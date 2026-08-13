@@ -452,19 +452,30 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      // Exact, not heuristic: nextCursor is authoritative for this route.
+      // Exact, not heuristic: nextCursor is authoritative for this route. Taken
+      // from the page either way, so a page that merges nothing still advances
+      // the cursor and the operator can keep paging.
       cursorRef.current = page.nextCursor;
       setHasOlder(page.nextCursor !== null);
-      setState((prev) => ({
-        ...prev,
-        // `upcoming` / `upcomingTimezone` are a FIRST-PAGE-ONLY bucket server-side
-        // (the route gathers them only when `cursor` is absent), so an older page
-        // carries none. The spread keeps what the first page gave us rather than
-        // blanking the pinned section.
-        items: mergeTimelineItems(prev.items, normalizeServerItems(page.items)),
-      }));
-      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
-      setOlderPagesLoaded((n) => n + 1);
+      // Normalized ONCE, outside the updater: React may invoke an updater twice,
+      // so the "did anything actually merge?" decision cannot live inside one.
+      const olderItems = normalizeServerItems(page.items);
+      // Spec 4.5: an older page that merges NOTHING is not a prepend, so neither
+      // the item state nor the counter moves. Bumping would fire <Timeline>'s
+      // scroll anchor for a prepend that never happened and swallow the pill of
+      // any append coalesced into the same commit.
+      if (olderItems.length > 0) {
+        setState((prev) => ({
+          ...prev,
+          // `upcoming` / `upcomingTimezone` are a FIRST-PAGE-ONLY bucket
+          // server-side (the route gathers them only when `cursor` is absent), so
+          // an older page carries none. The spread keeps what the first page gave
+          // us rather than blanking the pinned section.
+          items: mergeTimelineItems(prev.items, olderItems),
+        }));
+        // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+        setOlderPagesLoaded((n) => n + 1);
+      }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -473,8 +484,17 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
       // A failed older page must never error the whole timeline: the history they
       // already have is still correct.
     } finally {
-      loadingOlderRef.current = false;
-      if (!controller.signal.aborted) setLoadingOlder(false);
+      // Guarded exactly like the state setter beside it: an ABORTED request no
+      // longer owns the in-flight guard, so a late-settling one must not clear it
+      // out from under a NEWER request. Unreachable through the button (disabled
+      // by loadingOlder), but the deferred scroll-triggered auto-loader (spec
+      // section 6) calls loadOlder() programmatically. The abort path that DOES
+      // need the guard cleared (a contact or kinds change) clears it itself in
+      // the reset effect above.
+      if (!controller.signal.aborted) {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
     }
   }, [contactId, kinds]);
 

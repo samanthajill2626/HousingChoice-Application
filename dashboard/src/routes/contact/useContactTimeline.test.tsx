@@ -608,6 +608,182 @@ describe('useContactTimeline paging', () => {
     await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
   });
 
+  // Spec 5.1 asks for this in ALL THREE hooks, and only the relay suite had it.
+  // The counter is <Timeline>'s prepend signal, so a bump without a merge fires a
+  // scroll restore for a prepend that never happened.
+  it('bumps olderPagesLoaded only when an older page actually merges', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0'); // first load is not a prepend
+
+    // An SSE refetch is not a prepend.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('c', '2026-08-13T11:00:00.000Z')],
+      nextCursor: 'CURSOR9',
+      upcoming: [],
+    });
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('b,c'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0');
+
+    // A merged older page IS.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: 'CURSOR2',
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-pages')).toHaveTextContent('1'));
+
+    // A FAILED older page is not - nothing merged, so nothing may signal one.
+    getContactTimeline.mockRejectedValueOnce(new Error('boom'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('1');
+    expect(screen.getByTestId('p-status')).toHaveTextContent('ready'); // never errors the feed
+  });
+
+  // Spec 4.5: "empty older pages leave it untouched". Rarer here than on the
+  // conversation hooks (the cursor is authoritative) but not impossible - the
+  // server can hand back a cursor whose page filters down to nothing.
+  it('leaves olderPagesLoaded untouched when the older page comes back EMPTY', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+
+    getContactTimeline.mockResolvedValueOnce({ items: [], nextCursor: 'CURSOR2' });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0');
+    // The cursor still advanced, so the operator can page THROUGH the empty page.
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true');
+    getContactTimeline.mockResolvedValueOnce({ items: [], nextCursor: null });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenLastCalledWith(
+      'p1',
+      { cursor: 'CURSOR2' },
+      expect.anything(),
+    );
+  });
+
+  // The isFirstLoad baseline guard, which here protects the CURSOR as well as
+  // hasOlder. Without it, one inbound message after the operator has paged the
+  // feed back to its beginning both resurrects the control and rewinds the cursor
+  // to the newest page's boundary - so every later click re-reads pages already
+  // merged and nothing on screen changes.
+  it('does not resurrect a retired control (or rewind the cursor) on an SSE refetch', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true'));
+
+    // Page back to the beginning: a null cursor retires the control.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false'));
+
+    // One inbound message; the debounced refetch reads a newest page that still
+    // has history behind IT, so it carries a cursor.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('c', '2026-08-13T11:00:00.000Z')],
+      nextCursor: 'CURSOR9',
+      upcoming: [],
+    });
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a,b,c'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+
+    // ...and the cursor stayed null, so a further load is a no-op rather than a
+    // re-read of pages already merged.
+    const calls = getContactTimeline.mock.calls.length;
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(calls);
+  });
+
+  // A late-settling ABORTED older request must not clear the in-flight guard
+  // belonging to a NEWER one. Unreachable through the button today, which is why
+  // it is asserted here: the deferred scroll-triggered auto-loader calls
+  // loadOlder() programmatically.
+  it('an aborted older request does not release the guard held by a newer one', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    let releaseFirst: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const { rerender } = render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+
+    // A kinds change is a NEW feed: the reset effect aborts the older request.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('z', '2026-08-13T12:00:00.000Z')],
+      nextCursor: 'CURSOR7',
+      upcoming: [],
+    });
+    let releaseSecond: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseSecond = resolve;
+      }),
+    );
+    rerender(<PagingProbe contactId="p1" kinds="message" />);
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(4);
+
+    await act(async () => {
+      releaseFirst({ items: [], nextCursor: null }); // the ABORTED one settles late
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      releaseSecond({ items: [], nextCursor: null });
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+  });
+
   it('replaces rather than merges when the kinds filter changes', async () => {
     getContactTimeline.mockResolvedValueOnce({
       items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],

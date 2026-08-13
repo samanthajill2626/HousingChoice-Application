@@ -106,9 +106,14 @@ export interface RelayThreadState {
    *  size this shows the control once when nothing older exists; clicking it
    *  fetches an empty page and the control disappears. The label can therefore be
    *  briefly wrong, but only in the harmless direction - a full page always means
-   *  more MAY exist and a short page always means the end was reached, so no
-   *  history is ever unreachable. The honest fix (server returns hasMore from a
-   *  limit+1 read) is deferred, not rejected: spec section 4.4.
+   *  more MAY exist, and a short page means the end was reached for every page
+   *  the server can actually return in full. The one caveat is the read itself:
+   *  messagesRepo.listByConversation discards LastEvaluatedKey, so a Query capped
+   *  at DynamoDB's 1MB limit would also come back short and read as end-of-
+   *  history. At 50 rows of realistic message size that is roughly an order of
+   *  magnitude away, but it is why this is a heuristic and not a proof. The
+   *  honest fix (server returns hasMore from a limit+1 read, and surfaces the
+   *  cap) is deferred, not rejected: spec section 4.4.
    *
    *  This holds ONLY because the bound below is derived from the same RAW page
    *  this count comes from - see oldestFetchedIdRef. */
@@ -314,13 +319,32 @@ export function useRelayThread(conversationId: string): RelayThreadState {
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      setServerItems((prev) => mergeTimelineItems(prev, buildRelayItems(older)));
+      // Mapped ONCE, outside every setState updater: React may invoke an updater
+      // twice, so the "did anything actually merge?" decision cannot live inside
+      // one.
+      const olderItems = buildRelayItems(older);
+      // Spec 4.5: an older page that merges NOTHING is not a prepend, so neither
+      // the item state nor the counter moves. The check is on the MAPPED page,
+      // not the raw one - buildRelayItems drops calls and email, so a full raw
+      // page can map to zero rows, which is equally not a prepend. Merging an
+      // empty page would only allocate a new array and force a pointless
+      // re-render; bumping the counter would fire <Timeline>'s scroll anchor for
+      // a prepend that never happened, and (because the consume branch returns
+      // early) swallow the "New messages" pill of any append coalesced into that
+      // same commit. Spec 4.4's accepted heuristic makes this reachable BY
+      // DESIGN: every thread whose length is an exact multiple of the page size
+      // ends on exactly this click.
+      if (olderItems.length > 0) {
+        setServerItems((prev) => mergeTimelineItems(prev, olderItems));
+        // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+        setOlderPagesLoaded((n) => n + 1);
+      }
+      // The bound and hasOlder come from the RAW page either way - that is what
+      // lets the operator keep paging through a run of fully-dropped pages.
       const oldest = older[older.length - 1]?.tsMsgId;
       if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
       // Spec 4.4 heuristic again, on the same RAW page the bound above came from.
       setHasOlder(older.length >= THREAD_PAGE_SIZE);
-      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
-      setOlderPagesLoaded((n) => n + 1);
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -329,8 +353,18 @@ export function useRelayThread(conversationId: string): RelayThreadState {
       // the operator can retry. It must never error the whole thread: the
       // history they already have is still correct.
     } finally {
-      loadingOlderRef.current = false;
-      if (!controller.signal.aborted) setLoadingOlder(false);
+      // Guarded exactly like setLoadingOlder below: an ABORTED request no longer
+      // owns the in-flight guard, so a late-settling one must not clear it out
+      // from under a NEWER request. Unreachable through the button (disabled by
+      // loadingOlder), but the deferred scroll-triggered auto-loader (spec
+      // section 6) calls loadOlder() programmatically, and the ref exists
+      // precisely because state lands a render too late to stop it. The abort
+      // paths that DO need the guard cleared (a conversation change) clear it
+      // themselves in the reset effect above.
+      if (!controller.signal.aborted) {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
     }
   }, [conversationId]);
 

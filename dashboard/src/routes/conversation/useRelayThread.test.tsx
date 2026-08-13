@@ -195,6 +195,150 @@ describe('useRelayThread paging', () => {
     expect(screen.getByTestId('pages')).toHaveTextContent('1');
   });
 
+  // Spec 4.5: "empty older pages leave it untouched". Reachable BY DESIGN, not by
+  // accident - spec 4.4's heuristic means every thread whose length is an exact
+  // multiple of the page size ends on exactly this click. A bump here would fire
+  // <Timeline>'s scroll anchor for a prepend that never happened, and the consume
+  // branch returns before the pill logic, so an append coalesced into the same
+  // commit is both scrolled past and has its "New messages" pill swallowed.
+  it('leaves olderPagesLoaded untouched when the older page comes back EMPTY', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // m10..m59
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    getConversationMessages.mockResolvedValueOnce(page(2, 8)); // a real prepend
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('pages')).toHaveTextContent('1'));
+
+    getConversationMessages.mockResolvedValueOnce([]); // nothing older after all
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('1');
+    expect(screen.getByTestId('ids')).toHaveTextContent('m8,m9,m10');
+  });
+
+  // The guard is on the MAPPED page, not the raw one: buildRelayItems drops calls
+  // and email, so a page that came back FULL can still prepend nothing. The bound
+  // and hasOlder still move, so the operator can page THROUGH such a run.
+  it('leaves olderPagesLoaded untouched when a full older page maps to no rows', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // m10..m59
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // 50 rows the relay mapper drops entirely.
+    const calls = page(50, 60).map((m) => ({ ...m, tsMsgId: `call${m.tsMsgId}`, type: 'call' }));
+    getConversationMessages.mockResolvedValueOnce(calls);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('0');
+    // ...but the operator can keep paging: the bound advanced to the raw page's
+    // oldest row and the full page kept the control alive.
+    expect(screen.getByTestId('hasOlder')).toHaveTextContent('true');
+    getConversationMessages.mockResolvedValueOnce([]);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenLastCalledWith(
+      'c1',
+      { limit: 50, before: `callm60` },
+      expect.anything(),
+    );
+  });
+
+  // The isFirstLoad baseline guard. Without it, ONE inbound message after the
+  // operator has paged a thread back to its beginning resurrects the control
+  // permanently: the refetched newest page is full, so hasOlder flips back to
+  // true and the bound is re-baselined into history already held - every later
+  // click then re-reads rows the merge already has and changes nothing on screen.
+  it('does not resurrect a retired control when an SSE refetch reads a FULL page', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // m10..m59
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('hasOlder')).toHaveTextContent('true'));
+
+    // Page back to the very beginning: a SHORT page retires the control.
+    getConversationMessages.mockResolvedValueOnce(page(2, 8)); // m8, m9
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('hasOlder')).toHaveTextContent('false'));
+
+    // One inbound message; the debounced refetch reads a FULL newest page.
+    getConversationMessages.mockResolvedValueOnce(page(50, 12));
+    await act(async () => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'c1' });
+      await flushDebounce();
+    });
+    expect(screen.getByTestId('hasOlder')).toHaveTextContent('false');
+
+    // ...and the bound was not re-baselined either: the next read still starts
+    // from the oldest row the operator actually walked back to, not from the
+    // newest page's tail.
+    getConversationMessages.mockResolvedValueOnce([]);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenLastCalledWith(
+      'c1',
+      { limit: 50, before: 'm8' },
+      expect.anything(),
+    );
+  });
+
+  // A late-settling ABORTED older request must not clear the in-flight guard
+  // belonging to a NEWER one. Unreachable through the button today (loadingOlder
+  // disables it), which is why it is asserted here rather than through the UI:
+  // the deferred scroll-triggered auto-loader calls loadOlder() programmatically.
+  it('an aborted older request does not release the guard held by a newer one', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // c1 first page
+    let releaseC1: (v: Message[]) => void = () => {};
+    getConversationMessages.mockReturnValueOnce(
+      new Promise<Message[]>((resolve) => {
+        releaseC1 = resolve;
+      }),
+    );
+    const { rerender } = render(<Probe conversationId="c1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click(); // c1 older, in flight
+    });
+
+    // Switch threads: the reset effect aborts c1's older request.
+    getConversationMessages.mockResolvedValueOnce(page(50, 100)); // c2 first page
+    let releaseC2: (v: Message[]) => void = () => {};
+    getConversationMessages.mockReturnValueOnce(
+      new Promise<Message[]>((resolve) => {
+        releaseC2 = resolve;
+      }),
+    );
+    rerender(<Probe conversationId="c2" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m100'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click(); // c2 older, in flight
+    });
+    expect(getConversationMessages).toHaveBeenCalledTimes(4);
+
+    // c1's aborted request finally settles, AFTER c2's is already in flight.
+    await act(async () => {
+      releaseC1([]);
+    });
+
+    // c2's page is still in flight, so a further call must be a no-op.
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      releaseC2([]);
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+  });
+
   // The ONLY thing standing between two threads' transcripts fusing.
   it('replaces rather than merges when the conversation changes', async () => {
     getConversationMessages.mockResolvedValueOnce(page(3, 100)); // m100..m102

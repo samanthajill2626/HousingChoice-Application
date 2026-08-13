@@ -166,6 +166,140 @@ describe('useGroupThread paging', () => {
     await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
   });
 
+  // Spec 5.1 asks for this in ALL THREE hooks, and only the relay suite had it.
+  // The counter is <Timeline>'s prepend signal, so a bump without a merge fires a
+  // scroll restore for a prepend that never happened.
+  it('bumps olderPagesLoaded only when an older page actually merges', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10));
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('0'); // first load is not a prepend
+
+    // An SSE refetch is not a prepend.
+    getConversationMessages.mockResolvedValueOnce(page(50, 12));
+    await act(async () => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'g1' });
+      await flushDebounce();
+    });
+    expect(screen.getByTestId('pages')).toHaveTextContent('0');
+
+    // A merged older page IS.
+    getConversationMessages.mockResolvedValueOnce(page(2, 8));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('pages')).toHaveTextContent('1'));
+
+    // A FAILED older page is not - nothing merged, so nothing may signal one.
+    getConversationMessages.mockRejectedValueOnce(new Error('boom'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('1');
+  });
+
+  // Spec 4.5: "empty older pages leave it untouched". Reachable BY DESIGN - spec
+  // 4.4's heuristic means a thread whose length is an exact multiple of the page
+  // size ends on exactly this click.
+  it('leaves olderPagesLoaded untouched when the older page comes back EMPTY', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10));
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    getConversationMessages.mockResolvedValueOnce(page(2, 8)); // a real prepend
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('pages')).toHaveTextContent('1'));
+
+    getConversationMessages.mockResolvedValueOnce([]); // nothing older after all
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('1');
+    expect(screen.getByTestId('ids')).toHaveTextContent('m8,m9,m10');
+  });
+
+  // The isFirstLoad baseline guard, tested here too rather than assumed from the
+  // copy. Without it, one inbound message after the operator has paged the thread
+  // back to its beginning resurrects the control permanently.
+  it('does not resurrect a retired control when an SSE refetch reads a FULL page', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10));
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('hasOlder')).toHaveTextContent('true'));
+
+    getConversationMessages.mockResolvedValueOnce(page(2, 8)); // short page: the end
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('hasOlder')).toHaveTextContent('false'));
+
+    getConversationMessages.mockResolvedValueOnce(page(50, 12)); // FULL newest page
+    await act(async () => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'g1' });
+      await flushDebounce();
+    });
+    expect(screen.getByTestId('hasOlder')).toHaveTextContent('false');
+
+    // ...and the bound was not re-baselined into history already held.
+    getConversationMessages.mockResolvedValueOnce([]);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenLastCalledWith(
+      'g1',
+      { limit: 50, before: 'm8' },
+      expect.anything(),
+    );
+  });
+
+  // A late-settling ABORTED older request must not clear the in-flight guard
+  // belonging to a NEWER one. Unreachable through the button today, which is why
+  // it is asserted here: the deferred scroll-triggered auto-loader calls
+  // loadOlder() programmatically.
+  it('an aborted older request does not release the guard held by a newer one', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // g1 first page
+    let releaseG1: (v: Message[]) => void = () => {};
+    getConversationMessages.mockReturnValueOnce(
+      new Promise<Message[]>((resolve) => {
+        releaseG1 = resolve;
+      }),
+    );
+    const { rerender } = render(<Probe conversationId="g1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+
+    getConversationMessages.mockResolvedValueOnce(page(50, 100)); // g2 first page
+    let releaseG2: (v: Message[]) => void = () => {};
+    getConversationMessages.mockReturnValueOnce(
+      new Promise<Message[]>((resolve) => {
+        releaseG2 = resolve;
+      }),
+    );
+    rerender(<Probe conversationId="g2" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m100'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenCalledTimes(4);
+
+    await act(async () => {
+      releaseG1([]); // the ABORTED g1 request settles late
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      releaseG2([]);
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+  });
+
   it('replaces rather than merges when the conversation changes', async () => {
     getConversationMessages.mockResolvedValueOnce(page(3, 100));
     const { rerender } = render(<Probe conversationId="g1" />);

@@ -55,8 +55,11 @@ export interface GroupThreadState {
    *  route returns no `hasMore`, so a FULL page is read as "probably more". A
    *  thread that is an exact multiple of the page size shows the control once
    *  with nothing behind it; the click fetches an empty page and it disappears.
-   *  Wrong only in the harmless direction - no history is ever unreachable.
-   *  Spec section 4.4. */
+   *  Wrong only in the harmless direction. One caveat on "short means the end":
+   *  messagesRepo.listByConversation discards LastEvaluatedKey, so a Query capped
+   *  at DynamoDB's 1MB limit would also come back short and read as
+   *  end-of-history - an order of magnitude away at 50 rows of realistic size,
+   *  but it is why this is a heuristic. Spec section 4.4. */
   hasOlder: boolean;
   /** An older page is in flight - the control is disabled. */
   loadingOlder: boolean;
@@ -232,13 +235,26 @@ export function useGroupThread(conversationId: string): GroupThreadState {
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      setServerItems((prev) => mergeTimelineItems(prev, buildRelayItems(older)));
+      // Mapped ONCE, outside every setState updater (React may invoke an updater
+      // twice, so the "did anything actually merge?" decision cannot live in one).
+      const olderItems = buildRelayItems(older);
+      // Spec 4.5: an older page that merges NOTHING is not a prepend, so neither
+      // the item state nor the counter moves. The check is on the MAPPED page,
+      // not the raw one - buildRelayItems drops calls and email, so a full raw
+      // page can map to zero rows, which is equally not a prepend. A bogus bump
+      // fires <Timeline>'s scroll anchor for a prepend that never happened and
+      // swallows the pill of any append coalesced into the same commit.
+      if (olderItems.length > 0) {
+        setServerItems((prev) => mergeTimelineItems(prev, olderItems));
+        // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+        setOlderPagesLoaded((n) => n + 1);
+      }
+      // The bound and hasOlder come from the RAW page either way - that is what
+      // lets the operator keep paging through a run of fully-dropped pages.
       const oldest = older[older.length - 1]?.tsMsgId;
       if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
       // Spec 4.4 heuristic again, on the same RAW page the bound above came from.
       setHasOlder(older.length >= THREAD_PAGE_SIZE);
-      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
-      setOlderPagesLoaded((n) => n + 1);
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -246,8 +262,17 @@ export function useGroupThread(conversationId: string): GroupThreadState {
       // Keep hasOlder as-is so the control stays and the operator can retry; the
       // history already on screen is still correct.
     } finally {
-      loadingOlderRef.current = false;
-      if (!controller.signal.aborted) setLoadingOlder(false);
+      // Guarded exactly like the state setter beside it: an ABORTED request no
+      // longer owns the in-flight guard, so a late-settling one must not clear it
+      // out from under a NEWER request. Unreachable through the button (disabled
+      // by loadingOlder), but the deferred scroll-triggered auto-loader (spec
+      // section 6) calls loadOlder() programmatically. The abort path that DOES
+      // need the guard cleared (a conversation change) clears it itself in the
+      // reset effect above.
+      if (!controller.signal.aborted) {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
     }
   }, [conversationId]);
 

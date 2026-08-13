@@ -52,6 +52,22 @@ export class SendRefusedError extends Error {
       | 'breaker_open'
       | 'manual_mode'
       | 'relay_not_supported'
+      | 'group_text_not_supported'
+      // Native group texting (S5): the group send service's own refusals. They
+      // live in this union so the ONE `instanceof SendRefusedError` catch in the
+      // send route keeps mapping every refusal to a status code.
+      | 'not_a_group_text'
+      | 'group_roster_empty'
+      | 'group_too_many_members'
+      | 'group_member_deleted'
+      | 'group_member_no_consent'
+      | 'group_rail_unavailable'
+      // A post that failed for a reason that says nothing about the rail
+      // (network, 429, 5xx) and one the shared A2P meter could not admit inside
+      // its wait bound. Both are RETRYABLE - deliberately distinct from
+      // `group_rail_unavailable`, which means the thread has nowhere to post.
+      | 'group_send_failed'
+      | 'group_send_busy'
       | 'sms_sending_disabled',
   ) {
     super(message);
@@ -142,6 +158,27 @@ export class RelaySendNotSupportedError extends SendRefusedError {
     super(
       `conversation ${conversationId} is a relay_group — use the relay fan-out path, not the 1:1 send wrapper`,
       'relay_not_supported',
+    );
+  }
+}
+
+/**
+ * A NATIVE group text handed to the 1:1 send wrapper. It gets its OWN error, not
+ * relay's: the two failures have different causes and different fixes, and a
+ * group thread reported as `relay_not_supported` would send whoever reads the
+ * log or the 409 hunting through relay code that is not involved.
+ *
+ * Without this case a group thread fell through to the phone check below and
+ * threw the RELAY error simply because it has no participant_phone - a
+ * misleading message from an accidental code path (invariant 13.6: no "not
+ * relay_group" reader may silently treat a group text as a 1:1). The group send
+ * path itself lands in S5.
+ */
+export class GroupTextSendNotSupportedError extends SendRefusedError {
+  constructor(conversationId: string) {
+    super(
+      `conversation ${conversationId} is a native group_text - use the group send path, not the 1:1 send wrapper`,
+      'group_text_not_supported',
     );
   }
 }
@@ -253,6 +290,9 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // never this SMS path. Both misroutes throw so no caller can misuse it; the
     // guard also narrows participant_phone to a definite string below.
     if (conversation.type === 'relay_group') throw new RelaySendNotSupportedError(conversationId);
+    if (conversation.type === 'group_text') {
+      throw new GroupTextSendNotSupportedError(conversationId);
+    }
     const participantPhone = conversation.participant_phone;
     if (participantPhone === undefined) throw new RelaySendNotSupportedError(conversationId);
 

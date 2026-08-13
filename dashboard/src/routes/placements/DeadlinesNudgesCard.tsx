@@ -54,7 +54,7 @@ const NUDGE_SKIP_REASON_LABELS: Readonly<Record<NudgeSkipReason, string>> = {
   contact_missing: 'recipient no longer exists',
   contact_no_phone: 'recipient has no phone number',
   tenant_not_on_roster: "tenant not on this placement's roster",
-  roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
+  roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
 };
 
 /** Why an ARMED rung will not fire at dueAt (the server's estimate, new with

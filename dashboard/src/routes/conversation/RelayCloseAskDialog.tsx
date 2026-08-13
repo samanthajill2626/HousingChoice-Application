@@ -1,13 +1,13 @@
-// RelayCloseAskDialog - the shared "Also close the group text?" confirm offered
+// RelayCloseAskDialog - the shared "Also close the relay group?" confirm offered
 // AFTER a tour/placement terminal outcome is recorded, when the entity still has
 // a linked OPEN relay group (design D4). Non-blocking by construction: the caller
 // opens it ONLY once the outcome save has already succeeded, so a failure of
 // either action here must never look like the outcome failed - it surfaces a
 // small inline error and stays dismissible.
-//   Close group text -> PATCH .../close { closed: true } (the existing endpoint;
+//   Close relay group -> PATCH .../close { closed: true } (the existing endpoint;
 //     the backend sends the final "group is closed" message and keeps the number).
 //   Keep it open      -> POST .../close-nag/defer (pushes the Today nag out 28 days).
-// Both then call onDone(). Staff-dashboard copy uses "group text" (GLOSSARY);
+// Both then call onDone(). Staff-dashboard copy uses "relay group" (GLOSSARY);
 // ASCII only.
 import { useState } from 'react';
 import { closeConversation, deferCloseNag } from '../../api/index.js';
@@ -36,8 +36,8 @@ export function RelayCloseAskDialog({
 
   const title =
     memberSummary.trim().length > 0
-      ? `Also close the group text with ${memberSummary}?`
-      : 'Also close the group text?';
+      ? `Also close the relay group with ${memberSummary}?`
+      : 'Also close the relay group?';
 
   // Run one action (close or defer). The recorded outcome is ALREADY saved, so a
   // failure here must never re-open/undo it: show a small inline error, re-enable
@@ -49,7 +49,7 @@ export function RelayCloseAskDialog({
     void action()
       .then(() => onDone())
       .catch(() => {
-        setError('We could not update the group text. You can close it later from the group.');
+        setError('We could not update the relay group. You can close it later from the group.');
         setBusy(false);
       });
   };
@@ -75,13 +75,13 @@ export function RelayCloseAskDialog({
             onClick={() => run(() => closeConversation(conversationId, true))}
             disabled={busy}
           >
-            Close group text
+            Close relay group
           </Button>
         </>
       }
     >
       <p className={styles.body}>
-        This group text is still open. Closing it sends everyone a final note and stops new
+        This relay group is still open. Closing it sends everyone a final note and stops new
         messages; keeping it open reminds you again in 28 days.
       </p>
       {error !== null ? (

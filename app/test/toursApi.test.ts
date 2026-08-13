@@ -1826,7 +1826,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     // The roster decides who gets the pin, exactly like the add/remove-member
     // milestones (routes/relayGroups.ts records against THAT member's contact).
     // Here a caseworker and a PM are texting instead of the tenant and the
-    // unit's landlord: "Group text opened" belongs on the two feeds of the
+    // unit's landlord: "Relay group opened" belongs on the two feeds of the
     // people actually in the chat, and on NEITHER absent party's.
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
@@ -1857,7 +1857,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
       expect(pins).toHaveLength(1);
       expect(pins[0]).toMatchObject({
         type: 'tour_group_opened',
-        label: 'Group text opened',
+        label: 'Relay group opened',
         refType: 'tour',
         refId: tourId,
       });
@@ -1878,7 +1878,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
   });
 
   it('the AUTO-resolved roster IS [tenant, landlord], so both of them get the pin', async () => {
-    // The dashboard's [Open group text] sends no roster, so this is the shape
+    // The dashboard's [Open relay group] sends no roster, so this is the shape
     // the product actually produces today: roster-driven and tour-parties-driven
     // agree, because auto-resolve builds the roster FROM those two parties.
     const pool = makeFakePoolNumbers();
@@ -3548,7 +3548,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       expect(res.body.error).toBe('thread_exists');
       // The same renderable copy the plan endpoints already answer with.
       expect(res.body.message).toBe(
-        'This group text is already open. Edit its members from the live group.',
+        'This relay group is already open. Edit its members from the live group.',
       );
     } finally {
       world.toursRepo.setRoster = realSetRoster;
@@ -3629,7 +3629,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual(
       [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
     );
-    expect(world.sent[0]!.body).toContain('Casey Worker joined this group text.');
+    expect(world.sent[0]!.body).toContain('Casey Worker joined this group chat.');
   });
 
   it('LIVE add on a CLOSED thread is silent and immediate - never announced, never deferred', async () => {

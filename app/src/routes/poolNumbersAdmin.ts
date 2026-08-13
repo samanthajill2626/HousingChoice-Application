@@ -1,4 +1,4 @@
-// Group text numbers - the admin-only, READ-ONLY pool-number inventory
+// Relay group numbers - the admin-only, READ-ONLY pool-number inventory
 // (spec docs/superpowers/specs/2026-07-18-pool-numbers-admin-design.md sec 3).
 //
 //   GET /api/pool-numbers -> { numbers: PoolNumberRow[] }
@@ -95,7 +95,7 @@ const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
  * prefix (admin view - no "self" to exclude); (2) the placement_tag, read
  * DEFENSIVELY via the index signature (it is written by createRelayGroup but not
  * declared on ConversationItem - mirrors inbox.ts / contacts.ts); (3) the literal
- * 'Group text'. No pool-number rung - the number is the parent row's own column.
+ * 'Relay group'. No pool-number rung - the number is the parent row's own column.
  */
 function serverLabel(conv: ConversationItem): string {
   const names = (conv.participants ?? [])
@@ -104,7 +104,7 @@ function serverLabel(conv: ConversationItem): string {
   if (names.length > 0) return `With ${names.join(' & ')}`;
   const tag = conv['placement_tag'];
   if (typeof tag === 'string' && tag.length > 0) return tag;
-  return 'Group text';
+  return 'Relay group';
 }
 
 /**
@@ -128,6 +128,11 @@ function toGroupRow(conv: ConversationItem): PoolNumberGroupRow {
     label: serverLabel(conv),
     memberCount: (conv.participants ?? []).length,
     // status is typed `string`; relay_group values are exactly 'open' | 'closed'.
+    // UNCHECKED CAST, safe by the READER: every row here comes from a
+    // pool-number lookup, and only relay threads carry a pool_number (a native
+    // group text never does, spec 4.2), so a `group_open` value cannot reach it.
+    // If this reader ever widens, narrow at runtime - do not widen the cast, or
+    // the admin page will confidently report a status the row does not have.
     status: conv.status as 'open' | 'closed',
     createdAt: conv.created_at,
     ...(closedAt !== undefined && { closedAt }),

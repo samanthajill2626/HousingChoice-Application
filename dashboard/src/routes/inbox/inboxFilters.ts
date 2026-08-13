@@ -8,11 +8,14 @@ export interface InboxFilterTab {
   label: string;
 }
 
-/** Tab order, left→right. 'all' is the default (first). */
+/** Tab order, left->right. 'all' is the default (first). "Groups" is the plural
+ *  CATEGORY (native group texts), deliberately not the product label "Group
+ *  text" - a tab is a place, not a thing. */
 export const INBOX_FILTERS: InboxFilterTab[] = [
   { filter: 'all', label: 'All' },
   { filter: 'unread', label: 'Unread' },
   { filter: 'unknown', label: 'Unknown' },
+  { filter: 'groups', label: 'Groups' },
 ];
 
 /** The honest empty-state copy per filter (spec §States & mobile). */
@@ -22,6 +25,11 @@ export function emptyCopy(filter: InboxFilter): { title: string; body: string } 
       return { title: "You're all caught up", body: 'Switch to All to browse.' };
     case 'unknown':
       return { title: 'No unknown numbers', body: 'Untriaged inbound numbers show up here.' };
+    case 'groups':
+      return {
+        title: 'No group texts yet',
+        body: 'Group texts you are part of show up here.',
+      };
     case 'all':
       return {
         title: 'No conversations yet',

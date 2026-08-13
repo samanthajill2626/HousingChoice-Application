@@ -157,6 +157,10 @@ const childEnv = {
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
   TWILIO_API_BASE_URL: fakeUrl,
   BUSINESS_PHONE_NUMBER: '+15550009999',
+  // The hermetic org owns exactly that one number - assert it (the `none`
+  // literal) so the group-identity boot check is satisfied deliberately rather
+  // than by omission, and every lane derives group ids from the same set.
+  GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
   // --- Voice Intelligence (voice-transcription feature) ---
   // The fake-twilio host also impersonates the VI REST API and fires the signed
   // completion webhook. TWILIO_VI_SERVICE_SID turns transcription ON and MUST equal

@@ -28,9 +28,9 @@ import {
 } from '../../lib/events.js';
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
+import { summarizeError } from '../../lib/errors.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
-import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import type { PoolNumbersService } from '../../services/poolNumbers.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -67,6 +67,28 @@ import {
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
+import { applyNumberSuppression } from '../../services/numberSuppression.js';
+import {
+  hasOtherRecipientsBeyondCap,
+  isMissingEnvelopeGroupShape,
+  MAX_OTHER_RECIPIENTS_INDEX,
+  parseOtherRecipients,
+} from '../../services/groupEnvelope.js';
+import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
+import { groupMemberKey, resolveGroupMembers } from '../../services/groupMembers.js';
+import {
+  hasActiveGroupRail,
+  MAX_RAIL_MEMBERS,
+  type GroupRailEnqueuer,
+} from '../../services/groupRail.js';
+import { createGroupRailEnqueuer } from '../../jobs/groupRail.js';
+import { createGroupCrossCheck, type GroupCrossCheck } from '../../services/groupCrossCheck.js';
+import { convertConnectingRelayGroupToGroupText } from '../../services/groupConvert.js';
+import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNumbersRepo.js';
+import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../../repos/settingsRepo.js';
+import { createRateLimitedWarn } from '../../lib/rateLimitedWarn.js';
+import { normalizeToE164 } from '../../lib/phone.js';
+import { conversationIdForGroup } from '../../lib/import/ids.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -77,29 +99,31 @@ import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
-/**
- * TwiML wrapper for a single reply message — the idiomatic Twilio mechanism for
- * a webhook to answer inbound SMS. WE own the keyword replies now (spec §6):
- * Twilio Advanced Opt-Out auto-reply is OFF (operator step), so a matched
- * keyword's filed reply is returned HERE. Critically, the STOP confirmation goes
- * to a JUST-opted-out number, so it must ride the TwiML response — NOT the
- * opt-out-GATED sendMessage wrapper (which would refuse it). XML-escape the body
- * so filed copy can never break the TwiML.
- */
-function messageTwiml(body: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(body)}</Message></Response>`;
-}
-
-/** Minimal XML entity escaping for a TwiML text node (filed copy is trusted, but
- *  ampersands/angle brackets must still be escaped to stay well-formed). */
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+// THERE IS NO KEYWORD-REPLY TwiML ANY MORE (2026-08-12, Cameron's ruling; issue
+// twilio-standard-optout-double-reply). This module used to carry a
+// `messageTwiml(body)` helper because "WE own the keyword replies (spec 6):
+// Twilio Advanced Opt-Out auto-reply is OFF (operator step)". A live dev test
+// on the real messaging service disproved every clause of that premise:
+//
+//   - HELP never reached this webhook at all. Twilio consumed it and answered.
+//   - Our STOP confirmation was refused with error 21610 (send to an opted-out
+//     number) because Twilio had ALREADY applied the block. It has never once
+//     been delivered - the "must ride the TwiML response, not the gated send
+//     wrapper" reasoning was correct about the gate and wrong about the outcome.
+//   - START drew Twilio's own confirmation ON TOP of our welcome: a double text.
+//
+// The resolution is the opposite configuration: Advanced Opt-Out is turned ON
+// and configured, in the console, with OUR filed copy (messages/catalog.ts stays
+// the source of truth; see RUNBOOK "Keyword auto-replies (Advanced Opt-Out)").
+// The app keeps ALL the keyword machinery - classification, suppression and
+// consent bookkeeping, the audit trail, the relay annotations - and emits NO
+// reply, so every inbound now acks with the empty TwiML below.
+//
+// ONE LIVE CONSEQUENCE TO KNOW ABOUT: with Advanced Opt-Out ON, Twilio stamps
+// `OptOutType` on the inbound, and `classifyInboundKeyword` already PREFERS it
+// over the body. That is now the LIVE classification path, not a hypothetical.
+// It matches on the exact keyword message, which the dev keyword canary verifies
+// with a sentence probe ("please stop sending tour reminders" must NOT classify).
 
 // Opt-out / opt-in keyword sets + the filed replies now live in the SINGLE
 // SOURCE OF TRUTH (lib/smsCompliance.ts) so they can never drift from the
@@ -143,6 +167,33 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
  * newest (never a crash), and a sender in several CLOSED groups on one number
  * routes to the newest for provenance.
  */
+/**
+ * Seen keys for the delivery-error DEGRADATION logs (the arms that flag nothing
+ * and only report: sms_unreachable with no contact, and the 21610 arms). Twilio
+ * redelivers a status callback until it is acked, and a group leg has no contact
+ * to flag, so without this one undeliverable message could log the same line
+ * dozens of times and swamp the signal.
+ *
+ * Keyed `<code>:<sid>` so the 21610 and 30005/30006 arms cannot swallow each
+ * other's first line for the same message.
+ *
+ * Bounded FIFO: this is a log-noise damper, not a correctness mechanism, so
+ * forgetting the oldest keys is fine - the worst case is one extra line.
+ */
+const DEGRADATION_LOGGED_KEYS = new Set<string>();
+const DEGRADATION_LOGGED_MAX = 500;
+
+/** Run `emit` at most once per (error code, provider SID) (within the bound above). */
+function logDegradationOnce(key: string, emit: () => void): void {
+  if (DEGRADATION_LOGGED_KEYS.has(key)) return;
+  if (DEGRADATION_LOGGED_KEYS.size >= DEGRADATION_LOGGED_MAX) {
+    const oldest = DEGRADATION_LOGGED_KEYS.values().next().value;
+    if (oldest !== undefined) DEGRADATION_LOGGED_KEYS.delete(oldest);
+  }
+  DEGRADATION_LOGGED_KEYS.add(key);
+  emit();
+}
+
 function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
   const aC = a.created_at ?? '';
   const bC = b.created_at ?? '';
@@ -169,9 +220,10 @@ export interface TwilioWebhookDeps {
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
   /**
-   * Org settings — read at the START/opt-in keyword reply so it honors the
-   * operator's `welcomeText` override (resolveWithSettings('welcome.sms')),
-   * matching the housing-fair path. Injectable in tests; the real repo otherwise.
+   * Org settings - the group cross-check / railed-inbound liveness high-water
+   * marks are written through it. (It used to also resolve the operator's
+   * `welcomeText` override for the opt-in keyword reply; that reply is Twilio's
+   * now.) Injectable in tests; the real repo otherwise.
    */
   settingsRepo?: SettingsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
@@ -194,6 +246,24 @@ export interface TwilioWebhookDeps {
    * deps (index.ts) thread it in; the real service by default. Injectable in tests.
    */
   poolNumbersService?: PoolNumbersService;
+  /**
+   * Pool-number inventory (native group texting): the cached exclusion-set read
+   * that keeps a relay number out of a derived group roster. Read-only here;
+   * the real repo by default, injectable in tests.
+   */
+  poolNumbersRepo?: Pick<PoolNumbersRepo, 'listActive'>;
+  /**
+   * The group-text RAIL seam (spec 6.1 DETECTION). Detection ENQUEUES rail
+   * creation rather than calling Twilio inline (the 5s webhook budget).
+   * Defaults to the real `groupRail.ensure` producer (T6.6(a)).
+   */
+  groupRailEnqueuer?: GroupRailEnqueuer;
+  /**
+   * The guardrail cross-check (T6.6(d)). Filing a group inbound onto a RAILED
+   * thread is the classic half of the (rail, author) match, so this call is what
+   * keeps a healthy channel from alarming. Defaults to the real service.
+   */
+  groupCrossCheck?: Pick<GroupCrossCheck, 'recordClassicInbound'>;
 }
 
 /** Default wait before the one unknown-SID retry in /status (see above). */
@@ -237,6 +307,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
+  const groupRail = deps.groupRailEnqueuer ?? createGroupRailEnqueuer({ logger: log });
+  const groupCrossCheck = deps.groupCrossCheck ?? createGroupCrossCheck({ logger: log });
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -371,7 +444,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
@@ -450,14 +523,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // used by BOTH the fan-out guard AND the keyword-processing block below so
     // they can never diverge.
     //
-    // W4 (SF-2) OptOutType coupling: we run with Twilio Advanced Opt-Out OFF
-    // (A2P checklist). classifyInboundKeyword returns a kind on OptOutType alone
-    // regardless of body; were Advanced Opt-Out ever flipped ON, a full sentence
-    // "stop the listings but keep the tour" would carry OptOutType=STOP and be
-    // treated as a command here, swallowing it from the group. That is the
-    // compliance-correct direction (Twilio also actions the opt-out itself), and
-    // the W3 narrowing already guards the opt-in (YES) case - keep Advanced
-    // Opt-Out OFF so human sentences are never reclassified.
+    // W4 (SF-2) OptOutType coupling, REWRITTEN 2026-08-12 - the premise flipped.
+    // Advanced Opt-Out is now ON, configured with OUR filed copy (RUNBOOK
+    // "Keyword auto-replies (Advanced Opt-Out)"), so classifyInboundKeyword
+    // trusting OptOutType is the LIVE intended path here, not a hypothetical.
+    // It is bounded because Twilio stamps OptOutType on EXACT keyword messages
+    // only (Twilio docs, and the dev keyword canary's sentence probe): a full
+    // sentence like "stop the listings but keep the tour" is NOT stamped, so it
+    // is not reclassified and still fans out as ordinary group content. The W3
+    // narrowing above additionally guards the bare-YES opt-in case.
+    //
+    // Operators must NOT turn Advanced Opt-Out back OFF: it is the ONLY source
+    // of keyword confirmations now - the app composes and sends none - so
+    // flipping it off silently removes every STOP/HELP/START reply while this
+    // code keeps recording as if nothing changed.
     const kind = classifyInboundKeyword(Body, msg.params['OptOutType']);
     // A keyword is a command by default; an opt-in narrows to command ONLY when
     // the sender is currently suppressed. This ONE boolean drives both the
@@ -544,14 +623,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // itself stays on the relay thread (persisted above for the audit trail).
     // Gated on isCommand (NOT kind): an unsuppressed opt-in is content and was
     // already fanned out above, so it must skip keyword processing entirely.
-    let keywordReply: string | undefined;
     if (isCommand) {
       const effectiveContact = senderContact ?? (await contacts.findByPhone(From));
       const oneToOne = await conversations.createOrGetByParticipantPhone(
         From,
         conversationTypeFor(effectiveContact),
       );
-      keywordReply = await processInboundKeywords({
+      await processInboundKeywords({
         conversation: oneToOne,
         effectiveContact,
         From,
@@ -596,31 +674,49 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       },
       'twilio relay inbound message processed',
     );
-    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
-  // Keyword handling (STOP / HELP / opt-in) - spec sec 6, WE own the replies.
+  // Keyword handling (STOP / HELP / opt-in) - spec sec 6, TWILIO owns the replies.
   // Extracted from the /sms handler so the closed-group intercept can REUSE the
   // SAME logic path (relay-number-lifecycle AF-4: a closed-group member's STOP
   // to the pool number must suppress exactly like a STOP to the main number did
   // pre-feature, when a closed group's cleared number fell through to the 1:1).
-  // Sets the conversation opt-out flag, the CONTACT flag only on the primary
-  // number (BE1 number-scope), stamps inbound_text consent, audits, and returns
-  // the filed reply (STOP confirmation / HELP / welcome) to ride the TwiML
-  // response. Best-effort: a repo failure is logged and NEVER crashes the
+  // Suppression writes go through the SHARED number-scoped seam
+  // (services/numberSuppression.ts): conversation flag always, CONTACT flag only
+  // on the primary number (BE1 number-scope). This function keeps the consent
+  // stamps and the audit source tag. It composes NO reply - Twilio's Advanced
+  // Opt-Out answers STOP/HELP/START with the copy filed in messages/catalog.ts
+  // (module header). Best-effort: a repo failure is logged and NEVER crashes the
   // webhook (the message is already persisted). PII: SIDs/IDs only.
+  //
+  // GROUP TEXTING (spec 4.4): the target conversation may be a LAZY THUNK. The
+  // group path runs this seam on EVERY group inbound - the plain-inbound
+  // contact-level consent stamp lives here - but must NOT mint the sender's 1:1
+  // thread for a plain inbound or a HELP, which would leave an empty
+  // needs-triage inbox row per group member. The thunk is therefore called only
+  // inside the opt-out/opt-in block, where setSmsOptOut genuinely needs a
+  // target. Passing a ConversationItem (every 1:1/relay caller) is unchanged.
   // ---------------------------------------------------------------------
   async function processInboundKeywords(input: {
-    conversation: ConversationItem;
+    conversation: ConversationItem | (() => Promise<ConversationItem>);
     effectiveContact: ContactItem | undefined;
     From: string;
     Body: string | undefined;
     OptOutType: string | undefined;
     MessageSid: string;
-  }): Promise<string | undefined> {
-    const { conversation, effectiveContact, From, Body, OptOutType, MessageSid } = input;
-    let keywordReply: string | undefined;
+    /** Extra audit detail (group provenance, spec 4.4). Absent on 1:1. */
+    auditContext?: Record<string, unknown>;
+  }): Promise<void> {
+    const {
+      conversation,
+      effectiveContact,
+      From,
+      Body,
+      OptOutType,
+      MessageSid,
+      auditContext,
+    } = input;
     try {
       const kind = classifyInboundKeyword(Body, OptOutType);
       const isHelp = kind === 'help';
@@ -649,84 +745,53 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         });
       }
 
-      if (isHelp) {
-        // HELP: no suppression change. Reply the filed HELP copy (declares no
-        // phone number - verified in lib/smsCompliance.ts + its test).
-        keywordReply = resolveMessage('keyword.help');
-      } else if (optedOut || optedIn) {
-        // The CONVERSATION flag is always written - a STOP from a phone with
-        // no contact record yet (auto-capture is M1.2) must still suppress
-        // every later send. The send wrapper gates on either flag.
-        await conversations.setSmsOptOut(conversation.conversationId, optedOut);
-        const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
+      // HELP has NO branch of its own any more. It never changed suppression and
+      // it no longer draws a reply (Twilio answers HELP - on the live service it
+      // usually consumes the message before this webhook sees it at all), so the
+      // only thing HELP still does here is EXCLUDE itself from the plain-inbound
+      // consent stamp above. That exclusion is why `isHelp` survives, and why no
+      // conversation is resolved on a HELP - which is exactly what the lazy thunk
+      // below exists for.
+      if (optedOut || optedIn) {
         const source =
           OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
-        // BE1 number-scoped consent: the CONTACT-level flag (which suppresses the
-        // contact's GOOD primary number across broadcasts + 1:1 sends) is set ONLY
-        // when the STOP/START arrived on the contact's PRIMARY number (From ===
-        // contact.phone). A STOP on an ATTACHED secondary number must NOT
-        // contaminate the primary - the conversation-level flag above already
-        // suppresses this thread (the correct per-number scope).
-        const isPrimaryNumber =
-          effectiveContact !== undefined && From === effectiveContact.phone;
-        if (effectiveContact && isPrimaryNumber) {
-          if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
-          else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
+        // The one number-scoped suppression writer (BE1): the CONVERSATION flag
+        // always - a STOP from a phone with no contact record yet (auto-capture
+        // is M1.2) must still suppress every later send - and the CONTACT flag
+        // only when the keyword arrived on the contact's PRIMARY number. A STOP
+        // on an ATTACHED secondary number must not contaminate the primary.
+        // This is where the lazy target is finally resolved.
+        const applied = await applyNumberSuppression(
+          { contactsRepo: contacts, conversationsRepo: conversations, auditRepo: audit, logger: log },
+          {
+            phone: From,
+            suppressed: optedOut,
+            contact: effectiveContact,
+            conversation:
+              typeof conversation === 'function' ? conversation : async () => conversation,
             source,
-          });
-          // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
-          // opt-in (spec sec 6): if this (primary-number) contact has NO
-          // consent_method yet, stamp inbound_text so proactive sends aren't
-          // JIT-gated. Idempotent - only stamped when absent (never overwrites
-          // a web_form / verbal record). Best-effort inside the same try.
-          if (optedIn && !effectiveContact.consent_method) {
-            await contacts.update(effectiveContact.contactId, {
-              consent_method: 'inbound_text',
-              consent_at: new Date().toISOString(),
-            });
-          }
-        } else if (effectiveContact) {
-          // Non-primary (attached) number: the contact flag is NOT touched (per-
-          // number scope) - only this conversation is suppressed (above). Audit on
-          // the conversation so the trail records the number-scoped opt-out/in.
-          log.info(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in on a non-primary attached number - conversation suppressed, contact flag NOT changed (number-scoped)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
             providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
-          });
-        } else {
-          // Only reachable when auto-capture itself failed above - the
-          // conversation flag still suppresses every later send.
-          log.warn(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in from a phone with no contact record - conversation flagged, no contact to flag (auto-capture failed)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
+            ...(auditContext !== undefined && { auditContext }),
+          },
+        );
+        // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
+        // opt-in (spec sec 6): if this (primary-number) contact has NO
+        // consent_method yet, stamp inbound_text so proactive sends aren't
+        // JIT-gated. Idempotent - only stamped when absent (never overwrites
+        // a web_form / verbal record). Best-effort inside the same try.
+        if (optedIn && effectiveContact && applied.scope === 'primary' && !effectiveContact.consent_method) {
+          await contacts.update(effectiveContact.contactId, {
+            consent_method: 'inbound_text',
+            consent_at: new Date().toISOString(),
           });
         }
-        // The filed reply for the matched keyword (rides the TwiML response).
-        // STOP -> the compliance-locked confirmation; opt-in/START -> the welcome,
-        // resolved through settings so an operator `welcomeText` override is
-        // honored (sec 7 - matches the housing-fair path; today's raw-constant use
-        // ignored the override).
-        keywordReply = optedOut
-          ? resolveMessage('keyword.stop')
-          : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
+        // NO REPLY IS COMPOSED HERE. `keyword.stop` and `welcome.sms` remain the
+        // filed copy Twilio's Advanced Opt-Out is configured WITH; the app sends
+        // neither (see the module header).
       }
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed - message persisted, flag NOT updated');
     }
-    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
@@ -739,7 +804,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   // strictly more useful and never pollutes group history). STOP/opt-out IS
   // processed here (AF-4) via the shared processInboundKeywords path so a
   // closed-group member's STOP suppresses exactly like a STOP to the main
-  // number - the filed reply is returned to the caller to ride the TwiML.
+  // number does. Neither path replies any more (module header).
   // ---------------------------------------------------------------------
   async function handleClosedGroupInbound(
     group: ConversationItem,
@@ -749,9 +814,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     const { MessageSid, From, Body } = msg;
     const mediaUrls = parseInboundMediaUrls(msg.params);
+
+    // INVARIANT 13.1, THE FIFTH FILING PATH. This intercept runs at step (1.5),
+    // BEFORE the group block at (1.75) computes an envelope at all - so a
+    // carrier-group message that happens to include a RETIRED POOL NUMBER (the
+    // population `docs/issues/group-mms-including-pool-numbers.md` describes)
+    // lands here and is filed as ONE contact's 1:1 speech. The ROUTING decision
+    // stays exactly as it is (relay behavior is unchanged - invariant 13.6);
+    // what changes is that the filing is no longer silent. `parseOtherRecipients`
+    // is pure property access on the already-parsed body, so this costs no I/O.
+    const envelopeBearing = parseOtherRecipients(msg.params).length > 0;
+    if (envelopeBearing) {
+      warnEnvelopeViaClosedRelay(
+        { event: 'group_envelope_via_closed_relay_group', providerSid: MessageSid },
+        'a carrier group envelope arrived on a pool number whose groups are all CLOSED - intercepted into the sender 1:1, no native thread minted',
+      );
+    }
 
     // Resolve the sender's 1:1 thread exactly as the public-intake path does:
     // honest conversation typing (only a reviewed contact type yields a typed
@@ -781,6 +862,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Provenance: the pool number this reached only matches From on the CLOSED
       // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
       viaClosedGroup: group.conversationId,
+      // THE EXTRACTION MARKER STAYS ON THIS PATH (fix wave 2, contest X1;
+      // re-review conformance F1 overturned wave 1's removal). Spec 13.1
+      // enumerates FIVE exceptions and says all five are "alarmed, marked with
+      // `group_ambiguous_origin`, and extraction-suppressed" - (e) is this path.
+      // The spec also answers the invariant-6 objection wave 1 raised, in its
+      // own words: "(d) and (e) are ROUTING decisions that predate this feature
+      // and are deliberately unchanged (invariant 6); what fix waves 2 and 4
+      // changed is that the filing is no longer silent."
+      //
+      // The marker has exactly ONE consumer - jobs/extraction.ts's transcript
+      // filter - so it changes no relay routing, no relay message, no relay UI
+      // and no relay delivery; 13.6 is untouched. And this path carries POSITIVE
+      // proof of group content (parseOtherRecipients already returned members),
+      // unlike the tripwire heuristic, whose separate ruling stays with
+      // docs/issues/tripwire-extraction-scope.md. Without the marker a carrier
+      // group that happens to include a retired pool number is fed to AI fact
+      // extraction as ONE contact's own words - the exact harm the marker
+      // exists to prevent. DO NOT REMOVE IT AGAIN without amending spec 13.1.
+      ...(envelopeBearing && { groupAmbiguousOrigin: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -835,9 +935,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // STOP must register the opt-out (conversation + primary-number contact
     // flags) so later 1:1/relay sends are gated - restoring the pre-feature
     // behavior (a closed group's cleared number fell through to the 1:1 STOP
-    // block). The message already landed above; the returned reply rides the
-    // TwiML the caller sends.
-    return processInboundKeywords({
+    // block). The message already landed above.
+    //
+    // THE MARKER/REPLY DISAGREEMENT THIS COMMENT USED TO EXPLAIN IS GONE (fix
+    // wave 4 item 10, retired 2026-08-12). The extraction MARKER is still set
+    // only for an envelope-bearing inbound - it asks "might this text be group
+    // content?", it is extraction hygiene, and it has exactly one consumer
+    // (jobs/extraction.ts's transcript filter). The keyword REPLY that used to
+    // ride this path unconditionally no longer exists on ANY path, so there is
+    // nothing left for the two to disagree about. That IS a relay-visible
+    // change - a closed-group member's STOP used to draw the app's confirmation
+    // here - and it is deliberate: Twilio now sends that confirmation itself,
+    // and keeping ours would double it (which invariant 13.6 never asked for).
+    await processInboundKeywords({
       conversation,
       effectiveContact: contact,
       From,
@@ -845,6 +955,798 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       OptOutType: msg.params['OptOutType'],
       MessageSid,
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // NATIVE GROUP TEXT detection (group-texting spec 5).
+  //
+  // A carrier group text to the business number arrives at THIS webhook looking
+  // exactly like a 1:1 except for the undocumented `OtherRecipients{N}` params.
+  // Everything below turns that envelope into a native `group_text` thread.
+  // ---------------------------------------------------------------------
+
+  /** How long the pool-number list is reused before re-reading (spec 4.1). */
+  const GROUP_EXCLUSION_CACHE_TTL_MS = 60_000;
+  /** Minimum gap between tripwire WARNs (spec 8.1 - the signal is the RATE). */
+  const GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS = 5 * 60_000;
+  /**
+   * Minimum gap between rail re-enqueues for a thread whose last attempt FAILED
+   * (fix wave 5, adversarial 35). Long enough that a chatty group cannot flood
+   * the shared jobs queue with certain-to-fail work, short enough that a genuine
+   * transient (a 429 during a migration burst) still heals within a few minutes.
+   */
+  const RAIL_REQUEUE_BACKOFF_MS = 5 * 60_000;
+
+  /**
+   * Threads already reported as structurally unrailable (fix wave 2, adversarial
+   * 15). The condition is permanent, so the line is worth exactly once per
+   * thread per process - and the durable reader is the migration convergence
+   * report, not this log. Bounded so the set cannot grow without limit; past the
+   * bound it STOPS REMEMBERING rather than forgetting what it knows (see the
+   * call site).
+   */
+  const unrailableRostersLogged = new Set<string>();
+  const UNRAILABLE_LOG_MEMORY = 500;
+
+  let poolNumberCache: { at: number; numbers: string[] } | undefined;
+  const warnEnvelopeMissing = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+  /**
+   * PER-EVENT DAMPERS (fix wave 5, adversarial 15). These three say completely
+   * different things and must not share one throttle. They used to: ONE closure
+   * served `group_envelope_via_closed_relay_group`,
+   * `group_detection_unconfigured` and `group_envelope_off_business_number`, and
+   * `group_detection_unconfigured` IS the chatty one - an unset
+   * BUSINESS_PHONE_NUMBER fires it on every envelope-bearing inbound. Its
+   * emissions refreshed the shared `lastEmittedAt`, so for the whole window the
+   * other two - the events that say "a group envelope landed on a number we do
+   * not own" - were never emitted at all, and whichever event next won carried
+   * the COMBINED `suppressedCount`, mis-attributing hundreds of occurrences to
+   * the wrong event. This is the same reasoning that already gave the tripwire
+   * its own damper, applied inside the unminted family.
+   */
+  const warnEnvelopeViaClosedRelay = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+  const warnDetectionUnconfigured = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+  const warnEnvelopeOffBusinessNumber = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+
+  /**
+   * The exclusion set group identity subtracts (spec 4.1): our business number,
+   * every relay pool number, and the deploy-fixed config list.
+   *
+   * `groupIdentity` is deliberately PURE, so assembling this is the caller's
+   * job. The pool list is the only part that needs I/O; it is cached because it
+   * changes on the order of weeks and this runs on every group inbound.
+   * STALE-IF-ERROR: a refresh failure reuses the last good list rather than
+   * silently shrinking the exclusion set, which would fork every id derived
+   * while the read is broken.
+   *
+   * COLD START HAS NO STALE LIST, so there is nothing to be stale-if-error
+   * WITH. Installing an empty one would do the exact thing the paragraph above
+   * forbids - and it would ALSO silence `poolNumbersInEnvelope`, the one signal
+   * that says a pool number is in this roster, because that anomaly is computed
+   * from the same set. A wrong id is permanent data; a 1:1 refile is
+   * recoverable. So a cold-start failure THROWS and the caller refuses the
+   * group branch for this inbound.
+   */
+  async function groupExclusions(): Promise<GroupExclusionSet> {
+    const now = Date.now();
+    if (poolNumberCache === undefined || now - poolNumberCache.at >= GROUP_EXCLUSION_CACHE_TTL_MS) {
+      try {
+        const active = await poolNumbers.listActive();
+        poolNumberCache = { at: now, numbers: active.map((p) => p.poolNumber) };
+      } catch (err) {
+        if (poolNumberCache === undefined) {
+          log.error(
+            { err, hadCache: false },
+            'group identity: pool-number read failed with NO cached list - refusing to derive a group id from an incomplete exclusion set',
+          );
+          throw err;
+        }
+        log.error(
+          { err, hadCache: true },
+          'group identity: pool-number read failed - reusing the last known list for the exclusion set',
+        );
+        // Keep the stale entry but do not re-stamp `at`, so the next inbound retries.
+      }
+    }
+    const cached = poolNumberCache;
+    if (cached === undefined) {
+      // Unreachable: the try either assigns or (cold) throws above.
+      throw new Error('group identity: pool-number exclusion list unavailable');
+    }
+    return {
+      businessPhoneNumber: config.businessPhoneNumber,
+      poolNumbers: cached.numbers,
+      configuredNumbers: config.groupIdentityExcludedNumbers,
+    };
+  }
+
+  /** Best-effort rail (re-)enqueue. NEVER crashes the webhook (spec 15.3). */
+  async function ensureRailEnqueued(
+    thread: ConversationItem,
+    reason: 'created' | 'rail_missing',
+    providerSid: string,
+  ): Promise<void> {
+    if (reason === 'rail_missing' && hasActiveGroupRail(thread)) return;
+    // BACK-OFF ON A KNOWN-FAILING RAIL (fix wave 5, adversarial 35). Branch (b)
+    // re-enqueues on EVERY inbound to a rail-less group thread, which is exactly
+    // right for the create-then-crash window it exists to close - but for a
+    // thread whose rail can never be built (a landline member -> Twilio 50407,
+    // a roster past the participant cap) it fed a certain-to-fail job into the
+    // SHARED jobs queue that relay fan-out, broadcasts and tour reminders use,
+    // once per inbound, forever, with no back-off at all.
+    //
+    // This is also the READER `rail_failed` never had (adversarial 10). It only
+    // means anything now that a successful finalize CLEARS the field, so a
+    // healed thread is not held back by a failure it recovered from.
+    if (reason === 'rail_missing') {
+      const roster = thread.participants ?? [];
+      if (roster.length === 0 || roster.length > MAX_RAIL_MEMBERS) {
+        // STRUCTURAL: no retry can change this, so do not queue one at all. The
+        // thread stays inbound-only and the thread view says so.
+        //
+        // ONCE PER THREAD, NOT ONCE PER INBOUND (fix wave 2, adversarial 15).
+        // The condition is permanent, so repeating the line on every message to
+        // an active group buries everything around it. The READER that makes
+        // this thread visible to a human is the migration convergence report,
+        // which lists a structurally unrailable roster as ADJUDICATION-REQUIRED
+        // (lib/import/convertGroups.ts); this line is the live-traffic echo of
+        // the same fact, and one is enough.
+        if (!unrailableRostersLogged.has(thread.conversationId)) {
+          // AT THE CAP WE STOP REMEMBERING; WE DO NOT FORGET EVERYTHING (fix
+          // wave 4, item 10). Clearing the set turned the bound into a
+          // PERIODIC FLUSH: past 500 unrailable threads, every 501st one wiped
+          // the memory of the other 500, and each of them logged again on its
+          // next inbound - so on a stack that has passed the cap the line goes
+          // from "once per thread" back to something close to once per message,
+          // which is exactly what this guard exists to prevent. Not adding past
+          // the cap degrades honestly instead: the first 500 stay quiet and only
+          // the tail repeats.
+          if (unrailableRostersLogged.size < UNRAILABLE_LOG_MEMORY) {
+            unrailableRostersLogged.add(thread.conversationId);
+          }
+          log.info(
+            {
+              event: 'group_rail_requeue_skipped',
+              conversationId: thread.conversationId,
+              reason: 'roster_unrailable',
+              memberCount: roster.length,
+            },
+            'group rail not re-enqueued - the roster can never be railed (the migration convergence report lists this thread as ADJUDICATION-REQUIRED)',
+          );
+        }
+        return;
+      }
+      const failedAt = Date.parse(String(thread.rail_failed?.at ?? ''));
+      if (Number.isFinite(failedAt) && Date.now() - failedAt < RAIL_REQUEUE_BACKOFF_MS) {
+        log.info(
+          {
+            event: 'group_rail_requeue_backoff',
+            conversationId: thread.conversationId,
+            sinceFailureMs: Date.now() - failedAt,
+          },
+          'group rail re-enqueue skipped - a recent attempt failed and the back-off has not elapsed',
+        );
+        return;
+      }
+    }
+    try {
+      const outcome = await groupRail.enqueueGroupRail({
+        conversationId: thread.conversationId,
+        members: thread.participants ?? [],
+        reason,
+      });
+      if (outcome.status !== 'enqueued') {
+        log.warn(
+          {
+            providerSid,
+            conversationId: thread.conversationId,
+            railStatus: outcome.status,
+            reason: outcome.reason,
+          },
+          'group rail not enqueued - the thread is inbound-only until a rail exists',
+        );
+      }
+    } catch (err) {
+      log.error(
+        { err, providerSid, conversationId: thread.conversationId },
+        'group rail enqueue threw - message persisted, thread stays inbound-only',
+      );
+    }
+  }
+
+  /**
+   * The outcome of classifying + filing ONE group-envelope inbound.
+   *
+   * `handled: false` means "this message belongs in the sender's 1:1 after all"
+   * - the collapsed-roster rule and the corrupt-shape branch (spec 13.1's two
+   * non-tripwire exceptions). The caller then runs the ordinary 1:1 pipeline
+   * with the extraction marker set; NOTHING is persisted here in that case, so
+   * the message can never land twice.
+   */
+  interface GroupInboundOutcome {
+    handled: boolean;
+    // THIS OUTCOME USED TO CARRY A SECOND FIELD, `semantically1to1` (fix wave 2,
+    // contest X2), which told the 1:1 pipeline whether to withhold OUR filed
+    // keyword reply: a COLLAPSED roster is "semantically a 1:1" (spec 13.1(c))
+    // and kept its replies, while every other decline was a GROUP reason and did
+    // not. It had exactly one consumer and no other meaning, and since
+    // 2026-08-12 the app emits no keyword reply on ANY path (module header), so
+    // there is nothing left for the distinction to decide. The collapsed-roster
+    // ruling itself still stands - it is what the extraction marker and the
+    // filing target are argued from - it just no longer branches here.
+  }
+
+  async function handleGroupInbound(msg: {
+    MessageSid: string;
+    From: string;
+    To: string;
+    Body: string | undefined;
+    OptOutType: string | undefined;
+    params: WebhookParams;
+    others: string[];
+  }): Promise<GroupInboundOutcome> {
+    const { MessageSid, From, To, Body, params } = msg;
+
+    // (0) THE EXCLUSION SET, or nothing. A cold-start pool-number read failure
+    // throws here rather than deriving an id from a set known to be incomplete
+    // (that id would be permanent, wrong, and unrecoverable). Refuse the group
+    // branch instead: the caller files 1:1 WITH the extraction marker, which is
+    // recoverable, and invariant 13.3 still holds because nothing is lost.
+    let exclusions: GroupExclusionSet;
+    try {
+      exclusions = await groupExclusions();
+    } catch (err) {
+      log.error(
+        { err, event: 'group_exclusions_unavailable', providerSid: MessageSid },
+        'group exclusion set unavailable - refusing to derive a group id, filed to the sender 1:1 with the extraction marker',
+      );
+      // A REDELIVERY OF AN ALREADY-FILED GROUP MESSAGE MUST NOT BE RE-FILED 1:1
+      // (fix wave 5, adversarial 18). This cold-start refusal is the ONE
+      // transient fail-open path in the feature, and the (ii.5) redelivery guard
+      // sits BELOW it - so delivery 1 could classify the message as a group,
+      // append it to thread G, and then 5xx downstream (media mirroring runs
+      // before the ack), and delivery 2 - hitting a cold pool cache - fell
+      // straight through to the 1:1 pipeline. That pipeline calls
+      // `createOrGetByParticipantPhone` unconditionally, MATERIALIZING an empty
+      // needs-triage 1:1 for the group sender (the exact row numberSuppression
+      // and the group path both go out of their way never to create), and it
+      // ran the keyword handler on that phantom row. (It also drew a TwiML
+      // keyword reply the group path never sent; no path replies now.)
+      //
+      // The sid pointer already knows. If this message lives on a GROUP thread,
+      // the first delivery's filing stands: ack and stop. Best effort - a failed
+      // pointer read falls through to the pre-fix behaviour, never a lost
+      // message (invariant 13.3).
+      try {
+        const filed = await messages.getByProviderSid(MessageSid);
+        if (filed !== undefined) {
+          const where = await conversations.getById(filed.conversationId);
+          if (where?.type === 'group_text') {
+            log.warn(
+              {
+                event: 'group_inbound_redelivery_already_group_filed',
+                providerSid: MessageSid,
+                conversationId: filed.conversationId,
+              },
+              'group exclusion set unavailable on a REDELIVERY of a message already filed to its group thread - acking without minting a 1:1',
+            );
+            // A STOP MAY NEVER GO UNRECORDED (fix wave 2, adversarial 7). This
+            // ack skips the whole pipeline, and the group path's keyword step
+            // runs AFTER media mirroring - so delivery 1 can append the message
+            // and then die before recording anything, leaving THIS delivery as
+            // the only pass that will ever see the keyword. Run the same shared
+            // seam the group path runs (lazy 1:1 target, so a plain inbound or a
+            // HELP still mints nothing). Idempotent by construction, so
+            // re-running it after a delivery that already recorded is a no-op
+            // on the same flags.
+            //
+            // ONE contact read, not two (fix wave 4, item 10). The sender was
+            // being resolved twice - once for the lazy conversation factory and
+            // once for `effectiveContact` - on a path that runs while the pool
+            // table is already unavailable. Two reads of the same row cannot
+            // disagree usefully here; they can only cost.
+            //
+            // THE AUDIT ROW IS WRITTEN AGAIN ON A REDELIVERY, deliberately and
+            // consistently with the rest of this webhook. `processInboundKeywords`
+            // is idempotent on the FLAGS (same value, same row) but its audit
+            // append is not deduped by provider sid - and neither is the 1:1
+            // keyword path's, which has always re-audited a redelivered STOP. A
+            // duplicate audit row is a true record of a webhook delivery that
+            // really happened; a MISSING opt-out is not recoverable. The
+            // precedent is what settles it, not an accident.
+            try {
+              const sender = await contacts.findByPhone(From);
+              await processInboundKeywords({
+                conversation: async () =>
+                  conversations.createOrGetByParticipantPhone(From, conversationTypeFor(sender)),
+                effectiveContact: sender,
+                From,
+                Body,
+                OptOutType: msg.OptOutType,
+                MessageSid,
+                auditContext: { groupConversationId: filed.conversationId, via: 'group_text' },
+              });
+            } catch (keywordErr) {
+              // SUMMARIZED, like every other catch that can see a vendor error on
+              // this route (fix wave 4, item 10): a raw `err` here serializes
+              // every enumerable key of whatever threw, and an AxiosError carries
+              // the Authorization header and the request body.
+              log.error(
+                { err: summarizeError(keywordErr), providerSid: MessageSid },
+                'group inbound redelivery guard: keyword bookkeeping failed - message stays filed, suppression flags NOT updated',
+              );
+            }
+            return { handled: true };
+          }
+        }
+      } catch (readErr) {
+        log.error(
+          { err: summarizeError(readErr), providerSid: MessageSid },
+          'group inbound: redelivery pre-check failed after an exclusion-set failure - falling through to the 1:1 pipeline',
+        );
+      }
+      return { handled: false };
+    }
+
+    // (0b) ENVELOPE CAP - REFUSAL, not just a tripwire. `parseOtherRecipients`
+    // stops at MAX_OTHER_RECIPIENTS_INDEX, so an envelope that keeps going
+    // yields a SHORT roster - and a short roster is a DIFFERENT
+    // conversationId, i.e. a forked thread under an id this code would itself
+    // call wrong. The two sibling roster-SHRINKING conditions already state the
+    // rule: an unparseable address refuses ("deriving an id from the survivors
+    // would give a 3-person group the id of a 2-person one") and so does a
+    // cold-start exclusion failure ("a wrong id is permanent data; a 1:1 refile
+    // is recoverable"). This is the same fact pattern and now gets the same
+    // answer - WARN (not ERROR: the level is F13's ruling, and a subject-only
+    // shape must not page anyone) and file to the sender's 1:1 with the marker.
+    if (hasOtherRecipientsBeyondCap(params)) {
+      log.warn(
+        {
+          event: 'group_envelope_truncated',
+          providerSid: MessageSid,
+          scannedCount: msg.others.length,
+          maxIndex: MAX_OTHER_RECIPIENTS_INDEX,
+        },
+        'group envelope carries an OtherRecipients index past the scan cap - the derived roster would be SHORT and the thread id therefore WRONG, so no thread was minted; filed to the sender 1:1 with the extraction marker',
+      );
+      return { handled: false };
+    }
+
+    const identity = groupIdentity(From, To, msg.others, exclusions, { logger: log });
+
+    // (i) CORRUPT ENVELOPE: an address we cannot canonicalize. Deriving an id
+    // from the survivors would give a 3-person group the id of a 2-person one -
+    // a silently WRONG thread. File 1:1, mark, and say so loudly.
+    if (identity.unparseable.length > 0) {
+      log.error(
+        { event: 'group_envelope_unparseable', providerSid: MessageSid, unparseableCount: identity.unparseable.length },
+        'group envelope carries an address that is not a valid phone number - filed to the sender 1:1, NOT as a group',
+      );
+      return { handled: false };
+    }
+
+    // (ii) COLLAPSED ROSTER (spec 5.1): fewer than two outside members after
+    // exclusion. Us-plus-one-person IS a 1:1, so filing it there is also the
+    // semantically right answer - but the body may name the other parties, so
+    // it still carries the extraction marker.
+    if (identity.collapsed) {
+      log.warn(
+        { event: 'group_roster_collapsed', providerSid: MessageSid, rosterSize: identity.roster.length },
+        'group envelope collapsed to fewer than two outside members - filed to the sender 1:1 (semantically a 1:1)',
+      );
+      // The ONE decline that is not group content: 13.1(c) says this IS a 1:1.
+      // It keeps full 1:1 keyword semantics, which since 2026-08-12 means the
+      // same "record everything, reply nothing" every other path gets. The
+      // extraction marker still rides along - the body may name the other
+      // parties.
+      return { handled: false };
+    }
+
+    // (ii.5) A REDELIVERY NEVER RE-CLASSIFIES. The cold-start refusal at (0) is
+    // the one TRANSIENT fail-open path in this feature, so one MessageSid can be
+    // classified 1:1 on its first delivery (pool read down) and group on a
+    // redelivery (pool read healthy) - and Twilio only redelivers when the first
+    // delivery 5xx'd AFTER the append. Without this check the second delivery
+    // MINTS the group thread, then `messages.append` dedupes against the row in
+    // the sender's 1:1: a group thread carrying a preview and ZERO messages,
+    // with nothing logged.
+    //
+    // The sid pointer is the authority on where this message already lives. If
+    // it lives somewhere other than the id we just derived, the FIRST delivery's
+    // filing stands and this delivery's job is to finish it - so refuse the
+    // group branch and let the 1:1 pipeline re-run its idempotent side effects
+    // (it adopts `persistedConversationId` from the same read). One point read
+    // on the group branch only; the 1:1 path is untouched (invariant 13.2).
+    let alreadyFiledElsewhere = false;
+    try {
+      const alreadyFiled = await messages.getByProviderSid(MessageSid);
+      alreadyFiledElsewhere =
+        alreadyFiled !== undefined && alreadyFiled.conversationId !== identity.conversationId;
+      if (alreadyFiledElsewhere) {
+        log.error(
+          {
+            event: 'group_inbound_already_filed_elsewhere',
+            providerSid: MessageSid,
+            conversationId: identity.conversationId,
+          },
+          'this MessageSid already persisted on a DIFFERENT conversation (a first delivery classified it 1:1) - refusing to mint a group thread for a message that lives elsewhere; completing the original filing instead',
+        );
+      }
+    } catch (err) {
+      // A failed pointer read must not lose the message. Fall through: the worst
+      // case is the pre-fix behavior, and the post-append guard below still
+      // keeps a diverged row from dressing this thread.
+      log.error(
+        { err, providerSid: MessageSid },
+        'group inbound: sid-pointer pre-check failed - proceeding, the post-append divergence guard still applies',
+      );
+    }
+    if (alreadyFiledElsewhere) return { handled: false };
+
+    // (iii) Resolve the thread at the derived id. THREE legal shapes.
+    const existing = await conversations.getById(identity.conversationId);
+    let thread: ConversationItem;
+    if (existing === undefined) {
+      // (a) NOT FOUND -> create. Members first: every ConversationParticipant
+      // carries a REQUIRED contactId, and the stubs must NOT go through
+      // captureContact (adjudication A7 - it would stamp consent_method).
+      const resolution = await resolveGroupMembers(identity.roster, {
+        contactsRepo: contacts,
+        logger: log,
+      });
+      const { item, created } = await conversations.createGroupTextThread({
+        conversationId: identity.conversationId,
+        members: resolution.members,
+        ...(Body !== undefined && Body.length > 0 && { preview: Body }),
+      });
+      thread = item;
+      // Created -> enqueue the rail. Adopted (lost the create race) -> the
+      // winner already enqueued, so only heal a genuinely rail-less thread.
+      await ensureRailEnqueued(thread, created ? 'created' : 'rail_missing', MessageSid);
+    } else if (existing.type === 'group_text') {
+      // (b) FOUND, already native. Re-enqueue the rail when there is none: this
+      // is what closes the create-then-crash-before-enqueue window (spec 15.3).
+      thread = existing;
+      await ensureRailEnqueued(thread, 'rail_missing', MessageSid);
+    } else if (
+      existing.type === 'relay_group' &&
+      existing.status === 'connecting' &&
+      !(typeof existing.pool_number === 'string' && existing.pool_number.length > 0)
+    ) {
+      // (c) FOUND, an IMPORTED row nobody converted yet -> AUTO-CONVERT inline
+      // (Cameron's gate ruling). Called WITHOUT ownNumbers: exclusion-set parity
+      // belongs to the bulk migration entry, which has the import context; this
+      // caller is guarded by boot validation plus the identity fingerprint.
+      const converted = await convertConnectingRelayGroupToGroupText(identity.conversationId, {
+        conversationsRepo: conversations,
+        contactsRepo: contacts,
+        logger: log,
+      });
+      if (converted.outcome === 'refused') {
+        log.error(
+          { event: 'group_autoconvert_refused', providerSid: MessageSid, conversationId: identity.conversationId, refusal: converted.refusal },
+          'inline auto-convert refused an imported group row - filed to the sender 1:1, never guessed',
+        );
+        return { handled: false };
+      }
+      const reread = await conversations.getById(identity.conversationId);
+      if (reread === undefined || reread.type !== 'group_text') {
+        log.error(
+          { event: 'group_autoconvert_unreadable', providerSid: MessageSid, conversationId: identity.conversationId },
+          'inline auto-convert reported success but the thread does not read back as a group text - filed to the sender 1:1',
+        );
+        return { handled: false };
+      }
+      thread = reread;
+      log.warn(
+        { event: 'group_autoconvert_self_heal', providerSid: MessageSid, conversationId: identity.conversationId, outcome: converted.outcome },
+        'inbound group message SELF-HEALED an unconverted imported relay row into a native group text (the migration should have done this before go-live)',
+      );
+      await ensureRailEnqueued(thread, 'rail_missing', MessageSid);
+    } else {
+      // ANY OTHER SHAPE: an open/connected relay group with a pool number at a
+      // DERIVED GROUP ID. The importer cannot produce this, so it means the row
+      // is corrupt or an id collided. Never guess - file 1:1 and alarm.
+      log.error(
+        { event: 'group_id_wrong_shape', providerSid: MessageSid, conversationId: identity.conversationId, foundType: existing.type, foundStatus: existing.status },
+        'the derived group id resolves to a thread that is neither a group text nor a convertible imported row - filed to the sender 1:1',
+      );
+      return { handled: false };
+    }
+
+    // --- From here the message IS a group message -------------------------
+    mergeContext({ conversationId: thread.conversationId });
+
+    // ROSTER/ID DIVERGENCE TRIPWIRE. The thread's id is uuidv5 over its roster,
+    // so the roster STORED on the thread must hash back to the id we resolved
+    // it by. A row written by a path that truncated the roster while keeping
+    // the full-set id (a workbook `drop` on an imported group is the known
+    // producer) breaks that: the sender can then be a NON-MEMBER of the thread
+    // its own message lands on - no member chip, no sender attribution, no
+    // stub, and a Conversations rail built from `participants` would omit a
+    // real handset.
+    //
+    // REPORT ONLY, never repair. Re-keying the roster to match the id (or the
+    // id to match the roster) changes thread identity and orphans history; the
+    // migration refuses such a row so a human adjudicates it (groupConvert's
+    // `roster_id_mismatch`). Here the message is already correctly filed by id,
+    // so the honest action is to say the roster is wrong and keep going.
+    //
+    // EXCLUSION-SET-AWARE (fix wave 2). An ABSENT sender is only a signal when
+    // the roster is supposed to contain them. When the founder or staff texts
+    // one of their own groups from ANOTHER ORG NUMBER, the exclusion set
+    // correctly subtracts that number and the sender is correctly not on the
+    // roster - spec 4.1 (r3 finding 9) calls that "the correctly-configured
+    // steady state, not a signal". It is also a designed-for workflow that
+    // recurs across every group, so alarming on it at ERROR - the channel that
+    // feeds the production alarm - would bury the real corruption signal on day
+    // one. Skip those; keep the ERROR for a sender absent for any OTHER reason.
+    const senderE164 = normalizeToE164(From);
+    const rosterPhones = (thread.participants ?? []).map((p) => p.phone);
+    if (senderE164 !== undefined && !rosterPhones.includes(senderE164) && !identity.senderExcluded) {
+      log.error(
+        {
+          event: 'group_sender_not_on_roster',
+          providerSid: MessageSid,
+          conversationId: thread.conversationId,
+          rosterSize: rosterPhones.length,
+          derivedRosterSize: identity.roster.length,
+          rosterMatchesId: conversationIdForGroup(rosterPhones) === thread.conversationId,
+        },
+        'the sender of a group message is NOT on the resolved thread roster - the stored roster does not describe this group (member chips, attribution and the rail will all be short)',
+      );
+    }
+
+    // T3.4a: group member keys are PHONE-SCOPED, ALWAYS. relayMemberKey prefers
+    // contactId, which would collapse two numbers of ONE contact into a single
+    // delivery/attribution slot (spec 15.6) - so it is deliberately not used.
+    const senderKey = groupMemberKey(normalizeToE164(From) ?? From);
+    // THE SENDER'S CONTACT, RESOLVED THROUGH THE ROSTER - NOT THROUGH `byPhone`.
+    //
+    // `contacts.findByPhone` is a QUERY on the byPhone GSI, and a GSI is
+    // EVENTUALLY consistent. On the create branch above, the sender's own stub
+    // was minted MOMENTS AGO in THIS SAME REQUEST (resolveGroupMembers), so that
+    // query legitimately comes back empty. Live dev proved it: the first-contact
+    // sender was left with `group_participation_at` and NO `consent_method`,
+    // because the plain-inbound consent stamp inside processInboundKeywords is
+    // guarded on `effectiveContact &&` and therefore silently no-opped - and
+    // `author` fell to `unknown` off the same undefined read. Spec 4.4/5 says a
+    // group sender gets NORMAL inbound consent semantics; without the stamp the
+    // next proactive 1:1 to them is JIT-gated for consent they already gave.
+    //
+    // No test could see it: every fake resolves byPhone consistently, so this
+    // read always hit. Only real DynamoDB exhibits the lag.
+    //
+    // The thread's roster already carries the sender's contactId - the create
+    // branch just wrote it, and branches (b)/(c) read a persisted one - and
+    // `getById` with `consistentRead` is a strongly-consistent POINT read with
+    // no index to lag behind. `findByPhone` stays as the fallback for a sender
+    // who is legitimately NOT a roster member (the exclusion-set case: staff
+    // texting one of their own groups from another org number), and for a roster
+    // slot whose derived id has no row behind it - neither races a just-written
+    // item. This is inside the group branch only; the 1:1-classified path gains
+    // no I/O (invariant 13.2).
+    const senderRosterContactId =
+      senderE164 === undefined
+        ? undefined
+        : (thread.participants ?? []).find((p) => p.phone === senderE164)?.contactId;
+    const senderContact =
+      senderRosterContactId === undefined
+        ? await contacts.findByPhone(From)
+        : ((await contacts.getById(senderRosterContactId, { consistentRead: true })) ??
+          (await contacts.findByPhone(From)));
+    // Author honesty: only a reviewed contact type claims tenant/landlord.
+    const author =
+      senderContact?.type === 'landlord' ||
+      senderContact?.type === 'tenant' ||
+      senderContact?.type === 'partner'
+        ? senderContact.type
+        : 'unknown';
+
+    const mediaUrls = parseInboundMediaUrls(params);
+    const providerTs = new Date().toISOString();
+    // Dedupe rides the EXISTING MessageSid sid-pointer transaction. The repo
+    // returns the FIRST delivery's tsMsgId from the pointer, so the keys below
+    // address the persisted row either way - and a redelivery RE-ENTERS media
+    // mirroring when the first pass stored fewer attachments than the envelope
+    // carried (see the completeness gate below; the 1:1 path does the same).
+    //
+    // NO `deliveryRecipients` seed: the relay path seeds an empty map because a
+    // fan-out job writes per-recipient child fields into the SOURCE message. A
+    // carrier group needs no fan-out (the carrier already delivered to every
+    // handset), so an inbound group message has no per-recipient delivery map.
+    const appended = await messages.append({
+      conversationId: thread.conversationId,
+      providerSid: MessageSid,
+      providerTs,
+      type: mediaUrls.length > 0 ? 'mms' : 'sms',
+      direction: 'inbound',
+      author,
+      deliveryStatus: 'delivered',
+      relaySenderKey: senderKey,
+      ...(Body !== undefined && Body.length > 0 && { body: Body }),
+      ...(mediaUrls.length > 0 && { mediaUrls }),
+    });
+
+    // Media (T3.6): the SHARED mirror, under the GROUP conversationId.
+    //
+    // REDELIVERY RECOVERY, identical to the 1:1 path's completeness gate.
+    // `mirrorInboundMedia` never throws - it catches PER ATTACHMENT - so a
+    // Twilio media 404 or an S3 5xx leaves the row with fewer attachments than
+    // `NumMedia` and still returns 200. Twilio's media URLs expire, so a
+    // redelivery that skipped the mirror outright would lose the photo
+    // PERMANENTLY. Gate on completeness (not on `deduped`): re-putting an
+    // already-stored key is an idempotent same-bytes no-op.
+    let groupMediaAlreadyMirrored = false;
+    if (appended.deduped) {
+      try {
+        const persisted = await messages.getByProviderSid(MessageSid);
+        // THE CONCURRENT HALF of the (ii.5) guard: two deliveries in flight at
+        // once can both pass the pre-check and still dedupe against each other.
+        // Nothing was persisted by THIS pass, so refusing here is safe and the
+        // 1:1 pipeline finishes the filing that actually won - which also keeps
+        // the media mirror pointed at the row that exists.
+        if (persisted !== undefined && persisted.conversationId !== thread.conversationId) {
+          log.error(
+            {
+              event: 'group_inbound_already_filed_elsewhere',
+              providerSid: MessageSid,
+              conversationId: thread.conversationId,
+            },
+            'group inbound deduped against a message persisted on a DIFFERENT conversation - leaving this thread untouched and completing the original filing',
+          );
+          return { handled: false };
+        }
+        groupMediaAlreadyMirrored =
+          mediaUrls.length > 0 &&
+          persisted !== undefined &&
+          mediaAttachmentsOf(persisted).length >= mediaUrls.length;
+        if (persisted === undefined) {
+          // The append deduped, so the SID pointer exists - failing to read the
+          // message back is never expected. Carry on under the keys we have
+          // rather than dropping the media.
+          log.error(
+            { providerSid: MessageSid },
+            'group inbound deduped but the persisted message could not be read back - re-mirroring any media under the append keys',
+          );
+        }
+      } catch (err) {
+        log.error(
+          { err, providerSid: MessageSid },
+          'group inbound dedupe read-back failed - re-entering the mirror rather than risking a permanent media loss',
+        );
+      }
+    }
+    if (!groupMediaAlreadyMirrored) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: thread.conversationId,
+        tsMsgId: appended.tsMsgId,
+        params,
+      });
+    }
+
+    // Sender attribution across a second handset - the same touch a 1:1 does
+    // (it is sender attribution, not a 1:1-ism). Best-effort.
+    if (senderContact) {
+      try {
+        await contacts.touchPhoneLastSeen(senderContact.contactId, From, providerTs);
+      } catch (err) {
+        log.error(
+          { err, providerSid: MessageSid },
+          'phone lastSeenAt touch failed - message persisted, lastSeenAt stale',
+        );
+      }
+    }
+
+    // Inbox touch + unread + SSE, on the GROUP conversationId. touchLastActivity
+    // takes NO special parameters: S2's repo guard keeps the row in its own
+    // `group_open` byLastActivity partition.
+    let touched: ConversationItem | undefined;
+    try {
+      if (!appended.deduped) await conversations.incrementUnread(thread.conversationId);
+      touched = await conversations.touchLastActivity(
+        thread.conversationId,
+        Body || undefined,
+        providerTs,
+      );
+    } catch (err) {
+      log.error(
+        { err, providerSid: MessageSid },
+        'group touchLastActivity/unread failed - message persisted, inbox stale',
+      );
+    }
+    if (!appended.deduped) {
+      events.emit('message.persisted', {
+        conversationId: thread.conversationId,
+        tsMsgId: appended.tsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+
+    // Keywords (spec 4.4): the SHARED seam runs on EVERY group inbound, because
+    // the plain-inbound contact-level consent stamp for the SENDER lives there.
+    // The target conversation is a THUNK - the sender's 1:1 is materialized ONLY
+    // if an opt-out/opt-in actually needs a target, never for plain inbound and
+    // never for HELP. Suppression is scoped to the sender (contact + their own
+    // 1:1), NEVER the group thread. The app SENDS NOTHING here - which is now
+    // true of every path, so it costs no parameter.
+    await processInboundKeywords({
+      conversation: async () =>
+        conversations.createOrGetByParticipantPhone(From, conversationTypeFor(senderContact)),
+      effectiveContact: senderContact,
+      From,
+      Body,
+      OptOutType: msg.OptOutType,
+      MessageSid,
+      auditContext: { groupConversationId: thread.conversationId, via: 'group_text' },
+    });
+
+    // Cross-check liveness (spec 8.2): record that a RAILED group thread took
+    // classic-webhook inbound. Paired with the cross-check endpoint's own
+    // high-water mark, that is what makes "the monitor went quiet" detectable.
+    if (hasActiveGroupRail(thread)) {
+      try {
+        await settings.putGroupTimestamp(GROUP_RAILED_INBOUND_LAST_AT_ID, providerTs);
+      } catch (err) {
+        log.warn(
+          { err, providerSid: MessageSid },
+          'group railed-inbound liveness stamp failed - message persisted, cross-check high-water mark stale',
+        );
+      }
+      // T6.6(d): this filing is the CLASSIC half of the cross-check's
+      // (rail, author) match. Without it every Conversations event would sit
+      // unmatched and alarm at its grace deadline - i.e. a perfectly healthy
+      // channel would look like the failure the guardrail exists to detect.
+      // recordClassicInbound never throws; a bookkeeping problem is its own WARN.
+      //
+      // DELIBERATELY NOT GATED ON `appended.deduped`. This step used to be
+      // non-idempotent, and a redelivery banked a phantom credit that later
+      // absorbed a genuinely unmatched event - the guardrail reporting health
+      // while detection was down. The fix is a per-provider-SID dedupe marker
+      // INSIDE recordClassicInbound, not a gate here: a first delivery that died
+      // after the append but before this line leaves no marker, and its
+      // redelivery (which appends as `deduped`) is the only chance to file the
+      // classic half. Gating on the flag would convert that recovery into a
+      // false `group_crosscheck_inbound_missing` ERROR on healthy traffic.
+      //
+      // The RAW `From` is passed on purpose: the ledger's ONE key builder
+      // normalizes it, so the two halves cannot drift (spec 4.1).
+      await groupCrossCheck.recordClassicInbound({
+        conversationSid: thread.twilio_conversation_sid as string,
+        author: From,
+        providerSid: MessageSid,
+      });
+    }
+
+    log.info(
+      {
+        providerSid: MessageSid,
+        direction: 'inbound',
+        conversationId: thread.conversationId,
+        memberCount: (thread.participants ?? []).length,
+        bodyLength: Body?.length ?? 0,
+        mediaCount: mediaUrls.length,
+        deduped: appended.deduped,
+      },
+      'twilio inbound group message processed',
+    );
+    return { handled: true };
   }
 
   // ---------------------------------------------------------------------
@@ -912,13 +1814,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         const openMatch = openMatches.sort(byNewestCreated)[0];
         if (openMatch) {
-          // Parity with the closed intercept: an open-path keyword (STOP/HELP/
-          // opt-in) returns its filed reply to ride the TwiML; a normal relay
-          // returns undefined -> empty ack.
-          const relayReply = await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(
-            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
-          );
+          // Empty ack, keyword or not: the open path processes STOP/HELP/opt-in
+          // and Twilio's Advanced Opt-Out sends the confirmation.
+          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // (b) Else a CLOSED group whose roster contains the sender -> deliver
@@ -929,17 +1828,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           .filter((g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From))
           .sort(byNewestCreated)[0];
         if (closedMatch) {
-          // AF-4: the intercept processes STOP/opt-out and returns the filed
-          // reply (STOP confirmation / HELP / welcome), which rides the TwiML.
-          const closedReply = await handleClosedGroupInbound(closedMatch, {
+          // AF-4: the intercept processes STOP/opt-out; the confirmation is
+          // Twilio's, so the ack is empty.
+          await handleClosedGroupInbound(closedMatch, {
             MessageSid,
             From,
             Body,
             params,
           });
-          res.type('text/xml').send(
-            closedReply !== undefined ? messageTwiml(closedReply) : EMPTY_TWIML,
-          );
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // (c) Unknown sender (on NO roster) texting a pool number.
@@ -953,16 +1850,108 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         //     closed-roster member (that interception is branch (b) above).
         const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
         if (openFallback) {
-          // Same reply-riding-TwiML contract as the open-roster match above (an
-          // unknown-sender STOP still gets its confirmation).
-          const relayReply = await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(
-            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
-          );
+          // Same contract as the open-roster match above (an unknown-sender STOP
+          // is still recorded; Twilio still confirms it).
+          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // else: every group on this number is closed -> fall through to (2).
       }
+    }
+
+    // (1.75) NATIVE GROUP TEXT detection (group-texting spec 5). Sits AFTER both
+    // echo drops and ALL relay routing, and BEFORE any 1:1 I/O - the envelope
+    // read below is pure property access on an already-parsed body, so an
+    // envelope-less inbound reaches (2) with a byte-identical call sequence
+    // (invariant 13.2).
+    //
+    // GATED ON THE BUSINESS NUMBER (adjudication A6). Spec 5 puts this "in the
+    // main-number branch", and the gate is what makes that true: the relay block
+    // above FALLS THROUGH when every group on a pool number is closed, so
+    // without it a group-origin inbound addressed to a POOL number would mint a
+    // native thread and quietly change relay behavior (invariant 13.6).
+    const others = parseOtherRecipients(params);
+    const onBusinessNumber =
+      To !== undefined &&
+      config.businessPhoneNumber !== undefined &&
+      To === config.businessPhoneNumber;
+    // Set when a fail-open path files a possibly-group message into a 1:1
+    // thread. AI fact extraction excludes marked messages from every transcript
+    // window it builds (spec 5.4).
+    let groupAmbiguousOrigin = false;
+    if (others.length > 0 && onBusinessNumber) {
+      const outcome = await handleGroupInbound({
+        MessageSid,
+        From,
+        To: To as string,
+        Body,
+        OptOutType,
+        params,
+        others,
+      });
+      if (outcome.handled) {
+        // The app SENDS NOTHING on a group inbound (spec 4.4), keywords
+        // included - which is now the whole stack's posture, not this branch's
+        // exception (issue twilio-standard-optout-double-reply, RESOLVED).
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
+      // Collapsed roster or corrupt shape: fall through to the 1:1 pipeline
+      // below, MARKED. Nothing was persisted above, so no double-filing.
+      groupAmbiguousOrigin = true;
+    } else if (others.length > 0) {
+      // EVERY OTHER ENVELOPE-BEARING INBOUND. We have POSITIVE proof this is
+      // carrier-group content (the envelope is right here) but we are NOT
+      // minting a native thread for it - either BUSINESS_PHONE_NUMBER is unset
+      // (detection is structurally off) or the message landed on one of our
+      // OTHER numbers, which for a pool number is A6's deliberate fall-through
+      // keeping relay behavior byte-identical (invariant 13.6).
+      //
+      // The DECISION not to mint a thread is separate from the MARKER. Filing
+      // group content into a 1:1 UNMARKED hands it to AI fact extraction as
+      // that one contact's own speech - the precise harm the marker exists to
+      // prevent - so invariant 13.1's rule holds here too: EVERY envelope-
+      // bearing inbound filed 1:1 carries the marker AND alarms. Rate-limited
+      // because a misconfigured stack matches on every group inbound at once
+      // and the flood would bury the signal.
+      //
+      // THE KEYWORD REPLY ARGUMENT THAT USED TO SIT HERE (fix wave 4, item 9)
+      // IS MOOT. It weighed whether this branch should withhold OUR filed
+      // confirmation; the app no longer has one to withhold, on any branch, and
+      // Twilio confirms every keyword itself. What survives from it is the part
+      // that was never about the reply: a person who texts STOP to a number
+      // where detection is off still has their opt-out RECORDED here, which the
+      // shared seam below does unconditionally.
+      //
+      // The MARKER is a separate decision and still applies: the envelope is
+      // positive proof of group content, and filed unmarked it would reach AI
+      // fact extraction as this one contact's own speech.
+      groupAmbiguousOrigin = true;
+      if (config.businessPhoneNumber === undefined) {
+        warnDetectionUnconfigured(
+          { event: 'group_detection_unconfigured', providerSid: MessageSid },
+          'a group envelope arrived but BUSINESS_PHONE_NUMBER is unset - group detection is OFF, filed as 1:1 WITH the extraction marker',
+        );
+      } else {
+        warnEnvelopeOffBusinessNumber(
+          { event: 'group_envelope_off_business_number', providerSid: MessageSid },
+          'a carrier group envelope arrived on a NON-business number (pool or other org number) - filed as 1:1 WITH the extraction marker, no native thread minted (A6)',
+        );
+      }
+    } else if (onBusinessNumber && isMissingEnvelopeGroupShape(MessageSid, params)) {
+      // (1.8) TRIPWIRE (spec 8.1). An MM-prefixed SID with no media and no
+      // envelope is what a SILENTLY REMOVED `OtherRecipients` contract looks
+      // like from in here. FAIL OPEN - file as a 1:1, never lose a message -
+      // and WARN, deliberately NOT error: a subject-only 1:1 MMS legitimately
+      // matches this shape, and the ERROR channel feeds the production alarm.
+      // Rate-limited because if the contract really did disappear, EVERY group
+      // inbound matches at once and the flood would bury the signal.
+      groupAmbiguousOrigin = true;
+      warnEnvelopeMissing(
+        { event: 'group_envelope_missing', providerSid: MessageSid },
+        'MM-shaped inbound with no media and no OtherRecipients envelope - filed as 1:1 (possible group-detection outage)',
+      );
     }
 
     // (2) Resolve contact + conversation. Unknown phones still get a
@@ -999,6 +1988,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Inbound messages are received by definition; the outbound delivery
       // machine never transitions them.
       deliveryStatus: 'delivered',
+      // Fail-open group filing (spec 5.4): this message MAY be carrier-group
+      // content, so AI fact extraction must not attribute it to this contact.
+      ...(groupAmbiguousOrigin && { groupAmbiguousOrigin: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -1086,21 +2078,18 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
     }
 
-    // (4) STOP / HELP / START keyword handling (spec §6 — WE own the replies).
-    // Twilio Advanced Opt-Out auto-reply is OFF (operator step) so no double
-    // confirmations; the filed reply is returned as TwiML at the ack below. The
-    // message itself stays on the timeline either way (persisted above).
-    //   - opt-out keyword → suppress + reply STOP_CONFIRMATION;
-    //   - HELP           → reply HELP_REPLY (no flag change);
-    //   - opt-in keyword → clear suppression, stamp inbound_text consent if the
-    //                      contact has none, reply WELCOME_SMS.
-    // `keywordReply` is captured here and emitted as the TwiML response at the
-    // end of the handler. The STOP confirmation MUST ride this TwiML response,
-    // NOT the opt-out-gated sendMessage wrapper (which would refuse a send to a
-    // just-opted-out number).
-    // Shared with the closed-group intercept (AF-4) so both inbound paths honor
-    // STOP identically. keywordReply rides the TwiML response at the ack below.
-    const keywordReply = await processInboundKeywords({
+    // (4) STOP / HELP / START keyword handling (spec 6 - TWILIO owns the
+    // replies since 2026-08-12; see the module header and RUNBOOK "Keyword
+    // auto-replies (Advanced Opt-Out)"). The message itself stays on the
+    // timeline either way (persisted above). What THIS still does:
+    //   - opt-out keyword -> suppress (conversation always, contact on primary);
+    //   - HELP            -> nothing (no flag change, no thread minted);
+    //   - opt-in keyword  -> clear suppression, stamp inbound_text consent if the
+    //                       contact has none.
+    // Shared with the closed-group intercept (AF-4) and the group path so every
+    // inbound path honors STOP identically. The handler emits no reply, so this
+    // returns nothing and the ack at the end of the handler is always empty.
+    await processInboundKeywords({
       conversation,
       effectiveContact,
       From,
@@ -1187,15 +2176,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: 'inbound',
         bodyLength: Body?.length ?? 0,
         mediaCount: mediaUrls.length,
-        keywordReply: keywordReply !== undefined,
       },
       'twilio inbound message processed',
     );
-    // A matched keyword (STOP/HELP/opt-in) returns its filed reply as a TwiML
-    // <Message>; every other inbound acks with empty TwiML. NO PII in the body
-    // (all filed copy). The STOP confirmation reaching a just-opted-out number
-    // is exactly why this rides the TwiML response, not the gated send wrapper.
-    res.type('text/xml').send(keywordReply !== undefined ? messageTwiml(keywordReply) : EMPTY_TWIML);
+    // EVERY inbound acks with the empty TwiML, keyword or not (module header).
+    res.type('text/xml').send(EMPTY_TWIML);
   });
 
   // ---------------------------------------------------------------------
@@ -1447,6 +2432,23 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
+            // NATIVE GROUP TEXTS ARE REACHABLE HERE. A classic status callback
+            // for a group leg in the pre-marker window resolves to the GROUP
+            // thread, which carries NO participant_phone - so the lookup below
+            // finds no contact and the whole case degrades to a log line. That
+            // outcome is CORRECT (there is no single member to flag: a group
+            // failure says nothing about any one number), but it is a distinct
+            // situation from "we have a number and no contact record", so it
+            // says so and logs ONCE per sid instead of on every redelivery.
+            if (conversation?.type === 'group_text') {
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  'sms_unreachable on a group_text thread - no single member to flag (group legs report per-recipient)',
+                );
+              });
+              break;
+            }
             const convPhone = conversation?.participant_phone;
             const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
             if (contact && convPhone === contact.phone) {
@@ -1457,7 +2459,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 'sms_unreachable on a non-primary attached number — contact flag NOT set (number-scoped)',
               );
             } else {
-              log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, 'sms_unreachable: no contact record to flag');
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  'sms_unreachable: no contact record to flag',
+                );
+              });
             }
             break;
           }
@@ -1480,6 +2487,26 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — a 21610 on a SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
+            // NATIVE GROUP TEXTS ARE REACHABLE HERE, exactly as on the
+            // 30005/30006 twin above: a classic status callback for a group leg
+            // resolves to the GROUP thread, which carries no participant_phone.
+            // RULING (invariant 13.8): this arm writes NOTHING for a group
+            // thread. A 21610 on a group leg is per-RECIPIENT information that
+            // the classic callback does not carry, so there is no number to
+            // scope the suppression to and guessing would suppress the wrong
+            // handset. Spec 15.8's receipts-side 21610 bookkeeping (the
+            // per-member map on the Conversations rail) is S5/T5.3's job and
+            // builds on this branch; until then, say so ONCE per sid instead of
+            // falling into "no contact record to flag" on every redelivery.
+            if (conversation?.type === 'group_text') {
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  '21610 suppression on a group_text thread - no single member to scope it to, nothing flagged (per-member receipts land in S5)',
+                );
+              });
+              break;
+            }
             const convPhone = conversation?.participant_phone;
             const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
             if (contact && convPhone === contact.phone) {
@@ -1495,7 +2522,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 '21610 suppression on a non-primary attached number — contact flag NOT set (number-scoped)',
               );
             } else {
-              log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, '21610 suppression: no contact record to flag');
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, '21610 suppression: no contact record to flag');
+              });
             }
             break;
           }

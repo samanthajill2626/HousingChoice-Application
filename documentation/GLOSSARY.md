@@ -157,17 +157,43 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   New-property form's Rent fields), not on the person. `lease_terms` is
   internal-only (never on the flyer projections).
 
-- **"Group text number"** = the STAFF-FACING name a navigator sees for a relay
-  **pool number** (the shared number the relay multiplexes group texts onto).
+- **"Relay group"** (RENAMED 2026-08-10, group-texting S1) = the STAFF-FACING
+  label for the MASKED relay thread: tenant and landlord talk through a shared
+  **pool number** and never see each other's real number. It used to be called
+  "Group text" everywhere in staff copy; that vocabulary now belongs to the
+  NATIVE type below, so the relay product took the unambiguous name. Code and
+  data are UNCHANGED - the conversation type is still `relay_group`, the repos
+  are still `relayGroupsRepo` / `poolNumbersRepo`, the persisted activity-event
+  types are still `added_to_group_text` / `removed_from_group_text`, and the
+  contact-file component is still `GroupTextsCard.tsx`. Only display copy moved.
+  MEMBER-facing outbound copy says **"group chat"**, never either staff label
+  (`relay.group_closed`, the fan-out `joined` fragment). Tenants and landlords
+  never see the words "relay group".
+
+- **"Relay group number"** = the STAFF-FACING name a navigator sees for a relay
+  **pool number** (the shared number the relay multiplexes relay groups onto).
   Code and data stay `pool_number` / `poolNumber` (`poolNumbersRepo`,
   `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the Settings tab at
   `/settings/numbers` is titled **"Phone numbers"** and its pool inventory block
-  is still headed **"Group text numbers"** (admin-only, read-only - the tab
+  is headed **"Relay group numbers"** (admin-only, read-only - the tab
   itself is visible to every authenticated user, since its other block shows OUR
-  one business number). A number is provisioned with the first group text and
+  one business number). A number is provisioned with the first relay group and
   can outlive many groups (burn-as-claim multiplexing), so the accurate noun is
-  "group text number", never "the group's number". Tenants and landlords never
+  "relay group number", never "the group's number". Tenants and landlords never
   see this term.
+
+- **"Group text"** (native group texting, 2026-08-10) = a REAL carrier group
+  text: one thread on OUR one business number where EVERYONE SEES EVERYONE's
+  real number. Nothing is masked and no pool number is involved - the exact
+  opposite of a **relay group**, which is why the two could not keep sharing a
+  label. Code and data: the conversation type `group_text`, thread id
+  `conversationIdForGroup(<sorted outside-participant set>)` with the business
+  number, every pool number, and `GROUP_IDENTITY_EXCLUDED_NUMBERS` subtracted
+  from the envelope's participants. A group text arises from exactly two paths -
+  the Quo import/migration seam and inbound detection - and is NEVER created by
+  staff from the dashboard. Tenants and landlords experience it as an ordinary
+  group text from the number on the flyer; members see it as a "group chat" in
+  any copy we send into it.
 
 - **"Our number"** / **the business number** (2026-08-06) = the ONE number an
   environment texts and calls FROM, configured as the env var
@@ -176,8 +202,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   special). Staff see it read-only as "Our number" in **Settings > Phone
   numbers** and as the "Sending from" pill on **Settings > System status**;
   tenants and landlords know it as the number on the flyer. It is NEVER a relay
-  pool number ("group text number", above): dev and prod each have their own,
-  and there is no in-app edit path.
+  pool number ("relay group number", above): dev and prod each have their own,
+  and there is no in-app edit path. It IS the number every native **group text**
+  (above) runs on.
 
 - **`partner`** (email-channel v1, 2026-07-21) - a FIRST-CLASS `ContactType` (the
   code/data value `partner`, a union member beside `tenant` / `landlord` /
@@ -208,7 +235,7 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   never quarantine.
 
 - **primary contact** (contact-rosters, 2026-08-04) - the property-side person we
-  put on group texts and reach by a masked call: the unit's DEFAULT contact. Code
+  put on relay groups and reach by a masked call: the unit's DEFAULT contact. Code
   and data: the roster-row flag `UnitContact.primaryContact` plus the unit scalar
   `primary_contact`, which `unitsRepo.addContact` / `removeContact` keep
   consistent with each other. AT MOST ONE per unit (zero is legal and reachable -
@@ -216,7 +243,7 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   as the "primary" on the property's Contacts card. RENAMED 2026-08-04 from
   `primaryVoice` / `primary_voice_contact`: the old names meant only "the
   landlord-side person a masked tenant call routes to", and the concept widened to
-  cover group texts as well as calls (persisted keys were renamed too - safe only
+  cover relay groups as well as calls (persisted keys were renamed too - safe only
   because prod is not live yet and dev reseeds).
 
 - **landlord of record** (contact-rosters, 2026-08-04) - `unit.landlordId`: who

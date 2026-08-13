@@ -1,7 +1,7 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
 // status) - Preferences & notes - Properties sent (C4) - Tours - Placements - Group
-// texts - Media (C5). Placements + Tours + Properties-sent + Group texts are REAL
+// texts - Media (C5). Placements + Tours + Properties-sent + Relay groups are REAL
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
@@ -12,6 +12,7 @@ import {
   type Contact,
   type ContactPhone,
   type FieldSource,
+  type GroupThreadRow,
   type RelayGroupRow,
   type SuggestionItem,
   type Tour,
@@ -38,6 +39,7 @@ import { SuggestionChip } from './SuggestionChip.js';
 import { SUGGESTION_TARGET_LABEL, aiSourceOf, suggestionFor } from './suggestionTargets.js';
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
+import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -57,8 +59,13 @@ export interface TenantFileProps {
   listingsSent: ListingSendRow[];
   /** Relay-membership slice status (panel degrades to pending on 404). */
   relayGroupsPending: boolean;
-  /** The group texts (relay threads) this contact is a member of. */
+  /** The relay groups (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
+  groupThreadsPending: boolean;
+  /** The contact's NATIVE group texts (the "Group threads" card). */
+  groupThreads: GroupThreadRow[];
+  /** The bounded group-threads read stopped early - the card says so. */
+  groupThreadsTruncated: boolean;
   /** Pending AI suggestions for this contact (conversation-fact-extraction). A
    *  chip renders under a field only when a suggestion for that target is present
    *  here - the server is authoritative (no client-side policy). */
@@ -104,6 +111,9 @@ export function TenantFile({
   listingsSent,
   relayGroupsPending,
   relayGroups,
+  groupThreadsPending,
+  groupThreads,
+  groupThreadsTruncated,
   media,
   mediaLoading,
   suggestions = [],
@@ -330,6 +340,12 @@ export function TenantFile({
       </Card>
 
       <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
+
+      <GroupThreadsCard
+        pending={groupThreadsPending}
+        groups={groupThreads}
+        truncated={groupThreadsTruncated}
+      />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

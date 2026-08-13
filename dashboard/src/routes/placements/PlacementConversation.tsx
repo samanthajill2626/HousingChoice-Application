@@ -1,5 +1,5 @@
 // PlacementConversation - the placement page's LEFT pane: a channel switcher over
-// the group text plus ONE 1:1 tab per person the page put on this placement
+// the relay group plus ONE 1:1 tab per person the page put on this placement
 // (`channels.people`, keyed by contactId and labelled with that person's DISPLAY
 // NAME - no role words). Structural mirror of tours/TourConversation.tsx. The
 // initial tab is Group when the placement already has a group thread, else the
@@ -25,7 +25,7 @@
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
 // never fetch every tab up front). Empty states render in place: the group offers
-// [Open group text] (which provisions the masked relay via
+// [Open relay group] (which provisions the masked relay via
 // provisionPlacementRelay and mounts the fresh thread at once); a 1:1 whose
 // contact record failed to load says so (the pane requires a LOADED Contact), and
 // a contact with no thread yet gets a live composer that creates the conversation
@@ -81,14 +81,14 @@ export interface PlacementConversationProps {
    *  Conversation pane state + the shell breakpoint); we are always MOUNTED, so
    *  we cannot tell. Gates the 1:1 mark-read fan-out only - see the effect. */
   commsVisible: boolean;
-  /** Open the group text THROUGH THE PAGE. Opening sends a real intro text, so
+  /** Open the relay group THROUGH THE PAGE. Opening sends a real intro text, so
    *  the hub routes it via the pre-open confirm (contact-rosters spec 6.3);
    *  without this prop the pane keeps its own direct provision (the standalone
    *  render path its own tests exercise). */
   onOpenGroup?: () => void;
   /** True while the page's open flow is in flight (only with onOpenGroup). */
   openGroupBusy?: boolean;
-  /** Why [Open group text] is unavailable right now - today: fewer than two
+  /** Why [Open relay group] is unavailable right now - today: fewer than two
    *  reachable roster members (spec 6.2). Disables the control and says so
    *  rather than failing at click time. */
   openGroupDisabledReason?: string;
@@ -117,11 +117,11 @@ export function PlacementConversation({
   // is exactly where an operator reaches for it (spec A-M2).
   const [commsOnly, setCommsOnly] = useState(false);
 
-  // The rail: the group text, then one tab per person - label verbatim from the
+  // The rail: the relay group, then one tab per person - label verbatim from the
   // channel (the page resolved the display name; no role word is derived here).
   const people = channels.people;
   const tabs: ChannelTab[] = [
-    { key: GROUP_KEY, label: 'Group text', unread: channels.group.unread },
+    { key: GROUP_KEY, label: 'Relay group', unread: channels.group.unread },
     ...people.map((p) => ({ key: p.contactId, label: p.label, unread: p.unread })),
   ];
 
@@ -134,7 +134,7 @@ export function PlacementConversation({
   const isGroupTab = activePerson === undefined;
   const effectiveKey = isGroupTab ? GROUP_KEY : activeKey;
 
-  // A placement has no `status`; a group text cannot be opened once the deal is
+  // A placement has no `status`; a relay group cannot be opened once the deal is
   // terminal (moved_in / lost).
   const groupDead = TERMINAL_STAGES.has(placement.stage);
   const oneToOneContactId = activePerson?.contactId;
@@ -182,7 +182,7 @@ export function PlacementConversation({
   }, [isGroupTab, groupConversationId, activeUnread, channels]);
 
   // Group provisioning lives HERE (not delegated to a parent onOpenGroup like the
-  // tour page): [Open group text] calls provisionPlacementRelay, then injects the
+  // tour page): [Open relay group] calls provisionPlacementRelay, then injects the
   // fresh conversationId so the relay thread mounts immediately.
   const [openGroupBusy, setOpenGroupBusy] = useState(false);
   const [groupError, setGroupError] = useState<string | null>(null);
@@ -203,12 +203,12 @@ export function PlacementConversation({
         // id that does not exist. (The page-owned flow, which is what the real
         // app renders, carries the full pending banner + its two ways out.)
         if (result.deferred) {
-          setGroupError('This group text opens when quiet hours end.');
+          setGroupError('This relay group opens when quiet hours end.');
           return;
         }
         channels.setGroupConversationId(result.conversationId);
       })
-      .catch(() => setGroupError('Could not open the group text. Please try again.'))
+      .catch(() => setGroupError('Could not open the relay group. Please try again.'))
       .finally(() => setOpenGroupBusy(false));
   }
 
@@ -222,9 +222,9 @@ export function PlacementConversation({
             <GroupChannel conversationId={groupConversationId} />
           ) : (
             <div className={styles.channelEmpty}>
-              <p className={styles.emptyTitle}>No group text yet</p>
+              <p className={styles.emptyTitle}>No relay group yet</p>
               <p className={styles.emptyNote}>
-                Open a masked group text with the tenant and landlord to coordinate this placement.
+                Open a masked relay group with the tenant and landlord to coordinate this placement.
               </p>
               <Button
                 size="sm"
@@ -232,7 +232,7 @@ export function PlacementConversation({
                 onClick={onOpenGroup}
                 disabled={busyOpening || groupDead || openGroupDisabledReason !== undefined}
               >
-                {busyOpening ? 'Opening...' : 'Open group text'}
+                {busyOpening ? 'Opening...' : 'Open relay group'}
               </Button>
               {openGroupDisabledReason !== undefined && !groupDead ? (
                 <p className={styles.emptyNote}>{openGroupDisabledReason}</p>
@@ -240,7 +240,7 @@ export function PlacementConversation({
               {groupError !== null ? <p className={styles.emptyNote}>{groupError}</p> : null}
               {groupDead ? (
                 <p className={styles.emptyNote}>
-                  This placement is {STAGE_LABELS[placement.stage]} - a group text cannot be opened.
+                  This placement is {STAGE_LABELS[placement.stage]} - a relay group cannot be opened.
                 </p>
               ) : null}
             </div>
@@ -273,7 +273,7 @@ export function PlacementConversation({
   );
 }
 
-/** The group-text transcript: the relay thread + roster + closed state, mirroring
+/** The relay-group transcript: the relay thread + roster + closed state, mirroring
  *  ConversationDetail's left pane. Sending is hard-disabled when the group is
  *  closed. Mounts only while the Group tab is active (lazy fetch). */
 function GroupChannel({ conversationId }: { conversationId: string }): React.JSX.Element {

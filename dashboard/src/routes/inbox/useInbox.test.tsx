@@ -6,6 +6,7 @@ import type { InboxFilter, InboxPage, InboxRow } from '../../api/index.js';
 
 const getInbox = vi.fn();
 const markInboxRead = vi.fn();
+const markConversationRead = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -14,6 +15,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getInbox: (...a: unknown[]) => getInbox(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
     },
@@ -49,6 +51,9 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="count">{s.rows.length}</span>
       <span data-testid="unread">{s.rows.map((r) => r.unreadCount).join(',')}</span>
       <span data-testid="hasMore">{String(s.hasMore)}</span>
+      <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
+      <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
+      <span data-testid="loadingMore">{String(s.loadingMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
@@ -62,6 +67,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
 beforeEach(() => {
   getInbox.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
+  markConversationRead.mockReset().mockResolvedValue(undefined);
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -98,6 +104,102 @@ describe('useInbox', () => {
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
     expect((getInbox.mock.calls[1]?.[0] as { cursor?: string }).cursor).toBe('CUR');
+  });
+
+  // C2 / conformance F10. Spec 11 names a DEFENSE-IN-DEPTH pair: the server
+  // 400s a cursor whose tag mismatches the filter, AND the client drops the
+  // cursor on a filter switch. `fetchFirstPage` had both an AbortController and
+  // a generation ref; `loadMore` had neither, so a "Load more" in flight across
+  // a tab switch appended the OLD filter's rows to the NEW filter's list and
+  // installed the OLD partition's cursor - which the server then 400s into
+  // loadMore's empty .catch, leaving contaminated rows and a dead Load more.
+  it('drops an in-flight loadMore when the filter changes under it', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'CUR-ALL'));
+    const { rerender } = render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+
+    let releaseMore: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseMore = () =>
+            res(
+              pageOf(
+                [mkRow({ contactId: 'c-old-filter', lastActivityAt: '2026-06-17T08:00:00.000Z' })],
+                'CUR-OLD-PARTITION',
+              ),
+            );
+        }),
+    );
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+
+    // The operator switches tabs while it is still in flight, and the new
+    // filter's first page lands first.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c-new' })], null));
+    rerender(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+
+    act(() => releaseMore());
+    await new Promise((r) => setTimeout(r, 20));
+    // No contamination, and no cursor from a partition this filter cannot read.
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+  });
+
+  // Adversarial 29. `loadMore`'s `stale()` guard consulted the FILTER axis only,
+  // so an SSE reconcile racing an in-flight page still appended it - on top of a
+  // first page the reconcile had just replaced - and overwrote the fresh cursor
+  // with one addressing a position the list no longer holds. `rows` is not
+  // deduped, so that is duplicate rowKeys and silently skipped rows, and the
+  // dead cursor is the same class of failure the filter axis already guards.
+  it('drops an in-flight loadMore when an SSE reconcile lands under it', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'CUR-PAGE-1'));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+
+    let releaseMore: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseMore = () =>
+            res(
+              pageOf(
+                [mkRow({ contactId: 'c-page-2', lastActivityAt: '2026-06-17T08:00:00.000Z' })],
+                'CUR-STALE-POSITION',
+              ),
+            );
+        }),
+    );
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('true');
+
+    // A message lands anywhere in the org: the debounced reconcile refetches the
+    // FIRST page and commits a brand-new list, with its own (here: exhausted)
+    // cursor.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c-fresh' })], null));
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x',
+        last_activity_at: '2026-06-17T11:00:00.000Z',
+        unread_count: 1,
+        type: 'tenant_1to1',
+        participant_display_name: 'T',
+      });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('false'));
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+
+    // The page that was in flight the whole time finally lands.
+    act(() => releaseMore());
+    await new Promise((r) => setTimeout(r, 20));
+    // It neither appends to a list it was never a continuation of...
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    // ...nor reinstalls a cursor addressing a position that list no longer holds.
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    // ...and Load more is not left permanently spinning.
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
   });
 
   it('optimistically marks a row read and posts to the contact read endpoint', async () => {
@@ -207,5 +309,117 @@ describe('useInbox', () => {
     // The stale refetch now resolves — the generation guard must discard it.
     act(() => releaseStale());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+  });
+});
+
+describe('useInbox - native group text rows', () => {
+  const groupRow = (over: Partial<InboxRow> = {}): InboxRow =>
+    mkRow({
+      kind: 'group_text',
+      contactId: undefined,
+      channel: undefined,
+      direction: undefined,
+      name: 'With Ann & Marcus',
+      conversationId: 'gt-1',
+      unreadCount: 2,
+      ...over,
+    });
+
+  it('keys a group_text row with its OWN prefix (g: already belongs to relay)', () => {
+    expect(rowKey(groupRow())).toBe('gt:gt-1');
+    expect(rowKey(mkRow({ kind: 'relay_group', contactId: undefined, conversationId: 'gt-1' }))).toBe(
+      'g:gt-1',
+    );
+  });
+
+  it('marks a group row read through its OWN conversation, not the contact fan-out', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([groupRow()]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    expect(markConversationRead).toHaveBeenCalledWith('gt-1');
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
+  // A26, CORRECTED by adversarial 30. A26 pinned this count to the PAGE THE
+  // SERVER RETURNED, which fixed the wrong half of the drift: on the Unread tab
+  // `rows` drops every row the operator marks read while the server page does
+  // not, so the notice could read "Showing the latest 2 unread group texts" with
+  // ZERO group rows on screen - a claim about the list that the list contradicts.
+  // The notice is a statement about what is RENDERED, so it counts what is
+  // rendered. A26's own case is still covered by the sibling test below: on All
+  // and Groups a marked-read row stays in the list, so nothing ticks there.
+  it('counts the group rows actually RENDERED, so the notice cannot outlive them', async () => {
+    getInbox.mockResolvedValueOnce({
+      rows: [
+        groupRow({ conversationId: 'gt-1', unreadCount: 1 }),
+        groupRow({ conversationId: 'gt-2', unreadCount: 1 }),
+      ],
+      nextCursor: null,
+      groupsTruncated: true,
+    });
+    render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
+
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    // The row leaves the Unread list immediately, and the count leaves with it.
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('1'));
+
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-2' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
+    // The notice can no longer claim group texts that are not on screen.
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('0'));
+  });
+
+  // A26's actual protection, kept: on every filter that does NOT narrow by
+  // unread, marking a row read leaves it in the list, so the count is stable and
+  // the operator never watches it tick down under a standing truncation claim.
+  it('does NOT tick down when a marked-read group row stays in the list', async () => {
+    getInbox.mockResolvedValueOnce({
+      rows: [
+        groupRow({ conversationId: 'gt-1', unreadCount: 1 }),
+        groupRow({ conversationId: 'gt-2', unreadCount: 1 }),
+      ],
+      nextCursor: null,
+      groupsTruncated: true,
+    });
+    render(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0,1'));
+    expect(screen.getByTestId('count')).toHaveTextContent('2');
+    expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2');
+  });
+
+  it('grows the group count as further pages land', async () => {
+    getInbox
+      .mockResolvedValueOnce({
+        rows: [groupRow({ conversationId: 'gt-1' })],
+        nextCursor: 'CUR',
+        groupsTruncated: true,
+      })
+      .mockResolvedValueOnce(
+        pageOf([groupRow({ conversationId: 'gt-2', lastActivityAt: '2026-06-17T09:00:00.000Z' })], null),
+      );
+    render(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
+  });
+
+  it('surfaces the server truncation flag and clears it on a filter change', async () => {
+    getInbox.mockResolvedValueOnce({ rows: [groupRow()], nextCursor: null, groupsTruncated: true });
+    const { rerender } = render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('groupsTruncated')).toHaveTextContent('true'));
+
+    getInbox.mockResolvedValueOnce(pageOf([groupRow()]));
+    rerender(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('groupsTruncated')).toHaveTextContent('false'));
+    expect(getInbox).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: 'groups' }),
+      expect.anything(),
+    );
   });
 });

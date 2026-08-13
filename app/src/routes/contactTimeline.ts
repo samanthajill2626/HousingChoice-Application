@@ -501,6 +501,13 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
     case 'unit_contact_removed':
       return {
         ...base,
+        // A UNIT-CONTACT event borrowing the add/remove MILESTONE KIND - not a
+        // group text and not a relay group. The kind is a display bucket here
+        // (the dashboard switches a colour on it, Timeline.tsx); the label and
+        // `refType: 'unit'` below carry the real meaning. Named before the
+        // native `group_text` conversation type existed and deliberately NOT
+        // renamed - these strings are persisted on historical rows, so a rename
+        // is a data migration (adjudication on ActivityEventType).
         type: e.event_type === 'unit_contact_added' ? 'added_to_group_text' : 'removed_from_group_text',
         label: e.event_type === 'unit_contact_added' ? 'Property contact added' : 'Property contact removed',
         refType: 'unit',
@@ -833,10 +840,14 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     // their phone numbers AND email addresses, so an email-only thread's
     // messages appear in the merged timeline. relay_group threads front a pool
     // number (never the contact's real phone/email), so they are excluded -
-    // group-text activity surfaces as milestones, never inlined content.
+    // relay-group activity surfaces as milestones, never inlined content.
     const convById = new Map<string, ConversationItem>();
     for (const conv of await conversationsForContact(contact, conversations)) {
-      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      // Multi-party threads are excluded by NAME, never by "not relay_group"
+      // (invariant 13.6). A native group_text carries no participant_phone or
+      // participant_email, so conversationsForContact cannot return one today -
+      // the explicit case keeps that true if it ever can.
+      if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
       convById.set(conv.conversationId, conv);
     }
 

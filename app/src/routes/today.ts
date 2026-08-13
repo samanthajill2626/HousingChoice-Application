@@ -72,6 +72,7 @@ import {
   type ToursRepo,
 } from '../repos/toursRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -151,6 +152,14 @@ const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']
  * truncation) so an operator drowning in work is visible in the logs.
  */
 const GROUP_FETCH_LIMIT = 100;
+
+/**
+ * How many pages the untriaged-contacts read will walk past excluded rows (fix
+ * wave 2, adversarial 6). Bounded so a partition made entirely of group stubs
+ * costs a fixed handful of Queries rather than an unbounded walk, and generous
+ * enough to clear the ~600 stubs a full cutover import can mint.
+ */
+const TRIAGE_MAX_PAGES = 10;
 
 /** A human-friendly per-deadline-type label used in `why`. */
 const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
@@ -511,6 +520,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // contact) to one item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
     {
+      // NATIVE GROUP TEXTS ARE STRUCTURALLY ABSENT from this read: they live in
+      // the `group_open` partition, and this Query asks for `open`. That is the
+      // whole point of the separate partition - 132 group threads would have
+      // blown this hard-capped 100-row read and pushed real work off Today.
+      // Spec 11 also keeps them out of Today deliberately (inbox + thread view
+      // only in v1), so there is nothing to add here.
       const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
       warnIfCapped('conversations', page.items.length);
       for (const conv of page.items) {
@@ -555,8 +570,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
                 refType: 'contact',
                 refId: memberContactId,
                 who: memberWho,
-                why: 'Opted out of a group text — not receiving messages',
-                tag: 'Group text',
+                why: 'Opted out of a relay group - not receiving messages',
+                tag: 'Relay group',
                 attention: true,
               },
               at: now,
@@ -591,6 +606,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             });
           }
         } else if (
+          // A POSITIVE allowlist: every multi-party type (relay_group above,
+          // group_text unreachable here) falls out deliberately.
           conv.type === 'tenant_1to1' ||
           conv.type === 'landlord_1to1' ||
           conv.type === 'partner_1to1'
@@ -625,13 +642,82 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // The (type=unknown, status=needs_review) byTypeStatus partition IS the human
     // triage queue — one bounded Query, never a Scan.
     {
-      const page = await contacts.listByType('unknown', {
-        status: 'needs_review',
-        limit: GROUP_FETCH_LIMIT,
-      });
-      warnIfCapped('contacts:triage', page.items.length);
-      for (const contact of page.items) {
+      // FILL THE PAGE PAST THE STUBS (fix wave 2, adversarial 6). DynamoDB
+      // applies `Limit` at the index BEFORE any filter, and every row in the
+      // `unknown#needs_review` partition carries the identical sort key - so
+      // intra-partition order is stable and the same 100 rows come back every
+      // time. Once enough group-detection stubs sort ahead of the real unknown
+      // contacts, filtering them at display rendered an EMPTY block, forever,
+      // which reads as "nothing needs triage": a loud problem turned silent.
+      // The exclusion is pushed into the Query (saves work, not page slots) AND
+      // the read pages until it has a real page or runs out, bounded so a
+      // partition made entirely of stubs cannot spin.
+      //
+      // WHAT THIS COSTS (fix wave 4, item 7): up to TRIAGE_MAX_PAGES (10)
+      // SEQUENTIAL Queries of GROUP_FETCH_LIMIT (100) rows each on one Today
+      // request - a bounded but real read amplification, paid only while the
+      // partition ahead of the real unknowns is thick with excluded rows. It
+      // stops the moment a page fills the block.
+      const collected: ContactItem[] = [];
+      let cursor: Record<string, unknown> | undefined;
+      let pagesWalked = 0;
+      for (let page = 0; page < TRIAGE_MAX_PAGES; page += 1) {
+        pagesWalked = page + 1;
+        const read = await contacts.listByType('unknown', {
+          status: 'needs_review',
+          limit: GROUP_FETCH_LIMIT,
+          // Their triage surface is the GROUP THREAD, which is where a human can
+          // actually tell who these people are.
+          excludeOrigin: GROUP_DETECTION_ORIGIN,
+          ...(cursor !== undefined && { exclusiveStartKey: cursor }),
+        });
+        collected.push(...read.items);
+        cursor = read.lastEvaluatedKey;
+        if (cursor === undefined || collected.length >= GROUP_FETCH_LIMIT) break;
+      }
+      // THE PAGE BUDGET RAN OUT WITH ROWS STILL BEHIND IT (fix wave 4, item 7).
+      // Every other truncation on this route is announced by `warnIfCapped`, and
+      // this one was not: a partition holding more than ~1000 excluded rows
+      // ahead of the real unknowns exhausts the walk with a short block, and the
+      // block reads as "nothing needs triage" - which is exactly the loud
+      // problem turned silent that the fill loop was added to prevent, one layer
+      // further out.
+      if (cursor !== undefined && collected.length < GROUP_FETCH_LIMIT) {
+        log.warn(
+          { group: 'contacts:triage', pages: pagesWalked, found: collected.length },
+          'today: the untriaged-contacts walk ran out of pages before filling the block - some untriaged contacts are NOT shown',
+        );
+      }
+      // HARD CAP THE RESULT, NOT JUST THE READ. The loop breaks on `>=`, so a
+      // last page could take the total to 199 - twice the bound every other
+      // group on this route respects, and a block a human is meant to work
+      // through.
+      const triaged = collected.slice(0, GROUP_FETCH_LIMIT);
+      warnIfCapped('contacts:triage', triaged.length);
+      for (const contact of triaged) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;
+        // GROUP-DETECTION STUBS ARE NOT A TODAY ROW (fix wave 5, adversarial 30;
+        // moved to the QUERY + a fill loop above in fix wave 2, adversarial 6 -
+        // this line is now the belt to that braces, and covers a stub written
+        // before the `origin` marker existed).
+        // Detection mints a contact for EVERY unseen roster member as
+        // (unknown, needs_review) - the exact partition this block reads - so
+        // one inbound from a six-person carrier group put five "New unknown
+        // contact" rows into `needs_you_now` in a single shot, none of them
+        // de-duped (group members deliberately get no 1:1 thread minted, so the
+        // conversation-row de-dupe above cannot see them). Worse, this Query is
+        // hard-capped and the byTypeStatus GSI's range key is `status`, not a
+        // timestamp, so there is NO recency ordering: past the page limit,
+        // genuinely new unknown contacts became permanently invisible here.
+        //
+        // Their triage surface is the GROUP THREAD, which is where a human can
+        // actually tell who these people are - and Today already states that
+        // group conversations are structurally absent from it. This makes the
+        // contacts they create absent too, rather than only the conversations.
+        // A stub that a human later triages loses `needs_review` and leaves this
+        // partition anyway; a real unknown caller who TEXTED still surfaces
+        // through the conversation-row source above.
+        if (contact.origin === GROUP_DETECTION_ORIGIN) continue;
         // De-dupe by phone: if this person already emitted an unknown_1to1
         // conversation row above, skip the contact (prefer the conversation —
         // it carries the unread and is the actionable triage target). A
@@ -695,6 +781,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // relay opt-out attention item above); LOGS stay counts/IDs only.
     const relayCloseNags: RelayCloseNagItem[] = [];
     {
+      // listRelayGroups reads the SPARSE byRelayStatus GSI. A native group text
+      // never writes `relay_status` (spec 4.2 forbids it outright), so it cannot
+      // appear here and no group thread is ever close-nagged - it has no close.
       const { items: openGroups, truncated } = await conversations.listRelayGroups('open');
       if (truncated) {
         log.warn(

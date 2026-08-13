@@ -306,7 +306,7 @@ export function isOnRoster(roster: ResolvedRoster, contactId: string): boolean {
  */
 export type RosterMemberRole = 'tenant' | UnitContact['role'] | 'added' | 'removed_contact';
 
-/** Whether this member would actually receive the group text, right now. */
+/** Whether this member would actually receive the relay group's messages, right now. */
 export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
 
 /**

@@ -86,6 +86,11 @@ export function registerRelayNumberReadyJobHandler(deps: RelayNumberReadyJobDeps
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
 
+    // T4.5 RULING - group_text: POSITIVE `type === 'relay_group'` throughout this
+    // handler, so a native group text is left FULLY ALONE - no burn, no intro, no
+    // flush (invariant 13.6). A converted imported row is exactly the shape that
+    // could reach a stale job payload here, and "left alone" is the correct
+    // outcome: a carrier group has no pool number to make ready.
     // G3 read-check: only a group STILL connecting is opened here. A redelivered
     // job (group already open) / a closed or unknown conversation never re-burns
     // and never re-enqueues the intro (both are one-shot on the open path).

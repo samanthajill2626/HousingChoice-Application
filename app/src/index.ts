@@ -13,6 +13,7 @@ const { newBootId, runWithContext } = await import('./lib/context.js');
 const { buildApp } = await import('./app.js');
 const { maybeLoadDevRouter } = await import('./lib/devRoutes.js');
 const { configureOutboundQueue, configureScheduler, dispatchJob } = await import('./jobs/jobs.js');
+const { drainRateLimitedWarns } = await import('./lib/rateLimitedWarn.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -79,15 +80,19 @@ if (config.jobsQueueUrl) {
   );
 } else {
   const { InProcessOutboundQueueAdapter } = await import('./adapters/scheduler.js');
-  const { TokenBucket } = await import('./lib/tokenBucket.js');
+  const { sharedA2pBucket } = await import('./lib/tokenBucket.js');
   const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
   // FIX 6: capacity == the EXACT per-second rate (not ceil — at a fractional
   // rate ceil would let a burst exceed the A2P tier), floored at 1. The bucket
   // starts full → first burst up to `capacity`, then paced at `refillPerSec`/s.
-  const a2pBucket = new TokenBucket({
-    capacity: Math.max(1, config.a2pRateLimitPerSec),
-    refillPerSec: config.a2pRateLimitPerSec,
-  });
+  // The SAME memoized instance the app's group-send route draws from (fix wave
+  // 5, adversarial 34) - a meter that is not shared is not a meter. TRUE OF
+  // THIS BRANCH ONLY (fix wave 2, conformance F3): with JOBS_QUEUE_URL set, the
+  // jobs run in the WORKER process against the worker's own bucket, so app and
+  // worker each meter their own traffic. That is how every metered path in this
+  // codebase has always worked; it is stated here so nobody reads this line as
+  // a cross-process guarantee.
+  const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
   registerAllJobHandlers({ tokenBucket: a2pBucket });
   configureOutboundQueue(
     new InProcessOutboundQueueAdapter({
@@ -108,6 +113,29 @@ if (config.jobsQueueUrl) {
       'JOBS_QUEUE_URL unset — jobs run IN-PROCESS in the app (local dev only; production uses SQS to the worker)',
     );
   });
+}
+
+// Native group texting (spec 4.1): GROUP_IDENTITY_EXCLUDED_NUMBERS is part of
+// the group-thread IDENTITY contract, so a DEPLOYED stack pins a fingerprint of
+// it on first boot and REFUSES to start when the configured list stops matching
+// (changing it re-mints every affected group's conversationId - a migration, not
+// a config edit). Local/hermetic stacks skip it: reseeds wipe the settings table,
+// where the fingerprint would protect nothing and break every lane. Deliberately
+// BEFORE the server listens - a stack that would mint wrong ids must not serve.
+{
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
+  const { verifyGroupIdentityFingerprint } = await import(
+    './services/groupIdentityFingerprint.js'
+  );
+  await runWithContext(bootContext, async () =>
+    verifyGroupIdentityFingerprint({
+      store: createSettingsRepo(),
+      excludedNumbers: config.groupIdentityExcludedNumbers,
+      // Deployed stacks pin NODE_ENV=production (see lib/config.ts).
+      deployed: config.nodeEnv === 'production',
+      logger,
+    }),
+  );
 }
 
 // One epoch cache shared by the app's auth middleware AND the dev router, so
@@ -144,6 +172,12 @@ const server = runWithContext(bootContext, () =>
 
 function shutdown(signal: NodeJS.Signals): void {
   runWithContext(bootContext, () => {
+    // DRAIN THE THROTTLED TALLIES FIRST (fix wave 2, adversarial 26). The
+    // trailing flush is an unref'd timer, so a rolling deploy inside the window
+    // silently dropped up to 5 minutes of suppressed count - exactly the "task
+    // replacement" case the throttle's own docstring names. This is the last
+    // moment that loss is preventable.
+    drainRateLimitedWarns();
     logger.info({ signal }, 'shutdown signal received — closing server');
     server.close(() => {
       logger.info('server closed — exiting');

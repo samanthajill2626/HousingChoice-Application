@@ -68,7 +68,7 @@ export const APP_NUMBER = '+15550009999';
  * app's business number. Relay-group traffic fails this in both directions (a
  * fan-out leg's `from` is the pool; a member's group send's `to` is the pool)
  * and belongs ONLY in the GroupPanel transcript: the 1:1 pane and its unread
- * rule filter on this predicate so group texts don't show up twice (2026-07-07
+ * rule filter on this predicate so relay groups don't show up twice (2026-07-07
  * UX decision, revising spec §3's "badged in the 1:1 too" simplification). The
  * raw `threads` state stays UNFILTERED — it mirrors `GET /control/threads`,
  * which the e2e scenario steps assert pool legs INTO.
@@ -129,6 +129,20 @@ export interface SendAsPartyInput {
   to?: string;
   body?: string;
   mediaUrls?: string[];
+}
+
+/**
+ * A NATIVE CARRIER group text arriving at the business number - a different
+ * product from the relay `GroupSnapshot` above, which is pool-number inference.
+ * `otherRecipients` becomes the undocumented `OtherRecipients{N}` envelope the
+ * app's detection reads.
+ */
+export interface SendGroupAsPartyInput extends SendAsPartyInput {
+  otherRecipients: string[];
+  /** `indexed` (the live shape) or `single` (the bare defensive key). */
+  otherRecipientsShape?: 'indexed' | 'single';
+  /** Force the provider SID prefix - the tripwire needs MM with NumMedia=0. */
+  sidShape?: 'SM' | 'MM';
 }
 
 export interface SetDeliveryOutcomeInput {

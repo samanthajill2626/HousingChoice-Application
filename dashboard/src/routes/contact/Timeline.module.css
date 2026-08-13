@@ -830,7 +830,7 @@ a.pill:focus-visible {
 }
 
 /* Phone width: there is no room for [Attach] [reply note] [Send] on one row once
- * the note is a group roster ("everyone in this group text (Ann, Marcus)"). Left
+ * the note is a group roster ("everyone in this relay group (Ann, Marcus)"). Left
  * inline it wrapped to three lines mid-row, stealing the composer's height and
  * squeezing the reply box. Drop it to its own full-width line UNDER the controls
  * (order:1 sorts it after them despite coming between them in the DOM, which is

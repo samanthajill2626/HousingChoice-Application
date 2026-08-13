@@ -18,6 +18,7 @@ import {
   ContactOptedOutError,
   ConversationNotFoundError,
   ManualModeError,
+  GroupTextSendNotSupportedError,
   RelaySendNotSupportedError,
   SendRefusedError,
   SmsSendingDisabledError,
@@ -140,6 +141,32 @@ function makeFakes(
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,
+    // group_text repo methods are unreachable from this 1:1 suite - throw so an
+    // accidental call is loud instead of silently returning a plausible shape.
+    createGroupTextThread: async () => {
+      throw new Error('createGroupTextThread: not used in this suite');
+    },
+    listGroupTexts: async () => {
+      throw new Error('listGroupTexts: not used in this suite');
+    },
+    claimRailCreation: async () => {
+      throw new Error('claimRailCreation: not used in this suite');
+    },
+    clearGroupRail: async () => {
+      throw new Error('clearGroupRail: not used in this suite');
+    },
+    recordRailFailure: async () => {
+      throw new Error('recordRailFailure: not used in this suite');
+    },
+    setTwilioConversation: async () => {
+      throw new Error('setTwilioConversation: not used in this suite');
+    },
+    convertRelayGroupToGroupText: async () => {
+      throw new Error('convertRelayGroupToGroupText: not used in this suite');
+    },
+    backfillGroupTextRoster: async () => {
+      throw new Error('backfillGroupTextRoster: not used in this suite');
+    },
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
@@ -162,6 +189,9 @@ function makeFakes(
     setPrimaryEmail: async () => contact!,
     removeEmail: async () => contact!,
     touchEmailLastSeen: async () => {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
@@ -196,6 +226,40 @@ function makeFakes(
     getRelaySidPointer: async () => undefined,
     putSystemSidMarker: async () => {},
     getSystemSidMarker: async () => undefined,
+    // Group-texting deadline partition (S5) - unreachable from this 1:1 suite.
+    listDueRows: async () => [],
+    deleteDueRow: async () => {},
+    setRecipientDeliverySid: async () => false,
+    parkGroupReceipt: async () => true,
+    listParkedGroupReceipts: async () => [],
+    deleteParkedGroupReceipt: async () => {},
+    claimCrossCheckClassic: async () => {
+      throw new Error('claimCrossCheckClassic: not used in this suite');
+    },
+    claimCrossCheckEvent: async () => {
+      throw new Error('claimCrossCheckEvent: not used in this suite');
+    },
+    recordCrossCheckEvent: async () => {
+      throw new Error('recordCrossCheckEvent: not used in this suite');
+    },
+    bumpCrossCheckClassic: async () => {
+      throw new Error('bumpCrossCheckClassic: not used in this suite');
+    },
+    releaseCrossCheckPending: async () => {
+      throw new Error('releaseCrossCheckPending: not used in this suite');
+    },
+    claimOldestCrossCheckPending: async () => {
+      throw new Error('claimOldestCrossCheckPending: not used in this suite');
+    },
+    resolveCrossCheckPending: async () => {
+      throw new Error('resolveCrossCheckPending: not used in this suite');
+    },
+    recordCrossCheckClassicReceipt: async () => {
+      throw new Error('recordCrossCheckClassicReceipt: not used in this suite');
+    },
+    claimCrossCheckClassicInWindow: async () => {
+      throw new Error('claimCrossCheckClassicInWindow: not used in this suite');
+    },
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {
@@ -350,6 +414,21 @@ describe('sendMessage service', () => {
     expect(f.appended).toHaveLength(0);
   });
 
+  it('refuses a native group_text with its OWN error, never the relay one', async () => {
+    // Before the explicit case a group thread fell through to the no-phone check
+    // and threw the RELAY error - a misleading message from an accidental path,
+    // pointing whoever read it at relay code that is not involved.
+    const f = makeFakes({
+      conversation: { type: 'group_text', status: 'group_open', participant_phone: undefined },
+    });
+    const err = await f.service({ conversationId: 'conv-1', body: 'x' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GroupTextSendNotSupportedError);
+    expect(err).not.toBeInstanceOf(RelaySendNotSupportedError);
+    expect((err as GroupTextSendNotSupportedError).code).toBe('group_text_not_supported');
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
   it('refuses sends to sms_opt_out contacts with a typed error (nothing sent, nothing persisted)', async () => {
     const f = makeFakes({
       contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
@@ -388,6 +467,39 @@ describe('sendMessage service', () => {
       expect(f.sent).toHaveLength(0);
       expect(f.appended).toHaveLength(0);
       expect(f.emitted).toHaveLength(0);
+    });
+
+    // group-texting A8, consumer 1 of 6 (sendMessage.ts JIT gate - the one the
+    // spec's list omits). A SILENT group member carries group_participation_at
+    // and NO consent_method, so the proactive 1:1 gate must still refuse them.
+    it('BLOCKS a proactive send to a SILENT GROUP MEMBER (group_participation_at is not consent)', async () => {
+      const f = makeFakes({
+        contact: {
+          contactId: 'contact-1',
+          type: 'tenant',
+          phone: '+15550100001',
+          group_participation_at: '2026-08-10T12:00:00.000Z',
+        },
+      });
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'x', automated: false }),
+      ).rejects.toBeInstanceOf(ContactNoConsentError);
+      expect(f.sent).toHaveLength(0);
+    });
+
+    it('ALLOWS a human send once a GENUINE basis lands beside the group one (no masking)', async () => {
+      const f = makeFakes({
+        contact: {
+          contactId: 'contact-1',
+          type: 'tenant',
+          phone: '+15550100001',
+          group_participation_at: '2026-08-10T12:00:00.000Z',
+          consent_method: 'inbound_text',
+        },
+      });
+      await expect(
+        f.service({ conversationId: 'conv-1', body: 'x', automated: false }),
+      ).resolves.toMatchObject({ providerSid: 'SMfake-1' });
     });
 
     it('ALLOWS a human send when the contact HAS consent (inbound_text)', async () => {

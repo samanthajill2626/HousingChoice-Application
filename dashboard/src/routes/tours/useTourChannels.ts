@@ -1,8 +1,8 @@
-// useTourChannels - resolves the tour's conversation channels (the group text +
+// useTourChannels - resolves the tour's conversation channels (the relay group +
 // ONE 1:1 per person on the tour) and keeps their unread dots live via
 // `conversation.updated`.
 //
-//   - group  = tour.groupThreadId (absent until [Open group text] provisions it)
+//   - group  = tour.groupThreadId (absent until [Open relay group] provisions it)
 //              -> {conversationId, unread}: ONE relay thread the Group tab mounts.
 //   - people = one channel per PersonChannelInput the CALLER passes
 //              ({contactId, label}) -> {unread} on top: the SUM of unread across
@@ -103,17 +103,24 @@ const REFETCH_DEBOUNCE_MS = 300;
  *  projection memo below recompute on every render). */
 const NO_PEOPLE: PersonChannel[] = [];
 
-/** Total unread across the contact's NON-relay conversations on this inbox page.
- *  A relay_group NEVER counts - its unread belongs to the Group tab, and the 1:1
- *  fan-out read cannot clear it (relay groups front the POOL number, so the
- *  contact's threads never include one). An email-keyed thread is recognised by
- *  the participants ROSTER alone: `participant_email` is not a dashboard field.
+/** Total unread across the contact's NON-multi-party conversations on this inbox
+ *  page. A relay_group NEVER counts - its unread belongs to the Group tab, and
+ *  the 1:1 fan-out read cannot clear it (relay groups front the POOL number, so
+ *  the contact's threads never include one). A native group_text is excluded for
+ *  a STRONGER reason: it matches by ROSTER, and one group roster matches up to
+ *  nine contacts at once, so counting it would add the same unread to every
+ *  member's 1:1 dot - a nine-fold over-count no 1:1 mark-read can clear
+ *  (exclusion is the only correct handling here, not a preference). An
+ *  email-keyed thread is recognised by the participants ROSTER alone:
+ *  `participant_email` is not a dashboard field.
  *  HONEST LIMITATION: the inbox page is the first 50 OPEN conversations, so a
  *  thread off that page is invisible to the dot. */
 function sumUnread(summaries: ConversationSummary[], contactId: string): number {
   return summaries.reduce(
     (total, s) =>
-      s.type !== 'relay_group' && involvesContact(s.participants, contactId)
+      s.type !== 'relay_group' &&
+      s.type !== 'group_text' &&
+      involvesContact(s.participants, contactId)
         ? total + s.unread_count
         : total,
     0,

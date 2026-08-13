@@ -1,0 +1,161 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  hasGroupEnvelope,
+  hasOtherRecipientsBeyondCap,
+  isMissingEnvelopeGroupShape,
+  MAX_OTHER_RECIPIENTS_INDEX,
+  parseOtherRecipients,
+} from '../src/services/groupEnvelope.js';
+
+describe('parseOtherRecipients (group-texting T3.1)', () => {
+  it('is empty for an ordinary 1:1 inbound with no envelope', () => {
+    expect(parseOtherRecipients({ From: '+15550100001', To: '+15550009999' })).toEqual([]);
+    expect(hasGroupEnvelope({ From: '+15550100001' })).toBe(false);
+  });
+
+  it('reads the indexed OtherRecipients0..N form in index order', () => {
+    expect(
+      parseOtherRecipients({
+        OtherRecipients0: '+15550100002',
+        OtherRecipients1: '+15550100003',
+        OtherRecipients2: '+15550100004',
+      }),
+    ).toEqual(['+15550100002', '+15550100003', '+15550100004']);
+  });
+
+  it('tolerates GAPS in the index sequence instead of stopping at the first hole', () => {
+    expect(
+      parseOtherRecipients({
+        OtherRecipients0: '+15550100002',
+        OtherRecipients3: '+15550100005',
+        OtherRecipients7: '+15550100009',
+      }),
+    ).toEqual(['+15550100002', '+15550100005', '+15550100009']);
+  });
+
+  it('reads a single UNINDEXED OtherRecipients param', () => {
+    expect(parseOtherRecipients({ OtherRecipients: '+15550100002' })).toEqual(['+15550100002']);
+  });
+
+  it('reads the unindexed and indexed forms together without losing either', () => {
+    expect(
+      parseOtherRecipients({
+        OtherRecipients: '+15550100002',
+        OtherRecipients0: '+15550100003',
+      }),
+    ).toEqual(['+15550100002', '+15550100003']);
+  });
+
+  it('accepts a REPEATED unindexed key (express hands back a string[], not a string)', () => {
+    // `extended: false` urlencoded parsing yields an array for a repeated key -
+    // the WebhookParams string type would be lying, so the parser guards it.
+    const params = { OtherRecipients: ['+15550100002', '+15550100003'] } as unknown as Record<
+      string,
+      string | undefined
+    >;
+    expect(parseOtherRecipients(params)).toEqual(['+15550100002', '+15550100003']);
+  });
+
+  it('skips empty and non-string values rather than emitting blanks', () => {
+    const params = {
+      OtherRecipients0: '',
+      OtherRecipients1: '+15550100003',
+      OtherRecipients2: undefined,
+    } as Record<string, string | undefined>;
+    expect(parseOtherRecipients(params)).toEqual(['+15550100003']);
+  });
+
+  it('trims surrounding whitespace on each entry', () => {
+    expect(parseOtherRecipients({ OtherRecipients0: '  +15550100002  ' })).toEqual([
+      '+15550100002',
+    ]);
+  });
+
+  it('reads high indexes up to the cap (a 9-recipient carrier group and beyond)', () => {
+    const params: Record<string, string> = {};
+    for (let i = 0; i < 9; i++) params[`OtherRecipients${i}`] = `+1555010000${i}`;
+    expect(parseOtherRecipients(params)).toHaveLength(9);
+  });
+
+  it('reports an envelope as present as soon as ONE recipient parses', () => {
+    expect(hasGroupEnvelope({ OtherRecipients0: '+15550100002' })).toBe(true);
+    expect(hasGroupEnvelope({ OtherRecipients0: '   ' })).toBe(false);
+  });
+});
+
+describe('isMissingEnvelopeGroupShape (group-texting T3.7 tripwire)', () => {
+  it('is true for an MM-prefixed sid with NumMedia=0 and no envelope', () => {
+    expect(isMissingEnvelopeGroupShape('MM123', { NumMedia: '0' })).toBe(true);
+  });
+
+  it('is true when NumMedia is absent entirely (no media, MM shape)', () => {
+    expect(isMissingEnvelopeGroupShape('MM123', {})).toBe(true);
+  });
+
+  it('is false for an SM-prefixed sid (an ordinary 1:1 SMS)', () => {
+    expect(isMissingEnvelopeGroupShape('SM123', { NumMedia: '0' })).toBe(false);
+  });
+
+  it('is false when media is actually attached (a real MMS)', () => {
+    expect(isMissingEnvelopeGroupShape('MM123', { NumMedia: '1' })).toBe(false);
+  });
+
+  it('is false when the envelope IS present (that inbound is handled as a group)', () => {
+    expect(
+      isMissingEnvelopeGroupShape('MM123', { NumMedia: '0', OtherRecipients0: '+15550100002' }),
+    ).toBe(false);
+  });
+});
+
+describe('hasOtherRecipientsBeyondCap', () => {
+  it('is false for an ordinary envelope', () => {
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipients0: '+15550100002' })).toBe(false);
+  });
+
+  it('is false when the envelope fills the cap exactly', () => {
+    const params: Record<string, string> = {};
+    for (let i = 0; i <= MAX_OTHER_RECIPIENTS_INDEX; i++) params[`OtherRecipients${i}`] = `+1555010${4000 + i}`;
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(false);
+  });
+
+  it('is TRUE when an index past the cap is populated - the scan truncated', () => {
+    // A short roster is a DIFFERENT conversationIdForGroup, i.e. a forked
+    // thread. This is the only roster-shrinking condition that used to be
+    // silent, and the module header's own argument (the contract is
+    // undocumented and Twilio can change it without notice) is the argument FOR
+    // a tripwire, not against one.
+    const params: Record<string, string> = {
+      [`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 1}`]: '+15550104099',
+    };
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(true);
+  });
+
+  it('is TRUE for a SPARSE envelope whose next populated index skips the probe', () => {
+    // The scanner is GAP-TOLERANT by design - `parseOtherRecipients` documents a
+    // sparse `OtherRecipients0` + `OtherRecipients3` envelope as supported - so
+    // a check that probes only cap+1 is narrower than the property it claims to
+    // enforce. Here index 33 is absent and 34 is populated: the roster is short
+    // by one and the derived thread id is therefore wrong.
+    const params: Record<string, string> = {};
+    for (let i = 0; i <= MAX_OTHER_RECIPIENTS_INDEX; i++) {
+      params[`OtherRecipients${i}`] = `+1555010${4000 + i}`;
+    }
+    params[`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 2}`] = '+15550104099';
+
+    expect(parseOtherRecipients(params)).toHaveLength(MAX_OTHER_RECIPIENTS_INDEX + 1);
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(true);
+  });
+
+  it('is TRUE for an index-base change the literal scan cannot read', () => {
+    // A zero-padded key is neither read by the capped scan nor equal to any key
+    // it reads, so it is a silent truncation of exactly the same kind.
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipients033: '+15550104099' })).toBe(true);
+  });
+
+  it('ignores a non-numeric OtherRecipients-prefixed key', () => {
+    // Only `OtherRecipients{digits}` is the envelope contract; anything else is
+    // some other param and must not raise a truncation alarm.
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipientsCount: '34' })).toBe(false);
+  });
+});

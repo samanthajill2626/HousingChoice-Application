@@ -9,7 +9,7 @@
 //      the owner is showing it - so the operator adds the owner from the inline
 //      "Also on this property" suggestion and removes the PM. Two clicks, both
 //      persisted on click, both SILENT (no thread exists yet, so nothing has
-//      been sent and there is nothing to confirm). Then [Open group text] shows
+//      been sent and there is nothing to confirm). Then [Open relay group] shows
 //      the SERVER-composed intro - the body asserted against the server's OWN
 //      preview, never a literal - with its recipients, and only the confirm
 //      provisions - after which the conversation's participants ARE the card's
@@ -89,7 +89,7 @@ interface Party {
   name: string;
 }
 
-/** A fresh typed contact WITH a phone - reachability is what the group text and
+/** A fresh typed contact WITH a phone - reachability is what the relay group and
  *  the recipient count are computed from. A property manager is a `landlord`-
  *  typed contact; the ROLE is what the property roster row carries. */
 async function createContact(
@@ -225,10 +225,10 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     await expect(page.getByText(/Customized for this tour/)).toBeVisible();
     await page.getByRole('button', { name: 'Done editing people' }).click();
 
-    // --- 3. Open the group text: preview, then confirm ----------------------
+    // --- 3. Open the relay group: preview, then confirm ----------------------
     await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Open group text' }).click();
-    const confirm = page.getByRole('dialog', { name: 'Open the group text?' });
+    await page.getByRole('menuitem', { name: 'Open relay group' }).click();
+    const confirm = page.getByRole('dialog', { name: 'Open the relay group?' });
     await expect(confirm).toBeVisible({ timeout: 20_000 });
     // The body is the SERVER's, and every recipient is named with the count.
     await expect(confirm.getByRole('region', { name: 'Message preview' })).toBeVisible();
@@ -277,7 +277,7 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     await expect(recipients.getByText(owner.name)).toBeVisible();
     await expect(recipients.getByText(pm.name)).toHaveCount(0);
     await expect(confirm.getByText('2 recipients will receive this.')).toBeVisible();
-    await confirm.getByRole('button', { name: 'Open group text' }).click();
+    await confirm.getByRole('button', { name: 'Open relay group' }).click();
     await expect(confirm).toHaveCount(0, { timeout: 30_000 });
 
     // --- 4. The conversation's participants ARE the card's rows (spec D1) ---
@@ -322,7 +322,7 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     await page.setViewportSize(NARROW_360);
     await page.getByRole('button', { name: 'Edit people' }).click();
     await page.getByRole('button', { name: `Add ${pm.name} to this tour` }).click();
-    const addConfirm = page.getByRole('dialog', { name: `Add ${pm.name} to the group text?` });
+    const addConfirm = page.getByRole('dialog', { name: `Add ${pm.name} to the relay group?` });
     await expect(addConfirm).toBeVisible({ timeout: 20_000 });
 
     // Spec 6.7: below 860px the footer stacks FULL WIDTH with the DEFAULT on
@@ -527,7 +527,7 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     });
     // The rail is built from the ROSTER, not from a thread, so a five-tab rail
     // needs NO relay provisioning: the default pair (tenant + the property's
-    // primary contact) plus two plan-adds, plus the fixed Group text tab.
+    // primary contact) plus two plan-adds, plus the fixed Relay group tab.
     await planAddMember(req, tourId, owner.contactId);
     await planAddMember(req, tourId, extra.contactId);
 

@@ -690,7 +690,7 @@ const TOUR_TOOK_PLACE: ReadonlySet<TourStatus> = new Set<TourStatus>(['toured', 
 
 /** VERBATIM live-writer labels (routes/tours.ts relay route + routes/placements.ts
  *  conversion) - e2e pins these strings byte-exact, so never reword them here. */
-const TOUR_GROUP_OPENED_LABEL = 'Group text opened';
+const TOUR_GROUP_OPENED_LABEL = 'Relay group opened';
 const TOUR_CONVERTED_LABEL = 'Converted to placement';
 
 /**

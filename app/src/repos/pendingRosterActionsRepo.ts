@@ -50,7 +50,7 @@ import type { RepoDeps } from './conversationsRepo.js';
  *  the lower layer, and the resolver imports repos). */
 export type RosterActionOwnerType = 'tour' | 'placement';
 
-/** What was deferred: opening the group text, or adding one member to it. */
+/** What was deferred: opening the relay group, or adding one member to it. */
 export type RosterActionKind = 'open_group' | 'add_member';
 
 /** Why the action was deferred. Quiet hours is the only deferral today (5.3). */
@@ -73,7 +73,7 @@ export type RosterActionSkipReason =
   /** The roster lost its second reachable member, so no group can be opened. */
   | 'roster_too_thin'
   /** Live relay-number provisioning is OFF in this environment
-   *  (RELAY_LIVE_PROVISIONING, the pre-A2P posture), so no group text can be
+   *  (RELAY_LIVE_PROVISIONING, the pre-A2P posture), so no relay group can be
    *  opened. Checked BEFORE the claim: the refusal is otherwise raised inside
    *  provisioning, i.e. after the row is already terminal, where the operator
    *  would see neither a group nor a notice. */

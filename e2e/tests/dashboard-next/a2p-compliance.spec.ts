@@ -19,14 +19,18 @@ import { callTimeline, uniqueVoicePhone, verifyCell } from '../../fixtures/voice
 // and also assert structural invariants (opt-out line present, HELP has no phone
 // number) so a copy drift fails loudly rather than silently matching a stale string.
 //
-// KEYWORD-REPLY MECHANISM: the webhook answers a matched STOP/HELP/opt-in keyword
-// with a TwiML `<Message>` in the /sms HTTP RESPONSE — NOT an outbound thread the
-// fake records (the fake's send-as-party discards the response body). So the keyword
-// replies are asserted by POSTing the signed inbound webhook OURSELVES via the
-// `postInboundSms` test-support helper (fixtures/fakeTwilio.ts) and reading the TwiML
-// back. Suppression side-effects (sms_opt_out / consent) are asserted via the
-// authenticated contacts API. Unique per-case phones avoid inbound-SID/dedupe and
-// per-phone welcome-idempotency collisions.
+// KEYWORD-REPLY MECHANISM (CHANGED 2026-08-12): the app no longer answers a matched
+// STOP/HELP/opt-in keyword at all. The live dev test recorded in
+// docs/issues/twilio-standard-optout-double-reply.md proved Twilio's platform keyword
+// handling is active on the messaging service - it consumed HELP before our webhook
+// saw it, refused our STOP TwiML with 21610 (that confirmation has never once been
+// delivered), and answered START on top of our welcome. Twilio now owns every keyword
+// REPLY via Advanced Opt-Out, configured in the console with the copy filed in
+// app/src/lib/smsCompliance.ts (RUNBOOK: "Keyword auto-replies (Advanced Opt-Out)").
+// The app keeps all the MACHINERY, so what these tests assert is: EMPTY TwiML plus the
+// suppression/consent side-effects, read through the authenticated contacts API. The
+// filed copy is still asserted structurally, because it is what the console is set to.
+// Unique per-case phones avoid inbound-SID/dedupe and welcome-idempotency collisions.
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -485,7 +489,7 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
 // =====================================================================
 // §8.4 / §8.5 — every keyword honored + STOP/HELP copy matches filed strings
 // =====================================================================
-test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword replies', () => {
+test.describe('A2P 8.4/8.5 - every keyword honored; Twilio owns the replies', () => {
   // Assert digit-free HELP by rejecting any run of 3+ digits (a phone-number-shaped
   // run); the filed HELP copy contains none.
   function hasPhoneNumber(s: string): boolean {
@@ -493,7 +497,7 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
   }
 
   for (const keyword of OPT_OUT_KEYWORDS) {
-    test(`opt-out keyword "${keyword}" → sms_opt_out set + STOP_CONFIRMATION reply`, async ({
+    test(`opt-out keyword "${keyword}" -> sms_opt_out set, EMPTY TwiML`, async ({
       page,
       request,
     }) => {
@@ -503,15 +507,16 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
       // Seed the contact first with a benign inbound (auto-capture).
       await sendAsParty(request, { from: phone, to: APP_NUMBER, body: 'hello there' });
 
-      // Now post the opt-out keyword DIRECTLY and read the TwiML reply.
+      // Now post the opt-out keyword DIRECTLY and read the TwiML back.
       const { status, body } = await postInboundSms(request, {
         from: phone,
         body: keyword,
         messageSid: uniqueSid(`out${keyword}`),
       });
       expect(status).toBe(200);
-      // The TwiML <Message> reply (XML-unescaped) is EXACTLY the filed STOP copy.
-      expect(twimlMessageBody(body)).toBe(STOP_CONFIRMATION);
+      // The app answers NOTHING; Twilio's Advanced Opt-Out sends STOP_CONFIRMATION.
+      expect(twimlMessageBody(body)).toBeUndefined();
+      expect(body).toContain('<Response/>');
 
       // The contact's sms_opt_out flag is set (primary-number opt-out).
       await devLogin(page);
@@ -529,7 +534,7 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
   }
 
   for (const keyword of OPT_IN_KEYWORDS) {
-    test(`opt-in keyword "${keyword}" → suppression cleared + WELCOME_SMS + consent stamped`, async ({
+    test(`opt-in keyword "${keyword}" -> suppression cleared + consent stamped, EMPTY TwiML`, async ({
       page,
       request,
     }) => {
@@ -539,14 +544,16 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
       await sendAsParty(request, { from: phone, to: APP_NUMBER, body: 'hi' });
       await postInboundSms(request, { from: phone, body: 'STOP', messageSid: uniqueSid(`inpre${keyword}`) });
 
-      // Now the opt-in keyword → WELCOME_SMS TwiML reply.
+      // Now the opt-in keyword. Twilio's opt-in confirmation is configured with
+      // WELCOME_SMS; the app itself answers with a bare ack.
       const { status, body } = await postInboundSms(request, {
         from: phone,
         body: keyword,
         messageSid: uniqueSid(`in${keyword}`),
       });
       expect(status).toBe(200);
-      expect(twimlMessageBody(body)).toBe(WELCOME_SMS);
+      expect(twimlMessageBody(body)).toBeUndefined();
+      expect(WELCOME_SMS).toContain('Reply STOP to unsubscribe');
 
       // Suppression cleared + consent stamped (inbound_text) on the contact.
       await devLogin(page);
@@ -566,7 +573,7 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
     });
   }
 
-  test('HELP → filed HELP_REPLY with NO phone number in the body', async ({ request }) => {
+  test('HELP -> EMPTY TwiML, and the filed HELP copy carries NO phone number', async ({ request }) => {
     const phone = uniquePhone();
     await registerParty(request, { label: 'Helper', role: 'tenant', number: phone });
     await sendAsParty(request, { from: phone, to: APP_NUMBER, body: 'hi' });
@@ -577,13 +584,22 @@ test.describe('A2P §8.4/§8.5 — self-managed STOP / HELP / opt-in keyword rep
       messageSid: uniqueSid('help'),
     });
     expect(status).toBe(200);
-    // Exact filed HELP copy (XML-unescaped from the TwiML reply)…
-    const replyBody = twimlMessageBody(body);
-    expect(replyBody).toBe(HELP_REPLY);
-    // …and it carries NO phone number (the campaign declares phone-numbers = No) —
-    // assert against BOTH the filed constant and the ACTUAL reply body.
+    // On the live service HELP never even reaches this webhook (Twilio consumes
+    // it). When it does reach us, we answer nothing.
+    expect(twimlMessageBody(body)).toBeUndefined();
+    // The copy the console is configured WITH carries no phone number (the
+    // campaign declares phone-numbers = No).
     expect(hasPhoneNumber(HELP_REPLY)).toBe(false);
-    expect(hasPhoneNumber(replyBody ?? '')).toBe(false);
+  });
+
+  test('the console-configured keyword copy is still filed here (the source of truth)', async () => {
+    // Twilio sends these, but the app remains where the copy is authored and
+    // reviewed. A drift between this file and app/src/lib/smsCompliance.ts is the
+    // signal that the Advanced Opt-Out console entries need re-pasting.
+    expect(STOP_CONFIRMATION).toContain('unsubscribed');
+    expect(STOP_CONFIRMATION).toContain('Reply START to resubscribe');
+    expect(HELP_REPLY).toContain('Reply STOP to opt out');
+    expect(WELCOME_SMS).toContain('Reply STOP to unsubscribe');
   });
 
   test('a non-keyword inbound gets an EMPTY TwiML ack (no <Message> reply)', async ({ request }) => {

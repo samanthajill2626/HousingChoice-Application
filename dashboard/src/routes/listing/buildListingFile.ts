@@ -28,7 +28,7 @@ export interface RosterRow {
   /** Human role label, e.g. "Landlord" / "Property manager". */
   roleLabel: string;
   company?: string;
-  /** The ☎ primary contact: the property's default contact - group texts
+  /** The primary contact: the property's default contact - relay groups
    *  and masked calls. */
   primaryContact: boolean;
   /** True when synthesized from `landlordId` (C3 not live), false from contacts[]. */

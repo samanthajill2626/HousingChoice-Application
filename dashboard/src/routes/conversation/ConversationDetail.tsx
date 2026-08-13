@@ -1,6 +1,7 @@
 // ConversationDetail — the /conversations/:conversationId view. It fetches the
 // conversation header (GET /api/conversations/:id) and DISPATCHES by type:
-//   • relay_group → the group view (transcript + reply + roster/close management)
+//   - relay_group -> the relay view (transcript + reply + roster/close management)
+//   - group_text -> the NATIVE group-text view (transcript + read-only roster)
 //   • a plain 1:1 → REDIRECT to its owning contact (/contacts/:contactId); 1:1
 //     threads live on the contact page, so this generic URL stays honest without
 //     duplicating the timeline. An unresolvable contact degrades to a minimal
@@ -35,7 +36,9 @@ import { Card, CardAction, KV } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
+import { groupMemberLabel } from '../../lib/groupThread.js';
 import { useRelayThread } from './useRelayThread.js';
+import { GroupTextView } from './GroupTextView.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
 
@@ -63,12 +66,12 @@ function ownerTarget(owner: RelayOwner | undefined): { to: string; label: string
   return { to: `/placements/${owner.id}`, label: 'Placement' };
 }
 
-/** A member's display: its resolved name, else the formatted phone. */
-function memberDisplayName(m: ConversationParticipant): string {
-  const name = m.name?.trim();
-  if (name && name.length > 0) return name;
-  return formatPhoneDisplay(m.phone) || m.phone;
-}
+/** A member's display: its resolved name, else the formatted phone. THE shared
+ *  rule (lib/groupThread.ts), not a private copy - this was one of three
+ *  byte-identical copies, and adversarial 17 is what drifting copies of a naming
+ *  rule do to a screen. Relay's rendering is unchanged (invariant 6): the
+ *  extracted helper is the same expression, plus the raw-passthrough guards. */
+const memberDisplayName = (m: ConversationParticipant): string => groupMemberLabel(m);
 
 export function ConversationDetail(): React.JSX.Element {
   const { conversationId = '' } = useParams<{ conversationId: string }>();
@@ -129,23 +132,38 @@ export function ConversationDetail(): React.JSX.Element {
     );
   }
 
-  // A plain 1:1 lives on the contact page — redirect there. When the contact
-  // can't be resolved, degrade to a minimal fallback link (never crash).
-  if (header.type !== 'relay_group') {
-    const contactId = firstParticipantContactId(header.participants as readonly unknown[] | undefined);
-    if (contactId !== undefined) return <Navigate to={`/contacts/${contactId}`} replace />;
-    const phone = typeof header.participant_phone === 'string' ? header.participant_phone : '';
-    return (
-      <div className={styles.fallback}>
-        <p>This is a direct conversation. Open it on the contact:</p>
-        <Link to={`/contacts/unknown?phone=${encodeURIComponent(phone)}`}>
-          Open the contact
-        </Link>
-      </div>
-    );
+  // POSITIVE DISPATCH, one arm per thread type. This used to be a single
+  // `type !== 'relay_group'` redirect, which silently sent a MULTI-PARTY thread
+  // to roster member #1's contact page - a compile-clean misroute that looks
+  // like it worked. Every new type must now name itself here, and the 1:1
+  // redirect is the FALL-THROUGH, never a negative test.
+  if (header.type === 'relay_group') {
+    return <RelayGroupView conversationId={conversationId} header={header} onHeader={setHeader} />;
   }
 
-  return <RelayGroupView conversationId={conversationId} header={header} onHeader={setHeader} />;
+  if (header.type === 'group_text') {
+    // `onHeader` is passed for the same reason the relay arm passes it, and
+    // adversarial 17 is what its absence cost: the group view learns fresher
+    // roster names from /group-members (which converges the stored snapshot in
+    // the same request) and had no way to hand them back, so the header effect -
+    // keyed on [conversationId], with no SSE event behind the backfill - kept
+    // rendering the pre-migration numbers while the panel beside it rendered the
+    // names, for the life of the mount.
+    return <GroupTextView conversationId={conversationId} header={header} onHeader={setHeader} />;
+  }
+
+  // 1:1 ONLY from here down. A plain 1:1 lives on the contact page - redirect
+  // there. When the contact can't be resolved, degrade to a minimal fallback
+  // link (never crash).
+  const contactId = firstParticipantContactId(header.participants as readonly unknown[] | undefined);
+  if (contactId !== undefined) return <Navigate to={`/contacts/${contactId}`} replace />;
+  const phone = typeof header.participant_phone === 'string' ? header.participant_phone : '';
+  return (
+    <div className={styles.fallback}>
+      <p>This is a direct conversation. Open it on the contact:</p>
+      <Link to={`/contacts/unknown?phone=${encodeURIComponent(phone)}`}>Open the contact</Link>
+    </div>
+  );
 }
 
 interface RelayGroupViewProps {
@@ -303,12 +321,12 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         ) {
           // W1: this person is already burned on this group's number (another
           // group's history), so they cannot be added here - surface the
-          // server's actionable "start a new group text" copy.
+          // server's actionable "start a new relay group" copy.
           const serverMsg = (err.body as { message?: unknown } | null)?.message;
           setAddError(
             typeof serverMsg === 'string' && serverMsg.length > 0
               ? serverMsg
-              : 'This person already has a group text history on this number. Start a new group text with them instead.',
+              : 'This person already has a relay group history on this number. Start a new relay group with them instead.',
           );
         } else {
           setAddError("Couldn't add that member. Please try again.");
@@ -348,13 +366,13 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
       .catch((err: unknown) => {
         // AF-3: surface the server's actionable copy when reopen is refused
         // because the pool number was retired/released - a generic error would
-        // hide the "start a new group text instead" guidance.
+        // hide the "start a new relay group instead" guidance.
         if (err instanceof ApiError && err.status === 409 && err.code === 'pool_number_released') {
           const serverMsg = (err.body as { message?: unknown } | null)?.message;
           setActionError(
             typeof serverMsg === 'string' && serverMsg.length > 0
               ? serverMsg
-              : 'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.',
+              : 'This relay group cannot be reopened: its number was retired after long inactivity. Start a new relay group instead.',
           );
           return;
         }
@@ -371,7 +389,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   const identityFacts =
     memberNames.length > 0
       ? `With ${memberNames.join(' & ')}`
-      : formatPhoneDisplay(header.pool_number) || 'Group text';
+      : formatPhoneDisplay(header.pool_number) || 'Relay group';
 
   return (
     <div className={shell.page}>
@@ -381,7 +399,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         </Link>
         <div className={shell.identity}>
           <div className={shell.nameRow}>
-            <span className={shell.name}>Group text</span>
+            <span className={shell.name}>Relay group</span>
             <span className={`${styles.statusPill} ${statusPillClass}`}>{statusLabel}</span>
           </div>
           <div className={styles.facts}>{identityFacts}</div>
@@ -593,7 +611,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            <strong>{memberDisplayName(removing)}</strong> will be removed from this group text and
+            <strong>{memberDisplayName(removing)}</strong> will be removed from this relay group and
             will no longer receive its messages.
           </p>
         </Modal>

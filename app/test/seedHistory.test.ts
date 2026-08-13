@@ -498,7 +498,7 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     expect(requested).toBeDefined();
     const rows = tourMilestones(requested!);
     expect(rows.map((r) => r.type)).toEqual(['tour_group_opened']);
-    expect(rows[0]!.label).toBe('Group text opened');
+    expect(rows[0]!.label).toBe('Relay group opened');
     expect(rows[0]!.refType).toBe('tour');
 
     const bare = TOURS.find((t) => t['status'] === 'requested' && t['groupThreadId'] === undefined);
@@ -793,7 +793,22 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     } finally {
       doc.destroy();
     }
-  }, 60_000);
+    // 120s, matching this describe's own beforeAll/afterAll. NOT a slow test: it
+    // runs in ~6s on its own. In-suite it shares DynamoDB Local with every other
+    // integration file and the whole `full` seed round-trip measured 57.0s
+    // against the old 60s budget on 2026-08-11 - a three-second margin, i.e. it
+    // was going to fail on the next slow day whatever anyone did to the seed.
+    // Budget, not work: raise it to where the surrounding hooks already are.
+    //
+    // 120s -> 240s (fix wave 2). The same margin ran out again: this file is the
+    // heaviest writer in the suite and the cross-check ledger's event half now
+    // costs four writes per event instead of two, so the group integration files
+    // hold the emulator's single SQLite write lock longer while this one is
+    // seeding. It timed out in 4 of 6 full runs and passed alone every time
+    // (~20s), which is the signature the issue doc describes
+    // (docs/issues/dynamodb-local-cross-worktree-test-contention.md): budget,
+    // never a hang, and serializing the whole suite costs every future run.
+  }, 240_000);
 
   it('a seeded TOURED tour reads back as a newest-first tours# trail projecting to known labels', async () => {
     // Task 2: the tour detail page's Activity read is auditRepo.listByEntity
@@ -880,7 +895,8 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     } finally {
       doc.destroy();
     }
-  }, 60_000);
+    // Same reasoning as its sibling above: 120s to match this describe's hooks.
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------

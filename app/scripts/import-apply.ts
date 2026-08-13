@@ -25,9 +25,22 @@ import {
   HC_PROFILE,
   HC_REGION,
 } from '../../scripts/lib/hcAws.mjs';
+// Retained from the group-texting side: the pre-write group-identity parity
+// gate below reads config. `getDocumentClient` is NOT retained - main's --env
+// stage resolution builds the client with the account guard instead.
+import { loadConfig } from '../src/lib/config.js';
 import { runApply } from '../src/lib/import/apply.js';
+import {
+  assertGroupIdentityEnvDeclared,
+  assertGroupIdentityParity,
+  GroupIdentityEnvUndeclaredError,
+  GroupIdentityParityError,
+  PoolNumbersUnavailableError,
+  readPoolNumbersForParity,
+} from '../src/lib/import/convertGroups.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
+import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -163,6 +176,76 @@ console.log(`target endpoint : ${endpoint ?? `AWS ${HC_REGION} (profile ${HC_PRO
 console.log(`table prefix    : ${prefix}`);
 console.log(`mode            : ${dryRun ? 'DRY RUN (no writes)' : 'WRITE'}`);
 
+// GROUP-IDENTITY PARITY, BEFORE THE FIRST WRITE (adversarial finding 6).
+//
+// A group thread's conversationId is derived from its roster, and the roster is
+// whatever is left after our own org numbers are subtracted. If the export's
+// `ownNumbers` and the deployed GROUP_IDENTITY_EXCLUDED_NUMBERS disagree, every
+// group id this run is about to write is a DIFFERENT id from the one detection
+// will derive for the same carrier group. This check already existed - but only
+// downstream in import:convert-groups, i.e. after apply had written 132 group
+// conversations and all of their history, and the conversion then refused to
+// touch any of it. There is no group-thread retraction path
+// (docs/issues/import-group-thread-retraction.md), so those rows would be
+// permanent orphans in the staff inbox. It is the SAME exported function, run
+// here first. Deliberately before the write confirmation, so a --dry-run
+// rehearsal surfaces the mismatch too.
+//
+// THE GATE'S OWN PRECONDITION FIRST (adversarial finding 1). loadConfig() reads
+// ambient process.env and there is no dotenv here, so an unset
+// GROUP_IDENTITY_EXCLUDED_NUMBERS silently means "compare against nothing" and
+// refuses EVERY documented invocation, dry run included. Both vars must be
+// declared in THIS shell, and the refusal says which and where the value comes
+// from.
+try {
+  assertGroupIdentityEnvDeclared(process.env);
+} catch (err) {
+  if (!(err instanceof GroupIdentityEnvUndeclaredError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS WRITTEN.');
+  process.exit(1);
+}
+
+let poolNumbers: string[] = [];
+try {
+  // Retried rather than degraded to `[]` (adversarial finding 22): pool numbers
+  // are subtracted from BOTH sides, so comparing without them turns any pool
+  // number in either list into a FALSE mismatch - a new single point of refusal
+  // on cutover day, and on the rehearsal dry run that is supposed to de-risk it.
+  poolNumbers = await readPoolNumbersForParity(() => createPoolNumbersRepo({ doc }).listActive(), {
+    onRetry: (attempt, err) =>
+      console.warn(
+        `  ! pool-number read failed (attempt ${attempt}): ` +
+          `${err instanceof Error ? err.message : String(err)} - retrying`,
+      ),
+  });
+} catch (err) {
+  if (!(err instanceof PoolNumbersUnavailableError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS WRITTEN.');
+  process.exit(1);
+}
+
+try {
+  const config = loadConfig();
+  assertGroupIdentityParity(plan.quo.ownNumbers, {
+    businessPhoneNumber: config.businessPhoneNumber,
+    poolNumbers,
+    configuredNumbers: config.groupIdentityExcludedNumbers,
+  });
+} catch (err) {
+  if (!(err instanceof GroupIdentityParityError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error(
+    'NOTHING WAS WRITTEN. Fix GROUP_IDENTITY_EXCLUDED_NUMBERS (or the export) so the two lists\n' +
+      'agree, then re-run - applying now would write every group thread under an id the\n' +
+      'conversion and live detection will not recognise, and group threads cannot be retracted.\n' +
+      'Both lists above came from THIS shell, not from the deployed stack: set them to the\n' +
+      'values the target stage is deployed with (RUNBOOK, cutover checklist step 1).',
+  );
+  process.exit(1);
+}
+
 if (!dryRun && !yes) {
   console.log(
     '\nThis will write to the tables above. Re-run with --dry-run to preview, or --yes to proceed.',
@@ -201,6 +284,9 @@ console.log(`  conversations written   : ${report.conversations.written}`);
 console.log(`    relay groups          : ${report.conversations.groups}`);
 console.log(`    flagged connect-day-1 : ${report.conversations.connectedDayOne}`);
 console.log(`    dropped by review     : ${report.conversations.droppedGroups}`);
+console.log(
+  `    drops KEPT on a group : ${report.conversations.groupRosterDropsKept} (a group roster is its thread identity - see the warnings)`,
+);
 // Print the reconciliation, not just the total, so a short count is never left
 // looking like data loss (spec §5).
 const unroutable = plan.threads.unroutable;

@@ -14,6 +14,7 @@
 import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
+  OPT_IN_CONFIRMATION,
   RELAY_INTRO_IDENTITY,
   SMS_BRAND_NAME,
   STOP_CONFIRMATION,
@@ -56,6 +57,7 @@ export type MessageId =
   // Compliance-locked (never freely editable)
   | 'keyword.stop'
   | 'keyword.help'
+  | 'keyword.optin'
   | 'consent.web_form'
   | 'relay.identity'
   // Voice <Say> (routes/webhooks/voice.ts)
@@ -229,7 +231,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   // Member added to an EXISTING group: announced to the WHOLE group (the new
   // member's first contact on this number, so brand + trailing opt-out fold in
-  // exactly like the intro). {joined} = "<Name> joined this group text." and
+  // exactly like the intro). {joined} = "<Name> joined this group chat." and
   // {members} = the connection sentence, both computed in code
   // (jobs/relayFanOut.ts composeMemberAddedBody).
   'relay.member_added': {
@@ -250,7 +252,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'sms',
     vars: ['name'],
   },
-  // Final message sent to every member when a group text is CLOSED (spec 4.5):
+  // Final message sent to every member when a relay group is CLOSED (spec 4.5):
   // the group is closed, and texting this number still reaches the team (true
   // under the closed-group->1:1 interception). No tokens. editable:true so an
   // operator can override it via the existing catalog machinery (resolveWith-
@@ -272,6 +274,14 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     // WELCOME_SMS carries no {firstName} token; an operator OVERRIDE may still use
     // it (today's renderWelcome convention) — so firstName is a declared, default-
     // unused var (allowed because the entry is editable).
+    //
+    // TWO USES, ONE OF WHICH THE APP NO LONGER SENDS. As the housing-fair /
+    // web-form welcome it is sent by the app exactly as before. As the OPT-IN
+    // (START/JOIN/HOME/YES/UNSTOP) confirmation it is sent by Twilio Advanced
+    // Opt-Out, console-configured from this default - the app does not send it;
+    // see RUNBOOK "Keyword auto-replies (Advanced Opt-Out)". An operator
+    // `welcomeText` override therefore reaches the web-form path only; changing
+    // the keyword confirmation is a console edit.
     default: WELCOME_SMS,
     class: 'operational',
     editable: true,
@@ -290,6 +300,14 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
 
   // --- Compliance-locked (never freely editable; reference smsCompliance consts) ---
+  //
+  // BOTH ENTRIES ARE SENT BY TWILIO ADVANCED OPT-OUT (console-configured from
+  // these constants) - the app does not send either one; see RUNBOOK "Keyword
+  // auto-replies (Advanced Opt-Out)". They stay here because this catalog is
+  // still the SOURCE OF TRUTH the console is configured FROM: the copy is
+  // authored, reviewed and version-controlled here, and the RUNBOOK's
+  // copy-change procedure is edit-constant -> update-console -> canary.
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
   'keyword.stop': {
     id: 'keyword.stop',
     default: STOP_CONFIRMATION,
@@ -298,6 +316,16 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'sms',
     vars: [],
   },
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
+  'keyword.optin': {
+    id: 'keyword.optin',
+    default: OPT_IN_CONFIRMATION,
+    class: 'compliance-locked',
+    editable: false,
+    channel: 'sms',
+    vars: [],
+  },
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
   'keyword.help': {
     id: 'keyword.help',
     default: HELP_REPLY,

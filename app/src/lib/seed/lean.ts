@@ -10,12 +10,23 @@
 //   - Unit canonical names: beds/rent_min/rent_max/pets
 //   - Status field: single `status` on contacts; single `stage` on placements
 
+import { conversationIdForGroup } from '../import/ids.js';
 import type { SeedConversationRow } from './types.js';
 
 // Stable timestamps so re-runs write byte-identical items.
 const T0 = '2026-06-01T14:00:00.000Z';
 const T1 = '2026-06-01T14:02:10.000Z';
 const T2 = '2026-06-01T14:05:45.000Z';
+// Native group texting (S8/T8.2). DELIBERATELY EARLIER THAN T2 (adjudication
+// A29): `last_activity_at` is the byLastActivity RANGE key, so a group thread
+// timestamped after T2 would displace Tasha as the newest inbox row and quietly
+// re-point every spec that reads the first one. Both new threads also carry
+// `unread_count: 0` - a nonzero one would take up permanent residence in the
+// Unread tab that inbox-markread.spec.ts exercises.
+const TG0 = '2026-06-01T13:40:00.000Z';
+const TG1 = '2026-06-01T13:42:30.000Z';
+const TG2 = '2026-06-01T13:45:00.000Z';
+const TC0 = '2026-06-01T13:30:00.000Z';
 // matches TTL: epoch seconds for 2026-09-01T00:00:00Z (far enough out that
 // DynamoDB Local's TTL sweep never deletes it mid-demo).
 const MATCH_EXPIRES_AT = 1_787_270_400;
@@ -32,6 +43,31 @@ const IDS = {
   founder: 'user-0001',
   va: 'user-0002',
 } as const;
+
+// ---------------------------------------------------------------------------
+// Native group texting (group-texting spec 4.1 / 12)
+// ---------------------------------------------------------------------------
+//
+// The ids are DERIVED, never hardcoded. A group thread's identity IS
+// `uuidv5` over its sorted roster, and the import and the runtime must agree or
+// the same carrier group yields two threads (invariant 13.5). Deriving here
+// means a fixture can never drift from the function under test; it is still
+// byte-stable, because the derivation is pure and the rosters are literals.
+const GROUP_TEXT_MEMBERS = ['+15550100001', '+15550100002'] as const;
+const GROUP_TEXT_ID = conversationIdForGroup([...GROUP_TEXT_MEMBERS]);
+
+/**
+ * THE CONVERSION FIXTURE: an imported relay group still waiting for a pool
+ * number, which the migration turns into a native group text. Its id is derived
+ * from its roster too, because `convertConnectingRelayGroupToGroupText` REFUSES
+ * a thread whose id does not match its members (`roster_id_mismatch`) - the
+ * guard that stops a conversion from minting a thread nobody can find again.
+ *
+ * It carries NO `pool_number`, which is what `connecting` means and is also a
+ * conversion precondition.
+ */
+const CONNECTING_MEMBERS = ['+15550100002', '+15550100003'] as const;
+const CONNECTING_GROUP_ID = conversationIdForGroup([...CONNECTING_MEMBERS]);
 
 /** table base name -> items. Document-style: only keys/GSI attrs contractual.
  *  Exported so a unit test can guard the field CASING (the flexible-doc repos
@@ -188,6 +224,49 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       last_message_preview: 'Saturday morning works great, thank you!',
       created_at: T0,
     },
+    // A NATIVE CARRIER group text (type `group_text`). It lives in its OWN
+    // byLastActivity partition (`group_open`) and carries none of relay's
+    // mechanism - no `pool_number`, no `relay_status`, no `participant_phone`.
+    // Nobody is masked here: everyone on a carrier group sees everyone's number.
+    {
+      conversationId: GROUP_TEXT_ID,
+      status: 'group_open', // byLastActivity HASH - its own partition
+      last_activity_at: TG2, // byLastActivity RANGE - see A29 above
+      type: 'group_text',
+      // A carrier group is staff-run in v1; `manual` matches relay groups and
+      // keeps the automated-send breaker in its manual posture.
+      ai_mode: 'manual',
+      participants: [
+        { contactId: IDS.tenant, phone: GROUP_TEXT_MEMBERS[0], name: 'Tasha Nguyen' },
+        { contactId: IDS.landlord, phone: GROUP_TEXT_MEMBERS[1], name: 'Marcus Bell' },
+      ],
+      last_message_preview: 'Works for me - see you both there.',
+      unread_count: 0,
+      created_at: TG0,
+    },
+    // An imported relay group still CONNECTING (no pool number yet): the
+    // conversion fixture the migration e2e drives to `group_text`.
+    {
+      conversationId: CONNECTING_GROUP_ID,
+      status: 'connecting', // byLastActivity HASH
+      relay_status: 'relay_group#connecting', // byRelayStatus HASH (sparse; relay only)
+      last_activity_at: TC0,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: IDS.landlord, phone: CONNECTING_MEMBERS[0], name: 'Marcus Bell' },
+        { contactId: IDS.haStaffer, phone: CONNECTING_MEMBERS[1], name: 'Renee Carter' },
+      ],
+      participant_display_name: 'Marcus Bell + Renee Carter',
+      // Import provenance: the migration reports the connect flag, and keeping
+      // it is what makes a re-run report the same thing rather than `false`.
+      imported_from: 'quo',
+      imported_at: TC0,
+      import_connect_requested: true,
+      last_message_preview: 'Imported group - waiting on a number.',
+      unread_count: 0,
+      created_at: TC0,
+    },
   ],
   messages: [
     {
@@ -216,6 +295,41 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       author: 'teammate',
       body: 'Booked: Saturday 6/13 at 10am. Address: 1450 Joseph E. Boone Blvd NW.',
       ts: T2,
+    },
+    // The carrier group's transcript. Inbound rows carry `relay_sender_key` -
+    // the SHARED sender-attribution field - keyed PHONE-scoped (`phone#<E164>`)
+    // for a group text, never contactId-scoped the way a relay group keys it.
+    {
+      conversationId: GROUP_TEXT_ID,
+      tsMsgId: `${TG0}#msg-group-0001`,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      body: 'Marcus, can we all walk the unit Saturday morning?',
+      delivery_status: 'delivered',
+      relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[0]}`,
+      ts: TG0,
+    },
+    {
+      conversationId: GROUP_TEXT_ID,
+      tsMsgId: `${TG1}#msg-group-0002`,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'Saturday 10am works on our side - confirming with the owner.',
+      delivery_status: 'delivered',
+      ts: TG1,
+    },
+    {
+      conversationId: GROUP_TEXT_ID,
+      tsMsgId: `${TG2}#msg-group-0003`,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'landlord',
+      body: 'Works for me - see you both there.',
+      delivery_status: 'delivered',
+      relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[1]}`,
+      ts: TG2,
     },
   ],
   matches: [

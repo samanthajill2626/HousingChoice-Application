@@ -6,6 +6,7 @@ import type {
   GroupSnapshot,
   Persona,
   SendAsPartyInput,
+  SendGroupAsPartyInput,
   Thread,
 } from './types.js';
 
@@ -42,6 +43,16 @@ export async function getGroups(): Promise<GroupSnapshot[]> {
 
 export async function sendAsParty(input: SendAsPartyInput): Promise<string> {
   return (await post<{ sid: string }>('/control/send-as-party', input)).sid;
+}
+
+/**
+ * Send a NATIVE CARRIER group text to the business number (group-texting spec
+ * 5.1). Distinct from `sendAsParty` + `to: <pool>`, which is a RELAY group leg:
+ * a carrier group goes to the business number and carries the `OtherRecipients`
+ * envelope instead.
+ */
+export async function sendGroupAsParty(input: SendGroupAsPartyInput): Promise<string> {
+  return (await post<{ sid: string }>('/control/send-group-as-party', input)).sid;
 }
 
 export async function addAdHoc(input: AddAdHocInput): Promise<Persona> {

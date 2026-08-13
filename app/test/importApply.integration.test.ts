@@ -498,6 +498,447 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(await countMessages(id)).toBe(0);
   });
 
+  it('leaves a native group_text thread byte-identical on every field it owns', async () => {
+    // THE RE-RUN-UNDER-TRAFFIC CASE (group-texting spec section 9). After the
+    // migration (or after live detection minted the same derived id), the group
+    // row is a native group_text thread. A later import re-run must not be able
+    // to drag it back into relay shape.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+
+    const converted = {
+      conversationId: id,
+      type: 'group_text',
+      status: 'group_open',
+      last_activity_at: '2026-09-01T00:00:00.000Z',
+      created_at: '2026-07-25T10:00:00.000Z',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: contactIdForPhone(PHONES.groupTenant), phone: PHONES.groupTenant },
+        { contactId: contactIdForPhone(PHONES.landlord), phone: PHONES.landlord },
+      ],
+      twilio_conversation_sid: 'CH00000000000000000000000000000001',
+      twilio_participant_map: { MB0000000000000000000000000000001: `phone#${PHONES.landlord}` },
+    };
+    await doc.send(new Put({ TableName: table('conversations'), Item: converted }));
+
+    const review = cleanReview();
+    for (const row of review.groups.values()) row.connect_day_one = 'Y';
+    await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const conv = await doc.send(
+      new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
+    );
+    const item = conv.Item!;
+    // Everything the native thread owns is untouched.
+    expect(item.type).toBe('group_text');
+    expect(item.status).toBe('group_open');
+    expect(item.participants).toEqual(converted.participants);
+    expect(item.ai_mode).toBe('manual');
+    expect(item.created_at).toBe(converted.created_at);
+    expect(item.twilio_conversation_sid).toBe(converted.twilio_conversation_sid);
+    expect(item.twilio_participant_map).toEqual(converted.twilio_participant_map);
+    // And nothing relay-shaped or import-owned was stamped onto it. relay_status
+    // is the sneaky one: `if_not_exists` protects nothing on a row that
+    // deliberately has none, so without the skip this row would have joined the
+    // byRelayStatus GSI and reappeared as a connecting relay group.
+    expect(item.relay_status).toBeUndefined();
+    expect(item.imported_from).toBeUndefined();
+    expect(item.imported_at).toBeUndefined();
+    expect(item.import_connect_requested).toBeUndefined();
+    expect(item.pool_number).toBeUndefined();
+    // KNOWN, ACCEPTED residual: the second write (the guarded last_activity_at
+    // advance) is not type-guarded, so a re-run whose export is NEWER than the
+    // stored activity reorders the group in the inbox. Here the stored value is
+    // newer, so it stays put.
+    expect(item.last_activity_at).toBe(converted.last_activity_at);
+
+    // Messages still import normally - they are separately keyed.
+    expect(await countMessages(id)).toBeGreaterThan(0);
+  });
+
+  it('advances a converted group thread last_activity_at when the export is newer', async () => {
+    // The one write that still reaches a native group thread. Pinned rather than
+    // fixed: moving last_activity_at forward is correct behavior, and the only
+    // consequence is inbox ORDER (group_open is a byLastActivity partition).
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Put({
+        TableName: table('conversations'),
+        Item: {
+          conversationId: id,
+          type: 'group_text',
+          status: 'group_open',
+          last_activity_at: '2020-01-01T00:00:00.000Z',
+          created_at: '2020-01-01T00:00:00.000Z',
+          ai_mode: 'manual',
+          participants: [],
+        },
+      }),
+    );
+
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const conv = await doc.send(
+      new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
+    );
+    expect(conv.Item!.last_activity_at).toBe('2026-07-26T10:00:00.000Z');
+    expect(conv.Item!.status).toBe('group_open');
+  });
+
+  it('refuses to drop a contact a native group text roster references', async () => {
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const memberId = contactIdForPhone(PHONES.groupTenant);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Put({
+        TableName: table('conversations'),
+        Item: {
+          conversationId: conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]),
+          type: 'group_text',
+          status: 'group_open',
+          last_activity_at: '2026-09-01T00:00:00.000Z',
+          created_at: '2026-07-25T10:00:00.000Z',
+          ai_mode: 'manual',
+          participants: [
+            { contactId: memberId, phone: PHONES.groupTenant },
+            { contactId: contactIdForPhone(PHONES.landlord), phone: PHONES.landlord },
+          ],
+        },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.groupTenant)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const contact = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: memberId } }),
+    );
+    expect(contact.Item).toBeDefined();
+    expect(report.warnings.some((w) => w.includes('KEPT (GROUP MEMBER)'))).toBe(true);
+  });
+
+  it('refuses to drop a contact stamped as a group member after the roster walk', async () => {
+    // THE RACE. The roster walk runs once at the start of the drop pass, so a
+    // thread created after it would be invisible; the ConditionExpression on the
+    // delete is evaluated by DynamoDB and cannot be raced.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const memberId = contactIdForPhone(PHONES.groupTenant);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    // No group_open row exists - only the consent-basis stamp, exactly the state
+    // a detection that landed between the walk and the delete would leave.
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: memberId },
+        UpdateExpression: 'SET group_participation_at = :at',
+        ExpressionAttributeValues: { ':at': '2026-08-12T00:00:00.000Z' },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.groupTenant)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const contact = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: memberId } }),
+    );
+    expect(contact.Item).toBeDefined();
+    expect(report.warnings.some((w) => w.includes('while this import was running'))).toBe(true);
+    // Nothing half-retracted: their own thread history is still there.
+    expect(await countMessages(conversationIdFor1to1(PHONES.groupTenant))).toBeGreaterThan(0);
+  });
+
+  it('never RESURRECTS a contact deleted between the read and the retract marker', async () => {
+    // adversarial 14. The marker `UpdateCommand` conditioned only on
+    // `attribute_not_exists(group_participation_at)`, and DynamoDB's UpdateItem
+    // CREATES an absent item - a condition an absent item satisfies. Two
+    // overlapping runs (the RUNBOOK says re-running is safe and expected) both
+    // read the row; A hard-deletes it; B's marker then MINTS a phantom carrying
+    // only `{contactId, import_retract_started_at}`. With no phone, type or
+    // status it is on neither GSI, and every future run's `imported_from` check
+    // refuses to touch it - so it is permanent residue no run can ever see.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const { DeleteCommand: Delete, UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    let stolen = false;
+    let afterMarker: Record<string, unknown> | undefined;
+    const racingDoc = {
+      send: async (command: unknown) => {
+        const input = (command as { input: Record<string, any> }).input;
+        const isTargetGet =
+          command instanceof GetCommand &&
+          input.TableName === table('contacts') &&
+          input.Key?.contactId === target;
+        let result: unknown;
+        let thrown: unknown;
+        try {
+          result = await doc.send(command as never);
+        } catch (err) {
+          thrown = err;
+        }
+        if (isTargetGet && !stolen) {
+          // The OTHER run finishes and hard-deletes the contact, right here.
+          stolen = true;
+          await doc.send(new Delete({ TableName: table('contacts'), Key: { contactId: target } }));
+        }
+        if (command instanceof Update && input.Key?.contactId === target) {
+          const probe = await doc.send(
+            new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+          );
+          afterMarker = probe.Item;
+        }
+        if (thrown !== undefined) throw thrown;
+        return result;
+      },
+    } as unknown as typeof doc;
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc: racingDoc, plan, review, importedAt, env: testEnv });
+
+    expect(stolen).toBe(true);
+    // THE PHANTOM WAS NEVER CREATED.
+    expect(afterMarker).toBeUndefined();
+    const after = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(after.Item).toBeUndefined();
+    // And the operator is not told a group-membership story that did not happen.
+    expect(report.warnings.some((w) => w.includes('joined a native group text'))).toBe(false);
+  });
+
+  it('states what ACTUALLY happened to the contact, re-checked after the deletes', async () => {
+    // adversarial 25. The foreign-message warning was flipped to "the thread was
+    // KEPT, the contact was removed" to match the new destruction order - but
+    // the contact delete happens 30 lines later and can REFUSE, so the sentence
+    // became a prediction that can be false. Here the person joins a native
+    // group text between the marker and the delete, so BOTH the thread and the
+    // contact survive; neither warning may claim otherwise.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const conversationId = conversationIdFor1to1(PHONES.tenantBusy);
+    const { PutCommand: Put, UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Put({
+        TableName: table('messages'),
+        Item: {
+          conversationId,
+          tsMsgId: '2026-08-12T00:00:00.000Z#LIVE-9',
+          type: 'sms',
+          direction: 'inbound',
+          body: 'arrived after cutover',
+          provider_sid: 'LIVE-9',
+          provider_ts: '2026-08-12T00:00:00.000Z',
+          delivery_status: 'received',
+          created_at: '2026-08-12T00:00:00.000Z',
+        },
+      }),
+    );
+
+    let stamped = false;
+    const racingDoc = {
+      send: async (command: unknown) => {
+        const input = (command as { input: Record<string, any> }).input;
+        const isMarker =
+          command instanceof Update &&
+          input.TableName === table('contacts') &&
+          input.Key?.contactId === target &&
+          String(input.UpdateExpression ?? '').includes('import_retract_started_at');
+        const result = await doc.send(command as never);
+        if (isMarker && !stamped) {
+          // Detection stamps the group consent basis right after our marker.
+          stamped = true;
+          await doc.send(
+            new Update({
+              TableName: table('contacts'),
+              Key: { contactId: target },
+              UpdateExpression: 'SET group_participation_at = :at',
+              ExpressionAttributeValues: { ':at': '2026-08-12T01:00:00.000Z' },
+            }),
+          );
+        }
+        return result;
+      },
+    } as unknown as typeof doc;
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc: racingDoc, plan, review, importedAt, env: testEnv });
+
+    expect(stamped).toBe(true);
+    const survivor = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(survivor.Item).toBeDefined();
+    // NO warning may say the contact was removed, because it was not.
+    expect(report.warnings.some((w) => w.includes('the contact was removed'))).toBe(false);
+    expect(report.warnings.some((w) => w.includes('contact record was removed'))).toBe(false);
+    // NO warning may say the 1:1 thread was already removed, because the foreign
+    // message kept it.
+    expect(report.warnings.some((w) => w.includes('thread was already removed'))).toBe(false);
+    expect(await countMessages(conversationId)).toBeGreaterThan(0);
+    // The marker does not persist forever on a live group member's contact.
+    expect(survivor.Item!.import_retract_started_at).toBeUndefined();
+  });
+
+  it('READS import_retract_started_at: a retract that died halfway is reported and resumed', async () => {
+    // conformance F6 / adversarial 35. The field was a write with ZERO readers -
+    // the exact defect class this same commit indicted `imported_sender_phone`
+    // for - while its own comment promised "a contact carrying
+    // import_retract_started_at and still having a thread is exactly a retract
+    // that died halfway". This is that reader.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: target },
+        UpdateExpression: 'SET import_retract_started_at = :at',
+        ExpressionAttributeValues: { ':at': '2026-08-11T09:00:00.000Z' },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    expect(
+      report.warnings.some(
+        (w) => w.includes('2026-08-11T09:00:00.000Z') && w.includes('did NOT finish'),
+      ),
+    ).toBe(true);
+    // Resumed, not skipped.
+    const gone = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(gone.Item).toBeUndefined();
+    expect(await countMessages(conversationIdFor1to1(PHONES.tenantBusy))).toBe(0);
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, item 6). The resume sentence was pushed
+  // BEFORE the guarded marker write that can refuse the whole retract, so a
+  // person who had joined a native group text got a report saying "RESUMING it
+  // now - their imported thread and messages are being removed again"
+  // immediately followed by "the contact was KEPT (GROUP MEMBER)": two
+  // contradictory sentences about one person, the first of them false, in the
+  // document the founder reads to decide whether the import went right. The same
+  // commit states the rule thirty lines further down - record the outcome, state
+  // it once, when it is a fact.
+  it('does NOT claim a half-finished retract was resumed when the group-member guard refuses it', async () => {
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    // A retract died halfway AND the person has since joined a group text, so
+    // the guarded marker write refuses and nothing is retracted at all.
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: target },
+        UpdateExpression:
+          'SET import_retract_started_at = :at, group_participation_at = :joined',
+        ExpressionAttributeValues: {
+          ':at': '2026-08-11T09:00:00.000Z',
+          ':joined': '2026-08-12T00:00:00.000Z',
+        },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    // The report says they were KEPT...
+    expect(report.warnings.some((w) => w.includes('KEPT (GROUP MEMBER)'))).toBe(true);
+    // ...and never that their thread and messages were being removed again.
+    expect(report.warnings.some((w) => w.includes('did NOT finish'))).toBe(false);
+    expect(report.warnings.some((w) => w.includes('RESUMING it now'))).toBe(false);
+    // And the words match the world: nothing was destroyed.
+    const survivor = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(survivor.Item).toBeDefined();
+    expect(await countMessages(conversationIdFor1to1(PHONES.tenantBusy))).toBeGreaterThan(0);
+  });
+
+  it('does not blame group text detection for a row the import itself created', async () => {
+    // adversarial 37. import:convert-groups re-mints a dropped group member as a
+    // group-scoped stub carrying `origin: group_detection`, and every later
+    // import:apply then reported "their contact record was created by group text
+    // detection, not by the import" - about a row the import's own convert-groups
+    // step created. The refusal is right; the attribution was not.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: target },
+        UpdateExpression: 'SET origin = :o',
+        ExpressionAttributeValues: { ':o': 'group_detection' },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const line = report.warnings.find((w) => w.includes('GROUP MEMBER'));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('not by the import');
+    expect(line).toContain('group text detection or by this import');
+    const kept = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(kept.Item).toBeDefined();
+  });
+
   it('writes nothing on a dry run', async () => {
     for (const t of TABLES) {
       await deleteTableIfExists(client, table(t));

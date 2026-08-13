@@ -63,7 +63,11 @@ const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
   landlord_1to1: 'Landlord',
   partner_1to1: 'Partner',
   unknown_1to1: 'Unknown',
-  relay_group: 'Group',
+  relay_group: 'Relay group',
+  // UNREACHABLE label, kept so the Record stays total: group threads are dropped
+  // at Today's intake filter (see buildToday's conversation loop), so no Today
+  // row is ever tagged with it.
+  group_text: 'Group text',
 };
 
 const HOUR_MS = 3_600_000;
@@ -103,7 +107,10 @@ function conversationWho(conv: ConversationSummary): string {
 }
 
 /** The external participant's contact id (match by phone, else the first
- *  participant). Undefined when the summary carries no participant contact id. */
+ *  participant). Undefined when the summary carries no participant contact id.
+ *  SINGLE-PARTY ONLY: the `participants[0]` fallback would name a random member
+ *  of a multi-party roster. Today's intake filter drops group threads before
+ *  this is ever called. */
 function participantContactId(conv: ConversationSummary): string | undefined {
   const p = conv.participants.find((x) => x.phone === conv.participant_phone) ?? conv.participants[0];
   return p?.contactId;
@@ -125,6 +132,9 @@ function contactRefId(conv: ConversationSummary): string {
 
 /** 1:1 conversation types (one external contact) — these route to the contact
  *  page. relay_group has no single contact, so it keeps a conversation ref.
+ *  group_text is deliberately NOT here and never reaches this Set: Today drops
+ *  it at intake. Note this is a plain Set, so widening ConversationType does NOT
+ *  produce a compile error here - the intake filter is the real guard.
  *  partner_1to1 is a 1:1 too (n8): omitting it dropped an unread partner thread
  *  onto the dead /conversations/:id 404 fallback instead of /contacts/:id. */
 const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
@@ -260,6 +270,15 @@ export function buildTodayFromSources(
   }
 
   for (const conv of conversations) {
+    // NATIVE GROUP TEXTS ARE EXCLUDED FROM TODAY ENTIRELY (spec 11: v1 treats
+    // them as inbox + thread-view only). An INTAKE filter, not a per-branch one,
+    // so no later rule can readmit them: `participantContactId` below falls back
+    // to participants[0] and would name a random member, and `ONE_TO_ONE` is a
+    // plain Set that adding a type to the union does not force anyone to update.
+    // Today's own feed cannot return one either (it reads the `open` status
+    // partition; group threads live in `group_open`) - this is the guard that
+    // does not depend on that staying true.
+    if (conv.type === 'group_text') continue;
     if (conv.type === 'unknown_1to1') {
       // Untriaged inbound — needs triage (surfaces in needs_you_now, not
       // unreplied). Links to the unknown CONTACT's page (the inbound created an

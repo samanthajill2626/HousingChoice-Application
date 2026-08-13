@@ -632,9 +632,18 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
   });
 });
 
-describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, spec §6)', () => {
-  // Extract + un-escape the TwiML <Message> body so we can compare against the
-  // (un-escaped) filed copy. The handler XML-escapes ' & < > " into entities.
+describe('POST /webhooks/twilio/sms - A2P/CTIA keywords (TWILIO owns the replies)', () => {
+  // THE 2026-08-12 LIVE TEST SETTLED THIS (docs/issues/
+  // twilio-standard-optout-double-reply.md). Twilio's platform keyword handling
+  // is LIVE on the messaging service: HELP never reached our webhook at all,
+  // our STOP TwiML confirmation was refused with 21610 (it has never once been
+  // delivered), and START drew Twilio's reply ON TOP of ours. Cameron's ruling:
+  // Twilio owns the keyword REPLIES via Advanced Opt-Out configured with OUR
+  // filed copy; the app keeps every bit of keyword MACHINERY and emits NO
+  // reply. So the assertion for all three keywords is now "empty TwiML, books
+  // fully written" - the copy constants stay the source of truth for what the
+  // console is configured WITH (see catalog.ts and RUNBOOK "Keyword
+  // auto-replies (Advanced Opt-Out)").
   function twimlMessage(xml: string): string | undefined {
     const m = /<Message>([\s\S]*?)<\/Message>/.exec(xml);
     if (!m) return undefined;
@@ -646,7 +655,7 @@ describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, s
       .replace(/&amp;/g, '&');
   }
 
-  it('STOP → TwiML STOP_CONFIRMATION reply (NOT via the gated send wrapper — reaches the opted-out number)', async () => {
+  it('STOP -> EMPTY TwiML (Twilio replies), suppression still recorded', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
 
@@ -658,29 +667,46 @@ describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, s
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/xml');
-    expect(twimlMessage(res.text)).toBe(STOP_CONFIRMATION);
-    // The confirmation did NOT go through the opt-out-gated sendMessage wrapper.
+    expect(res.text).toContain('<Response/>');
+    expect(twimlMessage(res.text)).toBeUndefined();
+    // ...and no send through the wrapper either. The app answers NOTHING.
     expect(world.sent).toHaveLength(0);
-    // Suppression still recorded.
+    // Suppression still recorded - the machinery is untouched.
     expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: true }]);
   });
 
-  it('HELP → TwiML HELP_REPLY reply, no suppression change, and the body carries NO phone number (digits)', async () => {
+  it('the STOP copy Twilio is configured with still declares itself here', () => {
+    // The catalog remains the SOURCE OF TRUTH for the console-configured copy,
+    // so a silent edit to the constant is still a reviewed change.
+    expect(STOP_CONFIRMATION).toContain('unsubscribed');
+  });
+
+  it('HELP -> EMPTY TwiML, no suppression change, and NO consent stamp (isHelp\'s one surviving job)', async () => {
     const { app, world } = makeWebhookHarness();
-    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+    // Seeded deliberately WITHOUT consent_method. A PLAIN inbound from an
+    // existing no-consent contact stamps inbound_text (see the test below);
+    // HELP must NOT, because a request for help is not an affirmative opt-in.
+    // That exclusion (`!isHelp` in the plain-inbound stamp condition) is the
+    // ONLY behavior `isHelp` still has, so this is what pins it.
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
 
     const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'HELP', MessageSid: 'SMkwhelp' }));
 
     expect(res.status).toBe(200);
-    const body = twimlMessage(res.text)!;
-    expect(body).toBe(HELP_REPLY);
-    expect(/\d/.test(body)).toBe(false); // no phone number in HELP (campaign: phone=No)
+    expect(twimlMessage(res.text)).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+    // The copy the console is configured WITH is still pinned (campaign: phone=No).
+    expect(/\d/.test(HELP_REPLY)).toBe(false);
     // HELP never changes suppression.
     expect(world.flagWrites).toHaveLength(0);
     expect(world.optOutSets).toHaveLength(0);
+    // ...and never confers consent (mirrors the STOP-is-a-revocation test).
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBeUndefined();
+    expect(contact.consent_at).toBeUndefined();
   });
 
-  it('opt-in (START) → clears suppression, stamps inbound_text consent when absent, replies WELCOME_SMS', async () => {
+  it('opt-in (START) -> clears suppression + stamps inbound_text consent, and replies NOTHING', async () => {
     const { app, world } = makeWebhookHarness();
     // Contact opted out earlier, and (deliberately) has NO consent recorded.
     world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, sms_opt_out: true });
@@ -692,7 +718,10 @@ describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, s
     );
 
     expect(res.status).toBe(200);
-    expect(twimlMessage(res.text)).toBe(WELCOME_SMS);
+    expect(twimlMessage(res.text)).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+    // The welcome copy Twilio's opt-in confirmation is configured with.
+    expect(WELCOME_SMS).toContain('Reply STOP');
     // Suppression cleared.
     expect(world.flagWrites).toContainEqual({ contactId: 'contact-T', flag: 'sms_opt_out', value: false });
     // Consent stamped (keyword opt-in is a documented affirmative opt-in).
@@ -777,22 +806,27 @@ describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, s
     expect(contact.consent_method).toBeUndefined(); // a STOP never confers consent
   });
 
-  it('honors the NEW opt-out keywords OPTOUT and REVOKE (STOP_CONFIRMATION reply + suppression)', async () => {
+  it('honors the NEW opt-out keywords OPTOUT and REVOKE (suppression, no reply)', async () => {
     for (const keyword of ['OPTOUT', 'REVOKE', 'optout', 'Revoke']) {
       const { app, world } = makeWebhookHarness();
       world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
       const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: keyword, MessageSid: `SM-${keyword}` }));
-      expect(twimlMessage(res.text), keyword).toBe(STOP_CONFIRMATION);
+      expect(twimlMessage(res.text), keyword).toBeUndefined();
       expect(world.flagWrites, keyword).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: true }]);
     }
   });
 
-  it('honors the NEW opt-in keywords JOIN and HOME (WELCOME_SMS reply)', async () => {
+  it('honors the NEW opt-in keywords JOIN and HOME (suppression cleared, no reply)', async () => {
     for (const keyword of ['JOIN', 'HOME', 'join', 'Home']) {
       const { app, world } = makeWebhookHarness();
       world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, sms_opt_out: true });
       const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: keyword, MessageSid: `SM-${keyword}` }));
-      expect(twimlMessage(res.text), keyword).toBe(WELCOME_SMS);
+      expect(twimlMessage(res.text), keyword).toBeUndefined();
+      expect(world.flagWrites, keyword).toContainEqual({
+        contactId: 'contact-T',
+        flag: 'sms_opt_out',
+        value: false,
+      });
     }
   });
 

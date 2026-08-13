@@ -6,10 +6,10 @@
 //   recordPersonMilestone (DUAL-PARTY) - for a lifecycle fact about the deal:
 //     scheduled, took place, no-show, canceled, outcome, stage moves. It is
 //     news for BOTH sides: the TENANT whose tour/placement it is, and the
-//     LANDLORD who owns the unit, whether or not either is on any group text.
+//     LANDLORD who owns the unit, whether or not either is on any relay group.
 //
 //   recordRosterMilestone (ROSTER) - for an event that asserts MEMBERSHIP OF A
-//     CONVERSATION ("Group text opened"). Those follow the roster that was
+//     CONVERSATION ("Relay group opened"). Those follow the roster that was
 //     actually provisioned, because a pin claiming someone is in a chat they
 //     are not in is simply false. This mirrors the rule the add/remove-member
 //     milestones already follow (routes/relayGroups.ts records

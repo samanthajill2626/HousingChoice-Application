@@ -560,7 +560,7 @@ export function createStatusTransitionService(
       // moved_in) whose linked relay group is still OPEN arms the 28-day
       // close-nag (set-if-absent), so a group left open past the terminal event
       // surfaces on Today even if the operator never answered the inline "Also
-      // close the group text?" ask. Best-effort - never fails the transition.
+      // close the relay group?" ask. Best-effort - never fails the transition.
       // (Arming a nag is NOT closing - spec D4 "nothing auto-closes" is intact.)
       if (conversationsRepo !== undefined && (toStage === 'lost' || toStage === 'moved_in')) {
         await armRelayCloseNagIfOpen(

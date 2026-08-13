@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
@@ -106,13 +106,21 @@ beforeEach(() => {
     Promise.resolve({ nextCursor: null, contacts: params.type === 'tenant' ? [CANDIDATE] : [] }),
   );
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  // UNMOUNT BEFORE RESTORING (fix wave 2). The group view's member effect re-runs
+  // on a debounced live signal, so a timer scheduled by one test can fire while a
+  // component is still mounted at teardown - and once the api mocks are restored
+  // the call returns undefined and the effect crashes on `.then`, failing whatever
+  // test happens to be running. Explicit cleanup makes the ordering deterministic.
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('ConversationDetail dispatch', () => {
   it('renders the group view for a relay_group conversation', async () => {
     getConversation.mockResolvedValue(relayHeader());
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     // The segmented toggle leads with Conversation (aria-pressed).
     expect(screen.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Details' })).toHaveAttribute('aria-pressed', 'false');
@@ -224,7 +232,7 @@ describe('ConversationDetail group view', () => {
   it('renders the transcript reply box and the three Details cards', async () => {
     getConversation.mockResolvedValue(relayHeader());
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     expect(screen.getByLabelText('Reply message')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /Group/ })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /Members/ })).toBeInTheDocument();
@@ -240,7 +248,7 @@ describe('ConversationDetail group view', () => {
     // number.
     getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /^Send$/ })).toBeDisabled();
     expect(screen.getByText(/this group is closed/i)).toBeInTheDocument();
   });
@@ -256,7 +264,7 @@ describe('ConversationDetail group view', () => {
       status: 'queued',
     });
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     await user.type(screen.getByLabelText('Reply message'), 'On my way');
     await user.click(screen.getByRole('button', { name: /^Send$/ }));
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('conv-g1', { body: 'On my way' }));
@@ -276,7 +284,7 @@ describe('ConversationDetail connecting state', () => {
       status: 'queued_pending',
     });
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     // A distinct Connecting state - never Open, never Closed.
     expect(screen.getAllByText('Connecting').length).toBeGreaterThanOrEqual(1);
@@ -300,7 +308,7 @@ describe('ConversationDetail roster management', () => {
     getConversation.mockResolvedValue(relayHeader());
     addConversationMember.mockResolvedValue([KEISHA, LARS, { contactId: 'c-new', phone: '+14045550199', name: 'Nadia Newman' }]);
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Add a member' }));
     const search = screen.getByRole('combobox', { name: 'Add member' });
@@ -323,7 +331,7 @@ describe('ConversationDetail roster management', () => {
     getConversation.mockResolvedValue(relayHeader());
     addConversationMember.mockResolvedValue([KEISHA, LARS, { contactId: '', phone: '+14045550123' }]);
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Add a member' }));
     await user.type(screen.getByRole('combobox', { name: 'Add member' }), '(404) 555-0123');
@@ -340,7 +348,7 @@ describe('ConversationDetail roster management', () => {
     getConversation.mockResolvedValue(relayHeader());
     removeConversationMember.mockResolvedValue([LARS]);
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Remove Keisha Kane' }));
     const dialog = await screen.findByRole('dialog', { name: /Remove member\?/i });
@@ -355,7 +363,7 @@ describe('ConversationDetail roster management', () => {
     getConversation.mockResolvedValue(relayHeader());
     removeConversationMember.mockRejectedValue(new ApiError(409, 'roster_conflict', 'roster_conflict'));
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
     // getConversationMembers ran once on mount.
     await waitFor(() => expect(getConversationMembers).toHaveBeenCalledTimes(1));
 
@@ -372,7 +380,7 @@ describe('ConversationDetail roster management', () => {
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader());
     const serverMessage =
-      'This person already has a group text history on this number. Start a new group text with them instead.';
+      'This person already has a relay group history on this number. Start a new relay group with them instead.';
     addConversationMember.mockRejectedValue(
       new ApiError(409, 'phone_conflict_on_number', 'phone_conflict_on_number', {
         error: 'phone_conflict_on_number',
@@ -380,7 +388,7 @@ describe('ConversationDetail roster management', () => {
       }),
     );
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Add a member' }));
     await user.type(screen.getByRole('combobox', { name: 'Add member' }), '(404) 555-0177');
@@ -398,7 +406,7 @@ describe('ConversationDetail close / reopen', () => {
     getConversation.mockResolvedValue(relayHeader());
     closeConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Close group' }));
     const dialog = await screen.findByRole('dialog', { name: /Close group\?/i });
@@ -414,7 +422,7 @@ describe('ConversationDetail close / reopen', () => {
     getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     closeConversation.mockResolvedValue(relayHeader());
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Reopen group' }));
     const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });
@@ -429,7 +437,7 @@ describe('ConversationDetail close / reopen', () => {
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     const serverMessage =
-      'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.';
+      'This relay group cannot be reopened: its number was retired after long inactivity. Start a new relay group instead.';
     closeConversation.mockRejectedValue(
       new ApiError(409, 'pool_number_released', 'pool_number_released', {
         error: 'pool_number_released',
@@ -437,7 +445,7 @@ describe('ConversationDetail close / reopen', () => {
       }),
     );
     renderAt('conv-g1');
-    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Reopen group' }));
     const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });

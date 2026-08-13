@@ -210,7 +210,7 @@ const ANONYMOUS_JOINED_LABEL = 'A new member';
  * the WHOLE group — the new member's first contact on this number (leading
  * brand + trailing STOP fold in like the intro) doubling as the join notice
  * for everyone else. E.g. "Tenant Place LLC. Carol Brown joined this group
- * text. You're now connected with Alice, Bob, and Carol Brown on this number.
+ * chat. You're now connected with Alice, Bob, and Carol Brown on this number.
  * Reply here and everyone in the group sees it. Reply STOP to opt out."
  */
 export function composeMemberAddedBody(
@@ -222,7 +222,7 @@ export function composeMemberAddedBody(
       ? newMemberName.trim()
       : ANONYMOUS_JOINED_LABEL;
   return resolveMessage('relay.member_added', {
-    joined: `${who} joined this group text.`,
+    joined: `${who} joined this group chat.`,
     members: composeConnectionSentence(memberNames),
   });
 }
@@ -579,7 +579,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   // member FROM the pool number, throttled by the shared bucket. The intro
   // names everyone connected (display names where known, never a phone).
   // Persisted in the thread as a SYSTEM announcement (relayAnnouncements.ts —
-  // founder decision 2026-07-14: everything sent into a group text must be
+  // founder decision 2026-07-14: everything sent into a relay group must be
   // visible in its dashboard thread) UNLESS payload.persist === false (the dev
   // replay seam). Idempotent via the job execution marker so a redelivery
   // never re-texts everyone or double-persists.

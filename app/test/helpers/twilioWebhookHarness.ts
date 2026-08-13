@@ -46,6 +46,13 @@ import {
   type AiRunsRepo,
 } from '../../src/repos/aiRunsRepo.js';
 import { normalizeSuggestionValue } from '../../src/services/extraction/schema.js';
+import {
+  createGroupReceiptsService,
+  type GroupReceiptsService,
+} from '../../src/services/groupReceipts.js';
+import type { GroupSendService } from '../../src/services/groupSend.js';
+import type { ConversationsCrossCheck } from '../../src/routes/webhooks/twilioConversations.js';
+import { createGroupCrossCheck } from '../../src/services/groupCrossCheck.js';
 import type { Verdict } from '../../src/services/extraction/runTypes.js';
 import type {
   SuggestionResolutionItem,
@@ -57,6 +64,9 @@ import {
   type SettingsRepo,
 } from '../../src/repos/settingsRepo.js';
 import {
+  decodeGroupCursor,
+  encodeGroupCursor,
+  GROUP_TEXT_STATUS,
   toPreview,
   type ConversationItem,
   type ConversationsRepo,
@@ -69,6 +79,12 @@ import {
   type MessageItem,
   type MessagesRepo,
   type ParkedEmailEvent,
+  groupCrossCheckDueSortKey,
+  GROUP_CROSSCHECK_DUE_KIND,
+  GROUP_CROSSCHECK_DUE_PARTITION,
+  type GroupDueRow,
+  type ParkedGroupReceipt,
+  type PendingCrossCheckEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
@@ -128,7 +144,11 @@ import {
   type UpsertPendingInput,
 } from '../../src/repos/pendingRosterActionsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
-import { type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
+import { type PoolNumberItem, type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
+import type {
+  GroupRailEnqueueRequest,
+  GroupRailEnqueuer,
+} from '../../src/services/groupRail.js';
 import {
   type PushNotification,
   type PushService,
@@ -282,6 +302,33 @@ export interface FakeWorld {
   /** Durable suggestion-resolution protocol rows, absent from pending lists. */
   suggestionResolutions: Map<string, SuggestionResolutionItem>;
   suggestionResolutionRepo: SuggestionResolutionRepo;
+  /** Group-texting liveness records (spec 8.2), keyed by settingId. */
+  groupTimestamps: Map<string, string>;
+  /** Active relay pool numbers the group exclusion-set read sees (spec 4.1). */
+  activePoolNumbers: string[];
+  poolNumbersRepo: Pick<PoolNumbersRepo, 'listActive'>;
+  /** Every group-rail enqueue the webhook attempted (S3 seam; S6 wires the job). */
+  groupRailEnqueues: GroupRailEnqueueRequest[];
+  groupRailEnqueuer: GroupRailEnqueuer;
+  /** T6.2 cross-check ledger: IM SIDs already recorded (the dedupe marker). */
+  crossCheckMarkers: Set<string>;
+  /** The CLASSIC half's dedupe marker: SM/MM SIDs already filed into the ledger. */
+  crossCheckClassicMarkers: Set<string>;
+  /** Events awaiting their classic filing, per (rail, author) pair. */
+  crossCheckPending: Map<string, PendingCrossCheckEvent[]>;
+  /**
+   * The PAIR BALANCE, per (rail, author) pair (fix wave 5). Positive = events
+   * awaiting their filings; negative = filings banked as credits, the oldest of
+   * them at `since`. Both halves move this one counter atomically, which is what
+   * makes the two webhooks impossible to interleave wrongly.
+   */
+  crossCheckBalances: Map<string, CrossCheckPairState>;
+}
+
+/** One pair's ledger balance in the fake world. See crossCheckBalances. */
+export interface CrossCheckPairState {
+  balance: number;
+  since?: string;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -296,6 +343,11 @@ export function createFakeWorld(): FakeWorld {
   >();
   // System-send SID markers (syssid#), providerSid -> kind.
   const systemSidMarkers = new Map<string, string>();
+  // Group texting (S5): parked delivery receipts, IMxx -> (MBxx -> receipt).
+  const parkedGroupReceipts = new Map<
+    string,
+    Map<string, { receipt: ParkedGroupReceipt; rank: number }>
+  >();
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
@@ -371,7 +423,12 @@ export function createFakeWorld(): FakeWorld {
       touches.push({ conversationId, previewText, ts });
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`touchLastActivity: no conversation ${conversationId}`);
-      conv.status = 'open';
+      // Model the REPO-LEVEL PARTITION GUARD: a group_text thread keeps its
+      // `group_open` status through every touch (the real repo's conditional
+      // status write + no-status retry). Without this the webhook tests would
+      // pass while production silently loses group threads out of their
+      // partition.
+      if (conv.type !== 'group_text') conv.status = 'open';
       conv.last_activity_at = ts;
       const preview = toPreview(previewText);
       if (preview !== undefined) conv.last_message_preview = preview;
@@ -668,6 +725,137 @@ export function createFakeWorld(): FakeWorld {
       }
       return conv;
     },
+
+    async createGroupTextThread({ conversationId, members, lastActivityAt, preview }) {
+      const existing = conversations.get(conversationId);
+      if (existing) return { item: existing, created: false };
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId,
+        status: GROUP_TEXT_STATUS,
+        last_activity_at: lastActivityAt ?? now,
+        type: 'group_text',
+        ai_mode: 'manual',
+        participants: members,
+        created_at: now,
+        ...(toPreview(preview) !== undefined && { last_message_preview: toPreview(preview) }),
+      };
+      conversations.set(conversationId, item);
+      return { item, created: true };
+    },
+
+    async listGroupTexts(opts = {}) {
+      const all = [...conversations.values()]
+        .filter((c) => c.status === GROUP_TEXT_STATUS)
+        .sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at));
+      // The cursor is TAGGED and decoded BEFORE any I/O, exactly like the real
+      // repo: a foreign/tampered cursor is refused rather than used as an
+      // ExclusiveStartKey for someone else's partition. Modeled here so a route
+      // that stopped mapping GroupCursorError to a 400 cannot pass on a fake.
+      const start =
+        opts.cursor !== undefined && opts.cursor.length > 0
+          ? (((decodeGroupCursor(opts.cursor) as { idx?: number }).idx ?? -1) as number) + 1
+          : 0;
+      const limit = opts.limit ?? 50;
+      const items = all.slice(start, start + limit);
+      const endIdx = start + items.length - 1;
+      const more = start + items.length < all.length;
+      return {
+        items,
+        ...(more && { nextCursor: encodeGroupCursor({ idx: endIdx }) }),
+        truncated: false,
+      };
+    },
+
+    async claimRailCreation(conversationId, claim, expiredBefore) {
+      const conv = conversations.get(conversationId);
+      if (!conv) return { claimed: false };
+      // Models the real ConditionExpression: the claim is FREE when absent or
+      // older than the expiry window (re-claimable), never otherwise.
+      const held = conv.rail_creating;
+      if (held !== undefined && held.at > expiredBefore) return { claimed: false, item: conv };
+      conv.rail_creating = { ...claim };
+      return { claimed: true, item: conv };
+    },
+
+    async recordRailFailure(conversationId, reason, at, claimToken) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.rail_creating?.token !== claimToken) return;
+      conv.rail_failed = { at, reason };
+      delete conv.rail_creating;
+    },
+
+    async clearGroupRail(conversationId, expectedSid) {
+      // Models the real ConditionExpression: only the caller that saw THIS sid
+      // may drop it, so a concurrent healer's fresh rail is never clobbered.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.twilio_conversation_sid !== expectedSid) return false;
+      delete conv.twilio_conversation_sid;
+      delete conv.twilio_participant_map;
+      return true;
+    },
+
+    async setTwilioConversation(conversationId, sid, participantMap, claimToken) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.rail_creating?.token !== claimToken) return undefined;
+      conv.twilio_conversation_sid = sid;
+      conv.twilio_participant_map = participantMap;
+      delete conv.rail_creating;
+      return conv;
+    },
+
+    async convertRelayGroupToGroupText(conversationId, members) {
+      const conv = conversations.get(conversationId);
+      // Models the real ConditionExpression: existence + the three
+      // preconditions. A lost condition returns undefined, never throws.
+      if (
+        !conv ||
+        conv.type !== 'relay_group' ||
+        conv.status !== 'connecting' ||
+        typeof conv.pool_number === 'string'
+      ) {
+        return undefined;
+      }
+      conv.type = 'group_text';
+      conv.status = GROUP_TEXT_STATUS;
+      conv.participants = members;
+      for (const relayOnly of [
+        'relay_status',
+        'pool_number',
+        'participant_phone',
+        'participants_version',
+        'relay_opted_out_members',
+        'close_nag_next_at',
+        'close_announced_at',
+        'ever_member_phones',
+        'placementId',
+        'owner',
+      ]) {
+        delete conv[relayOnly];
+      }
+      return conv;
+    },
+
+    async backfillGroupTextRoster(conversationId, members, expectedPrior) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.type !== 'group_text') return undefined;
+      // THE THIRD ARGUMENT IS HONOURED (adversarial 24). It used to be dropped
+      // from this signature, so every test through the harness passed whether
+      // the real `participants = :prior` precondition worked, always failed, or
+      // never failed. A caller that read a roster and lost the race gets
+      // `undefined` here, exactly as DynamoDB answers with a
+      // ConditionalCheckFailedException. Structural comparison stands in for
+      // DynamoDB's (key-order-independent) map equality; every producer in this
+      // codebase builds participants field-by-field in the same order.
+      if (
+        expectedPrior !== undefined &&
+        JSON.stringify(conv.participants ?? []) !== JSON.stringify(expectedPrior)
+      ) {
+        return undefined;
+      }
+      conv.participants = members;
+      return conv;
+    },
   };
 
   const findBySid = (sid: string): MessageItem | undefined =>
@@ -703,6 +891,9 @@ export function createFakeWorld(): FakeWorld {
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         // Relay number lifecycle: preserve the closed-group interception provenance.
         ...(message.viaClosedGroup !== undefined && { via_closed_group: message.viaClosedGroup }),
+        // Native group texting (T3.7): preserve the fail-open filing marker that
+        // keeps a possibly-group message out of every AI transcript window.
+        ...(message.groupAmbiguousOrigin === true && { group_ambiguous_origin: true }),
         // Relay group (M1.7): preserve the seeded per-recipient delivery map so
         // the fan-out's child-only setRecipientDelivery has a parent to write
         // into (mirrors the real repo's append passthrough).
@@ -903,7 +1094,7 @@ export function createFakeWorld(): FakeWorld {
       if (!item) throw new Error(`setRecipientDelivery: no message ${conversationId}/${tsMsgId}`);
       item.delivery_recipients = { ...(item.delivery_recipients ?? {}), [memberKey]: delivery };
     },
-    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode) {
+    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode, opts) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       const slot = item?.delivery_recipients?.[memberKey];
       if (!item || !slot) return false;
@@ -913,9 +1104,40 @@ export function createFakeWorld(): FakeWorld {
         status,
         ...(errorCode !== undefined && { errorCode }),
         ...(status === 'delivered' && { deliveredAt: new Date().toISOString() }),
+        // Group texting (S5): the real repo records the per-member channel SID
+        // alongside the transition, as a CHILD field.
+        ...(opts?.sid !== undefined && { sid: opts.sid }),
       };
       item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
       return true;
+    },
+    // Group texting (S5): the sid-IF-ABSENT write that keeps a duplicate receipt
+    // useful. Models the real repo's condition, absence included.
+    async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      const slot = item?.delivery_recipients?.[memberKey];
+      if (!item || !slot) return false;
+      if (slot.sid !== undefined) return false;
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: { ...slot, sid } };
+      return true;
+    },
+    // Group texting (S5): the parked-receipt partition, keyed IMxx + MBxx with
+    // forward-only coalescing WITHIN a slot - the real repo's ConditionExpression
+    // modelled, so a test cannot pass while production would regress a slot.
+    async parkGroupReceipt(receipt, opts) {
+      const slots = parkedGroupReceipts.get(receipt.messageSid) ?? new Map();
+      const existing = slots.get(receipt.participantSid);
+      if (existing !== undefined && existing.rank > opts.rank) return false;
+      slots.set(receipt.participantSid, { receipt: { ...receipt }, rank: opts.rank });
+      parkedGroupReceipts.set(receipt.messageSid, slots);
+      return true;
+    },
+    async listParkedGroupReceipts(messageSid) {
+      const slots = parkedGroupReceipts.get(messageSid);
+      return slots === undefined ? [] : [...slots.values()].map((v) => ({ ...v.receipt }));
+    },
+    async deleteParkedGroupReceipt(messageSid, participantSid) {
+      parkedGroupReceipts.get(messageSid)?.delete(participantSid);
     },
     async putRelaySidPointer(providerSid, ref) {
       if (!relaySidPointers.has(providerSid)) relaySidPointers.set(providerSid, ref);
@@ -931,6 +1153,153 @@ export function createFakeWorld(): FakeWorld {
     async getSystemSidMarker(providerSid) {
       const kind = systemSidMarkers.get(providerSid);
       return kind === undefined ? undefined : { kind };
+    },
+    // Group-texting deadline partition (S5): the webhook path never writes or
+    // reads a due row - throw so an accidental call is loud rather than a
+    // plausible empty answer.
+    // The deadline partition, modelled (T6.2/T6.3). The wiring suite drives a
+    // real sweep over rows the real cross-check wrote through this same fake, so
+    // a silent [] here would let "the classic filing matched the event" pass
+    // against a ledger that never had anything in it.
+    async listDueRows(_partition, throughIso, limit = 50) {
+      return [...crossCheckDueRows.values()]
+        .filter((row) => row.deadlineAt <= throughIso)
+        .sort((a, b) => (a.sortKey < b.sortKey ? -1 : 1))
+        .slice(0, limit)
+        .map((row) => ({ ...row }));
+    },
+    async deleteDueRow(_partition, sortKey) {
+      crossCheckDueRows.delete(sortKey);
+    },
+
+    // T6.2's cross-check ledger. MODELLED (not thrown), because T6.6(d) wires
+    // recordClassicInbound into the very filing path this harness drives: a
+    // throwing stub would be swallowed by that call site's catch and the wiring
+    // test would pass while production wrote nothing.
+    async claimCrossCheckEvent(messageSid) {
+      if (crossCheckMarkers.has(messageSid)) return false;
+      crossCheckMarkers.add(messageSid);
+      return true;
+    },
+    // MODELLED, not stubbed, for the same reason as the marker above: the
+    // wiring suite drives a REAL redelivery through the real filing path, and a
+    // fake that always said "fresh" would let the spurious-credit defect pass.
+    async claimCrossCheckClassic(providerSid) {
+      if (crossCheckClassicMarkers.has(providerSid)) return false;
+      crossCheckClassicMarkers.add(providerSid);
+      return true;
+    },
+    // THE PAIR BALANCE, modelled the way the repo implements it (fix wave 5):
+    // one signed counter per pair, moved atomically by both halves. Positive =
+    // events awaiting their filings; negative = filings banked as credits, the
+    // oldest of them at `since`.
+    async recordCrossCheckEvent(
+      event: PendingCrossCheckEvent,
+      bounds: { notBeforeIso: string; nowIso: string; expiresAt: number },
+    ) {
+      const state = crossCheckBalances.get(event.pairKey) ?? { balance: 0 };
+      const staleCredits =
+        state.balance < 0 && state.since !== undefined && state.since < bounds.notBeforeIso;
+      // Stale credits are DISCARDED BY COUNT - the stack observed at the read,
+      // plus this event's own slot - never by an overwrite and never by a delta
+      // that pins the result at 1 (fix wave 2, adversarial 8; fix wave 3,
+      // adversarial 1). Modelled here because the wiring suite is what proves
+      // the two halves agree.
+      const delta = staleCredits ? -state.balance + 1 : 1;
+      const balance = state.balance + delta;
+      crossCheckBalances.set(event.pairKey, {
+        balance,
+        // A discard RE-STAMPS the anchor rather than removing it: anything that
+        // survived it was banked in the same instant, and an anchorless negative
+        // balance would be consumable at any age.
+        ...(staleCredits
+          ? { since: bounds.nowIso }
+          : state.since !== undefined && { since: state.since }),
+      });
+      if (balance <= 0) return 'credit' as const;
+      // Pending: the rows land WITH the balance, never separately.
+      const pending = crossCheckPending.get(event.pairKey) ?? [];
+      pending.push({ ...event });
+      pending.sort((a: PendingCrossCheckEvent, b: PendingCrossCheckEvent) =>
+        a.deadlineAt < b.deadlineAt ? -1 : 1,
+      );
+      crossCheckPending.set(event.pairKey, pending);
+      const sortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
+      crossCheckDueRows.set(sortKey, {
+        partition: GROUP_CROSSCHECK_DUE_PARTITION,
+        sortKey,
+        kind: GROUP_CROSSCHECK_DUE_KIND,
+        deadlineAt: event.deadlineAt,
+        ref: {
+          conversationId: event.pairKey,
+          tsMsgId: `evt2#${event.deadlineAt}#${event.messageSid}`,
+        },
+        providerSid: event.messageSid,
+        conversationSid: event.conversationSid,
+        author: event.author,
+      });
+      return 'pending' as const;
+    },
+    async bumpCrossCheckClassic(pairKey, nowIso) {
+      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
+      const balance = state.balance - 1;
+      // The FIRST credit of a run stamps `since`; later ones keep the oldest.
+      const since = state.balance >= 0 ? nowIso : state.since;
+      crossCheckBalances.set(pairKey, { balance, ...(since !== undefined && { since }) });
+      return balance >= 0 ? 'matched' : 'credit';
+    },
+    // The classic filing RECEIPT + its window read (last-chance verification).
+    // MODELLED, not stubbed, like the rest of this ledger: the wiring suite
+    // drives a real sweep over rows the real service wrote through this fake, so
+    // a receipt store that never returned anything would let a false alarm pass.
+    async recordCrossCheckClassicReceipt(pairKey, receipt) {
+      const rows = crossCheckClassicReceipts.get(pairKey) ?? [];
+      rows.push({ providerSid: receipt.providerSid, filedAt: receipt.filedAt });
+      rows.sort((a, b) => (a.filedAt < b.filedAt ? -1 : 1));
+      crossCheckClassicReceipts.set(pairKey, rows);
+    },
+    async claimCrossCheckClassicInWindow(pairKey, fromIso, toIso) {
+      // CLAIMED, not read - one receipt is evidence about ONE filing, so it
+      // reconciles ONE pending row. Modelled, because a fake that handed the
+      // same receipt to every overdue row would hide exactly that.
+      const rows = crossCheckClassicReceipts.get(pairKey) ?? [];
+      const i = rows.findIndex((r) => r.filedAt >= fromIso && r.filedAt <= toIso);
+      if (i < 0) return undefined;
+      const [claimed] = rows.splice(i, 1);
+      crossCheckClassicReceipts.set(pairKey, rows);
+      return claimed;
+    },
+    async releaseCrossCheckPending(pairKey) {
+      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
+      if (state.balance > 0) {
+        crossCheckBalances.set(pairKey, {
+          balance: state.balance - 1,
+          ...(state.since !== undefined && { since: state.since }),
+        });
+      }
+    },
+    async claimOldestCrossCheckPending(pairKey) {
+      const pending = crossCheckPending.get(pairKey) ?? [];
+      const oldest = pending.shift();
+      crossCheckPending.set(pairKey, pending);
+      if (oldest !== undefined) {
+        crossCheckDueRows.delete(
+          groupCrossCheckDueSortKey(oldest.deadlineAt, oldest.messageSid),
+        );
+      }
+      return oldest;
+    },
+    async resolveCrossCheckPending(pairKey: string, pairSortKey: string, dueSortKey: string) {
+      // Keyed off the due row's own pointer, like the repo: the message sid is
+      // the last segment of the pair sort key.
+      const messageSid = pairSortKey.slice(pairSortKey.lastIndexOf('#') + 1);
+      const before = crossCheckPending.get(pairKey) ?? [];
+      const pending = before.filter((p) => p.messageSid !== messageSid);
+      crossCheckPending.set(pairKey, pending);
+      crossCheckDueRows.delete(dueSortKey);
+      // TRUE only when THIS call removed the pair row - the sweep releases the
+      // balance slot off exactly that (fix wave 2, adversarial 11).
+      return pending.length < before.length;
     },
   };
 
@@ -1059,15 +1428,33 @@ export function createFakeWorld(): FakeWorld {
       return contacts.find((c) => c.contactId === contactId);
     },
     async listByType(type, opts = {}) {
-      const items = contacts
+      const partition = contacts
         // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.
         .filter((c) => c.phone_ref !== true && c.email_ref !== true)
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
-        .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)))
-        .slice(0, opts.limit ?? 50);
-      return { items };
+        .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)));
+      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6): the
+      // page is drawn FIRST and any FilterExpression is applied to what came
+      // back, so a filtered-out row still spends a page slot. A fake that
+      // filtered before slicing could never see the defect the Today fill loop
+      // exists to close.
+      const start = typeof opts.exclusiveStartKey?.['contactId'] === 'string'
+        ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1
+        : 0;
+      const limit = opts.limit ?? 50;
+      const page = partition.slice(start, start + limit);
+      const filtered =
+        opts.excludeOrigin === undefined
+          ? page
+          : page.filter((c) => c.origin !== opts.excludeOrigin);
+      const last = page[page.length - 1];
+      const more = start + page.length < partition.length;
+      return {
+        items: filtered,
+        ...(more && last !== undefined && { lastEvaluatedKey: { contactId: last.contactId } }),
+      };
     },
     async listByHousingAuthority(housingAuthority, opts = {}) {
       // Mirror the byHousingAuthority GSI: tenant-sparse (only tenants carry the
@@ -1253,6 +1640,14 @@ export function createFakeWorld(): FakeWorld {
       fakeDeleteEmailPointer(email);
       return contact;
     },
+    async stampGroupParticipation(contactId, at) {
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact) return 'missing';
+      // Conditional and first-write-wins, like the real conditional update.
+      if (typeof contact.group_participation_at === 'string') return 'already';
+      contact.group_participation_at = at;
+      return 'stamped';
+    },
     async touchEmailLastSeen(contactId, email, at) {
       const contact = contacts.find((c) => c.contactId === contactId);
       if (!contact || !Array.isArray(contact.emails) || contact.emails.length === 0) return;
@@ -1328,6 +1723,8 @@ export function createFakeWorld(): FakeWorld {
   // In-memory org settings (M1.4): starts at the CO2 defaults; putOrgSettings
   // merges a partial patch (field-level) exactly like the real repo.
   const settings: OrgSettings = { ...DEFAULT_ORG_SETTINGS };
+  /** Group-texting liveness records (spec 8.2), keyed by settingId. */
+  const groupTimestamps = new Map<string, string>();
   const settingsRepo: SettingsRepo = {
     async getOrgSettings() {
       return { ...settings };
@@ -1353,6 +1750,30 @@ export function createFakeWorld(): FakeWorld {
         settings.welcomeText = patch.welcomeText;
       }
       return { ...settings };
+    },
+    async claimGroupIdentityFingerprint() {
+      // The fingerprint is a DEPLOYED-stack boot guard; no webhook path touches
+      // it. Throw so an accidental call is loud rather than silently "created".
+      throw new Error('claimGroupIdentityFingerprint: not used in the webhook harness');
+    },
+    // Group liveness high-water marks (group-texting spec 8.2). MONOTONIC like
+    // the real repo, so a test cannot pass while production would rewind one.
+    async putGroupTimestamp(id, at) {
+      const stored = groupTimestamps.get(id);
+      if (stored !== undefined && stored >= at) return;
+      groupTimestamps.set(id, at);
+    },
+    async getGroupTimestamp(id) {
+      return groupTimestamps.get(id);
+    },
+    // Cadence claim (T6.3). Models the real ConditionExpression - absent, or no
+    // later than notBefore - so a test cannot pass while production would let
+    // two pollers claim the same period.
+    async claimGroupPeriod(id, at, notBefore) {
+      const stored = groupTimestamps.get(id);
+      if (stored !== undefined && stored > notBefore) return false;
+      groupTimestamps.set(id, at);
+      return true;
     },
   };
 
@@ -2819,6 +3240,33 @@ export function createFakeWorld(): FakeWorld {
     },
   });
 
+  // Native group texting: the exclusion-set pool read + the rail enqueue seam.
+  // Both are in-memory, so a group inbound never reaches DynamoDB or a job queue.
+  const activePoolNumbers: string[] = [];
+  const poolNumbersRepo: Pick<PoolNumbersRepo, 'listActive'> = {
+    async listActive() {
+      return activePoolNumbers.map((poolNumber) => ({ poolNumber }) as PoolNumberItem);
+    },
+  };
+  const crossCheckMarkers = new Set<string>();
+  const crossCheckClassicMarkers = new Set<string>();
+  const crossCheckDueRows = new Map<string, GroupDueRow>();
+  const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
+  const crossCheckBalances = new Map<string, CrossCheckPairState>();
+  /** Classic filing RECEIPTS per pair - the sweep's last-chance evidence. */
+  const crossCheckClassicReceipts = new Map<
+    string,
+    Array<{ providerSid: string; filedAt: string }>
+  >();
+  const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
+  const groupRailEnqueuer: GroupRailEnqueuer = {
+    async enqueueGroupRail(request) {
+      groupRailEnqueues.push(request);
+      // S3 ships the SEAM only - S6 replaces this with the real job enqueue.
+      return { status: 'unavailable', reason: 'group rail job not wired yet (S6 task T6.6(a)/(d))' };
+    },
+  };
+
   return {
     conversations,
     messages,
@@ -2892,6 +3340,15 @@ export function createFakeWorld(): FakeWorld {
     aiRuns,
     suggestionResolutions: suggestionResolutionFake.items,
     suggestionResolutionRepo: suggestionResolutionFake.repo,
+    groupTimestamps,
+    activePoolNumbers,
+    poolNumbersRepo,
+    groupRailEnqueues,
+    crossCheckMarkers,
+    crossCheckClassicMarkers,
+    crossCheckPending,
+    crossCheckBalances,
+    groupRailEnqueuer,
   };
 }
 
@@ -2911,6 +3368,25 @@ export interface HarnessOptions {
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
+  /** Native group texting (S5): replace the Conversations receipts pipeline. */
+  groupReceipts?: GroupReceiptsService;
+  /** Native group texting (S5): replace the group send service on /api. */
+  groupSendService?: GroupSendService;
+  /** Unknown-IMxx retry window for the group receipts path (default 250ms). */
+  groupReceiptRetryDelayMs?: number;
+  /** Native group texting (T6.2): replace the cross-check to observe forwarding. */
+  groupCrossCheck?: ConversationsCrossCheck;
+  /** Mark the injected cross-check as a deliberate GAP (the not-wired counter). */
+  groupCrossCheckWired?: boolean;
+  /**
+   * Injected clock for the WORLD's cross-check (T6.2). The ledger stamps its
+   * grace deadlines and credit timestamps from this clock, so a test that later
+   * sweeps at a fixed instant must inject one here too - otherwise the rows are
+   * written from the wall clock, the sweep instant is a calendar literal, and
+   * whether a row is overdue depends on what time of day the suite happens to
+   * run. Omit to use the wall clock.
+   */
+  groupCrossCheckNow?: () => Date;
   /** SSE heartbeat override for /api/events tests (default 25s). */
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
@@ -3014,6 +3490,19 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
   // users repo that knows BOTH the 'va' and 'admin' test users so authed
   // requests (incl. the M1.4 admin surfaces) stay authed.
   const fakeUsers = makeFakeUsersRepo([testUserItem(), adminUserItem()]);
+  // ONE cross-check over the world's fakes, shared by both halves of the match:
+  // the Conversations route (events) and the inbound webhook (classic filings).
+  // They must be the same instance, or a test could never see them meet.
+  const worldCrossCheck = createGroupCrossCheck({
+    messagesRepo: world.messagesRepo,
+    settingsRepo: world.settingsRepo,
+    businessNumber: OUR_NUMBER,
+    logger: createLogger({ destination: capture.stream }),
+    // One clock for the whole scenario when a test asks for it: the ledger
+    // deadlines the webhooks write and the instant a test sweeps at have to come
+    // from the SAME timeline, or the assertion is wall-clock dependent.
+    ...(opts.groupCrossCheckNow !== undefined && { now: opts.groupCrossCheckNow }),
+  });
   const app = buildApp({
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
@@ -3091,6 +3580,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.sendMessageService !== undefined && {
         sendMessageService: opts.sendMessageService,
       }),
+      // Native group texting (S5): the group reply path. Injected so a route
+      // test drives the branch without a Conversations adapter.
+      ...(opts.groupSendService !== undefined && { groupSendService: opts.groupSendService }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,
@@ -3155,6 +3647,34 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // ai_extraction table; a test may pass opts.extractionRepo (a spy) to OBSERVE
       // the schedule call.
       extractionRepo: opts.extractionRepo ?? world.extractionRepo,
+      // Native group texting (S3): the exclusion-set pool read and the rail
+      // enqueue seam are in-memory, so a group inbound touches no AWS.
+      poolNumbersRepo: world.poolNumbersRepo,
+      groupRailEnqueuer: world.groupRailEnqueuer,
+      // T6.6(d). The cross-check runs over the WORLD's messages repo (which
+      // models the ledger), so an inbound-webhook test exercises the real
+      // service without reaching for DynamoDB.
+      groupCrossCheck: worldCrossCheck,
+      // Native group texting (S5): the Conversations webhook's two halves. The
+      // receipts service defaults to the world's messages/conversations/contacts
+      // fakes, so a delivery receipt never reaches DynamoDB; the cross-check is
+      // S6's and is only injected by tests that assert the seam.
+      groupReceipts:
+        opts.groupReceipts ??
+        createGroupReceiptsService({
+          logger: createLogger({ level: 'info', destination: capture.stream }),
+          messagesRepo: world.messagesRepo,
+          conversationsRepo: world.conversationsRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          ...(opts.groupReceiptRetryDelayMs !== undefined && {
+            unknownMessageRetryDelayMs: opts.groupReceiptRetryDelayMs,
+          }),
+        }),
+      crossCheck: opts.groupCrossCheck ?? worldCrossCheck,
+      ...(opts.groupCrossCheckWired !== undefined && {
+        crossCheckWired: opts.groupCrossCheckWired,
+      }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

@@ -12,7 +12,7 @@
 //      out (proved against the fake-twilio thread store, never the deprecated
 //      /__dev/outbox - worklist A12).
 //
-//   2. THE DEFERRED ADD, both ways it can end. Against a LIVE group text: the
+//   2. THE DEFERRED ADD, both ways it can end. Against a LIVE relay group: the
 //      add defers (the person is deliberately NOT a member yet - membership
 //      defers WITH the message), the operator cancels it, and the cancel leaves
 //      a VISIBLE notice that survives until it is dismissed - after which a full
@@ -203,7 +203,7 @@ async function getRoster(
   return (await res.json()) as { pending: Array<{ actionId: string; kind: string; dueAt: string }> };
 }
 
-/** SETUP ONLY: open the tour's group text through the API with quiet hours OFF,
+/** SETUP ONLY: open the tour's relay group through the API with quiet hours OFF,
  *  and drive the connect handshake so the thread is really OPEN. The subject of
  *  test 2 is the deferred ADD, not the open. */
 async function openGroupForSetup(request: APIRequestContext, tourId: string): Promise<string> {
@@ -305,8 +305,8 @@ test.describe('Roster changes during quiet hours', () => {
       timeout: 20_000,
     });
     await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Open group text' }).click();
-    const confirm = page.getByRole('dialog', { name: 'Open the group text?' });
+    await page.getByRole('menuitem', { name: 'Open relay group' }).click();
+    const confirm = page.getByRole('dialog', { name: 'Open the relay group?' });
     await expect(confirm).toBeVisible({ timeout: 20_000 });
 
     // The clock label is formatted in the BROWSER's zone, so match its shape -
@@ -342,7 +342,7 @@ test.describe('Roster changes during quiet hours', () => {
 
     // --- 3. "Send now anyway" overrides the window --------------------------
     await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Open group text' }).click();
+    await page.getByRole('menuitem', { name: 'Open relay group' }).click();
     await expect(confirm).toBeVisible({ timeout: 20_000 });
     await confirm.getByRole('button', { name: 'Send now anyway' }).click();
     await expect(confirm).toHaveCount(0, { timeout: 30_000 });
@@ -394,7 +394,7 @@ test.describe('Roster changes during quiet hours', () => {
       unitId,
       tourType: 'landlord_led',
     });
-    // SETUP: a LIVE group text (adds against a live group are what announce).
+    // SETUP: a LIVE relay group (adds against a live group are what announce).
     await openGroupForSetup(req, tourId);
 
     await putQuietHours(request, windowAroundNow());
@@ -405,7 +405,7 @@ test.describe('Roster changes during quiet hours', () => {
     await expect(roster.getByText(tenant.name)).toBeVisible({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Edit people' }).click();
     await page.getByRole('button', { name: `Add ${pm.name} to this tour` }).click();
-    const addConfirm = page.getByRole('dialog', { name: `Add ${pm.name} to the group text?` });
+    const addConfirm = page.getByRole('dialog', { name: `Add ${pm.name} to the relay group?` });
     await expect(addConfirm).toBeVisible({ timeout: 20_000 });
     await addConfirm.getByRole('button', { name: /^Add and notify at / }).click();
     await expect(addConfirm).toHaveCount(0, { timeout: 20_000 });
@@ -454,7 +454,7 @@ test.describe('Roster changes during quiet hours', () => {
     await page.reload();
     await expect(roster.getByText(pm.name)).toBeVisible({ timeout: 30_000 });
     await expect(pendingList(page)).toHaveCount(0);
-    await expectSentTo(req, tenant.phone, 'joined this group text');
-    await expectSentTo(req, pm.phone, 'joined this group text');
+    await expectSentTo(req, tenant.phone, 'joined this group chat');
+    await expectSentTo(req, pm.phone, 'joined this group chat');
   });
 });

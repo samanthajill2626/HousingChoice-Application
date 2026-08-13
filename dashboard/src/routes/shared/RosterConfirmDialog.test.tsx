@@ -1,5 +1,5 @@
 // RosterConfirmDialog component tests (contact-rosters spec 6.3 / 6.4, Task 11).
-// The dialog is the last thing an operator reads before a REAL group text goes
+// The dialog is the last thing an operator reads before a REAL relay group goes
 // out, so every assertion here is about honesty:
 //   - the body is the SERVER-composed one, rendered verbatim (never re-built in
 //     the browser - the template is founder-editable and a client copy drifts)
@@ -40,9 +40,9 @@ function renderDialog(over: Partial<RosterConfirmDialogProps> = {}): {
   const onConfirm = vi.fn().mockResolvedValue(undefined);
   const onClose = vi.fn();
   const props: RosterConfirmDialogProps = {
-    title: 'Open the group text?',
+    title: 'Open the relay group?',
     preview: preview(),
-    confirmLabel: 'Open group text',
+    confirmLabel: 'Open relay group',
     deferLabel: 'Open',
     onConfirm,
     onClose,
@@ -133,13 +133,13 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
     expect(screen.getByRole('button', { name: `Open at ${CLOCK}` })).toBeInTheDocument();
     // The interim two-button copy is GONE - it promised an immediate send.
     expect(screen.queryByText(/still send now/)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open group text' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open relay group' })).not.toBeInTheDocument();
   });
 
   it('renders the ADD dialog verb: "Add and notify at <time>" (spec 6.4)', () => {
     renderDialog({
       preview: preview(QUIET),
-      title: 'Add Alicia Grant to the group text?',
+      title: 'Add Alicia Grant to the relay group?',
       confirmLabel: 'Add and notify',
       deferLabel: 'Add and notify',
     });
@@ -172,7 +172,7 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
     const { onConfirm } = renderDialog();
     expect(screen.queryByText(/Quiet hours/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send now anyway' })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(false));
   });
 });
@@ -180,7 +180,7 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
 describe('RosterConfirmDialog - actions', () => {
   it('confirms once, then closes', async () => {
     const { onConfirm, onClose } = renderDialog();
-    await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
@@ -198,13 +198,13 @@ describe('RosterConfirmDialog - actions', () => {
       .mockRejectedValue(
         new ApiError(409, 'phone_conflict_on_number', 'phone_conflict_on_number', {
           error: 'phone_conflict_on_number',
-          message: 'That number is already in another group text on this pool number.',
+          message: 'That number is already in another relay group on this pool number.',
         }),
       );
     const onClose = vi.fn();
     render(
       <RosterConfirmDialog
-        title="Add Alicia Grant to the group text?"
+        title="Add Alicia Grant to the relay group?"
         preview={preview()}
         confirmLabel="Add and notify"
         deferLabel="Add and notify"
@@ -215,7 +215,7 @@ describe('RosterConfirmDialog - actions', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Add and notify' }));
     expect(
       await screen.findByText(
-        'That number is already in another group text on this pool number.',
+        'That number is already in another relay group on this pool number.',
       ),
     ).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
@@ -229,7 +229,7 @@ describe('RosterConfirmDialog - narrow viewport (spec 6.7)', () => {
     // The default action is authored LAST (desktop puts it rightmost); the
     // narrow rule reverses the column so it lands on TOP. jsdom evaluates no
     // CSS, so assert the hook AND the rule that targets it (the s3c idiom).
-    const actions = screen.getByRole('button', { name: 'Open group text' }).parentElement!;
+    const actions = screen.getByRole('button', { name: 'Open relay group' }).parentElement!;
     expect(actions.className).toContain('actions');
     const css = readFileSync(
       join(process.cwd(), 'src/routes/shared/RosterConfirmDialog.module.css'),

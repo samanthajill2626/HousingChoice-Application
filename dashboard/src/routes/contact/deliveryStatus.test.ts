@@ -61,7 +61,7 @@ describe('presentRelayDelivery', () => {
   });
 
   it('surfaces the A2P-unregistered code (30034) and dedupes repeated codes across legs', () => {
-    // Both intro legs bounce 30034 (the group-text bug): one reason, not two.
+    // Both intro legs bounce 30034 (the relay-group bug): one reason, not two.
     expect(
       presentRelayDelivery([
         { status: 'undelivered', errorCode: '30034' },
@@ -99,6 +99,21 @@ describe('presentRelayDelivery', () => {
     ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
   });
 
+  it('excludes an UNDELIVERED opted-out leg too - group receipts record 21610 that way', () => {
+    // The relay fan-out writes `failed` on a suppressed leg; the group-text
+    // receipts path writes what Twilio actually reports for a 21610, which is
+    // `undelivered`. Both mean "never really sent", so both must be excluded -
+    // otherwise a group text paints an opted-out member as a hard failure while
+    // the identical relay leg is quietly excluded.
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        { status: 'delivered' },
+        { status: 'undelivered', errorCode: 'contact_opted_out' },
+      ]),
+    ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
+  });
+
   it('returns null when there is nothing to summarize (no legs, or everyone opted out)', () => {
     expect(presentRelayDelivery([])).toBeNull();
     expect(
@@ -121,5 +136,34 @@ describe('deliveryReason', () => {
   it('returns undefined when there is no code', () => {
     expect(deliveryReason(undefined)).toBeUndefined();
     expect(deliveryReason('')).toBeUndefined();
+  });
+
+  // A16 / adversarial 14. When EVERY member of a group has opted out,
+  // deriveGroupDeliveryStatus writes the message-level aggregate as
+  // { status: 'undelivered', errorCode: 'contact_opted_out' } - and the bubble
+  // has no per-leg rollup to fall back on, so this reason IS the chip. The
+  // generic branch rendered "Delivery failed (error contact_opted_out)", which
+  // dresses a token this app invents as a carrier error number an operator could
+  // look up. Staff-facing UI copy, so it lives here beside ERROR_CODE_REASONS,
+  // NOT in the app's message catalog (that catalog is member-facing copy).
+  it('renders the app-internal opted-out token as operator copy, never as an error number', () => {
+    const reason = deliveryReason('contact_opted_out');
+    expect(reason).toBe('Everyone here has opted out - nothing was sent');
+    expect(reason).not.toMatch(/contact_opted_out/);
+    expect(reason).not.toMatch(/error/i);
+  });
+
+  // Adversarial 30. Both reason maps are bare object literals, so a code that
+  // happens to name an Object.prototype member resolves off the PROTOTYPE. The
+  // internal map's early return then hands the caller a FUNCTION where the type
+  // says string (the error map was accidentally safe only because its template
+  // wrap coerced whatever it found into "function Object() { [native code] }").
+  // An error_code is provider/wire data - it is never trusted as a key.
+  it('never resolves a delivery reason off Object.prototype', () => {
+    for (const code of ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf']) {
+      const reason = deliveryReason(code);
+      expect(typeof reason).toBe('string');
+      expect(reason).toBe(`Delivery failed (error ${code})`);
+    }
   });
 });

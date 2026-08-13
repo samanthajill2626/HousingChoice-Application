@@ -27,22 +27,22 @@ describe('RelayCloseAskDialog', () => {
   it('renders a dialog named for the members with both actions', () => {
     render(<RelayCloseAskDialog conversationId="g1" memberSummary="Ann & Marcus" onDone={vi.fn()} />);
     expect(
-      screen.getByRole('dialog', { name: /Also close the group text with Ann & Marcus\?/i }),
+      screen.getByRole('dialog', { name: /Also close the relay group with Ann & Marcus\?/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Close group text' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close relay group' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Keep it open' })).toBeInTheDocument();
   });
 
   it('falls back to a generic title when there is no member summary', () => {
     render(<RelayCloseAskDialog conversationId="g1" memberSummary="" onDone={vi.fn()} />);
-    expect(screen.getByRole('dialog', { name: /Also close the group text\?/i })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: /Also close the relay group\?/i })).toBeInTheDocument();
   });
 
-  it('Close group text PATCHes closed:true then calls onDone (defer never fires)', async () => {
+  it('Close relay group PATCHes closed:true then calls onDone (defer never fires)', async () => {
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<RelayCloseAskDialog conversationId="g1" memberSummary="Ann" onDone={onDone} />);
-    await user.click(screen.getByRole('button', { name: 'Close group text' }));
+    await user.click(screen.getByRole('button', { name: 'Close relay group' }));
     expect(closeConversation).toHaveBeenCalledWith('g1', true);
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(deferCloseNag).not.toHaveBeenCalled();
@@ -63,7 +63,7 @@ describe('RelayCloseAskDialog', () => {
     const onDone = vi.fn();
     closeConversation.mockRejectedValue(new Error('boom'));
     render(<RelayCloseAskDialog conversationId="g1" memberSummary="Ann" onDone={onDone} />);
-    await user.click(screen.getByRole('button', { name: 'Close group text' }));
+    await user.click(screen.getByRole('button', { name: 'Close relay group' }));
     // The failed close surfaces an inline error and does NOT fire onDone (the
     // recorded outcome must not look like it failed).
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());

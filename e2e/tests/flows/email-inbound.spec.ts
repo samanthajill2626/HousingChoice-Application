@@ -65,7 +65,16 @@ test.describe('Inbound email - contact timeline, threading, and bounce', () => {
     //     (the inbound bumped unread). Asserted BEFORE opening his contact, because
     //     opening the contact marks the thread read.
     await page.goto(`${NEXT}/inbox`);
-    const marcusRow = page.getByRole('listitem').filter({ hasText: 'Marcus Bell' });
+    // Filtered on the CHANNEL as well as the name. Marcus is on a seeded
+    // multi-party thread too (group-texting S8/T8.2 added a connecting relay
+    // group with him on the roster, whose derived label spells out full member
+    // names), so a name-only filter is a strict-mode violation. The channel chip
+    // is what actually identifies HIS 1:1 email row - and it is the thing this
+    // test is about.
+    const marcusRow = page
+      .getByRole('listitem')
+      .filter({ hasText: 'Marcus Bell' })
+      .filter({ hasText: 'Email' });
     await expect(marcusRow).toBeVisible({ timeout: 15_000 });
     await expect(marcusRow.getByText('Email', { exact: true })).toBeVisible();
     await expect(marcusRow.locator('[aria-label$="unread"]')).toBeVisible();

@@ -90,6 +90,23 @@ A new table or GSI lands in a real env via **`npm run plan -- <env>` + `npm run 
 NOT via `deploy:<env>` (which only rolls the app image). **Apply the schema BEFORE deploying the code
 that reads/writes it**, or the new endpoints 500 against a missing table/index.
 
+### Relay label rename: MIXED activity history on dev/prod (2026-08-10, no action)
+
+The group-texting S1 slice renamed relay's staff copy from "Group text" to
+**"Relay group"** (the native carrier type now owns "Group text"; see
+`documentation/GLOSSARY.md`). Three of those strings are PERSISTED into
+`activity_events` rows at write time, not rendered from a map:
+`'Group text opened'` (rosterProvision), `'Added to group text'` and
+`'Removed from group text'` (relayMembers). Renaming the writers changes FUTURE
+rows only, so **existing dev and prod rows keep their old text**: a contact's
+Timeline can show "Group text opened" on an old pin and "Relay group opened" on
+a new one. This is deliberate - no back-compat display shim and no backfill
+(the founder reads these as history, not as a live label). The TOUR page is
+different: it maps the event TYPE to a label at render time
+(`tourActivityFormat.ts`), so tour Activity rows re-label retroactively and the
+two surfaces will disagree about the same old event. Expected; not a bug.
+Reseeded environments (all e2e lanes, any dev wipe) show the new text only.
+
 ### AI extraction run log (owed post-merge operation)
 
 The admin-only forensic log is at `/settings/ai-runs`. It retains each `ai_runs` envelope for 90 days;
@@ -319,7 +336,7 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes, then rest
 
 ### Pool-number audit (Twilio ↔ pool_numbers reconciliation)
 
-Relay/group-text numbers live in two places: Twilio (the purchased numbers, attached to
+Relay group numbers live in two places: Twilio (the purchased numbers, attached to
 our Messaging Service) and the `hc-<env>-pool_numbers` table (the app's routing +
 lifecycle record). A wipe empties the table but leaves the Twilio side untouched, so the
 numbers become invisible to the app (inbound relay SMS stops routing; the next relay
@@ -551,7 +568,7 @@ number warms, so the readiness gate is live before it is needed):**
    the very first warmed number's registration event has somewhere to land.
 
 **Verify a live event.** With the sink `active` and `RELAY_LIVE_PROVISIONING` on,
-warm a number (open a relay group text for a fresh pair, or let the buffer refill)
+warm a number (open a relay group for a fresh pair, or let the buffer refill)
 and confirm it promotes `warming -> active`: watch the `pool_numbers` item flip
 `lifecycle_state`, or watch a `connecting` group open + its intro deliver, or read
 the **Twilio Console -> Monitor -> Event Streams** delivery logs for the
@@ -962,7 +979,7 @@ If a ladder seems dead in a deployed env: check the worker service is running (o
 both polls), then look for `… poll error` lines in the worker logs.
 
 - **Roster deferred actions** (`pendingRosterActions` table, `jobs/rosterActions.ts`): quiet-hours
-  deferral for the tour/placement People card (contact-rosters). A group-text OPEN or a live-thread
+  deferral for the tour/placement People card (contact-rosters). A relay-group OPEN or a live-thread
   ADD confirmed during org quiet hours writes a pending row (deterministic PK
   `tour#<id>#open` / `tour#<id>#add#<contactId>`, placement mirrors) due at quiet-end instead of
   sending; the worker poll (same `WORKER_POLL_INTERVAL_MS` cadence as the ladders above) claims the
@@ -1200,11 +1217,21 @@ npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --
   wholesale row_key reshuffle a re-export causes.
 
 Apply — **always dry-run first**; the write needs an explicit `--yes`. The stage
-is a required flag, NOT environment variables:
+is a required flag, NOT environment variables.
+
+TWO ENV VARS ARE STILL REQUIRED, and they are NOT stage targeting — that is the
+distinction to hold onto. `--env` (or the `:local`/`:dev`/`:prod` scripts)
+resolves WHERE the run writes: table prefix, credentials, account guard. The two
+vars below are the inputs to the GROUP-IDENTITY PARITY GATE, which compares the
+export's `ownNumbers` against the exclusion list the target stage is deployed
+with. `assertGroupIdentityEnvDeclared` REFUSES the run — dry runs included — if
+either is undeclared, because an unset list silently means "compare against
+nothing". They come from THIS shell, so set them to the values the stage named
+in the flag is actually deployed with:
 
 ```powershell
-npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
-npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
 `import:apply:local` / `import:apply:dev` / `import:apply:prod` (or the generic
@@ -1219,8 +1246,37 @@ npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --revi
 
 No `DYNAMODB_ENDPOINT`, no `TABLE_PREFIX`, no `AWS_PROFILE` exports needed.
 
+**Both group-identity vars are REQUIRED in the invoking shell**, on the real run
+and on the dry run alike. Before its first write, `import:apply` compares the
+export's `ownNumbers` against the runtime exclusion set (a group thread's id is
+derived from its roster minus our own numbers, so a mismatch writes 132 group
+threads under ids live detection will never produce, and group threads cannot be
+retracted). There is no dotenv here: the command reads those two values from the
+shell you type in. It REFUSES with a message naming this step when either is
+unset, because "not set" is not the same statement as "the org has no other
+numbers" - silently reading it as the latter is how the gate refuses every
+correct run. Set them to what the STAGE you are pointing at is deployed with;
+the value and its rationale are in the cutover checklist's rank-1 step below.
+
 **Things that will bite you:**
 
+- **An unset `GROUP_IDENTITY_EXCLUDED_NUMBERS` or `BUSINESS_PHONE_NUMBER` stops
+  the command dead**, and it is the one failure that reads like a data problem
+  when it is a shell problem. The refusal says `NOT a mismatch`; it means the
+  parity gate had nothing to compare against. Set both (see the invocation lines
+  above) and re-run. Setting them WRONG is the failure the gate cannot catch:
+  it compares against your shell, not against the deployed stack.
+- **A pool-number read failure is retried, then fatal.** The gate subtracts the
+  active pool numbers from both sides, so it will not proceed on a guess. Three
+  attempts, then a `PoolNumbersUnavailableError` naming the underlying error -
+  check `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` and credentials, not the exclusion
+  list.
+- **A `drop` on someone who is on a group roster becomes permanent.** The
+  retract refuses for a group member, and once `import:convert-groups` has
+  re-minted them as a group-scoped stub (`origin: group_detection`) every later
+  run refuses too, saying so. "Drop" then means "dropped from 1:1 and history,
+  permanently retained as a group-scoped contact"; contact soft-delete in the
+  app is the remaining lever.
 - **PII.** The workbook holds real names and phone numbers, and this repo pushes
   to Azure DevOps. `import:plan` REFUSES to write inside the working tree; keep
   the workbook next to the exports. `.gitignore` is the second line of defence.
@@ -1243,6 +1299,465 @@ No `DYNAMODB_ENDPOINT`, no `TABLE_PREFIX`, no `AWS_PROFILE` exports needed.
 - **Verify Quo's ids are stable across exports** before trusting the carry-forward
   (diff contact ids between two exports). If they turn out to be per-export, the
   fallback is a content hash — one function, not a redesign.
+
+## Group identity exclusion list (GROUP_IDENTITY_EXCLUDED_NUMBERS)
+
+The org's OTHER numbers, subtracted from a carrier group's roster before the group
+thread id is derived. It is part of the group-thread IDENTITY contract, not ordinary
+config: ids are `uuidv5(sorted roster)`, so changing the list re-mints the
+conversationId of every group containing a changed number. The old threads are
+orphaned (nothing points at them) and the next inbound opens a SECOND thread for the
+same people.
+
+Set it in `.env.dev` / `.env.prod` (comma-separated E.164, or the literal `none` to
+assert the org has no extra numbers), then `npm run secrets:push -- <env>` and deploy.
+A deployed stack REFUSES TO BOOT when the key is missing or blank.
+
+**Boot fingerprint.** On its first deployed boot the app writes a sha256 of the sorted
+list to the `settings` table (`settingId = group_identity_fingerprint`) and compares on
+every later boot. A mismatch refuses the boot with the message pointing here. Local and
+hermetic stacks skip the check (reseeds wipe that table).
+
+**Changing the list deliberately** - treat as a migration, in this order:
+
+1. Record the decision and WHY (which numbers, which direction). Adding a number
+   REMOVES a member from every roster containing it; removing one ADDS a member back.
+2. Write the thread-merge plan: list the affected group threads (their ids change), and
+   decide per thread whether history moves to the new id or the old thread is retired.
+   There is no automatic merge.
+3. Push the new value and deploy.
+4. Reset the fingerprint LAST, after 1-3 are done: delete the
+   `group_identity_fingerprint` item from the `settings` table
+   (`aws dynamodb delete-item --table-name hc-<env>-settings --key '{"settingId":{"S":"group_identity_fingerprint"}}' --profile <hc profile> --region us-east-1`),
+   then restart the app so the next boot re-pins it.
+
+Deleting the fingerprint item WITHOUT steps 1-3 is the failure mode this guard exists
+to prevent: the boot then succeeds and the thread population forks silently.
+
+## Native group texting: merge/cutover checklist
+
+Everything below is Cameron-executed and in ORDER. Nothing here is automated: the
+Twilio-side configuration is console/API work, and the migration is a command that
+must be re-run until it says COMPLETE.
+
+**THERE IS NO ACCOUNT-GLOBAL CONVERSATIONS WEBHOOK STEP.** The S5-PRE addendum
+proved live that configuring a SERVICE-scoped webhook silences the account-global
+scope entirely - the global config fired zero times over a 60-minute window while
+the service scope received everything. An earlier draft of this checklist had a
+global-webhook step; following it would have silently killed the cross-check
+guardrail. One webhook, on the default Conversations service, with BOTH filters.
+
+### 1. RANK 1, BEFORE ANY DEPLOY OF THIS BRANCH: push GROUP_IDENTITY_EXCLUDED_NUMBERS
+
+**Deploying this branch to prod without pushing this var FIRST is a FULL STACK
+OUTAGE.** `loadConfig()` throws when `MESSAGING_DRIVER=twilio`,
+`NODE_ENV=production` and `GROUP_IDENTITY_EXCLUDED_NUMBERS` is unset, blank, or
+not per-entry E.164 - and `loadConfig()` runs at IMPORT time in EVERY process
+(app and worker alike). So the failure is not "group texting is degraded": the
+app does not boot, the worker does not boot, and nothing about the rest of the
+product works. Rank 1 means rank 1: this happens before the deploy, not as part
+of the migration window below.
+
+**There is no infra wiring for it.** `GROUP_IDENTITY_EXCLUDED_NUMBERS` appears in
+no `.tf` and in no deploy script - the only references outside the app are
+`scripts/dev.mjs` and `scripts/e2e-session.mjs`, which inject the literal `none`
+for local/hermetic lanes. The var reaches a deployed stack ONLY through whatever
+pushes `.env.prod` (`npm run secrets:sync -- prod`, edit, `npm run secrets:push
+-- prod`). This is exactly `BUSINESS_PHONE_NUMBER`'s existing pattern, so it is
+consistent rather than novel - but it means the push is a manual, ordered,
+easy-to-forget prerequisite with an outage on the other side of forgetting it.
+
+The value itself: the import export's `ownNumbers` MINUS the business number, or
+the literal `none` if the org truly has no other number that could appear in a
+carrier group (see the identity-contract section above - this is an identity
+contract, not config, and it is IMMUTABLE once fingerprinted). Note that
+`.env.prod.example` now ships the valid default `none`, so `secrets:sync` will
+hand you a bootable value; that is precisely why deciding whether `none` is
+CORRECT for prod is an explicit signed-off step here rather than something a bad
+boot would have caught for you. The migration command refuses the whole run on a
+mismatch with the export, by design.
+
+Verify after the push and before the deploy: confirm the key is present and
+non-blank in the pushed parameter set, then confirm the deployed app's boot log
+carries no `GROUP_IDENTITY_EXCLUDED_NUMBERS` error and the fingerprint pinned.
+
+### 1b. AT DEPLOY, ON ANY STAGE THAT ALREADY RAN AN EARLIER BUILD OF THIS BRANCH: drop the cross-check ledger rows
+
+**Dev only in practice.** Prod has never run the cross-check, so it has no rows
+to drop and this step is a no-op there. Dev has, and the ledger's shape changed
+twice on this branch.
+
+**Why.** The cross-check keeps one `state` item per (rail, member) pair holding a
+signed balance, plus one `evt2#` pending row per event and one `groupdue#xc` due
+row. A pending row written by an EARLIER build was counted in that balance, is
+invisible to the current claim (the row prefix moved `evt#` -> `evt2#`), and
+carries no `counted` marker - so the sweep will not give its slot back either.
+Each affected pair therefore carries a permanent `+N` skew, and while it burns
+off, each classic filing reports matched, finds nothing claimable, logs
+`group_crosscheck_pending_row_missing`, and its own event alarms
+`group_crosscheck_inbound_missing` for a healthy message. With the 5-minute
+grace, N is 1 for essentially every affected pair - one false alarm each - but
+the skew is free to remove and there is no reason to carry it.
+
+**Safe by construction.** These rows are a liveness heuristic with a 5-minute
+grace and a 7-day TTL. They hold no product data, nothing reads them across a
+deploy, and the ledger rebuilds itself from the next event on each pair. Deleting
+them costs at most one window's matching - which the deploy costs anyway.
+
+**What to delete** in `hc-<env>-messages`: every item whose `conversationId`
+begins with `groupxc#` (the per-pair `state` item and its `evt2#`/`evt#` pending
+rows - one prefix match covers BOTH row generations, because only the SORT key
+changed), every item in the `groupdue#xc` partition, and every item in the
+**`groupdue#pending`** partition. Leave `groupdue#send` alone - that is the
+delivery-staleness sweep, not this one.
+
+`groupdue#pending` is the third one and it is easy to miss (added fix wave 4,
+item 10). The two guardrail sweeps originally SHARED one deadline partition under
+that name; a later build on this branch split them into `groupdue#send` and
+`groupdue#xc`. Nothing reads `groupdue#pending` any more, so every row a
+pre-split build wrote there is orphaned - including SEND due rows, which means a
+send that went stale under the old build will never be alarmed by anything. They
+age out on the 7-day TTL either way; deleting them with the rest is free and
+leaves no partition behind that no code knows about.
+
+```powershell
+$v = @{':xc'=@{S='groupxc#'};':due'=@{S='groupdue#xc'};':old'=@{S='groupdue#pending'}} | ConvertTo-Json -Compress; aws dynamodb scan --table-name hc-dev-messages --projection-expression 'conversationId,tsMsgId' --filter-expression 'begins_with(conversationId, :xc) OR conversationId = :due OR conversationId = :old' --expression-attribute-values $v --profile housingchoice --region us-east-1 --no-cli-pager --output json | ConvertFrom-Json | ForEach-Object { $_.Items } | ForEach-Object { aws dynamodb delete-item --table-name hc-dev-messages --key (@{conversationId=@{S=$_.conversationId.S};tsMsgId=@{S=$_.tsMsgId.S}} | ConvertTo-Json -Compress) --profile housingchoice --region us-east-1 --no-cli-pager }
+```
+
+Run the `scan` half alone first and read the count - the same dry-run-then-commit
+discipline as every other destructive step here. A `wipe:dev` makes this step
+unnecessary (it empties the table outright). The scan is unpaginated: if it
+reports a `LastEvaluatedKey`, re-run it until it does not.
+
+### 2. Production preflight (before the migration window)
+
+0. **MMS-ENABLED CAMPAIGN APPROVAL - the gate on outbound existing at all.**
+   Real group outbound may NOT be switched on until the A2P campaign backing
+   `TWILIO_MESSAGING_SERVICE_SID` is approved AND MMS-enabled. This is Cameron's
+   gate, it is not negotiable by any other step in this list, and it is
+   independent of the detection/ingestion side: group INBOUND and rail creation
+   are silent (creating a Conversation and attaching participants transmits
+   nothing to any handset), so those may go live first. Until the campaign is
+   approved, leave `SMS_SENDING_ENABLED=false` in the env - the adapter refuses
+   every group POST inside itself, so no code path can leak unregistered A2P
+   traffic. Confirm the approval in the Twilio console before flipping it.
+1. **Capability check.** On the PROD Twilio account, create one throwaway group
+   Conversation with two participants and delete it. This proves the account can
+   do Conversations at all, with the campaign-bearing messaging service pinned,
+   before 132 groups depend on it.
+2. **Signed webhook canary.** POST a SIGNED request to the EXACT configured URL
+   (`https://<prod host>/webhooks/twilio/conversations`) with
+   `EventType=onDeliveryUpdated` and confirm a 200 plus the handler's log line.
+   Aim it at the exact string configured in the console, not at a URL retyped
+   from memory - a trailing slash or a stale host is the whole failure mode.
+3. **Production-service keyword canary.** Requires step 3b ("Keyword
+   auto-replies (Advanced Opt-Out)") to have been done on the PROD messaging
+   service first. From a test handset, to the business number:
+   - `HELP` -> exactly ONE reply, and it is our `HELP_REPLY` copy. (Expect our
+     webhook NOT to be called at all: Twilio consumes HELP.)
+   - `STOP` -> exactly ONE reply, and it is our `STOP_CONFIRMATION` copy. Then
+     confirm the app recorded it: `sms_opt_out` set on the contact / the 1:1
+     conversation. ONE reply is the assertion - two means the app is still
+     replying somewhere.
+   - `START` -> exactly ONE reply, our `WELCOME_SMS` copy, and suppression
+     cleared. (This is the keyword that used to double.)
+   - **Sentence probe:** send `please stop sending tour reminders`. It must NOT
+     be treated as a keyword: no opt-out recorded, no auto-reply, and on a relay
+     pool number it still fans out to the group. This is what verifies that
+     Advanced Opt-Out stamps `OptOutType` on EXACT keyword messages only - the
+     one real risk of turning it on.
+   Group keyword handling stays scoped to the sender, never the group thread.
+
+### 3. Twilio configuration, per env
+
+On the DEFAULT Conversations service (the one the rails are created under):
+
+- Post-webhook URL: `https://<host>/webhooks/twilio/conversations`
+- Method: **HTTP POST**. Format: **`application/x-www-form-urlencoded`**. These
+  are Twilio's defaults, so the correct action is to LEAVE THEM ALONE - but state
+  them explicitly, because both are selectable in the console and both wrong
+  choices fail silently rather than loudly. A GET hits no route and returns 404
+  forever (the handler is POST-only). A JSON body is not parsed by
+  `express.urlencoded` and does not match the `X-Twilio-Signature` the signature
+  middleware recomputes over form parameters, so every receipt is a permanent
+  403. Neither shows up as an error in the Twilio console; the only symptom is
+  that group delivery state never updates and the cross-check guardrail alarms.
+- Filters: **`onDeliveryUpdated` AND `onMessageAdded`** - both, on this one URL.
+  `onDeliveryUpdated` is the only source of group delivery state (classic status
+  callbacks do NOT fire for Conversations sends - proved live), and
+  `onMessageAdded` is the cross-check guardrail's entire input.
+- Do NOT set `X-Twilio-Webhook-Enabled` on our own posts: delivery receipts flow
+  without it, and setting it would only add echoes of our own outbound.
+
+**MONITORING NOTE - the alarm flood that means Twilio changed its behavior.**
+The receipts module deliberately does NOT write a `syssid#` marker for
+Conversations legs (`app/src/services/groupReceipts.ts:5-9`), on the strength of
+a live measurement that classic status callbacks do not fire for
+Conversations-originated sends. That measurement is real evidence, not an
+assumption: the service-level "Delivery status callback" documented in the
+Twilio section above IS configured on the same Messaging Service every rail is
+pinned to, so the measurement was taken WITH the callback in place and the legs
+still did not call back.
+
+If Twilio's inheritance behavior ever changes, the signature is unmistakable:
+every per-leg `SMxx` starts reaching `/webhooks/twilio/status`, resolves to no
+message row, no relay pointer and no system marker, and logs `status callback
+for unknown provider SID after retry - delivery outcome dropped` at **ERROR**
+once per member per send. A three-member group sending ten times a day is thirty
+ERRORs a day out of nowhere - an alarm FLOOD, not a trickle, and the one in-app
+mitigation that would have absorbed it was deliberately removed.
+
+What an operator should do on seeing that flood:
+
+1. Confirm the shape before assuming a regression - the dropped SIDs are `SMxx`
+   (not `IMxx`), they arrive on `/webhooks/twilio/status`, and they correlate
+   one-per-member with recent GROUP sends rather than with 1:1 traffic.
+2. Confirm group delivery is otherwise HEALTHY. If `onDeliveryUpdated` receipts
+   are still landing, the flood is noise on a working path: delivery state is
+   correct and only the log is wrong. Do not react by changing the receipts
+   path.
+3. The cheap containment is at the Twilio end, not ours: detach the
+   service-level delivery status callback from the Messaging Service (1:1
+   delivery outcomes then go dark, so only do this knowingly and briefly), or
+   suppress the alarm on that one log line while the real fix is scoped.
+4. The real fix is to restore the `syssid#` marker for Conversations legs so the
+   status handler resolves them instead of erroring. That is a code change with
+   its own review; file it rather than hand-patching prod.
+
+### 3b. Keyword auto-replies (Advanced Opt-Out)
+
+**Console-only, per Messaging Service. Dev now; prod at the preflight (step 2.3
+depends on it).** There is no Terraform or API step for this in the repo, which
+is exactly why it is written down here.
+
+**Why.** The app used to send the STOP/HELP/opt-in confirmations itself. A live
+test on 2026-08-12 proved Twilio's platform keyword handling answers them
+regardless: HELP never reached our webhook, our STOP confirmation was refused
+with error 21610 (Twilio had already blocked the number, so it had never once
+been delivered), and START produced a DOUBLE message. Cameron's ruling: Twilio
+owns the replies, configured with OUR copy; the app keeps every bit of the
+machinery (classification, suppression, consent, audit, relay annotations) and
+sends nothing. Background:
+`docs/issues/twilio-standard-optout-double-reply.md`.
+
+**Consequence if this step is skipped on a service:** nothing breaks and the
+compliance floor is still met - Twilio falls back to its DEFAULT, unbranded
+keyword copy. The only loss is that the replies are not ours.
+
+**Steps** (Twilio Console -> Messaging -> Services -> the service backing
+`TWILIO_MESSAGING_SERVICE_SID` for that env -> Opt-Out Management):
+
+1. Set opt-out management to **Advanced Opt-Out** (enabled).
+2. Leave the keyword LISTS at Twilio's defaults. Our lists are supersets
+   (opt-out adds OPTOUT + REVOKE; opt-in adds JOIN + HOME + YES + UNSTOP) and
+   the app honors the supersets itself - the console lists only control which
+   words Twilio answers and blocks.
+3. Paste the three confirmations VERBATIM from
+   `app/src/lib/smsCompliance.ts` (surfaced through
+   `app/src/messages/catalog.ts`, which is the source of truth):
+   - **Opt-out confirmation** = `STOP_CONFIRMATION` (`keyword.stop`)
+   - **Help message** = `HELP_REPLY` (`keyword.help`)
+   - **Opt-in confirmation** = `OPT_IN_CONFIRMATION` (`keyword.optin`)
+   Do not retype them. Copy from the constant so a character never drifts.
+   All three are compliance-locked constants; none is operator-editable.
+4. Save, then run the keyword canary in step 2.3 against that service - ONE
+   branded reply per keyword, plus the sentence probe.
+
+**Changing the copy later** - three steps, in this order, always:
+
+1. Edit the constant in `app/src/lib/smsCompliance.ts` and ship it (it is the
+   reviewed, version-controlled source of truth; `keyword.stop` / `keyword.help`
+   are compliance-locked and not operator-editable).
+2. Update the corresponding console field on EVERY messaging service (dev and
+   prod are configured independently).
+3. Re-run the keyword canary. The console is the only thing that actually sends
+   these, so an un-mirrored constant edit changes nothing a recipient sees - and
+   nothing in the app will tell you.
+
+The Settings -> Templates "Welcome text" field is INDEPENDENT of all of this
+by design (2026-08-12 split): it edits only the app-sent web-form/housing-fair
+welcome (`welcome.sms`). The console's opt-in confirmation mirrors the LOCKED
+`OPT_IN_CONFIRMATION` constant instead, so a Settings edit can never make the
+two silently diverge - there is nothing to keep in sync.
+
+### 4. The migration run
+
+**REQUIRED: DRY RUN FIRST.** The bulk runner is the cutover instrument - it is
+run ONCE, against 132 real threads, and spec 14's hardened invariant is expressed
+entirely in its report. It has good unit coverage but no end-to-end exercise (the
+hermetic lane has no export-directory fixture), so the first real exercise of the
+real thing must not also be the real thing. Run it without `--yes` against the
+same three export directories the real run will use:
+
+```powershell
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value this stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<this stage's business number>"; npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir>
+```
+
+Both group-identity vars are required here for the same reason they are required
+by `import:apply` - same gate, same shell, same refusal when they are undeclared.
+
+Without `--yes` the runner writes NOTHING: it prints the target endpoint, the
+table prefix, the expected group count and how many the workbook excluded, then
+exits 1 by design. Check all four before proceeding - a wrong `TABLE_PREFIX` or
+`DYNAMODB_ENDPOINT` is the failure that is unrecoverable, and it is visible only
+here. Then the real run:
+
+```powershell
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value this stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<this stage's business number>"; npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir> --yes
+```
+
+Convergent and safe to re-run. Exit 0 ONLY when every expected group reached the
+full end state; exit 1 while anything is refused or rail-less. **Re-run until it
+prints COMPLETE.**
+
+Two report lines that are NOT transient failures:
+
+- `members RE-MINTED` non-zero holds COMPLETE back on purpose. A re-mint is
+  contact creation nobody asked for by hand (a workbook `drop` on a group
+  member), and it makes that drop permanently inoperative for that person. Read
+  the warning, then run again: the second pass re-mints nothing and completes.
+- `ADJUDICATION REQUIRED` non-zero is a HUMAN decision, not a re-run. The
+  roster is empty or above the rail cap, so no retry can rail it and nothing
+  re-enqueues it - the thread is permanently inbound-only. Fix the roster or
+  record it as a known inbound-only thread (the cutover gate allows exactly
+  that, explicitly adjudicated).
+
+CUTOVER GATE (hard): zero unresolved rail failures. Every retained imported group
+must be converted AND carry an ACTIVE rail with a VERIFIED participant map, or be
+explicitly deleted/adjudicated (a documented inbound-only thread the founder knows
+about). Also verify zero remaining `relay_group#connecting` rows.
+
+A rail failure in the report names its reason - a landline in the roster, a number
+Twilio will not attach (50407-class), a roster above nine members. That is exactly
+why rails are created eagerly: the alternative is discovering it when staff try to
+reply weeks later.
+
+**Resolving a rail failure**, in order:
+
+1. **Just re-run.** A transient refusal (a 429, a 5xx, one throttled participant
+   add) heals on the next run: `ensureGroupRail` adopts the same Conversation by
+   UniqueName, attaches exactly the members the rail is short, and re-reads the
+   participant list from Twilio. An incomplete rail is REPAIRABLE in-app; it does
+   not need a human.
+2. **A permanent refusal is a data problem.** A landline or an unattachable
+   number will refuse forever. Fix the roster (remove or correct the number in
+   the workbook, or adjudicate the thread as documented inbound-only) - do not
+   retry it hoping for a different answer.
+3. **Last resort, and only if a rail is wedged in a state the repair cannot
+   reach** (for example the Conversation itself is `closed` or `failed`): delete
+   that Conversation in the Twilio console. Because `UniqueName` is our
+   conversationId, the next run finds nothing to adopt and creates a clean rail
+   under the same name. Delete the CONVERSATION, never the messaging service.
+
+### 5. After the run
+
+- Reseed where applicable, then spot-check one converted thread in the dashboard:
+  members visible, composer enabled, no relay chrome.
+- The founder's `drop = Y` workbook column can no longer delete the contact record
+  of anyone on a group roster (the retract guard). Post-migration that is most of
+  the roster-bearing population. Contact soft-delete in the app is the remaining
+  lever.
+
+### 6. Rollback contract
+
+**Conversion is FORWARD-ONLY.** There is no down-migration. A code rollback leaves
+`group_text` rows UI-orphaned (the readers that render them are gone) until a
+redeploy. The remedy is to roll FORWARD - redeploy the current build - not to try
+to convert threads back.
+
+### 7. Cost note
+
+Twilio bills Conversations by users assigned to conversations. The imported rosters
+plausibly exceed the 200-user free tier; order $10-20/month. Budgeted, not a
+surprise to discover on the first invoice.
+
+### 8. What tells you it broke
+
+Group detection depends on `OtherRecipients{N}`, an UNDOCUMENTED Twilio webhook
+parameter, so the guardrails exist to make its disappearance loud. Watch for these
+log events (see "Reading logs" and "Alarms"):
+
+| event | level | what it means |
+| --- | --- | --- |
+| `group_crosscheck_inbound_missing` | ERROR | A message reached the Conversation and never reached the classic webhook. The envelope may be gone. |
+| `group_send_receipts_stale` | ERROR | A group send's recipients are still non-terminal past the deadline. The receipts webhook is likely dead or misconfigured - re-check step 3. |
+| `group_crosscheck_channel_quiet` | WARN | Railed threads took classic inbound for 24h while the cross-check recorded nothing. The MONITOR is dead, not the feature. |
+| `group_crosscheck_lastchance_reconciled` | INFO | A pending event was about to alarm, and the sweep found the receipt of a classic filing that really did land in its window - so it reconciled quietly instead. NOT an outage: it is the counter for "how often the ledger's count is wrong on healthy traffic". A steady trickle is expected; a sharp rise means the ledger is losing claims and is worth a look on its own. |
+| `group_crosscheck_lastchance_read_failed` | WARN | The last-chance receipt read failed, so the sweep alarmed on the ledger alone. Any `group_crosscheck_inbound_missing` in the same window may be false. |
+| `group_inbound_heartbeat_quiet` | WARN | No group-origin INBOUND for seven days while group threads exist. Staff replies deliberately do NOT quiet this - only inbound (and a just-migrated thread's grace window) does. |
+| `group_envelope_missing` | WARN | The tripwire: an MMS shaped like a group with no envelope. One is not news; a run of them is. |
+| `group_rail_ensure_failed` | WARN | One thread could not get a rail. It is inbound-only until it does. Remedy: "Resolving a rail failure" in step 4. |
+| `group_rail_participants_incomplete` | WARN | A rail was short of its roster and the missing members are being attached. One is a healed transient; a run of them means participant adds are being throttled. |
+
+### 9. The support ticket (open it, do not wait for a failure)
+
+Open a Twilio support ticket asking Twilio to **confirm `OtherRecipients{N}` as a
+supported contract on the Programmable Messaging inbound webhook** - whether it is
+guaranteed, whether it is subject to change without notice, and whether there is a
+supported alternative for identifying a carrier group inbound.
+
+This is the single highest-leverage ops action for this feature and it costs
+nothing. Every guardrail in the table above exists because the answer today is
+"undocumented". A written answer either downgrades that risk permanently or tells
+us to start on the standby below - and it is far better to have it in hand than to
+be reading it for the first time during an incident. Record the ticket number and
+Twilio's answer here when it arrives.
+
+### 10. Standby: switching group ingestion onto the Conversations rail
+
+**Use when:** `group_crosscheck_inbound_missing` is firing broadly, or
+`group_envelope_missing` has gone from occasional to constant - i.e. the envelope
+has been removed or suppressed and detection is no longer receiving it. This is
+the contingency for this feature's central undocumented-API risk (spec 8.2), and
+it is DORMANT: nothing about it is switched on today.
+
+**Why it works.** Group inbound reaches the app on TWO independent paths. The
+classic messaging webhook carries `OtherRecipients{N}` (the undocumented one);
+the service-scoped Conversations webhook delivers `onMessageAdded` for the same
+carrier message because it bound to a rail - a path that has nothing to do with
+the envelope. Today the second path is used only to CROSS-CHECK the first. The
+standby promotes it to the ingestion rail for railed threads.
+
+**Preconditions - check these first, because the standby is worthless without
+them:**
+
+- The thread must HAVE a rail. Rail-less and rail-ineligible threads (a roster
+  above nine) are not covered by this path at all, and never will be - they stay
+  on the classic path with the envelope, whatever state it is in.
+- The Conversations webhook must be healthy. If `group_crosscheck_channel_quiet`
+  is also firing, the standby channel is the one that is broken - fix step 3
+  before anything else. Two dead channels is not a failover situation.
+
+**Procedure:**
+
+1. **Confirm which channel is alive.** Compare `group_railed_inbound_last_at` and
+   `group_crosscheck_last_event_at` (both in the settings table). Events arriving
+   with no classic filings is the signature this standby is for; the reverse means
+   the problem is the Conversations webhook, not the envelope.
+2. **Freeze the blast radius.** Set `SMS_SENDING_ENABLED=false` if staff replies
+   would compound a mis-filing, and tell the team group threads are read-only.
+3. **Assess exposure.** Group-shaped inbound that arrives with no envelope is
+   already fail-open: it files onto the sender's 1:1 marked
+   `group_ambiguous_origin`, which excludes it from every AI transcript window
+   and is visible in the UI. Nothing is lost while the standby is being switched
+   on; messages are merely in the wrong thread and marked as such.
+4. **Switch ingestion.** This is a CODE change, deliberately not a flag - it
+   changes which webhook files a message and must go through review:
+   `onMessageAdded` already carries the author, the body and the CHxx, and the
+   roster comes from ONE Participants read on that rail (or from the thread's own
+   stored roster, which the rail was built from). File onto the thread whose
+   `twilio_conversation_sid` is that CHxx. Keep the classic path filing 1:1 as it
+   does now, marked - do not delete it.
+5. **Turn the cross-check around.** With ingestion on the Conversations side, a
+   classic filing that never arrives is expected, not an alarm. The
+   `group_crosscheck_inbound_missing` ERROR must be downgraded in the same change
+   or it will fire on every message and bury everything else.
+6. **Re-file what landed wrong.** Messages filed 1:1 during the outage carry
+   `group_ambiguous_origin`, which is how you find them.
+
+**What this does NOT cover:** rail-less threads, media (`onMessageAdded` carries
+media differently), and delivery receipts (unchanged - they were always on the
+Conversations side). Treat it as ingestion continuity, not a full replacement.
 
 ## Rollback
 

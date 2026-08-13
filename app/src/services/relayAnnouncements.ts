@@ -1,7 +1,7 @@
 // Relay-group SYSTEM ANNOUNCEMENTS — the one chain behind every app-authored
 // group send (the relay.intro welcome + the tour-reminder group rungs).
 //
-// Founder decision 2026-07-14: everything sent into a group text MUST be
+// Founder decision 2026-07-14: everything sent into a relay group MUST be
 // visible in its dashboard thread. Announcements previously sent per-member
 // provider messages and persisted NOTHING, so the thread showed an empty
 // timeline while members' phones received texts. This service persists the
@@ -73,8 +73,27 @@ export async function isMemberSuppressed(
   // 1:1 conversation - the correct suppression record when the contact flag
   // is out of reach (roster phone became a secondary attached number).
   // Read-only GSI query - a leg check must never mint a conversation.
+  //
+  // GROUP TEXTS ARE EXCLUDED HERE TOO (invariant 13.6). A multi-party thread is
+  // not a per-number suppression record: neither a relay_group nor a group_text
+  // carries participant_phone, so neither can legitimately reach this GSI, and
+  // spec 4.4 forbids sms_opt_out on a group thread at all. Naming the type is
+  // what keeps a future denormalization (a "primary member" participant_phone
+  // for inbox rendering, a GSI widening) from silently reading a group flag as
+  // this member's own opt-out and muting them from every relay announcement.
+  // The twin reader services/numberSuppression.ts:129 carries the same clause.
+  //
+  // WHAT IS DELIBERATELY *NOT* CHANGED HERE: this function's contact-flag rule
+  // (`contact?.sms_opt_out` above, which speaks for ANY of the contact's
+  // numbers) disagrees with the shared seam's number-scoped rule for a
+  // SECONDARY number. That divergence is RELAY's pre-existing behavior and
+  // invariant 13.6 forbids changing relay behavior in this mission, so it is
+  // filed rather than "corrected" - see
+  // docs/issues/relay-member-suppression-diverges-from-number-seam.md.
   const threads = await conversations.findByParticipantPhone(member.phone);
-  return threads.some((c) => c.type !== 'relay_group' && c.sms_opt_out === true);
+  return threads.some(
+    (c) => c.type !== 'relay_group' && c.type !== 'group_text' && c.sms_opt_out === true,
+  );
 }
 
 export interface RelayAnnouncementDeps {
@@ -137,6 +156,11 @@ export async function sendRelayAnnouncement(
   const conversation = await deps.conversationsRepo.getById(conversationId);
   const poolNumber = conversation?.pool_number;
   const roster = (conversation?.participants ?? []) as ConversationParticipant[];
+  // T4.5 RULING - group_text: this guard is a POSITIVE `type === 'relay_group'`
+  // test, so a native group text falls out here with the ordinary unusable WARN
+  // and NOTHING is sent (invariant 13.6). That is correct and deliberate:
+  // relay announcements are a masked-number mechanism and a carrier group has no
+  // pool number to announce on. Group sends are S5's own path.
   // HARDENING (spec 4.4): `status` is now the authoritative closed-gate. Because
   // pool_number NEVER clears (burn-multiplexing keeps a closed group resolvable),
   // a CLOSED group still carries its number, so a pool_number-presence check

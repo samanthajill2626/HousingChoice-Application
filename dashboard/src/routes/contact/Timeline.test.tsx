@@ -267,14 +267,14 @@ describe('Timeline', () => {
       id: 'ms-group-open',
       at: '2026-06-08T08:00:00',
       type: 'tour_group_opened',
-      label: 'Group text opened',
+      label: 'Relay group opened',
       refType: 'tour',
       refId: 't1',
     };
     renderTimeline({ items: [groupOpened] });
-    const link = screen.getByRole('link', { name: 'Group text opened' });
+    const link = screen.getByRole('link', { name: 'Relay group opened' });
     expect(link).toHaveAttribute('href', '/tours/t1');
-    // Same purple family as added_to_group_text - a group-text membership cue.
+    // Same purple family as added_to_group_text - a relay-group membership cue.
     expect(link.parentElement?.className).toContain('purple');
   });
 
@@ -475,7 +475,7 @@ describe('Timeline', () => {
     });
     const foot = screen.getByText(/Reply sends to/);
     expect(foot).toHaveTextContent(
-      'Reply sends to everyone in this group text (Ann, (404) 555-0122)',
+      'Reply sends to everyone in this relay group (Ann, (404) 555-0122)',
     );
     // The single-target copy (incl. the replyToPhone prop the helper passes) is gone.
     expect(foot).not.toHaveTextContent(/\(470\) 555-0148/);
@@ -485,7 +485,7 @@ describe('Timeline', () => {
   it('a relay GROUP with an unloaded roster keeps the honest "everyone" line, no list', () => {
     renderTimeline({ items: [], relayRoster: [] });
     expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
-      'Reply sends to everyone in this group text',
+      'Reply sends to everyone in this relay group',
     );
     expect(screen.getByText(/Reply sends to/)).not.toHaveTextContent('(');
   });
@@ -693,6 +693,45 @@ describe('Timeline', () => {
     expect(screen.queryByText(/opted out — not relayed/)).not.toBeInTheDocument();
   });
 
+  // A27(a) / adversarial 22. On a NATIVE group text nothing is relayed - the
+  // thread already exists on everyone's handset and we post into it. Twilio
+  // SKIPS a suppressed participant outright (app/src/services/groupDelivery.ts),
+  // so "not relayed to them" both invents a mechanism and contradicts the
+  // suppression banner rendered directly above the same conversation
+  // (GroupTextView.tsx). Relay bubbles keep their copy: relay really does relay.
+  it('frames the opted-out note for a GROUP TEXT as a skipped participant, never as a relay', () => {
+    const groupSource: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-group-optout',
+      tsMsgId: 'm-group-optout',
+      body: 'heading over now',
+      delivery_recipients: {
+        'phone#+14045550111': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550112': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [groupSource], rosterKind: 'group_text' });
+    expect(screen.queryByText(/not relayed to them/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 member opted out/)).toHaveTextContent(/Twilio skips them/);
+  });
+
+  it('pluralizes the group-text opted-out note', () => {
+    const groupSource: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-group-optout2',
+      tsMsgId: 'm-group-optout2',
+      body: 'open house Saturday',
+      delivery_recipients: {
+        'phone#+14045550111': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550113': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550112': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [groupSource], rosterKind: 'group_text' });
+    expect(screen.getByText(/2 members opted out/)).toHaveTextContent(/Twilio skips them/);
+    expect(screen.queryByText(/not relayed to them/)).not.toBeInTheDocument();
+  });
+
   it('shows no status chip (and no Retry) when delivery_status is absent — seed/legacy rows', () => {
     const noStatus = {
       ...MESSAGE_OUT,
@@ -885,7 +924,7 @@ describe('Timeline relay-group annotations', () => {
     expect(chip).toHaveAttribute('title', expect.stringContaining('error 30005'));
   });
 
-  it('surfaces the A2P-unregistered code (30034) on the rollup — the group-text bug now shows WHY', () => {
+  it('surfaces the A2P-unregistered code (30034) on the rollup - the relay-group bug now shows WHY', () => {
     const bothFailed: TimelineItem = {
       ...RELAY_OUT,
       delivery_recipients: {
@@ -946,9 +985,64 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.getByText('Keisha Kane')).toBeInTheDocument();
   });
 
+  it('attributes a PHONE-SCOPED sender key to the same member (native group_text convention)', () => {
+    // Native group threads key members by phone (spec 15.6) while relay keys
+    // them by contactId. ONE shared resolver serves both - this bubble proves
+    // the phone-scoped form resolves through the very same Timeline path.
+    const inbound: TimelineItem = {
+      kind: 'message',
+      id: 'gt1',
+      at: '2026-06-08T09:26:00',
+      conversationId: 'gt-1',
+      tsMsgId: 'gt1',
+      direction: 'inbound',
+      author: 'tenant',
+      type: 'sms',
+      delivery_status: 'delivered',
+      body: 'On my way',
+      relay_sender_key: 'phone#+14045550112',
+    };
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+    expect(screen.getByText('Lars Landlord')).toBeInTheDocument();
+  });
+
   it('leaves a 1:1 bubble unchanged (no delivered summary, no attribution)', () => {
     renderTimeline({ items: [MESSAGE_OUT] });
     expect(screen.queryByText(/^delivered \d+\/\d+$/)).not.toBeInTheDocument();
+  });
+
+  // INVARIANT 6, pinned. The group_text fix (L6) gives a NAMELESS member a
+  // formatted-number sender chip. Relay must keep rendering exactly what it
+  // rendered before: nothing. `rosterKind` defaults to 'relay', and this is the
+  // test that fails if that default is ever widened.
+  const NAMELESS_INBOUND: TimelineItem = {
+    kind: 'message',
+    id: 'r-nameless',
+    at: '2026-06-08T09:27:00',
+    conversationId: 'g1',
+    tsMsgId: 'r-nameless',
+    direction: 'inbound',
+    author: 'tenant',
+    type: 'sms',
+    delivery_status: 'delivered',
+    body: 'no name on this roster entry',
+    relay_sender_key: 'phone#+14045550999',
+  };
+  const NAMELESS_ROSTER = [{ contactId: 'c9', phone: '+14045550999' }];
+
+  it('RELAY: a nameless member still gets NO attribution line (rendering frozen)', () => {
+    renderTimeline({ items: [NAMELESS_INBOUND], relayRoster: NAMELESS_ROSTER });
+    expect(screen.getByText('no name on this roster entry')).toBeInTheDocument();
+    expect(screen.queryByText('(404) 555-0999')).not.toBeInTheDocument();
+  });
+
+  it('GROUP_TEXT: the same bubble and roster DO get the formatted-number chip', () => {
+    renderTimeline({
+      items: [NAMELESS_INBOUND],
+      relayRoster: NAMELESS_ROSTER,
+      rosterKind: 'group_text',
+    });
+    expect(screen.getByText('(404) 555-0999')).toBeInTheDocument();
   });
 });
 

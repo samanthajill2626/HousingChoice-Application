@@ -489,8 +489,17 @@ describe('seed matrix: pool numbers and relay conversations', () => {
   // covering its own roster (the phones whose burn on the number belongs to
   // THIS group) - so a member-add of an already-rostered person needs no fresh
   // claim and seeds are add-member-ready natively (no first-add legacy init).
-  it('every relay group seeds ever_member_phones covering its roster', () => {
-    const relayConvs = allConversations.filter((c) => c['type'] === 'relay_group');
+  //
+  // SCOPED TO NUMBERED GROUPS (group-texting S8/T8.2). Burn provenance is a fact
+  // about a POOL NUMBER: it records which phones this group burned on the number
+  // it holds. A `connecting` group holds no number yet, so it has burned nothing
+  // - and DynamoDB cannot store the empty string set that would honestly say so.
+  // Requiring the attribute there would force a seed to claim burns that never
+  // happened, which is worse than not asserting on it.
+  it('every NUMBERED relay group seeds ever_member_phones covering its roster', () => {
+    const relayConvs = allConversations.filter(
+      (c) => c['type'] === 'relay_group' && typeof c['pool_number'] === 'string',
+    );
     expect(relayConvs.length).toBeGreaterThanOrEqual(2);
     for (const conv of relayConvs) {
       const rawEver = conv['ever_member_phones'];

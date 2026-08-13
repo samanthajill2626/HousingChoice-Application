@@ -13,6 +13,14 @@
 // fan-out wants all of them). relay_group threads front a pool number and carry
 // no participant_email, so an email query never returns them; a phone query can,
 // which is why callers still filter on type where they need to.
+//
+// NATIVE GROUP TEXTS ARE NEVER RETURNED BY ANY QUERY HERE: a group_text thread
+// carries NEITHER participant_phone NOR participant_email (spec 4.2) - it is
+// reached only by conversationId, its roster, or the group_open partition. So no
+// caller of this function can see one, and a contact's group threads surface on
+// their own card (GET /api/contacts/:id/group-threads) instead. If a future
+// change ever gives a group thread a participant key, EVERY caller of this
+// function needs a type filter first.
 import {
   contactEmails,
   contactPhones,

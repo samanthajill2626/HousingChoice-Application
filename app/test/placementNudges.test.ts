@@ -1025,6 +1025,21 @@ describe('forceSendNudge', () => {
     expect(row.skippedAt).toBeUndefined();
   });
 
+  // group-texting A8, consumer 3 of 6 (placementNudges.ts).
+  it('refuses a SILENT GROUP MEMBER (group_participation_at is not consent)', async () => {
+    const { deps, send } = tenantRig({
+      contactOver: {
+        consent_method: undefined,
+        group_participation_at: '2026-08-10T12:00:00.000Z',
+      },
+    });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_consent' });
+    expect(send.sent).toHaveLength(0);
+  });
+
   it('refuses no_consent WITHOUT claiming', async () => {
     const { deps, send, row } = tenantRig({ contactOver: { consent_method: undefined } });
 

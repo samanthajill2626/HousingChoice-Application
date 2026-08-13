@@ -85,7 +85,7 @@ describe('InboxRow', () => {
     expect(screen.getByText('Call')).toBeInTheDocument();
   });
 
-  it('renders a relay_group row with a Group text chip, linking to the conversation view', () => {
+  it('renders a relay_group row with a Relay group chip, linking to the conversation view', () => {
     renderRow(
       mkRow({
         kind: 'relay_group',
@@ -101,8 +101,50 @@ describe('InboxRow', () => {
     );
     const link = screen.getByRole('link', { name: /With Keisha & Lars/ });
     expect(link).toHaveAttribute('href', '/conversations/conv-g1');
-    expect(screen.getByText('Group text')).toBeInTheDocument();
+    expect(screen.getByText('Relay group')).toBeInTheDocument();
     expect(within(link).getByText(/See you at 3/)).toBeInTheDocument();
+  });
+
+  it('renders a group_text row with a Group text chip, linking to the thread view', () => {
+    renderRow(
+      mkRow({
+        kind: 'group_text',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Ann & Marcus',
+        preview: 'Saturday works',
+        conversationId: 'gt-1',
+      }),
+    );
+    const link = screen.getByRole('link', { name: /With Ann & Marcus/ });
+    // NOT /contacts/unknown?phone= - the trailing fall-through would have sent a
+    // group row to the triage list with an empty number.
+    expect(link).toHaveAttribute('href', '/conversations/gt-1');
+    expect(screen.getByText('Group text')).toBeInTheDocument();
+    expect(screen.queryByText('Relay group')).toBeNull();
+    expect(within(link).getByText(/Saturday works/)).toBeInTheDocument();
+  });
+
+  it('renders no lifecycle tag on a group_text row (no closed state in v1)', () => {
+    renderRow(
+      mkRow({
+        kind: 'group_text',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Ann & Marcus',
+        conversationId: 'gt-1',
+        // status MUST be 'closed' here. mkRow omits status, and with it omitted
+        // `row.status === 'closed'` alone is already false, so the assertion
+        // below would pass for any row kind and prove nothing. With it set, the
+        // `isRelay &&` half is the only thing suppressing the tag.
+        status: 'closed',
+      }),
+    );
+    expect(screen.queryByText('Closed')).toBeNull();
   });
 
   it('flags a closed relay_group row', () => {

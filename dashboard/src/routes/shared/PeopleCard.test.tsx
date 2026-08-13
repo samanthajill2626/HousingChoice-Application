@@ -8,7 +8,7 @@
 //   - the tenant-off-the-roster note (D11) and the caseworker hint
 //   - the disabled-open-group reason (and its absence once a thread exists)
 //   - the hub-owned Property / provenance rows, which stay BELOW the divider
-// Edit mode, the confirm dialogs and the live [Open group text] rewiring are
+// Edit mode, the confirm dialogs and the live [Open relay group] rewiring are
 // Task 11 - nothing here may assume them.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -202,7 +202,7 @@ describe('PeopleCard - member rows', () => {
       }),
     });
     expect(
-      within(rosterRows()[1]!).getByText('not on the group text - no mobile number'),
+      within(rosterRows()[1]!).getByText('not on the relay group - no mobile number'),
     ).toBeInTheDocument();
   });
 
@@ -221,7 +221,7 @@ describe('PeopleCard - member rows', () => {
         ],
       }),
     });
-    expect(within(rosterRows()[1]!).getByText('not on the group text - opted out')).toBeInTheDocument();
+    expect(within(rosterRows()[1]!).getByText('not on the relay group - opted out')).toBeInTheDocument();
   });
 
   it('says when a member shares a number with an earlier one (one message)', () => {
@@ -295,7 +295,7 @@ describe('PeopleCard - notes', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reset to property default' })).toBeDisabled();
     expect(
-      screen.getByText('members are on a live group text - add or remove them individually'),
+      screen.getByText('members are on a live relay group - add or remove them individually'),
     ).toBeInTheDocument();
   });
 
@@ -341,18 +341,18 @@ describe('PeopleCard - notes', () => {
     expect(screen.queryByText(/Caseworker on file/)).not.toBeInTheDocument();
   });
 
-  it('explains why a group text cannot be opened when too few members are reachable', () => {
+  it('explains why a relay group cannot be opened when too few members are reachable', () => {
     renderCard({ roster: view({ canOpenGroup: false }) });
     expect(
-      screen.getByText('Not enough people to open a group text - two reachable members are needed'),
+      screen.getByText('Not enough people to open a relay group - two reachable members are needed'),
     ).toBeInTheDocument();
   });
 
-  it('never blames "too few people" once the group text already exists', () => {
+  it('never blames "too few people" once the relay group already exists', () => {
     renderCard({
       roster: view({ source: 'participants', threadExists: true, canOpenGroup: false }),
     });
-    expect(screen.queryByText(/Not enough people to open a group text/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not enough people to open a relay group/)).not.toBeInTheDocument();
   });
 });
 
@@ -436,7 +436,7 @@ function pmContact(): Contact {
 
 function preview(over: Partial<RosterPreview> = {}): RosterPreview {
   return {
-    body: 'Adding Alicia Grant to this group text.',
+    body: 'Adding Alicia Grant to this relay group.',
     recipients: [
       { name: 'Tasha Nguyen', reachability: 'reachable' },
       { name: 'Alicia Grant', reachability: 'reachable' },
@@ -557,7 +557,7 @@ describe('PeopleCard - edit mode', () => {
   });
 });
 
-describe('PeopleCard - edit mode against a LIVE group text', () => {
+describe('PeopleCard - edit mode against a LIVE relay group', () => {
   const live = (over: Partial<RosterView> = {}): RosterView =>
     view({ source: 'participants', threadExists: true, canOpenGroup: false, ...over });
 
@@ -569,12 +569,12 @@ describe('PeopleCard - edit mode against a LIVE group text', () => {
     ]);
     await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
     const dialog = await screen.findByRole('dialog', {
-      name: 'Add Alicia Grant to the group text?',
+      name: 'Add Alicia Grant to the relay group?',
     });
     expect(previewTourRosterAdd).toHaveBeenCalledWith('tour-abc', 'c-pm');
     // Nothing is written until the operator confirms.
     expect(addTourRosterLiveMember).not.toHaveBeenCalled();
-    expect(within(dialog).getByText('Adding Alicia Grant to this group text.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Adding Alicia Grant to this relay group.')).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Add and notify' }));
     // Outside quiet hours the confirm is the plain (unforced) add.
     await waitFor(() =>
@@ -610,7 +610,7 @@ describe('PeopleCard - edit mode against a LIVE group text', () => {
     ]);
     await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
     const dialog = await screen.findByRole('dialog', {
-      name: 'Add Alicia Grant to the group text?',
+      name: 'Add Alicia Grant to the relay group?',
     });
     await userEvent.click(
       within(dialog).getByRole('button', { name: `Add and notify at ${clock}` }),
@@ -629,7 +629,7 @@ describe('PeopleCard - edit mode against a LIVE group text', () => {
     await renderEditing({ roster: live({ members: [view().members[0]!] }) }, [PM_SUGGESTION]);
     await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
     const dialog = await screen.findByRole('dialog', {
-      name: 'Add Alicia Grant to the group text?',
+      name: 'Add Alicia Grant to the relay group?',
     });
     await userEvent.click(within(dialog).getByRole('button', { name: 'Send now anyway' }));
     await waitFor(() =>
@@ -668,7 +668,7 @@ describe('PeopleCard - refusals', () => {
     addTourRosterMember.mockRejectedValue(
       new ApiError(409, 'thread_exists', 'thread_exists', {
         error: 'thread_exists',
-        message: 'This tour already has a group text - use the live roster controls.',
+        message: 'This tour already has a relay group - use the live roster controls.',
       }),
     );
     const { onRetry } = await renderEditing({ roster: view({ members: [view().members[0]!] }) }, [
@@ -686,7 +686,7 @@ describe('PeopleCard - refusals', () => {
     expect(onRetry).toHaveBeenCalled();
     expect(
       await screen.findByText(
-        'A group text was just opened for this tour - that change was not applied. Try it again to notify the group.',
+        'A relay group was just opened for this tour - that change was not applied. Try it again to notify the group.',
       ),
     ).toBeInTheDocument();
   });
@@ -800,7 +800,7 @@ describe('PeopleCard - pending quiet-hours actions', () => {
     const onOpenNow = vi.fn();
     renderWithActions({ roster: view({ pending: [PENDING_OPEN] }) }, { onOpenNow });
     expect(screen.getByText(`Opens at ${DUE_CLOCK} - quiet hours`)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Send the group text now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Send the relay group now' }));
     // The HUB owns the relay-open path (it mounts the new thread), so the card
     // delegates rather than opening a thread it cannot show.
     expect(onOpenNow).toHaveBeenCalledTimes(1);
@@ -811,7 +811,7 @@ describe('PeopleCard - pending quiet-hours actions', () => {
     const next = view();
     cancelTourRosterAction.mockResolvedValue(next);
     const { onApply } = renderWithActions({ roster: view({ pending: [PENDING_OPEN] }) });
-    await userEvent.click(screen.getByRole('button', { name: 'Cancel opening the group text' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel opening the relay group' }));
     await waitFor(() =>
       expect(cancelTourRosterAction).toHaveBeenCalledWith('tour-abc', 'tour#tour-abc#open'),
     );
@@ -855,13 +855,13 @@ describe('PeopleCard - skipped notices (visible until dismissed)', () => {
   // back at 8:05 must be able to tell what happened without reading a log.
   const CASES: Array<[RosterSkippedAction, string]> = [
     [skip({ reason: 'canceled' }), 'Canceled - Alicia Grant was not added.'],
-    [openSkip('canceled'), 'Canceled - the group text was not opened.'],
-    [skip({ reason: 'group_closed' }), 'Alicia Grant was not added - the group text was closed.'],
-    [openSkip('group_closed'), 'The group text was not opened - it had already been closed.'],
+    [openSkip('canceled'), 'Canceled - the relay group was not opened.'],
+    [skip({ reason: 'group_closed' }), 'Alicia Grant was not added - the relay group was closed.'],
+    [openSkip('group_closed'), 'The relay group was not opened - it had already been closed.'],
     [skip({ reason: 'owner_canceled' }), 'Alicia Grant was not added - this tour was canceled.'],
     [
       skip({ reason: 'already_member' }),
-      'Alicia Grant was not added - they were already on the group text.',
+      'Alicia Grant was not added - they were already on the relay group.',
     ],
     [
       skip({ reason: 'contact_deleted' }),
@@ -871,12 +871,12 @@ describe('PeopleCard - skipped notices (visible until dismissed)', () => {
       skip({ reason: 'member_no_longer_on_roster' }),
       'Alicia Grant was not added - they were removed from this tour first.',
     ],
-    [openSkip('roster_too_thin'), 'The group text was not opened - two reachable members are needed.'],
+    [openSkip('roster_too_thin'), 'The relay group was not opened - two reachable members are needed.'],
     [
       openSkip('provisioning_unavailable'),
-      'The group text was not opened - live number provisioning is off.',
+      'The relay group was not opened - live number provisioning is off.',
     ],
-    [openSkip('converted'), 'The group text was not opened - this tour became a placement first.'],
+    [openSkip('converted'), 'The relay group was not opened - this tour became a placement first.'],
   ];
 
   it.each(CASES)('says what happened (case %#)', (row, sentence) => {
@@ -919,7 +919,7 @@ describe('PeopleCard - skipped notices (visible until dismissed)', () => {
         <PeopleCard {...props} />
       </MemoryRouter>,
     );
-    const sentence = 'Alicia Grant was not added - they were already on the group text.';
+    const sentence = 'Alicia Grant was not added - they were already on the relay group.';
     expect(screen.getByText(sentence)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Dismiss notice for Alicia Grant' }));
@@ -949,7 +949,7 @@ describe('PeopleCard - skipped notices (visible until dismissed)', () => {
       screen.getByRole('button', { name: 'Dismiss notice for Alicia Grant' }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: 'Dismiss notice for the group text' }),
+      screen.getByRole('button', { name: 'Dismiss notice for the relay group' }),
     ).toBeInTheDocument();
   });
 });

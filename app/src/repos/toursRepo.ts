@@ -82,7 +82,7 @@ export interface TourItem {
   /** Optional: the relay group conversationId for the tour thread. */
   groupThreadId?: string;
   /**
-   * contact-rosters (spec D1): the roster PLAN - who this tour's group text
+   * contact-rosters (spec D1): the roster PLAN - who this tour's relay group
    * will open with. ABSENT is the normal state and means "resolve from the
    * property" (tenant + the unit's primaryContact). It materializes on the
    * first human edit and is CONSUMED (deleted) when the group is provisioned:

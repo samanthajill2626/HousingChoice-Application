@@ -83,6 +83,18 @@ function makeDeps(seed: Seed): InboxRouterDeps {
           .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
         return { items, truncated: false };
       },
+      // The group_open partition - a THIRD, disjoint source (S4). These fixtures
+      // seed no group threads; the source's own behavior is covered by
+      // inboxGroups.test.ts. Modeled (not omitted) so the aggregator's real call
+      // runs here too: a production regression that stopped guarding the group
+      // read must not pass because the fake happened to lack the method.
+      async listGroupTexts({ limit }: { limit?: number; cursor?: string } = {}) {
+        const items = seed.conversations
+          .filter((c) => c.type === 'group_text')
+          .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
+          .slice(0, limit ?? 50);
+        return { items, truncated: false };
+      },
     } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
     contactsRepo: {
       async findByPhone(phone: string) {
@@ -280,7 +292,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(relay.direction).toBeUndefined();
   });
 
-  it('relay label precedence: member names → placement_tag → formatted pool number → "Group text"', async () => {
+  it('relay label precedence: member names -> placement_tag -> formatted pool number -> "Relay group"', async () => {
     const base = { last_activity_at: '2026-06-12T10:00:00.000Z' };
     const tagOnly = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps({
       contacts: [],
@@ -297,10 +309,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
     const emptyGroup = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps({
       contacts: [],
-      // No members, no tag, no pool number → the "Group text" fallback.
+      // No members, no tag, no pool number -> the "Relay group" fallback.
       conversations: [relayConv({ conversationId: 'r-bare', pool_number: '', participant_phone: 'x', ...base })],
     }));
-    expect(emptyGroup.rows[0]!.name).toBe('Group text');
+    expect(emptyGroup.rows[0]!.name).toBe('Relay group');
   });
 
   it('relay rows merge-sort with contact/unknown rows by last_activity_at (newest first)', async () => {

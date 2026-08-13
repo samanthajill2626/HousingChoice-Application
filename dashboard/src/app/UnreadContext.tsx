@@ -29,6 +29,11 @@ export function UnreadProvider({ children }: { children: React.ReactNode }): Rea
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      // Native group threads ride in here automatically: the unread filter's
+      // group source is a FULL PARTITION WALK on the server (spec 4.2 / 15.10),
+      // deliberately uncapped, precisely because this badge counts the rows it
+      // returns. `limit` bounds the CONTACT pager only - it never applies to the
+      // group source, so the badge cannot silently undercount group unread.
       const page = await getInbox({ filter: 'unread', limit: BADGE_LIMIT }, controller.signal);
       if (controller.signal.aborted) return;
       setUnread(page.rows.length);

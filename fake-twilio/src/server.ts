@@ -16,6 +16,9 @@ import { createControlRouter } from './routes/control.js';
 import { createVoiceControlRouter } from './routes/voiceControl.js';
 import { createSesRestRouter } from './routes/sesRest.js';
 import { createSesControlRouter } from './routes/sesControl.js';
+import { ConversationsEngine } from './engine/conversationsEngine.js';
+import { createConversationsRestRouter } from './routes/conversationsRest.js';
+import { createConversationsControlRouter } from './routes/conversationsControl.js';
 import { createRcsRouter } from './routes/rcs.js';
 import { createEventsRouter } from './routes/events.js';
 
@@ -45,6 +48,11 @@ export interface FakeTwilioAppDeps {
    *  constructed sharing the messaging engine's hub so its `mail.outbound` events
    *  reach the SSE stream. */
   mailEngine?: MailEngine;
+  /** The Twilio Conversations emulation (native carrier group texting). Injectable
+   *  for tests; default-constructed sharing the messaging engine's hub + a real
+   *  clock/dispatcher, and holding a reference to the messaging engine so a rail
+   *  fan-out lands in each fake phone's 1:1 thread. */
+  conversationsEngine?: ConversationsEngine;
 }
 
 export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
@@ -126,6 +134,26 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
       },
     });
 
+  // The Twilio Conversations emulation - the RAIL behind a native carrier group
+  // text. Shares the SAME hub (so `conversation.updated` reaches the SSE stream
+  // by construction, like the CallEngine and MailEngine above) and holds the
+  // messaging engine, because a rail post fans out to each member's ORDINARY 1:1
+  // fake-phone thread. Its own dispatcher targets the ONE service-scoped webhook
+  // both Conversations event kinds are delivered to (spec 16.1).
+  const conversationsEngine =
+    deps.conversationsEngine ??
+    new ConversationsEngine({
+      clock: new RealClock(),
+      dispatcher: new WebhookDispatcher({
+        appBaseUrl: deps.config.appBaseUrl,
+        appPublicBaseUrl: deps.config.appPublicBaseUrl,
+        authToken: deps.config.authToken,
+        originSecret: deps.config.originSecret,
+      }),
+      hub: engine.hub,
+      messaging: engine,
+    });
+
   const app = express();
   // Twilio posts application/x-www-form-urlencoded; the control API uses JSON.
   app.use(express.urlencoded({ extended: false }));
@@ -177,6 +205,14 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // + static-UI blocks so the reserved-prefix guard (/v2, /control) matches them.
   app.use(createSesRestRouter(mailEngine));
   app.use(createSesControlRouter(mailEngine));
+  // Native carrier group texting: the Conversations REST surface (/v1/Conversations,
+  // /v1/ConversationWithParticipants, .../Participants, .../Messages) the app's
+  // GroupConversationsPort adapter drives through createRedirectingHttpClient, plus
+  // the DISJOINT control subpaths (/control/send-group-as-party,
+  // /control/conversations[...]). `/v1` is already a reserved prefix below, so the
+  // SPA fallback never swallows the REST half.
+  app.use(createConversationsRestRouter(conversationsEngine));
+  app.use(createConversationsControlRouter({ engine, conversations: conversationsEngine }));
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
   // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine
   // emits through — no way to fabricate a mismatched hub even when `engine` is injected

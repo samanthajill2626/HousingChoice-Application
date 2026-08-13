@@ -180,12 +180,17 @@ export const TABLES: readonly TableSpec[] = [
     rangeKey: { name: 'tsMsgId', type: 'S' },
     gsis: [],
     stream: 'NEW_AND_OLD_IMAGES', // feeds side effects (doc §5)
-    // TTL (adv M3): the ONLY messages items carrying `expires_at` are the F12
-    // parked SES events (`emailevent#<sesId>`, a 7d backstop) - real
-    // conversation messages never set it (verified: putParkedEmailEvent is the
-    // sole writer), so enabling TTL reaps only an orphan parked event the
-    // post-send consumer never claimed (e.g. a bounce for a send this stack
-    // never made), closing the unbounded-accrual gap.
+    // TTL (adv M3): real conversation messages NEVER set `expires_at`. The
+    // items that do are all short-lived bookkeeping rows in their own pointer
+    // partitions, each with its own authoritative consume step - TTL is only the
+    // backstop that closes the unbounded-accrual gap when a consume never comes:
+    //   - F12 parked SES events (`emailevent#<sesId>`, 7d)
+    //   - group-texting due rows (`groupdue#send` for the per-send delivery
+    //     staleness deadline and `groupdue#xc` for the cross-check deadline,
+    //     both 30d - see messagesRepo GROUP_SEND_DUE_PARTITION /
+    //     GROUP_CROSSCHECK_DUE_PARTITION) and parked group receipts
+    //     (`groupreceipt#<IMxx>`), where the horizon is deliberately far
+    //     past the alarm deadline - spec 15.5: TTL is NEVER the alarm mechanism.
     ttlAttribute: 'expires_at',
   },
   {
@@ -338,7 +343,7 @@ export const TABLES: readonly TableSpec[] = [
   {
     // NEW in BE2/C2 (NOT in the doc §5 9-table model — new-dashboard build): the
     // person-centric activity-event log. Each row is one milestone (a case
-    // opened/closed, a stage change, a property sent, a number added, group-text
+    // opened/closed, a stage change, a property sent, a number added, relay-group
     // membership, …) for a contact, so the contact-timeline endpoint can MERGE
     // these with the contact's messages/calls into one chronological feed.
     //
@@ -439,7 +444,7 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // NEW in contact-rosters (spec 5.3): deferred roster actions - an
-    // "open the group text" or "add this member" the operator confirmed during
+    // "open the relay group" or "add this member" the operator confirmed during
     // QUIET HOURS, held until dueAt (quiet-end) and applied by the poller.
     //
     // PK actionId is DETERMINISTIC (`${ownerType}#${ownerId}#open` /

@@ -15,6 +15,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_EXTRACTION_ATTEMPTS,
+  MAX_TRANSCRIPT_MESSAGES,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
@@ -1195,5 +1196,112 @@ describe('runDueExtractions - run log backstop and isolation', () => {
     expect(logged).not.toContain('SECRETVALUE');
     expect(logged).not.toContain('EXTRACT:');
     expect(JSON.stringify(h.runs[0])).toContain('SECRETVALUE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Group-texting T3.7: possibly-group-origin messages are excluded at the
+// TRANSCRIPT level, not merely at the trigger.
+//
+// The three fail-open filing paths (tripwire, corrupt shape, collapsed roster)
+// deliberately park a message that MAY be group content in the sender's 1:1
+// thread. Guarding only the schedule trigger suppresses nothing: extraction
+// reads WHOLE-THREAD windows, and four other schedulers (triage, voice, email,
+// transcripts) aim at the same 1:1 conversationId. The filter therefore lives
+// on the fetched page, which is the single funnel every window derives from.
+// ---------------------------------------------------------------------------
+describe('runDueExtractions - group_ambiguous_origin exclusion (T3.7)', () => {
+  const WROTE_PETS =
+    'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats","reason":"said so"}}}';
+
+  function marked(m: MessageItem): MessageItem {
+    return { ...m, group_ambiguous_origin: true };
+  }
+
+  it('keeps a marker-carrying message OUT of the rendered transcript', async () => {
+    const clean = msg(10, 'inbound', 'clean one');
+    const ambiguous = marked(msg(20, 'inbound', 'AMBIGUOUSBODY'));
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [ambiguous, clean],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript.map((u) => u.tsMsgId)).toEqual([clean.tsMsgId]);
+    expect(JSON.stringify(h.seen[0]!.transcript)).not.toContain('AMBIGUOUSBODY');
+  });
+
+  it('keeps it out of the RUN-LOG window too (no hash, no chars, no id)', async () => {
+    const clean = msg(10, 'inbound', WROTE_PETS);
+    const ambiguous = marked(msg(20, 'inbound', 'AMBIGUOUSBODY'));
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [ambiguous, clean],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    const w = h.runs[0]!.window!;
+    expect(w.messages.map((m) => m.tsMsgId)).toEqual([clean.tsMsgId]);
+    expect(JSON.stringify(w)).not.toContain(ambiguous.tsMsgId);
+  });
+
+  it('does NOT let a marked message satisfy the has-new-client gate (never bills a run)', async () => {
+    // The load-bearing case: filtering only the rendered transcript would leave
+    // the marked message able to TRIGGER a paid model call whose content is a
+    // group message.
+    const seen = msg(10, 'inbound', 'older, already processed');
+    const ambiguous = marked(msg(20, 'inbound', 'AMBIGUOUSBODY'));
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: seen.tsMsgId })],
+      messages: [ambiguous, seen],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(0);
+    expect(h.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'no_new_client' });
+  });
+
+  it('leaves an ordinary 1:1 window untouched when no message carries the marker', async () => {
+    const a = msg(10, 'inbound', 'one');
+    const b = msg(20, 'inbound', WROTE_PETS);
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [b, a],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen[0]!.transcript.map((u) => u.tsMsgId)).toEqual([a.tsMsgId, b.tsMsgId]);
+  });
+
+  it('reports windowCappedAtLimit off the RAW fetch, not the post-filter count', async () => {
+    // `windowCappedAtLimit` means "the READ hit MAX_TRANSCRIPT_MESSAGES", i.e.
+    // there may be older history we never saw. Counting post-filter would flip
+    // it to false the moment one marked message rode a full page.
+    const page: MessageItem[] = [];
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES; i++) page.push(msg(i, 'inbound', `m${i}`));
+    page[0] = marked(page[0]!);
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: page,
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.runs[0]!.window!.windowCappedAtLimit).toBe(true);
   });
 });

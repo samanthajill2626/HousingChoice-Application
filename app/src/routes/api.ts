@@ -60,7 +60,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -78,11 +78,20 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import {
+  createGroupSendService,
+  type GroupSendService,
+} from '../services/groupSend.js';
+import {
   createSendEmailMessageService,
   EmailSendRefusedError,
   type SendEmailService,
 } from '../services/sendEmailMessage.js';
 import { createApplyParkedEmailEvents } from '../services/emailEvents.js';
+import {
+  readNumberSuppression,
+  type NumberSuppressionScope,
+  type NumberSuppressionState,
+} from '../services/numberSuppression.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
@@ -147,6 +156,24 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   manual_mode: 409,
   breaker_open: 429,
   relay_not_supported: 409,
+  // A native group text handed to the 1:1 send wrapper. Its own code, so the
+  // dashboard never has to read a relay refusal to mean a group one.
+  group_text_not_supported: 409,
+  // Native group send refusals (S5). All 409: each one is a state the staff
+  // member can see and act on from the thread view - too many members, a
+  // deleted member to restore, a member with no consent basis, or a thread with
+  // no Conversations rail behind it yet.
+  not_a_group_text: 409,
+  group_roster_empty: 409,
+  group_too_many_members: 409,
+  group_member_deleted: 409,
+  group_member_no_consent: 409,
+  group_rail_unavailable: 409,
+  // RETRYABLE, and therefore 503 rather than 409 (fix wave 2, adversarial 2 /
+  // conformance F4): the rail is fine, the attempt failed. A 409 told staff the
+  // thread has no rail on every network blip, which is the opposite diagnosis.
+  group_send_failed: 503,
+  group_send_busy: 503,
   // A2P kill-switch (pre-A2P): SMS sending disabled → 503 (matches the relay
   // provisioning kill-switch's 503 posture).
   sms_sending_disabled: 503,
@@ -177,11 +204,17 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
- * The statuses conversations actually use (conversationsRepo: `open` is the
- * only value any code path writes — create, touchLastActivity). ?status= is
- * the byLastActivity partition key, so anything else is allowlisted here
- * before it reaches DynamoDB; extend this set when a close/archive flow
- * lands.
+ * The statuses THIS ROUTE serves. `?status=` is the byLastActivity partition
+ * key, so anything else is allowlisted here before it reaches DynamoDB; extend
+ * this set when a close/archive flow lands.
+ *
+ * `open` is no longer the only value the repo writes: relay groups use
+ * `connecting`/`closed` (read through byRelayStatus, never here) and native
+ * group texts live in their own `group_open` partition. Group threads stay OUT
+ * of this allowlist DELIBERATELY - this is the 50-row page four dashboard hooks
+ * consume, and it is what keeps 132+ group rows from diluting it. They are read
+ * through conversations.listGroupTexts by the group source instead, so a client
+ * asking for `?status=group_open` gets a 400, by design.
  */
 const CONVERSATION_STATUSES = new Set(['open']);
 
@@ -191,11 +224,42 @@ const CONVERSATION_STATUSES = new Set(['open']);
  */
 const SSE_HEARTBEAT_MS = 25_000;
 
+/**
+ * One member of a NATIVE group text, as the thread view needs them. The roster
+ * itself is immutable (spec 4.2), so the only moving parts are the per-member
+ * states the view must be honest about: number-scoped suppression and the
+ * contact's soft-delete.
+ */
+export interface GroupMemberRow {
+  /** Empty string when the member has no contact record yet. */
+  contactId: string;
+  phone: string;
+  name?: string;
+  /** Is THIS NUMBER suppressed? Never "the contact opted out" on its own. */
+  suppressed: boolean;
+  /** Which record answered: the contact's own flag ('primary'), this number's
+   *  1:1 thread ('secondary'), or a number with no contact at all. */
+  suppressionScope: NumberSuppressionScope;
+  /**
+   * A read behind this member FAILED, so `suppressed: false` is NOT an answer -
+   * it is the absence of one. Group reads are LOUD by contract, and a false
+   * negative here is the worst kind: a contact whose opt-out came from the DNC
+   * toggle or the import carries ONLY the contact flag, so a failed contact
+   * read makes an opted-out member look sendable on the exact screen staff use
+   * to decide whether to text the group.
+   */
+  suppressionUnknown?: boolean;
+  /** Present/true only for a soft-deleted contact (sends refuse; spec 15.7). */
+  deleted?: boolean;
+}
+
 export interface ApiRouterDeps {
   config?: AppConfig;
   logger?: Logger;
   /** Test seam: injected service (no DynamoDB/provider). */
   sendMessageService?: SendMessageService;
+  /** Native group texting (S5): injected group send service (test seam). */
+  groupSendService?: GroupSendService;
   /** Email-channel A5: injected email send service (test seam). */
   sendEmailService?: SendEmailService;
   conversationsRepo?: ConversationsRepo;
@@ -494,6 +558,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // from config. The email send route also resolves the recipient contact by
   // address, so a contacts repo is shared with it.
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  // Native group texting (S5): the group reply path. Default-constructed here
+  // for the same reason sendMessage is - the composition root needs no change -
+  // and it builds its own Conversations adapter from config. It takes the SAME
+  // contacts repo as the email path so the deleted/consent fences read the
+  // caller's repo, never a second one of their own.
+  const groupSend =
+    deps.groupSendService ??
+    createGroupSendService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      auditRepo: audit,
+      events,
+    });
   // The email From line renders "<name> at Housing Choice" to the RECIPIENT;
   // the session user carries no `name`, so resolve the full user record
   // (best-effort - a users-table blip falls back to the session identity).
@@ -593,7 +673,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
-  // Group text numbers - admin-only READ-ONLY pool-number inventory
+  // Relay group numbers - admin-only READ-ONLY pool-number inventory
   // (GET /api/pool-numbers; requireRole admin inside the router). Reads the pool
   // repo (listByState) + each number's byPoolNumber group history; the retire
   // block mirrors services/poolNumbers.ts retireEligible.
@@ -1112,6 +1192,39 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
 
+    // Native group text branch (S5). Its own service: the 1:1 wrapper texts
+    // participant_phone, which a group thread does not have, and the relay
+    // fan-out sends FROM a pool number, which a group thread does not have
+    // either. Both other branches are untouched.
+    if (conversation?.type === 'group_text') {
+      if (body === undefined) {
+        // Outbound group MEDIA is a filed follow-up (spec 6.2: text only in v1).
+        // Refuse explicitly rather than dropping the attachments silently.
+        res.status(400).json({ error: 'group_text_media_not_supported' });
+        return;
+      }
+      if (attachments !== undefined || mediaUrls !== undefined) {
+        res.status(400).json({ error: 'group_text_media_not_supported' });
+        return;
+      }
+      try {
+        const actor = (req as AuthedRequest).user?.userId;
+        const outcome = await groupSend({
+          conversationId,
+          body,
+          ...(actor !== undefined && { actorUserId: actor }),
+        });
+        res.status(201).json(outcome);
+      } catch (err) {
+        if (err instanceof SendRefusedError) {
+          res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
+          return;
+        }
+        throw err; // Express 5 forwards async throws to the error handler.
+      }
+      return;
+    }
+
     // 1:1: presign each durable key FRESH (per-attempt rule) into the adapter
     // mediaUrls; merge any legacy raw mediaUrls behind them. Presigned URLs are
     // bearer tokens - never logged here (s3Key/count only).
@@ -1581,6 +1694,121 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
     res.json({ conversation });
+  });
+
+  // GET /api/conversations/:conversationId/group-members -> the NATIVE group
+  // thread's roster, each member carrying the state the thread view must show.
+  //
+  // WHY ITS OWN ROUTE: /relay-groups/:id/members 404s for a non-relay thread
+  // (positive type guard, deliberately), and the two pieces of state that matter
+  // here cannot be derived client-side anyway:
+  //   - SUPPRESSION is NUMBER-SCOPED. The contact flag is authoritative for a
+  //     member's PRIMARY number only; on a secondary number it says nothing, and
+  //     that number's own 1:1 thread flag is the answer. Reading "contact opted
+  //     out" alone would libel a member who only silenced another number - so
+  //     this reads through the ONE suppression seam (services/numberSuppression).
+  //   - DELETED is a soft-delete flag on the contact record.
+  // Roster membership itself is immutable (written once at creation, spec 4.2).
+  router.get('/conversations/:conversationId/group-members', async (req, res) => {
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation || conversation.type !== 'group_text') {
+      // Positive guard, mirroring the relay routes: this surface answers for
+      // NATIVE group threads only, and never speaks for a relay or 1:1 thread.
+      res.status(404).json({ error: 'group_text_not_found' });
+      return;
+    }
+
+    const members: GroupMemberRow[] = [];
+    // ONE NAME FOR THE THREAD, EVERYWHERE (fix wave 5, adversarial 11). The
+    // inbox row and the contact card both title a group from the IMMUTABLE
+    // roster snapshot via lib/groupTitle.ts; detection mints every unseen member
+    // as a NAMELESS stub, so the moment staff triage that stub into a real
+    // contact the snapshot goes stale and those two surfaces read
+    // "With (555) 010-0002 & (555) 010-0003" forever. The header used to paper
+    // over it by re-titling from this route's fresher names, which made the
+    // divergence permanent AND visible (numbers, then names, a beat after open).
+    // The fix is to CONVERGE the snapshot instead: this route is already reading
+    // every member's contact, so when it finds a fresher name it writes the
+    // roster back through the existing backfill. Best effort by construction -
+    // a failure here must never cost the panel its answer - and conditional on
+    // the roster we read, so a concurrent converge is not clobbered.
+    let rosterNamesAreStale = false;
+    for (const m of conversation.participants ?? []) {
+      // ONE contact read per member, passed into the seam so it cannot issue a
+      // second (presence of the key is the switch - `{contact: undefined}` means
+      // "there is none", not "look it up").
+      let contact: ContactItem | undefined;
+      // A FAILED READ IS NOT AN ANSWER. Either read failing makes
+      // `suppressed:false` a guess, and the route must not hand a guess to the
+      // one screen staff use to decide whether to text a group - a contact
+      // whose opt-out came from the DNC toggle or the import has ONLY the
+      // contact flag, so a swallowed findByPhone failure reads as "not
+      // suppressed" for somebody who is. Keep the roster (an unreadable member
+      // must not blank the panel) and mark the member UNKNOWN so the chip and
+      // the send-time gate can both be honest about it.
+      let suppressionUnknown = false;
+      try {
+        contact = await contacts.findByPhone(m.phone);
+      } catch (err) {
+        suppressionUnknown = true;
+        log.error(
+          { err, conversationId },
+          'group members: contact lookup failed - member reported with suppression UNKNOWN, never as not-suppressed',
+        );
+      }
+      let suppression: NumberSuppressionState;
+      try {
+        suppression = await readNumberSuppression(
+          { contactsRepo: contacts, conversationsRepo: conversations },
+          m.phone,
+          { contact },
+        );
+      } catch (err) {
+        suppressionUnknown = true;
+        log.error(
+          { err, conversationId },
+          'group members: suppression read failed - member reported with suppression UNKNOWN, never as not-suppressed',
+        );
+        suppression = { suppressed: false, scope: 'no_contact' };
+      }
+      const first = typeof contact?.firstName === 'string' ? contact.firstName : '';
+      const last = typeof contact?.lastName === 'string' ? contact.lastName : '';
+      const contactName = `${first} ${last}`.trim();
+      const rosterName = typeof m.name === 'string' ? m.name.trim() : '';
+      // The CONTACT's name is fresher than the roster snapshot taken at creation.
+      const name = contactName.length > 0 ? contactName : rosterName;
+      if (contactName.length > 0 && contactName !== rosterName) rosterNamesAreStale = true;
+      members.push({
+        contactId: contact?.contactId ?? m.contactId,
+        phone: m.phone,
+        ...(name.length > 0 && { name }),
+        suppressed: suppression.suppressed,
+        suppressionScope: suppression.scope,
+        ...(suppressionUnknown && { suppressionUnknown: true }),
+        ...(contact !== undefined && isDeleted(contact) && { deleted: true }),
+      });
+    }
+
+    if (rosterNamesAreStale) {
+      const prior = conversation.participants ?? [];
+      const refreshed = prior.map((p) => {
+        const resolved = members.find((r) => r.phone === p.phone);
+        const name = resolved?.name;
+        return name !== undefined && name.length > 0 ? { ...p, name } : p;
+      });
+      try {
+        await conversations.backfillGroupTextRoster(conversationId, refreshed, prior);
+      } catch (err) {
+        log.warn(
+          { err, conversationId },
+          'group members: roster name refresh failed - the panel is unaffected, the inbox row stays stale',
+        );
+      }
+    }
+
+    res.json({ members });
   });
 
   // GET /api/conversations/:conversationId/messages?limit=50&before=...

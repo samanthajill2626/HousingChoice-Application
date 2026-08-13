@@ -34,14 +34,19 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
   expect(res.ok(), `lean reseed failed: ${res.status()} ${await res.text()}`).toBeTruthy();
 }
 
-/** Assert the inbox has finished loading and holds NO Tasha row. On the lean seed
- *  her thread is the ONLY conversation, so "hidden" means the inbox is empty -
- *  anchoring on the loaded empty state first keeps the toHaveCount(0) from passing
- *  vacuously against a still-booting SPA (it would be satisfied by an unrendered
- *  page just as happily as by a correctly hidden row). */
+/** Assert the inbox has finished loading and holds NO Tasha row.
+ *
+ *  The `toHaveCount(0)` needs an anchor, or it passes just as happily against a
+ *  still-booting SPA as against a correctly hidden row. That anchor USED to be
+ *  the empty state: on the lean seed Tasha's thread was the only conversation,
+ *  so "hidden" meant "inbox empty". It is not any more - lean now also seeds a
+ *  native group text and a connecting relay group (group-texting S8/T8.2), and
+ *  neither is Tasha's 1:1 to hide. The anchor is now a POSITIVE one: some OTHER
+ *  row has rendered, which proves the list is loaded without depending on how
+ *  many conversations the fixture happens to contain. */
 async function expectTashaHidden(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Inbox' })).toBeVisible();
-  await expect(page.getByText('No conversations yet')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('listitem').first()).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('link', { name: /Tasha Nguyen/ })).toHaveCount(0);
 }
 

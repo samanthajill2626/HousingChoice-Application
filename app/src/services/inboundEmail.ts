@@ -770,6 +770,12 @@ export async function ingestInboundEmail(
     // Is the From-address on the resolved conversation's known set? (its
     // participant_email, or any address of its roster contact, or the tier-6
     // contact when it IS the roster contact.)
+    // FIRST-PARTICIPANT-WINS, and it is only sound because this roster belongs
+    // to a 1:1 thread: tier-5 resolution reaches only threads found by an email
+    // token/reference, and a native group text carries no participant_email and
+    // is never email-threaded (its members' emails resolve to their own 1:1s).
+    // On a multi-party roster this would silently attribute the mail to member
+    // #1.
     const rosterContactId = resolvedConversation.participants?.[0]?.contactId;
     const rosterContact =
       rosterContactId !== undefined && rosterContactId.length > 0
@@ -800,7 +806,13 @@ export async function ingestInboundEmail(
     // Resolve the target thread: existing open email thread for this address,
     // else the contact's primary-phone open 1:1 (plan: "resolve via contact
     // primary phone thread"), else create the email-keyed 1:1 (ADJ-9 opts).
-    const not1to1 = (c: ConversationItem) => c.type === 'relay_group' || c.status !== 'open';
+    // Multi-party threads are named EXPLICITLY. `status !== 'open'` already
+    // excludes a native group text for free (they live in the `group_open`
+    // partition), but relying on that alone would make this guard depend on a
+    // partition choice made elsewhere - name the type so the exclusion survives
+    // any future status change (invariant 13.6).
+    const not1to1 = (c: ConversationItem) =>
+      c.type === 'relay_group' || c.type === 'group_text' || c.status !== 'open';
     let target: ConversationItem | undefined = (
       await deps.conversations.findByParticipantEmail(fromNorm)
     ).find((c) => !not1to1(c));

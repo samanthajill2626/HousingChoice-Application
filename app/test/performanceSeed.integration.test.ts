@@ -265,8 +265,17 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     const connecting = await readers.conversations.listRelayGroups('connecting');
     expect(open).toMatchObject({ truncated: false });
     expect(connecting).toMatchObject({ truncated: false });
-    expect(open.items).toHaveLength(500);
-    expect(connecting.items).toHaveLength(500);
+    // Count the GENERATED share only (this test's own subject), not the whole
+    // partition. resetPerformanceData reseeds the LEAN profile first
+    // (performanceSeed.ts), and lean carries one `connecting` relay_group as the
+    // group-texting conversion fixture - so the raw partition legitimately holds
+    // 501. Asserting the absolute count made this test a tripwire for anything
+    // lean ever adds, which is not what "without truncation" is about; the
+    // `truncated: false` assertions above are.
+    const generated = (items: typeof open.items) =>
+      items.filter((item) => item.conversationId.startsWith('perf-'));
+    expect(generated(open.items)).toHaveLength(500);
+    expect(generated(connecting.items)).toHaveLength(500);
     expect(open.items.every((item) => item.relay_status === 'relay_group#open')).toBe(true);
     expect(connecting.items.every((item) => item.relay_status === 'relay_group#connecting')).toBe(true);
   }, 300_000);

@@ -24,11 +24,17 @@ const CHANNEL_LABEL: Record<InboxChannel, string> = {
   email: 'Email',
 };
 
-/** The deep-link target: contact rows → the contact page; relay_group rows → the
- *  conversation view; unknown rows → the Contacts ▸ Unknown triage list,
- *  deep-linked with the number. */
+/** The deep-link target: contact rows -> the contact page; the two MULTI-PARTY
+ *  kinds (relay_group, group_text) -> the conversation view; unknown rows -> the
+ *  Contacts > Unknown triage list, deep-linked with the number.
+ *  The trailing return is the UNKNOWN case, so an unhandled kind would silently
+ *  link to `/contacts/unknown?phone=` (empty) - a wrong-surface link that looks
+ *  like it worked. Every kind is handled above it on purpose. */
 function hrefFor(row: InboxRowData): string {
-  if (row.kind === 'relay_group' && row.conversationId !== undefined) {
+  if (
+    (row.kind === 'relay_group' || row.kind === 'group_text') &&
+    row.conversationId !== undefined
+  ) {
     return `/conversations/${row.conversationId}`;
   }
   if (row.kind === 'contact' && row.contactId !== undefined) {
@@ -44,9 +50,19 @@ export function InboxRow({
 }: InboxRowProps): React.JSX.Element {
   const unread = row.unreadCount > 0;
   const isRelay = row.kind === 'relay_group';
+  const isGroupText = row.kind === 'group_text';
+  // Both multi-party kinds get the same people glyph; the CHIP is what tells
+  // them apart (a masked relay thread vs a native carrier group text).
+  const isMultiParty = isRelay || isGroupText;
   // The channel/kind chip: contact/unknown rows show the latest item's channel
-  // (Text/Photo/Call); a relay_group row has no channel — show "Group text".
-  const kindLabel = isRelay ? 'Group text' : row.channel ? CHANNEL_LABEL[row.channel] : '';
+  // (Text/Photo/Call); a multi-party row has no channel - show what it IS.
+  const kindLabel = isRelay
+    ? 'Relay group'
+    : isGroupText
+      ? 'Group text'
+      : row.channel
+        ? CHANNEL_LABEL[row.channel]
+        : '';
 
   // Swipe-to-reveal (mobile). Keyboard/pointer users reach the same buttons via
   // Tab (focus-within reveals them in CSS); swipe is an ADDITIONAL affordance.
@@ -74,10 +90,12 @@ export function InboxRow({
           {row.role ? <span className={`${styles.dot} ${styles[`dot_${row.role}`] ?? ''}`} aria-hidden="true" /> : null}
           <span className={styles.head}>
             <span className={`${styles.name} ${unread ? styles.bold : ''}`}>
-              {isRelay ? <span aria-hidden="true">👥 </span> : null}
+              {isMultiParty ? <span aria-hidden="true">👥 </span> : null}
               {row.name}
             </span>
             <span className={styles.channel}>{kindLabel}</span>
+            {/* RELAY-only lifecycle: a native group text has no closed state in
+                v1 (spec 10) and its rows carry no `status` at all. */}
             {isRelay && row.status === 'closed' ? <span className={styles.tag}>Closed</span> : null}
             {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}

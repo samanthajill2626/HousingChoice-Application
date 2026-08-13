@@ -1,6 +1,6 @@
 // NumbersSection tests - the "Phone numbers" section: the "Our number" block
 // (OUR one business number, read-only, for EVERY authenticated user) plus the
-// admin-only "Group text numbers" pool inventory. Covers the table render
+// admin-only "Relay group numbers" pool inventory. Covers the table render
 // (mocked listPoolNumbers), the four retirement-cell variants, the state filter
 // chips (default active+releasing / Released / All), row expansion into group
 // rows that link to the conversation thread, both empty states, the error +
@@ -228,13 +228,13 @@ describe('NumbersSection - state filter chips', () => {
     const u = userEvent.setup();
     renderSection();
 
-    expect(await screen.findByText('No group text numbers match this filter.')).toBeInTheDocument();
+    expect(await screen.findByText('No relay group numbers match this filter.')).toBeInTheDocument();
     // NOT the no-numbers-at-all copy.
-    expect(screen.queryByText(/a number is provisioned with the first group text/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/a number is provisioned with the first relay group/i)).not.toBeInTheDocument();
 
     await u.click(screen.getByRole('button', { name: 'Released' }));
     expect(screen.getByText('(555) 019-0003')).toBeInTheDocument();
-    expect(screen.queryByText('No group text numbers match this filter.')).not.toBeInTheDocument();
+    expect(screen.queryByText('No relay group numbers match this filter.')).not.toBeInTheDocument();
   });
 });
 
@@ -331,7 +331,7 @@ describe('NumbersSection - empty + error', () => {
     renderSection();
     expect(
       await screen.findByText(
-        'No group text numbers yet - a number is provisioned with the first group text.',
+        'No relay group numbers yet - a number is provisioned with the first relay group.',
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
@@ -375,8 +375,8 @@ describe('NumbersSection - our number', () => {
     // table, no fetch, no "the pool is empty" claim, no error alert, no counts.
     expect(screen.queryByRole('table')).toBeNull();
     expect(listPoolNumbers).not.toHaveBeenCalled();
-    expect(screen.queryByText(/No group text numbers yet/i)).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Group text numbers' })).toBeNull();
+    expect(screen.queryByText(/No relay group numbers yet/i)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Relay group numbers' })).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByLabelText('Pool number counts')).toBeNull();
   });
@@ -401,7 +401,7 @@ describe('NumbersSection - our number', () => {
 
     expect(await screen.findByText('(555) 000-9999')).toBeVisible();
     expect(await screen.findByRole('table')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Group text numbers' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Relay group numbers' })).toBeVisible();
     expect(listPoolNumbers).toHaveBeenCalled();
   });
 });
@@ -431,9 +431,9 @@ describe('NumbersSection - role gating (the route is no longer guarded)', () => 
     expect(screen.queryByText('TEMPLATES PANEL')).toBeNull();
 
     // ...and the pool inventory stays admin-only, the fetch included.
-    expect(screen.queryByRole('heading', { name: 'Group text numbers' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Relay group numbers' })).toBeNull();
     expect(screen.queryByRole('table')).toBeNull();
-    expect(screen.queryByText(/No group text numbers yet/i)).toBeNull();
+    expect(screen.queryByText(/No relay group numbers yet/i)).toBeNull();
     expect(listPoolNumbers).not.toHaveBeenCalled();
   });
 });

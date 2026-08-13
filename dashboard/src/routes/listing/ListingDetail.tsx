@@ -346,7 +346,7 @@ export function ListingDetail(): React.JSX.Element {
 
   // --- Contacts card edit mode (spec 6.1 / D9) ------------------------------
   // This card is where the property's PRIMARY CONTACT is set: the person tours
-  // and placements put on the group text and reach by masked call when nobody
+  // and placements put on the relay group and reach by masked call when nobody
   // has overridden the roster. A deleted property is read-only, like every other
   // card here.
   const contactsEditing = editingContacts && !deleted;
@@ -439,7 +439,7 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   /** Removing the CURRENT primary contact re-points live masked calls and every
-   *  new group text, so it confirms first and NAMES who inherits that routing.
+   *  new relay group, so it confirms first and NAMES who inherits that routing.
    *  Any other row removes on click. */
   const onRemoveContactRow = (row: RosterRow): void => {
     if (row.primaryContact) {
@@ -460,7 +460,7 @@ export function ListingDetail(): React.JSX.Element {
         ? contactRows.find((r) => r.contactId === landlordOfRecord)?.name ?? landlordOfRecord
         : undefined;
     return promoted !== undefined
-      ? `${promoted} becomes the primary contact - calls and new group texts for this property will go to them.`
+      ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
       : 'This property will have no primary contact - tours fall back to the landlord of record.';
   };
 

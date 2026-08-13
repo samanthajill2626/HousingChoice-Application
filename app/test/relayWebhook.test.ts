@@ -408,9 +408,10 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
       relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMclosed-stop' }),
     );
     expect(res.status).toBe(200);
-    // The STOP confirmation rides the TwiML response - parity with a STOP to the
-    // main number (pre-feature, a closed group's number fell through to the 1:1).
-    expect(res.text).toContain('<Message>');
+    // NO app reply - parity with a STOP to the main number, which no longer
+    // replies either (Twilio Advanced Opt-Out owns every keyword confirmation;
+    // docs/issues/twilio-standard-optout-double-reply.md).
+    expect(res.text).not.toContain('<Message>');
 
     // The STOP still lands in ALICE's OWN 1:1 thread WITH provenance (the message
     // stays on the timeline exactly as the 1:1 path keeps it).
@@ -599,8 +600,16 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
 // Open-path keyword handling (relay-open-path-stop, plan Task 3): a member (or
 // any sender) who texts STOP / HELP / an opt-in keyword to a pool number while
 // the group is OPEN gets the keyword processed exactly like the 1:1 and closed
-// paths - flags set/cleared on the sender's OWN 1:1 (never the group), filed
-// reply on the TwiML, and the bare keyword NEVER relayed to the other members.
+// paths - flags set/cleared on the sender's OWN 1:1 (never the group) and the
+// bare keyword NEVER relayed to the other members.
+//
+// THE REPLY IS GONE FROM ALL THREE PATHS (2026-08-12, Cameron's ruling). The
+// live test proved Twilio's platform keyword handling is on: it consumed HELP
+// before our webhook saw it, refused our STOP TwiML with 21610, and doubled our
+// START welcome. Twilio now owns the replies via Advanced Opt-Out configured
+// with OUR filed copy. This IS a relay-visible change - the open/closed relay
+// paths used to answer STOP/HELP/START themselves - and it is deliberate:
+// leaving them would keep exactly the double-confirmation the ruling removes.
 describe('open-path keyword handling (relay-open-path-stop)', () => {
   let world: FakeWorld;
 
@@ -631,7 +640,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     return [...world.conversations.values()].find((c) => c.participant_phone === phone);
   }
 
-  it('STOP from a roster member: persisted on the relay thread, NO fan-out, 1:1 flagged, contact flagged (primary), annotation set, STOP confirmation TwiML', async () => {
+  it('STOP from a roster member: persisted on the relay thread, NO fan-out, 1:1 flagged, contact flagged (primary), annotation set, EMPTY TwiML', async () => {
     seedRelay(world);
     // ALICE is a real tenant contact whose PRIMARY number is ALICE.
     world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
@@ -643,8 +652,8 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
       relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMopen-stop' }),
     );
     expect(res.status).toBe(200);
-    // The STOP confirmation rides the TwiML response (WE own the reply).
-    expect(res.text).toContain('<Message>');
+    // TWILIO owns the confirmation now; the app answers with a bare ack.
+    expect(res.text).not.toContain('<Message>');
 
     // The bare STOP stays on the RELAY thread for the audit trail (one row,
     // inbound, attributed to Alice) - and is NEVER fanned out to Bob/Carol.
@@ -682,7 +691,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
       relayInboundParams({ From: BOB, Body: 'STOP', MessageSid: 'SMopen-stop-secondary' }),
     );
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Message>');
+    expect(res.text).not.toContain('<Message>');
 
     // The 1:1 for the SECONDARY number (BOB) is flagged - the correct per-number
     // suppression record when the contact flag is out of reach.
@@ -697,7 +706,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
-  it('HELP from a member: filed HELP reply TwiML, no flags, no fan-out', async () => {
+  it('HELP from a member: EMPTY TwiML, no flags, no fan-out', async () => {
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
 
@@ -707,7 +716,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
       relayInboundParams({ From: ALICE, Body: 'HELP', MessageSid: 'SMopen-help' }),
     );
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Message>'); // the filed HELP copy rides the TwiML
+    expect(res.text).not.toContain('<Message>'); // Twilio answers HELP, not us
     // HELP never touches suppression state and never fans out.
     expect(world.optOutSets).toHaveLength(0);
     expect(world.flagWrites).toHaveLength(0);
@@ -715,7 +724,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
-  it('START from a previously opted-out member: flags cleared, annotation cleared, welcome TwiML, no fan-out', async () => {
+  it('START from a previously opted-out member: flags cleared, annotation cleared, EMPTY TwiML, no fan-out', async () => {
     seedRelay(world, {
       relay_opted_out_members: {
         'c-alice': { contactId: 'c-alice', phone: ALICE, at: '2026-07-16T00:00:00.000Z' },
@@ -736,7 +745,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
       relayInboundParams({ From: ALICE, Body: 'START', MessageSid: 'SMopen-start' }),
     );
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Message>'); // the welcome copy rides the TwiML
+    expect(res.text).not.toContain('<Message>'); // Twilio's opt-in confirmation, not ours
 
     // The 1:1 flag is CLEARED (value false), and the contact flag is cleared.
     const oneToOne = oneToOneFor(ALICE);
@@ -774,7 +783,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
   });
 
-  it('opt-in suppression read THROWS: fails CLOSED to the command path (welcome TwiML, no fan-out)', async () => {
+  it('opt-in suppression read THROWS: fails CLOSED to the command path (no fan-out)', async () => {
     seedRelay(world);
     // Alice is a roster member with NO contact flag, so the suppression predicate
     // moves past the contact read to the conversation-thread read...
@@ -793,10 +802,15 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     );
     expect(res.status).toBe(200);
     // Fail CLOSED: an indeterminate suppression state is treated as a command, so
-    // the YES is NOT relayed (a fan-out to Bob/Carol would prove fail-OPEN) and
-    // the welcome reply rides the TwiML.
-    expect(res.text).toContain('<Message>');
+    // the YES is NOT relayed. TwiML is empty on BOTH branches now (Twilio owns
+    // the reply), so the absent fan-out to Bob/Carol is one half of the proof...
+    expect(res.text).not.toContain('<Message>');
     expect(world.sent).toHaveLength(0);
+    // ...and the other half is that keyword processing actually RAN: the opt-in
+    // cleared suppression on Alice's own 1:1. The sibling unsuppressed-YES test
+    // above asserts optOutSets is EMPTY, so this is the signal that separates
+    // the command path from the content path.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([false]);
   });
 
   it('a body merely CONTAINING a keyword fans out normally with empty TwiML and no flags', async () => {
@@ -818,7 +832,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.flagWrites).toHaveLength(0);
   });
 
-  it('unknown-sender STOP on the open fallback: 1:1 + contact flagged, NO annotation, confirmation TwiML, no fan-out', async () => {
+  it('unknown-sender STOP on the open fallback: 1:1 + contact flagged, NO annotation, EMPTY TwiML, no fan-out', async () => {
     seedRelay(world); // open group Alice/Bob/Carol; ZARA is on NO roster
     // ZARA is a known contact (primary = ZARA) but not a member of this group.
     world.contacts.push({ contactId: 'c-zara', type: 'tenant', phone: ZARA } as ContactItem);
@@ -830,7 +844,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
       relayInboundParams({ From: ZARA, Body: 'STOP', MessageSid: 'SMopen-unknown-stop' }),
     );
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Message>'); // the STOP confirmation still rides the TwiML
+    expect(res.text).not.toContain('<Message>'); // Twilio sends the confirmation
 
     // ZARA's own 1:1 + contact are flagged (same as a STOP to the main number).
     const oneToOne = oneToOneFor(ZARA);
@@ -865,7 +879,7 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
   });
 
-  it('redelivered STOP (same MessageSid): still no fan-out, idempotent flag re-writes, confirmation TwiML again', async () => {
+  it('redelivered STOP (same MessageSid): still no fan-out, idempotent flag re-writes, EMPTY TwiML both times', async () => {
     seedRelay(world);
     world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
     const { app } = makeWebhookHarness({ world });
@@ -873,12 +887,12 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     const params = relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMopen-stop-redeliver' });
     const first = await signedTwilioPost(app, '/webhooks/twilio/sms', params);
     expect(first.status).toBe(200);
-    expect(first.text).toContain('<Message>');
+    expect(first.text).not.toContain('<Message>');
 
     // Twilio redelivers the SAME SID.
     const second = await signedTwilioPost(app, '/webhooks/twilio/sms', params);
     expect(second.status).toBe(200);
-    expect(second.text).toContain('<Message>'); // confirmation re-rides the TwiML
+    expect(second.text).not.toContain('<Message>');
 
     // The relay message persisted exactly ONCE (SID dedupe), never fanned out.
     expect(world.messages.filter((m) => m.provider_sid === 'SMopen-stop-redeliver')).toHaveLength(1);

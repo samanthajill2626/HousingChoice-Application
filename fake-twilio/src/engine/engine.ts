@@ -6,8 +6,8 @@ import { GroupStore } from './groups.js';
 import { buildInboundSmsParams, buildStatusParams, type WebhookParams } from './signer.js';
 import { plannedTransitions, stepDelayMs } from './delivery.js';
 import type {
-  AddAdHocInput, DeliveryProfile, GroupSnapshot, Persona, SendAsPartyInput, SetDeliveryOutcomeInput, Thread,
-  ThreadMessage,
+  AddAdHocInput, DeliveryProfile, DeliveryState, GroupSnapshot, Persona, SendAsPartyInput,
+  SetDeliveryOutcomeInput, Thread, ThreadMessage,
 } from './types.js';
 import type { EventHub } from './eventHub.js';
 import type { EngineEvent, EngineListener } from './engineEvents.js';
@@ -34,6 +34,8 @@ export interface DispatchError {
 /** Modest robustness caps on the untrusted control surface (sendAsParty). */
 const MAX_BODY_LEN = 10000;
 const MAX_MEDIA_URLS = 25;
+/** Twilio caps a group MMS at 10 handsets; the parser scans to index 32. */
+const MAX_OTHER_RECIPIENTS = 32;
 /** Cap on the in-engine dispatch-error ring buffer. */
 const MAX_DISPATCH_ERRORS = 50;
 
@@ -202,9 +204,22 @@ export class FakeTwilioEngine {
         if (!isHttpUrl(url)) throw new Error(`sendAsParty: mediaUrl ${url} is not an http(s) URL`);
       }
     }
+    if (input.otherRecipients !== undefined) {
+      if (input.otherRecipients.length > MAX_OTHER_RECIPIENTS) {
+        throw new Error(`sendAsParty: otherRecipients exceeds ${MAX_OTHER_RECIPIENTS} entries`);
+      }
+      for (const other of input.otherRecipients) {
+        if (!isE164(other)) {
+          throw new Error(`sendAsParty: otherRecipient ${other} is not a valid E.164 number`);
+        }
+      }
+    }
     const to = input.to ?? this.appNumber;
     const hasMedia = (input.mediaUrls?.length ?? 0) > 0;
-    const sid = this.mintSid(hasMedia ? 'MM' : 'SM');
+    // A28: the prefix is normally derived from media presence alone, which makes
+    // the tripwire shape (MM + NumMedia=0) unproducible. An explicit override
+    // wins, and is the ONLY way that shape is reachable.
+    const sid = this.mintSid(input.sidShape ?? (hasMedia ? 'MM' : 'SM'));
     const now = this.clock.nowIso();
     const message: ThreadMessage = {
       sid, direction: 'inbound', from: input.from, to,
@@ -232,6 +247,10 @@ export class FakeTwilioEngine {
       messageSid: sid, from: input.from, to,
       ...(input.body !== undefined && { body: input.body }),
       ...(input.mediaUrls !== undefined && { mediaUrls: input.mediaUrls }),
+      ...(input.otherRecipients !== undefined && { otherRecipients: input.otherRecipients }),
+      ...(input.otherRecipientsShape !== undefined && {
+        otherRecipientsShape: input.otherRecipientsShape,
+      }),
     });
     // FIX 2a: surface a rejected inbound webhook (e.g. a signing regression → non-2xx)
     // to the control-API caller instead of silently succeeding.
@@ -241,6 +260,95 @@ export class FakeTwilioEngine {
       throw new Error(`sendAsParty: inbound webhook returned ${status}`);
     }
     return sid;
+  }
+
+  // -------------------------------------------------------------------------
+  // Conversations fan-out legs (native group texting)
+  // -------------------------------------------------------------------------
+  //
+  // A Conversations-originated send reaches each handset as an ordinary carrier
+  // message, so it MUST land in that persona's fake-phone thread. What it must
+  // NOT do is fire a classic status callback: the S5-PRE addendum proved live
+  // that Programmable Messaging status callbacks do NOT fire for
+  // Conversations-originated sends (zero callbacks over a window where both legs
+  // reached `delivered`). Emitting them here would be worse than cosmetic - the
+  // app has no message row under the leg's SMxx, so every leg would produce the
+  // "status callback for unknown provider SID" ERROR that spec 12's reply-all
+  // test exists to prove ABSENT.
+  //
+  // Delivery state for these legs therefore arrives SOLELY as `onDeliveryUpdated`
+  // events, which the ConversationsEngine schedules and dispatches.
+
+  /**
+   * Append one Conversations fan-out leg to a party's thread. Auto-registers an
+   * unknown recipient exactly like `recordOutboundFromApp`, mints its own SMxx
+   * (the ChannelMessageSid a receipt carries) and schedules NOTHING.
+   */
+  appendConversationsLeg(input: { to: string; from: string; body?: string }): string {
+    if (this.registry.byNumber(input.to) === undefined) {
+      try {
+        this.addAdHoc({ label: input.to, role: 'unknown', number: input.to });
+      } catch {
+        /* app-number near-miss or non-E.164 - leave unregistered */
+      }
+    }
+    const sid = this.mintSid('SM');
+    const now = this.clock.nowIso();
+    const message: ThreadMessage = {
+      sid,
+      direction: 'outbound',
+      from: input.from,
+      to: input.to,
+      ...(input.body !== undefined && { body: input.body }),
+      state: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.append(input.to, message);
+    this.emit({ type: 'message.appended', partyNumber: input.to, message });
+    return sid;
+  }
+
+  /**
+   * Advance a fan-out leg's stored state (and its ErrorCode on a failure), so
+   * the fake-phones UI tracks the same progression the receipts carry. No
+   * webhook: the ConversationsEngine owns that half.
+   */
+  advanceLegState(sid: string, partyNumber: string, state: DeliveryState, errorCode?: string): void {
+    const updated = this.store.updateState(sid, state);
+    if (!updated) return;
+    updated.updatedAt = this.clock.nowIso();
+    if (errorCode !== undefined) updated.errorCode = errorCode;
+    this.emit({ type: 'message.updated', partyNumber, message: updated });
+  }
+
+  /**
+   * Consume the delivery profile armed for a party via
+   * `POST /control/delivery-outcome`. ONE arming API serves both 1:1 sends and
+   * group legs - notably the per-member 21610 a STOPped handset produces.
+   */
+  takeDeliveryProfile(partyNumber: string): DeliveryProfile {
+    const profile = this.nextProfile.get(partyNumber) ?? { kind: 'normal' as const };
+    this.nextProfile.delete(partyNumber);
+    return profile;
+  }
+
+  /** Register a cancel fn so `reset()` tears down a Conversations receipt timer
+   *  exactly like a status-callback timer, and report the generation it was
+   *  captured under so a late callback can no-op. */
+  trackPendingCancel(cancel: () => void): number {
+    this.pendingCancels.add(cancel);
+    return this.generation;
+  }
+
+  /** True when the generation a scheduled callback captured is still current. */
+  isCurrentGeneration(generation: number): boolean {
+    return generation === this.generation;
+  }
+
+  /** Drop a fired timer's cancel from the pending set (mirrors FIX 1). */
+  releasePendingCancel(cancel: () => void): void {
+    this.pendingCancels.delete(cancel);
   }
 
   /**

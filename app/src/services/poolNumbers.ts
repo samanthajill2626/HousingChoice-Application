@@ -379,6 +379,9 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // Cheap PRE-veto (skip obviously-live numbers without claim/abort churn);
       // the AUTHORITATIVE veto is the post-claim re-verify below.
       const groups = await conversations.getAllByPoolNumber(record.poolNumber);
+      // Keyed on getAllByPoolNumber, so only relay threads are ever considered:
+      // a native group text carries no pool_number and can neither veto nor be
+      // affected by pool-number retirement.
       if (groups.length === 0 || groups.some((g) => g.status === 'open')) continue;
 
       // (1) CLAIM active -> releasing (W2 TOCTOU fence). From here burnClaim

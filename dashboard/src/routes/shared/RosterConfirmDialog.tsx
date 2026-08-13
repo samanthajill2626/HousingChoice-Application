@@ -1,5 +1,5 @@
-// RosterConfirmDialog - the last thing an operator reads before a REAL group
-// text goes out (contact-rosters spec 6.3 pre-open / 6.4 add-to-live-group).
+// RosterConfirmDialog - the last thing an operator reads before a REAL relay
+// group goes out (contact-rosters spec 6.3 pre-open / 6.4 add-to-live-group).
 // Both confirms are the SAME shape because they answer the same question:
 // exactly what will be sent, and to exactly whom.
 //
@@ -37,11 +37,11 @@ const NOT_RECEIVING: Readonly<Record<string, string>> = {
 };
 
 export interface RosterConfirmDialogProps {
-  /** The question, e.g. "Open the group text?" / "Add Alicia Grant to the group text?" */
+  /** The question, e.g. "Open the relay group?" / "Add Alicia Grant to the relay group?" */
   title: string;
   /** The server-resolved preview. Never rebuilt client-side. */
   preview: RosterPreview;
-  /** The DEFAULT action's label OUTSIDE quiet hours, e.g. "Open group text" /
+  /** The DEFAULT action's label OUTSIDE quiet hours, e.g. "Open relay group" /
    *  "Add and notify". */
   confirmLabel: string;
   /** The verb phrase the DEFERRAL button reads with, e.g. "Open" -> "Open at

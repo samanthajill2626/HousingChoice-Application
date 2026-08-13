@@ -28,7 +28,7 @@ describe('describeTourActivity', () => {
 
   it('links a group-opened row to the conversation', () => {
     const d = describeTourActivity(ev({ type: 'tour_group_opened', conversationId: 'g-9' }));
-    expect(d.label).toBe('Group text opened');
+    expect(d.label).toBe('Relay group opened');
     expect(d.to).toBe('/conversations/g-9');
   });
 
@@ -61,7 +61,7 @@ describe('tourActivityToMilestone', () => {
     });
     expect(tourActivityToMilestone(ev({ type: 'tour_group_opened' }))).toMatchObject({
       type: 'added_to_group_text',
-      label: 'Group text opened',
+      label: 'Relay group opened',
     });
     expect(tourActivityToMilestone(ev({ type: 'tour_converted' }))).toMatchObject({
       type: 'placement_opened',

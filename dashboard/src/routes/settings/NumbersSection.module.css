@@ -1,5 +1,5 @@
 /* NumbersSection - the "Phone numbers" section: the everyone-visible "Our
- * number" block plus the admin-only "Group text numbers" inventory table +
+ * number" block plus the admin-only "Relay group numbers" inventory table +
  * state-filter chips + per-number group expansion. Tokens only (shares the
  * TeamSection table idiom, the AudienceFilters chip idiom, and the VoiceSection
  * labelled-value block idiom). */

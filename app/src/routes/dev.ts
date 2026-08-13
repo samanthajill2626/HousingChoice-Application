@@ -8,7 +8,14 @@ import { Router, json } from 'express';
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
-import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import {
+  clearDevLogTail,
+  devLogTailEnabled,
+  logger as defaultLogger,
+  readDevLogTail,
+  DEV_LOG_TAIL_MIN_LEVEL,
+  type Logger,
+} from '../lib/logger.js';
 import { sealSession, sessionCookieOptions, type SessionEpochCache } from '../middleware/auth.js';
 import { SESSION_COOKIE_NAME } from '../lib/sessionCookie.js';
 import {
@@ -59,6 +66,17 @@ import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
 import { appEvents } from '../lib/events.js';
 import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
+import {
+  GROUP_GUARDRAIL_DUTIES,
+  isGroupGuardrailDuty,
+  runGroupGuardrails,
+  type GroupGuardrailDuty,
+  type RunGroupGuardrailsDeps,
+} from '../jobs/groupGuardrails.js';
+import {
+  createGroupSendStaleness,
+  type GroupSendStalenessService,
+} from '../services/groupSendStaleness.js';
 import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
@@ -96,6 +114,10 @@ export interface DevRouterDeps {
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
+  /** Deps for POST /__dev/group-guardrails/tick (T6.3) - injected in tests. */
+  groupGuardrailDeps?: RunGroupGuardrailsDeps;
+  /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
+  groupStaleness?: GroupSendStalenessService;
   performanceReseed?: typeof resetPerformanceData;
   performanceReseedRequestAllowed?: (remoteAddress: string | null) => boolean;
 }
@@ -178,6 +200,53 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       // only by this already dev-gated router.
       profilerOwnerToken: process.env['E2E_PROFILER_OWNER_TOKEN'] ?? null,
     });
+  });
+
+  // GET /__dev/logtail — the app process's WARN+ERROR ring buffer
+  // (group-texting S8/T8.0). The ONLY way an e2e spec can assert on an app log
+  // line: every child is spawned with stdio:'inherit', so the lines otherwise
+  // go to the launcher's stdout where no test can reach them.
+  //
+  // A16 (BINDING): this is the APP process only. The hermetic lane also spawns
+  // a real worker whose WARN/ERROR never lands here, so a spec asserting a
+  // guardrail line must drive the APP-side tick (/__dev/group-guardrails/tick,
+  // /__dev/group-send-staleness/check, ...), never wait on the worker.
+  //
+  // Query: level=warn|error (default warn), since=<ISO>, contains=<substr of
+  // msg>, event=<exact `event` field>, limit=<n>. Newest last.
+  router.get('/__dev/logtail', (req, res) => {
+    const levelRaw = typeof req.query['level'] === 'string' ? req.query['level'].toLowerCase() : '';
+    const minLevel = levelRaw === 'error' ? 50 : levelRaw === 'fatal' ? 60 : DEV_LOG_TAIL_MIN_LEVEL;
+    const sinceRaw = typeof req.query['since'] === 'string' ? req.query['since'] : undefined;
+    if (sinceRaw !== undefined && !Number.isFinite(Date.parse(sinceRaw))) {
+      res.status(400).json({ error: 'since must be a valid ISO 8601 datetime' });
+      return;
+    }
+    const contains = typeof req.query['contains'] === 'string' ? req.query['contains'] : undefined;
+    const event = typeof req.query['event'] === 'string' ? req.query['event'] : undefined;
+    const limitRaw = typeof req.query['limit'] === 'string' ? Number(req.query['limit']) : undefined;
+    const lines = readDevLogTail({
+      minLevel,
+      ...(sinceRaw !== undefined && { sinceMs: Date.parse(sinceRaw) }),
+      ...(contains !== undefined && { contains }),
+      ...(event !== undefined && { event }),
+      ...(limitRaw !== undefined && Number.isFinite(limitRaw) && { limit: limitRaw }),
+    });
+    res.status(200).json({
+      // FALSE means the ring was never installed (the gate was closed at
+      // createLogger time), so an EMPTY `lines` proves nothing. A spec asserting
+      // the ABSENCE of an ERROR must check this first or it asserts on a
+      // structurally silent surface.
+      capturing: devLogTailEnabled(),
+      lines,
+    });
+  });
+
+  // POST /__dev/logtail/clear — drop the retained lines so a spec can assert
+  // "nothing since I started" without threading timestamps. Workers=1 in the
+  // Playwright config, so this is never racing another spec.
+  router.post('/__dev/logtail/clear', (_req, res) => {
+    res.status(200).json({ ok: true, cleared: clearDevLogTail() });
   });
 
   // POST /auth/dev-login — mint a session for a dev user without Google.
@@ -420,6 +489,82 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDuePendingRosterActions(nowIso, rosterActionDeps());
     log.info({ now: nowIso }, 'dev roster-action tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/group-guardrails/tick { now?, force?, duties? } - the app-side
+  // driver for the four native-group-texting guardrail duties (T6.3).
+  //
+  // TWO REASONS THIS EXISTS, both from worklist A16. A hermetic e2e lane runs a
+  // REAL worker process beside the app: (1) that worker's WARN/ERROR never
+  // reaches the app-side /__dev/logtail, so a spec asserting a guardrail log
+  // line must drive the duty HERE; (2) the worker polls the SAME cadence
+  // records, so without a bypass a spec would silently no-op whenever the
+  // worker had just claimed the period.
+  //
+  // `force` therefore DEFAULTS TO TRUE. A spec that forgets the flag must not
+  // flake; a test that wants to exercise the cadence gate passes force: false
+  // explicitly. A forced run still stamps the period, so the worker does not
+  // immediately redo the work.
+  //
+  // `duties` (optional) narrows the pass to any of `crosscheck_sweep`,
+  // `send_staleness`, `channel_quiet`, `heartbeat`. `now` (optional) is
+  // NORMALIZED via new Date(x).toISOString(), because every deadline comparison
+  // downstream is a LEXICOGRAPHIC ISO sort-key range.
+  router.post('/__dev/group-guardrails/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown; force?: unknown; duties?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    let duties: GroupGuardrailDuty[] | undefined;
+    if (body.duties !== undefined) {
+      if (!Array.isArray(body.duties) || !body.duties.every(isGroupGuardrailDuty)) {
+        res.status(400).json({
+          error: `duties must be a subset of ${GROUP_GUARDRAIL_DUTIES.join(', ')}`,
+        });
+        return;
+      }
+      duties = body.duties;
+    }
+    const force = body.force === undefined ? true : body.force === true;
+    const outcome = await runGroupGuardrails(
+      nowIso,
+      deps.groupGuardrailDeps ?? { logger: log },
+      { force, ...(duties !== undefined && { duties }) },
+    );
+    log.info({ now: nowIso, force, ran: outcome.ran }, 'dev group-guardrail tick ran');
+    res.status(200).json({ ok: true, ...outcome });
+  });
+
+  // POST /__dev/group-send-staleness/check { conversationId, tsMsgId } - T6.4's
+  // direct seam. It answers "are this send's receipts complete?" for ONE
+  // message without waiting out the ten-minute deadline or touching the due
+  // partition, which is what lets a spec assert the predicate (A18: `sent` is
+  // NOT terminal) rather than the sweep's plumbing.
+  let stalenessService: GroupSendStalenessService | undefined;
+  const staleness = (): GroupSendStalenessService => {
+    stalenessService ??= deps.groupStaleness ?? createGroupSendStaleness({ logger: log });
+    return stalenessService;
+  };
+  router.post('/__dev/group-send-staleness/check', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { conversationId?: unknown; tsMsgId?: unknown };
+    if (typeof body.conversationId !== 'string' || typeof body.tsMsgId !== 'string') {
+      res.status(400).json({ error: 'conversationId and tsMsgId are required' });
+      return;
+    }
+    const result = await staleness().checkMessage({
+      conversationId: body.conversationId,
+      tsMsgId: body.tsMsgId,
+    });
+    log.info(
+      { conversationId: body.conversationId, outcome: result.outcome },
+      'dev group send-staleness check ran',
+    );
+    res.status(200).json({ ok: true, ...result });
   });
 
   router.post('/__dev/placement-nudges/tick', json(), async (req, res) => {
@@ -720,6 +865,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   };
   router.post('/__dev/relay/replay-intros', async (_req, res) => {
     const { conversationsRepo, enqueueIntro } = relayReplayDeps();
+    // listRelayGroups reads the sparse byRelayStatus GSI, which a native group
+    // text never writes (spec 4.2) - so this dev replay is relay-scoped by the
+    // reader itself and can never touch a group thread.
     const { items } = await conversationsRepo.listRelayGroups('open');
     let replayed = 0;
     let skipped = 0;

@@ -16,13 +16,13 @@ import { Scenario, freshTenant, freshLandlord, tourSchedule } from '../../scenar
 //                       message to BOTH members, hard-disables the composer, and KEEPS
 //                       the pool number on the closed conversation.
 //   3b. CLOSE (ASK)   - recording "not a fit" on a tour with a linked open group pops
-//                       the inline RelayCloseAskDialog; "Close group text" runs the same
+//                       the inline RelayCloseAskDialog; "Close relay group" runs the same
 //                       close (final message to both members).
 //   4. LATE TEXT      - after a group closes, a still-rostered member's text to the
 //                       (kept) number lands in their 1:1 WITH the provenance badge; the
 //                       closed group transcript is untouched and a disjoint OPEN group on
 //                       the SAME number is unaffected.
-//   5. NAG            - the Today "Group texts to close" card renders a past-due seeded
+//   5. NAG            - the Today "Relay groups to close" card renders a past-due seeded
 //                       group; "Keep open" defers it 28 days and the row leaves.
 //
 // SEEDING: burn is PERMANENT per seeded DB, so multiplexing is NOT seedable - the
@@ -239,7 +239,7 @@ test('close (ConversationDetail): final message to both members, composer hard-d
   expect(conv.pool_number).toBe(group.pool_number);
 });
 
-test('close (inline ask): "not a fit" on a tour pops RelayCloseAskDialog; "Close group text" sends the final message', async ({
+test('close (inline ask): "not a fit" on a tour pops RelayCloseAskDialog; "Close relay group" sends the final message', async ({
   page,
   request,
 }) => {
@@ -275,12 +275,12 @@ test('close (inline ask): "not a fit" on a tour pops RelayCloseAskDialog; "Close
   await page.getByRole('button', { name: 'Save decision' }).click();
 
   // The inline ask appears (design D4 human path) - nothing auto-closed the group.
-  const ask = page.getByRole('dialog', { name: /Also close the group text/i });
+  const ask = page.getByRole('dialog', { name: /Also close the relay group/i });
   await expect(ask).toBeVisible({ timeout: 15_000 });
-  await ask.getByRole('button', { name: 'Close group text' }).click();
+  await ask.getByRole('button', { name: 'Close relay group' }).click();
   await expect(ask).toHaveCount(0, { timeout: 15_000 });
 
-  // "Close group text" ran the close: the final catalog copy reached BOTH members.
+  // "Close relay group" ran the close: the final catalog copy reached BOTH members.
   await expectOutboxIncludes(request, tenant.phone, CLOSED_COPY);
   await expectOutboxIncludes(request, owner.phone, CLOSED_COPY);
 });
@@ -345,18 +345,18 @@ test('late text: a closed member texting the kept number lands in their 1:1 with
   expect(g2.pool_number).toBe(pool);
 });
 
-test('Today nag: the past-due seeded group shows in "Group texts to close"; Keep open defers it and the row leaves', async ({
+test('Today nag: the past-due seeded group shows in "Relay groups to close"; Keep open defers it and the row leaves', async ({
   page,
   request,
 }) => {
   await reseedFull(request); // the seeded past-due nag group lives only in FULL
   await devLogin(page); // lands on Today (session minted after the FULL reseed)
 
-  // The seeded past-due nag surfaces in the "Group texts to close" card.
-  await expect(page.getByRole('heading', { name: /Group texts to close/i })).toBeVisible({
+  // The seeded past-due nag surfaces in the "Relay groups to close" card.
+  await expect(page.getByRole('heading', { name: /Relay groups to close/i })).toBeVisible({
     timeout: 15_000,
   });
-  const list = page.getByRole('list', { name: 'Group texts to close' });
+  const list = page.getByRole('list', { name: 'Relay groups to close' });
   const row = list.getByRole('listitem').filter({ hasText: NAG_POOL_DISPLAY });
   await expect(row).toBeVisible();
 

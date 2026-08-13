@@ -1,7 +1,7 @@
 // RosterRail — the left rail of the fake-phones UI. Personas are grouped under
 // role headings (Landlord / Tenant / PM / Staff / Unknown); each row is a button showing
 // the persona label, its number, and an unread badge. Below the persona role
-// groups, a "Group texts" section lists the traffic-inferred relay groups —
+// groups, a "Relay groups" section lists the traffic-inferred relay groups -
 // one row per group (formatted pool number + member count + the same unread
 // treatment), rendered only when groups exist. The selected row (persona OR
 // group) is visually active and carries aria-current. A "＋ Ad-hoc number"
@@ -18,7 +18,7 @@ export interface RosterRailProps {
   selected: string | null;
   onSelect: (partyNumber: string) => void;
   onAddAdHoc: () => void;
-  // ---- "Group texts" section (all optional so non-group usage is unchanged) ----
+  // ---- "Relay groups" section (all optional so non-group usage is unchanged) ----
   /** Traffic-inferred relay groups; the section renders only when non-empty. */
   groups?: GroupSnapshot[];
   /** Per-pool unread transcript-activity count (mirrors unreadByNumber). */
@@ -99,7 +99,7 @@ export function RosterRail({
 
         {relayGroups.length > 0 && (
           <section className={styles.group}>
-            <h2 className={styles.heading}>Group texts</h2>
+            <h2 className={styles.heading}>Relay groups</h2>
             <ul className={styles.list}>
               {relayGroups.map((g) => {
                 const unread = groupUnreadByPool[g.poolNumber] ?? 0;

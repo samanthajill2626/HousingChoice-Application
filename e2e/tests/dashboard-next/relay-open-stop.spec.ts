@@ -14,10 +14,11 @@ import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 // resumes their delivery.
 //
 // OBSERVABILITY (worklist adjudication 1 / research-e2e.md):
-//   - STOP/START replies ride the webhook's TwiML <Message> HTTP response, NOT the
-//     outbox - so they are captured by POSTing the signed inbound OURSELVES
-//     (postInboundSms) and reading the reply (twimlMessageBody). After a bare STOP
-//     the outbox gains ZERO rows.
+//   - The app NO LONGER REPLIES to STOP/START on any path (2026-08-12 ruling,
+//     docs/issues/twilio-standard-optout-double-reply.md): Twilio's Advanced Opt-Out
+//     sends the confirmations, configured with the copy filed in the app catalog. The
+//     inbound is still POSTed OURSELVES (postInboundSms) so the TwiML can be read back
+//     and asserted EMPTY. After a bare STOP the outbox gains ZERO rows, as before.
 //   - Fan-out reach/skip is asserted with outbox `since`-diffs (legs go through the
 //     recording send wrapper -> /__dev/outbox). "B/C received nothing new" = an empty
 //     since-diff; a delivered member is a positive poll (expectOutboxIncludes).
@@ -27,11 +28,10 @@ import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 //     is matched against the filed catalog copy.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
-// Filed reply copy, read from the app catalog so a copy edit can never silently drift
-// this spec (the same import the lifecycle spec uses for the close copy). keyword.stop
-// === STOP_CONFIRMATION; welcome.sms === WELCOME_SMS (settings-resolved on the START
-// path, but the hermetic seed sets no welcomeText override so the default copy is
-// exactly what the world produces - proven by a2p-compliance.spec.ts).
+// Filed keyword copy, read from the app catalog. The app no longer SENDS it - the
+// catalog is the source of truth for what the Twilio Advanced Opt-Out console entries
+// are configured with - so this spec asserts the copy exists and is compliant rather
+// than that a reply carried it.
 const STOP_COPY = MESSAGE_CATALOG['keyword.stop'].default;
 const WELCOME_COPY = MESSAGE_CATALOG['welcome.sms'].default;
 // The relay.intro trailing opt-out footer: the settle barrier for the create-time
@@ -140,8 +140,8 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
   await expectOutboxIncludes(request, memberC.phone, INTRO_NEEDLE, pool);
   const t0 = new Date().toISOString();
 
-  // --- Act 1: A texts STOP to the POOL number. The filed confirmation rides the
-  //     webhook TwiML response (postInboundSms); the bare STOP is NOT relayed. ---
+  // --- Act 1: A texts STOP to the POOL number. The app answers NOTHING (Twilio's
+  //     Advanced Opt-Out sends STOP_COPY); the bare STOP is NOT relayed. ---
   const stop = await postInboundSms(request, {
     from: aPhone,
     to: pool,
@@ -149,7 +149,9 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
     messageSid: uniqueSid('stop'),
   });
   expect(stop.status).toBe(200);
-  expect(twimlMessageBody(stop.body)).toBe(STOP_COPY);
+  expect(twimlMessageBody(stop.body)).toBeUndefined();
+  // The copy Twilio is configured with still lives in the catalog.
+  expect(STOP_COPY).toContain('unsubscribed');
 
   // B and C received NOTHING new: the webhook returned only AFTER deciding to skip the
   // fan-out for the bare keyword (so no worker job exists to relay it); the settle lets
@@ -176,8 +178,8 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
   );
   expect(aGot1, 'opted-out A must be skipped on the fan-out').toHaveLength(0);
 
-  // --- Act 3: A texts START -> the welcome copy rides the TwiML response and
-  //     suppression is cleared. ---
+  // --- Act 3: A texts START -> suppression is cleared and the app still replies
+  //     nothing (Twilio's opt-in confirmation is configured with WELCOME_COPY). ---
   const start = await postInboundSms(request, {
     from: aPhone,
     to: pool,
@@ -185,7 +187,8 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
     messageSid: uniqueSid('start'),
   });
   expect(start.status).toBe(200);
-  expect(twimlMessageBody(start.body)).toBe(WELCOME_COPY);
+  expect(twimlMessageBody(start.body)).toBeUndefined();
+  expect(WELCOME_COPY).toContain('Reply STOP to unsubscribe');
 
   // --- Act 4: member B sends again -> A now RECEIVES the relayed message (suppression
   //     lifted by START). ---

@@ -18,7 +18,7 @@
 //   4. Sending SMS from a tour 1:1 tab still works end to end, INCLUDING for a
 //      tenant with no prior conversation (create-on-demand).
 //   5. This tour's lifecycle pins are sourced from the PERSON feed and land on
-//      BOTH parties' tabs: "Tour scheduled" (schedule) and "Group text opened"
+//      BOTH parties' tabs: "Tour scheduled" (schedule) and "Relay group opened"
 //      (group-open) appear on the Tenant tab AND the Landlord tab.
 //
 // The placement half of item 1 lives here rather than in a placement sibling
@@ -318,7 +318,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     // The tour page opens on the GROUP tab (the tour has a group thread), and the
     // Tenant tab carries the summed dot.
     await page.goto(`${NEXT}/tours/${tourId}`);
-    await expect(page.getByRole('tab', { name: 'Group text', selected: true })).toBeVisible({
+    await expect(page.getByRole('tab', { name: 'Relay group', selected: true })).toBeVisible({
       timeout: 15_000,
     });
     await expect(page.getByRole('tab', { name: personTabUnread(tenant) })).toBeVisible({
@@ -342,7 +342,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     await expect(comms.getByText(secondBody).first()).toBeVisible({ timeout: 15_000 });
 
     // (item 5b) The group-open pin, sourced from the tenant's person feed.
-    const tenantGroupPin = comms.getByRole('link', { name: /Group text opened/ }).first();
+    const tenantGroupPin = comms.getByRole('link', { name: /Relay group opened/ }).first();
     await expect(tenantGroupPin).toBeVisible({ timeout: 15_000 });
     await expect(tenantGroupPin).toHaveAttribute('href', `/tours/${tourId}`);
 
@@ -362,14 +362,14 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
       to: poolNumber,
       body: `Group ping ${stamp}`,
     });
-    await expect(page.getByRole('tab', { name: /^Group text unread$/ })).toBeVisible({
+    await expect(page.getByRole('tab', { name: /^Relay group unread$/ })).toBeVisible({
       timeout: 30_000,
     });
 
     // (item 5b, landlord half) The same dual-party group-open pin on his tab.
     await page.getByRole('tab', { name: personTab(landlord) }).click();
     const landlordGroupPin = commsRegion(page)
-      .getByRole('link', { name: /Group text opened/ })
+      .getByRole('link', { name: /Relay group opened/ })
       .first();
     await expect(landlordGroupPin).toBeVisible({ timeout: 15_000 });
     await expect(landlordGroupPin).toHaveAttribute('href', `/tours/${tourId}`);

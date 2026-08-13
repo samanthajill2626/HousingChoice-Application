@@ -35,6 +35,8 @@ import type {
   ConversationHeader,
   ConversationParticipant,
   ConversationsPage,
+  GroupMemberRow,
+  GroupThreadsPage,
   DevLoginResult,
   HistoryRow,
   InboxFilter,
@@ -757,6 +759,24 @@ export async function getConversationMembers(
   return res.members;
 }
 
+/** GET /api/conversations/:id/group-members -> { members }. A NATIVE group text's
+ *  roster with per-member suppression + deleted state (unwrapped). 404
+ *  group_text_not_found for a relay / 1:1 / missing id.
+ *
+ *  This is NOT getConversationMembers: that route is relay-only by a positive
+ *  type guard and 404s a group thread. The roster itself is immutable, but
+ *  suppression is number-scoped state only the server can resolve correctly. */
+export async function getGroupMembers(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<GroupMemberRow[]> {
+  const res = await request<{ members: GroupMemberRow[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/group-members`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.members;
+}
+
 /** POST /api/conversations/:id/members { phone, contactId?, name? } → { members }.
  *  Idempotent add; returns the updated roster. Throws ApiError(409 roster_conflict)
  *  on an optimistic-concurrency collision (the caller refetches the roster). */
@@ -1191,9 +1211,9 @@ export async function getContactMedia(
   return res.media;
 }
 
-/** GET /api/contacts/:id/relay-groups — the contact's group-text (relay)
+/** GET /api/contacts/:id/relay-groups - the contact's relay-group
  *  memberships, open + closed, newest-activity-first. 404s on a backend
- *  without the route → the "Group texts" card renders its pending state. */
+ *  without the route -> the "Relay groups" card renders its pending state. */
 export async function getContactRelayGroups(
   contactId: string,
   signal?: AbortSignal,
@@ -1203,6 +1223,20 @@ export async function getContactRelayGroups(
     { ...(signal !== undefined && { signal }) },
   );
   return res.groups;
+}
+
+/** GET /api/contacts/:id/group-threads - the NATIVE group texts this contact is
+ *  a member of, newest-activity-first, plus the `truncated` flag from the
+ *  bounded partition read. 404s on a backend without the route -> the "Group
+ *  threads" card renders its pending state. */
+export async function getContactGroupThreads(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<GroupThreadsPage> {
+  return request<GroupThreadsPage>(
+    `/api/contacts/${encodeURIComponent(contactId)}/group-threads`,
+    { ...(signal !== undefined && { signal }) },
+  );
 }
 
 // --- Contact mutations (edit / triage / phones / opt-out) -------------------
@@ -1610,7 +1644,7 @@ export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }>
   });
 }
 
-// --- Settings > Phone numbers: the group text pool (/api/pool-numbers) -------
+// --- Settings > Phone numbers: the relay group pool (/api/pool-numbers) -------
 // The ADMIN-ONLY pool-number inventory (the other half of that section, OUR one
 // business number, rides on /api/settings and is visible to everyone).
 // requireRole('admin') upstream; a VA gets 403.
@@ -1893,7 +1927,7 @@ export async function getPlacementRoster(
 //
 //   PLAN  (`.../roster/members`, `.../roster/reset`)  - no thread exists yet.
 //         Silent: nothing has been sent, the roster is only a plan. These
-//         REFUSE with 409 `thread_exists` the moment a group text exists, and
+//         REFUSE with 409 `thread_exists` the moment a relay group exists, and
 //         THE DASHBOARD MUST NEVER AUTO-RESUBMIT THAT EDIT through the live
 //         endpoints - a silent plan edit would escalate into a `member_added`
 //         text nobody confirmed. Refetch, surface the live state, and let the
@@ -1989,7 +2023,7 @@ export async function removeTourRosterLiveMember(
   );
 }
 
-/** GET /api/tours/:tourId/roster/preview-open - what opening the group text
+/** GET /api/tours/:tourId/roster/preview-open - what opening the relay group
  *  would send: the server-composed intro body, per-member deliverability, the
  *  distinct reachable count, and the quiet state. 409 relay_already_provisioned
  *  once a thread exists - refetch, never dialog. */

@@ -210,6 +210,29 @@ describe('useTourChannels', () => {
     expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2');
   });
 
+  it('never counts a native group_text toward a 1:1 tab (one roster matches every member)', async () => {
+    // Byte-identical hazard to the placement twin: a group roster names up to
+    // nine contacts, so counting it would add the SAME unread to every member's
+    // 1:1 dot, and no 1:1 mark-read could clear it.
+    getConversations.mockResolvedValue({
+      conversations: [
+        {
+          ...conv('gt-1', 'ten-1', 5, 'group_text'),
+          participants: [
+            { contactId: 'ten-1', phone: '+14045550111' },
+            { contactId: 'lord-1', phone: '+14045550112' },
+          ],
+        },
+        conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
+      ],
+      nextCursor: null,
+    });
+    render(<Probe tour={makeTour()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2');
+    expect(screen.getByTestId('landlord')).toHaveTextContent('unread:0');
+  });
+
   it('a channel with no thread resolves to null / zero unread', async () => {
     getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);

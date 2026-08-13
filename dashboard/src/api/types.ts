@@ -66,7 +66,7 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
-// --- Settings > Phone numbers: the group text pool (admin-only inventory) ----
+// --- Settings > Phone numbers: the relay group pool (admin-only inventory) ----
 // Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
 // The dashboard is a separate package and cannot import from app/src, so these
 // are duplicated; keep them in sync with the router when the shape changes.
@@ -369,7 +369,7 @@ export interface TodayItem {
   tag?: string; // "Placement - Touring"
   attention?: boolean;
 }
-/** One "close this still-open group text?" nag on the Today queue (D5). Built
+/** One "close this still-open relay group?" nag on the Today queue (D5). Built
  *  server-side from open relay groups whose 28-day close-nag is due. A SEPARATE
  *  list from `items` (not a TodayItem). Mirrors the app wire shape verbatim. */
 export interface RelayCloseNag {
@@ -404,13 +404,17 @@ export interface TodayResponse {
 /** Conversation thread type. `unknown_1to1` is the honest-identity value: a
  *  thread whose participant has not been triaged to tenant/landlord yet.
  *  `relay_group` (M1.7) is a multi-party masked thread fronted by a pool number:
- *  inbound on the pool number fans out to the other members. */
+ *  inbound on the pool number fans out to the other members.
+ *  `group_text` is a NATIVE carrier group on our own business number: no pool
+ *  number, no fan-out, identity is the sorted outside roster. Mirrors
+ *  app/src/repos/conversationsRepo.ts - keep the two unions in lockstep. */
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
   | 'partner_1to1'
   | 'unknown_1to1'
-  | 'relay_group';
+  | 'relay_group'
+  | 'group_text';
 
 /** A linked external participant: contact + phone pair. */
 export interface ConversationParticipant {
@@ -448,6 +452,33 @@ export interface ConversationsPage {
   conversations: ConversationSummary[];
   /** Opaque cursor to fetch the next page, or null when exhausted. */
   nextCursor: string | null;
+}
+
+/** Which record answered a member's suppression question. MIRRORS app/src/
+ *  services/numberSuppression.ts `NumberSuppressionScope`. */
+export type NumberSuppressionScope = 'primary' | 'secondary' | 'no_contact';
+
+/** GET /api/conversations/:id/group-members -> { members }. One member of a
+ *  NATIVE group text. MIRRORS app/src/routes/api.ts `GroupMemberRow`.
+ *
+ *  `suppressed` is NUMBER-scoped, resolved server-side through the one
+ *  suppression seam: the contact's own flag answers for a member's PRIMARY
+ *  number, that number's 1:1 thread answers for a secondary one. The dashboard
+ *  must never re-derive it from a contact's opt-out alone - that would libel a
+ *  member who only silenced a different number of theirs. */
+export interface GroupMemberRow {
+  /** Empty string when the member has no contact record yet. */
+  contactId: string;
+  phone: string;
+  name?: string;
+  suppressed: boolean;
+  suppressionScope: NumberSuppressionScope;
+  /** A read behind this member FAILED server-side, so `suppressed` is the
+   *  absence of an answer, not a `false`. Render it as UNKNOWN - never as
+   *  "reachable". */
+  suppressionUnknown?: boolean;
+  /** Present/true for a soft-deleted contact (group sends refuse; spec 15.7). */
+  deleted?: boolean;
 }
 
 /** The owning entity of a relay_group thread. MIRRORS app/src/repos/
@@ -841,8 +872,8 @@ export interface TourActivityEvent {
  * open; `default` = the property's primary contact + the tenant; `unavailable` =
  * a thread pointer is set but the conversation could NOT be read. An
  * `unavailable` roster is NEVER silently re-resolved into the default - the card
- * says so and offers a retry, because being wrong about who is on a live group
- * text outranks "never show an error".
+ * says so and offers a retry, because being wrong about who is on a live relay
+ * group outranks "never show an error".
  */
 export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
 
@@ -859,7 +890,7 @@ export type RosterMemberRole =
   | 'added'
   | 'removed_contact';
 
-/** Whether the GROUP TEXT can reach this member (the send path's own view). */
+/** Whether the RELAY GROUP can reach this member (the send path's own view). */
 export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
 
 export interface RosterMemberView {
@@ -897,8 +928,8 @@ export type RosterActionSkipReason =
   | 'member_no_longer_on_roster'
   /** The roster lost its second reachable member. */
   | 'roster_too_thin'
-  /** Live relay-number provisioning is off in this environment, so no group
-   *  text can be opened (the pre-A2P posture). */
+  /** Live relay-number provisioning is off in this environment, so no relay
+   *  group can be opened (the pre-A2P posture). */
   | 'provisioning_unavailable'
   /** Only when migration to the converted placement failed. */
   | 'converted';
@@ -906,7 +937,7 @@ export type RosterActionSkipReason =
 /**
  * One change confirmed inside QUIET HOURS and waiting for the window to end
  * (spec 5.3 / 6.5). A pending `add_member` is deliberately NOT in `members`:
- * membership defers WITH the message (D7), so nobody joins a group text before
+ * membership defers WITH the message (D7), so nobody joins a relay group before
  * the group has been told.
  */
 export interface RosterPendingAction {
@@ -1130,7 +1161,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   quiet_hours_superseded: 'superseded by a later reminder',
   past_event: 'would land after the tour starts',
   tenant_not_on_roster: "tenant not on this tour's roster",
-  roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
+  roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
 };
 
@@ -1417,7 +1448,7 @@ export type ConsentMethod =
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus =
   // 'queued_pending' (relay number buying strategy T7) is a PRE-queued hold: a
-  // team message composed on a `connecting` group text (its number is still
+  // team message composed on a `connecting` relay group (its number is still
   // warming / A2P-registering) is persisted with this state and sent to nobody
   // until the group connects, when it flushes into the normal queued -> ... path.
   | 'queued_pending'
@@ -1431,9 +1462,14 @@ export type DeliveryStatus =
  * Per-recipient delivery slot on a relay-group source message (M1.7). MIRRORS
  * app/src/repos/messagesRepo.ts `RelayRecipientDelivery` — the dashboard can't
  * import from app/, so keep it in sync by hand. Keyed by member key
- * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map;
- * a `status:'failed'` + `errorCode:'contact_opted_out'` slot means that member
- * opted out and was NOT relayed to (surfaced as a subtle Timeline note). */
+ * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map.
+ *
+ * SUPPRESSION IS KEYED ON THE CODE ALONE: an `errorCode:'contact_opted_out'`
+ * slot means that member opted out and was NOT delivered to (surfaced as a
+ * subtle Timeline note, and excluded from the `Delivered N/M` denominator
+ * rather than painted as a hard failure). Do NOT also require
+ * `status:'failed'` - relay writes `failed`, but a native group text's
+ * Conversations receipt carries Twilio's `undelivered` for the same event. */
 export interface RelayRecipientDelivery {
   status: DeliveryStatus;
   sid?: string;
@@ -2079,6 +2115,11 @@ export type TimelineMilestoneType =
   | 'contact_status_changed'
   | 'opt_out_changed'
   | 'number_added'
+  // NAME COLLISION, ADJUDICATED - DO NOT RENAME. Mirrors the server union
+  // (app/src/repos/activityEventsRepo.ts, where the full ruling lives): these
+  // two mean a RELAY-group or PROPERTY-contact add/remove, never the native
+  // `group_text` conversation type, and they are PERSISTED on historical rows.
+  // The dashboard reads them only to pick a milestone colour.
   | 'added_to_group_text'
   | 'removed_from_group_text';
 
@@ -2120,10 +2161,12 @@ export interface TimelineMessage extends TimelineBase {
    *  mail had HTML - fall back to the trimmed text body). Rendered ONLY inside the
    *  CSP-framed, fully sandboxed EmailHtmlFrame (B7) - never dangerouslySetInnerHTML. */
   email_html_sanitized?: string;
-  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
-   *  keyed by member key. A `contact_opted_out` failed slot means that member
-   *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
-   *  on 1:1 messages. */
+  /** Relay group (M1.7) and native group texting: per-recipient delivery slots
+   *  on a relay SOURCE message or a group send, keyed by member key. A slot
+   *  whose `errorCode` is `contact_opted_out` means that member opted out and
+   *  wasn't delivered to — the bubble renders a subtle note. The CODE alone
+   *  decides that; the accompanying `status` is `failed` on relay and
+   *  `undelivered` on a group leg. Absent on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
   /** Relay group (M1.7): who authored a relayed message — a member's key
    *  (contactId, else `phone#<E164>`), the `'team'` sentinel (a team reply),
@@ -2280,7 +2323,7 @@ export interface ContactMediaItem {
   conversationId: string;
 }
 
-// --- Relay-group memberships (the contact file's "Group texts" card) --------
+// --- Relay-group memberships (the contact file's "Relay groups" card) --------
 // Copied verbatim from the backend wire shape (routes/contacts.ts
 // RelayGroupRow — GET /api/contacts/:id/relay-groups). One row per relay_group
 // thread whose roster includes this contact (matched server-side by contactId
@@ -2301,6 +2344,36 @@ export interface RelayGroupRow {
   tag?: string;
   /** The OTHER members' resolved display names (known names only — no phones). */
   otherMemberNames: string[];
+}
+
+// --- Native group texts (the contact file's "Group threads" card) ------------
+// MIRRORS routes/contacts.ts GroupThreadRow - GET /api/contacts/:id/group-threads.
+// One row per group_text thread whose roster includes this contact. Smaller than
+// RelayGroupRow by construction: no pool number, no owner, no tag, no lifecycle
+// status (spec 4.2).
+
+export interface GroupThreadRow {
+  conversationId: string;
+  memberCount: number;
+  lastActivityAt: string; // ISO
+  /**
+   * The row's LABEL, derived SERVER-SIDE by the one group-title rule that also
+   * titles the inbox row and the thread header (app/src/lib/groupTitle.ts).
+   * Optional on the wire only so a card rendered against an older backend
+   * degrades to the local fallback instead of a blank row.
+   */
+  title?: string;
+  /** The OTHER members' resolved display names (known names only - no phones). */
+  otherMemberNames: string[];
+}
+
+/** The card's page: `truncated` says a BOUNDED read stopped before it had seen
+ *  every group thread, so the list may be missing older ones. There is no
+ *  member->thread index and this feature does not add one; the card must show
+ *  the flag rather than imply completeness. */
+export interface GroupThreadsPage {
+  groups: GroupThreadRow[];
+  truncated: boolean;
 }
 
 // --- C3: Unit ↔ contacts roster + related (§API Contract C3) ----------------
@@ -2567,7 +2640,9 @@ export interface BroadcastUpdatedEvent {
 // newest-activity-first, aggregating all of a contact's numbers. GET /api/inbox
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
-export type InboxFilter = 'all' | 'unread' | 'unknown';
+// 'groups' (S4) serves the native group-text partition ALONE, through its own
+// namespaced cursor - the contact and relay sources do not run under it.
+export type InboxFilter = 'all' | 'unread' | 'unknown' | 'groups';
 export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's
@@ -2575,9 +2650,14 @@ export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by
  *  OPTIONAL (a relay_group row omits them); the relay-only fields
  *  (`conversationId`/`status`/`owner`) are present iff `kind === 'relay_group'`;
  *  the group label rides the shared `name` field (formatted "With A & B"). Keep
- *  in sync with the backend contract. */
+ *  in sync with the backend contract.
+ *  `group_text` (native carrier groups) is declared here in S2 so both sides of
+ *  the wire agree on the vocabulary; the rows themselves are emitted in S4,
+ *  where the group source, its filter, and the renderers land. A group_text row
+ *  carries `conversationId` + the derived roster label in `name`, and NO
+ *  `status`/`owner`/`phone`. */
 export interface InboxRow {
-  kind: 'contact' | 'unknown' | 'relay_group';
+  kind: 'contact' | 'unknown' | 'relay_group' | 'group_text';
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
@@ -2596,11 +2676,21 @@ export interface InboxRow {
   deleted?: boolean;
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
-  status?: 'open' | 'closed'; // the relay group's lifecycle status
+  // Lifecycle status. `connecting` (D9) was on the server union only - a
+  // pre-existing mirror drift, fixed here so group status cannot repeat it.
+  // A group_text row carries no lifecycle status at all (it is always open).
+  status?: 'open' | 'closed' | 'connecting';
   owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 
 export interface InboxPage {
   rows: InboxRow[]; // newest-activity-first; ONE row per contact
   nextCursor: string | null;
+  /** TRUE when the GROUP source withheld rows this page would otherwise show:
+   *  page one takes only the newest 50 group threads, and the partition walk has
+   *  its own budget. The dashboard renders the "showing the latest group texts"
+   *  affordance with a link to the Groups filter. There is deliberately NO exact
+   *  total - the partition cannot produce one without walking it (spec 11).
+   *  Absent means nothing was withheld. */
+  groupsTruncated?: boolean;
 }

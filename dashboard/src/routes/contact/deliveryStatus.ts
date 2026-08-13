@@ -28,7 +28,7 @@ export interface DeliveryPresentation {
 
 const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
   // `queued_pending` (connect-when-ready hold, T7) = composed on a `connecting`
-  // group text and held: no number to send from yet, so it goes to nobody until
+  // relay group and held: no number to send from yet, so it goes to nobody until
   // the group connects and it flushes. A neutral, non-failure "Queued" cue that
   // says WHEN it will send - it is a deliberate hold, not a stall.
   queued_pending: {
@@ -76,9 +76,15 @@ export interface RelayDeliverySlot {
  * null: nothing was fanned out, so there is nothing to summarize.
  */
 export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresentation | null {
-  const fanned = slots.filter(
-    (s) => !(s.status === 'failed' && s.errorCode === 'contact_opted_out'),
-  );
+  // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
+  // suppressed leg as `failed`; the group-text receipts path records what Twilio
+  // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
+  // well meant a group text's opted-out member was counted as a hard failure -
+  // the exact outcome the synthetic `contact_opted_out` code exists to prevent -
+  // while the identical relay leg was excluded. `contact_opted_out` is written by
+  // us, never by a carrier, so the code by itself is an unambiguous statement
+  // that this leg was never really sent.
+  const fanned = slots.filter((s) => s.errorCode !== 'contact_opted_out');
   if (fanned.length === 0) return null;
   const delivered = fanned.filter((s) => s.status === 'delivered').length;
   const failed = fanned.filter(
@@ -87,7 +93,7 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
   const total = fanned.length;
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
-    // group-text bug read as a bare "0/2 - 2 failed" with no code). Distinct
+    // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
     // reasons joined; a repeated code collapses to one.
     const reasons = Array.from(
       new Set(
@@ -125,13 +131,47 @@ const ERROR_CODE_REASONS: Record<string, string> = {
 };
 
 /**
+ * Codes THIS APP invents, which no carrier ever emits and no operator can look
+ * up. They get plain operator copy and, deliberately, NO "(error <code>)" tail:
+ * printing `contact_opted_out` as if it were a carrier error number is the
+ * defect this map exists to fix (A16).
+ *
+ * `contact_opted_out` reaches the message-level chip only as the group-send
+ * AGGREGATE: `deriveGroupDeliveryStatus` (app/src/services/groupDelivery.ts)
+ * writes `{ status: 'undelivered', errorCode: 'contact_opted_out' }` when every
+ * member is suppressed, and `presentRelayDelivery` returns null for that map, so
+ * the bubble has no rollup to fall back on and this string IS what staff read.
+ * The framing matches groupDelivery.ts: Twilio never creates the leg, so nothing
+ * was sent - it is not a delivery failure.
+ *
+ * This is STAFF-FACING dashboard copy, so it lives here beside
+ * ERROR_CODE_REASONS rather than in the app's message catalog (which is the
+ * single source for automated MEMBER-facing copy).
+ */
+const INTERNAL_CODE_REASONS: Record<string, string> = {
+  contact_opted_out: 'Everyone here has opted out - nothing was sent',
+};
+
+/**
  * Twilio error code → a human reason that ALWAYS surfaces the raw code number
  * (mapped or not), so an operator never has to leave the thread to learn WHY a
  * send failed. Absent code ⇒ undefined (caller shows just the "Failed" label).
  */
+/** OWN-PROPERTY lookup (adversarial 30). Both maps are plain object literals, so
+ *  a bare `map[code]` resolves inherited Object.prototype members - and an
+ *  `error_code` is provider/wire data, never a trusted key. `INTERNAL_CODE_REASONS`
+ *  is the sharp one: its early return would hand back a FUNCTION where the
+ *  signature promises a string (the error map only escaped because its template
+ *  wrap coerced whatever it found). */
+function ownReason(map: Record<string, string>, code: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(map, code) ? map[code] : undefined;
+}
+
 export function deliveryReason(errorCode: string | undefined): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
-  const mapped = ERROR_CODE_REASONS[errorCode];
+  const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
+  if (internal !== undefined) return internal;
+  const mapped = ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`
     : `Delivery failed (error ${errorCode})`;

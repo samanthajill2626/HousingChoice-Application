@@ -95,6 +95,56 @@ export interface GroupSnapshot {
   lastActivityAt: string;
 }
 
+// ---- Native carrier group texting (Twilio Conversations; group-texting spec) ----
+// DISTINCT FROM THE RELAY GROUPS ABOVE. A relay group is traffic-inferred and
+// keyed by a POOL number; a CARRIER group is a real Conversations resource
+// (CHxx) with explicit participants (MBxx), keyed by nothing we infer. The two
+// never mix: a Conversations fan-out leaves FROM the business number, and the
+// relay inference only fires on a non-business `from`/`to`.
+
+/** One participant of a Conversation. Exactly ONE address field is set - the
+ *  business number is its OWN participant carrying only a PROJECTED address,
+ *  and each member carries only an ADDRESS. Combining them on one participant
+ *  is Twilio error 50407, which is why the shape is modelled faithfully. */
+export interface ConversationParticipantSnapshot {
+  /** MBxx. */
+  sid: string;
+  /** A MEMBER's handset (MessagingBinding.Address). */
+  address?: string;
+  /** The BUSINESS number (MessagingBinding.ProjectedAddress). */
+  projectedAddress?: string;
+  dateCreated: string;
+}
+
+/** One message posted into a Conversation. `source` distinguishes our own API
+ *  posts from carrier-sourced inbound - the guardrail cross-check filters on it. */
+export interface ConversationMessageSnapshot {
+  /** IMxx. */
+  sid: string;
+  author?: string;
+  body?: string;
+  index: number;
+  source: 'API' | 'SMS';
+  dateCreated: string;
+  /** Per-participant fan-out legs (outbound API posts only), MBxx -> SMxx. */
+  legs?: { participantSid: string; address: string; channelMessageSid: string; state: DeliveryState }[];
+}
+
+/** The whole-Conversation DTO: the `GET /control/conversations` item and the
+ *  `conversation.updated` SSE payload. */
+export interface ConversationSnapshot {
+  /** CHxx. */
+  sid: string;
+  /** Our conversationId - the deterministic, non-PII UniqueName. */
+  uniqueName?: string;
+  friendlyName?: string;
+  messagingServiceSid?: string;
+  state: string;
+  participants: ConversationParticipantSnapshot[];
+  messages: ConversationMessageSnapshot[];
+  dateCreated: string;
+}
+
 // ---- Control API DTOs ----
 export interface SendAsPartyInput {
   /** Party number (must be a known persona or ad-hoc). */
@@ -103,6 +153,20 @@ export interface SendAsPartyInput {
   to?: string;
   body?: string;
   mediaUrls?: string[];
+  /**
+   * The OTHER handsets on a carrier group text (group-texting spec 5.1). Present
+   * = this inbound carries a group envelope; absent = an ordinary 1:1.
+   */
+  otherRecipients?: string[];
+  /** `indexed` (OtherRecipients0..N, the live shape) or `single` (bare key). */
+  otherRecipientsShape?: 'indexed' | 'single';
+  /**
+   * Force the provider SID prefix. The engine otherwise derives it purely from
+   * media presence, so `MM` with `NumMedia=0` - the TRIPWIRE shape a silently
+   * removed OtherRecipients contract would produce (spec 8.1) - is otherwise
+   * unproducible and its e2e spec unwritable (adjudication A28).
+   */
+  sidShape?: 'SM' | 'MM';
 }
 
 export interface SetDeliveryOutcomeInput {

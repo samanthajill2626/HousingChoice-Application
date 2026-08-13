@@ -1,4 +1,4 @@
-// TourConversation tests - the channel switcher: the group text plus ONE 1:1 tab
+// TourConversation tests - the channel switcher: the relay group plus ONE 1:1 tab
 // per person the page resolves (keyed by contactId, labelled with that person's
 // display name), each 1:1 being the SHARED person-centric comms pane
 // (ContactCommsTab -> ContactCommsPane).
@@ -183,7 +183,7 @@ describe('TourConversation - no-show check-in seed', () => {
 
     // Starts on the Group tab (the tour has a groupThreadId); no tenant composer
     // is mounted yet, so nothing is seeded.
-    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute(
       'aria-selected',
       'true',
     );
@@ -387,11 +387,11 @@ describe('TourConversation - id-keyed person tabs', () => {
     );
 
     expect(screen.queryByRole('tab', { name: /Lon Landlord/ })).toBeNull();
-    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute(
       'aria-selected',
       'true',
     );
-    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+    expect(screen.getByText('No relay group yet')).toBeInTheDocument();
   });
 });
 

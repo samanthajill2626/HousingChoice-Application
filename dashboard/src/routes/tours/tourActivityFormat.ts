@@ -18,7 +18,7 @@ const TOUR_EVENT_LABELS: Record<string, string> = {
   tour_no_show: 'Marked no-show',
   tour_canceled: 'Tour canceled',
   tour_outcome: 'Outcome recorded',
-  tour_group_opened: 'Group text opened',
+  tour_group_opened: 'Relay group opened',
   tour_converted: 'Converted to placement',
 };
 

@@ -32,6 +32,7 @@
     "import:apply:local": "tsx app/scripts/import-apply.ts --env local",
     "import:apply:dev": "tsx app/scripts/import-apply.ts --env dev",
     "import:apply:prod": "tsx app/scripts/import-apply.ts --env prod",
+    "import:convert-groups": "tsx app/scripts/import-convert-groups.ts",
     "issues": "node scripts/issues.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:fake-twilio": "npm run test -w @housingchoice/fake-twilio",

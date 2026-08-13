@@ -952,7 +952,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     ...(item.roster !== undefined && { roster: item.roster }),
     ...(item.rosterVersion !== undefined && { rosterVersion: item.rosterVersion }),
     // Carried so a lost MATERIALIZE can tell "someone else materialized first"
-    // from "a group text just opened" (the latter is 409 thread_exists).
+    // from "a relay group just opened" (the latter is 409 thread_exists).
     ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
   });
 

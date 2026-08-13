@@ -346,9 +346,17 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       }
     }
 
-    // (5) Resolve the conversation (must exist + not relay_group).
+    // (5) Resolve the conversation (must exist + be a 1:1 thread). Multi-party
+    // threads are named EXPLICITLY, never inferred from "not relay_group":
+    // a native group_text has no participant_email and no single counterparty,
+    // so without its own case it would enter the email path and fail late and
+    // confusingly (invariant 13.6).
     const conversation = await conversations.getById(conversationId);
-    if (!conversation || conversation.type === 'relay_group') {
+    if (
+      !conversation ||
+      conversation.type === 'relay_group' ||
+      conversation.type === 'group_text'
+    ) {
       throw new EmailConversationNotFoundError(conversationId);
     }
     // (5a) The URL conversation MUST belong to the To-derived contact (m5). It does

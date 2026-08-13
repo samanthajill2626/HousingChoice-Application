@@ -129,7 +129,15 @@ async function resolveRecipientContact(
     if (byEmail) return byEmail;
   }
   const conversation = await ctx.conversations.getById(message.conversationId);
-  const contactId = conversation?.participants?.find((p) => p.contactId)?.contactId;
+  // FIRST-MATCHING-PARTICIPANT, sound ONLY on a single-party roster. Email
+  // events fire for EMAIL messages, and neither multi-party thread type can
+  // carry one (a relay group fronts a phone; a native group text has no email
+  // channel at all), so this cannot be reached with a multi-roster thread. The
+  // exclusion is explicit anyway: on a group roster this would suppress a
+  // bounce against whichever member happened to be listed first.
+  const roster = conversation?.participants ?? [];
+  const multiParty = conversation?.type === 'relay_group' || conversation?.type === 'group_text';
+  const contactId = multiParty ? undefined : roster.find((p) => p.contactId)?.contactId;
   if (contactId !== undefined) return ctx.contacts.getById(contactId);
   return undefined;
 }

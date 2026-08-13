@@ -122,6 +122,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
       return contacts.find((c) => c.contactId === contactId)!;
     },
     async touchEmailLastSeen() {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
 
   const conversationsRepo: ConversationsRepo = {
@@ -187,6 +190,32 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,
+    // group_text repo methods are unreachable from this 1:1 suite - throw so an
+    // accidental call is loud instead of silently returning a plausible shape.
+    createGroupTextThread: async () => {
+      throw new Error('createGroupTextThread: not used in this suite');
+    },
+    listGroupTexts: async () => {
+      throw new Error('listGroupTexts: not used in this suite');
+    },
+    claimRailCreation: async () => {
+      throw new Error('claimRailCreation: not used in this suite');
+    },
+    clearGroupRail: async () => {
+      throw new Error('clearGroupRail: not used in this suite');
+    },
+    recordRailFailure: async () => {
+      throw new Error('recordRailFailure: not used in this suite');
+    },
+    setTwilioConversation: async () => {
+      throw new Error('setTwilioConversation: not used in this suite');
+    },
+    convertRelayGroupToGroupText: async () => {
+      throw new Error('convertRelayGroupToGroupText: not used in this suite');
+    },
+    backfillGroupTextRoster: async () => {
+      throw new Error('backfillGroupTextRoster: not used in this suite');
+    },
   };
 
   const auditRepo: AuditRepo = {

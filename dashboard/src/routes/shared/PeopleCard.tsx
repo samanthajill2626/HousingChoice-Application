@@ -9,7 +9,7 @@
 //     has). The type-derived "Property manager" / "Landlord" key is GONE: role
 //     comes from the roster now, so the card can no longer claim a PM and render
 //     an owner.
-//   - a member the group text cannot reach is muted WITH the reason. They are
+//   - a member the relay group cannot reach is muted WITH the reason. They are
 //     still on the roster and still get a tab (spec D6).
 //   - source 'unavailable' (a thread pointer that would not read) renders a
 //     retry, NEVER the property default in its place - the plan was already
@@ -84,10 +84,10 @@ const ROLE_LABELS: Readonly<Record<RosterMemberRole, string>> = {
   removed_contact: 'removed contact',
 };
 
-/** Why the group text cannot reach a member (muted, under the name). */
+/** Why the relay group cannot reach a member (muted, under the name). */
 const REACHABILITY_NOTES: Readonly<Record<string, string>> = {
-  no_phone: 'not on the group text - no mobile number',
-  opted_out: 'not on the group text - opted out',
+  no_phone: 'not on the relay group - no mobile number',
+  opted_out: 'not on the relay group - opted out',
 };
 
 /** The server's own last-member refusal, said BEFORE the doomed click (the
@@ -99,7 +99,7 @@ const LAST_MEMBER_REASON =
 /** The reset control's reason once a thread exists: the plan was consumed at
  *  open, and the thread's participants are the fact now (spec D1). */
 const RESET_DISABLED_REASON =
-  'members are on a live group text - add or remove them individually';
+  'members are on a live relay group - add or remove them individually';
 
 /** Row keys for the inline error slot (one write at a time, one place to look). */
 const ADD_FORM_KEY = 'add-any-contact';
@@ -122,7 +122,7 @@ export interface PeopleCardEdit {
   /**
    * "Send now" on a DEFERRED OPEN (spec 6.5). The HUB owns the relay-open path -
    * it is the only place that can mount the freshly provisioned thread - so the
-   * card delegates instead of opening a group text it could not then show.
+   * card delegates instead of opening a relay group it could not then show.
    * Absent -> the banner still explains the deferral and still offers Cancel.
    */
   onOpenNow?: () => void;
@@ -370,7 +370,7 @@ export function PeopleCard({
         ) : null}
         {!roster.threadExists && !roster.canOpenGroup ? (
           <p className={styles.note}>
-            Not enough people to open a group text - two reachable members are needed
+            Not enough people to open a relay group - two reachable members are needed
           </p>
         ) : null}
       </>
@@ -441,7 +441,7 @@ export function PeopleCard({
       ) : null}
       {confirm !== null && edit !== undefined && api !== null ? (
         <RosterConfirmDialog
-          title={`Add ${confirm.name} to the group text?`}
+          title={`Add ${confirm.name} to the relay group?`}
           preview={confirm.preview}
           confirmLabel="Add and notify"
           deferLabel="Add and notify"
@@ -541,7 +541,7 @@ function MemberRow({
 /** WHO a pending row is about, mid-sentence - the subject of both its control
  *  labels, so the two can never name different people. */
 function pendingSubject(action: RosterPendingAction): string {
-  if (action.kind === 'open_group') return 'the group text';
+  if (action.kind === 'open_group') return 'the relay group';
   return action.name ?? 'that contact';
 }
 
@@ -575,7 +575,7 @@ function PendingRow({
   error: string | null;
 }): React.JSX.Element {
   const subject = pendingSubject(action);
-  const title = action.kind === 'open_group' ? 'Group text' : (action.name ?? 'That contact');
+  const title = action.kind === 'open_group' ? 'Relay group' : (action.name ?? 'That contact');
   return (
     <li className={styles.pendingRow}>
       <div className={styles.nameLine}>

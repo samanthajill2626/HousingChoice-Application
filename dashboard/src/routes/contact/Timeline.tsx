@@ -3,7 +3,7 @@
 // bubbles (full body, no truncation; inbound white / outbound light-blue),
 // collapsed call cards (transcript behind a <details> disclosure, never auto-
 // shown), and milestone pins (kind→color; they LINK OUT via refType/refId and
-// never inline content — esp. group-text content). A "Comms only" toggle hides
+// never inline content - esp. relay-group content). A "Comms only" toggle hides
 // milestones; a reply box notes the target number and sends to the resolved
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
@@ -26,6 +26,7 @@ import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
 import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
 import type { DeliveryTone } from './deliveryStatus.js';
+import { senderLabel as resolveSenderLabel } from '../../lib/memberAttribution.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
@@ -59,6 +60,26 @@ function sendFailureMessage(err: unknown): string {
         return 'SMS sending is currently disabled.';
       case 'relay_closed':
         return 'This relay group is closed — reopen it to send.';
+      // Native group text refusals (S5). Each names the ONE thing to do about
+      // it: a generic "couldn't send" would leave the operator re-clicking.
+      case 'group_member_deleted':
+        return 'Someone in this group text is a deleted contact - restore them, or reply one to one from the member links.';
+      case 'group_member_no_consent':
+        return 'Someone in this group text has no recorded consent basis, so group sending is blocked.';
+      case 'group_too_many_members':
+        return 'This group text has too many members to send as a group - reply one to one from the member links.';
+      case 'group_rail_unavailable':
+        return 'This group text is not connected for sending yet - try again in a moment.';
+      // RETRYABLE, and said differently on purpose: the group IS connected, the
+      // attempt failed (a network blip, a provider 5xx) or the shared sending
+      // meter is backed up. "Not connected yet" would send staff looking for a
+      // setup problem that does not exist.
+      case 'group_send_failed':
+        return "That didn't send - the connection to our messaging provider failed. Try again.";
+      case 'group_send_busy':
+        return 'Sending is backed up right now - try again in a moment.';
+      case 'group_text_media_not_supported':
+        return 'Group texts are text only for now - remove the attachment to send.';
     }
   }
   return "Couldn't send — please try again.";
@@ -156,6 +177,9 @@ function uploadFailureMessage(err: unknown): string {
 
 export type TimelineStatus = 'loading' | 'ready' | 'error';
 
+/** Which multi-party product a roster belongs to (see TimelineProps.rosterKind). */
+export type RosterKind = 'relay' | 'group_text';
+
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
@@ -205,6 +229,11 @@ export interface TimelineProps {
   deleted?: boolean;
   /** Restore the deleted contact (the note's button). */
   onRestore?: () => void;
+  /** Replace the composer entirely with this standing reason - the thread is
+   *  READ-ONLY. Prefer this over `canSend={false}` when sending is structurally
+   *  impossible rather than momentarily unavailable: a disabled composer invites
+   *  a draft that can never be sent. Absent on every existing caller. */
+  readOnlyNote?: string;
   /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
    *  consent modal records consent, then retries the send out-of-band of the
    *  composer). The composer restored its draft on the 409 refusal, so it must
@@ -216,6 +245,16 @@ export interface TimelineProps {
    *  outbound relay bubble shows a per-member "delivered N/M" summary. Absent on a
    *  1:1 contact timeline → those bubbles are visually unchanged. */
   relayRoster?: ConversationParticipant[];
+  /**
+   * Which PRODUCT the `relayRoster` above belongs to. It changes staff-facing
+   * words and one affordance, never behavior:
+   *   - the reply note names a "relay group" or a "group text";
+   *   - a group text hides the ATTACH control, because outbound group media is
+   *     not supported in v1 and the server 400s it - offering a picker that
+   *     uploads a file and then refuses it is worse than not offering one.
+   * Defaults to 'relay' so every existing caller is untouched.
+   */
+  rosterKind?: RosterKind;
   /** Relay group is closed — show a standing note at the composer (sending is
    *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
   relayClosed?: boolean;
@@ -270,55 +309,36 @@ export interface TimelineProps {
   onDraftSeeded?: () => void;
 }
 
-/** The relay member key convention (MIRRORS app relayMemberKey): the member's
- *  contactId when set, else `phone#<E164>`. */
-function relayMemberKey(member: ConversationParticipant): string {
-  return member.contactId && member.contactId.length > 0
-    ? member.contactId
-    : `phone#${member.phone}`;
-}
-
-/** Resolve a relayed message's sender label: the `'team'` sentinel → "Team";
- *  the `'system'` sentinel → "Automated" (an app announcement: group intro /
- *  tour reminder rung); a member key → that member's name (roster lookup);
- *  otherwise undefined (no attribution line). Only meaningful for a relay
- *  bubble (relay_sender_key set). */
-function relaySenderLabel(
-  senderKey: string | undefined,
-  roster: ConversationParticipant[] | undefined,
-): string | undefined {
-  if (senderKey === undefined || senderKey.length === 0) return undefined;
-  if (senderKey === 'team') return 'Team';
-  if (senderKey === 'system') return 'Automated';
-  for (const m of roster ?? []) {
-    if (relayMemberKey(m) === senderKey) {
-      const name = m.name?.trim();
-      return name && name.length > 0 ? name : undefined;
-    }
-  }
-  return undefined;
-}
-
 /** The GROUP composer footer: a reply relays to EVERY member, so the line names
- *  the whole roster ("everyone in this group text (Ann, Marcus)") instead of a
+ *  the whole roster ("everyone in this relay group (Ann, Marcus)") instead of a
  *  single number. A member with no resolved name falls back to their formatted
  *  phone; an empty/unloaded roster (best-effort fetch) keeps the honest
  *  "everyone" line with no list. */
-function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): React.JSX.Element {
+function GroupReplyNote({
+  roster,
+  kind,
+}: {
+  roster: ConversationParticipant[];
+  kind: RosterKind;
+}): React.JSX.Element {
   const names = roster.map((m) => {
     const n = m.name?.trim();
     return n && n.length > 0 ? n : formatPhone(m.phone) || m.phone;
   });
+  // The noun matters: a NATIVE group text is not a relay group, and calling it
+  // one on the very control that fans a message out to real handsets is the
+  // exact privacy-relevant confusion the S1 rename existed to end.
+  const label = kind === 'group_text' ? 'everyone in this group text' : 'everyone in this relay group';
   return (
     <>
-      Reply sends to <strong>everyone in this group text</strong>
+      Reply sends to <strong>{label}</strong>
       {names.length > 0 ? <> ({names.join(', ')})</> : null}
     </>
   );
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
- *  green markers). number_added = amber; group-text add/remove/open = purple;
+ *  green markers). number_added = amber; relay-group add/remove/open = purple;
  *  the positive outcome-ish ones = green; everything else neutral (including
  *  tour_converted - the placement_opened pin beside it carries the same news). */
 function milestoneVariant(type: TimelineMilestoneType): string {
@@ -460,11 +480,16 @@ function MessageBubble({
   msg,
   onRetry,
   relayRoster,
+  rosterKind = 'relay',
 }: {
   msg: TimelineMessage;
   onRetry?: (msg: TimelineMessage) => void;
   /** Present in the relay-group view → enables sender attribution + delivered N/M. */
   relayRoster?: ConversationParticipant[];
+  /** Which product the roster belongs to. Only the sender chip reads it: a
+   *  nameless `group_text` member is attributed by formatted number (spec 4.2),
+   *  while relay keeps its prior no-line rendering (invariant 6). */
+  rosterKind?: RosterKind;
 }): React.JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
@@ -485,9 +510,13 @@ function MessageBubble({
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
-  // so staff know the group text didn't reach everyone. Absent on 1:1 messages.
+  // so staff know the relay group didn't reach everyone. Absent on 1:1 messages.
+  // The CODE alone, matching presentRelayDelivery: relay writes `failed` on a
+  // suppressed leg, the group-text receipts path writes Twilio's own
+  // `undelivered` for a 21610. Requiring `failed` too left a group text's
+  // opted-out member unexplained AND counted as a hard failure.
   const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
-    (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
+    (r) => r.errorCode === 'contact_opted_out',
   ).length;
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
   // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery
@@ -502,9 +531,11 @@ function MessageBubble({
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(Object.values(msg.delivery_recipients))
       : null;
-  // Relay attribution: who authored this relayed message ("Team" or a member's
-  // name). Undefined on a 1:1 bubble (no relay_sender_key) → no attribution line.
-  const senderLabel = relaySenderLabel(msg.relay_sender_key, relayRoster);
+  // Multi-party attribution: who authored this message ("Team" or a member's
+  // name), resolved through the SHARED resolver so a relay bubble and a native
+  // group_text bubble render identically. Undefined on a 1:1 bubble (no
+  // relay_sender_key) -> no attribution line.
+  const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster, rosterKind);
   const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
 
   // The transport - number - time line is hidden by default; a click/tap on the
@@ -563,10 +594,24 @@ function MessageBubble({
         ) : null}
       </div>
       {optedOutCount > 0 ? (
+        // A27(a). The FRAMING is per product, because the mechanism is per
+        // product. A relay send really is relayed - we fan a message out to each
+        // member from a pool number, and an opted-out member is one we did not
+        // send to. A NATIVE group text relays nothing: the carrier thread already
+        // exists on every handset and we post one message into it, which Twilio
+        // then SKIPS for a suppressed participant (no leg, no carrier attempt, no
+        // receipt - app/src/services/groupDelivery.ts). Saying "not relayed to
+        // them" on a group bubble invents a mechanism AND contradicts the
+        // suppression banner directly above it in GroupTextView. Relay's copy is
+        // deliberately untouched (invariant 6).
         <p className={styles.relayOptOutNote}>
-          {optedOutCount === 1
-            ? '1 member opted out — not relayed to them.'
-            : `${optedOutCount} members opted out — not relayed to them.`}
+          {rosterKind === 'group_text'
+            ? optedOutCount === 1
+              ? '1 member opted out - Twilio skips them, so their phone never receives it.'
+              : `${optedOutCount} members opted out - Twilio skips them, so their phones never receive it.`
+            : optedOutCount === 1
+              ? '1 member opted out — not relayed to them.'
+              : `${optedOutCount} members opted out — not relayed to them.`}
         </p>
       ) : null}
       {delivery?.isFailure && onRetry ? (
@@ -774,10 +819,12 @@ function StreamItem({
   item,
   onRetry,
   relayRoster,
+  rosterKind,
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
   relayRoster?: ConversationParticipant[];
+  rosterKind?: RosterKind;
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
@@ -785,7 +832,12 @@ function StreamItem({
       return item.type === 'email' ? (
         <EmailCard msg={item} />
       ) : (
-        <MessageBubble msg={item} onRetry={onRetry} {...(relayRoster !== undefined && { relayRoster })} />
+        <MessageBubble
+          msg={item}
+          onRetry={onRetry}
+          {...(relayRoster !== undefined && { relayRoster })}
+          {...(rosterKind !== undefined && { rosterKind })}
+        />
       );
     case 'call':
       return <CallCard call={item} />;
@@ -811,6 +863,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     selectedConversationId,
     onSelectTarget,
     canSend,
+    readOnlyNote,
     onSend,
     onRetry,
     optedOut,
@@ -818,6 +871,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onRestore,
     clearDraftSignal,
     relayRoster,
+    rosterKind = 'relay',
     relayClosed,
     relayConnecting,
     resetScrollKey,
@@ -1219,6 +1273,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                     item={item}
                     onRetry={onRetrySurfaced}
                     {...(relayRoster !== undefined && { relayRoster })}
+                    rosterKind={rosterKind}
                   />
                 ))}
               </div>
@@ -1267,6 +1322,15 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </button>
             ) : null}
           </>
+        ) : readOnlyNote !== undefined ? (
+          /* READ-ONLY thread: the composer is replaced by a plain reason, never
+             rendered-but-disabled. A text box you can type into and never send
+             from is a trap - the operator writes a reply, hits a dead Send, and
+             loses the draft. Used by the native group-text view (no group send
+             until it exists; a >9-member group can never have one). */
+          <p className={styles.optOutNote} role="note">
+            {readOnlyNote}
+          </p>
         ) : (
           <>
             {showChannelToggle ? (
@@ -1397,33 +1461,40 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </p>
             ) : null}
             <div className={styles.replyFoot}>
-              <label className={styles.srOnly} htmlFor="mms-attach-input">
-                Attach files
-              </label>
-              <input
-                ref={fileInputRef}
-                id="mms-attach-input"
-                className={styles.srOnly}
-                type="file"
-                multiple
-                accept={MMS_ACCEPT}
-                aria-label="Attach files"
-                onChange={onPickFiles}
-              />
-              <button
-                type="button"
-                className={styles.attachBtn}
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach a file"
-              >
-                <span aria-hidden="true">+</span> Attach
-              </button>
+              {/* Outbound group MEDIA is not supported in v1 (spec 6.2) and the
+                  server refuses it, so a group text offers no picker at all
+                  rather than uploading a file and then rejecting it. */}
+              {rosterKind === 'group_text' ? null : (
+                <>
+                  <label className={styles.srOnly} htmlFor="mms-attach-input">
+                    Attach files
+                  </label>
+                  <input
+                    ref={fileInputRef}
+                    id="mms-attach-input"
+                    className={styles.srOnly}
+                    type="file"
+                    multiple
+                    accept={MMS_ACCEPT}
+                    aria-label="Attach files"
+                    onChange={onPickFiles}
+                  />
+                  <button
+                    type="button"
+                    className={styles.attachBtn}
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="Attach a file"
+                  >
+                    <span aria-hidden="true">+</span> Attach
+                  </button>
+                </>
+              )}
               <span className={styles.replyTarget}>
                 {relayRoster !== undefined ? (
                   // A relay GROUP: a reply fans out to every member, so naming a
                   // single contact/number here would be wrong (and was: the shared
                   // "this contact" fallback). Say who it actually reaches.
-                  <GroupReplyNote roster={relayRoster} />
+                  <GroupReplyNote roster={relayRoster} kind={rosterKind} />
                 ) : (
                   <ReplyTargetPicker
                     {...(replyToPhone !== undefined && { replyToPhone })}

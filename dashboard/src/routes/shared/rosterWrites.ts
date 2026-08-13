@@ -94,7 +94,7 @@ export function rosterApi(owner: RosterOwner): RosterApi {
 
 // --- Quiet-hours copy, stated ONCE (spec 6.5) -------------------------------
 //
-// The card, the confirm dialog and the [Open group text] control all say the
+// The card, the confirm dialog and the [Open relay group] control all say the
 // same things about a deferral, so they say them from here. The INSTANT is
 // always the server's (it owns the DST-safe window math); we only format it.
 
@@ -117,10 +117,10 @@ export function pendingActionNote(action: RosterPendingAction): string {
     : `${verb} at ${clock} - quiet hours`;
 }
 
-/** WHO/WHAT a notice is about, mid-sentence ("Alicia Grant" / "the group
- *  text"). Also the dismiss control's subject, so the two never disagree. */
+/** WHO/WHAT a notice is about, mid-sentence ("Alicia Grant" / "the relay
+ *  group"). Also the dismiss control's subject, so the two never disagree. */
 export function skippedActionSubject(row: RosterSkippedAction): string {
-  if (row.kind === 'open_group') return 'the group text';
+  if (row.kind === 'open_group') return 'the relay group';
   return row.name ?? 'that contact';
 }
 
@@ -150,11 +150,11 @@ function skipTail(
 ): string {
   switch (reason) {
     case 'group_closed':
-      return kind === 'add_member' ? 'the group text was closed.' : 'it had already been closed.';
+      return kind === 'add_member' ? 'the relay group was closed.' : 'it had already been closed.';
     case 'owner_canceled':
       return scope === 'tour' ? 'this tour was canceled.' : 'this placement closed.';
     case 'already_member':
-      return 'they were already on the group text.';
+      return 'they were already on the relay group.';
     case 'contact_deleted':
       return 'that contact is gone or has no mobile number.';
     case 'member_no_longer_on_roster':
@@ -202,5 +202,5 @@ export function refusalMessage(err: unknown): string {
  * say what to do instead.
  */
 export function threadExistsNote(scope: 'tour' | 'placement'): string {
-  return `A group text was just opened for this ${scope} - that change was not applied. Try it again to notify the group.`;
+  return `A relay group was just opened for this ${scope} - that change was not applied. Try it again to notify the group.`;
 }

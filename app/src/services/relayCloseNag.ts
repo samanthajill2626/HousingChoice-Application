@@ -1,9 +1,9 @@
 // Relay close-nag arming (D5 safety net, relay-number-lifecycle AF-1/CF-1).
 //
-// The D5 nag ("this group text is still open - close it?") must surface on Today
+// The D5 nag ("this relay group is still open - close it?") must surface on Today
 // for ANY group left OPEN past a terminal event (placement lost/moved_in, tour
-// canceled/not_a_fit) - NOT only for groups whose inline "Also close the group
-// text?" ask was explicitly deferred. The dashboard dialog is dismissable (one
+// canceled/not_a_fit) - NOT only for groups whose inline "Also close the relay
+// group?" ask was explicitly deferred. The dashboard dialog is dismissable (one
 // Escape) and can fail to load, so the robust seam is a BACKEND arm at the
 // terminal transition itself: it survives the operator closing the tab before
 // answering.

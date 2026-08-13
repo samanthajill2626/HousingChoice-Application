@@ -276,6 +276,11 @@ async function removedWhilePending(
         // Newest-first: the first event at or before the row's birth ends the
         // window - nothing older can be a removal "while pending".
         if (e.at <= row.createdAt) return false;
+        // The stored kind is named for the pre-group_text vocabulary (see the
+        // adjudication on ActivityEventType); it means a RELAY group removal.
+        // The `refId === conversationId` clause pins it to THIS relay thread, so
+        // the unit-contact reuse of the same kind (refType 'unit') and any
+        // native group_text milestone can never match here.
         if (e.type === 'removed_from_group_text' && e.refId === conversationId) return true;
       }
       // A short page means the feed is exhausted: the boundary IS reached.
@@ -324,6 +329,19 @@ async function validateAction(
       // action waited (a force-send, the raw relay route, the other hub).
       const conversation = await readConversation(owner.threadId, deps);
       if (conversation === 'unreadable' || conversation === undefined) return { wait: true };
+      // A native carrier group is NOT a relay group: it has no pool number and
+      // no roster mutation by construction, and its `group_open` status is
+      // neither `closed` nor `connecting`, so without this it would fall through
+      // and be treated as a live relay group. Nothing attaches a group_text to a
+      // tour/placement today (filed out of scope), so this is unreachable - and
+      // it is exactly the kind of unreachable that stops being unreachable.
+      if (conversation.type === 'group_text') {
+        log.error(
+          { actionId: row.actionId },
+          'roster action: owner thread is a native group text, not a relay group - retiring',
+        );
+        return { skip: 'group_closed' };
+      }
       // Opened AND closed inside the window: re-opening is not this action's
       // business (reopen is a separate decision) - retire it visibly.
       if (conversation.status === 'closed') return { skip: 'group_closed' };
@@ -363,6 +381,15 @@ async function validateAction(
   // read failure alike): claim nothing, retry next tick. Never a skip - a blip
   // must not retire a real add.
   if (conversation === 'unreadable' || conversation === undefined) return { wait: true };
+  // Same native-carrier-group guard as the open path above: a group_text thread
+  // has no roster to mutate, and its status is neither closed nor connecting.
+  if (conversation.type === 'group_text') {
+    log.error(
+      { actionId: row.actionId },
+      'roster action: add target is a native group text, not a relay group - retiring',
+    );
+    return { skip: 'group_closed' };
+  }
   // Spec section 7: a closed group is never announced into.
   if (conversation.status === 'closed') return { skip: 'group_closed' };
   // A CONNECTING group has no pool number yet, so services/relayMembers refuses

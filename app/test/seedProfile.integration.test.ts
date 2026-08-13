@@ -123,5 +123,17 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     // in all future states too.
     const fullCount = await seedAll(endpoint, 'full', namespace);
     expect(fullCount).toBeGreaterThanOrEqual(LEAN_TOTAL);
-  }, 120_000);
+    // 120s -> 240s (fix wave 3, adversarial 8), matching the sibling budget in
+    // seedHistory.test.ts. This is the second full-profile seed in the suite and
+    // it failed once on the same loaded run as that one, but only seedHistory's
+    // budget moved - so the same contention would have re-diagnosed the same
+    // cause from scratch on the next slow day. The cause is recorded in
+    // docs/issues/dynamodb-local-cross-worktree-test-contention.md: the group
+    // integration files hold DynamoDB Local's single SQLite write lock longer
+    // now that the cross-check ledger's event half costs four writes per event,
+    // and this file is a heavy writer waiting behind them. Budget, never a hang
+    // - it passes alone in seconds, and serializing the suite instead costs
+    // every future run. The DDL hooks above are left at 120s deliberately: they
+    // create and drop tables rather than seeding through the write lock.
+  }, 240_000);
 });

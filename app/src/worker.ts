@@ -23,7 +23,8 @@ const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
-const { TokenBucket } = await import('./lib/tokenBucket.js');
+const { sharedA2pBucket } = await import('./lib/tokenBucket.js');
+const { drainRateLimitedWarns } = await import('./lib/rateLimitedWarn.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -56,6 +57,33 @@ if (config.eventBridgeUrl) {
   });
 }
 
+// Native group texting (spec 4.1): the SAME identity fingerprint guard the app
+// runs at boot (index.ts). A deployed stack pins a fingerprint of
+// GROUP_IDENTITY_EXCLUDED_NUMBERS and REFUSES to start when the configured list
+// stops matching, because changing it re-mints every affected group's
+// conversationId - a migration, not a config edit. The worker needs it for the
+// same reason the app does: it runs the same job handlers against the same
+// identity contract, and a worker that started with a divergent list would
+// derive wrong ids for as long as it lived. Idempotent and order-independent -
+// whichever process boots first claims the fingerprint (conditional first
+// write), and the other compares against it. Deliberately BEFORE the consumer
+// starts polling: a process that would mint wrong ids must not take work.
+{
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
+  const { verifyGroupIdentityFingerprint } = await import(
+    './services/groupIdentityFingerprint.js'
+  );
+  await runWithContext(bootContext, async () =>
+    verifyGroupIdentityFingerprint({
+      store: createSettingsRepo(),
+      excludedNumbers: config.groupIdentityExcludedNumbers,
+      // Deployed stacks pin NODE_ENV=production (see lib/config.ts).
+      deployed: config.nodeEnv === 'production',
+      logger,
+    }),
+  );
+}
+
 // The shared A2P token bucket — ONE instance, sized from config
 // (a2pRateLimitPerSec, default ~1 msg/sec), shared across relay fan-out +
 // broadcast + missed-call auto-text so the COMBINED outbound rate stays under
@@ -65,10 +93,15 @@ if (config.eventBridgeUrl) {
 // admit a single message. The bucket starts full, so the first burst is up to
 // `capacity` messages immediately; thereafter sends are paced at `refillPerSec`
 // tokens/sec (the sustained A2P rate).
-const a2pBucket = new TokenBucket({
-  capacity: Math.max(1, config.a2pRateLimitPerSec),
-  refillPerSec: config.a2pRateLimitPerSec,
-});
+//
+// BUILT THROUGH THE SHARED CONSTRUCTOR (fix wave 2, adversarial 31). The app
+// path uses `sharedA2pBucket`, which memoizes one instance per process and
+// applies this exact sizing; hand-rolling a second `new TokenBucket` here meant
+// one semantic written twice and a future worker-side group send would get a
+// SECOND bucket inside this same process. The meter has always been
+// per-process (app and worker are separate tasks in a deployed stack); what
+// this removes is a second one inside ONE process.
+const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
 
 // Register EVERY job handler (retrySend, relay fan-out + intro, broadcast,
 // missed-call auto-text) through the single shared registry — the worker
@@ -312,7 +345,7 @@ runWithContext(bootContext, () => {
 // Pending-roster-action poll (contact-rosters Task 13): the same stateless 60s
 // cadence as the two polls above (state is the DynamoDB pendingRosterActions
 // rows). Applies the roster changes an operator confirmed during quiet hours -
-// opening a group text, adding a member - now that the window has passed, on the
+// opening a relay group, adding a member - now that the window has passed, on the
 // same claim-and-skip discipline. Deps are built once, lazily imported like the
 // blocks above; .unref()'d so it never holds the process open on shutdown.
 {
@@ -423,6 +456,29 @@ if (config.aiExtractionEnabled) {
   }, config.workerPollIntervalMs).unref();
 }
 
+// Native group texting: the guardrail duties (T6.3). Same 60s poll as every
+// other block, but the duties are CADENCED behind a conditional claim on a
+// settings record, so this poll is nearly always a no-op read - the cross-check
+// and staleness sweeps act every five minutes and the two liveness WARNs act
+// daily, no matter how many processes are polling.
+//
+// The app can drive the same runner through POST /__dev/group-guardrails/tick.
+// That is not a convenience: a hermetic e2e lane runs this worker process too,
+// and worker-side WARN/ERROR never reaches the app's /__dev/logtail, so any log
+// line a spec asserts has to come from the app side (worklist A16).
+{
+  const { runGroupGuardrails } = await import('./jobs/groupGuardrails.js');
+
+  const guardrailDeps = { logger };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runGroupGuardrails(now, guardrailDeps).catch((err: unknown) => {
+      logger.error({ err }, 'group guardrail poll error');
+    });
+  }, config.workerPollIntervalMs).unref();
+}
+
 // Keep the process alive until a shutdown signal arrives (also covers the
 // local mode where no poll loop is running).
 const keepAlive = setInterval(() => {
@@ -434,6 +490,10 @@ function shutdown(signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
   runWithContext(bootContext, () => {
+    // Same drain as the app process (fix wave 2, adversarial 26): the throttled
+    // WARN tally is held in an unref'd timer and would otherwise be lost on a
+    // rolling deploy inside the window.
+    drainRateLimitedWarns();
     logger.info({ signal }, 'shutdown signal received — worker draining');
   });
   clearInterval(keepAlive);

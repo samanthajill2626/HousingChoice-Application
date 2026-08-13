@@ -23,6 +23,7 @@ import {
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { groupThreadLabel } from '../lib/groupTitle.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
   LANDLORD_STATUS_LABELS,
@@ -171,7 +172,7 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
 
 /**
  * Wire shape (VERBATIM — the frontend imports identical field names). One
- * relay-group membership row for the contact page's "Group texts" card: the
+ * relay-group membership row for the contact page's "Relay groups" card: the
  * thread + its open/closed status, the pool number fronting it (absent once
  * closed — close clears it), roster size, last activity, the owning entity
  * (tour/placement — the dashboard's link target, from getOwner()), the
@@ -180,12 +181,39 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
  * numbers/names to the authed client matches the M1.7 relay posture; LOG
  * LINES stay IDs/counts only (doc §9).
  */
+/**
+ * One NATIVE group text on a contact's page. Smaller than RelayGroupRow by
+ * construction: a group_text has no pool number, no owner, no operator tag and
+ * no lifecycle status (spec 4.2). Names only, never a phone (same PII posture).
+ */
+interface GroupThreadRow {
+  conversationId: string;
+  memberCount: number;
+  /** ISO 8601 - the conversation's last_activity_at. */
+  lastActivityAt: string;
+  /**
+   * The row's LABEL, from the ONE group-title derivation (lib/groupTitle.ts)
+   * that also titles the inbox row and the thread header. Server-derived so all
+   * three surfaces cannot drift apart again.
+   */
+  title: string;
+  otherMemberNames: string[];
+}
+
+/**
+ * How many group threads the contact card's read considers. There is no
+ * member->thread index, so membership is matched in code over a bounded page of
+ * the group_open partition; whatever this bound withholds is reported to the
+ * client as `truncated`, never dropped silently.
+ */
+const CONTACT_GROUP_THREADS_LIMIT = 200;
+
 interface RelayGroupRow {
   conversationId: string;
   status: 'open' | 'closed' | 'connecting';
   poolNumber?: string;
   memberCount: number;
-  /** ISO 8601 — the conversation's last_activity_at. */
+  /** ISO 8601 - the conversation's last_activity_at. */
   lastActivityAt: string;
   owner: RelayOwner;
   tag?: string;
@@ -1075,7 +1103,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   });
 
   // GET /api/contacts/:contactId/relay-groups → { groups: RelayGroupRow[] }.
-  // The contact page's "Group texts" card: every relay_group thread whose
+  // The contact page's "Relay groups" card: every relay_group thread whose
   // roster includes this contact — by roster contactId OR any of the contact's
   // numbers — open AND closed, newest-activity-first. There is NO
   // member→conversation index (a relay's participant_phone is the POOL number;
@@ -1145,12 +1173,79 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ groups });
   });
 
+  // GET /api/contacts/:contactId/group-threads
+  //   -> { groups: GroupThreadRow[], truncated: boolean }
+  // The contact page's "Group threads" card: every NATIVE group text whose
+  // roster includes this contact. Same shape of problem as the relay card - there
+  // is no member->conversation index and this feature does not add one - so it
+  // reads the ONE group_open partition through the bounded listGroupTexts pager
+  // and matches rosters in code.
+  //
+  // TRUNCATION IS ON THE WIRE, not just in a log line (the relay card's
+  // precedent): a bounded walk that quietly omitted the older half of a
+  // founder's 132 group threads would read as "they are not in any others".
+  router.get('/:contactId/group-threads', async (req, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Membership across ALL the contact's numbers. Identical to the relay card's
+    // rule, and already the superset spec 15.6 wants: matching on EITHER the
+    // contactId or the phone is what makes phone-scoped member keys a no-op here.
+    const phones = new Set(contactPhones(contact).map((p) => p.phone));
+    const isSelf = (p: ConversationParticipant): boolean =>
+      (p.contactId !== '' && p.contactId === contactId) || phones.has(p.phone);
+
+    const { items, truncated, nextCursor } = await conversations.listGroupTexts({
+      limit: CONTACT_GROUP_THREADS_LIMIT,
+    });
+    // Either bound can withhold a thread this contact is in: the repo's walk
+    // budget, or our own page limit.
+    const withheld = truncated || nextCursor !== undefined;
+    if (withheld) {
+      log.warn(
+        { contactId, considered: items.length },
+        'contact group-threads: bounded read stopped early - older group threads not considered',
+      );
+    }
+
+    const groups: GroupThreadRow[] = [];
+    for (const conv of items) {
+      const roster = conv.participants ?? [];
+      if (!roster.some(isSelf)) continue;
+      const others = roster.filter((p) => !isSelf(p));
+      groups.push({
+        conversationId: conv.conversationId,
+        memberCount: roster.length,
+        lastActivityAt: conv.last_activity_at,
+        // THE title, from the ONE derivation (lib/groupTitle.ts) the inbox row
+        // and the thread header also use - over the OTHER members, since this
+        // card is read from inside one member's own file. The card used to make
+        // up its own rule over `otherMemberNames`, which rendered "Group text"
+        // for every migrated (nameless) roster while the same thread showed
+        // real names in its header. `otherMemberNames` stays on the wire for
+        // the count/tooltip surfaces; the LABEL comes from here.
+        title: groupThreadLabel(others),
+        otherMemberNames: others
+          .map((p) => p.name)
+          .filter((n): n is string => typeof n === 'string' && n.length > 0),
+      });
+    }
+
+    log.info({ contactId, groupCount: groups.length }, 'contact group threads served');
+    res.json({ groups, truncated: withheld });
+  });
+
   // GET /api/contacts/:contactId/media → { media: ContactMediaItem[] } (BE5/C5).
   // The tenant/landlord page's Media panel: every mirrored MMS attachment across
   // the contact's 1:1 conversations (ALL their numbers), newest-first. Reuses the
   // timeline's cross-phone resolution (contactPhones → findByParticipantPhone →
   // dedupe conversationIds) and EXCLUDES relay_group threads (those front a pool
-  // number, never the contact's real 1:1 — group-text media is never inlined).
+  // number, never the contact's real 1:1 - relay-group media is never inlined).
   // 404 unknown contact / phone-pointer id (mirrors BE1's GET). Returns [] for a
   // contact with no media (never a 404 for "no media"). NO URL is generated —
   // the frontend fetches bytes via GET /api/messages/:sid/media/:idx using s3Key.
@@ -1171,7 +1266,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact's real phone/email), so they are excluded purely on type.
     const convById = new Map<string, string>(); // conversationId → (presence)
     for (const conv of await conversationsForContact(contact, conversations)) {
-      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      // Multi-party threads are excluded by NAME, never by "not relay_group"
+      // (invariant 13.6). A native group_text carries no participant_phone or
+      // participant_email, so conversationsForContact cannot return one today -
+      // the explicit case keeps that true if it ever can.
+      if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
       convById.set(conv.conversationId, conv.conversationId);
     }
 

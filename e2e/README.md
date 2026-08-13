@@ -431,17 +431,43 @@ the lane stack eliminates this class of failure.
 7. Before claiming done: `npm run e2e` (full suite, green).
 
 ## Dev-only surface (local stack only)
-`/auth/dev-login`, `/__dev/ping`, `/__dev/outbox`, `/__dev/reseed` mount ONLY
-when `DEV_AUTH_ENABLED=1`, `NODE_ENV!=production`, AND a local `DYNAMODB_ENDPOINT`
-is set. They never exist in a deployed environment.
+These mount ONLY when `DEV_AUTH_ENABLED=1`, `NODE_ENV!=production`, AND a local
+`DYNAMODB_ENDPOINT` is set. They never exist in a deployed environment - the dev
+router module is not even imported there.
+
+- `POST /auth/dev-login` - mint a real session without Google.
+- `GET  /__dev/ping` - stack-identity probe (the preflight's staleness check).
+- `GET  /__dev/outbox` - DEPRECATED proof-of-send. Group sends are INVISIBLE to
+  it (they leave through the Conversations adapter, not the messaging one);
+  assert those against the fake's threads and the per-member chips instead.
+- `POST /__dev/reseed[?profile=full]` - clean slate. Logs the browser out.
+- `GET  /__dev/logtail?level=&since=&contains=&event=` - the app process's
+  WARN+ERROR ring buffer, and the ONLY way a spec can assert on an app log line.
+  The response carries `capturing`: an empty `lines` from a stack that never
+  installed the ring proves nothing, so a spec claiming "no ERROR" must check it
+  (`fixtures/groupText.ts` throws rather than pass silently).
+  `POST /__dev/logtail/clear` scopes a spec to its own window.
+- The `*/tick` seams - `tour-reminders`, `roster-actions`, `placement-nudges`,
+  `extraction`, and `group-guardrails` (plus `group-send-staleness/check`).
+
+**THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
+*and* spawns a real worker with its own pollers. Only the app's log lines reach
+`/__dev/logtail`, so any spec asserting a guardrail line must drive the app-side
+tick - waiting on the worker's copy proves nothing either way. The guardrail
+tick's `force` defaults to TRUE for the same reason: the worker may have just
+claimed the cadence period.
 
 ## Layout
-- `playwright.config.ts` — projects (`setup` → `chromium`), reporters, `webServer`.
-- `auth.setup.ts` — dev-login → saved `storageState` (the `vaPage` fixture uses it).
-- `fixtures/` — `auth` (`vaPage`), `outbox` (`getOutbox`), `reseed`.
-- `support/` — `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup).
-- `tests/` — `public/`, `dashboard/`, `flows/`.
-- `.artifacts/` — reports, traces, screenshots, the `.restart` sentinel, `lane.json` (gitignored).
+- `playwright.config.ts` - one `chromium` project, reporters, `webServer` (which runs `scripts/e2e-session.mjs`).
+- `fixtures/` - `outbox` (`getOutbox`, deprecated), `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts + the Conversations inspectors), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
+- `support/` - `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup), `viewport.ts`.
+- `tests/` - `dashboard-next/`, `flows/`, `scenarios/`, plus two loose specs.
+- `scenarios/` - `steps.ts`, the sequence-diagram vocabulary.
+- `.artifacts/` - reports, traces, screenshots, the `.restart` sentinel, `lane.json` (gitignored).
+
+There is no `auth.setup.ts` and no `vaPage` fixture: every spec declares its own
+four-line `devLogin(page)` helper. (This section claimed otherwise for a long
+time - it was describing a shape the harness never grew.)
 
 ## CI readiness (documented, not yet wired)
 

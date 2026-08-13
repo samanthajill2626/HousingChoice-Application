@@ -26,9 +26,12 @@ import {
 describe('today action-queue API (BE6/C7)', () => {
   let app: Express;
   let world: FakeWorld;
+  /** The harness's log capture - the truncation WARNs are asserted through it. */
+  let harness: ReturnType<typeof makeWebhookHarness>;
 
   beforeEach(() => {
     const h = makeWebhookHarness();
+    harness = h;
     app = h.app;
     world = h.world;
   });
@@ -726,8 +729,8 @@ describe('today action-queue API (BE6/C7)', () => {
       refType: 'contact',
       refId: 'c-optout',
       who: 'Opted Out',
-      why: 'Opted out of a group text — not receiving messages',
-      tag: 'Group text',
+      why: 'Opted out of a relay group - not receiving messages',
+      tag: 'Relay group',
       attention: true,
     });
   });
@@ -814,7 +817,7 @@ describe('today action-queue API (BE6/C7)', () => {
       refType: 'contact',
       refId: 'c-secondary',
       who: 'Second Number',
-      tag: 'Group text',
+      tag: 'Relay group',
       attention: true,
     });
   });
@@ -921,6 +924,127 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(forSug).toMatchObject({ refType: 'contact', who: 'Sug Gest', why: '2 suggestion(s)' });
     const forOne = ai.find((i) => i.refId === 't-one');
     expect(forOne).toMatchObject({ refType: 'contact', who: 'One Only', why: '1 suggestion(s)' });
+  });
+
+  // THE DEFECT THIS PINS (fix wave 5, adversarial 30). Group detection mints a
+  // contact for EVERY unseen roster member as (unknown, needs_review) - the
+  // exact byTypeStatus partition Today reads as its human triage queue - and
+  // group members deliberately get no 1:1 thread, so the conversation-row
+  // de-dupe cannot see them. One inbound from a six-person carrier group put
+  // five "New unknown contact" rows into needs_you_now in a single shot, and
+  // past the hard page cap (whose GSI range key is the STATUS, not a timestamp,
+  // so there is no recency ordering) genuinely new unknown contacts became
+  // permanently invisible in that block.
+  it('EXCLUDES group-detection contact stubs, and still shows a real unknown contact', async () => {
+    world.contacts.push({
+      contactId: 'c-groupstub',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110001',
+      origin: 'group_detection',
+      group_participation_at: '2026-08-11T12:00:00.000Z',
+    } as ContactItem);
+    world.contacts.push({
+      contactId: 'c-realunknown',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110099',
+    } as ContactItem);
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.map((r) => r.refId)).toEqual(['c-realunknown']);
+  });
+
+  it('a real unknown contact still surfaces behind MORE THAN A PAGE of group stubs', async () => {
+    // THE DEFECT (fix wave 2, adversarial 6). Wave 1 filtered the stubs at
+    // DISPLAY, but DynamoDB applies `Limit` at the index before anything
+    // application-side runs - so 100 rows are drawn from the whole
+    // `unknown#needs_review` partition and only then filtered. Every row in that
+    // partition carries the identical sort key, so intra-partition order is
+    // stable and the SAME 100 come back every time: once enough group stubs sort
+    // ahead of the real unknowns, the block rendered ZERO rows, every time,
+    // which reads as "nothing needs triage". Wave 1 turned a loud problem into a
+    // silent one; the page has to be FILLED past the stubs, not merely cleaned.
+    for (let i = 0; i < 120; i += 1) {
+      world.contacts.push({
+        contactId: `c-stub-${String(i).padStart(3, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555200${String(i).padStart(4, '0')}`,
+        origin: 'group_detection',
+        group_participation_at: '2026-08-11T12:00:00.000Z',
+      } as ContactItem);
+    }
+    world.contacts.push({
+      contactId: 'c-realunknown-behind',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110098',
+    } as ContactItem);
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.map((r) => r.refId)).toContain('c-realunknown-behind');
+  });
+
+  // THE TWO DEFECTS THESE PIN (fix wave 4, item 7). The fill loop that closed
+  // adversarial 6 introduced both of them at its own edges.
+  it('never emits MORE than the page cap - the fill loop could return 199 rows', async () => {
+    // The loop breaks on `collected.length >= GROUP_FETCH_LIMIT`, so one
+    // excluded row in the first page (99 real) followed by a full second page
+    // (100 real) put 199 rows in a block every other group on this route caps at
+    // 100 - and this block is a human worklist, not a report.
+    world.contacts.push({
+      contactId: 'c-stub-lead',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15552990000',
+      origin: 'group_detection',
+    } as ContactItem);
+    for (let i = 0; i < 199; i += 1) {
+      world.contacts.push({
+        contactId: `c-real-${String(i).padStart(3, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555300${String(i).padStart(4, '0')}`,
+      } as ContactItem);
+    }
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.length).toBe(100);
+  });
+
+  it('WARNS when the page budget runs out with rows still behind it, instead of a silent short block', async () => {
+    // Every other truncation on this route is announced. This one was not: a
+    // partition holding more excluded rows than the walk's whole budget
+    // exhausts it with a short block, and a short block reads as "nothing needs
+    // triage" - the loud-problem-turned-silent the fill loop exists to prevent,
+    // one layer further out.
+    for (let i = 0; i < 1005; i += 1) {
+      world.contacts.push({
+        contactId: `c-manystub-${String(i).padStart(4, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555400${String(i).padStart(4, '0')}`,
+        origin: 'group_detection',
+      } as ContactItem);
+    }
+
+    await getItems();
+
+    const warned = harness.capture
+      .atLevel(40)
+      .filter((l) => String(l['msg'] ?? '').includes('ran out of pages before filling the block'));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatchObject({ group: 'contacts:triage', found: 0 });
   });
 
   it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {

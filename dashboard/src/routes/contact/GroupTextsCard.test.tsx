@@ -1,5 +1,5 @@
 // GroupTextsCard — pending / honest-empty / row rendering, label preference
-// (other members' names > tag > pool number > "Group text"), conversation links
+// (other members' names > tag > pool number > "Relay group"), conversation links
 // (every row → /conversations/:conversationId), and the Closed right-hand label.
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
@@ -36,7 +36,7 @@ describe('GroupTextsCard', () => {
 
   it('renders the honest empty state when ready with no groups', () => {
     renderIt({ pending: false, groups: [] });
-    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
+    expect(screen.getByText('No relay groups yet.')).toBeInTheDocument();
   });
 
   it('renders a row per group with the member count; the heading carries no count', () => {
@@ -52,7 +52,7 @@ describe('GroupTextsCard', () => {
     expect(screen.getByText('2 members')).toBeInTheDocument();
     expect(screen.getByText('3 members')).toBeInTheDocument();
     // The heading is the bare title — count asides were removed 2026-08-03.
-    expect(screen.getByRole('heading', { name: 'Group texts' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Relay groups' })).toBeInTheDocument();
   });
 
   it('links every row to its own conversation view, regardless of owner', () => {
@@ -89,13 +89,13 @@ describe('GroupTextsCard', () => {
     expect(screen.queryByText('2 members')).not.toBeInTheDocument();
   });
 
-  it('label preference: names > tag > pool number > "Group text"', () => {
+  it('label preference: names > tag > pool number > "Relay group"', () => {
     expect(groupLabel(makeGroup({ otherMemberNames: ['A'], tag: 'T' }))).toBe('With A');
     expect(groupLabel(makeGroup({ tag: 'Maple St tour' }))).toBe('Maple St tour');
     expect(groupLabel(makeGroup({ poolNumber: '+15550190001' }))).toBe('(555) 019-0001');
     const bare = makeGroup({ status: 'closed' });
     delete bare.poolNumber;
-    expect(groupLabel(bare)).toBe('Group text');
+    expect(groupLabel(bare)).toBe('Relay group');
   });
 
   it('groupLink: always the row\'s own conversation view', () => {

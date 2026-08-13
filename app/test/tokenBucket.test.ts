@@ -3,7 +3,7 @@
 // acquisitions wait exactly the refill time; concurrent acquirers honour the
 // shared rate; acquire never blocks forever.
 import { describe, expect, it } from 'vitest';
-import { TokenBucket } from '../src/lib/tokenBucket.js';
+import { TokenBucket, TokenBucketBusyError } from '../src/lib/tokenBucket.js';
 
 /**
  * Fake clock + sleep: sleep ADVANCES the clock by the requested ms (so the
@@ -74,11 +74,53 @@ describe('TokenBucket', () => {
     expect(clock.waits).toEqual([500]);
   });
 
-  it('clamps a request larger than capacity (never deadlocks)', async () => {
+  it('pays a request larger than capacity IN FULL, in instalments (never deadlocks)', async () => {
+    // WAS "clamps a request larger than capacity" (fix wave 2, adversarial 3 /
+    // conformance F3). The clamp made the meter lie: a group send draws one
+    // token per carrier message, capacity is max(1, A2P_RATE_LIMIT_PER_SEC), and
+    // the shipped default is 1.0 - so a nine-member group post drew ONE token
+    // for nine messages and every test that stubbed the bucket said it drew
+    // nine. A draw beyond capacity is now taken in capacity-sized instalments,
+    // which costs exactly the wall-clock time the configured rate implies.
     const clock = fakeTime();
     const bucket = new TokenBucket({ capacity: 2, refillPerSec: 2, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
-    await bucket.acquire(5); // clamped to capacity 2 → immediate (starts full)
-    expect(clock.waits).toEqual([]);
+    await bucket.acquire(5); // 2 immediate (starts full), then 2 @1000ms, then 1 @500ms
+    expect(clock.waits).toEqual([1000, 500]);
+  });
+
+  it('a bounded acquire REFUSES rather than parking an interactive request forever', async () => {
+    // Every pre-existing caller is a background job and passes no bound. A group
+    // send is the first INTERACTIVE one: N queued sends serialise FIFO, so an
+    // unbounded wait holds N Express requests open with no ceiling at all (fix
+    // wave 2, adversarial 16).
+    const clock = fakeTime();
+    const bucket = new TokenBucket({ capacity: 1, refillPerSec: 1, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
+    await bucket.acquire(1); // drains the bucket
+    await expect(bucket.acquire(9, { timeoutMs: 2000 })).rejects.toBeInstanceOf(TokenBucketBusyError);
+    // It refused INSIDE the bound rather than waiting the nine seconds out.
+    expect(clock.waits.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(2000);
+  });
+
+  it('a refusal REPORTS the instalments it already drew, and never claims it spent nothing', async () => {
+    // The docstring used to promise "the throughput was never spent" (fix wave
+    // 3, conformance 3). At capacity 1 - the shipped default tier - every
+    // multi-member send is instalments, and the deadline check sits AFTER the
+    // deductions, so a refusal has typically paid for part of the draw.
+    const clock = fakeTime();
+    const bucket = new TokenBucket({ capacity: 1, refillPerSec: 1, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
+    const err = await bucket.acquire(9, { timeoutMs: 2000 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TokenBucketBusyError);
+    const busy = err as TokenBucketBusyError;
+    expect(busy.spent).toBeGreaterThan(0);
+    expect(busy.message).toContain('not refunded');
+    expect(busy.message).not.toContain('nothing drawn');
+  });
+
+  it('a bounded acquire that CAN be paid inside the bound still resolves', async () => {
+    const clock = fakeTime();
+    const bucket = new TokenBucket({ capacity: 2, refillPerSec: 2, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
+    await bucket.acquire(3, { timeoutMs: 5000 }); // 2 immediate, 1 @500ms
+    expect(clock.waits).toEqual([500]);
   });
 
   it('FIX 6: a fractional rate sizes capacity EXACTLY (not ceil) so the burst stays under the tier', async () => {
@@ -106,6 +148,73 @@ describe('TokenBucket', () => {
     expect(clock.waits).toEqual([]);
     await bucket.acquire(); // 1 token at 0.5/sec → 2000ms
     expect(clock.waits).toEqual([2000]);
+  });
+
+  // THE DEFECT THESE TWO PIN (fix wave 4, item 4). `timeoutMs` was documented as
+  // bounding the TOTAL wait "queue time included" and was implemented as a check
+  // AFTER `await prior` - so a request queued behind a long draw sat through the
+  // whole of that draw and only then discovered its bound had expired minutes
+  // ago. The bound capped the pacing wait; the wait the operator experiences,
+  // which is the one it exists to cap, was unbounded.
+  it('bounds the wait INCLUDING queue time - a queued send refuses AT the bound, not after the queue', async () => {
+    const clock = fakeTime();
+    let fireDeadline!: () => void;
+    const bucket = new TokenBucket({
+      capacity: 1,
+      refillPerSec: 1,
+      now: clock.now,
+      // The predecessor parks mid-pacing and never finishes: that IS the queue an
+      // interactive send gets stuck behind.
+      sleep: () => new Promise<void>(() => {}),
+      maxJitterMs: 0,
+      queueTimeout: () =>
+        new Promise<void>((resolve) => {
+          fireDeadline = resolve;
+        }),
+    });
+
+    void bucket.acquire(9); // takes the one token, then parks forever
+    const queued = bucket.acquire(2, { timeoutMs: 200 });
+    fireDeadline();
+
+    const outcome = await Promise.race([
+      queued.then(() => 'resolved' as const, (e: unknown) => e),
+      new Promise((r) => setTimeout(() => r('still stuck in the queue'), 100)),
+    ]);
+    expect(outcome).toBeInstanceOf(TokenBucketBusyError);
+    // It never reached the front, so it really did spend nothing.
+    expect((outcome as TokenBucketBusyError).spent).toBe(0);
+  });
+
+  it('a timed-out waiter leaves the queue WITHOUT letting the next one jump the line', async () => {
+    const clock = fakeTime();
+    let fireDeadline!: () => void;
+    const bucket = new TokenBucket({
+      capacity: 1,
+      refillPerSec: 1,
+      now: clock.now,
+      sleep: () => new Promise<void>(() => {}),
+      maxJitterMs: 0,
+      queueTimeout: () =>
+        new Promise<void>((resolve) => {
+          fireDeadline = resolve;
+        }),
+    });
+
+    void bucket.acquire(9); // parks forever at the front
+    const bounded = bucket.acquire(1, { timeoutMs: 200 });
+    let behindRan = false;
+    void bucket.acquire(1).then(() => {
+      behindRan = true;
+    });
+    fireDeadline();
+
+    await expect(bounded).rejects.toBeInstanceOf(TokenBucketBusyError);
+    // The waiter BEHIND the refusal must still be blocked by the draw that is
+    // still draining - releasing the tail eagerly would let it draw against the
+    // same budget concurrently, which is the overshoot FIFO exists to prevent.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(behindRan).toBe(false);
   });
 
   it('rejects nonsensical construction', () => {

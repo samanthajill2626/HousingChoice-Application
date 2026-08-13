@@ -49,7 +49,8 @@ export interface ConversationUpdatedEvent {
    */
   participant_display_name: string | null;
   /**
-   * Relay group status (M1.7): `open` | `closed` for relay_group threads;
+   * Multi-party thread status: `open` | `closed` for relay_group threads
+   * (M1.7), `group_open` for a native group_text (group-texting spec 4.2);
    * null for 1:1 (whose status is always implicitly open). Lets the inbox
    * grey out a closed relay live.
    */
@@ -60,10 +61,11 @@ export interface ConversationUpdatedEvent {
    */
   pool_number?: string | null;
   /**
-   * Relay group roster (M1.7), or null on 1:1 threads. The live member list so
-   * the relay UI updates rosters in place on add/remove. Each entry carries
-   * contactId/phone/name (name optional). 1:1 behavior is unchanged — this is
-   * null there.
+   * Multi-party roster, or null on 1:1 threads. For a relay_group (M1.7) the
+   * live member list so the relay UI updates rosters in place on add/remove;
+   * for a group_text the carrier group's roster, which the thread view resolves
+   * sender chips against. Each entry carries contactId/phone/name (name
+   * optional). 1:1 behavior is unchanged - this is null there.
    */
   members?: ConversationParticipant[] | null;
 }
@@ -86,6 +88,12 @@ export interface ConversationUpdatedEvent {
  */
 export function toConversationUpdatedEvent(item: ConversationItem): ConversationUpdatedEvent {
   const isRelay = item.type === 'relay_group';
+  // Native group texting (T3.8): a `group_text` thread is multi-party too, so
+  // the inbox and thread view need its live status + roster - but it NEVER
+  // carries a pool number (spec 4.2 forbids the field on a group thread), so
+  // this is a SEPARATE spread, not a widened relay one. The relay spread below
+  // stays byte-identical (pinned by exact-equality tests).
+  const isGroup = item.type === 'group_text';
   return {
     conversationId: item.conversationId,
     last_activity_at: item.last_activity_at,
@@ -99,6 +107,13 @@ export function toConversationUpdatedEvent(item: ConversationItem): Conversation
     ...(isRelay && {
       status: item.status ?? null,
       pool_number: item.pool_number ?? null,
+      members: item.participants ?? [],
+    }),
+    // Group fields: the live status (`group_open`) and the roster the thread
+    // view renders sender chips against. NO pool_number - a carrier group is
+    // fronted by the business number, never a masked relay number.
+    ...(isGroup && {
+      status: item.status ?? null,
       members: item.participants ?? [],
     }),
   };

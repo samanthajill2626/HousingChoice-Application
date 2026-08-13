@@ -1333,6 +1333,36 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(stored?.audience_mode).toBe('seeds_only');
   });
 
+  // group-texting A8, consumer 6 of 6 (broadcasts.ts resolveSeeds - staff
+  // display 2). A hand-picked group member previews as consent-not-recorded.
+  it('preview shows has_consent FALSE for a seeded SILENT GROUP MEMBER', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, {
+      contactId: 'c-groupmember',
+      phone: '+15550001009',
+      consent_method: undefined,
+      group_participation_at: '2026-08-10T12:00:00.000Z',
+    });
+    const unitId = seedUnit(world).unitId;
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId, body_template: 'Hi!', seedContactIds: ['c-groupmember'] });
+    expect(create.status).toBe(201);
+
+    const preview = await request(app)
+      .post(`/api/broadcasts/${create.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.candidates).toHaveLength(1);
+    expect(preview.body.candidates[0].contactId).toBe('c-groupmember');
+    expect(preview.body.candidates[0].has_consent).toBe(false);
+  });
+
   it('createDraft with seedContactIds AND an audience_filter stays in filter mode and estimates the union', async () => {
     const app = makeWebhookHarness({ world }).app;
     seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });

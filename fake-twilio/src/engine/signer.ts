@@ -3,6 +3,13 @@ import { createHmac } from 'node:crypto';
 
 export type WebhookParams = Record<string, string>;
 
+/** How the carrier-group envelope is laid out on the wire (group-texting 5.1).
+ *  `indexed` is the shape the live spike observed (OtherRecipients0..N);
+ *  `single` is the undocumented bare `OtherRecipients` the app's parser accepts
+ *  defensively, and can only ever carry ONE address (a repeated form key is an
+ *  ARRAY, which a Record<string,string> param set cannot express). */
+export type OtherRecipientsShape = 'indexed' | 'single';
+
 export interface BuildInboundSmsInput {
   messageSid: string;
   from: string;
@@ -10,6 +17,10 @@ export interface BuildInboundSmsInput {
   body?: string;
   mediaUrls?: string[];
   optOutType?: string;
+  /** The OTHER handsets on a carrier group text. Absent = an ordinary 1:1. */
+  otherRecipients?: string[];
+  /** Defaults to `indexed`. */
+  otherRecipientsShape?: OtherRecipientsShape;
 }
 
 /** Infer a Twilio-style MediaContentType from a media URL's file extension (FIX 7). */
@@ -44,8 +55,115 @@ export function buildInboundSmsParams(input: BuildInboundSmsInput): WebhookParam
     params[`MediaContentType${i}`] = inferMediaContentType(url);
   });
   if (input.optOutType !== undefined) params['OptOutType'] = input.optOutType;
+  // The carrier-group ENVELOPE. Undocumented by Twilio and proven only by the
+  // live spike, so both observed layouts are producible: the app's parser is
+  // gap-tolerant and reads BOTH, and a spec must be able to exercise each.
+  const others = input.otherRecipients ?? [];
+  if (others.length > 0) {
+    if ((input.otherRecipientsShape ?? 'indexed') === 'single') {
+      // Single form: exactly one address under the bare key. Extra addresses
+      // would need a repeated key, which this param shape cannot carry - so
+      // producing a SHORT roster silently is refused rather than risked (a
+      // short roster is a different conversationId, i.e. a forked thread).
+      if (others.length > 1) {
+        throw new Error(
+          'buildInboundSmsParams: the single OtherRecipients shape carries exactly one address',
+        );
+      }
+      params['OtherRecipients'] = others[0]!;
+    } else {
+      others.forEach((address, i) => {
+        params[`OtherRecipients${i}`] = address;
+      });
+    }
+  }
   return params;
 }
+
+// ---------------------------------------------------------------------------
+// Twilio Conversations webhook params (group-texting spec 7/16)
+// ---------------------------------------------------------------------------
+//
+// ONE service-scoped webhook carries BOTH filters (spec 16.1), so both builders
+// target the same path and differ only by EventType. Field names and casing are
+// the ones captured LIVE on the dev account (spike addendum) and pinned in
+// app/test/groupConversationsWebhook.test.ts - notably `Status` (not
+// `DeliveryStatus`) on the receipt.
+
+export interface BuildConversationsDeliveryInput {
+  conversationSid: string;
+  messageSid: string;
+  participantSid: string;
+  /** RAW Conversations status: sent | delivered | undelivered | failed | read. */
+  status: string;
+  errorCode?: string;
+  /** The per-member carrier SID (SMxx) - the receipts path's second join key. */
+  channelMessageSid?: string;
+  chatServiceSid?: string;
+  dateCreated?: string;
+}
+
+export function buildConversationsDeliveryParams(
+  input: BuildConversationsDeliveryInput,
+): WebhookParams {
+  const params: WebhookParams = {
+    AccountSid: FAKE_ACCOUNT_SID,
+    ChatServiceSid: input.chatServiceSid ?? FAKE_CHAT_SERVICE_SID,
+    ConversationSid: input.conversationSid,
+    DateCreated: input.dateCreated ?? new Date().toISOString(),
+    EventType: 'onDeliveryUpdated',
+    MessageSid: input.messageSid,
+    ParticipantSid: input.participantSid,
+    RetryCount: '0',
+    Status: input.status,
+  };
+  if (input.errorCode !== undefined) params['ErrorCode'] = input.errorCode;
+  if (input.channelMessageSid !== undefined) params['ChannelMessageSid'] = input.channelMessageSid;
+  return params;
+}
+
+export interface BuildConversationsMessageAddedInput {
+  conversationSid: string;
+  messageSid: string;
+  participantSid?: string;
+  author?: string;
+  body?: string;
+  index?: number;
+  /** `SMS` = carrier-sourced (what the cross-check counts); `API` = our own post. */
+  source?: string;
+  chatServiceSid?: string;
+  messagingServiceSid?: string;
+  dateCreated?: string;
+}
+
+export function buildConversationsMessageAddedParams(
+  input: BuildConversationsMessageAddedInput,
+): WebhookParams {
+  const params: WebhookParams = {
+    AccountSid: FAKE_ACCOUNT_SID,
+    Attributes: '{}',
+    ChatServiceSid: input.chatServiceSid ?? FAKE_CHAT_SERVICE_SID,
+    ConversationSid: input.conversationSid,
+    DateCreated: input.dateCreated ?? new Date().toISOString(),
+    EventType: 'onMessageAdded',
+    Index: String(input.index ?? 0),
+    MessageSid: input.messageSid,
+    MessagingServiceSid: input.messagingServiceSid ?? FAKE_MESSAGING_SERVICE_SID,
+    RetryCount: '0',
+    Source: input.source ?? 'SMS',
+  };
+  if (input.author !== undefined) params['Author'] = input.author;
+  if (input.body !== undefined) params['Body'] = input.body;
+  if (input.participantSid !== undefined) params['ParticipantSid'] = input.participantSid;
+  return params;
+}
+
+/** Cosmetic account/service SIDs stamped on Conversations webhooks. Nothing in
+ *  the app correlates on them (the join keys are CH/IM/MB), but the real events
+ *  carry them and a shape-faithful fake is the whole point. */
+const FAKE_ACCOUNT_SID = 'ACfake000000000000000000000000000';
+const FAKE_CHAT_SERVICE_SID = 'ISfake000000000000000000000000000';
+const FAKE_MESSAGING_SERVICE_SID = 'MGfake000000000000000000000000000';
 
 export interface BuildStatusInput {
   messageSid: string;

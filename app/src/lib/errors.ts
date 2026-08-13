@@ -10,7 +10,87 @@ import {
 import { logger as defaultLogger, type Logger } from './logger.js';
 
 function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
+  if (value instanceof Error) return value;
+  // `String(value)` THROWS for a symbol and for a null-prototype object (fix
+  // wave 2, adversarial 32). This helper runs inside catch blocks, so a throw
+  // here REPLACES the error being reported - on the boot fingerprint guard and
+  // on the group send path, the two places that most need to say what failed.
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('unstringifiable thrown value');
+  }
+}
+
+/**
+ * The safe fields of an error summary. See `summarizeError`.
+ *
+ * NO `message` (fix wave 2, adversarial 10 / conformance F7). The adjudicated
+ * allowlist is (name, code, status). `message` is the one field the vendor
+ * authors freely - Twilio's address/validation family echoes the offending
+ * parameter into it ("The 'To' number +1555... is not a valid phone number") -
+ * so a summary that carried it could not honestly claim nothing raw leaves.
+ */
+export interface ErrorSummary {
+  name: string;
+  code?: string;
+  status?: number;
+}
+
+/**
+ * THE SAFE SHAPE FOR LOGGING A VENDOR SDK ERROR (fix wave 5, adversarial 4).
+ *
+ * pino's default `err` serializer copies EVERY enumerable key of the error it
+ * is handed. A Twilio SDK network failure is a raw `AxiosError`, and axios sets
+ * `this.config = config` as an own enumerable property - so `log.warn({ err })`
+ * writes `config.headers.Authorization` (Basic base64 of the API key sid and
+ * secret) and `config.data` (the form-encoded request body: every member's
+ * phone number, and the full message text) straight into CloudWatch. The
+ * logger's `redact` list cannot save us there: the paths do not match and
+ * pino's redact is case-sensitive.
+ *
+ * So a call site that can receive a vendor error logs THIS instead of the error
+ * object: a name and the two vendor discriminators worth having. It copies
+ * nothing it was not asked for - not even `message` - so neither a future SDK
+ * adding an enumerable property nor a vendor writing PII into its own error text
+ * can smuggle anything into a log line.
+ *
+ * NUMERIC CODES COUNT (fix wave 2, adversarial 9). Twilio's `RestException`
+ * sets `code` as a NUMBER and never sets `name`, so a string-only check dropped
+ * the single most identifying field and reported every rail failure as a bare
+ * `Error`. The name falls back to the CONSTRUCTOR's name for exactly that case,
+ * while a real `TypeError` keeps its own.
+ */
+export function summarizeError(value: unknown): ErrorSummary {
+  const err = toError(value);
+  const raw = err as unknown as {
+    code?: unknown;
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  const code =
+    typeof raw.code === 'string' && raw.code.length > 0
+      ? raw.code
+      : typeof raw.code === 'number'
+        ? String(raw.code)
+        : undefined;
+  const status =
+    typeof raw.status === 'number'
+      ? raw.status
+      : typeof raw.response?.status === 'number'
+        ? raw.response.status
+        : undefined;
+  const declared = typeof err.name === 'string' && err.name.length > 0 ? err.name : 'Error';
+  const constructed = err.constructor?.name;
+  const name =
+    declared === 'Error' && typeof constructed === 'string' && constructed.length > 0
+      ? constructed
+      : declared;
+  return {
+    name,
+    ...(code !== undefined && { code }),
+    ...(status !== undefined && { status }),
+  };
 }
 
 /**

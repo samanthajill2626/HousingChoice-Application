@@ -227,6 +227,7 @@ vi.mock('../api/client.js', () => ({
   getThreads: vi.fn(async () => threads),
   getGroups: vi.fn(async () => seedGroups),
   sendAsParty: vi.fn(async () => 'SMx'),
+  sendGroupAsParty: vi.fn(async () => 'MMx'),
   addAdHoc: vi.fn(async () => personas[0]),
   setDeliveryOutcome: vi.fn(async () => undefined),
   resetAll: vi.fn(async () => undefined),

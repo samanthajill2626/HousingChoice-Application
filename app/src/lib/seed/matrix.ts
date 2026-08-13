@@ -1103,8 +1103,8 @@ function participantOf(contact: Record<string, unknown>): ConversationParticipan
 /**
  * Each relay group is owned by a scheduled tour, so its roster is DERIVED from
  * that tour's actual rows — the tour's tenant + the toured unit's landlord —
- * keeping the matrix coherent-by-construction (an empty roster seeded a group
- * text with no members: number-only inbox label, empty Members panel, and a
+ * keeping the matrix coherent-by-construction (an empty roster seeded a relay
+ * group with no members: number-only inbox label, empty Members panel, and a
  * fan-out with nobody to send to). The landlord may be the lean anchor
  * (contact-landlord-0001 on tourable units) — profiles compose additively, so
  * the lookup map must include lean's contacts.

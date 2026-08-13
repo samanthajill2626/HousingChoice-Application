@@ -10,12 +10,14 @@ import {
   getPlacements,
   getContactListingsSent,
   getContactMedia,
+  getContactGroupThreads,
   getContactRelayGroups,
   getTours,
   getUnits,
   type ContactMediaItem,
   type ListingSendRow,
   type PlacementItem,
+  type GroupThreadRow,
   type RelayGroupRow,
   type Tour,
   type UnitItem,
@@ -44,9 +46,15 @@ export interface ContactFileState {
   // delete this field + its fetch below + getContactMedia usage + the media
   // assertions in useContactFile.test.tsx. Left in deliberately for now.
   media: Slice<ContactMediaItem>;
-  /** The contact's group-text (relay) memberships — the "Group texts" card.
+  /** The contact's relay-group memberships - the "Relay groups" card.
    *  404 (a backend without the route) → 'pending', mirroring the C4/C5 slices. */
   relayGroups: Slice<RelayGroupRow>;
+  /** The contact's NATIVE group texts - the "Group threads" card. Same
+   *  degrade-on-404 posture as the sibling slices. */
+  groupThreads: Slice<GroupThreadRow>;
+  /** The group-threads read is BOUNDED (no member->thread index), so this says
+   *  older threads may not have been considered. The card shows it. */
+  groupThreadsTruncated: boolean;
 }
 
 /** Resolve a maybe-not-live slice: a 404 → 'pending'; other errors → 'error'. */
@@ -73,6 +81,8 @@ const FILE_LOADING: ContactFileState = {
   listingsSent: { status: 'loading' },
   media: { status: 'loading' },
   relayGroups: { status: 'loading' },
+  groupThreads: { status: 'loading' },
+  groupThreadsTruncated: false,
 };
 
 /**
@@ -106,7 +116,12 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
       try {
         // Placements + units back the REAL panels (Placements / Tours / Properties); both
         // exist today. The C4/C5 slices degrade independently.
-        const [placements, units, listingsSent, media, relayGroups] = await Promise.all([
+        // The group-threads read reports a truncation flag alongside its rows;
+        // loadSlice carries rows only, so the flag is captured here (assigned
+        // before Promise.all resolves).
+        let groupThreadsTruncated = false;
+        const [placements, units, listingsSent, media, relayGroups, groupThreads] =
+          await Promise.all([
           getPlacements(signal),
           getUnits({}, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
@@ -114,6 +129,11 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           // now derives from the live timeline; this fetch can be removed.
           loadSlice((s) => getContactMedia(contactId, s), signal),
           loadSlice((s) => getContactRelayGroups(contactId, s), signal),
+          loadSlice(async (s) => {
+            const page = await getContactGroupThreads(contactId, s);
+            groupThreadsTruncated = page.truncated;
+            return page.groups;
+          }, signal),
         ]);
         if (signal.aborted) return;
 
@@ -152,6 +172,8 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           listingsSent,
           media,
           relayGroups,
+          groupThreads,
+          groupThreadsTruncated,
           forId: contactId,
         });
       } catch (err) {

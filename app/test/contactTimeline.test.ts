@@ -515,7 +515,7 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(pages).toBeGreaterThanOrEqual(3);
   });
 
-  it('excludes relay_group threads (group-text content is never inlined)', async () => {
+  it('excludes relay_group threads (relay-group content is never inlined)', async () => {
     seedContact();
     // A relay_group thread fronted by a pool number that happens to also be one
     // of the contact's numbers in this contrived seed — it must STILL be

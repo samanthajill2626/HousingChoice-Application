@@ -145,6 +145,49 @@ describe('useContactTimeline', () => {
     expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
   });
 
+  it('never pulls a MULTI-PARTY thread into the 1:1 fallback timeline', async () => {
+    // The roster match alone would accept it (the contact IS on the roster), and
+    // the whole group transcript would land in this member's 1:1 timeline.
+    getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
+    getConversations.mockResolvedValue({
+      nextCursor: null,
+      conversations: [
+        ...CONVERSATIONS.conversations,
+        {
+          conversationId: 'gt-1',
+          type: 'group_text',
+          participants: [
+            { contactId: 'k1', phone: '+14040100007' },
+            { contactId: 'OTHER', phone: '+19990000000' },
+          ],
+          preview: null,
+          last_activity_at: '2026-06-09T09:00:00Z',
+          unread_count: 0,
+          sms_opt_out: false,
+          participant_display_name: null,
+        },
+        {
+          conversationId: 'relay-1',
+          type: 'relay_group',
+          participant_phone: '+15550190001',
+          participants: [{ contactId: 'k1', phone: '+14040100007' }],
+          preview: null,
+          last_activity_at: '2026-06-09T10:00:00Z',
+          unread_count: 0,
+          sms_opt_out: false,
+          participant_display_name: null,
+        },
+      ],
+    } as ConversationsPage);
+    getConversationMessages.mockResolvedValue([]);
+
+    render(<Probe contactId="k1" />);
+
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(getConversationMessages).toHaveBeenCalledTimes(1);
+    expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+  });
+
   it('threads the server upcoming[] bucket through to state', async () => {
     getContactTimeline.mockResolvedValue({
       ...SERVER_PAGE,

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,7 +114,15 @@ async function readySession(artifacts: string, child = new FakeChild(), alive = 
 
 describe('owned hermetic lifecycle startup', () => {
   it('anchors lifecycle state to the repository instead of the caller cwd', () => {
-    expect(defaultPerformanceRepoRoot()).toMatch(/[\\/]page-performance-profiler$/u);
+    // Anchored to the MODULE, not the caller's cwd - that is what the title
+    // claims and what the implementation does (it resolves `../..` from its own
+    // file URL). Asserting a specific directory NAME instead made this pass only
+    // inside a worktree literally called `page-performance-profiler`, and fail
+    // in every other checkout including the main one. Prove the property, not
+    // the developer's folder name: the resolved root must contain this module.
+    expect(existsSync(join(defaultPerformanceRepoRoot(), 'e2e', 'performance', 'lifecycle.ts'))).toBe(
+      true,
+    );
     expect(ownedLauncherDetached('win32')).toBe(false);
     expect(ownedLauncherDetached('linux')).toBe(true);
   });

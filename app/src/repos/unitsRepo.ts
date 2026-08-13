@@ -58,8 +58,8 @@ export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
  * imports the same shape). A unit has a many-to-many roster of the people who
  * own/manage it: the landlord, a property manager, the owner, or anyone else
  * relevant. At most one entry across the roster is `primaryContact: true` (the ☎
- * primary — the property's default contact: the person we put on the group
- * text and reach by a masked call; see unitsRepo.addContact, which keeps
+ * primary - the property's default contact: the person we put on the relay
+ * group and reach by a masked call; see unitsRepo.addContact, which keeps
  * `primary_contact` consistent with it). `name`/`company` are DENORMALIZED at
  * write time (the route resolves them from the contact) so the roster row is
  * self-describing without a join.
@@ -222,7 +222,7 @@ export interface UnitItem {
   application_process?: string;
   /**
    * The unit's primary contact (CO1): the property's default contact - the
-   * person we put on the group text and reach by a masked call. Stored as a
+   * person we put on the relay group and reach by a masked call. Stored as a
    * contactId. PENDING FOUNDER CONFIRMATION — may move to per-placement (CO1
    * notes routing comes "from the per-unit process" today; a later change
    * order may relocate this onto the placement). INTERNAL — never exposed
@@ -338,7 +338,7 @@ export interface UnitsRepo {
    * name/company updated in place. Maintains AT MOST ONE primaryContact across
    * the roster (when this contact is primaryContact, every other is demoted).
    * When the roster's primaryContact changes, the unit's `primary_contact`
-   * scalar (the property's default contact - group texts and masked calls) is
+   * scalar (the property's default contact - relay groups and masked calls) is
    * kept consistent = the primary contact's contactId. Persists contacts[] +
    * the scalar.
    */
@@ -606,7 +606,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       }
 
       // Keep the `primary_contact` scalar (the property's default contact -
-      // group texts and masked calls; today it is also the contactId the
+      // relay groups and masked calls; today it is also the contactId the
       // masked-call landlord leg dials, see routes/webhooks/voice.ts) consistent
       // with the roster's primaryContact. Only rewrite it when there IS a primary
       // on the roster; never blank it here (a roster-less unit keeps routing to

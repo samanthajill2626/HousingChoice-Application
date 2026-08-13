@@ -82,8 +82,8 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   // Start OFF the Tenant channel so the kebab action's SWITCH to Tenant is
   // observable end-to-end (the same group-start -> tenant-tab seed the
   // TourConversation unit test covers).
-  await page.getByRole('tab', { name: 'Group text' }).click();
-  await expect(page.getByRole('tab', { name: 'Group text', selected: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Relay group' }).click();
+  await expect(page.getByRole('tab', { name: 'Relay group', selected: true })).toBeVisible();
 
   await page.getByRole('button', { name: /more actions/i }).click();
   await page.getByRole('menuitem', { name: /send no-show check-in/i }).click();

@@ -32,7 +32,7 @@ import {
 } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
@@ -88,10 +88,12 @@ function seedSource(world: FakeWorld, body: string, senderKey: string): MessageI
 describe('relay.fanOut (M1.7)', () => {
   let world: FakeWorld;
   let outbound: InProcessOutboundQueueAdapter;
+  let capture: ReturnType<typeof createLogCapture>;
 
   beforeEach(() => {
     _resetForTests();
-    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
     configureJobsLogger(logger);
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
@@ -167,6 +169,70 @@ describe('relay.fanOut (M1.7)', () => {
     // No per-recipient delivery slots were written on the source message either.
     const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
     expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+  });
+
+  it('does NOT fan out a RELAY thread that has lost its pool number', async () => {
+    // NAMED FOR WHAT IT SEEDS. This is a relay_group row with pool_number
+    // deleted - there is no group_text anywhere in it, so it never proved
+    // anything about native group texting. What it does prove is real and worth
+    // keeping: the no-pool-number refusal stops the fan-out from addressing an
+    // undefined `from` instead of the members' handsets. The native group_text
+    // exclusion is the test directly below.
+    const conv = seedRelay(world);
+    const source = seedSource(world, 'hello everyone', 'c-alice');
+    delete (conv as { pool_number?: string }).pool_number;
+    world.conversations.set(conv.conversationId, conv);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+  });
+
+  it('a NATIVE group_text never fans out - its group_open status fails the AF-2 gate first', async () => {
+    // The real group_text exclusion, with a real group_text row. Nothing
+    // enqueues this job for a group thread today (spec 4.2: no pool number, no
+    // fan-out), so the value here is that a future caller which DID would be
+    // refused rather than blasting the roster from an undefined `from`.
+    //
+    // WHICH gate fires is asserted, not just "nothing was sent": the status gate
+    // and the pool-number gate BOTH independently refuse a group_text, so an
+    // outcome-only assertion would survive deleting either one. Pinning the log
+    // line makes this test fail when the status gate goes.
+    const conv = seedRelay(world, {
+      type: 'group_text',
+      status: GROUP_TEXT_STATUS,
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    delete (conv as { pool_number?: string }).pool_number;
+    delete (conv as { participant_phone?: string }).participant_phone;
+    world.conversations.set(conv.conversationId, conv);
+    const source = seedSource(world, 'hello everyone', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+    const skipped = capture.lines.find(
+      (l) => l['msg'] === 'relay fan-out skipped - group not open',
+    );
+    expect(skipped).toBeDefined();
+    expect(skipped?.['status']).toBe(GROUP_TEXT_STATUS);
   });
 
   it('does NOT relay to an opted-out member — marks the slot failed/contact_opted_out, still sends the others', async () => {
@@ -466,7 +532,7 @@ describe('relay.fanOut (M1.7)', () => {
     }
   });
 
-  // Founder decision 2026-07-14: everything sent into a group text must be
+  // Founder decision 2026-07-14: everything sent into a relay group must be
   // visible in its dashboard thread — the intro persists as a SYSTEM row.
   it('relay.intro PERSISTS one system announcement row with per-member delivery slots', async () => {
     seedRelay(world);
@@ -541,7 +607,7 @@ describe('relay.fanOut (M1.7)', () => {
     // as Alice/Bob's join notice).
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
     expect(world.sent.every((s) => s.from === POOL)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Carol joined this group text.');
+    expect(world.sent[0]!.body).toContain('Carol joined this group chat.');
     expect(world.sent[0]!.body).toContain('Alice, Bob, and Carol');
 
     // Persisted once as a system announcement with a slot per member.
@@ -561,7 +627,7 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
 
-    expect(world.sent[0]!.body).toContain('A new member joined this group text.');
+    expect(world.sent[0]!.body).toContain('A new member joined this group chat.');
   });
 });
 
@@ -593,14 +659,14 @@ describe('relay body/intro composition (M1.7)', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
     expect(body.startsWith('Tenant Place LLC.')).toBe(true);
     expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
-    expect(body).toContain('Carol Brown joined this group text.');
+    expect(body).toContain('Carol Brown joined this group chat.');
     expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
     // No name (phone-only member) → neutral label, NEVER a phone.
     expect(composeMemberAddedBody(undefined, ['Alice', undefined])).toContain(
-      'A new member joined this group text.',
+      'A new member joined this group chat.',
     );
     expect(composeMemberAddedBody('  ', ['Alice'])).toContain(
-      'A new member joined this group text.',
+      'A new member joined this group chat.',
     );
   });
 });

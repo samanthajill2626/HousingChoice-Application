@@ -161,6 +161,32 @@ function makeSendFakes(
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,
+    // group_text repo methods are unreachable from this 1:1 suite - throw so an
+    // accidental call is loud instead of silently returning a plausible shape.
+    createGroupTextThread: async () => {
+      throw new Error('createGroupTextThread: not used in this suite');
+    },
+    listGroupTexts: async () => {
+      throw new Error('listGroupTexts: not used in this suite');
+    },
+    claimRailCreation: async () => {
+      throw new Error('claimRailCreation: not used in this suite');
+    },
+    clearGroupRail: async () => {
+      throw new Error('clearGroupRail: not used in this suite');
+    },
+    recordRailFailure: async () => {
+      throw new Error('recordRailFailure: not used in this suite');
+    },
+    setTwilioConversation: async () => {
+      throw new Error('setTwilioConversation: not used in this suite');
+    },
+    convertRelayGroupToGroupText: async () => {
+      throw new Error('convertRelayGroupToGroupText: not used in this suite');
+    },
+    backfillGroupTextRoster: async () => {
+      throw new Error('backfillGroupTextRoster: not used in this suite');
+    },
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
@@ -183,6 +209,9 @@ function makeSendFakes(
     setPrimaryEmail: async () => contact!,
     removeEmail: async () => contact!,
     touchEmailLastSeen: async () => {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
@@ -215,6 +244,40 @@ function makeSendFakes(
     getRelaySidPointer: async () => undefined,
     putSystemSidMarker: async () => {},
     getSystemSidMarker: async () => undefined,
+    // Group-texting deadline partition (S5) - unreachable from this suite.
+    listDueRows: async () => [],
+    deleteDueRow: async () => {},
+    setRecipientDeliverySid: async () => false,
+    parkGroupReceipt: async () => true,
+    listParkedGroupReceipts: async () => [],
+    deleteParkedGroupReceipt: async () => {},
+    claimCrossCheckClassic: async () => {
+      throw new Error('claimCrossCheckClassic: not used in this suite');
+    },
+    claimCrossCheckEvent: async () => {
+      throw new Error('claimCrossCheckEvent: not used in this suite');
+    },
+    recordCrossCheckEvent: async () => {
+      throw new Error('recordCrossCheckEvent: not used in this suite');
+    },
+    bumpCrossCheckClassic: async () => {
+      throw new Error('bumpCrossCheckClassic: not used in this suite');
+    },
+    releaseCrossCheckPending: async () => {
+      throw new Error('releaseCrossCheckPending: not used in this suite');
+    },
+    claimOldestCrossCheckPending: async () => {
+      throw new Error('claimOldestCrossCheckPending: not used in this suite');
+    },
+    resolveCrossCheckPending: async () => {
+      throw new Error('resolveCrossCheckPending: not used in this suite');
+    },
+    recordCrossCheckClassicReceipt: async () => {
+      throw new Error('recordCrossCheckClassicReceipt: not used in this suite');
+    },
+    claimCrossCheckClassicInWindow: async () => {
+      throw new Error('claimCrossCheckClassicInWindow: not used in this suite');
+    },
   };
   const auditRepo: AuditRepo = {
     append: async () => {},

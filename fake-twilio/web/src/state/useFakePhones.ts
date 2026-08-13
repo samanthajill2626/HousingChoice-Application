@@ -11,6 +11,7 @@ import {
   getThreads,
   resetAll as apiResetAll,
   sendAsParty as apiSendAsParty,
+  sendGroupAsParty as apiSendGroupAsParty,
   setDeliveryOutcome as apiSetDeliveryOutcome,
 } from '../api/client.js';
 import { useFakeEvents } from '../api/useFakeEvents.js';
@@ -22,6 +23,7 @@ import type {
   GroupSnapshot,
   Persona,
   SendAsPartyInput,
+  SendGroupAsPartyInput,
   Thread,
 } from '../api/types.js';
 
@@ -156,6 +158,8 @@ export interface UseFakePhones {
   refresh: () => Promise<void>;
   // Action passthroughs (control client).
   sendAsParty: (input: SendAsPartyInput) => Promise<string>;
+  /** A NATIVE CARRIER group text to the business number (not a relay leg). */
+  sendGroupAsParty: (input: SendGroupAsPartyInput) => Promise<string>;
   addAdHoc: (input: AddAdHocInput) => Promise<Persona>;
   setDeliveryOutcome: (partyNumber: string, profile: DeliveryProfile) => Promise<void>;
   resetAll: () => Promise<void>;
@@ -226,6 +230,7 @@ export function useFakePhones(): UseFakePhones {
     selectGroup,
     refresh,
     sendAsParty: apiSendAsParty,
+    sendGroupAsParty: apiSendGroupAsParty,
     addAdHoc: apiAddAdHoc,
     setDeliveryOutcome: apiSetDeliveryOutcome,
     resetAll: apiResetAll,

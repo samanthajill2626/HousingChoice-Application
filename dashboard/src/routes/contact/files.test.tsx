@@ -4,9 +4,18 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
+import { PartnerFile } from './PartnerFile.js';
 import { BLANK } from './Card.js';
 import type { CommsMediaItem } from './media.js';
-import type { PlacementItem, Contact, RelayGroupRow, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
+import type {
+  PlacementItem,
+  Contact,
+  GroupThreadRow,
+  RelayGroupRow,
+  Tour,
+  UnitItem,
+  ListingSendRow,
+} from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -51,6 +60,8 @@ describe('TenantFile', () => {
       units?: UnitItem[];
       relayGroupsPending?: boolean;
       relayGroups?: RelayGroupRow[];
+      groupThreads?: GroupThreadRow[];
+      groupThreadsTruncated?: boolean;
       onSendProperty?: () => void;
       // Per-test fixture override (the LandlordFile helper below does the same).
       // Never mutate the shared `contact` - other assertions depend on it.
@@ -69,6 +80,9 @@ describe('TenantFile', () => {
           listingsSent={opts.listingsSent ?? []}
           relayGroupsPending={opts.relayGroupsPending ?? true}
           relayGroups={opts.relayGroups ?? []}
+          groupThreadsPending={opts.groupThreads === undefined}
+          groupThreads={opts.groupThreads ?? []}
+          groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={opts.media ?? []}
           onSendProperty={opts.onSendProperty}
         />
@@ -258,12 +272,12 @@ describe('TenantFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
-  it('shows "No group texts yet." when the relay slice is ready but empty', () => {
+  it('shows "No relay groups yet." when the relay slice is ready but empty', () => {
     renderIt({ relayGroupsPending: false, relayGroups: [] });
-    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
+    expect(screen.getByText('No relay groups yet.')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows (relay memberships) linking to the conversation view', () => {
+  it('renders Relay-groups rows (relay memberships) linking to the conversation view', () => {
     renderIt({
       relayGroupsPending: false,
       relayGroups: [
@@ -310,7 +324,15 @@ describe('LandlordFile', () => {
     company: 'Porter Properties',
   };
 
-  function renderIt(opts: { tours?: Tour[]; relayGroups?: RelayGroupRow[]; contact?: Contact } = {}) {
+  function renderIt(
+    opts: {
+      tours?: Tour[];
+      relayGroups?: RelayGroupRow[];
+      groupThreads?: GroupThreadRow[];
+      groupThreadsTruncated?: boolean;
+      contact?: Contact;
+    } = {},
+  ) {
     return render(
       <MemoryRouter>
         <LandlordFile
@@ -321,6 +343,9 @@ describe('LandlordFile', () => {
           units={[UNIT, PLACED_UNIT]}
           relayGroupsPending={opts.relayGroups === undefined}
           relayGroups={opts.relayGroups ?? []}
+          groupThreadsPending={opts.groupThreads === undefined}
+          groupThreads={opts.groupThreads ?? []}
+          groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={[]}
         />
       </MemoryRouter>,
@@ -412,7 +437,7 @@ describe('LandlordFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows — a closed group links to its conversation view', () => {
+  it('renders Relay-groups rows - a closed group links to its conversation view', () => {
     renderIt({
       relayGroups: [
         {
@@ -430,5 +455,58 @@ describe('LandlordFile', () => {
       .find((a) => a.getAttribute('href') === '/conversations/conv-g2' && /With Tina Tenant/.test(a.textContent ?? ''));
     expect(link).toBeDefined();
     expect(link).toHaveTextContent('Closed');
+  });
+});
+
+// C13 / conformance F13. A partner is a resolved external party (caseworker,
+// inspector, agency) and is exactly the kind of counterparty a coordination
+// group text is opened with. useContactFile already pays for the /group-threads
+// read on EVERY contact, so the card was absent here for no reason but omission.
+describe('PartnerFile', () => {
+  const partner: Contact = {
+    contactId: 'P1',
+    type: 'partner',
+    firstName: 'Pat',
+    lastName: 'Partner',
+    status: 'active',
+    phone: '+14040100055',
+  };
+
+  function renderIt(groupThreads: GroupThreadRow[] = []) {
+    return render(
+      <MemoryRouter>
+        <PartnerFile
+          contact={partner}
+          phones={[{ phone: '+14040100055', primary: true }]}
+          media={[]}
+          groupThreadsPending={false}
+          groupThreads={groupThreads}
+          groupThreadsTruncated={false}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('renders the Group threads card with a linked row', () => {
+    renderIt([
+      {
+        conversationId: 'gt-9',
+        memberCount: 3,
+        lastActivityAt: '2026-06-17T10:00:00.000Z',
+        title: 'With Ann & Marcus',
+        otherMemberNames: ['Ann Tenant', 'Marcus Landlord'],
+      },
+    ]);
+    expect(screen.getByRole('heading', { name: 'Group threads' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /With Ann & Marcus/ })).toHaveAttribute(
+      'href',
+      '/conversations/gt-9',
+    );
+  });
+
+  it('shows the card empty rather than hiding it', () => {
+    renderIt();
+    expect(screen.getByRole('heading', { name: 'Group threads' })).toBeInTheDocument();
+    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
   });
 });

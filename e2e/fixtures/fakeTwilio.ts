@@ -13,10 +13,12 @@ const FAKE_BASE = fakeUrl;
 // --- Direct inbound webhook (test-support only, for TwiML-reply assertions) ---
 //
 // The fake's `send-as-party` fires a signed inbound /sms webhook at the app but
-// DISCARDS the response body (it only checks the status). The A2P keyword replies
-// (STOP/HELP/opt-in) are returned by the webhook as TwiML `<Message>` in that
-// response body — NOT as an outbound thread message the fake records — so to
-// assert them we must POST the inbound webhook OURSELVES and read the TwiML back.
+// DISCARDS the response body (it only checks the status). Asserting what the app
+// answers an inbound with therefore means POSTing the inbound webhook OURSELVES and
+// reading the TwiML back. Since 2026-08-12 the app answers EVERY inbound - keywords
+// included - with the empty `<Response/>` ack (Twilio's Advanced Opt-Out owns the
+// STOP/HELP/opt-in replies), so this helper's job is now proving the ABSENCE of a
+// `<Message>` rather than its contents.
 //
 // This mirrors the fake's own signer (fake-twilio/src/engine/signer.ts) +
 // dispatcher exactly: HMAC-SHA1(authToken, signedUrl + sorted key/value params),
@@ -45,10 +47,9 @@ function signTwilio(url: string, params: Record<string, string>): string {
 
 /**
  * POST a signed inbound SMS webhook DIRECTLY to the app and return the raw TwiML
- * response body — the mechanism for asserting the A2P keyword replies (the webhook
- * answers a matched STOP/HELP/opt-in keyword with a TwiML `<Message>`, which the
- * fake's send-as-party would otherwise swallow). `messageSid` MUST be unique per
- * call (the inbound is deduped by SID). Returns `{ status, body }`.
+ * response body - the mechanism for asserting what the webhook answers an inbound
+ * with, which the fake's send-as-party would otherwise swallow. `messageSid` MUST be
+ * unique per call (the inbound is deduped by SID). Returns `{ status, body }`.
  */
 export async function postInboundSms(
   request: APIRequestContext,
@@ -76,9 +77,10 @@ export async function postInboundSms(
   return { status: res.status(), body: await res.text() };
 }
 
-/** XML-unescape a TwiML text node (the webhook XML-escapes filed copy: & < > " ').
- *  Reverses `escapeXml` in app/src/routes/webhooks/twilio.ts so a filed constant
- *  with raw `&`/`'` (e.g. "Msg & data", "You're") compares equal to the reply. */
+/** XML-unescape a TwiML text node (& < > " ').
+ *  Historically the reverse of the webhook's `escapeXml` (removed with the
+ *  keyword-reply path, 2026-08-12); retained because voice TwiML and other
+ *  XML-escaped fixtures still flow through the fake's assertions. */
 function unescapeXml(s: string): string {
   return s
     .replace(/&lt;/g, '<')
@@ -134,11 +136,134 @@ export async function registerParty(
 
 export async function sendAsParty(
   request: APIRequestContext,
-  input: { from: string; body?: string; to?: string; mediaUrls?: string[] },
+  input: {
+    from: string;
+    body?: string;
+    to?: string;
+    mediaUrls?: string[];
+    /**
+     * Force the provider SID prefix. The fake otherwise derives it from media
+     * presence alone, so `MM` with `NumMedia=0` - the group-texting TRIPWIRE
+     * shape (adjudication A28) - has no other way to exist.
+     */
+    sidShape?: 'SM' | 'MM';
+  },
 ): Promise<string> {
   const res = await request.post(`${FAKE_BASE}/control/send-as-party`, { data: input });
   if (!res.ok()) throw new Error(`send-as-party failed: ${res.status()}`);
   return (await res.json()).sid as string;
+}
+
+// --- Native carrier group texting (group-texting spec 5.1 / 7) --------------
+//
+// DISTINCT FROM `sendAsParty` + `to: <pool>`, which is a RELAY group leg. A
+// carrier group text goes to the BUSINESS number like any 1:1 and is
+// distinguished only by the undocumented `OtherRecipients` envelope. Everything
+// here says "carrier group" so no helper reads ambiguously against relay.
+
+export interface SendGroupAsPartyInput {
+  from: string;
+  /** The OTHER handsets on the thread. */
+  otherRecipients: string[];
+  body?: string;
+  mediaUrls?: string[];
+  /** `indexed` (the live shape, default) or `single` (the bare defensive key). */
+  otherRecipientsShape?: 'indexed' | 'single';
+  /** Force the provider SID prefix - the tripwire needs MM with NumMedia=0. */
+  sidShape?: 'SM' | 'MM';
+  /**
+   * Set false to suppress the Conversations `onMessageAdded` the fake would
+   * otherwise fire when the sender is on a rail. This is the ONLY way to
+   * manufacture the guardrail's target failure: a classic inbound that the
+   * Conversations channel never reported.
+   */
+  railEvent?: boolean;
+}
+
+/** Inject an inbound CARRIER group text. Returns the classic provider SID plus
+ *  the rail ids when the roster already had a Conversations rail. */
+export async function sendGroupAsParty(
+  request: APIRequestContext,
+  input: SendGroupAsPartyInput,
+): Promise<{ sid: string; conversationSid?: string; conversationMessageSid?: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/send-group-as-party`, { data: input });
+  if (!res.ok()) throw new Error(`send-group-as-party failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { sid: string; conversationSid?: string };
+}
+
+export interface FakeConversation {
+  /** CHxx. */
+  sid: string;
+  /** Our conversationId. */
+  uniqueName?: string;
+  state: string;
+  participants: { sid: string; address?: string; projectedAddress?: string }[];
+  messages: {
+    sid: string;
+    author?: string;
+    body?: string;
+    index: number;
+    source: 'API' | 'SMS';
+    legs?: { participantSid: string; address: string; channelMessageSid: string; state: string }[];
+  }[];
+}
+
+/** The rails the fake currently holds - the proof a thread got a Conversation. */
+export async function listConversations(request: APIRequestContext): Promise<FakeConversation[]> {
+  const res = await request.get(`${FAKE_BASE}/control/conversations`);
+  if (!res.ok()) throw new Error(`conversations failed: ${res.status()}`);
+  return (await res.json()).conversations as FakeConversation[];
+}
+
+/** Fire an `onMessageAdded` with NO classic counterpart - the guardrail's target
+ *  failure, and the only way to produce it. `source: 'API'` exercises the
+ *  cross-check's `Source === 'SMS'` filter for real. */
+export async function injectConversationEvent(
+  request: APIRequestContext,
+  input: {
+    conversationSid?: string;
+    uniqueName?: string;
+    author?: string;
+    body?: string;
+    source?: 'SMS' | 'API' | 'SDK';
+    messageSid?: string;
+  },
+): Promise<{ messageSid: string; conversationSid: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/conversations/inject-event`, { data: input });
+  if (!res.ok()) throw new Error(`inject-event failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { messageSid: string; conversationSid: string };
+}
+
+/**
+ * CLOSE A RAIL the way Twilio does - its own auto-close timer, or an operator in
+ * the console. A closed Conversation KEEPS its UniqueName and refuses every
+ * post, which is exactly the state the app's closed-rail heal has to survive:
+ * our UniqueName is the conversationId, so a naive retry re-adopts the same dead
+ * resource forever (fix wave 4, H1). There is no other way to manufacture it.
+ */
+export async function setConversationState(
+  request: APIRequestContext,
+  input: { conversationSid?: string; uniqueName?: string; state?: 'closed' | 'active' | 'failed' },
+): Promise<{ conversationSid: string; state: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/conversations/set-state`, { data: input });
+  if (!res.ok()) throw new Error(`set-state failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { conversationSid: string; state: string };
+}
+
+/**
+ * Arm the NEXT message to one handset with a delivery outcome. ONE control API
+ * serves both a 1:1 send and a carrier-group leg, so this is also how a
+ * per-member 21610 (a STOPped handset) is simulated on a group send.
+ */
+export async function setDeliveryOutcome(
+  request: APIRequestContext,
+  input: {
+    partyNumber: string;
+    profile: { kind: 'normal' | 'stall' | 'fail'; failState?: string; errorCode?: string };
+  },
+): Promise<void> {
+  const res = await request.post(`${FAKE_BASE}/control/delivery-outcome`, { data: input });
+  if (!res.ok()) throw new Error(`delivery-outcome failed: ${res.status()}`);
 }
 
 export async function listThreads(request: APIRequestContext): Promise<FakeThread[]> {

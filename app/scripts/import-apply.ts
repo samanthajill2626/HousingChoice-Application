@@ -473,7 +473,12 @@ if (!dryRun && !skipConvert) {
     conversationsRepo,
     contactsRepo,
     expected,
-    rail: createGroupRailService({ config }),
+    // The STAGE repo must be injected: left to its default, the rail service
+    // builds its own conversations repo on the ambient doc client + default
+    // hc-local- prefix, and its first getById throws "Requested resource not
+    // found" on every dev/prod row - before Twilio is ever contacted, and
+    // before recordRailFailure can stamp a reason.
+    rail: createGroupRailService({ config, conversationsRepo }),
     ownNumbers: plan.quo.ownNumbers,
     exclusions: {
       businessPhoneNumber: config.businessPhoneNumber,

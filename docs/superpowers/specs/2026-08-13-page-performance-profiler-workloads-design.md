@@ -1,7 +1,7 @@
 # Page Performance Profiler Workload and Inbox Expansion - Design
 
 - Date: 2026-08-13
-- Status: Draft for adversarial review
+- Status: Ready for human review
 - Owner: Cameron Abt
 - Branch: `feat/page-performance-profiler-workloads`
 - Extends: `docs/superpowers/specs/2026-08-11-page-performance-profiler-design.md`
@@ -141,6 +141,7 @@ then-current branch rather than treating this table as a substitute for source:
 | App-shell unread badge request and current shell classifier | `dashboard/src/app/UnreadContext.tsx:19-38`; `e2e/performance/collect.ts:109-125` |
 | Current pathname-only warm-source preparation/readiness | `e2e/performance/cli.ts:524-564` |
 | Current route-key sample, report, and comparison joins | `e2e/performance/types.ts:64-84,148-177`; `e2e/performance/report.ts:264-294`; `e2e/performance/compare.ts:24-30,56-81` |
+| Current relay DOM proof and over-broad conversation-link selector | `e2e/performance/cli.ts:572-574`; `e2e/performance/collect.ts:880-917`; `e2e/performance/selfQa.ts:335-349`; `dashboard/src/routes/inbox/InboxRow.tsx:27-39,51-65,89-97` |
 
 ## 6. Hermetic workload model
 
@@ -317,12 +318,14 @@ Every native group fixture must satisfy the current production data contract:
 
 The native-group member pool contains active generated performance contacts
 only; the lean contacts are not group-capacity fallbacks. For every feasible
-roster size from two through `min(4, activeGeneratedContacts)`, enumerate the
-unique contact combinations in lexicographic generated-contact-ID order. Select
-one combination from each non-empty size queue in round-robin size order. When
-a size queue is exhausted, remove it from the rotation; continue among the
-remaining queues. This preserves a deterministic size mix without reusing the
-smaller number of large rosters. Every selected roster combination is unique.
+roster size from two through `min(4, activeGeneratedContacts)`, create a lazy
+lexicographic combination iterator over generated contact IDs. Select one
+combination from each non-exhausted iterator in round-robin size order. When an
+iterator is exhausted, remove it from the rotation; continue among the remaining
+iterators. Consume at most `nativeGroups` combinations total and never
+materialize a complete combination pool. This preserves a deterministic size
+mix without reusing the smaller number of large rosters. Every selected roster
+combination is unique.
 The maximum exact native-group population is therefore:
 
 ```text
@@ -332,11 +335,14 @@ C(activeGeneratedContacts, 2)
 ```
 
 where terms larger than the member pool are zero and the calculation saturates
-safely at the configured entity-count bound. If `nativeGroups` exceeds that
-capacity, configuration fails before lifecycle work; it is never clipped and
-never reuses a roster. In particular, a positive native-group count with fewer
-than two active generated contacts is invalid. This guarantees canonical ID
-uniqueness and exact manifest/storage counts.
+safely at the configured entity-count bound. Capacity uses bounded combinatorial
+arithmetic, not candidate enumeration. If `nativeGroups` exceeds that capacity,
+configuration fails before lifecycle work; it is never clipped and never reuses
+a roster. In particular, a positive native-group count with fewer than two
+active generated contacts is invalid. Preflight work is O(active contacts plus
+requested native groups), excluding the bounded integer arithmetic; it does not
+grow with the full combination space. This guarantees canonical ID uniqueness
+and exact manifest/storage counts.
 
 The generator computes `nativeGroupMemberSlotCount` as the sum of the selected
 roster lengths. It is a logical-workload count even though the participant
@@ -496,7 +502,7 @@ The registry distinguishes identity, application path, and behavior explicitly.
 | `surfaceId` | Unique stable measurement identity | route ordering, sample token, request-evidence join, report map key, aggregation, ranking, baseline comparison, self-QA cardinality, and artifact allowlist |
 | `pathTemplate` | Application route/path contract, such as `/inbox` | cold-path validation, resolver path construction, navigation evidence, and route-template reporting |
 | `coldTarget` | Closed union of `{ kind: 'static', path }` or `{ kind: 'resolved' }` | exact direct-load URL for static/query surfaces, or an instruction that the existing entity resolver supplies the in-memory concrete URL |
-| `behaviorFamily` | Closed internal behavior discriminator, such as `inbox` | Inbox shell/page request classification, family-specific DOM proofs, and other collector special cases that currently compare a literal route key |
+| `behaviorFamily` | Closed internal behavior discriminator, such as `inbox` | Inbox shell/page request classification and other family-specific collector behavior that currently compares a literal route key; the relay-only proof is explicitly excluded and keyed to `inbox-all` |
 
 The current overloaded `route.key` is removed or narrowed so no consumer can
 silently guess which meaning it carries. Existing surfaces use their current
@@ -639,6 +645,30 @@ The profiler never clicks an Inbox row, its mark-read affordance, the Groups
 notice link, Retry, or Load more. The existing write firewall remains installed
 and the expected blocked-write set for these passive filter samples is empty.
 
+### 8.5 Relay-only DOM proof
+
+Preserve the existing hermetic proof that every generated relay group expected
+on Inbox All is actually rendered, but repair its discriminator before native
+groups share the same link family:
+
+- the proof runs exactly once on the successful `surfaceId='inbox-all'` sample;
+  it is never gated by `behaviorFamily` and therefore cannot attach to the first
+  shuffled Inbox filter;
+- within the `Conversations` list, it counts only list items that contain the
+  fixed exact kind label `Relay group` and a conversation-detail link;
+- it uses the fixed kind label only as a selector and never extracts, records,
+  or serializes the surrounding row text;
+- rows with the fixed `Group text` label are excluded even though their links
+  also begin `/conversations/`;
+- the expected value remains the resolved generated `relayGroupCount`, with the
+  existing exact equality assertion and no weakening to a lower bound;
+- the existing relay query-budget/no-truncation seed guard remains responsible
+  for proving every expected relay row belongs on All.
+
+Native groups do not broaden or replace this relay-specific invariant. Their
+exact storage count is proven by DynamoDB Local integration, and their rendered
+first page is exercised by the separate `inbox-groups` cold/warm surface.
+
 ## 9. Registry, reports, and comparison
 
 The current registry has 28 surfaces. Replacing its one Inbox entry with four
@@ -744,6 +774,8 @@ are fixed:
 - `e2e/performance/collect.ts` migrates route ordering, sample tokens, shell
   classification, request attribution, branch evidence, Inbox DOM proofs,
   accessible activation, and safe DOM cardinality off the overloaded route key;
+  its relay proof is keyed only to `inbox-all` and uses the fixed relay kind
+  label rather than the shared conversation-link prefix;
 - readiness/CLI terminal evaluation enforces the Inbox XOR and the fixed-action
   failure contract, and static route resolution navigates to `coldTarget.path`
   rather than deriving a concrete URL from `pathTemplate`;
@@ -777,6 +809,9 @@ Add or update tests for:
 - non-exhausted-size round-robin generation: when the only 3-member or 4-member
   combination is consumed, that size leaves the rotation and remaining unique
   combinations continue without a canonical-ID collision;
+- lazy combination selection at scale 1, scale 7, and the 20000-group bound,
+  proving at most the requested groups are visited/materialized and capacity is
+  computed with saturating arithmetic;
 - `nativeGroupMemberSlotCount` equals the sum of generated roster lengths and
   participates in manifest, comparison, and total-work cap arithmetic;
 - removal of the lean native-group conversation and all of its messages before
@@ -815,6 +850,9 @@ Add or update tests for:
   while the separate conversation-detail exact-row activation remains;
 - `required_action_missing` for a missing fixed tab, never a fixture skip;
 - safe rendered-row cardinality without text collection;
+- relay-only DOM cardinality runs only on `inbox-all`, counts fixed-label Relay
+  group rows exactly, excludes native Group text rows sharing the same href
+  prefix, and remains correct under shuffled filter order;
 - comparison incompatibility across old/new schema, registry, workload, or
   seed values;
 - comparison compatibility for omitted versus explicit equal defaults and for
@@ -848,6 +886,8 @@ Run a full hermetic registry self-QA at default scale 1 and require:
 - 62 successful samples, one cold and one warm for each surface;
 - all four Inbox surfaces present and independently ranked;
 - exact filter/limit contracts passing;
+- the `inbox-all` relay-only rendered count exactly matching
+  `relayGroupCount`, with all native Group text rows excluded from that count;
 - zero unexpected write tuples and a healthy escaped-write watchdog;
 - fixture reachability for the long conversation and large broadcast;
 - all original state-preservation, privacy, cleanup, lane-ownership, and report
@@ -906,9 +946,11 @@ The feature is acceptable when:
 15. Equivalent resolved workloads compare as controlled regardless of whether a
     default was omitted or explicitly supplied.
 16. Native-group member slots are included in the advertised total-work bound.
-17. All original profiler privacy, firewall, watchdog, ownership, and cleanup
+17. The original exact relay DOM proof remains relay-only, runs on `inbox-all`,
+    and cannot count native Group text links.
+18. All original profiler privacy, firewall, watchdog, ownership, and cleanup
     invariants remain true.
-18. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
+19. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
     real exit code 0.
 
 ## 15. Design gate

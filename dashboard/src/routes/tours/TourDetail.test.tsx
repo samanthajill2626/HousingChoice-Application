@@ -1034,11 +1034,10 @@ describe('TourDetail - channel switcher', () => {
       expect.anything(),
     );
     // ...and no single-conversation transcript is fetched for a 1:1 tab at all.
-    expect(getConversationMessages).not.toHaveBeenCalledWith(
-      'c-landlord',
-      expect.anything(),
-      expect.anything(),
-    );
+    // ARITY-INDEPENDENT on purpose: `signal` is optional in the (id, opts, signal)
+    // signature, so a 3-arg .not.toHaveBeenCalledWith would pass vacuously against
+    // a future two-argument call site. This asserts on the id alone.
+    expect(getConversationMessages.mock.calls.some((c) => c[0] === 'c-landlord')).toBe(false);
   });
 
   it('viewing an unread 1:1 tab marks the CONTACT read (inbox fan-out) - never one conversation', async () => {
@@ -1531,11 +1530,9 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     // ...and NOTHING was opened: the group pane still has no thread.
     await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
     expect(screen.getByText('No relay group yet')).toBeInTheDocument();
-    expect(getConversationMessages).not.toHaveBeenCalledWith(
-      'g-new',
-      expect.anything(),
-      expect.anything(),
-    );
+    // ARITY-INDEPENDENT (see the note on the 1:1 tab assertion above): `signal`
+    // is optional, so a 3-arg negative would stop matching a two-argument call.
+    expect(getConversationMessages.mock.calls.some((c) => c[0] === 'g-new')).toBe(false);
   });
 
   it('"Send the relay group now" on a pending open FORCES the provision through', async () => {

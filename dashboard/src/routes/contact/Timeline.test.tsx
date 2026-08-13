@@ -1273,6 +1273,26 @@ describe('Timeline load-older control', () => {
     expect(screen.queryByRole('button', { name: 'Load older messages' })).toBeNull();
   });
 
+  // Spec 4.5, by name: "It stays visible when the stream renders empty." If
+  // "Comms only" hides every entry on the current page, the control is the ONLY
+  // way to reach the pages behind it without abandoning the filter. Easy to
+  // regress with a visible.length guard on the render gate, which is exactly what
+  // this asserts against.
+  it('stays visible when the stream renders empty', () => {
+    const milestone: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms1',
+      at: '2026-08-13T08:00:00.000Z',
+      type: 'placement_opened',
+      label: 'Placement opened',
+    };
+    renderPagingTimeline({ items: [milestone], paging: pagingProps() });
+    fireEvent.click(screen.getByRole('button', { name: 'Comms only' }));
+
+    expect(screen.getByText('No messages yet.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeVisible();
+  });
+
   it('calls onLoadOlder when clicked', () => {
     const onLoadOlder = vi.fn();
     renderPagingTimeline({ paging: pagingProps({ onLoadOlder }) });
@@ -1434,6 +1454,134 @@ describe('Timeline load-older control', () => {
     );
 
     expect(el.scrollTop).toBe(200);
+  });
+
+  // THE SETTLE EFFECT. It is the ONLY thing that disarms the anchor when a load
+  // ends without changing anything - and after the empty-page fix it is the only
+  // thing at all on that path, because such a page no longer bumps the counter.
+  // A surviving anchor is consumed by a LATER, unrelated render and jumps the
+  // reader by content they never asked for.
+  //
+  // The items array identity is held across every render so `clusters` keeps its
+  // identity: the point is a load that changes NOTHING.
+  it('disarms the anchor when the older page returns nothing', () => {
+    const held: TimelineItem[] = [MID];
+    const { rerender } = renderPagingTimeline({ items: held, paging: pagingProps() });
+    const el = streamEl();
+    stubScroll(el, 500, 100);
+    el.scrollTop = 0;
+    fireEvent.scroll(el);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' })); // arms at 500
+
+    // The page is in flight...
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ loadingOlder: true })}
+        />
+      </MemoryRouter>,
+    );
+    // ...and comes back EMPTY: no items, no counter bump, the load just settles.
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ loadingOlder: false })}
+        />
+      </MemoryRouter>,
+    );
+
+    // A later render moves the counter with no arming click before it - the
+    // stale-anchor case. With the anchor disarmed the reader stays put.
+    setNum(el, 'scrollHeight', 700);
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ olderPagesLoaded: 1 })}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(el.scrollTop).toBe(0);
+  });
+
+  // The same settle path with the filter engaged, which is the other case the
+  // effect's comment names. The toggle re-renders while the page is still in
+  // flight, so the anchor is RE-BASELINED to the shrunk height first - and that
+  // re-baselined anchor is what has to be disarmed when the load settles with
+  // nothing to show for it.
+  it('disarms a re-baselined anchor when a filtered load settles with nothing', () => {
+    const milestone: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms1',
+      at: '2026-08-13T08:00:00.000Z',
+      type: 'placement_opened',
+      label: 'Placement opened',
+    };
+    const held: TimelineItem[] = [milestone, MID];
+    const { rerender } = renderPagingTimeline({ items: held, paging: pagingProps() });
+    const el = streamEl();
+    stubScroll(el, 500, 100);
+    el.scrollTop = 0;
+    fireEvent.scroll(el);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' })); // arms at 500
+
+    // "Comms only" hides the milestone while the page is in flight: the anchor is
+    // re-baselined to 400 so the eventual delta counts only prepended content.
+    setNum(el, 'scrollHeight', 400);
+    fireEvent.click(screen.getByRole('button', { name: 'Comms only' }));
+
+    // The page settles having contributed nothing visible.
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ loadingOlder: true })}
+        />
+      </MemoryRouter>,
+    );
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ loadingOlder: false })}
+        />
+      </MemoryRouter>,
+    );
+
+    setNum(el, 'scrollHeight', 700);
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={held}
+          source="server"
+          canSend={false}
+          paging={pagingProps({ olderPagesLoaded: 1 })}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(el.scrollTop).toBe(0);
   });
 
   // The "Comms only" toggle changes the FIRST rendered item with no prepend at

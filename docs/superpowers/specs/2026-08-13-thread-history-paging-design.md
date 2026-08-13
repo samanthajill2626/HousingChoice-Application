@@ -197,9 +197,17 @@ The contact timeline is unaffected: it uses its authoritative `nextCursor`.
 
 ### 4.5 Timeline UI and scroll anchoring
 
-`Timeline.tsx` gains three optional props - `hasOlder`, `onLoadOlder`,
-`loadingOlder`. Callers that pass none are behaviorally unchanged, which covers
-every caller not in scope here.
+`Timeline.tsx` gains ONE optional prop, `paging?: TimelinePaging`, carrying
+`hasOlder`, `loadingOlder`, `olderPagesLoaded`, and `onLoadOlder`. Callers that
+pass nothing are behaviorally unchanged, which covers every caller not in scope
+here.
+
+One object rather than four sibling props, because the four are meaningless
+apart: `loadingOlder` disarms a stale anchor and `olderPagesLoaded` consumes it,
+so a caller supplying only `hasOlder` and `onLoadOlder` gets a control whose
+scroll anchoring silently never fires - typecheck-green and invisible in review.
+As four optional props that contract can only be prose; as one object the
+compiler enforces it.
 
 The control renders above the stream with the accessible name
 "Load older messages", per the accessibility-first selector rule in
@@ -211,7 +219,9 @@ history, the control retiring - the transcript deliberately does not move.
 
 It stays visible when the stream renders empty. That is not a cosmetic slip: if
 the "Comms only" filter hides every entry on the current page, the control is
-the only way to reach the pages behind it.
+the only way to reach the pages behind it WITHOUT abandoning the filter. Turning
+the filter off also reveals them, but requiring that would mean the operator has
+to give up the view they chose in order to keep reading.
 
 It sits OUTSIDE the scroll container (in `.streamWrap`, above `.stream`), not
 inside it. Inside, the control would contribute to `el.scrollHeight` and then
@@ -253,11 +263,15 @@ changes. Two weaker rules were tried and both are wrong:
 A counter from the hook is immune to all of it: appends, filter toggles, retry
 collapses, and empty older pages leave it untouched.
 
-Accepted residual: if an append and the older page land in the SAME batched
-render, the restore delta includes the append's height and the reader is
-mis-positioned by roughly one message. It cannot lose or duplicate content, and
-closing it would require anchoring to a measured element position, which jsdom
-cannot exercise.
+Accepted residual, stated in full: if an append and the older page land in the
+SAME batched render, the consume branch both counts the append's height into the
+restore delta AND returns before the pill logic, absorbing the new count. So the
+reader is mis-positioned by the height of whatever arrived - a 300ms debounce can
+coalesce a burst, so "one message" is the floor, not the bound - and that
+message's "New messages" pill is skipped. It cannot lose or duplicate content,
+and it requires an inbound to arrive inside the older page's flight window.
+Closing it would mean anchoring to a measured element position, which jsdom
+cannot exercise, so it would ship untested.
 
 A settle effect clears a stale anchor once `loadingOlder` goes false, covering
 an older page that returns nothing at all. Callers therefore pass all four
@@ -268,7 +282,7 @@ behavior for appends are untouched.
 
 ### 4.6 Plumbing
 
-Five files pass the three new props into `<Timeline>`: `ConversationDetail`,
+Five files pass the `paging` object into `<Timeline>`: `ConversationDetail`,
 `GroupTextView`, `ContactCommsPane`, `TourConversation`, and
 `PlacementConversation`.
 
@@ -292,6 +306,9 @@ an unshipped control on the operator's two most-open pages. Only
   onto the older-page request; `upcoming` AND `timezone` both survive an
   older-page load; the fallback path reports `hasOlder: false`; a `kinds` change
   resets rather than merging across filters.
+- All three hooks: `olderPagesLoaded` bumps on a merged older page and NOT on a
+  first load, an SSE refetch, or a failed older read. It is the renderer's only
+  prepend signal, so a phantom bump breaks scroll anchoring everywhere.
 - `Timeline`: the control renders only when `hasOlder`; a prepend holds the
   scroll anchor; a prepend raises no "new below" pill; an append still does; an
   append arriving while an older page is in flight does NOT consume the prepend

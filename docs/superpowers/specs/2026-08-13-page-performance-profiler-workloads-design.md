@@ -26,10 +26,12 @@ yet representative enough for the next round of performance analysis:
    contract is split between source and README examples rather than exposed by
    one authoritative `--help` surface.
 
-The profiler must make those workloads controllable without turning a passive
-page-load profiler into a workflow runner. In particular, it must not open an
-Inbox row, click Load more, send a message, mark a row read, or perform any other
-application workflow.
+The profiler must make those workloads controllable without turning the four
+Inbox-filter samples into workflow runs. Those samples must not open an Inbox
+row, click Load more, send a message, mark a row read, or perform any other
+application workflow. The separately retained conversation-detail warm sample
+still activates its resolved exact Inbox-row link under the existing write
+firewall; that detail-navigation contract is outside the four filter samples.
 
 ## 2. Goals
 
@@ -81,7 +83,7 @@ control, the profiler records the initial result and does not press the control.
 | W6 | Coverage workloads | Keep 50 placements, 50 tours, 100 existing non-native conversations, and 10 broadcasts per scale unit as synthetic coverage workloads. |
 | W7 | Density | Keep ordinary messages per conversation and recipients per broadcast scale-invariant; provide both uniform density overrides and single-fixture tail overrides. |
 | W8 | Inbox surfaces | Rank All, Unread, Unknown, and Groups independently. |
-| W9 | Interaction | Cold URL navigation and warm accessible navigation only; never click a row or Load more. |
+| W9 | Interaction | The four Inbox-filter samples use cold URL navigation or exact filter-tab activation only; they never click a row or Load more. The existing conversation-detail warm sample may activate its resolved exact Inbox-row link under the write firewall. |
 | W10 | Existing data | Local and hosted-dev targets profile only the data already present on the target. |
 | W11 | Evidence | Emit privacy-safe timings, aggregate counts, resolved workload values, and controlled comparison metadata only. |
 | W12 | Historical baselines | Start a new comparison lineage; the old calibration artifacts are not comparison-compatible. |
@@ -125,6 +127,7 @@ then-current branch rather than treating this table as a substitute for source:
 | Existing relay-group ratio and deterministic conversation/message generation | `app/src/lib/seed/performance.ts:487-586,730-795` |
 | Existing broadcast recipient embedding | `app/src/lib/seed/performance.ts:589-641` |
 | Native `group_text` row shape | `app/src/lib/seed/lean.ts:227-246`; `app/src/repos/conversationsRepo.ts:35-59,105-130` |
+| Canonical native-group roster identity | `app/src/lib/import/ids.ts:68-76` |
 | Inbox filter enum and exact empty copy | `dashboard/src/routes/inbox/inboxFilters.ts:11-34` |
 | URL-backed selected tab and accessible tab markup | `dashboard/src/routes/inbox/Inbox.tsx:16-43,53-65` |
 | Initial Inbox page limit and request call | `dashboard/src/routes/inbox/useInbox.ts:64,93-166` |
@@ -132,6 +135,10 @@ then-current branch rather than treating this table as a substitute for source:
 | Groups-only native partition and All/Unread/Unknown group behavior | `app/src/routes/inbox.ts:158-180,437-451,700-723,844-887,907-920` |
 | Existing registry and current single Inbox surface | `e2e/performance/routes.ts:475-502` |
 | Existing public CLI option inventories | `e2e/performance/config.ts:59-97` |
+| Lean-first additive performance reset | `app/src/lib/performanceSeed.ts:170-190` |
+| Lean native-group messages and sender keys | `app/src/lib/seed/lean.ts:299-332`; `dashboard/src/lib/memberAttribution.ts:1-13,26-28,39-68` |
+| App-shell unread badge request and current shell classifier | `dashboard/src/app/UnreadContext.tsx:19-38`; `e2e/performance/collect.ts:109-125` |
+| Current route-key sample, report, and comparison joins | `e2e/performance/types.ts:64-84,148-177`; `e2e/performance/report.ts:264-294`; `e2e/performance/compare.ts:24-30,56-81` |
 
 ## 6. Hermetic workload model
 
@@ -156,6 +163,15 @@ native group texts use the separate `group_open` partition and are the only
 rows returned by the Inbox Groups filter. The manifest reports all three values:
 `conversations`, `nativeGroups`, and `totalConversations`.
 
+`nativeGroups` is the exact native-group population in the performance workload,
+not an additive count on top of lean. The current performance reset installs the
+lean seed first, and lean contains one native group plus its transcript. Inside
+the profiler-owned lane only, performance reset removes that lean native-group
+conversation and its associated message rows before writing the resolved
+performance workload. All other lean fallbacks remain. `nativeGroups=0`
+therefore produces an empty `group_open` partition, while `nativeGroups=21`
+produces exactly 21 native groups.
+
 The generator applies the 95/4/1 contact-type mix deterministically. For counts
 that are not a multiple of 100, landlord and unknown counts are the floors of
 4 percent and 1 percent respectively, and tenants receive the remainder. The
@@ -164,9 +180,10 @@ report generated totals and active totals separately so the meaning is not
 ambiguous.
 
 Every breadth override is a non-negative safe integer within the existing
-entity-count bound. The scale remains an integer from 1 through 100. All
-resolved values participate in the existing total-work bound before any lane is
-started or table is cleared.
+entity-count bound, subject to the native-roster feasibility rule in section
+6.5. The scale remains an integer from 1 through 100. All resolved values and
+feasibility checks participate in preflight before any lane is started or table
+is cleared.
 
 ### 6.2 Ordinary density
 
@@ -226,6 +243,9 @@ conversation-detail sample the profiler:
 This contract supports both an all-history initial render and a paginated
 initial render. A future change in initial-history behavior will show up as a
 rendered-row-count and timing change, not as a broken profiler workflow.
+The knob is deliberately forward-compatible storage workload: the profiler does
+not promise that increasing it changes current initial-load latency when the
+application reads only an initial page.
 
 ### 6.4 Tail workload: one large broadcast
 
@@ -240,11 +260,16 @@ greater than or equal to `recipientsPerBroadcast`. It replaces the ordinary
 recipient count for the deterministic terminal broadcast selected by the
 `/broadcasts/:broadcastId` resolver.
 
-Recipient IDs remain unique within a broadcast. A requested count greater than
-the eligible unique recipient pool resolves down to that pool. The manifest
-reports requested, resolved, and clipped counts for both the ordinary and large
-broadcast populations. If `broadcasts=0`, the large fixture is absent and its
-resolved count is zero.
+Recipient IDs remain unique within a broadcast. The eligible recipient pool is
+defined exactly as the active generated tenant contacts that have a valid
+primary phone and the generated consent fields, in deterministic generation
+order. Landlords, unknown contacts, and soft-deleted contacts are excluded. If
+that pool is empty, the one lean tenant is the explicit fallback pool. Ordinary
+and large broadcasts use this same pool and retain the tenant-only audience
+filter. A requested count greater than the pool resolves down to the pool size.
+The manifest reports pool source and size plus requested, resolved, and clipped
+counts for both populations. If `broadcasts=0`, the large fixture is absent and
+its resolved count is zero.
 
 The total logical recipient count is:
 
@@ -270,14 +295,34 @@ Every native group fixture must satisfy the current production data contract:
 - conversation identity uses the canonical roster-derived identity helper, not
   an arbitrary hand-written ID;
 - `last_activity_at`, `created_at`, provider IDs, and message sort keys are
-  deterministic and unique for a fixed seed anchor and configuration.
+  deterministic and unique for a fixed seed anchor and configuration;
+- every inbound native-group message carries a `relay_sender_key` in the exact
+  `phone#<E164>` form for one roster member, while outbound teammate messages do
+  not invent a member sender key.
 
-The roster size cycles deterministically through two, three, and four contacts
-when enough generated contacts exist, with the existing lean fallbacks used only
-when a parent override makes that impossible. Some group rows are unread and
-some are read so the All, Unread, and Groups branches have coverage at the
-default scale. The native-group messages use the same ordinary density as other
-conversations and valid group-message author metadata.
+The native-group member pool contains active generated performance contacts
+only; the lean contacts are not group-capacity fallbacks. Roster size cycles
+deterministically among the feasible sizes from two through
+`min(4, activeGeneratedContacts)`, and every selected roster combination is
+unique. The maximum exact native-group population is therefore:
+
+```text
+C(activeGeneratedContacts, 2)
+  + C(activeGeneratedContacts, 3)
+  + C(activeGeneratedContacts, 4)
+```
+
+where terms larger than the member pool are zero and the calculation saturates
+safely at the configured entity-count bound. If `nativeGroups` exceeds that
+capacity, configuration fails before lifecycle work; it is never clipped and
+never reuses a roster. In particular, a positive native-group count with fewer
+than two active generated contacts is invalid. This guarantees canonical ID
+uniqueness and exact manifest/storage counts.
+
+Some group rows are unread and some are read so the All, Unread, and Groups
+branches have coverage at the default scale. The native-group messages use the
+same ordinary density as other conversations. Their direction, author, and
+phone-scoped sender keys follow the explicit rules above.
 
 The default scale-1 seed must make all four Inbox filters meaningful:
 
@@ -286,8 +331,10 @@ The default scale-1 seed must make all four Inbox filters meaningful:
 - Unknown has at least one unknown row;
 - Groups has at least one native `group_text` row.
 
-Explicit zero overrides may legitimately drive any filter to its exact empty
-terminal.
+Explicit zero overrides may legitimately drive a filter to its exact empty
+terminal when all of that filter's contributing populations are zero. In
+particular, `nativeGroups=0` makes Groups empty because the lean group is removed
+from the performance workload first.
 
 ### 6.6 Bounds and preflight
 
@@ -337,6 +384,16 @@ Add `--help` and `-h` as true early exits. They must not load target state,
 probe ports, read credentials, start a browser, create an artifact directory,
 or touch a lane.
 
+Both forms are valid and exit 0:
+
+```text
+npm run perf:pages -- --help
+npm run perf:pages -- hermetic --help
+```
+
+The parser recognizes help before requiring or validating a target, so help is
+available even when no target is supplied. `-h` is identical.
+
 Help covers every accepted option and, for each numeric seed option, states:
 
 - purpose and unit;
@@ -345,6 +402,8 @@ Help covers every accepted option and, for each numeric seed option, states:
 - target availability;
 - whether scale affects it;
 - override and clipping behavior;
+- parent/capacity relationships, including the active-contact requirement for
+  native groups;
 - its contribution to the total-work cap.
 
 Help also explains that conversation depth is seeded storage depth and that
@@ -382,6 +441,16 @@ configuration. Hermetic output includes at least:
 - fixture-presence states and fallback use;
 - deterministic anchor.
 
+Requested overrides are invocation provenance only. Baseline compatibility uses
+a closed `comparisonWorkload` projection containing resolved workload model
+version, resolved breadth/density/tail counts, resolved pool sizes, and resolved
+fallback states. It excludes the anchor, the presence or spelling of requested
+overrides, and requested values that clip to the same stored workload. Therefore
+an omitted default and the same explicitly supplied default are compatible, and
+two requests that resolve to byte-equivalent clipped workloads are compatible.
+The full requested/resolved manifest remains available for diagnosis but is not
+deep-compared wholesale.
+
 Local and hosted-dev manifests instead say `dataSource: existing` and omit or
 set inapplicable synthetic counts to null. They never guess database totals from
 the first rendered page.
@@ -390,11 +459,20 @@ the first rendered page.
 
 ### 8.1 Stable surface identity
 
-The registry distinguishes an application route from a measured surface. Add a
-stable `surfaceId` (or an equivalent typed field) so multiple surfaces may share
-one route component and so query-string order never becomes report identity.
-Existing surfaces may derive their identity from the current route key. The four
-Inbox identities are fixed:
+The registry distinguishes identity, application path, and behavior explicitly.
+`RouteDefinition` gains these required fields:
+
+| Field | Meaning | Consumers |
+| --- | --- | --- |
+| `surfaceId` | Unique stable measurement identity | route ordering, sample token, request-evidence join, report map key, aggregation, ranking, baseline comparison, self-QA cardinality, and artifact allowlist |
+| `pathTemplate` | Application route/path contract, such as `/inbox` | cold-path validation, resolver path construction, navigation evidence, and route-template reporting |
+| `behaviorFamily` | Closed internal behavior discriminator, such as `inbox` | Inbox shell/page request classification, family-specific DOM proofs, and other collector special cases that currently compare a literal route key |
+
+The current overloaded `route.key` is removed or narrowed so no consumer can
+silently guess which meaning it carries. Existing surfaces use their current
+route key as `surfaceId` and keep the current path as `pathTemplate`. Inbox uses
+four non-path IDs with the shared `/inbox` path template and `inbox` behavior
+family. Query-string order never becomes identity. The four fixed entries are:
 
 | Surface ID | Cold URL | Selected filter | Initial API query |
 | --- | --- | --- | --- |
@@ -407,10 +485,30 @@ The browser navigation URL never carries `limit`. `PAGE_LIMIT = 30` belongs to
 `useInbox`, which supplies it only on the API request. A `cursor` is forbidden
 on the initial request because this feature never invokes Load more.
 
-The endpoint contract validates the exact allowlisted filter and numeric limit
-internally, not merely the presence of the `filter` and `limit` keys. The fixed
-filter enum and limit may appear as safe structured fields in artifacts; raw
-query strings and arbitrary query values remain forbidden.
+Two different first-party requests share the `/api/inbox` template and must not
+be conflated:
+
+| Request class | Fixed safe values | Role |
+| --- | --- | --- |
+| `inbox_page_all` | `filter=all`, `limit=30`, no cursor | required surface request for `inbox-all` |
+| `inbox_page_unread` | `filter=unread`, `limit=30`, no cursor | required surface request for `inbox-unread` |
+| `inbox_page_unknown` | `filter=unknown`, `limit=30`, no cursor | required surface request for `inbox-unknown` |
+| `inbox_page_groups` | `filter=groups`, `limit=30`, no cursor | required surface request for `inbox-groups` |
+| `inbox_badge` | `filter=unread`, `limit=100`, no cursor | optional background app-shell request |
+
+The collector classifies these tuples in memory from the parsed URL before it
+reduces evidence. Classification uses `behaviorFamily`, never `surfaceId` or a
+literal route-key comparison. Only the matching `inbox_page_*` request can
+satisfy a surface's required endpoint contract or contribute to its reported
+initial Inbox request count/timing. `inbox_badge` remains background evidence
+and cannot satisfy, fail, or inflate the destination page request. This is
+especially load-bearing on `inbox-unread`, where the filter is the same and the
+limit distinguishes the requests.
+
+Artifacts store only the closed request-class enum plus the existing templated
+endpoint evidence. They never store raw query strings. An `/api/inbox` request
+whose values match none of the closed tuples is an endpoint-contract failure
+reduced to a fixed reason; arbitrary values are not persisted.
 
 ### 8.2 Meaningful-ready terminals
 
@@ -418,7 +516,7 @@ Every successful Inbox terminal requires:
 
 1. the `Inbox filters` tablist;
 2. the exact expected tab with `aria-selected=true`;
-3. exactly one loaded branch:
+3. exactly one loaded branch, enforced as an exclusive-or:
    - a `Conversations` list; or
    - that filter's exact empty title;
 4. no page-level alert;
@@ -433,9 +531,13 @@ The empty titles are:
 | Unknown | `No unknown numbers` |
 | Groups | `No group texts yet` |
 
-The backend-pending and error branches are classified results, not successful
-ready terminals. The groups-truncated notice may coexist with a successful
-terminal and is recorded through the existing truncation evidence path.
+The terminal evaluator counts populated and filter-specific empty matches before
+returning success. Zero matches continue waiting; more than one produces the
+closed `contradictory_terminal` failure and preserves the partial artifact. It
+must not return populated merely because that check ran first. The
+backend-pending and error branches are classified results, not successful ready
+terminals. The groups-truncated notice may coexist with a successful terminal
+and is recorded through the existing truncation evidence path.
 
 ### 8.3 Cold and warm actions
 
@@ -456,7 +558,10 @@ filtered destination. The selected-tab assertion proves that the click changed
 the intended surface. Accessible-name matching is exact for these fixed labels.
 
 The action abstraction remains closed: `link` and `tab` are the only supported
-kinds in this change. It does not become a general arbitrary-click facility.
+kinds in this change. It does not become a general arbitrary-click facility. A
+missing exact fixed tab is the closed `required_action_missing` failure, not
+`skipped_fixture_not_navigable`; fixed product chrome is not a data fixture, and
+the full self-QA must fail.
 
 ### 8.4 Passive-only evidence
 
@@ -489,8 +594,14 @@ new fields also match:
 - report schema version;
 - registry/surface-set version;
 - workload model version;
-- all resolved seed breadth, density, and tail values for hermetic runs;
+- the closed `comparisonWorkload` projection of all resolved seed breadth,
+  density, tail, pool, and fallback values for hermetic runs;
 - target data-source class.
+
+Requested override syntax and the seed anchor remain in provenance but are not
+comparison keys. All sample joins use `surfaceId`; route paths remain separate
+diagnostic templates and never serve as unique map keys when multiple surfaces
+share them.
 
 An older 28-surface baseline or a baseline from the discarded scale
 calibration produces an explicit incompatible-comparison result. The runner
@@ -535,10 +646,15 @@ In addition to the original closed failure categories:
   the corresponding detail route follows its existing fixture-skip contract;
 - a mismatched Inbox filter value, limit, or unexpected initial cursor is an
   endpoint-contract failure, never rewritten into expected evidence;
-- a tab that cannot be found exactly is `skipped_fixture_not_navigable` for that
-  warm sample and never falls back to a different control;
+- the fixed page request and optional badge request are classified by their
+  exact safe tuples before evidence reduction, and only the page request can
+  satisfy readiness or page metrics;
+- a tab that cannot be found exactly is `required_action_missing`, fails the
+  warm sample and full self-QA, and never falls back to a different control;
 - a selected tab without a loaded list or exact empty branch times out under the
   existing artifact-preserving path;
+- simultaneous populated and empty branches are `contradictory_terminal` and
+  cannot pass because populated was checked first;
 - an observed passive write is handled by the existing firewall failure path
   and cannot be added to the empty expectation merely to make self-QA pass.
 
@@ -549,14 +665,32 @@ are fixed:
 
 - `app/src/lib/seed/performance.ts` owns pure workload resolution, bounds,
   native-group generation, and manifests;
-- the dev reseed seam continues to accept only validated performance-seed input
-  and remains structurally unavailable outside hermetic local development;
+- `app/src/lib/performanceSeed.ts` owns removal of the lean native-group row and
+  its message partition inside the already-owned performance reset, then writes
+  the exact resolved native-group population; every deletion remains confined
+  to the injected profiler table prefix;
+- the dev reseed route/parser and CLI-to-dev payload types are updated for every
+  new input and continue to accept only validated performance-seed input while
+  remaining structurally unavailable outside hermetic local development;
 - `e2e/performance/config.ts` owns CLI parsing and target-specific rejection;
 - the profiler CLI owns help and early exits but not seed arithmetic;
 - `e2e/performance/routes.ts` owns stable surface contracts, exact Inbox
-  terminals, endpoint expectations, and typed warm actions;
-- collection owns accessible activation and safe DOM cardinality;
-- report code owns the schema/version change and closed allowlists;
+  terminals, exact safe request classes, endpoint expectations, and typed warm
+  actions;
+- `e2e/performance/types.ts` carries `surfaceId`, `pathTemplate`, and closed
+  behavior/request classes through samples and request evidence without
+  duplicating raw URL values;
+- `e2e/performance/collect.ts` migrates route ordering, sample tokens, shell
+  classification, request attribution, branch evidence, Inbox DOM proofs,
+  accessible activation, and safe DOM cardinality off the overloaded route key;
+- readiness/CLI terminal evaluation enforces the Inbox XOR and the fixed-action
+  failure contract;
+- aggregation, report assembly/sanitization, ranking, comparison, baseline
+  parsing, self-QA, contract checkpoints, and their tests migrate every map,
+  set, join, allowlist, and compatibility key from route identity to
+  `surfaceId`, while retaining `pathTemplate` only as route evidence;
+- report code owns the schema/workload/registry version changes, the resolved
+  comparison projection, and closed allowlists;
 - `e2e/README.md` owns the durable operator reference;
 - no production dashboard behavior or runtime dependency is added.
 
@@ -569,11 +703,17 @@ Add or update tests for:
 - the new scale bases and deterministic 95/4/1 contact allocation, including
   remainder counts;
 - native-group counts, valid `group_text` shapes, canonical identities, roster
-  sizes, uniqueness, read/unread coverage, and deterministic messages;
+  sizes, uniqueness, read/unread coverage, phone-scoped inbound sender keys,
+  outbound sender-key absence, and deterministic messages;
+- native-roster capacity at 0, 1, 2, 3, 4, and default active-contact counts,
+  including pre-lifecycle rejection above capacity;
+- removal of the lean native-group conversation and all of its messages before
+  exact performance group generation, including `nativeGroups=0`;
 - ordinary and tail message formulas, parent-zero behavior, bounds, and total
   cap accounting;
 - ordinary and large-broadcast recipient formulas, uniqueness, clipping,
-  parent-zero behavior, and total cap accounting;
+  active-generated-tenant pool membership, exclusion of landlord/unknown/deleted
+  contacts, lean fallback, parent-zero behavior, and total cap accounting;
 - `--native-groups`, `--long-conversation-messages`, and
   `--large-broadcast-recipients` parsing and target restrictions;
 - `--help`/`-h` true early exit and parser/help parity;
@@ -581,12 +721,23 @@ Add or update tests for:
 - local and hosted-dev rejection of every seed option;
 - four stable Inbox surface IDs, exact cold URLs, exact API query values, and no
   initial cursor;
+- full route-key identity migration: unique `surfaceId` map/join/order keys,
+  retained path templates, behavior-family special cases, report allowlists,
+  self-QA keys, and comparison keys;
+- exact distinction between `inbox_badge` unread/100 background traffic and
+  every unread/30 or sibling page request, including an `inbox-unread` sample
+  containing both;
 - selected-tab plus populated/empty terminal alternatives for every filter;
+- terminal XOR rejection when populated and empty branches coexist;
 - warm buffer reset immediately before exact tab activation;
-- no Load more or row activation in the action registry;
+- no Load more or row activation in the four Inbox-filter action contracts,
+  while the separate conversation-detail exact-row activation remains;
+- `required_action_missing` for a missing fixed tab, never a fixture skip;
 - safe rendered-row cardinality without text collection;
 - comparison incompatibility across old/new schema, registry, workload, or
   seed values;
+- comparison compatibility for omitted versus explicit equal defaults and for
+  different requested values that resolve to the same clipped workload;
 - exact registry cardinality of 31 and self-QA cardinality of 62;
 - privacy allowlists in both directions for every new manifest and sample field.
 
@@ -596,6 +747,8 @@ The performance-seed integration suite must execute, not silently self-skip, in
 the final feature gates. It proves:
 
 - exact resolved counts at scale 1 and a non-default scale;
+- zero lean native-group rows/messages survive the performance-reset cleanup,
+  and stored native-group count equals the exact resolved count including zero;
 - native groups are queryable from the `group_open` byLastActivity partition in
   newest-first order;
 - the Inbox Groups branch can return seeded native groups;
@@ -645,24 +798,32 @@ The feature is acceptable when:
    50 placements, 50 tours, 100 existing conversations, and 10 broadcasts.
 2. Contact-type counts resolve to 95 tenants, 4 landlords, and 1 unknown at 100
    contacts.
-3. Scale and every override are deterministic, bounded, documented, and fully
+3. The performance reset removes the lean native group and produces exactly the
+   resolved native-group count; infeasible roster counts are rejected before
+   lifecycle work.
+4. Scale and every override are deterministic, bounded, documented, and fully
    represented in print-config and hermetic manifests.
-4. One designated conversation and broadcast can be made deep/wide without
+5. One designated conversation and broadcast can be made deep/wide without
    changing every parent density.
-5. All, Unread, Unknown, and Groups are four separately identified, timed, and
+6. All, Unread, Unknown, and Groups are four separately identified, timed, and
    ranked cold/warm surfaces.
-6. Filtered warm timing begins immediately before the exact tab click after all
+7. Filtered warm timing begins immediately before the exact tab click after all
    source evidence has been discarded.
-7. No Inbox or conversation-history Load more control is exercised.
-8. Seeded conversation depth and observed initial rows are reported as distinct
+8. The badge unread/100 request can never satisfy or inflate the Inbox page's
+   filter/30 request contract.
+9. Missing fixed tabs and contradictory populated/empty branches fail closed.
+10. No Inbox or conversation-history Load more control is exercised.
+11. Seeded conversation depth and observed initial rows are reported as distinct
    concepts, with no equality assertion.
-9. Local and hosted-dev reject seed controls and retain their existing-data-only
+12. Local and hosted-dev reject seed controls and retain their existing-data-only
    guarantee.
-10. Old baselines cannot be silently compared with the new workload or surface
+13. Old baselines cannot be silently compared with the new workload or surface
     set.
-11. All original profiler privacy, firewall, watchdog, ownership, and cleanup
+14. Equivalent resolved workloads compare as controlled regardless of whether a
+    default was omitted or explicitly supplied.
+15. All original profiler privacy, firewall, watchdog, ownership, and cleanup
     invariants remain true.
-12. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
+16. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
     real exit code 0.
 
 ## 15. Design gate

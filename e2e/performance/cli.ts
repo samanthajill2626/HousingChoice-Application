@@ -1,6 +1,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { exactTargetFromPath } from './routes.js';
 import type {
   Browser,
   BrowserContext,
@@ -492,7 +493,10 @@ async function terminalStateFor(
 }
 
 async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
-  return terminalStateFor(page, route.terminal, route.source.click.selected === true ? route.source.click : undefined);
+  const selected = route.source.action.kind === 'tab'
+    ? { role: 'tab', name: route.source.action.name, exactness: 'exact' as const, selected: true as const }
+    : undefined;
+  return terminalStateFor(page, route.terminal, selected);
 }
 
 export async function readPageStoreSnapshot(
@@ -517,9 +521,9 @@ function absoluteUrl(baseUrl: string, path: string): string {
 }
 
 export function targetPath(target: ExactBrowserTarget): string {
-  const query = target.query === undefined
+  const query = target.query.kind === 'absent'
     ? ''
-    : `?${new URLSearchParams(Object.entries(target.query).sort(([left], [right]) => left.localeCompare(right))).toString()}`;
+    : `?${new URLSearchParams(Object.entries(target.query.values).sort(([left], [right]) => left.localeCompare(right))).toString()}`;
   return `${target.path}${query}`;
 }
 
@@ -539,7 +543,7 @@ export function exactTargetMatches(url: string, target: ExactBrowserTarget): boo
   }
 }
 
-function createRealSamplePage(input: {
+export function createRealSamplePage(input: {
   page: Page;
   context: BrowserContext;
   contextState: { token: FirewallRecordingToken | null };
@@ -592,17 +596,23 @@ function createRealSamplePage(input: {
       }
       return false;
     },
-    async activateWarmAction(route, href): Promise<boolean> {
-      if (route.source.click.role === 'tab') {
-        const tab = input.page.getByRole('tab', { name: route.source.click.name, exact: true });
+    async activateWarmAction(route, destinationTarget): Promise<boolean> {
+      if (route.source.action.kind === 'tab') {
+        const tab = input.page.getByRole('tab', { name: route.source.action.name, exact: true });
         if (await tab.count() === 0 || !await tab.first().isVisible()) return false;
         await tab.first().click();
-        return true;
+      } else {
+        const destinationPath = targetPath(destinationTarget);
+        const link = input.page.locator(`a[href="${destinationPath}"]`).first();
+        if (await link.count() === 0 || !await link.isVisible()) return false;
+        await link.click();
       }
-      const link = input.page.locator(`a[href="${href}"]`).first();
-      if (await link.count() === 0 || !await link.isVisible()) return false;
-      await link.click();
-      return true;
+      const deadline = Date.now() + 3_000;
+      while (Date.now() <= deadline) {
+        if (targetNow(destinationTarget)) return true;
+        await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 25));
+      }
+      return false;
     },
     async countRelayConversationLinks(): Promise<number> {
       return await input.page.locator('a[href^="/conversations/"]').count();
@@ -893,7 +903,7 @@ function resolverFor(
       return Promise.resolve({
         kind: 'resolved',
         coldPath: route.coldTarget.path,
-        warmHref: route.source.href,
+        warmTarget: exactTargetFromPath(route.coldTarget.path),
         branch: { kind: 'none' },
       });
     case 'contact': return routes.resolveContactDetail(api, dom);

@@ -19,6 +19,7 @@ import {
 import {
   ROUTES,
   type EndpointContract,
+  type ExactBrowserTarget,
   type ResolverResult,
   type RouteContractBranch,
   type RouteDefinition,
@@ -468,7 +469,7 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async prepareWarmSource(route: RouteDefinition): Promise<void> {
-    this.events.push(`prepare:${route.source.target.path}`);
+    this.events.push(`prepare:${targetPath(route.source.target)}`);
     if (this.lifecycle !== undefined) {
       this.events.push(`prepare-lifecycle:${this.lifecycle.activeToken ?? 'none'}:${this.lifecycle.listenerCount}`);
     }
@@ -479,7 +480,8 @@ class FakeSamplingPage implements SamplePage {
     return this.sourceReady;
   }
 
-  async activateWarmAction(_route: RouteDefinition, href: string): Promise<boolean> {
+  async activateWarmAction(_route: RouteDefinition, destinationTarget: ExactBrowserTarget): Promise<boolean> {
+    const href = targetPath(destinationTarget);
     if (this.clickFailure !== null) throw this.clickFailure;
     if (!this.hrefs.has(href)) return false;
     this.events.push(`click:${href}`);
@@ -593,8 +595,27 @@ class FakeInstrumentation implements SampleInstrumentation {
   }
 }
 
+function target(path: string): ExactBrowserTarget {
+  const parsed = new URL(path, 'http://target.invalid');
+  const filter = parsed.searchParams.get('filter');
+  return filter === null
+    ? { path: parsed.pathname, query: { kind: 'absent' } }
+    : { path: parsed.pathname, query: { kind: 'fixed', values: { filter: filter as 'unread' | 'unknown' | 'groups' } } };
+}
+
+function targetPath(targetValue: ExactBrowserTarget): string {
+  return targetValue.query.kind === 'absent'
+    ? targetValue.path
+    : `${targetValue.path}?${new URLSearchParams(targetValue.query.values).toString()}`;
+}
+
 function resolved(path: string, branch: RouteContractBranch = { kind: 'none' }): ResolverResult {
-  return { kind: 'resolved', coldPath: path, warmHref: path, branch };
+  return { kind: 'resolved', coldPath: path, warmTarget: target(path), branch };
+}
+
+function staticDestination(route: RouteDefinition): string {
+  if (route.coldTarget.kind !== 'static') throw new Error('static destination required');
+  return route.coldTarget.path;
 }
 
 describe('cold and warm sampling protocol', () => {
@@ -890,8 +911,9 @@ describe('run ordering and warmup policy', () => {
       sourceTimeoutMs: 100,
       resolveCold: async (route) => resolved(route.surfaceId),
       resolveWarm: async (route, page) => {
-        (page as FakeSamplingPage).hrefs.add(route.source.href);
-        return resolved(route.source.href);
+        const destination = staticDestination(route);
+        (page as FakeSamplingPage).hrefs.add(destination);
+        return resolved(destination);
       },
       instrumentationFor: () => new FakeInstrumentation([]),
       tokenFactory: (mode, repeat, route) => `${mode}-${repeat}-${route.surfaceId}`,
@@ -954,8 +976,9 @@ describe('run ordering and warmup policy', () => {
       signal: controller.signal,
       resolveCold: async (route) => resolved(route.surfaceId),
       resolveWarm: async (route, page) => {
-        (page as FakeSamplingPage).hrefs.add(route.source.href);
-        return resolved(route.source.href);
+        const destination = staticDestination(route);
+        (page as FakeSamplingPage).hrefs.add(destination);
+        return resolved(destination);
       },
       instrumentationFor: (route, mode, repeat) => {
         const value = new FakeInstrumentation([]);
@@ -1019,9 +1042,9 @@ describe('run ordering and warmup policy', () => {
       resolveCold: async () => resolved('inbox-all'),
       resolveWarm: async (route, page) => {
         const fake = page as FakeSamplingPage;
-        fake.hrefs.add(route.source.href);
+        fake.hrefs.add(staticDestination(route));
         fake.relayLinks = 3;
-        return resolved(route.source.href);
+        return resolved(staticDestination(route));
       },
       instrumentationFor: () => new FakeInstrumentation([]),
       tokenFactory: (mode, repeat) => `${mode}-${repeat}`,

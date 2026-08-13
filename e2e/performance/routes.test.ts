@@ -243,27 +243,27 @@ describe('route registry completeness', () => {
       surfaceId: route.surfaceId,
       pathTemplate: route.pathTemplate,
       coldTarget: route.coldTarget,
-      click: route.source.click,
+      action: route.source.action,
       terminal: route.terminal.empty.map((locator) => locator.name),
     }))).toEqual([
       {
         surfaceId: 'inbox-all', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox' },
-        click: { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+        action: { kind: 'tab', name: 'All' },
         terminal: ['No conversations yet'],
       },
       {
         surfaceId: 'inbox-unread', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unread' },
-        click: { role: 'tab', name: 'Unread', exactness: 'exact', selected: true },
+        action: { kind: 'tab', name: 'Unread' },
         terminal: ["You're all caught up"],
       },
       {
         surfaceId: 'inbox-unknown', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unknown' },
-        click: { role: 'tab', name: 'Unknown', exactness: 'exact', selected: true },
+        action: { kind: 'tab', name: 'Unknown' },
         terminal: ['No unknown numbers'],
       },
       {
         surfaceId: 'inbox-groups', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=groups' },
-        click: { role: 'tab', name: 'Groups', exactness: 'exact', selected: true },
+        action: { kind: 'tab', name: 'Groups' },
         terminal: ['No group texts yet'],
       },
     ]);
@@ -308,10 +308,12 @@ describe('route registry completeness', () => {
       expect(route.viewportDependency).toBe('desktop_chrome');
       expect(route.source.viewportDependency).toBe('desktop_chrome');
       expect(route.terminal.viewportDependency).toBe('desktop_chrome');
-      expect(route.source.exactHref).toBe(true);
+      expect(route.source).not.toHaveProperty('click');
+      expect(route.source).not.toHaveProperty('href');
+      expect(route.source).not.toHaveProperty('exactHref');
+      expect(['link', 'tab']).toContain(route.source.action.kind);
       for (const locator of [
         route.source.ready,
-        route.source.click,
         ...route.terminal.structure,
         ...route.terminal.populated,
         ...route.terminal.empty,
@@ -395,10 +397,10 @@ describe('route registry completeness', () => {
 
   it('waits for the selected settings source data branch before timing the tab click', () => {
     const templates = ROUTES.find((route) => route.surfaceId === '/settings/templates')!;
-    expect(templates.source.target).toEqual({ path: '/settings/team' });
+    expect(templates.source.target).toEqual({ path: '/settings/team', query: { kind: 'absent' } });
     expect(templates.source.ready).toMatchObject({ role: 'table', exactness: 'role_only' });
     const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
-    expect(system.source.target).toEqual({ path: '/settings/templates' });
+    expect(system.source.target).toEqual({ path: '/settings/templates', query: { kind: 'absent' } });
     expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
   });
 
@@ -407,7 +409,9 @@ describe('route registry completeness', () => {
     const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
 
     expect([...inbox, conversation].map((route) => route.source.target)).toEqual([
-      { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' },
+      { path: '/inbox', query: { kind: 'absent' } }, { path: '/inbox', query: { kind: 'absent' } },
+      { path: '/inbox', query: { kind: 'absent' } }, { path: '/inbox', query: { kind: 'absent' } },
+      { path: '/inbox', query: { kind: 'absent' } },
     ]);
     expect([...inbox, conversation].every((route) => route.source.ready === inbox[0]!.source.ready)).toBe(true);
     expect([...inbox, conversation].every((route) => route.source.sourceTerminal !== undefined)).toBe(true);
@@ -532,7 +536,7 @@ describe('representative resolvers', () => {
     api.pages.set('/api/contacts?cursor=private-cursor&limit=100&type=tenant', [{ contacts: [], nextCursor: null }]);
     const result = await resolveContactDetail(api, new FakeDom(new Set(['/contacts/contact-private-b'])));
     expect(result).toEqual({
-      kind: 'resolved', coldPath: '/contacts/contact-private-b', warmHref: '/contacts/contact-private-b',
+      kind: 'resolved', coldPath: '/contacts/contact-private-b', warmTarget: { path: '/contacts/contact-private-b', query: { kind: 'absent' } },
       branch: { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 },
     });
     expect(Object.keys(result)).not.toContain('contactId');
@@ -582,7 +586,7 @@ describe('representative resolvers', () => {
       { kind: 'relay_group', conversationId: 'conv-private' },
     ] }]);
     await expect(resolveConversationDetail(inboxApi, new FakeDom(new Set(['/conversations/conv-private']))))
-      .resolves.toMatchObject({ kind: 'resolved', warmHref: '/conversations/conv-private' });
+      .resolves.toMatchObject({ kind: 'resolved', warmTarget: { path: '/conversations/conv-private', query: { kind: 'absent' } } });
 
     const broadcastApi = new FakeApi();
     broadcastApi.pages.set('/api/broadcasts?limit=50', [{ broadcasts: [
@@ -590,7 +594,7 @@ describe('representative resolvers', () => {
       { broadcastId: 'bcast-private', status: 'failed' },
     ], nextCursor: 'must-not-page' }]);
     await expect(resolveBroadcastDetail(broadcastApi, new FakeDom(new Set(['/broadcasts/bcast-private']))))
-      .resolves.toMatchObject({ kind: 'resolved', warmHref: '/broadcasts/bcast-private' });
+      .resolves.toMatchObject({ kind: 'resolved', warmTarget: { path: '/broadcasts/bcast-private', query: { kind: 'absent' } } });
     expect(broadcastApi.calls).toEqual(['/api/broadcasts?limit=50']);
   });
 
@@ -622,7 +626,7 @@ describe('representative resolvers', () => {
     ] }]);
     const result = await resolveTourDetail(api, new FakeDom(new Set(['/tours/tour-private']), resolverNow));
     expect(result).toMatchObject({
-      kind: 'resolved', warmHref: '/tours/tour-private',
+      kind: 'resolved', warmTarget: { path: '/tours/tour-private', query: { kind: 'absent' } },
       branch: { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: false },
     });
     expect(api.calls[0]).toContain(range.from);

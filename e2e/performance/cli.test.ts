@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   captureCdpClockAlignment,
   classifyEscapedWriteFailure,
+  createRealSamplePage,
   exactTargetMatches,
   installProfilerProcessHandlers,
   main,
@@ -17,6 +18,43 @@ import { FirewallEscapedWriteError } from './firewall.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
 import type { SampleBrowser, SampleInstrumentation } from './collect.js';
+
+class AdapterLocator {
+  constructor(
+    private readonly present: boolean,
+    private readonly clickAction: () => void,
+  ) {}
+
+  async count(): Promise<number> { return this.present ? 1 : 0; }
+  first(): this { return this; }
+  async isVisible(): Promise<boolean> { return this.present; }
+  async click(): Promise<void> { this.clickAction(); }
+}
+
+class AdapterPage {
+  current = 'http://dashboard.test/inbox?filter=groups';
+  readonly events: string[] = [];
+  missingTab = false;
+
+  url(): string { return this.current; }
+  async goto(url: string): Promise<void> { this.events.push(`goto:${url}`); this.current = url; }
+  locator(selector: string): AdapterLocator {
+    const href = selector.match(/^a\[href="(.+)"\]$/u)?.[1];
+    return new AdapterLocator(href !== undefined, () => {
+      this.events.push(`link:${href}`);
+      this.current = `http://dashboard.test${href}`;
+    });
+  }
+  getByRole(role: string, options: { name?: string } = {}): AdapterLocator {
+    const name = options.name ?? '';
+    const present = role !== 'tab' || !(this.missingTab && name === 'Unread');
+    return new AdapterLocator(present, () => {
+      this.events.push(`${role}:${name}`);
+      const filter = name === 'All' ? '' : `?filter=${name.toLowerCase()}`;
+      this.current = `http://dashboard.test/inbox${filter}`;
+    });
+  }
+}
 
 function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRuntime {
   const phase = <T>(name: string, value: T) => vi.fn(async () => {
@@ -43,19 +81,56 @@ function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRunt
 
 describe('exact browser targets', () => {
   it('accepts only normalized query-equivalent targets and rejects extra source state', () => {
-    expect(targetPath({ path: '/inbox' })).toBe('/inbox');
-    expect(targetPath({ path: '/inbox', query: { filter: 'unread', limit: '30' } })).toBe('/inbox?filter=unread&limit=30');
-    expect(exactTargetMatches('http://dashboard.test/inbox', { path: '/inbox' })).toBe(true);
+    expect(targetPath({ path: '/inbox', query: { kind: 'absent' } })).toBe('/inbox');
+    expect(targetPath({ path: '/inbox', query: { kind: 'fixed', values: { filter: 'unread' } } })).toBe('/inbox?filter=unread');
+    expect(exactTargetMatches('http://dashboard.test/inbox', { path: '/inbox', query: { kind: 'absent' } })).toBe(true);
     expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread&limit=30', {
-      path: '/inbox', query: { limit: '30', filter: 'unread' },
-    })).toBe(true);
-    expect(exactTargetMatches('http://dashboard.test/inbox?limit=30&filter=unread', {
-      path: '/inbox', query: { filter: 'unread', limit: '30' },
-    })).toBe(true);
-    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread', { path: '/inbox' })).toBe(false);
-    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread&extra=1', {
-      path: '/inbox', query: { filter: 'unread' },
+      path: '/inbox', query: { kind: 'fixed', values: { filter: 'unread' } },
     })).toBe(false);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread', {
+      path: '/inbox', query: { kind: 'fixed', values: { filter: 'unread' } },
+    })).toBe(true);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread', { path: '/inbox', query: { kind: 'absent' } })).toBe(false);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread&extra=1', {
+      path: '/inbox', query: { kind: 'fixed', values: { filter: 'unread' } },
+    })).toBe(false);
+  });
+
+  it('real adapter restores bare All before each filtered or detail activation and rejects a missing fixed tab', async () => {
+    const raw = new AdapterPage();
+    const page = createRealSamplePage({
+      page: raw as never,
+      context: { addInitScript: async () => undefined } as never,
+      contextState: { token: null },
+      firewall: {} as never,
+      baseUrl: 'http://dashboard.test',
+      pageStoreInstaller: (() => undefined) as never,
+    });
+    const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
+    const groups = ROUTES.find((route) => route.surfaceId === 'inbox-groups')!;
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    const unreadTarget = { path: '/inbox', query: { kind: 'fixed' as const, values: { filter: 'unread' as const } } };
+    const groupsTarget = { path: '/inbox', query: { kind: 'fixed' as const, values: { filter: 'groups' as const } } };
+    const conversationTarget = { path: '/conversations/fixed', query: { kind: 'absent' as const } };
+
+    await page.prepareWarmSource(unread);
+    expect(raw.url()).toBe('http://dashboard.test/inbox');
+    expect(await page.activateWarmAction(unread, unreadTarget)).toBe(true);
+    expect(raw.url()).toBe('http://dashboard.test/inbox?filter=unread');
+    await page.prepareWarmSource(groups);
+    expect(raw.url()).toBe('http://dashboard.test/inbox');
+    expect(await page.activateWarmAction(groups, groupsTarget)).toBe(true);
+    await page.prepareWarmSource(conversation);
+    expect(raw.url()).toBe('http://dashboard.test/inbox');
+    expect(await page.activateWarmAction(conversation, conversationTarget)).toBe(true);
+    expect(raw.events).toEqual([
+      'goto:http://dashboard.test/inbox', 'tab:Unread', 'link:/inbox', 'tab:Groups', 'link:/inbox', 'link:/conversations/fixed',
+    ]);
+
+    raw.current = 'http://dashboard.test/inbox?filter=groups';
+    raw.missingTab = true;
+    await page.prepareWarmSource(unread);
+    expect(await page.activateWarmAction(unread, unreadTarget)).toBe(false);
   });
 });
 

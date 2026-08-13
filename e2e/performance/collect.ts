@@ -6,6 +6,7 @@ import {
   ROUTES,
   CONTRACT_SOURCE_LEDGER,
   resolverSkipSampleResult,
+  type ExactBrowserTarget,
   type EndpointContract,
   type InboxRequestClass,
   type ResolverResult,
@@ -581,8 +582,13 @@ export interface SamplePage {
   // navigation and keep this page/context alive.
   prepareWarmSource(route: RouteDefinition): Promise<void>;
   waitForSourceReady(route: RouteDefinition, timeoutMs: number): Promise<boolean>;
-  activateWarmAction(route: RouteDefinition, href: string): Promise<boolean>;
+  activateWarmAction(route: RouteDefinition, destinationTarget: ExactBrowserTarget): Promise<boolean>;
   countRelayConversationLinks(): Promise<number>;
+}
+
+function exactTargetPath(target: ExactBrowserTarget): string {
+  if (target.query.kind === 'absent') return target.path;
+  return `${target.path}?${new URLSearchParams(target.query.values).toString()}`;
 }
 
 export interface SampleBrowserContext {
@@ -728,16 +734,16 @@ export async function collectWarmSample(input: CollectWarmSampleInput): Promise<
       branch: resolved.branch,
       mode: 'warm',
       repeat: input.repeat,
-      sourcePageUrl: input.route.source.target.path,
-      destinationPageUrl: resolved.warmHref,
+      sourcePageUrl: exactTargetPath(input.route.source.target),
+      destinationPageUrl: exactTargetPath(resolved.warmTarget),
       onOutOfSampleWrites: input.onOutOfSampleWrites ?? (() => undefined),
     });
-    if (!await input.page.activateWarmAction(input.route, resolved.warmHref)) {
+    if (!await input.page.activateWarmAction(input.route, resolved.warmTarget)) {
       return resolverSkipSampleResult(
         input.route.surfaceId,
         'warm',
         input.repeat,
-        input.route.source.click.role === 'tab' ? 'required_action_missing' : 'fixture_not_navigable',
+        input.route.source.action.kind === 'tab' ? 'required_action_missing' : 'fixture_not_navigable',
       );
     }
     collectionStarted = true;

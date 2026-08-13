@@ -180,6 +180,24 @@ export type TimelineStatus = 'loading' | 'ready' | 'error';
 /** Which multi-party product a roster belongs to (see TimelineProps.rosterKind). */
 export type RosterKind = 'relay' | 'group_text';
 
+/** What a paging caller must supply for the "Load older messages" control.
+ *
+ *  These four are one unit, not four options. `onLoadOlder` fetches,
+ *  `hasOlder` decides whether the control renders, `loadingOlder` disables it
+ *  AND disarms a stale scroll anchor, and `olderPagesLoaded` is what tells the
+ *  layout pass a prepend actually landed. Supplying a subset yields a control
+ *  whose scroll anchoring silently never fires. */
+export interface TimelinePaging {
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  /** The hook's count of older pages MERGED so far - monotonic, NEVER reset for
+   *  the life of the hook instance. The renderer only compares it to the value
+   *  it last saw, so any reset to 0 would read as a fresh prepend and fire a
+   *  bogus scroll restore. */
+  olderPagesLoaded: number;
+  onLoadOlder: () => void | Promise<void>;
+}
+
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
@@ -234,6 +252,10 @@ export interface TimelineProps {
    *  impossible rather than momentarily unavailable: a disabled composer invites
    *  a draft that can never be sent. Absent on every existing caller. */
   readOnlyNote?: string;
+  /** History paging. Absent on every caller that does not page, which leaves
+   *  those timelines visually unchanged. All four members travel together by
+   *  construction - see TimelinePaging. */
+  paging?: TimelinePaging;
   /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
    *  consent modal records consent, then retries the send out-of-band of the
    *  composer). The composer restored its draft on the 409 refusal, so it must
@@ -864,6 +886,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onSelectTarget,
     canSend,
     readOnlyNote,
+    paging,
     onSend,
     onRetry,
     optedOut,
@@ -1124,6 +1147,22 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     if (atBottomRef.current && hasNewBelow) setHasNewBelow(false);
   };
 
+  // [R1] Armed immediately BEFORE an older page is requested, and consumed only
+  // when the HOOK reports a merged older page (olderPagesLoaded changed). The
+  // signal has to come from the hook: an SSE append grows the list without a
+  // prepend, and the "Comms only" toggle changes the first RENDERED item without
+  // one, so neither the item count nor the first item id can stand in for it.
+  const prependAnchorRef = useRef<number | null>(null);
+  const seenOlderPagesRef = useRef(paging?.olderPagesLoaded ?? 0);
+
+  const handleLoadOlder = (): void => {
+    const el = streamRef.current;
+    // With no scroll container there is nothing to anchor TO. Arming with 0
+    // would later scroll by the entire content height.
+    prependAnchorRef.current = el ? el.scrollHeight : null;
+    void paging?.onLoadOlder();
+  };
+
   // After the rendered stream changes, decide what to do with the scroll: pin to
   // the bottom if the operator was there, flag "new below" if a new item landed
   // while they were scrolled up, or — when the conversation itself changed — treat
@@ -1133,24 +1172,55 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     const el = streamRef.current;
     if (!el) return;
     const count = clusters.reduce((n, c) => n + c.items.length, 0);
+    const merged = paging?.olderPagesLoaded ?? 0;
+    const prepended = merged !== seenOlderPagesRef.current;
+    seenOlderPagesRef.current = merged;
     if (prevKeyRef.current !== resetScrollKey) {
       // Switched conversations → open on the newest item, no carried-over pill.
       prevKeyRef.current = resetScrollKey;
       prevCountRef.current = count;
       atBottomRef.current = true;
+      prependAnchorRef.current = null;
       el.scrollTop = el.scrollHeight;
       setHasNewBelow(false);
       return;
     }
+    const anchor = prependAnchorRef.current;
+    if (anchor !== null && prepended) {
+      // The prepend landed: restore the offset so the bubble the operator was
+      // reading does not move, and never treat it as "new below".
+      prependAnchorRef.current = null;
+      prevCountRef.current = count;
+      el.scrollTop += el.scrollHeight - anchor;
+      return;
+    }
     const grew = count > prevCountRef.current;
     prevCountRef.current = count;
+    if (anchor !== null) {
+      // Something ELSE changed the height while the older page is in flight - an
+      // append, a filter toggle, a retry collapse. Re-baseline so the eventual
+      // restore delta counts only the prepended content.
+      prependAnchorRef.current = el.scrollHeight;
+    }
     if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
       setHasNewBelow(false);
     } else if (grew) {
       setHasNewBelow(true);
     }
-  }, [clusters, resetScrollKey]);
+    // `paging?.olderPagesLoaded` MUST stay in the deps: the merge and the counter
+    // bump land in the same commit, but a render where ONLY the counter changed
+    // must still be able to consume the anchor.
+  }, [clusters, resetScrollKey, paging?.olderPagesLoaded]);
+
+  // Clear a stale anchor once the load settles. Runs after paint, so the layout
+  // effect above has already had its chance to consume it. This is what covers an
+  // older page that returns NOTHING, or whose entries are all filtered out by
+  // "Comms only" / retry-collapse - in which case `clusters` is unchanged and the
+  // layout effect may not run at all.
+  useEffect(() => {
+    if (paging?.loadingOlder !== true) prependAnchorRef.current = null;
+  }, [paging?.loadingOlder]);
 
   // A retry IS a send — surface its failure (429 rate_limited, opt-out, …) in
   // the SAME composer error slot handleSend uses, instead of swallowing the
@@ -1244,6 +1314,23 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       </header>
 
       <div className={styles.streamWrap}>
+        {/* [R2] OUTSIDE the scroll container, deliberately. Inside, it would
+            contribute to el.scrollHeight and then unmount in the same commit as
+            the final prepend (the pass where hasOlder flips false), so the
+            restored offset would under-shoot by the control's own height on the
+            LAST "Load older" of every thread. */}
+        {status === 'ready' && paging?.hasOlder === true ? (
+          <div className={styles.loadOlderRow}>
+            <button
+              type="button"
+              className={styles.loadOlder}
+              onClick={handleLoadOlder}
+              disabled={paging.loadingOlder}
+            >
+              {paging.loadingOlder ? 'Loading...' : 'Load older messages'}
+            </button>
+          </div>
+        ) : null}
       <div className={styles.stream} ref={streamRef} onScroll={handleStreamScroll}>
         {status === 'loading' ? <Spinner center /> : null}
 

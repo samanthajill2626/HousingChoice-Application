@@ -1021,3 +1021,34 @@ a.pill:focus-visible {
   margin-top: var(--sp-1);
   font-size: var(--fs-xs);
 }
+
+/* --- "Load older messages" control ---------------------------------------- */
+
+/* Sits in .streamWrap ABOVE .stream, i.e. OUTSIDE the scroll container, so the
+ * control never contributes to the stream's scrollHeight and its unmount at the
+ * end of history cannot skew the restored scroll offset. Modeled on the
+ * broadcasts list's .loadMore. */
+.loadOlderRow {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-2) 0;
+}
+
+.loadOlder {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.loadOlder:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.loadOlder:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

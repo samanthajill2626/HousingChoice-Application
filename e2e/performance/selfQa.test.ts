@@ -74,36 +74,36 @@ function fixtureApi(overrides: Readonly<Record<string, unknown>> = {}): SelfQaAp
   });
 }
 
-function sample(routeKey: string, mode: 'cold' | 'warm', blockedWrites: SampleResult['blockedWrites'] = []): SampleResult {
+function sample(surfaceId: string, mode: 'cold' | 'warm', blockedWrites: SampleResult['blockedWrites'] = []): SampleResult {
   return {
-    routeKey, mode, repeat: 0, status: 'ok', readyMs: 1,
+    surfaceId, mode, repeat: 0, status: 'ok', readyMs: 1,
     navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
     paint: { fcpMs: null, lcpMs: null }, longTasks: { totalMs: 0, maxMs: 0, count: 0 },
     domElements: 1, apiRequestCount: 0, apiTransferBytes: 0, resourceRequestCount: 0,
     resourceTransferBytes: 0,
     resourceCountsByClass: { document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 },
     backgroundRequestCount: 0, backgroundTransferBytes: 0, blockedWrites,
-    consoleCategories: {}, clientTruncated: false, terminalState: 'populated', reason: null,
+    consoleCategories: {}, clientTruncated: false, terminalState: 'populated', surfaceEvidence: null, reason: null,
   };
 }
 
-function request(routeKey: string, mode: 'cold' | 'warm', endpointTemplate: string): RequestEvidence {
+function request(surfaceId: string, mode: 'cold' | 'warm', endpointTemplate: string): RequestEvidence {
   return {
-    routeKey, mode, repeat: 0, method: 'GET', resourceClass: 'api', originClass: 'first_party',
+    surfaceId, mode, repeat: 0, method: 'GET', resourceClass: 'api', originClass: 'first_party',
     endpointTemplate, queryKeys: [], startOffsetMs: 0, durationMs: 1, ttfbMs: 1, status: 200,
     transferBytes: 1, outcome: 'finished', requestRole: 'required', unmatchedApi: false,
   };
 }
 
 const branches = ROUTES.flatMap((route) => (['cold', 'warm'] as const).map((mode) => ({
-  routeKey: route.key,
+  surfaceId: route.surfaceId,
   mode,
   repeat: 0,
-  branch: route.key === '/contacts/:contactId'
+  branch: route.surfaceId === '/contacts/:contactId'
     ? ({ kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 } as const)
-    : route.key === '/listings/:unitId'
+    : route.surfaceId === '/listings/:unitId'
       ? ({ kind: 'unit_detail', hasLandlord: true } as const)
-      : route.key === '/tours/:tourId' || route.key === '/placements/:placementId'
+      : route.surfaceId === '/tours/:tourId' || route.surfaceId === '/placements/:placementId'
         ? ({ kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true } as const)
         : ({ kind: 'none' } as const),
 })));
@@ -186,7 +186,7 @@ describe('self-QA fixture and state guardian', () => {
 
 describe('self-QA closed proof evaluator', () => {
   it('selects the exact narrow subset and the full 28-route registry', () => {
-    expect(routesForSelfQa('narrow', ROUTES).map((route) => route.key)).toEqual([
+    expect(routesForSelfQa('narrow', ROUTES).map((route) => route.surfaceId)).toEqual([
       '/contacts/tenants', '/contacts/:contactId', '/inbox', '/conversations/:conversationId',
     ]);
     expect(routesForSelfQa('full', ROUTES)).toHaveLength(28);
@@ -194,7 +194,7 @@ describe('self-QA closed proof evaluator', () => {
 
   it('accepts exact tuple sets, including both legitimate warm conversation phases and duplicates', () => {
     const attempts = [...expectedAttempts('full'), expectedAttempts('full')[4]!];
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches,
       attempts, stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
@@ -224,7 +224,7 @@ describe('self-QA closed proof evaluator', () => {
       phase: 'out_of_sample' as const,
     }];
     expect(attemptsFromSamples([sample('/contacts/:contactId', 'warm', writes)])).toEqual([]);
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches,
       attempts: expectedAttempts('full'),
@@ -258,9 +258,9 @@ describe('self-QA closed proof evaluator', () => {
     ['unexpected', (rows: SelfQaAttempt[]) => [...rows, { surface: 'contact_detail' as const, mode: 'cold' as const, method: 'POST' as const, endpointTemplate: '/api/inbox/read', phase: 'destination_mount' as const }]],
   ])('rejects %s blocked attempt sets', (_name, mutate) => {
     const selected = routesForSelfQa('narrow', ROUTES);
-    const samples = selected.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = selected.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     const result = evaluateSelfQa({
-      mode: 'narrow', routes: selected, samples, requests: [], branches: branches.filter((row) => selected.some((route) => route.key === row.routeKey)),
+      mode: 'narrow', routes: selected, samples, requests: [], branches: branches.filter((row) => selected.some((route) => route.surfaceId === row.surfaceId)),
       attempts: mutate(expectedAttempts('narrow')), stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
       reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
     });
@@ -269,7 +269,7 @@ describe('self-QA closed proof evaluator', () => {
   });
 
   it('rejects endpoint mismatch, unmatched API, relay mismatch, outbox delta, non-ok full samples, and supplemental ranking leakage', () => {
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     samples[0] = { ...samples[0]!, status: 'timeout', reason: 'ready_timeout' };
     const badRequest = request('/', 'cold', '/api/not-declared');
     badRequest.unmatchedApi = true;
@@ -287,7 +287,7 @@ describe('self-QA closed proof evaluator', () => {
   });
 
   it('requires exact 56 full samples and serializes only allowlisted self-QA status', () => {
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm'))).slice(0, 55);
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm'))).slice(0, 55);
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches, attempts: expectedAttempts('full'),
       stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
@@ -315,7 +315,7 @@ describe('self-QA closed proof evaluator', () => {
         },
         target: { target: 'hermetic', proof: 'hermetic_lane', profilerCommit: 'abcdef1', targetAppCommit: '1234567', targetVersionStatus: 'verified' },
         samples: [], requests: [], routeOrders: [], browser: { version: '1', viewport: { width: 1280, height: 720 } },
-        warmup: { performed: true, routeKey: '/' }, relayDomCheck: null,
+        warmup: { performed: true, surfaceId: '/' }, relayDomCheck: null,
       } as const;
       const proof = serializeSelfQaResult({
         mode: 'narrow', status: 'pass', routeCount: 4, sampleCount: 8, coldOk: 4, warmOk: 4,

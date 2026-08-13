@@ -72,8 +72,8 @@ function resourceSummaries(
   ])) as Record<ResourceClass, NumericSummary>;
 }
 
-function groupKey(routeKey: string, mode: SampleMode): string {
-  return `${mode}\u0000${routeKey}`;
+function groupKey(surfaceId: string, mode: SampleMode): string {
+  return `${mode}\u0000${surfaceId}`;
 }
 
 export function aggregateSamples(
@@ -82,21 +82,21 @@ export function aggregateSamples(
 ): RouteModeAggregate[] {
   const groups = new Map<string, SampleResult[]>();
   for (const sample of samples) {
-    const key = groupKey(sample.routeKey, sample.mode);
+    const key = groupKey(sample.surfaceId, sample.mode);
     const group = groups.get(key);
     if (group) group.push(sample);
     else groups.set(key, [sample]);
   }
-  const metadataByRoute = new Map(routeMetadata.map((metadata) => [metadata.key, metadata]));
+  const metadataByRoute = new Map(routeMetadata.map((metadata) => [metadata.surfaceId, metadata]));
 
   return [...groups.values()].map((group) => {
     const first = group[0]!;
     const successful = group.filter((sample) => sample.status === 'ok');
     const successCount = successful.length;
     const lowSampleCount = successCount < 3;
-    const metadata = metadataByRoute.get(first.routeKey);
+    const metadata = metadataByRoute.get(first.surfaceId);
     return {
-      routeKey: first.routeKey,
+      surfaceId: first.surfaceId,
       mode: first.mode,
       sampleCount: group.length,
       successCount,
@@ -104,7 +104,7 @@ export function aggregateSamples(
       lowSampleCount,
       warnings: lowSampleCount ? ['low_sample_count'] : [],
       surfaceScaleBearing: metadata?.surfaceScaleBearing ?? false,
-      loadScaleBearing: metadata?.sourceLoadScaleBearing ?? false,
+      loadScaleBearing: metadata?.loadScaleBearing ?? false,
       clientTruncated: group.some((sample) => sample.clientTruncated),
       metrics: {
         readyMs: numericSummary(successful.map((sample) => sample.readyMs), successCount),

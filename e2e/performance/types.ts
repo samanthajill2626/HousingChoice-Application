@@ -1,4 +1,6 @@
-export const PERFORMANCE_SCHEMA_VERSION = 1 as const;
+export const PERFORMANCE_SCHEMA_VERSION = 2 as const;
+export const PERFORMANCE_REGISTRY_VERSION = 2 as const;
+export const PERFORMANCE_WORKLOAD_VERSION = 2 as const;
 export const INTERCEPTION_SCOPE_VERSION = 3 as const;
 
 export type TargetKind = 'hermetic' | 'local' | 'hosted-dev';
@@ -61,8 +63,19 @@ export interface BlockedWrite {
 
 export type ResourceClass = 'document' | 'script' | 'style' | 'font' | 'image' | 'api' | 'other';
 
+export type SurfaceEvidence =
+  | {
+      kind: 'inbox';
+      filter: 'all' | 'unread' | 'unknown' | 'groups';
+      renderedRowCount: number;
+      groupsTruncated: boolean;
+      initialInboxPageRequestCount: number;
+    }
+  | { kind: 'conversation_detail'; initialRenderedMessageCount: number | null }
+  | null;
+
 export interface RequestEvidence {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   method: string;
@@ -81,7 +94,7 @@ export interface RequestEvidence {
 }
 
 export interface SampleResult {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   status: SampleStatus;
@@ -105,6 +118,7 @@ export interface SampleResult {
   consoleCategories: Record<string, number>;
   clientTruncated: boolean;
   terminalState: 'populated' | 'empty' | 'error' | 'unknown';
+  surfaceEvidence: SurfaceEvidence;
   reason: FailureReasonCode | null;
 }
 
@@ -126,9 +140,9 @@ export interface NumericSummary {
 export type SampleStatusCounts = Record<SampleStatus, number>;
 
 export interface RouteScaleMetadata {
-  key: string;
+  surfaceId: string;
   surfaceScaleBearing: boolean;
-  sourceLoadScaleBearing: boolean;
+  loadScaleBearing: boolean;
 }
 
 export interface AggregateMetrics {
@@ -146,7 +160,7 @@ export interface AggregateNoise {
 }
 
 export interface RouteModeAggregate {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   sampleCount: number;
   successCount: number;
@@ -223,7 +237,7 @@ export interface MetricDelta {
 }
 
 export interface ComparisonEntryRef {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
 }
 

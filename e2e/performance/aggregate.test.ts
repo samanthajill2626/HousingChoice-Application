@@ -25,13 +25,13 @@ function resourceCounts(api = 0, script = 0): Record<ResourceClass, number> {
 }
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
@@ -53,6 +53,7 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
@@ -67,13 +68,13 @@ describe('aggregateSamples', () => {
 
     const rows = aggregateSamples([...odd, ...even]);
 
-    expect(rows.find((row) => row.routeKey === '/odd')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/odd')?.metrics.readyMs).toEqual({
       median: 5,
       min: 1,
       max: 9,
       p95: null,
     });
-    expect(rows.find((row) => row.routeKey === '/even')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/even')?.metrics.readyMs).toEqual({
       median: 5,
       min: 2,
       max: 8,
@@ -91,8 +92,8 @@ describe('aggregateSamples', () => {
 
     const rows = aggregateSamples([...nineteen, ...twenty]);
 
-    expect(rows.find((row) => row.routeKey === '/nineteen')?.metrics.readyMs.p95).toBeNull();
-    expect(rows.find((row) => row.routeKey === '/twenty')?.metrics.readyMs.p95).toBe(19);
+    expect(rows.find((row) => row.surfaceId === '/nineteen')?.metrics.readyMs.p95).toBeNull();
+    expect(rows.find((row) => row.surfaceId === '/twenty')?.metrics.readyMs.p95).toBe(19);
   });
 
   it('preserves unavailable metrics and excludes failed samples from statistics', () => {
@@ -109,12 +110,12 @@ describe('aggregateSamples', () => {
       sample('/all-null', 'cold', 0, { readyMs: null, domElements: null }),
     ]);
 
-    const nullable = rows.find((row) => row.routeKey === '/nullable');
+    const nullable = rows.find((row) => row.surfaceId === '/nullable');
     expect(nullable?.successCount).toBe(2);
     expect(nullable?.metrics.readyMs).toEqual({ median: 12, min: 12, max: 12, p95: null });
     expect(nullable?.metrics.domElements).toEqual({ median: 120, min: 120, max: 120, p95: null });
     expect(nullable?.metrics.apiRequestCount.max).not.toBe(999);
-    expect(rows.find((row) => row.routeKey === '/all-null')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/all-null')?.metrics.readyMs).toEqual({
       median: null,
       min: null,
       max: null,
@@ -157,7 +158,7 @@ describe('aggregateSamples', () => {
         backgroundRequestCount: 15,
         backgroundTransferBytes: 1_500,
       }),
-    ], [{ key: '/noise', surfaceScaleBearing: false, sourceLoadScaleBearing: true }]);
+    ], [{ surfaceId: '/noise', surfaceScaleBearing: false, loadScaleBearing: true }]);
 
     expect(row).toMatchObject({
       surfaceScaleBearing: false,
@@ -192,12 +193,12 @@ describe('buildRankings', () => {
 
     const rankings = buildRankings(rows);
 
-    expect(rankings.cold.readyMs.map((row) => row.routeKey)).toEqual([
+    expect(rankings.cold.readyMs.map((row) => row.surfaceId)).toEqual([
       '/first',
       '/second',
       '/fast',
     ]);
-    expect(rankings.warm.readyMs.map((row) => row.routeKey)).toEqual(['/warm-worst']);
+    expect(rankings.warm.readyMs.map((row) => row.surfaceId)).toEqual(['/warm-worst']);
   });
 
   it('provides every secondary ranking including each resource class', () => {

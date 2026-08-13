@@ -79,8 +79,8 @@ const ENDPOINT_TEMPLATES: ReadonlySet<string> = new Set([
   'third_party',
   'invalid_url',
 ]);
-const SAFE_ROUTE_KEY = /^\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*$/u;
-const ROUTE_KEYS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.key));
+const SAFE_SURFACE_ID = /^\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*$/u;
+const SURFACE_IDS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.surfaceId));
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
 const SAFE_RUN_ID = /^\d{8}T\d{9}Z-[0-9a-f]{8}$/u;
@@ -93,12 +93,12 @@ export interface ReportBrowserInput {
 export interface ReportRouteOrder {
   mode: SampleMode;
   repeat: number;
-  routeKeys: string[];
+  surfaceIds: string[];
 }
 
 export interface ReportWarmup {
   performed: boolean;
-  routeKey: string | null;
+  surfaceId: string | null;
 }
 
 export interface ReportRelayDomCheck {
@@ -155,7 +155,7 @@ interface PrivacyFailureResult {
 export type WritePerformanceReportResult = WrittenReportResult | PrivacyFailureResult;
 
 export interface ContractCheckpointBranch {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   branch: RouteContractBranch;
@@ -183,7 +183,7 @@ export interface ContractEndpointObservation {
 }
 
 export interface ContractCheckpointObservation {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   selectedBranch: string;
   terminal: SampleResult['terminalState'];
@@ -213,8 +213,8 @@ export interface ContractCheckpointEvaluation {
   outOfSampleWrites: BlockedWrite[];
 }
 
-function sampleKey(routeKeyValue: string, mode: SampleMode, repeat: number): string {
-  return `${routeKeyValue}|${mode}|${repeat}`;
+function sampleKey(surfaceIdValue: string, mode: SampleMode, repeat: number): string {
+  return `${surfaceIdValue}|${mode}|${repeat}`;
 }
 
 function symbolicBranch(branch: RouteContractBranch): string {
@@ -264,33 +264,33 @@ function observedEndpoints(requests: readonly RequestEvidence[]): ContractEndpoi
 export function evaluateContractCheckpoint(
   input: EvaluateContractCheckpointInput,
 ): ContractCheckpointEvaluation {
-  const routeByKey = new Map(input.routes.map((route) => [route.key, route]));
+  const routeBySurfaceId = new Map(input.routes.map((route) => [route.surfaceId, route]));
   const branches = new Map(input.branches.map((row) => [
-    sampleKey(row.routeKey, row.mode, row.repeat),
+    sampleKey(row.surfaceId, row.mode, row.repeat),
     row.branch,
   ]));
   const samples = new Map(input.samples.map((sample) => [
-    sampleKey(sample.routeKey, sample.mode, sample.repeat),
+    sampleKey(sample.surfaceId, sample.mode, sample.repeat),
     sample,
   ]));
   const keys = new Set([...samples.keys(), ...branches.keys()]);
   if (input.requireCompleteRegistry === true) {
     for (const route of input.routes) {
-      for (const mode of ['cold', 'warm'] as const) keys.add(sampleKey(route.key, mode, 0));
+      for (const mode of ['cold', 'warm'] as const) keys.add(sampleKey(route.surfaceId, mode, 0));
     }
   }
 
   const observations: ContractCheckpointObservation[] = [];
   for (const key of [...keys].sort()) {
-    const [routeKeyValue, rawMode, rawRepeat] = key.split('|');
+    const [surfaceIdValue, rawMode, rawRepeat] = key.split('|');
     const mode = rawMode === 'warm' ? 'warm' : 'cold';
     const repeat = Number.parseInt(rawRepeat ?? '0', 10);
-    const route = routeByKey.get(routeKeyValue ?? '');
+    const route = routeBySurfaceId.get(surfaceIdValue ?? '');
     if (route === undefined) continue;
     const sample = samples.get(key);
     const branch = branches.get(key);
     const requests = input.requests.filter((request) =>
-      request.routeKey === route.key && request.mode === mode && request.repeat === repeat,
+      request.surfaceId === route.surfaceId && request.mode === mode && request.repeat === repeat,
     );
     const mismatches = new Set<ContractCheckpointMismatchCode>();
     if (sample === undefined) mismatches.add('missing_sample');
@@ -337,7 +337,7 @@ export function evaluateContractCheckpoint(
 
     const endpoints = observedEndpoints(requests);
     observations.push({
-      routeKey: route.key,
+      surfaceId: route.surfaceId,
       mode,
       selectedBranch: branch === undefined ? 'unresolved' : symbolicBranch(branch),
       terminal: sample?.terminalState ?? 'unknown',
@@ -380,9 +380,9 @@ function nullableFinite(value: unknown): number | null {
   return value === null ? null : finite(value);
 }
 
-function routeKey(value: unknown): string {
-  if (value === '/' && ROUTE_KEYS.has('/')) return '/';
-  return typeof value === 'string' && SAFE_ROUTE_KEY.test(value) && ROUTE_KEYS.has(value)
+function surfaceId(value: unknown): string {
+  if (value === '/' && SURFACE_IDS.has('/')) return '/';
+  return typeof value === 'string' && SAFE_SURFACE_ID.test(value) && SURFACE_IDS.has(value)
     ? value
     : 'invalid_route';
 }
@@ -529,13 +529,29 @@ function cloneResourceCounts(value: Record<ResourceClass, number>): Record<Resou
   ])) as Record<ResourceClass, number>;
 }
 
+function cloneSurfaceEvidence(value: SampleResult['surfaceEvidence']): SampleResult['surfaceEvidence'] {
+  if (value?.kind === 'inbox') {
+    return {
+      kind: 'inbox',
+      filter: ['all', 'unread', 'unknown', 'groups'].includes(value.filter) ? value.filter : 'all',
+      renderedRowCount: integer(value.renderedRowCount),
+      groupsTruncated: value.groupsTruncated === true,
+      initialInboxPageRequestCount: integer(value.initialInboxPageRequestCount),
+    };
+  }
+  if (value?.kind === 'conversation_detail') {
+    return { kind: 'conversation_detail', initialRenderedMessageCount: nullableFinite(value.initialRenderedMessageCount) };
+  }
+  return null;
+}
+
 function cloneSample(sample: SampleResult): SampleResult {
   const status = SAMPLE_STATUSES.includes(sample.status) ? sample.status : 'failed';
   const reason = sample.reason !== null && FAILURE_REASONS.includes(sample.reason)
     ? sample.reason
     : null;
   return {
-    routeKey: routeKey(sample.routeKey),
+    surfaceId: surfaceId(sample.surfaceId),
     mode: sample.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(sample.repeat),
     status,
@@ -578,6 +594,7 @@ function cloneSample(sample: SampleResult): SampleResult {
     terminalState: ['populated', 'empty', 'error', 'unknown'].includes(sample.terminalState)
       ? sample.terminalState
       : 'unknown',
+    surfaceEvidence: cloneSurfaceEvidence(sample.surfaceEvidence),
     reason,
   };
 }
@@ -588,7 +605,7 @@ function cloneRequest(request: RequestEvidence): RequestEvidence {
     ? request.method
     : 'OTHER';
   return {
-    routeKey: routeKey(request.routeKey),
+    surfaceId: surfaceId(request.surfaceId),
     mode: request.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(request.repeat),
     method,
@@ -634,7 +651,7 @@ function cloneOrders(orders: readonly ReportRouteOrder[]): ReportRouteOrder[] {
   return orders.map((order) => ({
     mode: order.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(order.repeat),
-    routeKeys: order.routeKeys.map(routeKey),
+    surfaceIds: order.surfaceIds.map(surfaceId),
   }));
 }
 
@@ -646,7 +663,7 @@ function comparisonEnvironment(
   return {
     target: config.target,
     scaleManifest: config.seed,
-    routeSet: [...new Set(samples.map((sample) => sample.routeKey))].sort(),
+    routeSet: [...new Set(samples.map((sample) => sample.surfaceId))].sort(),
     browserMajor: browser.major,
     browserChannel: browser.channel,
     viewport: browser.viewport,
@@ -677,7 +694,7 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
   const resources = record(metrics?.['resourceCountsByClass']);
   const statuses = record(aggregate?.['statusCounts']);
   return aggregate !== null
-    && routeKey(aggregate['routeKey']) === aggregate['routeKey']
+    && surfaceId(aggregate['surfaceId']) === aggregate['surfaceId']
     && (aggregate['mode'] === 'cold' || aggregate['mode'] === 'warm')
     && metrics !== null
     && baselineSummary(metrics['readyMs'])
@@ -747,7 +764,7 @@ function rankingTable(rows: readonly RouteModeAggregate[], field: keyof RouteMod
   return [
     '| Route | Median | Labels |',
     '| --- | ---: | --- |',
-    ...rows.map((row) => `| ${row.routeKey} | ${metric(valueFor(row))} | ${labels(row)} |`),
+    ...rows.map((row) => `| ${row.surfaceId} | ${metric(valueFor(row))} | ${labels(row)} |`),
   ];
 }
 
@@ -813,7 +830,7 @@ function reportMarkdown(input: {
   const nonOk = input.samples.filter((sample) => sample.status !== 'ok');
   lines.push(...(nonOk.length === 0
     ? ['| none | - | - | - |']
-    : nonOk.map((sample) => `| ${sample.routeKey} | ${sample.mode} | ${sample.status} | ${sample.reason ?? 'none'} |`)));
+    : nonOk.map((sample) => `| ${sample.surfaceId} | ${sample.mode} | ${sample.status} | ${sample.reason ?? 'none'} |`)));
   lines.push('', '## Blocked writes', '', '| Method | Endpoint | Phase | Count |', '| --- | --- | --- | ---: |');
   const blocked = new Map<string, { value: BlockedWrite; count: number }>();
   for (const write of input.samples.flatMap((sample) => sample.blockedWrites)) {
@@ -881,7 +898,7 @@ function comparisonMarkdown(comparison: ComparisonResult): string {
     '| Route | Mode | Ready absolute | Ready percent |',
     '| --- | --- | ---: | ---: |',
     ...comparison.matched.map((entry) =>
-      `| ${entry.routeKey} | ${entry.mode} | ${metric(entry.metrics.readyMs.absolute)} | ${metric(entry.metrics.readyMs.percent)} |`),
+      `| ${entry.surfaceId} | ${entry.mode} | ${metric(entry.metrics.readyMs.absolute)} | ${metric(entry.metrics.readyMs.percent)} |`),
     '',
   ];
   return lines.join('\n');
@@ -1034,9 +1051,9 @@ export async function writePerformanceReport(
   const browser = browserMetadata(config, input.browser);
   const environment = comparisonEnvironment(config, browser, samples);
   const routeMetadata = ROUTES.map((route) => ({
-    key: route.key,
+    surfaceId: route.surfaceId,
     surfaceScaleBearing: route.surfaceScaleBearing,
-    sourceLoadScaleBearing: route.sourceLoadScaleBearing,
+    loadScaleBearing: route.loadScaleBearing,
   }));
   const aggregates = aggregateSamples(samples, routeMetadata);
   const rankings = buildRankings(aggregates);
@@ -1068,7 +1085,7 @@ export async function writePerformanceReport(
     routeOrders: cloneOrders(input.routeOrders),
     warmup: {
       performed: input.warmup.performed === true,
-      routeKey: input.warmup.routeKey === null ? null : routeKey(input.warmup.routeKey),
+      surfaceId: input.warmup.surfaceId === null ? null : surfaceId(input.warmup.surfaceId),
     },
     relayDomCheck: input.relayDomCheck === null ? null : {
       expectedCount: integer(input.relayDomCheck.expectedCount),

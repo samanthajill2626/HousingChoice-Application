@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   APP_ROUTE_EXCLUSIONS,
+  assertRouteRegistry,
   CONTACT_INBOX_PROBE,
   CONTRACT_SOURCE_LEDGER,
   ROUTES,
@@ -189,9 +190,28 @@ class FakeDom implements ResolverDom {
 }
 
 describe('route registry completeness', () => {
+  it('uses stable surface IDs separate from diagnostic path templates', () => {
+    expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(28);
+    expect(ROUTES.filter((route) => route.resolver === 'static').every((route) => route.coldTarget.kind === 'static')).toBe(true);
+    expect(ROUTES.filter((route) => route.resolver !== 'static').every((route) => route.coldTarget.kind === 'resolved')).toBe(true);
+    expect(() => assertRouteRegistry([
+      ...ROUTES,
+      { ...ROUTES[0]!, surfaceId: '/', pathTemplate: '/inbox' },
+    ])).toThrow('duplicate_surface_id');
+  });
+
+  it('has no legacy identity aliases in persisted or joining performance sources', () => {
+    const sources = [
+      'types.ts', 'routes.ts', 'collect.ts', 'aggregate.ts', 'compare.ts', 'report.ts', 'selfQa.ts', 'cli.ts',
+    ].map((file) => readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')).join('\n');
+    expect(sources).not.toMatch(/\brouteKeys?\b/u);
+    expect(sources).not.toMatch(/\bsourceLoadScaleBearing\b/u);
+  });
+
   it('has exactly 28 unique template-only bindings and no excluded surface', () => {
-    expect(ROUTES.map((route) => route.key)).toEqual(EXPECTED_KEYS);
-    expect(new Set(ROUTES.map((route) => route.key)).size).toBe(28);
+    expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(28);
     expect(ROUTES).toHaveLength(28);
     expect(APP_ROUTE_EXCLUSIONS).toEqual([
       { route: '/p/:unitId', reason: 'public' },
@@ -202,7 +222,7 @@ describe('route registry completeness', () => {
       { route: '*', reason: 'catch_all' },
     ]);
     expect(ROUTES.every((route) => !/[0-9a-f]{8}-[0-9a-f-]{27,}/i.test(route.pathTemplate))).toBe(true);
-    expect(ROUTES.every((route) => route.pathTemplate === route.key)).toBe(true);
+    expect(ROUTES.every((route) => route.pathTemplate === route.surfaceId)).toBe(true);
   });
 
   it('mechanically matches App route elements and proves generated placeholders are empty', () => {
@@ -258,10 +278,10 @@ describe('route registry completeness', () => {
         if (locator.exactness === 'role_only') expect(locator).not.toHaveProperty('name');
       }
     }
-    expect(ROUTES.find((route) => route.key === '/settings/system')?.targetStructuralNote)
+    expect(ROUTES.find((route) => route.surfaceId === '/settings/system')?.targetStructuralNote)
       .toBe('alarms_and_errors_differ_by_target');
-    expect(ROUTES.find((route) => route.key === '/tours/:tourId')?.sourceLoadScaleBearing).toBe(false);
-    expect(ROUTES.find((route) => route.key === '/placements/:placementId')?.sourceLoadScaleBearing).toBe(false);
+    expect(ROUTES.find((route) => route.surfaceId === '/tours/:tourId')?.loadScaleBearing).toBe(false);
+    expect(ROUTES.find((route) => route.surfaceId === '/placements/:placementId')?.loadScaleBearing).toBe(false);
   });
 
   it('cites every endpoint binding, branch, terminal, resolver, blocked write, and background rule', () => {
@@ -274,8 +294,8 @@ describe('route registry completeness', () => {
     const terminalSources = CONTRACT_SOURCE_LEDGER.terminals as Readonly<Record<string, string>>;
 
     for (const route of ROUTES) {
-      cited(endpointSources[route.key]?.base);
-      cited(terminalSources[route.key]);
+      cited(endpointSources[route.surfaceId]?.base);
+      cited(terminalSources[route.surfaceId]);
       cited(CONTRACT_SOURCE_LEDGER.resolvers[route.resolver]);
     }
     expect(Object.keys(CONTRACT_SOURCE_LEDGER.warmRequirementClassifications).sort()).toEqual([
@@ -300,27 +320,27 @@ describe('route registry completeness', () => {
   });
 
   it('models terminal alternatives without requiring mutually exclusive states together', () => {
-    const tours = ROUTES.find((route) => route.key === '/tours')!;
+    const tours = ROUTES.find((route) => route.surfaceId === '/tours')!;
     expect(tours.terminal.populatedAlternatives).toHaveLength(2);
     expect(tours.terminal.populatedAlternatives.every((alternative) => alternative.length === 1)).toBe(true);
     expect(tours.terminal.emptyAlternatives).toHaveLength(1);
     expect(tours.terminal.emptyAlternatives[0]).toHaveLength(2);
 
-    const system = ROUTES.find((route) => route.key === '/settings/system')!;
+    const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
     expect(system.terminal.populatedAlternatives).toHaveLength(9);
     expect(system.terminal.populatedAlternatives.every((alternative) => alternative.length === 4)).toBe(true);
     expect(system.terminal.populatedAlternatives[0]?.[1]).toMatchObject({
       role: 'listitem', name: 'Environment: ', exactness: 'prefix',
     });
 
-    const numbers = ROUTES.find((route) => route.key === '/settings/numbers')!;
+    const numbers = ROUTES.find((route) => route.surfaceId === '/settings/numbers')!;
     expect(numbers.terminal.populatedAlternatives).toHaveLength(4);
     expect(numbers.terminal.populatedAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
 
-    const voice = ROUTES.find((route) => route.key === '/settings/voice')!;
+    const voice = ROUTES.find((route) => route.surfaceId === '/settings/voice')!;
     expect(voice.terminal.populatedAlternatives.map((alternative) => alternative.length)).toEqual([1, 2]);
 
-    const broadcast = ROUTES.find((route) => route.key === '/broadcasts/:broadcastId')!;
+    const broadcast = ROUTES.find((route) => route.surfaceId === '/broadcasts/:broadcastId')!;
     expect(broadcast.terminal.populatedAlternatives).toHaveLength(1);
     expect(broadcast.terminal.populatedAlternatives[0]).toHaveLength(1);
     expect(broadcast.terminal.populatedAlternatives[0]?.[0]).toMatchObject({
@@ -330,10 +350,10 @@ describe('route registry completeness', () => {
   });
 
   it('waits for the selected settings source data branch before timing the tab click', () => {
-    const templates = ROUTES.find((route) => route.key === '/settings/templates')!;
+    const templates = ROUTES.find((route) => route.surfaceId === '/settings/templates')!;
     expect(templates.source.path).toBe('/settings/team');
     expect(templates.source.ready).toMatchObject({ role: 'table', exactness: 'role_only' });
-    const system = ROUTES.find((route) => route.key === '/settings/system')!;
+    const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
     expect(system.source.path).toBe('/settings/templates');
     expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
   });
@@ -342,18 +362,18 @@ describe('route registry completeness', () => {
 describe('endpoint and write contracts', () => {
   it('deep-compares exact cold and warm shapes for every route', () => {
     for (const route of ROUTES) {
-      const branch = branchFor(route.key);
+      const branch = branchFor(route.surfaceId);
       const warm = expectedGets(route, 'warm', branch);
       const cold = expectedGets(route, 'cold', branch);
-      const expectedWarm = EXPECTED_WARM[route.key as keyof typeof EXPECTED_WARM];
-      const coldDestination = route.key === '/tours/closed'
+      const expectedWarm = EXPECTED_WARM[route.surfaceId as keyof typeof EXPECTED_WARM];
+      const coldDestination = route.surfaceId === '/tours/closed'
         ? EXPECTED_WARM['/tours']
-        : route.key === '/email/quarantine'
+        : route.surfaceId === '/email/quarantine'
           ? EXPECTED_WARM['/email']
           : expectedWarm;
       const expectedCold = [...new Set([...SHELL_SHAPES, ...coldDestination])];
-      expect(shape(warm), `${route.key} warm`).toEqual(expectedWarm);
-      expect(shape(cold), `${route.key} cold`).toEqual(expectedCold);
+      expect(shape(warm), `${route.surfaceId} warm`).toEqual(expectedWarm);
+      expect(shape(cold), `${route.surfaceId} cold`).toEqual(expectedCold);
       expect(Object.isFrozen(warm)).toBe(true);
       expect(shape(warm)).not.toEqual(expect.arrayContaining([
         '/auth/me?#required', '/api/events?#required',
@@ -367,14 +387,14 @@ describe('endpoint and write contracts', () => {
   });
 
   it('keeps branch choices exact and required/conditional behavior closed', () => {
-    const contact = ROUTES.find((route) => route.key === '/contacts/:contactId')!;
+    const contact = ROUTES.find((route) => route.surfaceId === '/contacts/:contactId')!;
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 })))
       .toContain('/api/tours?tenantId#required');
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 2 })))
       .toContain('/api/tours?unitId#required');
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'other', landlordUnitCount: 0 })))
       .not.toContain('/api/tours?tenantId#required');
-    const unit = ROUTES.find((route) => route.key === '/listings/:unitId')!;
+    const unit = ROUTES.find((route) => route.surfaceId === '/listings/:unitId')!;
     expect(shape(expectedGets(unit, 'warm', { kind: 'unit_detail', hasLandlord: true })))
       .toContain('/api/contacts/:contactId?#required');
     expect(shape(expectedGets(unit, 'warm', { kind: 'unit_detail', hasLandlord: false })))
@@ -393,7 +413,7 @@ describe('endpoint and write contracts', () => {
   });
 
   it('preserves exact write surfaces and legitimate two-phase multiplicity', () => {
-    const conversation = ROUTES.find((route) => route.key === '/conversations/:conversationId')!;
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
     expect([...expectedBlockedWrites(conversation, 'cold', NONE)]).toEqual([
       'conversation_detail|POST|/api/conversations/:conversationId/read|destination_mount',
     ]);
@@ -402,7 +422,7 @@ describe('endpoint and write contracts', () => {
       'conversation_detail|POST|/api/conversations/:conversationId/read|destination_mount',
     ]);
     for (const key of ['/tours/:tourId', '/placements/:placementId']) {
-      const route = ROUTES.find((candidate) => candidate.key === key)!;
+      const route = ROUTES.find((candidate) => candidate.surfaceId === key)!;
       expect([...expectedBlockedWrites(route, 'cold', THREADS[0]!)]).toContain(
         'group_thread|POST|/api/conversations/:conversationId/read|destination_mount',
       );
@@ -427,7 +447,7 @@ describe('endpoint and write contracts', () => {
   });
 
   it('matches the current contact detail heading including its accessible edit action', () => {
-    const contact = ROUTES.find((route) => route.key === '/contacts/:contactId')!;
+    const contact = ROUTES.find((route) => route.surfaceId === '/contacts/:contactId')!;
     expect(contact.terminal.populated[0]).toMatchObject({
       role: 'heading', name: '^Details(?: Edit contact details)?$', exactness: 'regex',
     });

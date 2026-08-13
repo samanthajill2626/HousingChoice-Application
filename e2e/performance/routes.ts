@@ -49,11 +49,15 @@ export interface WarmSourceContract {
 }
 
 export type ResolverName = 'static' | 'contact' | 'unit' | 'tour' | 'placement' | 'conversation' | 'broadcast';
+export type BehaviorFamily = 'standard' | 'inbox';
+export type ColdTarget = Readonly<{ kind: 'static'; path: string }> | Readonly<{ kind: 'resolved' }>;
 
 export interface RouteDefinition {
-  key: string;
+  surfaceId: string;
   label: string;
   pathTemplate: string;
+  coldTarget: ColdTarget;
+  behaviorFamily: BehaviorFamily;
   requiredRole: 'staff' | 'admin';
   viewportDependency: 'desktop_chrome';
   resolver: ResolverName;
@@ -61,7 +65,7 @@ export interface RouteDefinition {
   terminal: TerminalContract;
   gets: readonly EndpointContract[];
   surfaceScaleBearing: boolean;
-  sourceLoadScaleBearing: boolean;
+  loadScaleBearing: boolean;
   targetStructuralNote: string | null;
   streamExclusions: readonly ['/api/events'];
   blockedSurface: 'none' | 'contact_detail' | 'conversation_detail' | 'thread_detail';
@@ -425,8 +429,11 @@ function source(
 }
 
 interface RowInput {
-  key: string;
+  surfaceId: string;
   label: string;
+  pathTemplate?: string;
+  coldTarget?: ColdTarget;
+  behaviorFamily?: BehaviorFamily;
   requiredRole?: 'staff' | 'admin';
   resolver?: ResolverName;
   source: WarmSourceContract;
@@ -440,9 +447,13 @@ interface RowInput {
 
 function row(input: RowInput): RouteDefinition {
   return Object.freeze({
-    key: input.key,
+    surfaceId: input.surfaceId,
     label: input.label,
-    pathTemplate: input.key,
+    pathTemplate: input.pathTemplate ?? input.surfaceId,
+    coldTarget: input.coldTarget ?? (input.resolver === undefined || input.resolver === 'static'
+      ? Object.freeze({ kind: 'static' as const, path: input.surfaceId })
+      : Object.freeze({ kind: 'resolved' as const })),
+    behaviorFamily: input.behaviorFamily ?? (input.surfaceId === '/inbox' ? 'inbox' as const : 'standard' as const),
     requiredRole: input.requiredRole ?? 'staff',
     viewportDependency: 'desktop_chrome' as const,
     resolver: input.resolver ?? 'static',
@@ -450,7 +461,7 @@ function row(input: RowInput): RouteDefinition {
     terminal: input.terminal,
     gets: input.gets,
     surfaceScaleBearing: input.surfaceScaleBearing,
-    sourceLoadScaleBearing: input.loadScaleBearing,
+    loadScaleBearing: input.loadScaleBearing,
     targetStructuralNote: input.targetStructuralNote ?? null,
     streamExclusions: NEVER_STREAM,
     blockedSurface: input.blockedSurface ?? 'none',
@@ -472,35 +483,51 @@ const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templa
   );
 
 export const ROUTES: readonly RouteDefinition[] = Object.freeze([
-  row({ key: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts', label: 'Contacts', source: NAV_TODAY('/contacts', 'Contacts', TODAY_GETS), terminal: contactListTerminal('Contacts'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/tenants', label: 'Tenants', source: CONTACT_SOURCE('/contacts/tenants', 'Tenants', CONTACT_LIVE_WALK), terminal: contactListTerminal('Tenants'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/landlords', label: 'Landlords', source: CONTACT_SOURCE('/contacts/landlords', 'Landlords', CONTACT_LIVE_WALK), terminal: contactListTerminal('Landlords'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/unknown', label: 'Unknown', source: CONTACT_SOURCE('/contacts/unknown', 'Unknown', CONTACT_LIVE_WALK), terminal: contactListTerminal('Unknown'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/deleted', label: 'Deleted contacts', source: CONTACT_SOURCE('/contacts/deleted', 'Deleted', CONTACT_LIVE_WALK), terminal: contactListTerminal('Deleted'), gets: CONTACT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, 'link', 'Deleted', '/listings/deleted', UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, 'link', 'Closed', '/tours/closed', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/inbox', label: 'Inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), terminal: INBOX_TERMINAL, gets: INBOX_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, 'link', 'Quarantine', '/email/quarantine', EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/settings/team', label: 'Team', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/team', 'Team'), terminal: TEAM_TERMINAL, gets: TEAM_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/templates', label: 'Templates', source: SETTINGS_SOURCE('/settings/templates', 'Templates', '/settings/team', TEAM_GETS), terminal: TEMPLATE_TERMINAL, gets: TEMPLATE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/notifications', label: 'Notifications', source: SETTINGS_SOURCE('/settings/notifications', 'Notifications'), terminal: NOTIFICATION_TERMINAL, gets: NOTIFICATION_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/voice', label: 'Voice', source: SETTINGS_SOURCE('/settings/voice', 'Voice'), terminal: VOICE_TERMINAL, gets: VOICE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/system', label: 'System status', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/system', 'System status'), terminal: SYSTEM_TERMINAL, gets: SYSTEM_GETS, surfaceScaleBearing: false, loadScaleBearing: false, targetStructuralNote: 'alarms_and_errors_differ_by_target' }),
-  row({ key: '/settings/ai-runs', label: 'AI run log', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/ai-runs', 'AI run log'), terminal: AI_RUN_TERMINAL, gets: AI_RUN_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/numbers', label: 'Phone numbers', source: SETTINGS_SOURCE('/settings/numbers', 'Phone numbers'), terminal: NUMBER_TERMINAL, gets: NUMBER_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), 'link', 'resolved_exact_href', ':warmHref', CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
-  row({ key: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, 'link', 'resolved_exact_href', ':warmHref', UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, 'link', 'resolved_exact_href', ':warmHref', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ key: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, 'link', 'resolved_exact_href', ':warmHref', PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ key: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', INBOX_GETS), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
-  row({ key: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
+  row({ surfaceId: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts', label: 'Contacts', source: NAV_TODAY('/contacts', 'Contacts', TODAY_GETS), terminal: contactListTerminal('Contacts'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/tenants', label: 'Tenants', source: CONTACT_SOURCE('/contacts/tenants', 'Tenants', CONTACT_LIVE_WALK), terminal: contactListTerminal('Tenants'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/landlords', label: 'Landlords', source: CONTACT_SOURCE('/contacts/landlords', 'Landlords', CONTACT_LIVE_WALK), terminal: contactListTerminal('Landlords'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/unknown', label: 'Unknown', source: CONTACT_SOURCE('/contacts/unknown', 'Unknown', CONTACT_LIVE_WALK), terminal: contactListTerminal('Unknown'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/deleted', label: 'Deleted contacts', source: CONTACT_SOURCE('/contacts/deleted', 'Deleted', CONTACT_LIVE_WALK), terminal: contactListTerminal('Deleted'), gets: CONTACT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, 'link', 'Deleted', '/listings/deleted', UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, 'link', 'Closed', '/tours/closed', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/inbox', label: 'Inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), terminal: INBOX_TERMINAL, gets: INBOX_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, 'link', 'Quarantine', '/email/quarantine', EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/settings/team', label: 'Team', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/team', 'Team'), terminal: TEAM_TERMINAL, gets: TEAM_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/templates', label: 'Templates', source: SETTINGS_SOURCE('/settings/templates', 'Templates', '/settings/team', TEAM_GETS), terminal: TEMPLATE_TERMINAL, gets: TEMPLATE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/notifications', label: 'Notifications', source: SETTINGS_SOURCE('/settings/notifications', 'Notifications'), terminal: NOTIFICATION_TERMINAL, gets: NOTIFICATION_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/voice', label: 'Voice', source: SETTINGS_SOURCE('/settings/voice', 'Voice'), terminal: VOICE_TERMINAL, gets: VOICE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/system', label: 'System status', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/system', 'System status'), terminal: SYSTEM_TERMINAL, gets: SYSTEM_GETS, surfaceScaleBearing: false, loadScaleBearing: false, targetStructuralNote: 'alarms_and_errors_differ_by_target' }),
+  row({ surfaceId: '/settings/ai-runs', label: 'AI run log', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/ai-runs', 'AI run log'), terminal: AI_RUN_TERMINAL, gets: AI_RUN_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/numbers', label: 'Phone numbers', source: SETTINGS_SOURCE('/settings/numbers', 'Phone numbers'), terminal: NUMBER_TERMINAL, gets: NUMBER_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), 'link', 'resolved_exact_href', ':warmHref', CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
+  row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, 'link', 'resolved_exact_href', ':warmHref', UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, 'link', 'resolved_exact_href', ':warmHref', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
+  row({ surfaceId: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, 'link', 'resolved_exact_href', ':warmHref', PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
+  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', INBOX_GETS), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
+  row({ surfaceId: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
 ]);
+
+export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
+  const surfaceIds = new Set<string>();
+  for (const route of routes) {
+    if (surfaceIds.has(route.surfaceId)) throw new Error('duplicate_surface_id');
+    surfaceIds.add(route.surfaceId);
+    if (route.resolver === 'static' && route.coldTarget.kind !== 'static') {
+      throw new Error('static_cold_target_required');
+    }
+    if (route.resolver !== 'static' && route.coldTarget.kind !== 'resolved') {
+      throw new Error('resolved_cold_target_required');
+    }
+  }
+}
+
+assertRouteRegistry(ROUTES);
 
 export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   endpoints: Object.freeze({
@@ -635,7 +662,7 @@ function freezeContracts(contracts: readonly EndpointContract[]): readonly Endpo
 }
 
 function selectedDestination(route: RouteDefinition, branch: RouteContractBranch): readonly EndpointContract[] {
-  if (route.key === '/contacts/:contactId') {
+  if (route.surfaceId === '/contacts/:contactId') {
     if (branch.kind !== 'contact_detail') throw new Error('route_branch_mismatch');
     if (branch.contactType === 'tenant') return [...route.gets, required('/api/tours', ['tenantId'])];
     if (branch.contactType === 'landlord' && branch.landlordUnitCount > 0) {
@@ -643,11 +670,11 @@ function selectedDestination(route: RouteDefinition, branch: RouteContractBranch
     }
     return route.gets;
   }
-  if (route.key === '/listings/:unitId') {
+  if (route.surfaceId === '/listings/:unitId') {
     if (branch.kind !== 'unit_detail') throw new Error('route_branch_mismatch');
     return branch.hasLandlord ? [...route.gets, required('/api/contacts/:contactId')] : route.gets;
   }
-  if (route.key === '/tours/:tourId' || route.key === '/placements/:placementId') {
+  if (route.surfaceId === '/tours/:tourId' || route.surfaceId === '/placements/:placementId') {
     if (branch.kind !== 'thread_detail') throw new Error('route_branch_mismatch');
     return [...route.gets, ...(branch.thread === 'group_thread' ? GROUP_THREAD_GETS : PERSON_THREAD_GETS)];
   }
@@ -664,11 +691,11 @@ export function expectedGets(
   // These two warm-only class changes are audited in
   // CONTRACT_SOURCE_LEDGER.warmRequirementClassifications. They model sibling
   // route persistence; they are not checkpoint-driven contract weakening.
-  if (mode === 'warm' && route.key === '/email/quarantine') {
+  if (mode === 'warm' && route.surfaceId === '/email/quarantine') {
     destination = destination.map((contract) => contract.endpointTemplate === '/api/unmatched-email'
       ? contract
       : { ...contract, requirement: 'conditional' });
-  } else if (mode === 'warm' && route.key === '/tours/closed') {
+  } else if (mode === 'warm' && route.surfaceId === '/tours/closed') {
     destination = destination.map((contract) => contract.endpointTemplate === '/api/tours'
       && contract.queryKeys.length === 1
       && contract.queryKeys[0] === 'status'
@@ -766,7 +793,7 @@ export type ResolverResult =
   | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' | 'unresolved_branch' };
 
 export function resolverSkipSampleResult(
-  routeKey: string,
+  surfaceId: string,
   mode: SampleMode,
   repeat: number,
   reason: Extract<ResolverResult, { kind: 'skip' }>['reason'],
@@ -779,7 +806,7 @@ export function resolverSkipSampleResult(
         ? 'skipped_source_not_ready'
         : 'skipped_unresolved_branch';
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status,
@@ -799,6 +826,7 @@ export function resolverSkipSampleResult(
     consoleCategories: {},
     clientTruncated: false,
     terminalState: 'unknown',
+    surfaceEvidence: null,
     reason,
   };
 }
@@ -837,24 +865,24 @@ export interface BoundSelfQaFixtures {
 }
 
 export function resolveBoundSelfQaDetail(
-  routeKey: string,
+  surfaceId: string,
   fixtures: Readonly<BoundSelfQaFixtures>,
   dom: ResolverDom,
 ): Promise<ResolverResult> {
-  if (routeKey === '/contacts/:contactId') {
+  if (surfaceId === '/contacts/:contactId') {
     return bindResolved(dom, `/contacts/${fixtures.contact_detail}`, {
       kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0,
     });
   }
-  if (routeKey === '/conversations/:conversationId') {
+  if (surfaceId === '/conversations/:conversationId') {
     return bindResolved(dom, `/conversations/${fixtures.conversation_detail}`, { kind: 'none' });
   }
-  if (routeKey === '/tours/:tourId') {
+  if (surfaceId === '/tours/:tourId') {
     return bindResolved(dom, `/tours/${fixtures.tour_id}`, {
       kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });
   }
-  if (routeKey === '/placements/:placementId') {
+  if (surfaceId === '/placements/:placementId') {
     return bindResolved(dom, `/placements/${fixtures.placement_id}`, {
       kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });

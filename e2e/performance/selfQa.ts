@@ -44,7 +44,7 @@ export interface SelfQaAttempt {
 }
 
 export interface SelfQaBranchObservation {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   branch: RouteContractBranch;
@@ -250,7 +250,7 @@ export function routesForSelfQa(
 ): readonly RouteDefinition[] {
   if (mode === 'full') return Object.freeze([...registry]);
   return Object.freeze(NARROW_KEYS.map((key) => {
-    const route = registry.find((candidate) => candidate.key === key);
+    const route = registry.find((candidate) => candidate.surfaceId === key);
     if (route === undefined) throw new Error('self_qa_route_missing');
     return route;
   }));
@@ -282,12 +282,12 @@ function expectedAttempts(mode: SelfQaMode): SelfQaAttempt[] {
 
 function endpointSubset(input: EvaluateSelfQaInput): boolean {
   for (const sample of input.samples) {
-    const route = input.routes.find((candidate) => candidate.key === sample.routeKey);
+    const route = input.routes.find((candidate) => candidate.surfaceId === sample.surfaceId);
     const branch = input.branches.find((candidate) =>
-      candidate.routeKey === sample.routeKey && candidate.mode === sample.mode && candidate.repeat === sample.repeat);
+      candidate.surfaceId === sample.surfaceId && candidate.mode === sample.mode && candidate.repeat === sample.repeat);
     if (route === undefined || branch === undefined) return false;
     const observed = input.requests
-      .filter((request) => request.routeKey === sample.routeKey && request.mode === sample.mode
+      .filter((request) => request.surfaceId === sample.surfaceId && request.mode === sample.mode
         && request.repeat === sample.repeat && request.resourceClass === 'api')
       .map((request) => ({
         endpointTemplate: request.endpointTemplate as never,
@@ -302,13 +302,13 @@ function endpointSubset(input: EvaluateSelfQaInput): boolean {
 
 export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAttempt[] {
   return samples.flatMap((sample) => {
-    const surface: SelfQaAttempt['surface'] | null = sample.routeKey === '/contacts/:contactId'
+    const surface: SelfQaAttempt['surface'] | null = sample.surfaceId === '/contacts/:contactId'
       ? 'contact_detail'
-      : sample.routeKey === '/conversations/:conversationId'
+      : sample.surfaceId === '/conversations/:conversationId'
         ? 'conversation_detail'
-        : sample.routeKey === '/tours/:tourId'
+        : sample.surfaceId === '/tours/:tourId'
           ? 'tour_group'
-          : sample.routeKey === '/placements/:placementId'
+          : sample.surfaceId === '/placements/:placementId'
             ? 'placement_group'
             : null;
     if (surface === null) return [];

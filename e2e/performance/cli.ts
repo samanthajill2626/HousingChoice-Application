@@ -679,7 +679,7 @@ export function createRealInstrumentation(input: {
       destinationPath = begin.destinationPageUrl;
       collector = new input.modules.collect.NetworkCollector({
         firstPartyOrigin: input.baseUrl,
-        routeKey: input.route.key,
+        surfaceId: input.route.surfaceId,
         mode: input.mode,
         repeat: input.repeat,
         expectedGets: input.modules.routes.expectedGets(input.route, input.mode, begin.branch),
@@ -791,7 +791,7 @@ export function createRealInstrumentation(input: {
           consoleCategories: ended.consoleCategories,
         });
         return {
-          routeKey: input.route.key,
+          surfaceId: input.route.surfaceId,
           mode: input.mode,
           repeat: input.repeat,
           status: readiness.status === 'ready' ? 'ok' : 'timeout',
@@ -811,6 +811,7 @@ export function createRealInstrumentation(input: {
           consoleCategories: ended.consoleCategories,
           clientTruncated: metrics.clientTruncated,
           terminalState: readiness.terminalState,
+          surfaceEvidence: null,
           reason: readiness.status === 'ready' ? null : 'ready_timeout',
         };
       } finally {
@@ -828,18 +829,19 @@ function resolverFor(
   selfQaBindings?: Readonly<SelfQaFixtureBindings>,
 ): Promise<ResolverResult> {
   if (selfQaBindings !== undefined && (
-    route.key === '/contacts/:contactId'
-    || route.key === '/conversations/:conversationId'
-    || route.key === '/tours/:tourId'
-    || route.key === '/placements/:placementId'
+    route.surfaceId === '/contacts/:contactId'
+    || route.surfaceId === '/conversations/:conversationId'
+    || route.surfaceId === '/tours/:tourId'
+    || route.surfaceId === '/placements/:placementId'
   )) {
-    return routes.resolveBoundSelfQaDetail(route.key, selfQaBindings, dom);
+    return routes.resolveBoundSelfQaDetail(route.surfaceId, selfQaBindings, dom);
   }
   switch (route.resolver) {
     case 'static':
+      if (route.coldTarget.kind !== 'static') throw new Error('static_cold_target_required');
       return Promise.resolve({
         kind: 'resolved',
-        coldPath: route.pathTemplate,
+        coldPath: route.coldTarget.path,
         warmHref: route.source.href,
         branch: { kind: 'none' },
       });
@@ -1212,8 +1214,8 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           samples: [],
           orders: [],
           warmup: runConfig.target === 'hosted-dev'
-            ? { performed: false, routeKey: null }
-            : { performed: true, routeKey: '/' },
+            ? { performed: false, surfaceId: null }
+            : { performed: true, surfaceId: '/' },
           lowSampleCount: true,
           relayDomCheck: null,
           branches: [],
@@ -1301,7 +1303,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           version: value['browserVersion'] as string,
           viewport: value['viewport'] as { width: number; height: number },
         },
-        warmup: value['warmup'] as { performed: boolean; routeKey: string | null },
+        warmup: value['warmup'] as { performed: boolean; surfaceId: string | null },
         relayDomCheck: value['relayDomCheck'] as null,
         checkpointBranches: value['checkpointBranches'] as never[],
         outOfSampleWrites: value['outOfSampleWrites'] as never[],

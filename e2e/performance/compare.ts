@@ -22,11 +22,11 @@ const RESOURCE_CLASSES: readonly ResourceClass[] = [
 ];
 
 function aggregateKey(aggregate: RouteModeAggregate): string {
-  return `${aggregate.mode}\u0000${aggregate.routeKey}`;
+  return `${aggregate.mode}\u0000${aggregate.surfaceId}`;
 }
 
 function entryRef(aggregate: RouteModeAggregate): ComparisonEntryRef {
-  return { routeKey: aggregate.routeKey, mode: aggregate.mode };
+  return { surfaceId: aggregate.surfaceId, mode: aggregate.mode };
 }
 
 function normalizeRevision(value: string | null): string | null {

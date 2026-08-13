@@ -22,13 +22,13 @@ function resourceCounts(api = 0, script = 0): Record<ResourceClass, number> {
 }
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
@@ -50,6 +50,7 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
@@ -165,8 +166,8 @@ describe('compareRuns', () => {
 
     const comparison = compareRuns(baseline, current);
 
-    expect(comparison.added).toEqual([{ routeKey: '/added', mode: 'warm' }]);
-    expect(comparison.removed).toEqual([{ routeKey: '/removed', mode: 'warm' }]);
+    expect(comparison.added).toEqual([{ surfaceId: '/added', mode: 'warm' }]);
+    expect(comparison.removed).toEqual([{ surfaceId: '/removed', mode: 'warm' }]);
   });
 
   it('lists skipped, timed-out, and failed current entries separately', () => {
@@ -184,11 +185,11 @@ describe('compareRuns', () => {
 
     const comparison = compareRuns(baseline, current);
 
-    expect(comparison.skipped).toEqual([{ routeKey: '/skip', mode: 'cold' }]);
-    expect(comparison.timedOut).toEqual([{ routeKey: '/timeout', mode: 'warm' }]);
+    expect(comparison.skipped).toEqual([{ surfaceId: '/skip', mode: 'cold' }]);
+    expect(comparison.timedOut).toEqual([{ surfaceId: '/timeout', mode: 'warm' }]);
     expect(comparison.failed).toEqual([
-      { routeKey: '/failed', mode: 'cold' },
-      { routeKey: '/blocked', mode: 'warm' },
+      { surfaceId: '/failed', mode: 'cold' },
+      { surfaceId: '/blocked', mode: 'warm' },
     ]);
   });
 

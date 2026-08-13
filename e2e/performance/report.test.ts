@@ -165,17 +165,17 @@ const TARGET: TargetMetadata = {
 };
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
-    readyMs: routeKey === '/contacts' ? 900 : 100,
+    readyMs: surfaceId === '/contacts' ? 900 : 100,
     navigation: { ttfbMs: 20, domContentLoadedMs: 70, loadMs: 80 },
     paint: { fcpMs: 40, lcpMs: 60 },
     longTasks: { totalMs: 12, maxMs: 8, count: 2 },
@@ -197,12 +197,13 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
-function request(routeKey: string, mode: 'cold' | 'warm', repeat: number): RequestEvidence {
+function request(surfaceId: string, mode: 'cold' | 'warm', repeat: number): RequestEvidence {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     method: 'GET',
@@ -224,8 +225,17 @@ function request(routeKey: string, mode: 'cold' | 'warm', repeat: number): Reque
 function reportInput(outputRoot: string, runId: string) {
   const samples = [
     sample('/contacts', 'cold', 0),
-    sample('/inbox', 'cold', 0, { readyMs: 100, clientTruncated: false }),
-    sample('/contacts', 'warm', 0, { readyMs: 400 }),
+    sample('/inbox', 'cold', 0, {
+      readyMs: 100,
+      clientTruncated: false,
+      surfaceEvidence: {
+        kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
+      },
+    }),
+    sample('/contacts', 'warm', 0, {
+      readyMs: 400,
+      surfaceEvidence: { kind: 'conversation_detail', initialRenderedMessageCount: null },
+    }),
     sample('/inbox', 'warm', 0, { readyMs: 50, clientTruncated: false }),
     sample('/settings/notifications', 'warm', 0, {
       status: 'skipped_no_fixture',
@@ -242,11 +252,11 @@ function reportInput(outputRoot: string, runId: string) {
     samples,
     requests: [request('/contacts', 'cold', 0), request('/contacts', 'warm', 1)],
     routeOrders: [
-      { mode: 'cold' as const, repeat: 0, routeKeys: ['/contacts', '/inbox'] },
-      { mode: 'warm' as const, repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
+      { mode: 'cold' as const, repeat: 0, surfaceIds: ['/contacts', '/inbox'] },
+      { mode: 'warm' as const, repeat: 0, surfaceIds: ['/inbox', '/contacts', '/settings/notifications'] },
     ],
     browser: { version: '140.0.7339.12', viewport: { width: 1280, height: 720 } },
-    warmup: { performed: true, routeKey: '/' },
+    warmup: { performed: true, surfaceId: '/' },
     relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
   };
 }
@@ -262,13 +272,13 @@ describe('createPerformanceRunId', () => {
 
 describe('writePerformanceReport', () => {
   it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
-    const route = ROUTES.find((candidate) => candidate.key === '/contacts/tenants')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
     const branch = { kind: 'none' } as const;
     const required = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'required')!;
     const conditional = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'conditional')!;
-    const baseSample = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const baseSample = sample(route.surfaceId, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
     const baseRequest: RequestEvidence = {
-      ...request(route.key, 'warm', 0),
+      ...request(route.surfaceId, 'warm', 0),
       endpointTemplate: required.endpointTemplate,
       queryKeys: [...required.queryKeys],
       requestRole: 'required',
@@ -277,12 +287,12 @@ describe('writePerformanceReport', () => {
     const evaluate = (overrides: {
       sample?: SampleResult;
       requests?: RequestEvidence[];
-      branches?: Array<{ routeKey: string; mode: 'cold' | 'warm'; repeat: number; branch: RouteContractBranch }>;
+      branches?: Array<{ surfaceId: string; mode: 'cold' | 'warm'; repeat: number; branch: RouteContractBranch }>;
     } = {}) => evaluateContractCheckpoint({
       routes: [route],
       samples: [overrides.sample ?? baseSample],
       requests: overrides.requests ?? [baseRequest],
-      branches: overrides.branches ?? [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+      branches: overrides.branches ?? [{ surfaceId: route.surfaceId, mode: 'warm', repeat: 0, branch }],
     });
 
     expect(evaluate().mismatchCodes).toEqual([]);
@@ -318,18 +328,18 @@ describe('writePerformanceReport', () => {
   });
 
   it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
-    const route = ROUTES.find((candidate) => candidate.key === '/conversations/:conversationId')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/conversations/:conversationId')!;
     const branch = { kind: 'none' } as const;
-    const base = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const base = sample(route.surfaceId, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
     const declared = expectedGets(route, 'warm', branch).filter((entry) => entry.requirement === 'required');
     const requests = declared.map((entry) => ({
-      ...request(route.key, 'warm', 0),
+      ...request(route.surfaceId, 'warm', 0),
       endpointTemplate: entry.endpointTemplate,
       queryKeys: [...entry.queryKeys],
     }));
     const evaluate = (value: SampleResult) => evaluateContractCheckpoint({
       routes: [route], samples: [value], requests,
-      branches: [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+      branches: [{ surfaceId: route.surfaceId, mode: 'warm', repeat: 0, branch }],
     });
 
     expect(evaluate(base).mismatchCodes).toContain('missing_blocked_write');
@@ -353,7 +363,7 @@ describe('writePerformanceReport', () => {
     }];
     Object.assign(input, {
       checkpointBranches: [{
-        routeKey: '/contacts/tenants', mode: 'warm', repeat: 0, branch: { kind: 'none' },
+        surfaceId: '/contacts/tenants', mode: 'warm', repeat: 0, branch: { kind: 'none' },
       }],
     });
     const secret = 'private.person@example.com';
@@ -404,7 +414,7 @@ describe('writePerformanceReport', () => {
     const requestsText = await readFile(join(runDirectory, 'requests.jsonl'), 'utf8');
     const report = await readFile(join(runDirectory, 'report.md'), 'utf8');
 
-    expect(summary.schemaVersion).toBe(1);
+    expect(summary.schemaVersion).toBe(2);
     expect(Object.keys(summary).sort()).toEqual([
       'aggregates', 'artifacts', 'browser', 'comparison', 'config', 'environment',
       'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'relayDomCheck', 'revisions',
@@ -426,6 +436,11 @@ describe('writePerformanceReport', () => {
     expect(summary.runtime.node).toMatch(/^\d+\.\d+\.\d+/u);
     expect(summary.runtime.os).toMatch(/^(?:aix|darwin|freebsd|linux|openbsd|sunos|win32)\/(?:arm|arm64|ia32|loong64|mips|mipsel|ppc|ppc64|riscv64|s390|s390x|x64)$/u);
     expect(summary.samples[0].rawRequests).toBeUndefined();
+    expect(summary.samples[0].surfaceEvidence).toBeNull();
+    expect(summary.samples[1].surfaceEvidence).toEqual({
+      kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
+    });
+    expect(summary.samples[2].surfaceEvidence).toEqual({ kind: 'conversation_detail', initialRenderedMessageCount: null });
     expect(summary.samples[0].blockedWrites).toEqual([{
       method: 'POST',
       endpointTemplate: '/api/inbox/:contactId/read',
@@ -435,8 +450,8 @@ describe('writePerformanceReport', () => {
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
     expect(summary.routeOrders).toEqual([
-      { mode: 'cold', repeat: 0, routeKeys: ['/contacts', '/inbox'] },
-      { mode: 'warm', repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
+      { mode: 'cold', repeat: 0, surfaceIds: ['/contacts', '/inbox'] },
+      { mode: 'warm', repeat: 0, surfaceIds: ['/inbox', '/contacts', '/settings/notifications'] },
     ]);
     expect(summary.manifest.contacts).toBe(100);
 
@@ -444,7 +459,7 @@ describe('writePerformanceReport', () => {
     expect(requestLines).toHaveLength(2);
     expect(Object.keys(requestLines[0]).sort()).toEqual([
       'durationMs', 'endpointTemplate', 'method', 'mode', 'originClass', 'outcome',
-      'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'routeKey', 'startOffsetMs',
+      'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'surfaceId', 'startOffsetMs',
       'status', 'transferBytes', 'ttfbMs', 'unmatchedApi',
     ].sort());
     expect(requestLines[0]).toMatchObject({ outcome: 'finished', requestRole: 'required' });
@@ -571,27 +586,27 @@ describe('writePerformanceReport', () => {
 
   it('round-trips every registry route through artifacts and a generated baseline', async () => {
     const outputRoot = await artifactRoot();
-    const routeKeys = ROUTES.map((route) => route.key);
+    const surfaceIds = ROUTES.map((route) => route.surfaceId);
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-11223344');
-    baselineInput.samples = routeKeys.map((key) => sample(key, 'cold', 0));
-    baselineInput.requests = routeKeys.map((key) => request(key, 'cold', 0));
-    baselineInput.routeOrders = [{ mode: 'cold', repeat: 0, routeKeys }];
+    baselineInput.samples = surfaceIds.map((key) => sample(key, 'cold', 0));
+    baselineInput.requests = surfaceIds.map((key) => request(key, 'cold', 0));
+    baselineInput.routeOrders = [{ mode: 'cold', repeat: 0, surfaceIds }];
 
     await expect(writePerformanceReport(baselineInput)).resolves.toMatchObject({ status: 'written' });
     const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
     const baseline = JSON.parse(baselineJson) as Record<string, any>;
 
-    expect(baseline.samples.map((row: SampleResult) => row.routeKey)).toEqual(routeKeys);
-    expect(baseline.routeOrders[0].routeKeys).toEqual(routeKeys);
-    expect(baseline.warmup.routeKey).toBe('/');
-    expect(baseline.aggregates.map((row: { routeKey: string }) => row.routeKey)).toEqual(routeKeys);
-    expect(baseline.rankings.cold.readyMs.some((row: { routeKey: string }) => row.routeKey === '/')).toBe(true);
+    expect(baseline.samples.map((row: SampleResult) => row.surfaceId)).toEqual(surfaceIds);
+    expect(baseline.routeOrders[0].surfaceIds).toEqual(surfaceIds);
+    expect(baseline.warmup.surfaceId).toBe('/');
+    expect(baseline.aggregates.map((row: { surfaceId: string }) => row.surfaceId)).toEqual(surfaceIds);
+    expect(baseline.rankings.cold.readyMs.some((row: { surfaceId: string }) => row.surfaceId === '/')).toBe(true);
 
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-55667788'),
-      samples: routeKeys.map((key) => sample(key, 'cold', 0)),
-      requests: routeKeys.map((key) => request(key, 'cold', 0)),
-      routeOrders: [{ mode: 'cold' as const, repeat: 0, routeKeys }],
+      samples: surfaceIds.map((key) => sample(key, 'cold', 0)),
+      requests: surfaceIds.map((key) => request(key, 'cold', 0)),
+      routeOrders: [{ mode: 'cold' as const, repeat: 0, surfaceIds }],
       baselineJson,
     };
     const current = await writePerformanceReport(currentInput);
@@ -608,7 +623,7 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456790Z-a1b2c3d4');
     input.routeOrders = [{
-      mode: 'cold', repeat: 0, routeKeys: ['/a|b', '/contacts/perf-contact-00001'],
+      mode: 'cold', repeat: 0, surfaceIds: ['/a|b', '/contacts/perf-contact-00001'],
     }];
 
     const result = await writePerformanceReport(input);
@@ -617,7 +632,7 @@ describe('writePerformanceReport', () => {
     const summaryText = await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8');
     expect(summaryText).not.toContain('/a|b');
     expect(summaryText).not.toContain('perf-contact-00001');
-    expect(JSON.parse(summaryText).routeOrders[0].routeKeys).toEqual(['invalid_route', 'invalid_route']);
+    expect(JSON.parse(summaryText).routeOrders[0].surfaceIds).toEqual(['invalid_route', 'invalid_route']);
   });
 
   it('rejects structurally invalid baseline aggregate entries before comparison publication', async () => {
@@ -625,7 +640,7 @@ describe('writePerformanceReport', () => {
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e4');
     await writePerformanceReport(baselineInput);
     const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
-    baseline.aggregates[0].routeKey = '/bad|key';
+    baseline.aggregates[0].surfaceId = '/bad|key';
     baseline.aggregates[0].mode = 'not-a-mode';
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f4'),

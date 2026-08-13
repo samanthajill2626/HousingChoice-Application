@@ -14,6 +14,7 @@ import {
   assertObservedGets,
   expectedBlockedWrites,
   expectedGets,
+  type InboxRequestClass,
   type RouteContractBranch,
   type RouteDefinition,
 } from './routes.js';
@@ -84,6 +85,14 @@ const SURFACE_IDS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.sur
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
 const SAFE_RUN_ID = /^\d{8}T\d{9}Z-[0-9a-f]{8}$/u;
+const INBOX_REQUEST_CLASSES: readonly InboxRequestClass[] = [
+  'inbox_page_all',
+  'inbox_page_unread',
+  'inbox_page_unknown',
+  'inbox_page_groups',
+  'inbox_badge',
+  'inbox_endpoint_contract_failure',
+];
 
 export interface ReportBrowserInput {
   version: string;
@@ -177,6 +186,7 @@ export type ContractCheckpointMismatchCode =
 export interface ContractEndpointObservation {
   endpointTemplate: string;
   queryKeys: string[];
+  inboxRequestClass?: InboxRequestClass;
   multiplicity: number;
   outcome: RequestEvidence['outcome'];
   role: RequestEvidence['requestRole'];
@@ -241,23 +251,29 @@ function blockedShape(value: BlockedWrite): string {
   return `${value.method}|${value.endpointTemplate}|${value.phase}`;
 }
 
+function inboxRequestClass(value: unknown): InboxRequestClass | undefined {
+  return INBOX_REQUEST_CLASSES.includes(value as InboxRequestClass) ? value as InboxRequestClass : undefined;
+}
+
 function observedEndpoints(requests: readonly RequestEvidence[]): ContractEndpointObservation[] {
   const rows = new Map<string, ContractEndpointObservation>();
   for (const request of requests.filter((row) => row.originClass === 'first_party' && row.resourceClass === 'api')) {
     const queryKeys = [...request.queryKeys].sort();
-    const key = `${request.endpointTemplate}?${queryKeys.join('&')}|${request.outcome}|${request.requestRole}`;
+    const requestClass = inboxRequestClass(request.inboxRequestClass);
+    const key = `${request.endpointTemplate}?${queryKeys.join('&')}|${requestClass ?? 'none'}|${request.outcome}|${request.requestRole}`;
     const prior = rows.get(key);
     rows.set(key, {
       endpointTemplate: endpointTemplate(request.endpointTemplate),
       queryKeys,
+      ...(requestClass !== undefined && { inboxRequestClass: requestClass }),
       multiplicity: (prior?.multiplicity ?? 0) + 1,
       outcome: request.outcome,
       role: request.requestRole,
     });
   }
   return [...rows.values()].sort((left, right) =>
-    `${endpointShape(left)}|${left.role}|${left.outcome}`
-      .localeCompare(`${endpointShape(right)}|${right.role}|${right.outcome}`),
+    `${endpointShape(left)}|${left.inboxRequestClass ?? 'none'}|${left.role}|${left.outcome}`
+      .localeCompare(`${endpointShape(right)}|${right.inboxRequestClass ?? 'none'}|${right.role}|${right.outcome}`),
   );
 }
 
@@ -605,6 +621,7 @@ function cloneRequest(request: RequestEvidence): RequestEvidence {
     && ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'OTHER'].includes(request.method)
     ? request.method
     : 'OTHER';
+  const requestClass = inboxRequestClass(request.inboxRequestClass);
   return {
     surfaceId: surfaceId(request.surfaceId),
     mode: request.mode === 'warm' ? 'warm' : 'cold',
@@ -616,6 +633,7 @@ function cloneRequest(request: RequestEvidence): RequestEvidence {
     queryKeys: request.queryKeys
       .filter((key) => typeof key === 'string' && SAFE_QUERY_KEY.test(key))
       .slice(0, 32),
+    ...(requestClass !== undefined && { inboxRequestClass: requestClass }),
     startOffsetMs: finite(request.startOffsetMs),
     durationMs: nullableFinite(request.durationMs),
     ttfbMs: nullableFinite(request.ttfbMs),

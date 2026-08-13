@@ -363,6 +363,70 @@ describe('writePerformanceReport', () => {
     expect(evaluate(requests).mismatchCodes).toEqual([]);
   });
 
+  it('retains distinct closed unread Inbox request classes in report artifacts', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-1a2b3c4d');
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
+    input.config = { ...input.config, contractCheckpoint: true };
+    input.samples = [sample(route.surfaceId, 'cold', 0, {
+      blockedWrites: [], terminalState: 'populated',
+    })];
+    input.requests = expectedGets(route, 'cold', { kind: 'none' }).map((contract) => ({
+      ...request(route.surfaceId, 'cold', 0),
+      endpointTemplate: contract.endpointTemplate,
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      requestRole: 'required' as const,
+    }));
+    Object.assign(input, {
+      checkpointBranches: [{
+        surfaceId: route.surfaceId, mode: 'cold', repeat: 0, branch: { kind: 'none' },
+      }],
+    });
+
+    await writePerformanceReport(input);
+
+    const requestLines = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLines.flatMap((line) => line.inboxRequestClass === undefined ? [] : [line.inboxRequestClass])).toEqual([
+      'inbox_badge', 'inbox_page_unread',
+    ]);
+    const checkpoint = JSON.parse(await readFile(
+      join(outputRoot, input.runId, 'contract-observations.json'),
+      'utf8',
+    )) as {
+      observations: Array<{
+        surfaceId: string;
+        mode: 'cold' | 'warm';
+        endpoints: Array<{ inboxRequestClass?: string }>;
+      }>;
+    };
+    const inboxRequestClasses = checkpoint.observations
+      .filter((observation) => observation.surfaceId === route.surfaceId && observation.mode === 'cold')
+      .flatMap((observation) => observation.endpoints)
+      .flatMap((endpoint) => (
+        endpoint.inboxRequestClass === undefined ? [] : [endpoint.inboxRequestClass]
+      ));
+    expect(inboxRequestClasses).toEqual([
+      'inbox_badge', 'inbox_page_unread',
+    ]);
+  });
+
+  it('omits an unknown Inbox request class at the report artifact boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-4d3c2b1a');
+    input.requests = [{
+      ...request('inbox-unread', 'cold', 0),
+      inboxRequestClass: 'raw-filter=unread' as never,
+    }];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const [requestLine] = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLine.inboxRequestClass).toBeUndefined();
+  });
+
   it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === '/conversations/:conversationId')!;
     const branch = { kind: 'none' } as const;

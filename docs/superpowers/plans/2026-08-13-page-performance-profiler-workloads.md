@@ -148,11 +148,18 @@ export interface InboxSampleEvidence {
   initialInboxPageRequestCount: number;
 }
 
-export type WorkloadFailureReason =
-  | 'required_action_missing'
-  | 'contradictory_terminal'
-  | 'endpoint_contract_mismatch';
+// Optional only on exact role locators. Route construction rejects selected on
+// any role other than tab, and the browser adapter maps it to ARIA state.
+export interface LocatorContract {
+  role: string;
+  name?: string;
+  exactness: LocatorExactness;
+  scope?: string;
+  selected?: true;
+}
 ```
+
+Add `required_action_missing`, `contradictory_terminal`, and `endpoint_contract_mismatch` to the existing closed `FailureReasonCode` union; do not introduce a second overlapping reason type.
 
 The workload input and resolved manifest must expose requested provenance separately from resolved storage shape. `PerformanceSeedInput` belongs to `app/src/lib/seed/performance.ts`; `ComparisonWorkload` is the closed e2e artifact type produced later by report code:
 
@@ -214,7 +221,7 @@ export interface ComparisonWorkload {
 - Consumes: current `PERFORMANCE_SEED_BOUNDS`, `PERFORMANCE_SEED_BASE`, deterministic anchor normalization, and total-work cap.
 
 - [ ] Add failing tests for exact scale-1 defaults: contacts 100, units 16, placements 50, tours 50, conversations 100, native groups 21, broadcasts 10, messages per conversation 10, and recipients per broadcast 25.
-- [ ] Add table tests for the 95/4/1 contact-type split. For a count `n`, assert `landlords = floor(n * 4 / 100)`, `unknown = floor(n / 100)`, and `tenants = n - landlords - unknown`. Assert generated totals and active/deleted totals reconcile.
+- [ ] Add table tests for the 95/4/1 contact-type split. For a count `n`, assert `landlords = floor(n * 4 / 100)`, `unknown = floor(n / 100)`, and `tenants = n - landlords - unknown`. Assert both the pure resolved counts and generated table counts use that allocation, and that generated totals and active/deleted totals reconcile.
 - [ ] Add failing bound and relationship tests for all three new options. `longConversationMessages` must be in `0..20000` and at least ordinary message density; `largeBroadcastRecipients` must be in `0..1000` and at least ordinary recipient density; `nativeGroups` must be in `0..20000` and not exceed exact roster capacity.
 - [ ] Add a table test for saturated combination capacity at active-contact counts 0, 1, 2, 3, 4, 100, and 20000. Assert the helper stops at the entity-count bound instead of overflowing or enumerating combinations. Use bounded `bigint` arithmetic internally so the intermediate multiplication cannot lose safe-integer precision.
 - [ ] Add formula tests for parent-zero, ordinary, tail, and clipped cases. Include physical items, logical member slots, logical recipients, and combined total items; keep `totalItems.max = 250000` unchanged.
@@ -253,6 +260,7 @@ function nativeGroupCapacity(activeContacts: number): number {
 - [ ] Resolve parent presence before tail replacement. When `conversations=0`, long fixture is absent and existing-conversation tail replacement is zero. When `broadcasts=0`, large fixture is absent and both its resolved count and replacement are zero.
 - [ ] Compute the selected roster-size schedule and `nativeGroupMemberSlotCount` during pure preflight using only saturated per-size capacities and at most `nativeGroups` round-robin selections. The generator must consume the same schedule when it chooses actual contacts, so total-work rejection completes before lifecycle discovery.
 - [ ] Compute the active generated tenant recipient pool after the deleted cadence and consent rules. Clip both ordinary and large recipient counts to that pool, or to the explicit one-row lean-tenant fallback only when the generated eligible pool is empty.
+- [ ] Replace `contactTypeAndOrdinal()` in this task with the deterministic 95/4/1 allocation before using active counts for native-group capacity or broadcast clipping. Keep the existing deterministic deleted cadence and generated consent fields unless a test proves a direct conflict.
 - [ ] Build the full requested/resolved manifest. Ensure `toPerformanceSeedManifest()` explicitly copies every new field; do not spread an unreviewed object into artifact data. The closed comparison projection remains report-owned in Task 9.
 - [ ] Run the focused test and typecheck:
 
@@ -293,13 +301,12 @@ Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add -- a
 npm run test -w @housingchoice/app -- performanceSeed.test.ts
 ```
 
-- [ ] Replace `contactTypeAndOrdinal()` with the deterministic 95/4/1 allocation without changing the existing deleted cadence unless a test proves that cadence conflicts with default Inbox coverage.
 - [ ] Implement one lazy lexicographic iterator per feasible roster size. Keep only current index vectors and the selected `nativeGroups` rows; round-robin over non-exhausted iterators and remove an iterator only after it yields its final combination.
 - [ ] Derive each group ID through `conversationIdForGroup(participantPhones)`. Sort/canonicalize only as required by that helper; do not invent an ID or reuse the existing performance ID namespace.
 - [ ] Generate native messages at ordinary density. Preserve deterministic timestamps and unique sort keys. Alternate or otherwise deterministically cover inbound and outbound sender attribution at default scale.
 - [ ] Designate one readable relay-group conversation as the long fixture when at least one existing conversation exists. Move only its `created_at` earlier when required by its oldest message. Do not add long messages on top of ordinary messages.
 - [ ] Build broadcasts from the resolved eligible pool and replace the terminal broadcast's recipient count with the large value. Keep audience `tenant` and recipient IDs unique within each item.
-- [ ] Update the deterministic fixture/resolver tests so conversation detail binds to the designated long relay conversation and broadcast detail binds to the designated terminal large broadcast without serializing either raw ID.
+- [ ] Update `resolvePerformanceSelfQaFixtures()` default-shape checks for units 16, native groups 21, resolved long-conversation messages 10, and resolved large-broadcast recipients 25. In pure generation tests, prove that its conversation detail ID names the designated long relay conversation and that the generated broadcast ordering/status makes the designated large broadcast the terminal-list candidate, without serializing either raw ID.
 - [ ] Run focused tests and typecheck:
 
 ```powershell
@@ -377,6 +384,7 @@ Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add -- a
 - [ ] Add a mechanical parity test: every accepted public long option appears exactly once in help, every documented long option belongs to the parser inventory, and aliases `-h`/`--help` render identical output.
 - [ ] Add CLI dependency-spy tests proving `npm run perf:pages -- --help` and `hermetic --help` do not parse/validate a target, probe ports, read auth, launch a browser, create output paths, or start a lane.
 - [ ] Add print-config tests proving it uses the same resolved manifest as a real hermetic run, including contact-type/active counts, tails, pool source, member slots, physical/logical totals, fixture presence, workload version, and anchor.
+- [ ] Extend `assertLockedDiagnosticMode()` default-shape tests for units 16, native groups 21, resolved long-conversation messages 10, and resolved large-broadcast recipients 25. Full self-QA and contract checkpoint continue to reject every explicitly supplied non-scale seed override, including the three new options.
 - [ ] Run the focused tests and confirm the new inventory/help assertions fail:
 
 ```powershell
@@ -498,7 +506,9 @@ inbox-unknown /inbox?filter=unknown  unknown  inbox_page_unknown
 inbox-groups  /inbox?filter=groups   groups   inbox_page_groups
 ```
 
-Each shares `pathTemplate='/inbox'`, uses `behaviorFamily='inbox'`, has an exact selected tab, and uses its filter-specific empty title. The three filtered entries use tab actions from canonical bare `/inbox`; no entry declares Load more or row activation.
+Each shares `pathTemplate='/inbox'`, uses `behaviorFamily='inbox'`, has an exact tab locator with `selected: true`, and uses its filter-specific empty title. Route validation permits `selected` only for a `tab` role. The three filtered entries use tab actions from canonical bare `/inbox`; no entry declares Load more or row activation.
+
+- [ ] Retain route resolver tests proving conversation detail selects the designated newest readable relay fixture and broadcast detail selects the designated first terminal broadcast fixture under the Task 2 ordering contract.
 
 - [ ] Add network tests that classify only these exact tuples: page `filter=<surface>&limit=30` without cursor and badge `filter=unread&limit=100` without cursor. Assert unread/30 and unread/100 remain distinct, an unexpected cursor/value/limit is a closed endpoint-contract failure, and no raw query value enters evidence.
 - [ ] Add cold/warm role tests: badge is required shell and readiness-bearing in cold mode, background shell if observed in warm mode; only the matching page class satisfies the page contract and increments `initialInboxPageRequestCount`.
@@ -546,7 +556,7 @@ Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add -- e
 
 - [ ] Add exact-target tests where current URLs are bare `/inbox`, each filtered query, the same keys in another order, and an extra query key. Only exact normalized equality may return ready; filtered or extra-query state must navigate to bare `/inbox`.
 - [ ] Add shuffled-order tests for every filtered-to-filtered transition and filtered-to-conversation-detail transition. Assert source All navigation/request/settle occurs before buffers reset, and destination timing begins immediately before the exact tab/link activation.
-- [ ] Add terminal tests for each filter: selected tab plus populated only succeeds, selected tab plus exact empty only succeeds, neither keeps waiting, both fail `contradictory_terminal`, wrong selected tab cannot succeed, pending/error remain non-success terminal states.
+- [ ] Add terminal tests for each filter: selected tab plus populated only succeeds, selected tab plus exact empty only succeeds, neither keeps waiting, both fail `contradictory_terminal`, wrong selected tab cannot succeed, pending/error remain non-success terminal states. Include a direct real-adapter test where the expected tab is visible but `aria-selected=false`; it must remain unready even while a Conversations list is visible.
 - [ ] Add warm action tests proving exact tab names, a missing fixed tab yields `required_action_missing`, and fixture-only resolved links retain `fixture_not_navigable`. Assert no action contract can express Load more, Retry, notice navigation, or arbitrary selector clicks.
 - [ ] Add an instrumentation test that source requests/firewall events exist, then reset immediately before click, and assert none appear in the destination sample.
 - [ ] Run red tests:
@@ -557,6 +567,7 @@ npm run test -w @housingchoice/e2e -- performance/routes.test.ts performance/col
 
 - [ ] Replace `WarmSourceContract.path` with `target: ExactBrowserTarget` and require the full source terminal. All Inbox source consumers, including conversation detail, use `{ path: '/inbox', query: { kind: 'absent' } }` plus the full All terminal.
 - [ ] In the real-page adapter, normalize `location.pathname` plus allowlisted search keys into the closed query state. Source preparation and readiness must call the same normalizer.
+- [ ] Map `LocatorContract.selected === true` to Playwright's `getByRole(..., { selected: true })` option and evaluate it in the same readiness poll as the populated/empty XOR. Do not infer selected state from a preceding click.
 - [ ] Extend the action switch only with `link` and `tab`. Use `getByRole('tab', { name, exact: true })` for fixed filter chrome. Do not fall back to substring or a generic locator.
 - [ ] Order `collectWarmSample()` as: prepare source, wait full source terminal, resolve fixture if needed, create/reset sample instrumentation and firewall phase state, then immediately activate exact action. Dispose all state through existing `finally` paths on missing actions or other failures.
 - [ ] Evaluate both populated and exact empty locators before returning terminal state. Surface a closed contradictory result through the existing artifact-preserving sample failure path.
@@ -588,7 +599,8 @@ npm run typecheck
 
 - [ ] Add DOM adapter tests with a `Conversations` list containing contact, relay-group, and native Group text rows. Assert rendered row count includes every row, but relay count includes only list items with the exact fixed `Relay group` label and a descendant `/conversations/` link.
 - [ ] Add a negative test proving a native row with fixed `Group text` and the same href prefix is excluded. Add shuffled-order coverage proving the relay proof runs exactly once on successful `surfaceId='inbox-all'`, never on the first `behaviorFamily='inbox'` sample.
-- [ ] Add tests for safe `groupsTruncated` detection and populated/empty Inbox rendered counts. For conversation detail, assert a stable safe message-element selector returns a numeric count and the absence of such a selector returns null. The adapter must never call `textContent`, `innerText`, or DOM serialization, and this feature must not add a dashboard-only profiler marker.
+- [ ] Add tests for safe `groupsTruncated` detection and populated/empty Inbox rendered counts. For All/Unknown, detect truncation only through the exact visible `See all group texts` link; for Unread, only through the exact visible `Browse all group texts (read and unread)` link; for Groups, only through an anchored fixed selector matching `Not all group texts are shown here.` or `Showing the latest <positive integer> group text(s).`. Add zero-row, singular, plural, Unread, and negative cases. Use those strings only as selectors and return only a boolean.
+- [ ] Assert the current conversation-detail initial rendered-message count is null because `Timeline.tsx` has no stable message-specific semantic marker. Do not add a speculative numeric branch, count generic Timeline children, or add a dashboard-only profiler marker. Preserve the nullable schema so a later product-owned semantic marker can enable numeric evidence without a schema change.
 - [ ] Add a test that no Inbox sample invokes row click, mark-read, notice link, Retry, or Load more and that expected blocked-write sets remain empty.
 - [ ] Run red tests:
 
@@ -596,7 +608,7 @@ npm run typecheck
 npm run test -w @housingchoice/e2e -- performance/collect.test.ts performance/cli.test.ts
 ```
 
-- [ ] Add one closed browser adapter method that returns only safe Inbox counts/booleans. Keep fixed labels inside selectors and never return the matched text.
+- [ ] Add one closed browser adapter method that returns only safe Inbox counts/booleans. Keep fixed labels inside selectors and never return the matched text. The Groups notice regex is anchored and ASCII-only; it permits only the fixed zero sentence or the fixed positive-integer singular/plural sentence.
 - [ ] Implement relay counting with a scoped locator equivalent to:
 
 ```ts
@@ -609,7 +621,7 @@ return relayRows.count();
 
 Use a page-scoped or row-scoped locator construction that Playwright supports; retain the exact-label and descendant-link semantics.
 
-- [ ] Attach `InboxSampleEvidence` only for `behaviorFamily='inbox'`. Attach the conversation-detail initial rendered-row count as `number | null` under its own closed evidence field. Do not compare it with stored tail depth and do not promise it is non-null on the current dashboard.
+- [ ] Attach `InboxSampleEvidence` only for `behaviorFamily='inbox'`. Attach `initialRenderedMessageCount: null` for conversation detail on the current dashboard. Do not compare it with stored tail depth; keep the field nullable for a future source-proven selector.
 - [ ] Dispatch the relay proof only when `surfaceId === 'inbox-all'`, `status === 'ok'`, and the one-run proof has not yet executed. Keep exact equality to `relayGroupCount` and the existing no-truncation/query-budget guard.
 - [ ] Run focused tests and typecheck:
 
@@ -710,7 +722,22 @@ npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --sel
 
 Require exit 0, 31 resolved surfaces, 62 successful samples, all four Inbox surfaces in both rankings, exact page/badge contracts, relay-only DOM equality, fixture reachability, zero unexpected write tuples, healthy watchdog, and all privacy/state/cleanup assertions.
 
-- [ ] Feed the produced summary back through the comparison path against an identical resolved scale-1 run. Require a controlled comparison even when one invocation spells explicit defaults and the other omits them.
+- [ ] Run a separate non-self-QA baseline with omitted seed defaults and a fixed order. This is distinct from the 31/62 self-QA because diagnostic mode intentionally rejects explicit seed overrides:
+
+```powershell
+npm run perf:pages -- hermetic --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242
+```
+
+- [ ] Require exit 0. In the next PowerShell call, resolve the just-created newest complete `summary.json`, verify it exists, and run the explicit-default half with the same repeats and route-order seed:
+
+```powershell
+$baselineSummary = Get-ChildItem -LiteralPath 'e2e/.artifacts/performance' -Filter 'summary.json' -File -Recurse | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
+if (-not $baselineSummary -or -not [IO.Path]::IsPathFullyQualified($baselineSummary)) { throw 'baseline_summary_missing' }
+npm run perf:pages -- hermetic --scale=1 --contacts=100 --units=16 --placements=50 --tours=50 --conversations=100 --native-groups=21 --messages-per-conversation=10 --long-conversation-messages=10 --broadcasts=10 --recipients-per-broadcast=25 --large-broadcast-recipients=25 --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242 "--baseline=$baselineSummary"
+if ($LASTEXITCODE -ne 0) { throw "explicit_default_comparison_failed exit=$LASTEXITCODE" }
+```
+
+Confirm `$baselineSummary` equals the safe absolute summary path printed by the immediately preceding run. Require an explicitly controlled comparison with no workload, route-order, schema, registry, or surface-set mismatch.
 - [ ] Run targeted suites once more after any integration fixes:
 
 ```powershell
@@ -731,7 +758,15 @@ npm run typecheck
 - Verify: all files changed since `main`
 
 - [ ] Inspect worktree ownership and branch state. If `main` advanced, sync it once into this feature branch. If syncing would conflict with another agent's active work, stop and ask the human.
-- [ ] Re-run the explicit non-skipped DynamoDB Local integration suite after the sync.
+- [ ] Re-run the explicit non-skipped DynamoDB Local integration suite after the sync. If Docker is unavailable, start the shared service with `npm run db:start` and leave it running. A skip is a final-gate failure:
+
+```powershell
+$env:PERF_SEED_REQUIRE_DYNAMO='1'
+npm run test -w @housingchoice/app -- performanceSeed.integration.test.ts
+Remove-Item Env:PERF_SEED_REQUIRE_DYNAMO
+```
+
+Require the output to name `performanceSeed.integration.test.ts` and report executed tests, then record that executed count in the handback.
 - [ ] Run the bare required gates from `W:\tmp\page-performance-profiler-workloads`, without piping:
 
 ```powershell
@@ -741,7 +776,11 @@ npm run e2e
 ```
 
 - [ ] If a documented known flake occurs, rerun it once and report both runs. Do not classify a new failure as a flake without evidence.
-- [ ] Run the exact full hermetic profiler self-QA again on the final commit candidate and verify the 31/62 and privacy/firewall/state assertions from Task 10.
+- [ ] Run the exact full hermetic profiler self-QA again on the final commit candidate and verify the 31/62 and privacy/firewall/state assertions from Task 10:
+
+```powershell
+npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --self-qa=full
+```
 - [ ] Run ASCII and change-scope checks:
 
 ```powershell

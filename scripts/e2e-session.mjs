@@ -412,7 +412,7 @@ function shutdown(code = 0) {
   }
   log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
-  removeOwnedSessionState({ pidFile, laneFile, launcherPid: process.pid });
+  removeOwnedSessionState({ pidFile, launcherPid: process.pid });
   setTimeout(() => process.exit(code), 500);
 }
 

@@ -193,6 +193,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       emailDriver: config.emailDriver,
       emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,
+      lane: Number.isSafeInteger(Number(process.env['E2E_LANE']))
+        ? Number(process.env['E2E_LANE'])
+        : null,
       // Launch commit (set by scripts/e2e-session.mjs) — the e2e preflight compares
       // it to the checkout to catch a stale reused backend. null when unstamped.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,

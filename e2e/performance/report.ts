@@ -49,6 +49,7 @@ const SAMPLE_STATUSES: readonly SampleStatus[] = [
   'skipped_no_fixture',
   'skipped_fixture_not_navigable',
   'skipped_source_not_ready',
+  'skipped_unresolved_branch',
 ];
 const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'ready_timeout',
@@ -59,6 +60,7 @@ const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'fixture_absent',
   'fixture_not_navigable',
   'source_not_ready',
+  'unresolved_branch',
   'cleanup_failed',
   'privacy_scan_failed',
   'comparison_failed',
@@ -312,6 +314,7 @@ export function evaluateContractCheckpoint(
           queryKeys: [...request.queryKeys],
           requirement: 'required' as const,
           outcome: request.outcome,
+          status: request.status,
         }));
       const endpointResult = assertObservedGets(declared, requiredObserved);
       if (endpointResult.missingRequired.length > 0) mismatches.add('missing_required_endpoint');
@@ -740,6 +743,7 @@ function reportMarkdown(input: {
   if (input.target.targetVersionStatus === 'unverified') {
     lines.push('- WARNING: `target_version_unverified`');
   }
+  if (input.outOfSampleWrites.length > 0) lines.push('- WARNING: `out_of_sample_write`');
   if (input.partialReason !== null) lines.push(`- Partial run reason: \`${input.partialReason}\``);
   if (input.safetyFailure !== null) {
     lines.push(`- Escaped write: \`${input.safetyFailure.method} ${input.safetyFailure.endpointTemplate}\``);
@@ -795,7 +799,9 @@ function reportMarkdown(input: {
   }
   lines.push(...(detached.size === 0
     ? ['| none | - | 0 |']
-    : [...detached.values()].map(({ value, count }) =>
+    : [...detached.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, { value, count }]) =>
       `| ${value.method} | ${value.endpointTemplate} | ${count} |`)));
   const unmatchedCount = input.requests.filter((request) => request.unmatchedApi).length;
   lines.push('', '## Unmatched APIs', '', `- Count: ${unmatchedCount}`);

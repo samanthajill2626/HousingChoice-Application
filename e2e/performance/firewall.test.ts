@@ -22,6 +22,7 @@ class FakeSession implements FirewallCdpSession {
   frameUrl = `${ORIGIN}/source`;
   detached = false;
   continueRequestFailure: Error | null = null;
+  frameTreeFailure: Error | null = null;
   pausedDuringFetchDisable: FirewallPausedRequest | null = null;
   pausedAfterNextFrameTree: FirewallPausedRequest | null = null;
 
@@ -33,6 +34,7 @@ class FakeSession implements FirewallCdpSession {
       throw error;
     }
     if (method === 'Page.getFrameTree') {
+      if (this.frameTreeFailure !== null) throw this.frameTreeFailure;
       if (this.pausedAfterNextFrameTree !== null) {
         const event = this.pausedAfterNextFrameTree;
         this.pausedAfterNextFrameTree = null;
@@ -286,6 +288,89 @@ describe('performance request firewall', () => {
 
     await expect(controller.assertHealthy()).resolves.toBeUndefined();
     expect(sentMethods(page)).toContain('Fetch.failRequest');
+    await controller.dispose();
+  });
+
+  it('reclaims a canceled watchdog candidate before declaring an escape', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'canceled-write',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation` },
+      type: 'Fetch',
+    });
+    page.session.emit('Network.loadingFailed', {
+      requestId: 'canceled-write',
+      canceled: true,
+    });
+
+    await expect(controller.assertHealthy()).resolves.toBeUndefined();
+    await controller.dispose();
+  });
+
+  it('does not convert a closed-target teardown into an escaped-write failure', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'target-closed',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation` },
+      type: 'Fetch',
+    });
+    page.session.frameTreeFailure = new Error('Protocol error: Target closed');
+
+    await expect(controller.dispose()).resolves.toBeUndefined();
+    expect(page.session.detached).toBe(true);
+  });
+
+  it('keeps genuine protocol barrier faults fail-closed', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'barrier-fault',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation` },
+      type: 'Fetch',
+    });
+    page.session.frameTreeFailure = new Error('Protocol transport failed');
+
+    await expect(controller.assertHealthy()).rejects.toBeInstanceOf(FirewallHandlerError);
+    await controller.dispose();
+  });
+
+  it('cleans finished paused request ids so reuse cannot hide a later write', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emitPaused({
+      ...paused('POST', '/api/inbox/contact-safe/read'),
+      networkId: 'reused-request-id',
+    });
+    await controller.assertHealthy();
+    page.session.emit('Network.loadingFinished', { requestId: 'reused-request-id' });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'reused-request-id',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation` },
+      type: 'Fetch',
+    });
+
+    await expect(controller.assertHealthy()).rejects.toMatchObject({
+      reason: 'uncataloged_write_escaped_firewall',
+    });
+    await controller.dispose();
+  });
+
+  it('offers a latched-failure-only health check for readiness polling', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'still-pending',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation` },
+      type: 'Fetch',
+    });
+    const barrierCount = sentMethods(page).filter((method) => method === 'Page.getFrameTree').length;
+
+    await expect(controller.assertHealthy({ settle: false })).resolves.toBeUndefined();
+    expect(sentMethods(page).filter((method) => method === 'Page.getFrameTree')).toHaveLength(barrierCount);
+
+    page.session.emit('Network.loadingFailed', { requestId: 'still-pending', canceled: true });
     await controller.dispose();
   });
 

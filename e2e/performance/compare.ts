@@ -134,7 +134,8 @@ function metricDeltas(
 function hasSkippedStatus(aggregate: RouteModeAggregate): boolean {
   return aggregate.statusCounts.skipped_no_fixture > 0
     || aggregate.statusCounts.skipped_fixture_not_navigable > 0
-    || aggregate.statusCounts.skipped_source_not_ready > 0;
+    || aggregate.statusCounts.skipped_source_not_ready > 0
+    || aggregate.statusCounts.skipped_unresolved_branch > 0;
 }
 
 function hasFailedStatus(aggregate: RouteModeAggregate): boolean {

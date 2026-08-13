@@ -10,7 +10,8 @@ export type SampleStatus =
   | 'blocked_write_dependency'
   | 'skipped_no_fixture'
   | 'skipped_fixture_not_navigable'
-  | 'skipped_source_not_ready';
+  | 'skipped_source_not_ready'
+  | 'skipped_unresolved_branch';
 export type FailureReasonCode =
   | 'ready_timeout'
   | 'source_timeout'
@@ -20,6 +21,7 @@ export type FailureReasonCode =
   | 'fixture_absent'
   | 'fixture_not_navigable'
   | 'source_not_ready'
+  | 'unresolved_branch'
   | 'cleanup_failed'
   | 'privacy_scan_failed'
   | 'comparison_failed'

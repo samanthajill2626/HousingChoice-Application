@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { probeLaneOwner } from './lib/sessionState.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const laneFile = path.join(repoRoot, 'e2e', '.artifacts', 'lane.json');
@@ -25,6 +26,13 @@ if (existsSync(laneFile)) {
   fakeTwilioBase = laneJson?.urls?.fake;
   if (!base || !fakeTwilioBase) {
     process.stderr.write(`[e2e-reseed] lane.json is malformed (missing urls.app or urls.fake)\n`);
+    process.exit(1);
+  }
+  const owner = await probeLaneOwner({ laneState: laneJson });
+  if (!owner.confirmed) {
+    process.stderr.write(
+      `[e2e-reseed] stale lane state (${owner.reason}): app owner could not be confirmed; refusing reseed\n`,
+    );
     process.exit(1);
   }
   process.stdout.write(`[e2e-reseed] targeting lane ${laneJson.lane} (${base})\n`);

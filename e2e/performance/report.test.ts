@@ -315,6 +315,8 @@ describe('writePerformanceReport', () => {
     expect(evaluate({ requests: [] }).mismatchCodes).toContain('missing_required_endpoint');
     expect(evaluate({ requests: [{ ...baseRequest, outcome: 'failed' }] }).mismatchCodes)
       .toContain('missing_required_endpoint');
+    expect(evaluate({ requests: [{ ...baseRequest, status: 500 }] }).mismatchCodes)
+      .toContain('missing_required_endpoint');
     expect(evaluate({ requests: [{ ...baseRequest, endpointTemplate: '/api/settings', queryKeys: [] }] }).mismatchCodes)
       .toEqual(expect.arrayContaining(['missing_required_endpoint', 'unexpected_endpoint']));
     expect(evaluate({ requests: [{ ...baseRequest, unmatchedApi: true }] }).mismatchCodes).toContain('unmatched_api');
@@ -492,11 +494,23 @@ describe('writePerformanceReport', () => {
     const input = reportInput(outputRoot, '20260812T123456789Z-eeee4444');
     input.config = { ...input.config, contractCheckpoint: true };
     Object.assign(input, {
-      outOfSampleWrites: [{
-        method: 'POST',
-        endpointTemplate: '/api/inbox/:contactId/read',
-        phase: 'out_of_sample',
-      }],
+      outOfSampleWrites: [
+        {
+          method: 'POST',
+          endpointTemplate: '/api/inbox/:contactId/read',
+          phase: 'out_of_sample',
+        },
+        {
+          method: 'POST',
+          endpointTemplate: '/api/conversations/:conversationId/read',
+          phase: 'out_of_sample',
+        },
+        {
+          method: 'POST',
+          endpointTemplate: '/api/inbox/:contactId/read',
+          phase: 'out_of_sample',
+        },
+      ],
     });
 
     const result = await writePerformanceReport(input);
@@ -504,11 +518,30 @@ describe('writePerformanceReport', () => {
     const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
     expect(result).toMatchObject({ status: 'checkpoint_mismatch', exitCode: 1 });
     expect(summary.samples.every((row: SampleResult) => row.blockedWrites.every((write) => write.phase !== 'out_of_sample'))).toBe(true);
-    expect(summary.outOfSampleWrites).toEqual([{
-      method: 'POST',
-      endpointTemplate: '/api/inbox/:contactId/read',
-      phase: 'out_of_sample',
-    }]);
+    expect(summary.outOfSampleWrites).toEqual([
+      {
+        method: 'POST',
+        endpointTemplate: '/api/inbox/:contactId/read',
+        phase: 'out_of_sample',
+      },
+      {
+        method: 'POST',
+        endpointTemplate: '/api/conversations/:conversationId/read',
+        phase: 'out_of_sample',
+      },
+      {
+        method: 'POST',
+        endpointTemplate: '/api/inbox/:contactId/read',
+        phase: 'out_of_sample',
+      },
+    ]);
+    const markdown = await readFile(join(outputRoot, input.runId, 'report.md'), 'utf8');
+    expect(markdown).toContain('- WARNING: `out_of_sample_write`');
+    const conversationRow = '| POST | /api/conversations/:conversationId/read | 1 |';
+    const inboxRow = '| POST | /api/inbox/:contactId/read | 2 |';
+    expect(markdown.match(new RegExp(conversationRow.replace(/[|/]/gu, '\\$&'), 'gu'))).toHaveLength(1);
+    expect(markdown.match(new RegExp(inboxRow.replace(/[|/]/gu, '\\$&'), 'gu'))).toHaveLength(1);
+    expect(markdown.indexOf(conversationRow)).toBeLessThan(markdown.indexOf(inboxRow));
     const checkpoint = JSON.parse(await readFile(
       join(outputRoot, input.runId, 'contract-observations.json'),
       'utf8',

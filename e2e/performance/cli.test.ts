@@ -92,6 +92,47 @@ describe('top-level profiler sequencing', () => {
     detach();
   });
 
+  it('does not arm force-exit for an unhandled rejection or override an active signal exit', () => {
+    const rejectionSource = new EventEmitter();
+    const rejectionController = new AbortController();
+    const rejectionForce = vi.fn();
+    const detachRejection = installProfilerProcessHandlers(
+      rejectionController,
+      rejectionSource as never,
+      { onForceExitRequested: rejectionForce },
+    );
+    rejectionSource.emit('unhandledRejection', new Error('private.person@example.test'));
+    expect(rejectionController.signal.reason).toEqual({ reason: 'crashed' });
+    expect(rejectionForce).not.toHaveBeenCalled();
+    detachRejection();
+
+    const signalSource = new EventEmitter();
+    const signalController = new AbortController();
+    const signalForce = vi.fn();
+    const detachSignal = installProfilerProcessHandlers(
+      signalController,
+      signalSource as never,
+      { onForceExitRequested: signalForce },
+    );
+    signalSource.emit('SIGINT');
+    signalSource.emit('unhandledRejection', new Error('late rejection'));
+    expect(signalController.signal.reason).toEqual({ reason: 'interrupted' });
+    expect(signalForce).not.toHaveBeenCalled();
+    detachSignal();
+
+    const exceptionSource = new EventEmitter();
+    const exceptionController = new AbortController();
+    const exceptionForce = vi.fn();
+    const detachException = installProfilerProcessHandlers(
+      exceptionController,
+      exceptionSource as never,
+      { onForceExitRequested: exceptionForce },
+    );
+    exceptionSource.emit('uncaughtException', new Error('fatal'));
+    expect(exceptionForce).toHaveBeenCalledOnce();
+    detachException();
+  });
+
   it('aligns the Node clock to the midpoint of the CDP timestamp round trip', async () => {
     const send = vi.fn(async (method: string) => method === 'Performance.getMetrics'
       ? { metrics: [{ name: 'Timestamp', value: 123.5 }] }

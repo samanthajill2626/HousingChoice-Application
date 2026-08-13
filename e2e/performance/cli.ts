@@ -10,7 +10,8 @@ import type {
   Page,
 } from '@playwright/test';
 import {
-  parseRunConfig,
+  parseProfilerArgs,
+  toHermeticReseedPayload,
   toSafeRunConfig,
   type ParseRunConfigDeps,
   type RunConfig,
@@ -261,7 +262,12 @@ export async function runProfiler(
   const stderr = deps.stderr ?? ((text: string) => process.stderr.write(text));
   let config: RunConfig;
   try {
-    config = parseRunConfig(argv, deps.configDeps);
+    const parsed = parseProfilerArgs(argv, deps.configDeps);
+    if (parsed.kind === 'help') {
+      stdout(parsed.text);
+      return 0;
+    }
+    config = parsed.config;
   } catch {
     stderr('configuration_invalid\n');
     return 1;
@@ -1030,22 +1036,12 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
       const lifecycle = owned as DefaultLifecycle;
       lifecycle.assertAlive();
       if (runConfig.seed === null) throw new Error('unexpected_failure');
-      const input = {
-        scale: runConfig.seed.scale,
-        contacts: runConfig.seed.contacts,
-        units: runConfig.seed.units,
-        placements: runConfig.seed.placements,
-        tours: runConfig.seed.tours,
-        conversations: runConfig.seed.conversations,
-        messagesPerConversation: runConfig.seed.messagesPerConversation,
-        broadcasts: runConfig.seed.broadcasts,
-        recipientsPerBroadcast: runConfig.seed.recipientsPerBroadcast,
-      };
+      const payload = toHermeticReseedPayload(runConfig);
       const timeoutMs = Math.max(120_000, Math.min(3_600_000, 120_000 + runConfig.seed.totalItemCount * 20));
       const response = await fetch(`${lifecycle.appBaseUrl}/__dev/performance/reseed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ input, anchor: runConfig.seed.anchor }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (response.status !== 200) {

@@ -301,20 +301,38 @@ describe('top-level profiler sequencing', () => {
     expect(JSON.parse(stdout.mock.calls[0]![0])).toMatchObject({ target: 'hermetic' });
   });
 
+  it('renders --help and -h before target parsing or any runtime side effect', async () => {
+    const loadRuntime = vi.fn();
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runProfiler(['--help'], { loadRuntime, stdout, stderr })).resolves.toBe(0);
+    const longHelp = stdout.mock.calls[0]?.[0];
+    expect(typeof longHelp).toBe('string');
+    expect(stderr).not.toHaveBeenCalled();
+    expect(loadRuntime).not.toHaveBeenCalled();
+
+    stdout.mockClear();
+    await expect(runProfiler(['hermetic', '-h'], { loadRuntime, stdout, stderr })).resolves.toBe(0);
+    expect(stdout).toHaveBeenCalledWith(longHelp);
+    expect(stderr).not.toHaveBeenCalled();
+    expect(loadRuntime).not.toHaveBeenCalled();
+  });
+
   it('prints only the resolved hermetic count manifest before runtime loading and startup', async () => {
     const events: string[] = [];
     const value = runtime(events);
     const expectedManifest = {
       scale: 1,
       contacts: 100,
-      units: 25,
+      units: 16,
       placements: 50,
       tours: 50,
       conversations: 100,
       messagesPerConversation: 10,
       broadcasts: 10,
       recipientsPerBroadcast: 25,
-      messageCount: 1000,
+      messageCount: 1210,
       requestedRecipientCount: 250,
       resolvedRecipientsPerBroadcast: 25,
       resolvedRecipientCount: 250,
@@ -322,8 +340,8 @@ describe('top-level profiler sequencing', () => {
       relayGroupCount: 20,
       clippedRelayGroupCount: 0,
       fixedUnmatchedEmailCount: 4,
-      physicalItemCount: 1339,
-      totalItemCount: 1589,
+      physicalItemCount: 1561,
+      totalItemCount: 1874,
     };
     const expectedLine = `performance_seed_counts=${JSON.stringify(expectedManifest)}\n`;
     const stdout = vi.fn((text: string) => events.push(`stdout:${text}`));

@@ -44,7 +44,7 @@ export const PERFORMANCE_SEED_BASE = Object.freeze({
   recipientsPerBroadcast: 25,
 });
 
-export const PERFORMANCE_SEED_WORKLOAD_MODEL_VERSION = 1;
+export const PERFORMANCE_SEED_WORKLOAD_MODEL_VERSION = 2;
 
 export interface PerformanceSeedInput {
   scale?: number;

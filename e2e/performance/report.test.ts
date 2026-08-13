@@ -397,6 +397,11 @@ describe('writePerformanceReport', () => {
     Object.assign(input.routeOrders[0] as object, { rawRouteIds: [secret] });
     Object.assign(input.warmup as object, { rawUrl: secret });
     Object.assign(input.relayDomCheck as object, { rawRows: [secret] });
+    input.samples.push(
+      sample('/tours', 'cold', 0, { readyMs: 110, clientTruncated: false }),
+      sample('/tours/closed', 'cold', 0, { readyMs: 120, clientTruncated: false }),
+    );
+    input.requests.push(request('/tours', 'cold', 0), request('/tours/closed', 'cold', 0));
 
     const result = await writePerformanceReport(input);
 
@@ -441,6 +446,8 @@ describe('writePerformanceReport', () => {
       kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
     });
     expect(summary.samples[2].surfaceEvidence).toEqual({ kind: 'conversation_detail', initialRenderedMessageCount: null });
+    expect(summary.samples.filter((sample: { surfaceId: string }) => sample.surfaceId.startsWith('/tours')).map((sample: { surfaceId: string }) => sample.surfaceId))
+      .toEqual(['/tours', '/tours/closed']);
     expect(summary.samples[0].blockedWrites).toEqual([{
       method: 'POST',
       endpointTemplate: '/api/inbox/:contactId/read',
@@ -456,7 +463,7 @@ describe('writePerformanceReport', () => {
     expect(summary.manifest.contacts).toBe(100);
 
     const requestLines = requestsText.trim().split(/\r?\n/u).map((line) => JSON.parse(line));
-    expect(requestLines).toHaveLength(2);
+    expect(requestLines).toHaveLength(4);
     expect(Object.keys(requestLines[0]).sort()).toEqual([
       'durationMs', 'endpointTemplate', 'method', 'mode', 'originClass', 'outcome',
       'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'surfaceId', 'startOffsetMs',
@@ -464,6 +471,7 @@ describe('writePerformanceReport', () => {
     ].sort());
     expect(requestLines[0]).toMatchObject({ outcome: 'finished', requestRole: 'required' });
     expect(requestLines[1]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
+    expect(requestLines.slice(2).map((line: { surfaceId: string }) => line.surfaceId)).toEqual(['/tours', '/tours/closed']);
     expect(requestLines[0].rawUrl).toBeUndefined();
 
     expect(report).toContain('## Cold worst offenders');

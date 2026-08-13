@@ -201,6 +201,15 @@ describe('route registry completeness', () => {
     ])).toThrow('duplicate_surface_id');
   });
 
+  it('accepts separate surface identities that share the inbox path template', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === '/inbox')!;
+    expect(() => assertRouteRegistry([
+      ...ROUTES,
+      { ...inbox, surfaceId: '/inbox-all' },
+      { ...inbox, surfaceId: '/inbox-unread' },
+    ])).not.toThrow();
+  });
+
   it('has no legacy identity aliases in persisted or joining performance sources', () => {
     const sources = [
       'types.ts', 'routes.ts', 'collect.ts', 'aggregate.ts', 'compare.ts', 'report.ts', 'selfQa.ts', 'cli.ts',

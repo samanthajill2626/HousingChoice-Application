@@ -366,7 +366,7 @@ describe('toSafeRunConfig', () => {
     const serialized = JSON.stringify(safe);
 
     expect(safe).not.toBe(internal);
-    expect(safe.seed).toMatchObject({ workloadModelVersion: 1, contacts: 100, anchor: NOW.toISOString() });
+    expect(safe.seed).toMatchObject({ workloadModelVersion: 2, contacts: 100, anchor: NOW.toISOString() });
     expect(Object.keys(safe).sort()).toEqual(
       [
         'browserChannel',

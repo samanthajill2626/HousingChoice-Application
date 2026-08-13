@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
 import type { RequestEvidence, SampleResult } from './types.js';
-import { resolveBoundSelfQaDetail, ROUTES } from './routes.js';
+import { expectedGets, resolveBoundSelfQaDetail, ROUTES } from './routes.js';
 import { writePerformanceReport } from './report.js';
 import {
   compareSelfQaSnapshots,
@@ -204,6 +204,27 @@ describe('self-QA closed proof evaluator', () => {
     expect(result.status).toBe('pass');
     expect(result.writeTuplesMatch).toBe(true);
     expect(result.sampleCount).toBe(56);
+  });
+
+  it('keeps shared-path self-QA samples and requests joined by surface identity', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === '/inbox')!;
+    const routes = ['/inbox-all', '/inbox-unread', '/inbox-recent', '/inbox-assigned'].map((surfaceId) => ({ ...inbox, surfaceId }));
+    const samples = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
+    const branches = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => ({
+      surfaceId: route.surfaceId, mode, repeat: 0, branch: { kind: 'none' as const },
+    })));
+    const requests = routes.flatMap((route) => (['cold', 'warm'] as const).flatMap((mode) =>
+      expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+      }))));
+    const result = evaluateSelfQa({
+      mode: 'narrow', routes, samples, requests, branches, attempts: expectedAttempts('narrow'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: null, supplementalSampleCount: 0,
+      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+    });
+
+    expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, status: 'pass' });
   });
 
   it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {

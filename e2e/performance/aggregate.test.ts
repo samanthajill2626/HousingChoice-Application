@@ -58,6 +58,18 @@ function sample(
 }
 
 describe('aggregateSamples', () => {
+  it('keeps shared-path surface samples in separate aggregates', () => {
+    const rows = aggregateSamples([
+      sample('/inbox-all', 'warm', 0, { readyMs: 10 }),
+      sample('/inbox-unread', 'warm', 0, { readyMs: 20 }),
+    ]);
+
+    expect(rows.map((row) => [row.surfaceId, row.metrics.readyMs.median])).toEqual([
+      ['/inbox-all', 10],
+      ['/inbox-unread', 20],
+    ]);
+  });
+
   it('computes odd and even medians with min and max', () => {
     const odd = [9, 1, 5].map((readyMs, repeat) =>
       sample('/odd', 'cold', repeat, { readyMs }),

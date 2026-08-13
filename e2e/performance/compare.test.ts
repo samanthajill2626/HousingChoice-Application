@@ -90,6 +90,22 @@ function run(
 }
 
 describe('compareRuns', () => {
+  it('matches shared-path surface aggregates by surface identity', () => {
+    const baseline = run([
+      sample('/inbox-all', 'cold', 0, { readyMs: 10 }),
+      sample('/inbox-unread', 'cold', 0, { readyMs: 20 }),
+    ]);
+    const current = run([
+      sample('/inbox-all', 'cold', 0, { readyMs: 30 }),
+      sample('/inbox-unread', 'cold', 0, { readyMs: 50 }),
+    ]);
+
+    expect(compareRuns(baseline, current).matched.map((row) => [row.surfaceId, row.metrics.readyMs.absolute])).toEqual([
+      ['/inbox-all', 20],
+      ['/inbox-unread', 30],
+    ]);
+  });
+
   it('computes matching route and mode deltas for every primary metric', () => {
     const baseline = run([
       sample('/shared', 'cold', 0),

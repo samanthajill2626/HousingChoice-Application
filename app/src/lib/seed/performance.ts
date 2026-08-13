@@ -696,6 +696,11 @@ interface LexicographicCombinationIterator<T> {
   next(): readonly T[] | undefined;
 }
 
+interface NativeRosterSelectionObserver {
+  onNativeRosterVisited?(): void;
+  onNativeRosterMaterialized?(): void;
+}
+
 function lexicographicCombinationIterator<T>(
   values: readonly T[],
   size: number,
@@ -728,6 +733,7 @@ function lexicographicCombinationIterator<T>(
 function selectNativeRosters(
   contacts: readonly NativeContactReference[],
   nativeGroups: number,
+  observer?: NativeRosterSelectionObserver,
 ): readonly (readonly NativeContactReference[])[] {
   const rotation = ([2, 3, 4] as const)
     .map((size) => ({ size, iterator: lexicographicCombinationIterator(contacts, size) }))
@@ -738,7 +744,9 @@ function selectNativeRosters(
     const entry = rotation[cursor]!;
     const roster = entry.iterator.next();
     if (!roster) throw new Error('native roster iterator exhausted before selection completed');
+    observer?.onNativeRosterVisited?.();
     rosters.push(roster);
+    observer?.onNativeRosterMaterialized?.();
     if (entry.iterator.exhausted) {
       rotation.splice(cursor, 1);
       if (rotation.length > 0) cursor %= rotation.length;
@@ -1108,6 +1116,7 @@ export function validatePerformanceConversation(conversation: ConversationItem):
 
 export function generatePerformanceSeed(
   config: ResolvedPerformanceSeedConfig,
+  observer?: NativeRosterSelectionObserver,
 ): GeneratedPerformanceSeed {
   const anchorMs = Date.parse(config.anchor);
   if (!Number.isFinite(anchorMs)) throw new Error('anchor must be an ISO timestamp');
@@ -1152,7 +1161,7 @@ export function generatePerformanceSeed(
     return { ...conversation, created_at: at(createdAtMs, 0) } satisfies ConversationItem;
   });
   const nativeContacts = activeNativeReferences(contacts);
-  const nativeRosters = selectNativeRosters(nativeContacts, config.nativeGroups);
+  const nativeRosters = selectNativeRosters(nativeContacts, config.nativeGroups, observer);
   const nativeConversations = nativeRosters.map((roster, index) =>
     buildNativeConversation(index, anchorMs, roster, tailConversations.length),
   );

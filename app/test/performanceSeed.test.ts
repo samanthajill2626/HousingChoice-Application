@@ -667,6 +667,40 @@ describe('generatePerformanceSeed', () => {
     expect(() => resolvePerformanceSeedConfig({ contacts: 20_000, nativeGroups: 20_000 }, ANCHOR)).toThrow('totalItemCount');
   });
 
+  it.each([
+    ['scale 1', resolvePerformanceSeedConfig({}, ANCHOR)],
+    ['scale 7', resolvePerformanceSeedConfig({ scale: 7 }, ANCHOR)],
+    ['cap-valid zero-density', resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 20_000, nativeGroups: 20_000, messagesPerConversation: 0, longConversationMessages: 0 }),
+      ANCHOR,
+    )],
+  ] as const)('visits and materializes no extra native roster combinations at %s', (_name, config) => {
+    let visited = 0;
+    let materialized = 0;
+
+    generatePerformanceSeed(config, {
+      onNativeRosterVisited: () => { visited += 1; },
+      onNativeRosterMaterialized: () => { materialized += 1; },
+    });
+
+    expect(visited).toBe(config.nativeGroups);
+    expect(materialized).toBe(config.nativeGroups);
+  });
+
+  it('reconciles every generated table and embedded recipient map to manifest totals', () => {
+    const { tables, manifest } = generatePerformanceSeed(resolvePerformanceSeedConfig({}, ANCHOR));
+    const physicalItemCount = Object.values(tables).reduce((total, table) => total + table.length, 0);
+    const nativeGroupMemberSlotCount = tables.conversations
+      .filter((conversation) => conversation.type === 'group_text')
+      .reduce((total, conversation) => total + (conversation.participants?.length ?? 0), 0);
+    const totalRecipientCount = tables.broadcasts
+      .reduce((total, broadcast) => total + Object.keys(broadcast.recipients).length, 0);
+
+    expect(physicalItemCount).toBe(manifest.physicalItemCount);
+    expect(nativeGroupMemberSlotCount).toBe(manifest.nativeGroupMemberSlotCount);
+    expect(totalRecipientCount).toBe(manifest.totalRecipientCount);
+  });
+
   it.each([0, 10, 10_080, 10_081, 10_082, 20_000])('replaces the relay fixture message depth at %i without backdating messages beyond its parent', (longConversationMessages) => {
     const config = resolvePerformanceSeedConfig(
       zeroWorld({ contacts: 100, conversations: 1, nativeGroups: 2, messagesPerConversation: 0, longConversationMessages }),

@@ -116,6 +116,30 @@
    * In rem (scales with root font) so it isn't a brittle pixel constant. */
   min-height: 8rem;
   overflow: auto;
+  /* Thread history paging: the manual scrollTop correction in Timeline.tsx's
+   * layout effect (`el.scrollTop += el.scrollHeight - anchor`) must be the ONLY
+   * correction applied when an older page is prepended. CSS scroll anchoring is
+   * ON by default and adjusts scrollTop by itself for content inserted above the
+   * viewport; if it fires alongside the layout effect, both compensate for the
+   * same prepend and the reader is scrolled by roughly TWICE the prepended
+   * height - worse than doing nothing.
+   *
+   * MEASURED, not assumed. With this line removed, Chromium 149 did NOT
+   * double-compensate: the e2e assertion below still passed from a mid-thread
+   * offset (scrollTop 1574, stream grown by 417px, reader held to within 2px).
+   * So this is belt-and-braces against an engine or a layout where anchoring
+   * DOES pick a node in this stream - Firefox implements it too and the e2e lane
+   * is Chromium-only - not a fix for an observed live defect. It costs nothing
+   * and makes "exactly one correction" structural instead of dependent on one
+   * engine's anchor-selection heuristics.
+   *
+   * No unit test can see either direction: jsdom performs no layout, and every
+   * jsdom anchor test sits at scroll offset 0, where native anchoring is
+   * suppressed anyway. The real-browser guard is the scrollTop assertion in
+   * e2e/tests/dashboard-next/thread-history-paging.spec.ts, which scrolls
+   * MID-thread first for exactly that reason. Do not remove this line without
+   * removing the manual correction too. */
+  overflow-anchor: none;
   padding: var(--sp-3);
   display: flex;
   flex-direction: column;

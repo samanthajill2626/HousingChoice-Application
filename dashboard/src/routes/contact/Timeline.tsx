@@ -1214,10 +1214,23 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   }, [clusters, resetScrollKey, paging?.olderPagesLoaded]);
 
   // Clear a stale anchor once the load settles. Runs after paint, so the layout
-  // effect above has already had its chance to consume it. This is what covers an
-  // older page that returns NOTHING, or whose entries are all filtered out by
-  // "Comms only" / retry-collapse - in which case `clusters` is unchanged and the
-  // layout effect may not run at all.
+  // effect above has already had its chance to consume it.
+  //
+  // What it actually covers: an older page that settles having MERGED NOTHING -
+  // the hook leaves `olderPagesLoaded` untouched for a page that returned no rows
+  // or whose rows all mapped away, so no prepend is ever signalled and the armed
+  // anchor would otherwise survive to be consumed by an unrelated later render,
+  // jumping the reader by the height of whatever changed then.
+  //
+  // It does NOT cover "the page merged but every entry is hidden by 'Comms only'
+  // / retry-collapse", which an earlier version of this comment claimed. That
+  // case reaches the layout effect and is consumed there at delta 0, by two
+  // independent routes: `visible` is `items.filter(...)` memoized on
+  // `[items, commsOnly]`, so a merge always produces a new `visible` - and
+  // therefore a new `clusters` - identity even when the rendered contents are
+  // identical; and `paging?.olderPagesLoaded` is in the layout effect's dep array
+  // regardless. Either alone schedules the effect. Both reviewers demonstrated
+  // this by experiment; the old wording would have justified deleting that dep.
   useEffect(() => {
     if (paging?.loadingOlder !== true) prependAnchorRef.current = null;
   }, [paging?.loadingOlder]);

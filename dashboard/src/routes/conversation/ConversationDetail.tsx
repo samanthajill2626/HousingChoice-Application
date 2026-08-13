@@ -473,6 +473,12 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             relayRoster={members}
             relayClosed={closed}
             relayConnecting={connecting}
+            paging={{
+              hasOlder: thread.hasOlder,
+              loadingOlder: thread.loadingOlder,
+              olderPagesLoaded: thread.olderPagesLoaded,
+              onLoadOlder: thread.loadOlder,
+            }}
             resetScrollKey={conversationId}
           />
         </div>

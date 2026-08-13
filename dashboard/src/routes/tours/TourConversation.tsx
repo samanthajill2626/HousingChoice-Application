@@ -460,6 +460,9 @@ function GroupChannel({
       });
   };
 
+  // NOTE: `paging` below comes off `thread`, never off the `items` passed here:
+  // `items` is the milestone-merged list, which grows for reasons that have
+  // nothing to do with a loaded older page.
   return (
     <Timeline
       status={thread.status}
@@ -471,6 +474,12 @@ function GroupChannel({
       {...(canSend && { onSend })}
       relayRoster={members}
       relayClosed={closed}
+      paging={{
+        hasOlder: thread.hasOlder,
+        loadingOlder: thread.loadingOlder,
+        olderPagesLoaded: thread.olderPagesLoaded,
+        onLoadOlder: thread.loadOlder,
+      }}
       resetScrollKey={conversationId}
     />
   );

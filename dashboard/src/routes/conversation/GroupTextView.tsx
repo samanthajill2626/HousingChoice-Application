@@ -445,6 +445,12 @@ export function GroupTextView({
               })}
               relayRoster={timelineRoster}
               rosterKind="group_text"
+              paging={{
+                hasOlder: thread.hasOlder,
+                loadingOlder: thread.loadingOlder,
+                olderPagesLoaded: thread.olderPagesLoaded,
+                onLoadOlder: thread.loadOlder,
+              }}
               resetScrollKey={conversationId}
             />
           </div>

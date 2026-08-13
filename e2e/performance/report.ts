@@ -412,7 +412,9 @@ function cloneManifest(manifest: PerformanceSeedManifest | null): PerformanceSee
     requestedNativeGroups: integer(manifest.requestedNativeGroups),
     nativeGroups: integer(manifest.nativeGroups),
     nativeGroupCapacity: integer(manifest.nativeGroupCapacity),
-    nativeGroupRosterSizes: manifest.nativeGroupRosterSizes.map((size) => integer(size)),
+    nativeGroupRosterSizes: Array.isArray(manifest.nativeGroupRosterSizes)
+      ? manifest.nativeGroupRosterSizes.map((size) => integer(size))
+      : [],
     nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
     totalConversations: integer(manifest.totalConversations),
     tenantCount: integer(manifest.tenantCount),

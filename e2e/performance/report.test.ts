@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolvePerformanceSeedConfig } from '../../app/src/lib/seed/performance.js';
 import type { SafeRunConfig } from './config.js';
 import {
   createPerformanceRunId,
@@ -152,59 +153,7 @@ const CONFIG: SafeRunConfig = {
   routeOrderSeed: 42,
   contractCheckpoint: false,
   selfQa: null,
-  seed: {
-    anchor: '2026-08-12T12:00:00.000Z',
-    scale: 1,
-    contacts: 100,
-    units: 25,
-    placements: 50,
-    tours: 50,
-    conversations: 100,
-    requestedNativeGroups: 21,
-    nativeGroups: 21,
-    nativeGroupCapacity: 20_000,
-    nativeGroupRosterSizes: [2, 3, 4],
-    nativeGroupMemberSlotCount: 63,
-    totalConversations: 121,
-    tenantCount: 95,
-    landlordCount: 4,
-    unknownCount: 1,
-    activeTenantCount: 81,
-    activeLandlordCount: 3,
-    activeUnknownCount: 1,
-    activeContactCount: 85,
-    deletedContactCount: 15,
-    messagesPerConversation: 10,
-    requestedLongConversationMessages: 10,
-    resolvedLongConversationMessages: 10,
-    longConversationFixturePresent: true,
-    ordinaryMessageCount: 1_200,
-    tailMessageCount: 10,
-    totalMessageCount: 1_210,
-    broadcasts: 10,
-    recipientsPerBroadcast: 25,
-    requestedLargeBroadcastRecipients: 25,
-    resolvedLargeBroadcastRecipients: 25,
-    clippedLargeBroadcastRecipients: 0,
-    largeBroadcastFixturePresent: true,
-    recipientPoolSize: 81,
-    recipientPoolSource: 'generated_tenants',
-    messageCount: 1_000,
-    requestedRecipientCount: 250,
-    resolvedRecipientsPerBroadcast: 25,
-    requestedOrdinaryRecipientCount: 225,
-    resolvedOrdinaryRecipientCount: 225,
-    clippedOrdinaryRecipientCount: 0,
-    resolvedRecipientCount: 250,
-    totalRecipientCount: 250,
-    requestedRelayGroupCount: 20,
-    relayGroupCount: 20,
-    clippedRelayGroupCount: 0,
-    fixedUnmatchedEmailCount: 4,
-    physicalItemCount: 1_339,
-    totalItemCount: 1_589,
-    fallbacks: { tenant: 'lean_tenant', landlord: 'lean_landlord', unit: 'lean_unit' },
-  },
+  seed: resolvePerformanceSeedConfig({}, '2026-08-12T12:00:00.000Z'),
 };
 
 const TARGET: TargetMetadata = {
@@ -517,6 +466,20 @@ describe('writePerformanceReport', () => {
     expect(report).toContain('summary.json');
     expect(report).toContain('requests.jsonl');
     expect((summaryText + requestsText + report).includes(secret)).toBe(false);
+  });
+
+  it('replaces a malformed native group roster with an empty closed value at the report boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-deadbeef');
+    input.config = {
+      ...input.config,
+      seed: { ...input.config.seed!, nativeGroupRosterSizes: null } as never,
+    };
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.manifest.nativeGroupRosterSizes).toEqual([]);
   });
 
   it('preserves out-of-sample evidence at run scope and emits its own checkpoint mismatch', async () => {

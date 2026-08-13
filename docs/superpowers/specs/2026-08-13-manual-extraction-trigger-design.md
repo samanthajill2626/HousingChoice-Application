@@ -142,12 +142,40 @@ Lifecycle:
   That is the same bug class as the `complete` case above, on the sibling write
   path.
 
-  Both branches gain `ConditionExpression: attribute_not_exists(_duePartition)`.
-  After a claim, that attribute is absent; if a press or an inbound message
-  re-armed the row during the run, it is present and the condition fails. On
-  failure, `fail` performs a second, scheduling-free update that records
-  `lastError` and increments `attempts` only, leaving the fresh `dueAt` and
-  `manualRequested` untouched. The re-armed run happens on its own schedule.
+  Both branches gain, and `fail` takes `listedDueAt` (the value `listDue`
+  returned, which `processRow` already holds and passes to `claim`):
+
+  ```
+  ConditionExpression: attribute_not_exists(_duePartition) OR dueAt = :listedDueAt
+  ```
+
+  **`attribute_not_exists(_duePartition)` alone is wrong**, and dangerously so.
+  `fail` is reached on two kinds of path. On the normal path the claim succeeded
+  and removed `_duePartition`, so the bare predicate holds. But when `claim`
+  itself THROWS, `processRow` returns `failed('repo', err)`
+  (`app/src/jobs/extraction.ts:367-370`) and the row was never un-armed - so the
+  bare predicate is false, `fail` would take the fallback branch forever, the
+  row would never back off and never park, and the poll would retry it every
+  interval indefinitely, writing a run-log record each time. A transient
+  DynamoDB error on one claim would produce an unbounded billed retry loop.
+
+  The disjunct fixes it without giving up the protection: an unclaimed row whose
+  `dueAt` still equals the listed value has demonstrably not been re-armed, so
+  backoff and parking proceed normally. If something DID re-arm it during the
+  throw, `dueAt` differs, the condition fails, and the press is preserved -
+  the same guarantee as the claimed path. Both paths terminate.
+
+  When the condition fails, `fail` performs a second, scheduling-free update
+  that records `lastError` and increments `attempts` only, leaving the fresh
+  `dueAt` and `manualRequested` untouched. The re-armed run happens on its own
+  schedule.
+
+  If that fallback update ALSO throws, `runDueExtractions` logs and swallows it
+  (`app/src/jobs/extraction.ts:663-667`), so the attempt is not counted and the
+  row keeps its schedule. This is exactly today's behavior when the current
+  single-step `fail` throws, and it is not made worse here - but the two-step
+  form has two writes that can fail instead of one, so the fallback logs at
+  `error` with the conversation id. Out of scope to fix properly (section 9).
 
   This also fixes the pre-existing case where an ordinary inbound message
   arriving during a failing run had its `dueAt` overwritten or removed. That bug
@@ -225,11 +253,19 @@ decides it:
 trigger: row.manualRequested === true ? 'manual' : (row.channel ?? 'manual')
 ```
 
-The `?? 'manual'` arm is defined rather than defensive. A row with no `channel`
-can only have been created by `requestManualExtraction`, and the flag is read
-before the claim clears it, so in practice the first arm always wins. The
-fallback exists so the type is total and no `undefined` can reach a stored
-record; it is asserted by a test, not left to inference.
+The `?? 'manual'` arm is a **totality device, not a second labelling rule**. The
+guarantee above is therefore stated precisely: a `manual` label originates from
+the flag on every reachable path. A row with no `channel` can only have been
+created by `requestManualExtraction`, which always sets the flag; the only way
+to strip the flag from such a row is the park branch of `fail` (4.1), and a
+parked row carries no `_duePartition`, so `listDue` never returns it and no
+draft is ever built from it. The second arm is consequently unreachable, and it
+exists so the expression is total and no `undefined` can reach a stored record.
+
+The test asserts exactly that - that the expression is total and yields a valid
+`RunTrigger` for a channel-less row - and does NOT assert that a flagless
+channel-less row "is a manual run", which would encode the contradiction rather
+than the invariant.
 
 The dashboard's `AiRunTrigger` union gains `'manual'`. **No other run-log change
 is needed:** `AiRunList.tsx:55` and `AiRunDetail.tsx:50` render `trigger` as
@@ -249,10 +285,13 @@ On success:
 3. **Filter to `tenant_1to1` and `unknown_1to1`.** `conversationsForContact`
    returns the raw union and its own header warns that a phone query can return
    `relay_group` threads, which front a pool number. Every other caller filters;
-   so does this one. Note this is a filter the automatic sites do NOT have - the
-   voice and triage hooks schedule whatever thread they are handed, because they
-   are reacting to an event on a specific thread rather than fanning out across
-   a contact's threads. Fanning out is what makes the filter necessary here.
+   so does this one. This is the SAME predicate the inbound sites already apply:
+   `touched?.type === 'tenant_1to1' || touched?.type === 'unknown_1to1'` at
+   `app/src/routes/webhooks/twilio.ts:2155-2158` and, in its own words "the EXACT
+   twilio predicate", `app/src/services/inboundEmail.ts:741-746`. The voice and
+   triage hooks do not filter, because they react to an event on one specific
+   thread rather than fanning out across a contact's threads; fanning out is
+   what makes the filter mandatory here.
 4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
    with no debounce - `dueAt = now`, as the voice and triage paths do.
 5. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
@@ -275,6 +314,10 @@ itself:
 | Contact type is `landlord`, `partner`, or `team_member` | 409 | `ineligible_contact_type` |
 | Contact has no threads at all | 409 | `no_conversations` |
 | Threads exist but none survive the type filter | 409 | `no_eligible_conversations` |
+
+The response body is `{ error: '<reason>' }`, the shape every sibling route in
+this file already returns (`res.status(404).json({ error: 'contact_not_found' })`
+at `app/src/routes/contacts.ts:1059`), so the client parses one shape.
 
 The phone-pointer case is a **404 `contact_not_found`**, reusing the branch the
 sibling contact endpoints already have rather than inventing a status: those
@@ -309,9 +352,11 @@ per-contact actions. There is no "AI suggestions area" to sit beside -
 takes `on*` callbacks plus `*Busy` flags and the parent owns every request
 (`ContactActionsMenu.tsx:11-33`). This action follows that contract exactly -
 `onRunExtraction` + `extractionBusy` - and `ContactDetail` performs the call.
-There is **no toast primitive in this dashboard**, so the outcome renders in a
-`role="status"` region in `ContactDetail`, following the existing
-`styles.deletedBanner` pattern (`ContactDetail.tsx:483`). This is small new UI
+There is **no toast primitive in this dashboard**, so the outcome renders in
+`ContactDetail`, following the existing `styles.deletedBanner` pattern
+(`ContactDetail.tsx:483`). Success uses `role="status"`; a refusal or error uses
+`role="alert"`, matching the file's own idiom for errors rather than announcing
+a failure politely. This is small new UI
 and it is load-bearing: after the deferral in section 9, it is the operator's
 only feedback that the press did anything at all. It is not optional dressing.
 
@@ -370,7 +415,8 @@ degraded, not broken.
   and every `fail` caller and fake must match the new signature. Consumers
   taking a `Pick<ExtractionRepo, ...>` view are unaffected, which is most of
   them. Known literals and fakes: `app/test/helpers/twilioWebhookHarness.ts:2886`,
-  `app/test/extractionJob.test.ts:164`, `app/test/extractionJobDraftGuard.test.ts:108`.
+  `app/test/extractionJob.test.ts:164`, `app/test/extractionJobDraftGuard.test.ts:108`,
+  `app/test/twilioSmsWebhook.test.ts:1135`.
   **`npm run typecheck` is the enumerator of record here** - the builder runs it
   before assuming this list is complete, because a missed literal is a compile
   error and a missed `Pick` view is not.
@@ -438,8 +484,12 @@ Unit:
 - `newRunDraft` records `manual` from the flag, and records a defined trigger
   for a row with no `channel` (the `?? 'manual'` arm).
 - Route: fan-out covers phone and email threads and EXCLUDES `relay_group` and
-  `landlord_1to1`; each of the four refusals returns its status and reason; a
-  repo failure is a 500; the audit entry is appended.
+  `landlord_1to1`; each of the FIVE refusals in 4.5 returns its status and
+  reason, including `no_conversations` and `no_eligible_conversations` being
+  distinguishable; a repo failure is a 500; the audit entry is appended.
+- `fail` after a THROWN claim (row still armed, `dueAt` unchanged) still backs
+  off and still parks at the threshold - the unbounded-retry regression test for
+  the disjunct in 4.1.
 
 Dashboard:
 
@@ -476,12 +526,17 @@ E2E (`e2e/`, accessibility-first selectors):
 - **A manual run writes to a real contact record.** It uses the same apply
   guards as every automatic run, so the blast radius is identical to what the
   system already does unprompted.
-- **A manual run can fail five times and park silently.** The operator gets no
-  signal - parking is a worker-side event and section 4.6's feedback covers
+- **A manual run can park silently, and possibly on its first failure.**
+  `attempts` lives on the row, not on the run, so a press inherits whatever
+  counter the thread's earlier failures left behind: a press on a row already at
+  four attempts parks on its first failure, not its fifth. The operator gets no
+  signal either way - parking is a worker-side event and 4.6's feedback covers
   queueing, not eventual outcome. The run log records each failure; nothing on
-  the contact page does. This is the invisibility gap of section 4.6 at its
-  worst, and it is the strongest reason the deferred run-status surface should
-  not stay deferred forever.
+  the contact page does. This is the invisibility gap of 4.6 at its worst, and
+  the strongest reason the deferred run-status surface should not stay deferred
+  forever. Resetting `attempts` on a manual press is NOT specified here: it
+  would change automatic backoff semantics for a manual reason, and the honest
+  fix is visibility, not a counter reset.
 
 ## 9. Out of scope
 

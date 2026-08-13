@@ -256,6 +256,13 @@ if (target === 'local') {
   );
 }
 
+// Physical table names come from the RESOLVED stage, never ambient env vars.
+// ONE definition, used by every repo/read below: the parity gate's pool-number
+// read once omitted it and silently queried the DEFAULT hc-local- prefix on
+// AWS - "Requested resource not found" on every dev/prod run, dry runs
+// included.
+const stageEnv = { ...process.env, TABLE_PREFIX: prefix };
+
 console.log(`\ntarget stage    : ${target}${target === 'prod' ? '  *** PRODUCTION ***' : ''}`);
 console.log(`target endpoint : ${endpoint ?? `AWS ${HC_REGION} (profile ${HC_PROFILE})`}`);
 console.log(`table prefix    : ${prefix}`);
@@ -297,13 +304,16 @@ try {
   // are subtracted from BOTH sides, so comparing without them turns any pool
   // number in either list into a FALSE mismatch - a new single point of refusal
   // on cutover day, and on the rehearsal dry run that is supposed to de-risk it.
-  poolNumbers = await readPoolNumbersForParity(() => createPoolNumbersRepo({ doc }).listActive(), {
-    onRetry: (attempt, err) =>
-      console.warn(
-        `  ! pool-number read failed (attempt ${attempt}): ` +
-          `${err instanceof Error ? err.message : String(err)} - retrying`,
-      ),
-  });
+  poolNumbers = await readPoolNumbersForParity(
+    () => createPoolNumbersRepo({ doc, env: stageEnv }).listActive(),
+    {
+      onRetry: (attempt, err) =>
+        console.warn(
+          `  ! pool-number read failed (attempt ${attempt}): ` +
+            `${err instanceof Error ? err.message : String(err)} - retrying`,
+        ),
+    },
+  );
 } catch (err) {
   if (!(err instanceof PoolNumbersUnavailableError)) throw err;
   console.error(`\n${err.message}`);
@@ -347,8 +357,7 @@ const report = await runApply({
   review: { contacts: review.contacts, groups: review.groups, units: review.units },
   importedAt,
   dryRun,
-  // Physical table names come from the RESOLVED stage, never ambient env vars.
-  env: { ...process.env, TABLE_PREFIX: prefix },
+  env: stageEnv,
   onProgress: (label, done, total) => {
     if (label !== lastLabel) {
       if (lastLabel) process.stdout.write('\n');
@@ -419,7 +428,6 @@ if (dryRun) console.log('\nDRY RUN - nothing was written.');
 if (!dryRun && !skipConvert) {
   console.log('\nphase 2: converting group threads to native group texts');
 
-  const stageEnv = { ...process.env, TABLE_PREFIX: prefix };
   const conversationsRepo = createConversationsRepo({ doc, env: stageEnv });
   const contactsRepo = createContactsRepo({ doc, env: stageEnv });
 

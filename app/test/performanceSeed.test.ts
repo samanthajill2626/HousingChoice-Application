@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LISTING_STATUSES, PLACEMENT_STAGES, TENANT_STATUSES, LANDLORD_STATUSES } from '../src/lib/statusModel.js';
 import { TOUR_STATUSES } from '../src/lib/toursModel.js';
+import { conversationIdForGroup } from '../src/lib/import/ids.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import {
   PERFORMANCE_SEED_BOUNDS,
@@ -416,8 +417,8 @@ describe('generatePerformanceSeed', () => {
       units: 16,
       placements: 50,
       tours: 50,
-      conversations: 100,
-      messages: 1_000,
+      conversations: 121,
+      messages: 1_210,
       broadcasts: 10,
       unmatched_email: 4,
     });
@@ -574,11 +575,15 @@ describe('generatePerformanceSeed', () => {
         created_at: expect.any(String),
       });
     }
-    expect(tables.messages).toHaveLength(config.conversations * config.messagesPerConversation);
+    expect(tables.messages).toHaveLength(config.totalMessageCount);
     for (const conversation of tables.conversations) {
       expect(() => validatePerformanceConversation(conversation)).not.toThrow();
       const messages = byConversation.get(conversation.conversationId) ?? [];
-      expect(messages).toHaveLength(config.messagesPerConversation);
+      expect(messages).toHaveLength(
+        conversation.type === 'relay_group' && conversation.status === 'open' && conversation.conversationId === 'perf-conversation-00000'
+          ? config.resolvedLongConversationMessages
+          : config.messagesPerConversation,
+      );
       expect(messages.map((row) => row.tsMsgId)).toEqual([...messages.map((row) => row.tsMsgId)].sort());
       expect(conversation).toMatchObject({
         last_activity_at: expect.any(String),
@@ -587,6 +592,109 @@ describe('generatePerformanceSeed', () => {
         created_at: expect.any(String),
       });
     }
+  });
+
+  it('generates unique canonical native groups with typed rosters and native sender attribution', () => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ contacts: 100, nativeGroups: 21, conversations: 1, messagesPerConversation: 2 }), ANCHOR);
+    const { tables } = generatePerformanceSeed(config);
+    const groups = tables.conversations.filter((row) => row.type === 'group_text');
+    const messagesByConversation = new Map<string, typeof tables.messages>();
+    for (const message of tables.messages) {
+      const rows = messagesByConversation.get(message.conversationId) ?? [];
+      rows.push(message);
+      messagesByConversation.set(message.conversationId, rows);
+    }
+
+    expect(groups).toHaveLength(config.nativeGroups);
+    expect(groups.map((group) => group.participants?.length)).toEqual(config.nativeGroupRosterSizes);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(groups.length);
+    expect(groups.some((group) => group.unread_count === 0)).toBe(true);
+    expect(groups.some((group) => (group.unread_count ?? 0) > 0)).toBe(true);
+    for (const group of groups) {
+      const roster = group.participants ?? [];
+      expect(group).toMatchObject({ status: 'group_open', ai_mode: 'manual' });
+      expect(group.pool_number).toBeUndefined();
+      expect(group.relay_status).toBeUndefined();
+      expect(group.participant_phone).toBeUndefined();
+      expect(group.participants_version).toBeUndefined();
+      expect(group.owner).toBeUndefined();
+      expect(group.ever_member_phones).toBeUndefined();
+      expect(group.conversationId).toBe(conversationIdForGroup(roster.map((participant) => participant.phone)));
+      expect(roster.every((participant) => participant.contactId.startsWith('perf-contact-'))).toBe(true);
+      for (const message of messagesByConversation.get(group.conversationId) ?? []) {
+        if (message.direction === 'inbound') {
+          expect(message.relay_sender_key).toMatch(/^phone#\+1555[0-9]{7}$/);
+          expect(['tenant', 'landlord', 'unknown']).toContain(message.author);
+        } else {
+          expect(message.author).toBe('teammate');
+          expect(message.relay_sender_key).toBe('team');
+        }
+      }
+    }
+    expect(config.nativeGroupMemberSlotCount).toBe(groups.reduce((total, group) => total + (group.participants?.length ?? 0), 0));
+  });
+
+  it.each([0, 1, 2, 3, 4, 5])('accepts every feasible native count for an active pool of %i', (activeContacts) => {
+    const contacts = activeContacts === 0 ? 0 : activeContacts + 1;
+    const base = zeroWorld({ contacts, messagesPerConversation: 0 });
+    const capacity = nativeGroupCapacity(activeContacts);
+
+    for (let requested = 0; requested <= capacity; requested += 1) {
+      expect(resolvePerformanceSeedConfig({ ...base, nativeGroups: requested }, ANCHOR).nativeGroups).toBe(requested);
+    }
+    expect(() => resolvePerformanceSeedConfig({ ...base, nativeGroups: capacity + 1 }, ANCHOR)).toThrow('nativeGroups');
+  });
+
+  it('keeps the remaining native iterators in rotation after the larger sizes exhaust', () => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ contacts: 5, nativeGroups: 11, messagesPerConversation: 0 }), ANCHOR);
+    const groups = generatePerformanceSeed(config).tables.conversations.filter((row) => row.type === 'group_text');
+
+    expect(config.nativeGroupRosterSizes).toEqual([2, 3, 4, 2, 3, 2, 3, 2, 3, 2, 2]);
+    expect(groups.map((group) => group.participants?.length)).toEqual(config.nativeGroupRosterSizes);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(11);
+  });
+
+  it('materializes only the requested native groups at the 20000 cap-valid zero-density boundary', () => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 20_000, nativeGroups: 20_000, messagesPerConversation: 0, longConversationMessages: 0 }),
+      ANCHOR,
+    );
+    const groups = generatePerformanceSeed(config).tables.conversations.filter((row) => row.type === 'group_text');
+
+    expect(config.nativeGroups).toBe(20_000);
+    expect(groups).toHaveLength(20_000);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(20_000);
+    expect(() => resolvePerformanceSeedConfig({ contacts: 20_000, nativeGroups: 20_000 }, ANCHOR)).toThrow('totalItemCount');
+  });
+
+  it.each([0, 10, 10_080, 10_081, 10_082, 20_000])('replaces the relay fixture message depth at %i without backdating messages beyond its parent', (longConversationMessages) => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 100, conversations: 1, nativeGroups: 2, messagesPerConversation: 0, longConversationMessages }),
+      ANCHOR,
+    );
+    const { tables } = generatePerformanceSeed(config);
+    const fixture = tables.conversations.find((row) => row.conversationId === 'perf-conversation-00000');
+    const fixtureMessages = tables.messages.filter((row) => row.conversationId === fixture?.conversationId);
+
+    expect(fixtureMessages).toHaveLength(longConversationMessages);
+    expect(fixtureMessages.every((row) => row.created_at >= (fixture?.created_at ?? ''))).toBe(true);
+    expect(tables.messages).toHaveLength(config.totalMessageCount);
+  });
+
+  it('uses active generated tenant recipients and makes the large terminal broadcast the fixture', () => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 100, broadcasts: 3, recipientsPerBroadcast: 2, largeBroadcastRecipients: 25 }),
+      ANCHOR,
+    );
+    const { tables } = generatePerformanceSeed(config);
+    const eligible = new Set(tables.contacts.filter((contact) => contact.type === 'tenant' && contact.deleted_at === undefined).map((contact) => contact.contactId));
+
+    expect(Object.keys(tables.broadcasts[0]?.recipients ?? {})).toHaveLength(config.resolvedLargeBroadcastRecipients);
+    expect(Object.keys(tables.broadcasts[1]?.recipients ?? {})).toHaveLength(config.resolvedRecipientsPerBroadcast);
+    expect(tables.broadcasts.every((broadcast) => Object.keys(broadcast.recipients).every((contactId) => eligible.has(contactId)))).toBe(true);
+    expect(tables.broadcasts.every((broadcast) => new Set(Object.keys(broadcast.recipients)).size === Object.keys(broadcast.recipients).length)).toBe(true);
+    const fallback = generatePerformanceSeed(resolvePerformanceSeedConfig(zeroWorld({ contacts: 0, broadcasts: 1, recipientsPerBroadcast: 2, largeBroadcastRecipients: 2 }), ANCHOR));
+    expect(Object.keys(fallback.tables.broadcasts[0]?.recipients ?? {})).toEqual(['contact-tenant-0001']);
   });
 
   it('clips relay groups without dropping conversations and enforces status-valid sparse fields', () => {
@@ -776,9 +884,12 @@ describe('resolvePerformanceSelfQaFixtures', () => {
     { placements: 49 },
     { tours: 49 },
     { conversations: 99 },
+    { nativeGroups: 20 },
     { messagesPerConversation: 9 },
+    { requestedLongConversationMessages: 9 },
     { broadcasts: 9 },
     { recipientsPerBroadcast: 24 },
+    { requestedLargeBroadcastRecipients: 24 },
   ] as const;
 
   it.each(changedConfigs)('rejects a non-default scale-1 fixture world %j', (patch) => {

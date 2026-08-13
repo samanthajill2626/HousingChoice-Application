@@ -5,6 +5,8 @@ import {
   TENANT_STATUSES,
 } from '../statusModel.js';
 import { TOUR_STATUSES, TOUR_TYPES } from '../toursModel.js';
+import { conversationIdForGroup } from '../import/ids.js';
+import { TEAM_SENDER_KEY } from '../../jobs/relayFanOut.js';
 import type { BroadcastItem, BroadcastRecipient, BroadcastStats } from '../../repos/broadcastsRepo.js';
 import type { ContactItem } from '../../repos/contactsRepo.js';
 import type {
@@ -663,6 +665,10 @@ interface ContactReference {
   phone: string;
 }
 
+interface NativeContactReference extends ContactReference {
+  type: 'tenant' | 'landlord' | 'unknown';
+}
+
 function generatedReferences(
   contacts: readonly ContactItem[],
   type: 'tenant' | 'landlord' | 'unknown',
@@ -670,6 +676,78 @@ function generatedReferences(
   return contacts
     .filter((contact) => contact.type === type)
     .map((contact) => ({ contactId: contact.contactId, phone: contact.phone ?? LEAN_TENANT_PHONE }));
+}
+
+function activeNativeReferences(contacts: readonly ContactItem[]): NativeContactReference[] {
+  return contacts.flatMap((contact) => {
+    if (
+      contact.deleted_at !== undefined ||
+      (contact.type !== 'tenant' && contact.type !== 'landlord' && contact.type !== 'unknown') ||
+      !contact.phone
+    ) {
+      return [];
+    }
+    return [{ contactId: contact.contactId, phone: contact.phone, type: contact.type }];
+  });
+}
+
+interface LexicographicCombinationIterator<T> {
+  readonly exhausted: boolean;
+  next(): readonly T[] | undefined;
+}
+
+function lexicographicCombinationIterator<T>(
+  values: readonly T[],
+  size: number,
+): LexicographicCombinationIterator<T> {
+  let indices: number[] | undefined = values.length >= size
+    ? Array.from({ length: size }, (_, index) => index)
+    : undefined;
+  return {
+    get exhausted() {
+      return indices === undefined;
+    },
+    next() {
+      if (!indices) return undefined;
+      const selected = indices.map((index) => values[index]!);
+      let cursor = indices.length - 1;
+      while (cursor >= 0 && indices[cursor] === values.length - size + cursor) cursor -= 1;
+      if (cursor < 0) {
+        indices = undefined;
+      } else {
+        indices[cursor] = (indices[cursor] ?? 0) + 1;
+        for (let index = cursor + 1; index < indices.length; index += 1) {
+          indices[index] = (indices[index - 1] ?? 0) + 1;
+        }
+      }
+      return selected;
+    },
+  };
+}
+
+function selectNativeRosters(
+  contacts: readonly NativeContactReference[],
+  nativeGroups: number,
+): readonly (readonly NativeContactReference[])[] {
+  const rotation = ([2, 3, 4] as const)
+    .map((size) => ({ size, iterator: lexicographicCombinationIterator(contacts, size) }))
+    .filter((entry) => !entry.iterator.exhausted);
+  const rosters: (readonly NativeContactReference[])[] = [];
+  let cursor = 0;
+  while (rosters.length < nativeGroups && rotation.length > 0) {
+    const entry = rotation[cursor]!;
+    const roster = entry.iterator.next();
+    if (!roster) throw new Error('native roster iterator exhausted before selection completed');
+    rosters.push(roster);
+    if (entry.iterator.exhausted) {
+      rotation.splice(cursor, 1);
+      if (rotation.length > 0) cursor %= rotation.length;
+    } else {
+      cursor = (cursor + 1) % rotation.length;
+    }
+  }
+  if (rosters.length !== nativeGroups) throw new Error('native roster selection did not satisfy configuration');
+  return rosters;
 }
 
 function oneToOneType(index: number): ConversationType {
@@ -775,6 +853,30 @@ function buildConversation(
   } satisfies ConversationItem;
 }
 
+function buildNativeConversation(
+  index: number,
+  anchorMs: number,
+  roster: readonly NativeContactReference[],
+  conversationOffset: number,
+): ConversationItem {
+  const participants: ConversationParticipant[] = roster.map((contact) => ({
+    contactId: contact.contactId,
+    phone: contact.phone,
+    name: `Synthetic ${contact.type}`,
+  }));
+  return {
+    conversationId: conversationIdForGroup(participants.map((participant) => participant.phone)),
+    type: 'group_text',
+    status: 'group_open',
+    ai_mode: 'manual',
+    participants,
+    last_activity_at: at(anchorMs, -(conversationOffset + index) * MINUTE_MS),
+    last_message_preview: `Synthetic native group preview ${padded(index)}`,
+    unread_count: index % 2 === 0 ? 2 : 0,
+    created_at: at(anchorMs, -(index + 7) * DAY_MS),
+  } satisfies ConversationItem;
+}
+
 function authorForConversation(conversation: ConversationItem, direction: 'inbound' | 'outbound'):
   MessageItem['author'] {
   if (direction === 'outbound') return 'teammate';
@@ -802,6 +904,39 @@ function buildMessage(
     direction,
     author: authorForConversation(conversation, direction),
     body: `Synthetic performance message ${messageIndex + 1}`,
+    provider_sid: `synthetic-provider-${padded(conversationIndex)}-${padded(messageIndex, 3)}`,
+    provider_ts: createdAt,
+    delivery_status: 'delivered',
+    created_at: createdAt,
+  } satisfies MessageItem;
+}
+
+function nativeAuthor(type: NativeContactReference['type']): MessageItem['author'] {
+  if (type === 'tenant' || type === 'landlord') return type;
+  return 'unknown';
+}
+
+function buildNativeMessage(
+  conversation: ConversationItem,
+  roster: readonly NativeContactReference[],
+  conversationIndex: number,
+  messageIndex: number,
+  messagesPerConversation: number,
+): MessageItem {
+  const lastActivityMs = Date.parse(conversation.last_activity_at);
+  const createdAt = at(lastActivityMs, -(messagesPerConversation - messageIndex - 1) * MINUTE_MS);
+  const messageId = `perf-msg-${padded(conversationIndex)}-${padded(messageIndex, 3)}`;
+  const direction = messageIndex % 2 === 0 ? 'inbound' : 'outbound';
+  const sender = roster[messageIndex % roster.length];
+  if (!sender) throw new Error('native conversation has no roster sender');
+  return {
+    conversationId: conversation.conversationId,
+    tsMsgId: `${createdAt}#${messageId}`,
+    type: 'sms',
+    direction,
+    author: direction === 'inbound' ? nativeAuthor(sender.type) : 'teammate',
+    relay_sender_key: direction === 'inbound' ? `phone#${sender.phone}` : TEAM_SENDER_KEY,
+    body: `Synthetic native group message ${messageIndex + 1}`,
     provider_sid: `synthetic-provider-${padded(conversationIndex)}-${padded(messageIndex, 3)}`,
     provider_ts: createdAt,
     delivery_status: 'delivered',
@@ -939,6 +1074,27 @@ export function validatePerformanceConversation(conversation: ConversationItem):
     return;
   }
 
+  if (conversation.type === 'group_text') {
+    if (
+      conversation.status !== 'group_open' ||
+      conversation.ai_mode !== 'manual' ||
+      conversation.participants.length < 2 ||
+      conversation.participant_phone !== undefined ||
+      conversation.relay_status !== undefined ||
+      conversation.pool_number !== undefined ||
+      conversation.participants_version !== undefined ||
+      conversation.relay_opted_out_members !== undefined ||
+      conversation.close_nag_next_at !== undefined ||
+      conversation.close_announced_at !== undefined ||
+      conversation.placementId !== undefined ||
+      conversation.owner !== undefined ||
+      conversation.ever_member_phones !== undefined
+    ) {
+      throw new Error('performance native group conversation has invalid fields');
+    }
+    return;
+  }
+
   if (
     conversation.status !== 'open' ||
     !assertNonEmptyString(conversation.participant_phone) ||
@@ -980,27 +1136,58 @@ export function generatePerformanceSeed(
   const tours = Array.from({ length: config.tours }, (_, index) =>
     buildTour(index, anchorMs, tenantIds, unitIds, config.tours === 1),
   );
-  const conversations = Array.from({ length: config.conversations }, (_, index) =>
+  const existingConversations = Array.from({ length: config.conversations }, (_, index) =>
     buildConversation(index, anchorMs, config.relayGroupCount, contacts),
   );
-  for (const conversation of conversations) validatePerformanceConversation(conversation);
-  const messages = conversations.flatMap((conversation, conversationIndex) =>
-    Array.from({ length: config.messagesPerConversation }, (_, messageIndex) =>
-      buildMessage(
-        conversation,
-        conversationIndex,
-        messageIndex,
-        config.messagesPerConversation,
-      ),
-    ),
+  const tailConversationId = config.longConversationFixturePresent
+    ? existingConversations.find((conversation) => conversation.type === 'relay_group' && conversation.status === 'open')?.conversationId
+    : undefined;
+  const tailConversations = existingConversations.map((conversation) => {
+    if (conversation.conversationId !== tailConversationId || config.resolvedLongConversationMessages === 0) {
+      return conversation;
+    }
+    const oldestMessageMs = Date.parse(conversation.last_activity_at) -
+      (config.resolvedLongConversationMessages - 1) * MINUTE_MS;
+    const createdAtMs = Math.min(Date.parse(conversation.created_at), oldestMessageMs);
+    return { ...conversation, created_at: at(createdAtMs, 0) } satisfies ConversationItem;
+  });
+  const nativeContacts = activeNativeReferences(contacts);
+  const nativeRosters = selectNativeRosters(nativeContacts, config.nativeGroups);
+  const nativeConversations = nativeRosters.map((roster, index) =>
+    buildNativeConversation(index, anchorMs, roster, tailConversations.length),
   );
-  const recipientPool = contacts.length > 0 ? contacts.map((contact) => contact.contactId) : [LEAN_TENANT_ID];
+  const conversations = [...tailConversations, ...nativeConversations];
+  for (const conversation of conversations) validatePerformanceConversation(conversation);
+  const messages: MessageItem[] = [];
+  for (const [conversationIndex, conversation] of conversations.entries()) {
+    const messageCount = conversation.conversationId === tailConversationId
+      ? config.resolvedLongConversationMessages
+      : config.messagesPerConversation;
+    const nativeRoster = conversation.type === 'group_text'
+      ? nativeRosters[conversationIndex - tailConversations.length]
+      : undefined;
+    for (let messageIndex = 0; messageIndex < messageCount; messageIndex += 1) {
+      messages.push(nativeRoster
+        ? buildNativeMessage(conversation, nativeRoster, conversationIndex, messageIndex, messageCount)
+        : buildMessage(conversation, conversationIndex, messageIndex, messageCount));
+    }
+  }
+  const recipientPool = contacts
+    .filter((contact) =>
+      contact.type === 'tenant' &&
+      contact.deleted_at === undefined &&
+      contact.phone !== undefined &&
+      contact.consent_method !== undefined &&
+      contact.consent_at !== undefined,
+    )
+    .map((contact) => contact.contactId);
+  if (recipientPool.length === 0) recipientPool.push(LEAN_TENANT_ID);
   const broadcasts = Array.from({ length: config.broadcasts }, (_, index) =>
     buildBroadcast(
       index,
       anchorMs,
       recipientPool,
-      config.resolvedRecipientsPerBroadcast,
+      index === 0 ? config.resolvedLargeBroadcastRecipients : config.resolvedRecipientsPerBroadcast,
       unitIds,
     ),
   );
@@ -1033,9 +1220,12 @@ export function resolvePerformanceSelfQaFixtures(
     config.placements === PERFORMANCE_SEED_BASE.placements &&
     config.tours === PERFORMANCE_SEED_BASE.tours &&
     config.conversations === PERFORMANCE_SEED_BASE.conversations &&
+    config.nativeGroups === PERFORMANCE_SEED_BASE.nativeGroups &&
     config.messagesPerConversation === PERFORMANCE_SEED_BASE.messagesPerConversation &&
+    config.requestedLongConversationMessages === config.messagesPerConversation &&
     config.broadcasts === PERFORMANCE_SEED_BASE.broadcasts &&
-    config.recipientsPerBroadcast === PERFORMANCE_SEED_BASE.recipientsPerBroadcast;
+    config.recipientsPerBroadcast === PERFORMANCE_SEED_BASE.recipientsPerBroadcast &&
+    config.requestedLargeBroadcastRecipients === config.recipientsPerBroadcast;
   if (!isDefaultScaleOne) {
     throw new Error('performance self-QA fixtures require the default scale-1 configuration');
   }

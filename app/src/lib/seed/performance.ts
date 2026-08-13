@@ -22,17 +22,21 @@ export const PERFORMANCE_SEED_BOUNDS = Object.freeze({
   scale: Object.freeze({ min: 1, max: 100 }),
   entityCount: Object.freeze({ min: 0, max: 20_000 }),
   messagesPerConversation: Object.freeze({ min: 0, max: 100 }),
+  longConversationMessages: Object.freeze({ min: 0, max: 20_000 }),
   recipientsPerBroadcast: Object.freeze({ min: 0, max: 1_000 }),
+  largeBroadcastRecipients: Object.freeze({ min: 0, max: 1_000 }),
+  nativeGroups: Object.freeze({ min: 0, max: 20_000 }),
   relayGroups: Object.freeze({ max: 1_000 }),
   totalItems: Object.freeze({ max: 250_000 }),
 });
 
 export const PERFORMANCE_SEED_BASE = Object.freeze({
   contacts: 100,
-  units: 25,
+  units: 16,
   placements: 50,
   tours: 50,
   conversations: 100,
+  nativeGroups: 21,
   messagesPerConversation: 10,
   broadcasts: 10,
   recipientsPerBroadcast: 25,
@@ -45,9 +49,12 @@ export interface PerformanceSeedInput {
   placements?: number;
   tours?: number;
   conversations?: number;
+  nativeGroups?: number;
   messagesPerConversation?: number;
+  longConversationMessages?: number;
   broadcasts?: number;
   recipientsPerBroadcast?: number;
+  largeBroadcastRecipients?: number;
 }
 
 export interface PerformanceSeedFallbacks {
@@ -64,13 +71,40 @@ export interface ResolvedPerformanceSeedConfig {
   placements: number;
   tours: number;
   conversations: number;
+  requestedNativeGroups: number;
+  nativeGroups: number;
+  nativeGroupCapacity: number;
+  nativeGroupRosterSizes: readonly number[];
+  nativeGroupMemberSlotCount: number;
+  totalConversations: number;
+  tenantCount: number;
+  landlordCount: number;
+  unknownCount: number;
+  activeTenantCount: number;
+  activeLandlordCount: number;
+  activeUnknownCount: number;
+  activeContactCount: number;
+  deletedContactCount: number;
   messagesPerConversation: number;
+  requestedLongConversationMessages: number;
+  resolvedLongConversationMessages: number;
+  longConversationFixturePresent: boolean;
+  ordinaryMessageCount: number;
+  tailMessageCount: number;
+  totalMessageCount: number;
   broadcasts: number;
   recipientsPerBroadcast: number;
+  requestedLargeBroadcastRecipients: number;
+  resolvedLargeBroadcastRecipients: number;
+  clippedLargeBroadcastRecipients: number;
+  largeBroadcastFixturePresent: boolean;
+  recipientPoolSize: number;
+  recipientPoolSource: 'generated_tenants' | 'lean_tenant';
   messageCount: number;
   requestedRecipientCount: number;
   resolvedRecipientsPerBroadcast: number;
   resolvedRecipientCount: number;
+  totalRecipientCount: number;
   requestedRelayGroupCount: number;
   relayGroupCount: number;
   clippedRelayGroupCount: number;
@@ -80,7 +114,65 @@ export interface ResolvedPerformanceSeedConfig {
   fallbacks: PerformanceSeedFallbacks;
 }
 
-export type PerformanceSeedManifest = ResolvedPerformanceSeedConfig;
+export type PerformanceSeedManifest = Omit<
+  ResolvedPerformanceSeedConfig,
+  | 'requestedNativeGroups'
+  | 'nativeGroups'
+  | 'nativeGroupCapacity'
+  | 'nativeGroupRosterSizes'
+  | 'nativeGroupMemberSlotCount'
+  | 'totalConversations'
+  | 'tenantCount'
+  | 'landlordCount'
+  | 'unknownCount'
+  | 'activeTenantCount'
+  | 'activeLandlordCount'
+  | 'activeUnknownCount'
+  | 'activeContactCount'
+  | 'deletedContactCount'
+  | 'requestedLongConversationMessages'
+  | 'resolvedLongConversationMessages'
+  | 'longConversationFixturePresent'
+  | 'ordinaryMessageCount'
+  | 'tailMessageCount'
+  | 'totalMessageCount'
+  | 'requestedLargeBroadcastRecipients'
+  | 'resolvedLargeBroadcastRecipients'
+  | 'clippedLargeBroadcastRecipients'
+  | 'largeBroadcastFixturePresent'
+  | 'recipientPoolSize'
+  | 'recipientPoolSource'
+  | 'totalRecipientCount'
+> & Partial<Pick<
+  ResolvedPerformanceSeedConfig,
+  | 'requestedNativeGroups'
+  | 'nativeGroups'
+  | 'nativeGroupCapacity'
+  | 'nativeGroupRosterSizes'
+  | 'nativeGroupMemberSlotCount'
+  | 'totalConversations'
+  | 'tenantCount'
+  | 'landlordCount'
+  | 'unknownCount'
+  | 'activeTenantCount'
+  | 'activeLandlordCount'
+  | 'activeUnknownCount'
+  | 'activeContactCount'
+  | 'deletedContactCount'
+  | 'requestedLongConversationMessages'
+  | 'resolvedLongConversationMessages'
+  | 'longConversationFixturePresent'
+  | 'ordinaryMessageCount'
+  | 'tailMessageCount'
+  | 'totalMessageCount'
+  | 'requestedLargeBroadcastRecipients'
+  | 'resolvedLargeBroadcastRecipients'
+  | 'clippedLargeBroadcastRecipients'
+  | 'largeBroadcastFixturePresent'
+  | 'recipientPoolSize'
+  | 'recipientPoolSource'
+  | 'totalRecipientCount'
+>>;
 
 export interface PerformanceSeedTables {
   contacts: ContactItem[];
@@ -143,6 +235,64 @@ function scaledOrOverride(
   );
 }
 
+interface ContactTypeCounts {
+  tenant: number;
+  landlord: number;
+  unknown: number;
+}
+
+function resolvedContactTypeCounts(contacts: number): ContactTypeCounts {
+  const landlord = Math.floor((contacts * 4) / 100);
+  const unknown = Math.floor(contacts / 100);
+  return { tenant: contacts - landlord - unknown, landlord, unknown };
+}
+
+function deletedCount(start: number, count: number): number {
+  if (count === 0) return 0;
+  return Math.floor((start + count - 1) / 7) - Math.floor((start - 1) / 7);
+}
+
+export function saturatedCombination(n: number, k: number, cap: number): number {
+  if (k > n) return 0;
+  let value = 1n;
+  const bounded = BigInt(cap);
+  for (let i = 1; i <= k; i += 1) {
+    value = (value * BigInt(n - k + i)) / BigInt(i);
+    if (value >= bounded) return cap;
+  }
+  return Number(value);
+}
+
+export function nativeGroupCapacity(activeContacts: number): number {
+  let total = 0;
+  for (const size of [2, 3, 4] as const) {
+    total = Math.min(
+      PERFORMANCE_SEED_BOUNDS.entityCount.max,
+      total + saturatedCombination(activeContacts, size, PERFORMANCE_SEED_BOUNDS.entityCount.max),
+    );
+  }
+  return total;
+}
+
+function nativeGroupRosterSizes(activeContacts: number, nativeGroups: number): readonly number[] {
+  const remaining = ([2, 3, 4] as const).map((size) =>
+    saturatedCombination(activeContacts, size, PERFORMANCE_SEED_BOUNDS.entityCount.max),
+  );
+  const sizes: number[] = [];
+  while (sizes.length < nativeGroups) {
+    let selected = false;
+    for (let index = 0; index < remaining.length && sizes.length < nativeGroups; index += 1) {
+      const capacity = remaining[index] ?? 0;
+      if (capacity === 0) continue;
+      sizes.push(index + 2);
+      remaining[index] = capacity - 1;
+      selected = true;
+    }
+    if (!selected) break;
+  }
+  return Object.freeze(sizes);
+}
+
 export function resolvePerformanceSeedConfig(
   input: PerformanceSeedInput = {},
   anchor?: string,
@@ -169,6 +319,12 @@ export function resolvePerformanceSeedConfig(
     PERFORMANCE_SEED_BASE.conversations,
     scale,
   );
+  const nativeGroups = scaledOrOverride(
+    'nativeGroups',
+    input.nativeGroups,
+    PERFORMANCE_SEED_BASE.nativeGroups,
+    scale,
+  );
   const broadcasts = scaledOrOverride(
     'broadcasts',
     input.broadcasts,
@@ -181,18 +337,72 @@ export function resolvePerformanceSeedConfig(
     PERFORMANCE_SEED_BOUNDS.messagesPerConversation.min,
     PERFORMANCE_SEED_BOUNDS.messagesPerConversation.max,
   );
+  const requestedLongConversationMessages = boundedInteger(
+    'longConversationMessages',
+    input.longConversationMessages ?? messagesPerConversation,
+    PERFORMANCE_SEED_BOUNDS.longConversationMessages.min,
+    PERFORMANCE_SEED_BOUNDS.longConversationMessages.max,
+  );
+  if (requestedLongConversationMessages < messagesPerConversation) {
+    throw new Error('longConversationMessages must be at least messagesPerConversation');
+  }
   const recipientsPerBroadcast = boundedInteger(
     'recipientsPerBroadcast',
     input.recipientsPerBroadcast ?? PERFORMANCE_SEED_BASE.recipientsPerBroadcast,
     PERFORMANCE_SEED_BOUNDS.recipientsPerBroadcast.min,
     PERFORMANCE_SEED_BOUNDS.recipientsPerBroadcast.max,
   );
+  const requestedLargeBroadcastRecipients = boundedInteger(
+    'largeBroadcastRecipients',
+    input.largeBroadcastRecipients ?? recipientsPerBroadcast,
+    PERFORMANCE_SEED_BOUNDS.largeBroadcastRecipients.min,
+    PERFORMANCE_SEED_BOUNDS.largeBroadcastRecipients.max,
+  );
+  if (requestedLargeBroadcastRecipients < recipientsPerBroadcast) {
+    throw new Error('largeBroadcastRecipients must be at least recipientsPerBroadcast');
+  }
 
-  const messageCount = conversations * messagesPerConversation;
+  const contactTypes = resolvedContactTypeCounts(contacts);
+  const deletedTenantCount = deletedCount(0, contactTypes.tenant);
+  const deletedLandlordCount = deletedCount(contactTypes.tenant, contactTypes.landlord);
+  const deletedUnknownCount = deletedCount(
+    contactTypes.tenant + contactTypes.landlord,
+    contactTypes.unknown,
+  );
+  const activeTenantCount = contactTypes.tenant - deletedTenantCount;
+  const activeLandlordCount = contactTypes.landlord - deletedLandlordCount;
+  const activeUnknownCount = contactTypes.unknown - deletedUnknownCount;
+  const activeContactCount = activeTenantCount + activeLandlordCount + activeUnknownCount;
+  const deletedContactCount = contacts - activeContactCount;
+  const nativeGroupCapacityValue = nativeGroupCapacity(activeContactCount);
+  if (nativeGroups > nativeGroupCapacityValue) {
+    throw new Error('nativeGroups exceeds active generated contact roster capacity');
+  }
+  const nativeGroupRosterSizesValue = nativeGroupRosterSizes(activeContactCount, nativeGroups);
+  const nativeGroupMemberSlotCount = nativeGroupRosterSizesValue.reduce((total, size) => total + size, 0);
+  const totalConversations = conversations + nativeGroups;
+  const longConversationFixturePresent = conversations > 0;
+  const resolvedLongConversationMessages = longConversationFixturePresent
+    ? requestedLongConversationMessages
+    : 0;
+  const ordinaryMessageCount =
+    (totalConversations - (longConversationFixturePresent ? 1 : 0)) * messagesPerConversation;
+  const tailMessageCount = resolvedLongConversationMessages;
+  const totalMessageCount = ordinaryMessageCount + tailMessageCount;
+  const messageCount = totalMessageCount;
   const requestedRecipientCount = broadcasts * recipientsPerBroadcast;
-  const recipientPoolSize = contacts === 0 ? 1 : contacts;
+  const recipientPoolSize = activeTenantCount === 0 ? 1 : activeTenantCount;
+  const recipientPoolSource = activeTenantCount === 0 ? 'lean_tenant' as const : 'generated_tenants' as const;
   const resolvedRecipientsPerBroadcast = Math.min(recipientsPerBroadcast, recipientPoolSize);
-  const resolvedRecipientCount = broadcasts * resolvedRecipientsPerBroadcast;
+  const largeBroadcastFixturePresent = broadcasts > 0;
+  const resolvedLargeBroadcastRecipients = largeBroadcastFixturePresent
+    ? Math.min(requestedLargeBroadcastRecipients, recipientPoolSize)
+    : 0;
+  const clippedLargeBroadcastRecipients = requestedLargeBroadcastRecipients - resolvedLargeBroadcastRecipients;
+  const totalRecipientCount = largeBroadcastFixturePresent
+    ? (broadcasts - 1) * resolvedRecipientsPerBroadcast + resolvedLargeBroadcastRecipients
+    : 0;
+  const resolvedRecipientCount = totalRecipientCount;
   const requestedRelayGroupCount = conversations === 0 ? 0 : Math.max(1, Math.floor(conversations / 5));
   const relayGroupCount = Math.min(
     requestedRelayGroupCount,
@@ -204,11 +414,11 @@ export function resolvePerformanceSeedConfig(
     units +
     placements +
     tours +
-    conversations +
-    messageCount +
+    totalConversations +
+    totalMessageCount +
     broadcasts +
     FIXED_UNMATCHED_EMAIL_COUNT;
-  const totalItemCount = physicalItemCount + resolvedRecipientCount;
+  const totalItemCount = physicalItemCount + nativeGroupMemberSlotCount + totalRecipientCount;
   if (totalItemCount > PERFORMANCE_SEED_BOUNDS.totalItems.max) {
     throw new Error('totalItemCount exceeds its allowed bound');
   }
@@ -221,13 +431,40 @@ export function resolvePerformanceSeedConfig(
     placements,
     tours,
     conversations,
+    requestedNativeGroups: nativeGroups,
+    nativeGroups,
+    nativeGroupCapacity: nativeGroupCapacityValue,
+    nativeGroupRosterSizes: nativeGroupRosterSizesValue,
+    nativeGroupMemberSlotCount,
+    totalConversations,
+    tenantCount: contactTypes.tenant,
+    landlordCount: contactTypes.landlord,
+    unknownCount: contactTypes.unknown,
+    activeTenantCount,
+    activeLandlordCount,
+    activeUnknownCount,
+    activeContactCount,
+    deletedContactCount,
     messagesPerConversation,
+    requestedLongConversationMessages,
+    resolvedLongConversationMessages,
+    longConversationFixturePresent,
+    ordinaryMessageCount,
+    tailMessageCount,
+    totalMessageCount,
     broadcasts,
     recipientsPerBroadcast,
+    requestedLargeBroadcastRecipients,
+    resolvedLargeBroadcastRecipients,
+    clippedLargeBroadcastRecipients,
+    largeBroadcastFixturePresent,
+    recipientPoolSize,
+    recipientPoolSource,
     messageCount,
     requestedRecipientCount,
     resolvedRecipientsPerBroadcast,
     resolvedRecipientCount,
+    totalRecipientCount,
     requestedRelayGroupCount,
     relayGroupCount,
     clippedRelayGroupCount,
@@ -249,13 +486,40 @@ export function toPerformanceSeedManifest(
     placements: config.placements,
     tours: config.tours,
     conversations: config.conversations,
+    requestedNativeGroups: config.requestedNativeGroups,
+    nativeGroups: config.nativeGroups,
+    nativeGroupCapacity: config.nativeGroupCapacity,
+    nativeGroupRosterSizes: [...config.nativeGroupRosterSizes],
+    nativeGroupMemberSlotCount: config.nativeGroupMemberSlotCount,
+    totalConversations: config.totalConversations,
+    tenantCount: config.tenantCount,
+    landlordCount: config.landlordCount,
+    unknownCount: config.unknownCount,
+    activeTenantCount: config.activeTenantCount,
+    activeLandlordCount: config.activeLandlordCount,
+    activeUnknownCount: config.activeUnknownCount,
+    activeContactCount: config.activeContactCount,
+    deletedContactCount: config.deletedContactCount,
     messagesPerConversation: config.messagesPerConversation,
+    requestedLongConversationMessages: config.requestedLongConversationMessages,
+    resolvedLongConversationMessages: config.resolvedLongConversationMessages,
+    longConversationFixturePresent: config.longConversationFixturePresent,
+    ordinaryMessageCount: config.ordinaryMessageCount,
+    tailMessageCount: config.tailMessageCount,
+    totalMessageCount: config.totalMessageCount,
     broadcasts: config.broadcasts,
     recipientsPerBroadcast: config.recipientsPerBroadcast,
+    requestedLargeBroadcastRecipients: config.requestedLargeBroadcastRecipients,
+    resolvedLargeBroadcastRecipients: config.resolvedLargeBroadcastRecipients,
+    clippedLargeBroadcastRecipients: config.clippedLargeBroadcastRecipients,
+    largeBroadcastFixturePresent: config.largeBroadcastFixturePresent,
+    recipientPoolSize: config.recipientPoolSize,
+    recipientPoolSource: config.recipientPoolSource,
     messageCount: config.messageCount,
     requestedRecipientCount: config.requestedRecipientCount,
     resolvedRecipientsPerBroadcast: config.resolvedRecipientsPerBroadcast,
     resolvedRecipientCount: config.resolvedRecipientCount,
+    totalRecipientCount: config.totalRecipientCount,
     requestedRelayGroupCount: config.requestedRelayGroupCount,
     relayGroupCount: config.relayGroupCount,
     clippedRelayGroupCount: config.clippedRelayGroupCount,
@@ -298,19 +562,19 @@ function at(anchorMs: number, offsetMs: number): string {
   return new Date(anchorMs + offsetMs).toISOString();
 }
 
-function contactTypeAndOrdinal(index: number): {
+function contactTypeAndOrdinal(index: number, counts: ContactTypeCounts): {
   type: 'tenant' | 'landlord' | 'unknown';
   ordinal: number;
 } {
-  const cycle = Math.floor(index / 10);
-  const position = index % 10;
-  if (position < 5) return { type: 'tenant', ordinal: cycle * 5 + position };
-  if (position < 8) return { type: 'landlord', ordinal: cycle * 3 + position - 5 };
-  return { type: 'unknown', ordinal: cycle * 2 + position - 8 };
+  if (index < counts.tenant) return { type: 'tenant', ordinal: index };
+  if (index < counts.tenant + counts.landlord) {
+    return { type: 'landlord', ordinal: index - counts.tenant };
+  }
+  return { type: 'unknown', ordinal: index - counts.tenant - counts.landlord };
 }
 
-function buildContact(index: number, anchorMs: number): ContactItem {
-  const { type, ordinal } = contactTypeAndOrdinal(index);
+function buildContact(index: number, anchorMs: number, counts: ContactTypeCounts): ContactItem {
+  const { type, ordinal } = contactTypeAndOrdinal(index, counts);
   const phone = contactPhone(index);
   const email = `perf-contact-${padded(index)}@example.test`;
   const status =
@@ -733,8 +997,13 @@ export function generatePerformanceSeed(
   const anchorMs = Date.parse(config.anchor);
   if (!Number.isFinite(anchorMs)) throw new Error('anchor must be an ISO timestamp');
 
+  const contactTypes: ContactTypeCounts = {
+    tenant: config.tenantCount,
+    landlord: config.landlordCount,
+    unknown: config.unknownCount,
+  };
   const contacts = Array.from({ length: config.contacts }, (_, index) =>
-    buildContact(index, anchorMs),
+    buildContact(index, anchorMs, contactTypes),
   );
   const tenantIds = contacts
     .filter((contact) => contact.type === 'tenant')

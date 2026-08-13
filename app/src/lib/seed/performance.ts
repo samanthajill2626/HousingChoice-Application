@@ -44,6 +44,8 @@ export const PERFORMANCE_SEED_BASE = Object.freeze({
   recipientsPerBroadcast: 25,
 });
 
+export const PERFORMANCE_SEED_WORKLOAD_MODEL_VERSION = 1;
+
 export interface PerformanceSeedInput {
   scale?: number;
   contacts?: number;
@@ -66,6 +68,7 @@ export interface PerformanceSeedFallbacks {
 }
 
 export interface ResolvedPerformanceSeedConfig {
+  workloadModelVersion: number;
   anchor: string;
   scale: number;
   contacts: number;
@@ -379,6 +382,7 @@ export function resolvePerformanceSeedConfig(
   }
 
   return Object.freeze({
+    workloadModelVersion: PERFORMANCE_SEED_WORKLOAD_MODEL_VERSION,
     anchor: normalizedAnchor(anchor, now),
     scale,
     contacts,
@@ -437,6 +441,7 @@ export function toPerformanceSeedManifest(
   config: ResolvedPerformanceSeedConfig,
 ): PerformanceSeedManifest {
   return {
+    workloadModelVersion: config.workloadModelVersion,
     anchor: config.anchor,
     scale: config.scale,
     contacts: config.contacts,

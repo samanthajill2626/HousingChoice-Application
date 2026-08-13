@@ -202,28 +202,7 @@ function ownerMarkerFailure(value: unknown): string | null {
 function hermeticSeedCountsLine(config: RunConfig): string | null {
   const seed = toSafeRunConfig(config).seed;
   if (seed === null) return null;
-  const counts = {
-    scale: seed.scale,
-    contacts: seed.contacts,
-    units: seed.units,
-    placements: seed.placements,
-    tours: seed.tours,
-    conversations: seed.conversations,
-    messagesPerConversation: seed.messagesPerConversation,
-    broadcasts: seed.broadcasts,
-    recipientsPerBroadcast: seed.recipientsPerBroadcast,
-    messageCount: seed.messageCount,
-    requestedRecipientCount: seed.requestedRecipientCount,
-    resolvedRecipientsPerBroadcast: seed.resolvedRecipientsPerBroadcast,
-    resolvedRecipientCount: seed.resolvedRecipientCount,
-    requestedRelayGroupCount: seed.requestedRelayGroupCount,
-    relayGroupCount: seed.relayGroupCount,
-    clippedRelayGroupCount: seed.clippedRelayGroupCount,
-    fixedUnmatchedEmailCount: seed.fixedUnmatchedEmailCount,
-    physicalItemCount: seed.physicalItemCount,
-    totalItemCount: seed.totalItemCount,
-  };
-  return `performance_seed_counts=${JSON.stringify(counts)}\n`;
+  return `performance_seed_counts=${JSON.stringify(seed)}\n`;
 }
 
 function safeTerminalValues(value: unknown, pattern: RegExp): string[] {

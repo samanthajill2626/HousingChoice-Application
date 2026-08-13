@@ -392,6 +392,7 @@ describe('resolvePerformanceSeedConfig', () => {
     expect(manifest).toEqual(config);
     expect(manifest).not.toBe(config);
     expect(manifestContract).toEqual(manifest);
+    expect(manifest.workloadModelVersion).toBe(1);
     expect(performanceSeedManifestHasNoOptionalKeys).toBeUndefined();
     expect(Object.keys(manifest).sort()).toEqual(Object.keys(config).sort());
   });

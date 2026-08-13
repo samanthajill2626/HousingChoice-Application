@@ -357,7 +357,7 @@ describe('parseRunConfig', () => {
 });
 
 describe('toSafeRunConfig', () => {
-  it('constructs a fresh allowlisted hermetic object with a counts-only seed manifest', () => {
+  it('constructs a fresh allowlisted hermetic object with the canonical seed manifest', () => {
     const internal = Object.assign(parse(['hermetic', '--baseline=secret/baseline.json']), {
       credential: 'credential-sentinel',
       redirect: 'redirect-sentinel',
@@ -366,7 +366,7 @@ describe('toSafeRunConfig', () => {
     const serialized = JSON.stringify(safe);
 
     expect(safe).not.toBe(internal);
-    expect(safe.seed).toMatchObject({ contacts: 100, anchor: NOW.toISOString() });
+    expect(safe.seed).toMatchObject({ workloadModelVersion: 1, contacts: 100, anchor: NOW.toISOString() });
     expect(Object.keys(safe).sort()).toEqual(
       [
         'browserChannel',

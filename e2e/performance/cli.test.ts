@@ -319,31 +319,9 @@ describe('top-level profiler sequencing', () => {
     expect(loadRuntime).not.toHaveBeenCalled();
   });
 
-  it('prints only the resolved hermetic count manifest before runtime loading and startup', async () => {
+  it('prints the canonical resolved hermetic manifest before runtime loading and startup', async () => {
     const events: string[] = [];
     const value = runtime(events);
-    const expectedManifest = {
-      scale: 1,
-      contacts: 100,
-      units: 16,
-      placements: 50,
-      tours: 50,
-      conversations: 100,
-      messagesPerConversation: 10,
-      broadcasts: 10,
-      recipientsPerBroadcast: 25,
-      messageCount: 1210,
-      requestedRecipientCount: 250,
-      resolvedRecipientsPerBroadcast: 25,
-      resolvedRecipientCount: 250,
-      requestedRelayGroupCount: 20,
-      relayGroupCount: 20,
-      clippedRelayGroupCount: 0,
-      fixedUnmatchedEmailCount: 4,
-      physicalItemCount: 1561,
-      totalItemCount: 1874,
-    };
-    const expectedLine = `performance_seed_counts=${JSON.stringify(expectedManifest)}\n`;
     const stdout = vi.fn((text: string) => events.push(`stdout:${text}`));
     const loadRuntime = vi.fn(async () => {
       events.push('load-runtime');
@@ -356,19 +334,23 @@ describe('top-level profiler sequencing', () => {
       '--baseline=baseline-path-sentinel.json',
     ], { configDeps, loadRuntime, stdout })).resolves.toBe(0);
 
-    expect(stdout.mock.calls).toEqual([[expectedLine]]);
+    expect(stdout).toHaveBeenCalledOnce();
+    const expectedLine = stdout.mock.calls[0]![0];
     expect(events.slice(0, 3)).toEqual([
       `stdout:${expectedLine}`,
       'load-runtime',
       'start',
     ]);
-    expect(JSON.parse(expectedLine.slice('performance_seed_counts='.length))).toEqual(expectedManifest);
-    expect(expectedLine).not.toContain('anchor');
-    expect(expectedLine).not.toContain('2026-08-12');
+    const printedManifest = JSON.parse(expectedLine.slice('performance_seed_counts='.length));
+    const printConfigStdout = vi.fn();
+    await expect(runProfiler(['hermetic', '--scale=1', '--print-config'], {
+      configDeps,
+      loadRuntime,
+      stdout: printConfigStdout,
+    })).resolves.toBe(0);
+    expect(printedManifest).toEqual(JSON.parse(printConfigStdout.mock.calls[0]![0]).seed);
+    expect(printedManifest).toMatchObject({ workloadModelVersion: expect.any(Number) });
     expect(expectedLine).not.toContain('baseline-path-sentinel');
-    expect(expectedLine).not.toContain('founder@example.com');
-    expect(expectedLine).not.toContain('hermetic');
-    expect(expectedLine).not.toContain('lean_tenant');
   });
 
   it('keeps the closed failure reason after the hermetic count line', async () => {

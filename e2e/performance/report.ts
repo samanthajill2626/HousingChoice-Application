@@ -400,6 +400,7 @@ function normalizedRevision(value: unknown): string | null {
 function cloneManifest(manifest: PerformanceSeedManifest | null): PerformanceSeedManifest | null {
   if (manifest === null) return null;
   return {
+    workloadModelVersion: integer(manifest.workloadModelVersion),
     anchor: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(manifest.anchor)
       ? manifest.anchor
       : '1970-01-01T00:00:00.000Z',

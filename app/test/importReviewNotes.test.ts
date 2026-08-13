@@ -161,3 +161,68 @@ describe('stripUnchangedFromBaseline', () => {
     expect(hers.status).toBe('on_hold');
   });
 });
+
+describe('status-column answers (her second review round, 2026-08-13)', () => {
+  it('"Delete" in status drops the row and NEVER reaches the stored status', () => {
+    const r = row({ status: 'Delete' });
+    const res = run(r);
+    expect(r.drop).toBe('Y');
+    expect(r.status).toBe(''); // byTypeStatus GSI can never see "Delete"
+    expect(res.interpreted).toHaveLength(1);
+  });
+
+  it('"keep" clears the column so fresh derivation applies', () => {
+    const r = row({ status: 'keep', drop: 'Y' });
+    run(r);
+    expect(r.drop).toBe('');
+    expect(r.status).toBe('');
+  });
+
+  it('"Keep tenant" also types the contact', () => {
+    const r = row({ status: 'Keep tenant', type: 'unknown' });
+    run(r);
+    expect(r.type).toBe('tenant');
+    expect(r.status).toBe('');
+  });
+
+  it('"?" on a seeded demo fixture (+1404555-01xx) is a drop', () => {
+    const r = row({ status: '?', phone: '+14045550102' });
+    const res = run(r);
+    expect(r.drop).toBe('Y');
+    expect(res.interpreted[0]!.action).toContain('demo fixture');
+  });
+
+  it('"?" on a real number stays a question - cleared, not guessed', () => {
+    const r = row({ status: '?', phone: '+16781234567' });
+    const res = run(r);
+    expect(r.drop).toBe('');
+    expect(r.status).toBe('');
+    expect(res.kept).toHaveLength(1);
+  });
+
+  it('an unrecognised value is cleared and reported, never stored', () => {
+    const r = row({ status: 'maybe later' });
+    const res = run(r);
+    expect(r.status).toBe('');
+    expect(res.kept).toHaveLength(1);
+  });
+
+  it('legal statuses pass through untouched', () => {
+    const r = row({ status: 'searching' });
+    const res = run(r);
+    expect(r.status).toBe('searching');
+    expect(res.interpreted.length + res.kept.length).toBe(0);
+  });
+
+  it('both passes run even though the input is a single-use iterator', () => {
+    // Map.values() is what the CLI passes; the notes pass must not exhaust it
+    // before the status pass runs.
+    const m = new Map([
+      ['HC-0001', row({ row_key: 'HC-0001', notes: 'Caseworker' })],
+      ['HC-0002', row({ row_key: 'HC-0002', status: 'Delete', phone: '+15550100002' })],
+    ]);
+    const res = interpretReviewNotes(m.values(), new Map());
+    expect(res.interpreted).toHaveLength(2);
+    expect(m.get('HC-0002')!.drop).toBe('Y');
+  });
+});

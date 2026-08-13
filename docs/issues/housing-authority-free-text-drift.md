@@ -172,3 +172,14 @@ regenerated both `infra/envs/{dev,prod}/tables.auto.tfvars.json`, per the gate r
 DESIGNING an infra change is feature work. What remains owed is only the `terraform apply` on
 dev (and prod at its gate) to drop the index - non-destructive, a GSI is a projection; stale
 local lanes keep a harmless extra index and fresh lanes create without it.
+
+**Founder's caseworker-org list (2026-08-13, via Cameron):** "Step Up, DCA, Hope
+Atlanta, Claratel, Hud Vash (list will expand over time but these are core ones
+I work with now)."
+
+Note the tension worth resolving when this issue is picked up: on 2026-08-09 she
+described **DCA as a housing authority** ("governs 120+ counties"); here it
+appears in her CASEWORKER-ORG list. Both may be true (DCA administers vouchers
+AND employs caseworkers she works through), which reinforces the two-dimension
+model - org-she-works-with vs authority-administering-the-voucher are different
+axes and DCA sits on both.

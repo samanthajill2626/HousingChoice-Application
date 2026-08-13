@@ -38,7 +38,12 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import { normalizeToE164 } from '../phone.js';
-import type { TransitionSource } from '../statusModel.js';
+import {
+  LANDLORD_STATUSES,
+  NON_TENANT_STATUSES,
+  TENANT_STATUSES,
+  type TransitionSource,
+} from '../statusModel.js';
 import type { ContactType } from '../../repos/contactsRepo.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
 import { groupMemberKey } from '../../services/groupMembers.js';
@@ -908,7 +913,26 @@ function resolvePerson(
     }
   }
 
-  const status = (row?.status ?? '').trim() || person.suggestedStatus;
+  // Workbook status wins ONLY when it is a legal value for the resolved type.
+  // `status` is the byTypeStatus GSI range key: a stray answer typed into the
+  // column ("Delete", "?") stored verbatim would poison the GSI partition. The
+  // interpreter clears those upstream; this is the belt-and-braces for a
+  // hand-edited workbook that never went through interpretation.
+  const validStatuses: readonly string[] =
+    type === 'tenant'
+      ? TENANT_STATUSES
+      : type === 'landlord'
+        ? LANDLORD_STATUSES
+        : NON_TENANT_STATUSES;
+  const rawStatus = (row?.status ?? '').trim();
+  if (rawStatus && !validStatuses.includes(rawStatus)) {
+    warnings.push(
+      `${person.rowKey}: status ${JSON.stringify(rawStatus)} is not a legal ${type} status - ` +
+        `using the derived suggestion (${person.suggestedStatus}) instead.`,
+    );
+  }
+  const status =
+    rawStatus && validStatuses.includes(rawStatus) ? rawStatus : person.suggestedStatus;
   const notes = (row?.notes ?? '').trim();
 
   const housingAuthority = housingAuthorityFor(person.airtableTenant?.voucherProgram);

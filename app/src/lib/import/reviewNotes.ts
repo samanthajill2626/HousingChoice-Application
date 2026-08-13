@@ -16,6 +16,11 @@
 // call, same as merge.resolveVoucherBeds) - on the 12 conflict rows Airtable
 // agreed with her hand answers on 8 of 11 it could check.
 
+import {
+  LANDLORD_STATUSES,
+  NON_TENANT_STATUSES,
+  TENANT_STATUSES,
+} from '../statusModel.js';
 import type { CsvRow } from './csv.js';
 
 export interface NoteAction {
@@ -64,7 +69,12 @@ export function interpretReviewNotes(
   const acknowledged: NoteAction[] = [];
   const kept: NoteAction[] = [];
 
-  for (const row of rows) {
+  // Materialize ONCE: callers pass Map.values(), a single-use iterator, and this
+  // function walks the rows twice (notes pass, then status-column pass). Without
+  // this the second pass would silently see nothing.
+  const allRows = [...rows];
+
+  for (const row of allRows) {
     const note = (row.notes ?? '').trim();
     if (!note) continue;
     const base: Omit<NoteAction, 'action'> = {
@@ -150,7 +160,82 @@ export function interpretReviewNotes(
     kept.push({ ...base, action: 'left in notes for human review' });
   }
 
+  interpretStatusColumn(allRows, interpreted, kept);
+
   return { interpreted, acknowledged, kept };
+}
+
+/** Every legal stored status, across all contact types. */
+const VALID_STATUSES: ReadonlySet<string> = new Set([
+  ...TENANT_STATUSES,
+  ...LANDLORD_STATUSES,
+  ...NON_TENANT_STATUSES,
+]);
+
+/** The seeded Airtable Tours demo people (+1 404-555-01xx) - never real. */
+const DEMO_FIXTURE_PHONE_RE = /^\+1404555\d{4}$/;
+
+/**
+ * The founder's SECOND review round (2026-08-13) answered in the `status`
+ * column - "Delete", "keep", "Keep tenant", "?", "unsure" - instead of notes.
+ *
+ * These must be interpreted AND CLEARED. `status` is a real stored field (the
+ * byTypeStatus GSI range key): letting "Delete" flow through apply would write
+ * it as a contact's lifecycle status and poison the GSI partition. So every
+ * non-legal status value is removed from the column no matter what - either
+ * translated into the right column, or cleared and reported for a human. A
+ * cleared cell falls back to fresh derivation, which is also the correct
+ * outcome for answered rows ("keep" means import normally).
+ */
+function interpretStatusColumn(
+  rows: Iterable<CsvRow>,
+  interpreted: NoteAction[],
+  kept: NoteAction[],
+): void {
+  for (const row of rows) {
+    const answer = (row.status ?? '').trim();
+    if (!answer || VALID_STATUSES.has(answer)) continue;
+    const base: Omit<NoteAction, 'action'> = {
+      rowKey: row.row_key ?? '',
+      phone: row.phone ?? '',
+      note: `status: ${answer}`,
+    };
+    row.status = '';
+
+    if (/^delete\.?$/i.test(answer)) {
+      row.drop = 'Y';
+      interpreted.push({ ...base, action: 'drop=Y (status column said Delete)' });
+      continue;
+    }
+    if (/^keep\b/i.test(answer)) {
+      row.drop = '';
+      const asTenant = /tenant/i.test(answer);
+      if (asTenant) row.type = 'tenant';
+      interpreted.push({
+        ...base,
+        action: asTenant ? 'kept, type=tenant (status column)' : 'kept (status column said keep)',
+      });
+      continue;
+    }
+    if (/^[?]+$/.test(answer) || /^unsure$/i.test(answer)) {
+      // "?" on a provable demo fixture is a drop; on anything real it stays a
+      // question. The fixtures are the seeded Tours people (+1 404-555-01xx)
+      // that leaked into her Airtable - she cannot recognise them because they
+      // do not exist.
+      if (DEMO_FIXTURE_PHONE_RE.test((row.phone ?? '').trim())) {
+        row.drop = 'Y';
+        interpreted.push({
+          ...base,
+          action: 'drop=Y (she did not recognise it - and it is a seeded demo fixture, +1404555-01xx)',
+        });
+      } else {
+        kept.push({ ...base, action: 'left for human review (she is unsure who this is)' });
+      }
+      continue;
+    }
+    // Unrecognised non-status value: cleared (never stored), reported.
+    kept.push({ ...base, action: 'cleared from status (not a legal value) - left for human review' });
+  }
 }
 
 /**

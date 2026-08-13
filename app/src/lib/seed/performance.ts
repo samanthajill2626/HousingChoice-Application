@@ -103,6 +103,9 @@ export interface ResolvedPerformanceSeedConfig {
   messageCount: number;
   requestedRecipientCount: number;
   resolvedRecipientsPerBroadcast: number;
+  requestedOrdinaryRecipientCount: number;
+  resolvedOrdinaryRecipientCount: number;
+  clippedOrdinaryRecipientCount: number;
   resolvedRecipientCount: number;
   totalRecipientCount: number;
   requestedRelayGroupCount: number;
@@ -114,65 +117,7 @@ export interface ResolvedPerformanceSeedConfig {
   fallbacks: PerformanceSeedFallbacks;
 }
 
-export type PerformanceSeedManifest = Omit<
-  ResolvedPerformanceSeedConfig,
-  | 'requestedNativeGroups'
-  | 'nativeGroups'
-  | 'nativeGroupCapacity'
-  | 'nativeGroupRosterSizes'
-  | 'nativeGroupMemberSlotCount'
-  | 'totalConversations'
-  | 'tenantCount'
-  | 'landlordCount'
-  | 'unknownCount'
-  | 'activeTenantCount'
-  | 'activeLandlordCount'
-  | 'activeUnknownCount'
-  | 'activeContactCount'
-  | 'deletedContactCount'
-  | 'requestedLongConversationMessages'
-  | 'resolvedLongConversationMessages'
-  | 'longConversationFixturePresent'
-  | 'ordinaryMessageCount'
-  | 'tailMessageCount'
-  | 'totalMessageCount'
-  | 'requestedLargeBroadcastRecipients'
-  | 'resolvedLargeBroadcastRecipients'
-  | 'clippedLargeBroadcastRecipients'
-  | 'largeBroadcastFixturePresent'
-  | 'recipientPoolSize'
-  | 'recipientPoolSource'
-  | 'totalRecipientCount'
-> & Partial<Pick<
-  ResolvedPerformanceSeedConfig,
-  | 'requestedNativeGroups'
-  | 'nativeGroups'
-  | 'nativeGroupCapacity'
-  | 'nativeGroupRosterSizes'
-  | 'nativeGroupMemberSlotCount'
-  | 'totalConversations'
-  | 'tenantCount'
-  | 'landlordCount'
-  | 'unknownCount'
-  | 'activeTenantCount'
-  | 'activeLandlordCount'
-  | 'activeUnknownCount'
-  | 'activeContactCount'
-  | 'deletedContactCount'
-  | 'requestedLongConversationMessages'
-  | 'resolvedLongConversationMessages'
-  | 'longConversationFixturePresent'
-  | 'ordinaryMessageCount'
-  | 'tailMessageCount'
-  | 'totalMessageCount'
-  | 'requestedLargeBroadcastRecipients'
-  | 'resolvedLargeBroadcastRecipients'
-  | 'clippedLargeBroadcastRecipients'
-  | 'largeBroadcastFixturePresent'
-  | 'recipientPoolSize'
-  | 'recipientPoolSource'
-  | 'totalRecipientCount'
->>;
+export type PerformanceSeedManifest = ResolvedPerformanceSeedConfig;
 
 export interface PerformanceSeedTables {
   contacts: ContactItem[];
@@ -402,6 +347,14 @@ export function resolvePerformanceSeedConfig(
   const totalRecipientCount = largeBroadcastFixturePresent
     ? (broadcasts - 1) * resolvedRecipientsPerBroadcast + resolvedLargeBroadcastRecipients
     : 0;
+  const requestedOrdinaryRecipientCount = largeBroadcastFixturePresent
+    ? (broadcasts - 1) * recipientsPerBroadcast
+    : 0;
+  const resolvedOrdinaryRecipientCount = largeBroadcastFixturePresent
+    ? (broadcasts - 1) * resolvedRecipientsPerBroadcast
+    : 0;
+  const clippedOrdinaryRecipientCount =
+    requestedOrdinaryRecipientCount - resolvedOrdinaryRecipientCount;
   const resolvedRecipientCount = totalRecipientCount;
   const requestedRelayGroupCount = conversations === 0 ? 0 : Math.max(1, Math.floor(conversations / 5));
   const relayGroupCount = Math.min(
@@ -463,6 +416,9 @@ export function resolvePerformanceSeedConfig(
     messageCount,
     requestedRecipientCount,
     resolvedRecipientsPerBroadcast,
+    requestedOrdinaryRecipientCount,
+    resolvedOrdinaryRecipientCount,
+    clippedOrdinaryRecipientCount,
     resolvedRecipientCount,
     totalRecipientCount,
     requestedRelayGroupCount,
@@ -518,6 +474,9 @@ export function toPerformanceSeedManifest(
     messageCount: config.messageCount,
     requestedRecipientCount: config.requestedRecipientCount,
     resolvedRecipientsPerBroadcast: config.resolvedRecipientsPerBroadcast,
+    requestedOrdinaryRecipientCount: config.requestedOrdinaryRecipientCount,
+    resolvedOrdinaryRecipientCount: config.resolvedOrdinaryRecipientCount,
+    clippedOrdinaryRecipientCount: config.clippedOrdinaryRecipientCount,
     resolvedRecipientCount: config.resolvedRecipientCount,
     totalRecipientCount: config.totalRecipientCount,
     requestedRelayGroupCount: config.requestedRelayGroupCount,

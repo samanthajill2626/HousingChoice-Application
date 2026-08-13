@@ -11,9 +11,17 @@ import {
   toPerformanceSeedManifest,
   validatePerformanceConversation,
   type PerformanceSeedInput,
+  type PerformanceSeedManifest,
 } from '../src/lib/seed/performance.js';
 
 const ANCHOR = '2026-08-11T16:00:00.000Z';
+
+type OptionalKeyOf<T> = {
+  [Key in keyof T]-?: {} extends Pick<T, Key> ? Key : never;
+}[keyof T];
+type AssertNoOptionalKeys<Keys extends never> = Keys;
+type PerformanceSeedManifestHasNoOptionalKeys = AssertNoOptionalKeys<OptionalKeyOf<PerformanceSeedManifest>>;
+const performanceSeedManifestHasNoOptionalKeys: PerformanceSeedManifestHasNoOptionalKeys = undefined as never;
 
 const zeroWorld = (overrides: PerformanceSeedInput = {}): PerformanceSeedInput => ({
   scale: 1,
@@ -311,7 +319,7 @@ describe('resolvePerformanceSeedConfig', () => {
       ANCHOR,
     );
     const clipped = resolvePerformanceSeedConfig(
-      zeroWorld({ contacts: 5, broadcasts: 2, recipientsPerBroadcast: 3, largeBroadcastRecipients: 1_000 }),
+      zeroWorld({ contacts: 5, broadcasts: 2, recipientsPerBroadcast: 1_000, largeBroadcastRecipients: 1_000 }),
       ANCHOR,
     );
 
@@ -327,9 +335,13 @@ describe('resolvePerformanceSeedConfig', () => {
     });
     expect(clipped).toMatchObject({
       recipientPoolSize: 4,
-      resolvedRecipientsPerBroadcast: 3,
+      recipientsPerBroadcast: 1_000,
+      resolvedRecipientsPerBroadcast: 4,
+      requestedOrdinaryRecipientCount: 1_000,
+      resolvedOrdinaryRecipientCount: 4,
+      clippedOrdinaryRecipientCount: 996,
       resolvedLargeBroadcastRecipients: 4,
-      totalRecipientCount: 7,
+      totalRecipientCount: 8,
       clippedLargeBroadcastRecipients: 996,
     });
   });
@@ -371,12 +383,16 @@ describe('resolvePerformanceSeedConfig', () => {
     expect(() => resolvePerformanceSeedConfig({}, 'not-an-anchor')).toThrow('anchor');
   });
 
-  it('builds a detached counts-only manifest', () => {
+  it('builds a detached manifest with every workload field required by its public type', () => {
     const config = resolvePerformanceSeedConfig({}, ANCHOR);
     const manifest = toPerformanceSeedManifest(config);
+    const manifestContract: PerformanceSeedManifest = manifest;
 
     expect(manifest).toEqual(config);
     expect(manifest).not.toBe(config);
+    expect(manifestContract).toEqual(manifest);
+    expect(performanceSeedManifestHasNoOptionalKeys).toBeUndefined();
+    expect(Object.keys(manifest).sort()).toEqual(Object.keys(config).sort());
   });
 });
 

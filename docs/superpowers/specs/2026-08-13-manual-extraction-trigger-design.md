@@ -332,11 +332,19 @@ selection: `listDue` for the poll, `repo.getDue(id)` per id here. Reimplementing
 the loop instead of sharing it would fork the machinery that took four review
 rounds to get right.
 
-**The claim is what makes this safe against the poll.** Both processes claim
-before doing any work, conditionally on `dueAt` still equalling the value they
-read (`app/src/repos/extractionRepo.ts:250-285`). Whichever gets there first
-runs; the other's claim returns false and it does nothing. No new locking, no
-new race - this is the existing guarantee, exercised by a second caller.
+**The claim is NOT a mutex, and this design must not pretend otherwise.** It is
+a debounce collapse: it stops two runners claiming the SAME scheduled instance
+(`app/src/repos/extractionRepo.ts:250-285`), and says nothing about two
+instances overlapping in time. Without the guard below, pressing twice would
+routinely produce two concurrent runs on one conversation - the second press
+re-arms the row and its own endpoint call claims it while the first run is still
+in its model call. That would mean two billed calls over the same window, two
+`complete()` writes racing with independently computed cursors (so the cursor
+can move BACKWARDS), and a `fail()` from one run re-arming a row the other is
+still executing. It would also invalidate the round-4 soundness argument for the
+conditional `fail`, which enumerated interleavings assuming a single runner.
+
+**The in-flight guard (4.5a) is what makes 4.4a safe**, not the claim.
 
 The call is fire-and-forget with respect to the response, but NOT unobserved: it
 is wrapped so a rejection is logged at `error` with the conversation id and can
@@ -350,6 +358,53 @@ of the worker today; routing some runs through the app does not create it, and
 a container restart during a 10-second window is the exposure. Recorded here so
 the builder does not think this design introduced it. See section 9.
 
+### 4.4a-i The in-flight guard
+
+Before scheduling a thread, the endpoint reads its due row and SKIPS that thread
+when a run is currently executing on it. The predicate is:
+
+```
+claimedAt is present AND _duePartition is absent AND claimedAt is recent
+```
+
+**All three clauses are load-bearing.**
+
+- `claimedAt` present alone is NOT "running". Neither branch of `fail` clears
+  `claimedAt` (`app/src/repos/extractionRepo.ts:307-352`) - only `complete`
+  does - so a row that failed hours ago still carries one. Testing `claimedAt`
+  alone would refuse presses forever after any failure, which is the opposite of
+  what an operator needs at that moment.
+- `_duePartition` absent is what distinguishes "claimed and running" from
+  "claimed earlier, then re-armed". A re-armed row is scheduled again and is not
+  in flight.
+- Recency is the escape hatch for a process that died mid-run. Without it, the
+  stranded-claim hazard (4.4a) would become permanently un-pressable, turning a
+  rare pre-existing bug into an unrecoverable one. A press past the staleness
+  window proceeds normally, which also gives the operator a manual recovery path
+  that does not exist today. The window is a named constant, comfortably longer
+  than any plausible run.
+
+A skipped thread is reported honestly rather than silently: the response
+distinguishes threads scheduled from threads already running, and 4.6 tells the
+operator a run is already in progress instead of pretending a new one started.
+
+**What this guard does and does not cover.** It covers presses, which is the
+concurrency 4.4a introduces. It does NOT cover an inbound message arriving
+during a run: that re-arms the row, and if the run outlasts the debounce plus
+the poll interval, the worker can claim and start a second concurrent run. That
+hazard ships today with no manual trigger anywhere near it and needs a run
+exceeding roughly 30-90 seconds to be reachable. Closing it would require
+turning the claim into a real lease, which is out of scope (section 9).
+
+**A press absorbs a pending inbound countdown; it does not race it.** There is
+exactly one due row per conversation and the debounce is a `dueAt` value on it,
+not a separate timer. An inbound sets `dueAt = now + 30s`
+(`app/src/lib/config.ts:869`); a press slides that same row to `now`. The
+pending automatic run is therefore replaced by the manual one rather than
+running alongside it. A consequence to expect: pressing mid-burst pre-empts what
+the debounce is for, so the tenant's next text re-arms the row and produces a
+second run - correct, since that is new content, but it costs a second call.
+
 ### 4.4b `ai_run.completed` - the event that resolves the indicator
 
 `AppEventMap` gains an eighth event (`app/src/lib/events.ts:271-298`). The
@@ -357,20 +412,50 @@ the builder does not think this design introduced it. See section 9.
 is a compile error until it is registered - which is exactly what guarantees it
 crosses the worker-to-app bridge rather than silently missing it.
 
-Payload: `{ contactId?, conversationId, runId, outcome, skipReason?, errorKind?,
-wrote, suggested, notedLines }` - ids and counts only, never field values or
-message content, matching the PII rule the job already follows.
+Payload: `{ conversationId, runId, outcome, skipReason?, errorKind?, wrote,
+suggested, notedLines, contactId? }` - ids and counts only, never field values
+or message content, matching the PII rule the job already follows.
+
+**`conversationId` is the match key, not `contactId`.** `contactId` is optional
+on the draft and is never set on a `no_contact` run
+(`app/src/jobs/extraction.ts:392-397` returns before the assignment at `:399`),
+so an indicator keyed on it would hang on exactly the runs that resolve fastest.
+`conversationId` is present on every draft from allocation
+(`app/src/jobs/extraction.ts:297-299`), and 4.6 already counts one event per
+returned `conversationId`. `contactId` rides along when known, for consumers
+that want it.
+
+**The counts must be put somewhere they exist.** `wrote` and `suggested` live on
+`applyOutcome` inside `processRow` and never reach `RunDraft`; `notedLines` does.
+The builder adds the two counts to the draft where `notedLines` is already set
+(`app/src/jobs/extraction.ts:531-532`) rather than re-deriving them from
+`draft.decisions`, which is assembled best-effort and can legitimately be
+absent - a degraded observability record must not become a wrong count in a
+live event.
 
 Emitted once per run from the job, immediately after `recordRun`, for **every**
-run rather than only manual ones. A uniform rule is easier to reason about than
-a conditional emit, the volume is low, and it makes the run log live for free.
-Consumers filter by `contactId`.
+run rather than only manual ones: a uniform rule is easier to reason about than
+a conditional emit, and the volume is bounded by the extraction rate, which is
+already one model call per run. No claim is made about this making the run-log
+page live - `useAiRuns.ts` does not subscribe to the event stream and this spec
+does not change that.
 
-Emitting from the job rather than the endpoint is what makes the indicator
-correct in the case where the app-side attempt LOSES the claim: the worker runs
-it, emits the event, and the bridge carries it to the waiting page. The
-indicator resolves either way, and the page never needs to know which process
-did the work.
+`recordRun` is best-effort and swallows its own failures
+(`app/src/jobs/extraction.ts:573-578`). The emit therefore sits AFTER it but
+does not depend on it: a run whose log write failed still emits, because the
+indicator's correctness must not hinge on an observability write.
+
+Emitting from the job rather than the endpoint is what keeps the indicator
+correct when the app-side attempt LOSES the claim: the worker runs it, emits,
+and the bridge carries it to the waiting page. The page never needs to know
+which process did the work.
+
+That covers a lost claim, **but not every case**. If an inbound message slides
+`dueAt` into the future between the schedule and the app-side attempt, the
+app-side claim fails its `dueAt <= now` condition and nobody runs the row until
+that new `dueAt` comes due and the poll reaches it - up to a debounce plus a
+poll interval later. No event arrives in the meantime. This is what 4.6's
+timeout exists for; the indicator must not claim "resolves either way".
 
 ### 4.5 `POST /api/contacts/:contactId/extraction-run`
 
@@ -392,13 +477,19 @@ On success:
    triage hooks do not filter, because they react to an event on one specific
    thread rather than fanning out across a contact's threads; fanning out is
    what makes the filter mandatory here.
-4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
-   with no debounce - `dueAt = now`, as the voice and triage paths do.
-5. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
-6. Respond `200 { scheduled: number, conversationIds: string[] }`. The client
-   needs `conversationIds` to know how many completion events to wait for.
-7. **After responding**, call `runExtractionForConversations` on those ids
-   (4.4a). Failures here are logged, never surfaced through the already-sent
+4. **Apply the in-flight guard (4.4a-i)** to each surviving thread, partitioning
+   them into threads to schedule and threads already running.
+5. `requestManualExtraction(conversationId, nowIso)` for each thread to
+   schedule, with no debounce - `dueAt = now`, as the voice and triage paths do.
+6. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
+7. Respond `200 { scheduled: string[], alreadyRunning: string[] }` - both as
+   `conversationId` arrays. The client waits for one completion event per entry
+   in `scheduled`, and must NOT wait on `alreadyRunning`: those runs were
+   started by someone else and their events may already have fired. A response
+   with an empty `scheduled` and a non-empty `alreadyRunning` is a success, not
+   a refusal, and 4.6 renders it as "already running".
+8. **After responding**, call `runExtractionForConversations` on the `scheduled`
+   ids (4.4a). Failures here are logged, never surfaced through the already-sent
    response.
 
 **This is not the same fan-out as the triage re-extraction hook.** That hook
@@ -567,8 +658,12 @@ degraded, not broken.
   payload.
 - The app-side extraction deps must now be constructible in the APP process, not
   only the worker and the dev tick. `app/src/routes/dev.ts:602-640` already
-  builds exactly these deps lazily; the endpoint needs the same, and the two
-  should share one builder rather than becoming a third copy that drifts.
+  builds exactly these deps lazily, but **the builder cannot live there**: the
+  dev router is structurally absent in deployed environments, so importing it
+  from a production route would either break the build or drag dev-only code
+  into production. Extract the builder to a normal module (alongside the job or
+  under `services/extraction/`) and have BOTH `routes/dev.ts` and the new
+  endpoint consume it, so a third copy cannot drift from the worker's.
 - `dashboard/src/routes/contact/ContactActionsMenu.tsx` and its API client.
 - `app/test/helpers/twilioWebhookHarness.ts:2886` - the extraction repo fake
   must implement the new method or the harness stops type-checking.
@@ -577,10 +672,13 @@ degraded, not broken.
 
 - **Two presses in quick succession** slide the single due row forward; one run
   happens. Existing debounce behavior, correct here.
-- **A press while a run is in flight** re-arms `dueAt` and writes a fresh
-  `manualRequested` on the row the poll already claimed. Because `claim` cleared
-  the flag rather than `complete`, the finishing run cannot wipe it: a second,
-  still-manual run follows.
+- **A press while a run is in flight** is REFUSED for that thread by the
+  in-flight guard (4.4a-i) and reported as `alreadyRunning`. This replaces the
+  earlier design's "a second run follows"; with an indicator on screen, being
+  told a run is already going is more useful than silently starting a rival one,
+  and it is what keeps 4.4a from producing concurrent runs on one conversation.
+  The flag lifecycle in 4.1 still matters for the paths the guard does not
+  cover: an inbound re-arm during a run, and a failed run's retry.
 - **A press while a run is failing** is preserved by the conditional `fail`
   (4.1): the re-armed `dueAt` and fresh flag survive, and `fail` records only
   the error and the attempt count. Without that condition the press would be
@@ -648,16 +746,35 @@ In-process runner and event:
 - `ai_run.completed` is emitted once per run, after `recordRun`, for applied,
   no_op, skipped AND failed outcomes - the skip and failure cases are the whole
   point of the indicator and are the easiest to forget.
+- The emit still fires when `recordRun` fails (its failure is swallowed).
+- A `no_contact` run emits with `conversationId` present and `contactId` absent.
 - The payload carries ids and counts only. A guard test asserts no message body,
   phone number, or field value can reach it.
+
+The in-flight guard (4.4a-i), one test per clause, because each clause exists to
+stop a specific wrong behavior:
+
+- A thread whose row is claimed-and-not-re-armed is reported `alreadyRunning`
+  and is NOT re-scheduled.
+- A thread whose row carries a `claimedAt` from an OLD FAILED run - `fail`
+  leaves it set - IS scheduled normally. This is the regression test for the
+  "refuses forever after any failure" trap.
+- A thread whose row is claimed but re-armed IS scheduled.
+- A thread whose `claimedAt` is older than the staleness window IS scheduled,
+  recovering a run stranded by a dead process.
+- A press covering two threads, one running and one idle, schedules exactly one
+  and reports the other as already running.
 
 Dashboard:
 
 - The menu item enters its running state on press and is disabled against a
   second press.
 - Each of the three resolutions renders: applied, nothing-new, failed.
-- **The multi-thread case resolves only when every named `conversationId` has
-  reported**, not on the first event.
+- **The multi-thread case resolves only when every `conversationId` in
+  `scheduled` has reported**, not on the first event, and does not wait on
+  `alreadyRunning` entries.
+- An `alreadyRunning`-only response renders "already running" and does not start
+  an indicator that can never resolve.
 - **The timeout renders the "still running" copy** and the indicator stops. A
   test drives this by never delivering an event.
 - An event for a DIFFERENT contact does not resolve this contact's indicator.
@@ -720,8 +837,12 @@ E2E (`e2e/`, accessibility-first selectors):
 - **Persisting the pending indicator across a page reload.** 4.6 keeps it
   session-local; the `byEntity` query that would recover it is real but is
   machinery for a wait measured in seconds.
-- **A stale-claim reaper.** A process dying mid-run strands its row (4.4a).
-  Pre-existing, true of the worker today, and not created by this change.
+- **A stale-claim reaper, or turning the claim into a real lease.** A process
+  dying mid-run strands its row (4.4a); an inbound landing during a long run can
+  still produce two concurrent runs (4.4a-i). Both are pre-existing, both need
+  a lease to close properly, and the human has accepted them knowingly. The
+  staleness clause in 4.4a-i gives the operator a manual way out of the first
+  without building one.
 - **Rendering `windowParams` in the run detail.** Nothing renders it today
   (4.3); making the stored record truthful does not require building a viewer.
 - **Backward pagination of the transcript window.**

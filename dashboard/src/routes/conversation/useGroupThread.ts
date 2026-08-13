@@ -23,6 +23,7 @@ import {
   type TimelineItem,
   type TimelineMessage,
 } from '../../api/index.js';
+import { mergeTimelineItems, THREAD_PAGE_SIZE } from '../shared/threadPaging.js';
 import { buildRelayItems } from './useRelayThread.js';
 
 export type GroupThreadStatus = 'loading' | 'ready' | 'error';
@@ -50,6 +51,28 @@ export interface GroupThreadState {
   refetchSignal: number;
   /** Refetch now (the view's error-state retry). */
   refresh: () => void;
+  /** Older history exists beyond the oldest entry held. HEURISTIC: the messages
+   *  route returns no `hasMore`, so a FULL page is read as "probably more". A
+   *  thread that is an exact multiple of the page size shows the control once
+   *  with nothing behind it; the click fetches an empty page and it disappears.
+   *  Wrong only in the harmless direction - no history is ever unreachable.
+   *  Spec section 4.4. */
+  hasOlder: boolean;
+  /** An older page is in flight - the control is disabled. */
+  loadingOlder: boolean;
+  /** Fetch and merge one older page. No-op while one is already in flight. */
+  loadOlder: () => Promise<void>;
+  /** Incremented ONLY when an older page has merged - <Timeline>'s prepend
+   *  signal. Nothing observable from the item list can replace it: an append
+   *  grows the list without a prepend, and the "Comms only" toggle changes the
+   *  first RENDERED item without one. Spec section 4.5.
+   *
+   *  NOT interchangeable with `refetchSignal` above, despite the similar shape:
+   *  that one bumps on the SSE tick BEFORE the fetch resolves and bumps even
+   *  when the refetch then errors. This one bumps only after a page has actually
+   *  merged. A consumer that reaches for the wrong counter fires a bogus scroll
+   *  restore on every inbound message. */
+  olderPagesLoaded: number;
   /** Optimistic send: show the outbound bubble immediately; returns a temp id. */
   addOptimistic: (conversationId: string, body: string) => string;
   /** POST succeeded: stamp the real tsMsgId + status so the refetch reconciles. */
@@ -64,6 +87,19 @@ export function useGroupThread(conversationId: string): GroupThreadState {
   const [pending, setPending] = useState<PendingSend[]>([]);
   const tempIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped ONLY on a successful older-page merge - <Timeline>'s prepend signal.
+  const [olderPagesLoaded, setOlderPagesLoaded] = useState(0);
+  // [R4] Ref, not state: two clicks in one tick share one render closure.
+  const loadingOlderRef = useRef(false);
+  // [R3] The bound comes from the RAW newest-first page, never from mapped items.
+  const oldestFetchedIdRef = useRef<string | null>(null);
+  // Its own controller: an SSE refetch aborts abortRef and must not cancel an
+  // in-flight "Load older" the operator just asked for.
+  const olderAbortRef = useRef<AbortController | null>(null);
+  const loadedIdRef = useRef<string | null>(null);
 
   const addOptimistic = useCallback((convId: string, body: string): string => {
     tempIdRef.current += 1;
@@ -114,10 +150,22 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     setPending((p) => p.filter((x) => x.tempId !== tempId));
   }, []);
 
-  // A new conversation resets any leftover optimistic bubbles.
+  // A new conversation resets any leftover optimistic bubbles, and every piece
+  // of paging state that describes the OLD thread.
+  //
+  // olderPagesLoaded is deliberately NOT reset. It is a monotonic change signal,
+  // not a count of what is on screen: dropping it back to 0 would itself read as
+  // a change to <Timeline> and consume a scroll anchor that no prepend produced.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHasOlder(false);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    oldestFetchedIdRef.current = null;
+    olderAbortRef.current?.abort();
   }, [conversationId]);
 
   const fetchNow = useCallback(async () => {
@@ -125,12 +173,40 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const messages = await getConversationMessages(conversationId, {}, controller.signal);
+      const messages = await getConversationMessages(
+        conversationId,
+        { limit: THREAD_PAGE_SIZE },
+        controller.signal,
+      );
       if (controller.signal.aborted) return;
       // buildRelayItems is the shared multi-party mapper: it carries
       // relay_sender_key + delivery_recipients onto each bubble, which is
       // exactly what group messages persist (spec 4.3).
-      setServerItems(buildRelayItems(messages));
+      const fresh = buildRelayItems(messages);
+      const isFirstLoad = loadedIdRef.current !== conversationId;
+      loadedIdRef.current = conversationId;
+      // A4: the first load REPLACES (nothing is held), but it still goes through
+      // mergeTimelineItems so ordering is identical before and after any merge.
+      // buildRelayItems returns 0 for equal `at` and JS sort is stable, so a raw
+      // page keeps NEWEST-FIRST order within a tie while the merge breaks the tie
+      // by ascending id - assigning `fresh` directly would reshuffle same-instant
+      // messages on the first SSE refetch, with no user action.
+      setServerItems((prev) =>
+        isFirstLoad ? mergeTimelineItems([], fresh) : mergeTimelineItems(prev, fresh),
+      );
+      if (isFirstLoad) {
+        // Only the FIRST load decides these: hasOlder describes the far end of
+        // the thread, which a refetch of the newest page says nothing about, and
+        // re-baselining the bound would discard pages already walked.
+        //
+        // [R3] Both come from the RAW page, never the mapped items.
+        oldestFetchedIdRef.current = messages[messages.length - 1]?.tsMsgId ?? null;
+        // Spec 4.4 heuristic: the route carries no hasMore, so a FULL page means
+        // "probably more". Wrong only in the harmless direction - an exact
+        // multiple of the page size shows the control once and one empty fetch
+        // retires it; no history is ever unreachable.
+        setHasOlder(messages.length >= THREAD_PAGE_SIZE);
+      }
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -140,11 +216,49 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     }
   }, [conversationId]);
 
+  const loadOlder = useCallback(async (): Promise<void> => {
+    if (loadingOlderRef.current) return;
+    const before = oldestFetchedIdRef.current;
+    if (before === null) return;
+    loadingOlderRef.current = true;
+    olderAbortRef.current?.abort();
+    const controller = new AbortController();
+    olderAbortRef.current = controller;
+    setLoadingOlder(true);
+    try {
+      const older = await getConversationMessages(
+        conversationId,
+        { limit: THREAD_PAGE_SIZE, before },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setServerItems((prev) => mergeTimelineItems(prev, buildRelayItems(older)));
+      const oldest = older[older.length - 1]?.tsMsgId;
+      if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
+      // Spec 4.4 heuristic again, on the same RAW page the bound above came from.
+      setHasOlder(older.length >= THREAD_PAGE_SIZE);
+      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+      setOlderPagesLoaded((n) => n + 1);
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        return;
+      }
+      // Keep hasOlder as-is so the control stays and the operator can retry; the
+      // history already on screen is still correct.
+    } finally {
+      loadingOlderRef.current = false;
+      if (!controller.signal.aborted) setLoadingOlder(false);
+    }
+  }, [conversationId]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);
+
+  // Mirrors the abortRef cleanup above for the independent older-page controller.
+  useEffect(() => () => olderAbortRef.current?.abort(), []);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [refetchSignal, setRefetchSignal] = useState(0);
@@ -192,6 +306,8 @@ export function useGroupThread(conversationId: string): GroupThreadState {
 
   const refresh = useCallback(() => {
     setStatus('loading');
+    // The retry must REPLACE, not union a stale transcript into a fresh read.
+    loadedIdRef.current = null;
     void fetchNow();
   }, [fetchNow]);
 
@@ -211,6 +327,10 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     items,
     refetchSignal,
     refresh,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    olderPagesLoaded,
     addOptimistic,
     resolveOptimistic,
     failOptimistic,

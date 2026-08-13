@@ -146,8 +146,20 @@ All three gain the same three members on their returned state:
 - `loadingOlder: boolean` - a fetch is in flight; the control is disabled.
 - `loadOlder: () => Promise<void>` - fetch and merge one older page.
 
-`useRelayThread` and `useGroupThread` page with `before = <oldest held id>` and
-`limit = 50`.
+`useRelayThread` and `useGroupThread` page with `limit = 50` and
+`before = <oldest RAW fetched tsMsgId>`, tracked in a ref from the last element
+of each newest-first `Message[]` page.
+
+The bound must come from the raw page, NOT from the mapped `TimelineItem[]`:
+`toTimelineMessage` drops calls and email, so a page of 50 can map to fewer
+items - or, in the limit, to none. Deriving `hasOlder` from the raw count while
+deriving `before` from mapped items would let a fully-dropped page render a
+button that can never page, which would contradict section 4.4's guarantee that
+no history is unreachable. Both values come from the same collection.
+
+`refresh()` on `useGroupThread` is a REPLACE, not a merge: it clears the
+loaded-id ref before refetching, so the error-state retry cannot union a stale
+transcript into a fresh one.
 
 `useContactTimeline` keeps `page.nextCursor` in state and passes it back with
 the current `kinds` filter. `upcoming` and `timezone` remain first-page-only:
@@ -186,9 +198,16 @@ The contact timeline is unaffected: it uses its authoritative `nextCursor`.
 `loadingOlder`. Callers that pass none are behaviorally unchanged, which covers
 every caller not in scope here.
 
-The control renders above the first cluster with the accessible name
+The control renders above the stream with the accessible name
 "Load older messages", per the accessibility-first selector rule in
 `e2e/support/selectors.md`.
+
+It sits OUTSIDE the scroll container (in `.streamWrap`, above `.stream`), not
+inside it. Inside, the control would contribute to `el.scrollHeight` and then
+unmount in the same commit as the final prepend - the pass where `hasOlder`
+flips false - so the restored offset would under-shoot by the control's own
+height on the last "Load older" of every thread. Outside, only prepended content
+changes the height, and the delta math is exact.
 
 The subtle part is scroll. To reach the button the operator must scroll UP, so
 `atBottomRef.current` is false. The existing layout effect at
@@ -198,21 +217,44 @@ landed above them, not below.
 
 The prepend path therefore:
 
-1. records `el.scrollHeight` immediately before invoking `onLoadOlder`;
-2. after the layout pass, sets `el.scrollTop += el.scrollHeight - recorded`, so
-   the bubble the operator was reading stays exactly where it was;
+1. records `{ height: el.scrollHeight, firstItemId }` immediately before invoking
+   `onLoadOlder`, where `firstItemId` is the id of the first RENDERED item;
+2. consumes that anchor only on a layout pass where the first rendered item id
+   has CHANGED - i.e. the prepend actually landed - setting
+   `el.scrollTop += el.scrollHeight - height` so the bubble the operator was
+   reading stays exactly where it was;
 3. suppresses the `hasNewBelow` pill for that pass.
+
+Keying on the first item id, rather than on "the next pass where the count
+grew", is load-bearing. The hooks refetch on a 300ms SSE debounce, so an inbound
+message can easily land WHILE the older page is in flight. A count-keyed anchor
+would be consumed by that append: the reader would be scrolled by the height of
+a message that arrived below them, the pill for it would be swallowed, and the
+real prepend - arriving with the anchor already spent - would then raise the
+spurious pill this section exists to prevent. An id-keyed anchor is untouched by
+an append.
+
+The same keying handles the two degenerate cases: an older page that returns
+nothing, and one whose entries are all filtered out by the "Comms only" toggle
+or retry-collapse (`clusters` derives from the FILTERED `visible`, not from
+`items`). In both, the first rendered id is unchanged, the anchor is not
+consumed, and a settle effect clears it so it cannot mis-handle a later append.
 
 The existing bottom-pinning, conversation-switch reset, and "new below" pill
 behavior for appends are untouched.
 
 ### 4.6 Plumbing
 
-`ConversationDetail`, `GroupTextView`, and `ContactCommsPane` pass the three new
-props from their hook state into `<Timeline>`. `TourConversation` and
-`PlacementConversation` inherit the fix through `useRelayThread` and
-`ContactCommsTab`; the build must confirm both forward the props rather than
-assuming inheritance is automatic.
+Five files pass the three new props into `<Timeline>`: `ConversationDetail`,
+`GroupTextView`, `ContactCommsPane`, `TourConversation`, and
+`PlacementConversation`.
+
+The tour and placement hubs do NOT inherit the fix. They mount `useRelayThread`
+and `ContactCommsTab`, so they inherit the paging at the HOOK layer - but each
+renders `<Timeline>` directly, hand-listing every prop, so an unpassed prop is
+an unshipped control on the operator's two most-open pages. Only
+`ContactCommsPane` is genuinely covered by one edit: it receives the whole
+`ContactTimelineState` object, and its three owners pass it whole.
 
 ## 5. Verification
 
@@ -220,21 +262,43 @@ assuming inheritance is automatic.
 
 - `useRelayThread` / `useGroupThread`: `loadOlder` prepends and merges; a live
   refetch preserves loaded older pages; the window-shift case from section 4.1
-  leaves NO gap; `hasOlder` flips false on a short page; conversation switch
-  resets rather than merges.
+  leaves NO gap; `hasOlder` flips false on a short page; a double click fires ONE
+  request (the guard is a ref, so it holds within a single render); conversation
+  switch resets rather than merges.
 - `useContactTimeline`: `nextCursor` is kept and sent back; `kinds` is carried
-  onto the older-page request; `upcoming` / `timezone` survive an older-page
-  load; the fallback path reports `hasOlder: false`.
+  onto the older-page request; `upcoming` AND `timezone` both survive an
+  older-page load; the fallback path reports `hasOlder: false`; a `kinds` change
+  resets rather than merging across filters.
 - `Timeline`: the control renders only when `hasOlder`; a prepend holds the
-  scroll anchor; a prepend raises no "new below" pill; an append still does.
+  scroll anchor; a prepend raises no "new below" pill; an append still does; an
+  append arriving while an older page is in flight does NOT consume the prepend
+  anchor (section 4.5).
 
 ### 5.2 End to end
 
-One spec that builds its own long thread rather than touching a seed fixture:
-it posts roughly 55 inbound messages from a fresh, unseeded number through the
-fake-phone webhook seam, producing a single conversation past the ceiling. It
-then asserts the newest 50 are present, clicks "Load older messages", and
-asserts the oldest message is reachable and the button is gone.
+One spec that builds its own long thread rather than touching a seed fixture.
+It targets a RELAY GROUP: `createGroupOpen` provisions an open group with a pool
+number, then roughly 55 inbound messages from one member through the fake-phone
+webhook seam push it past the ceiling. It asserts the newest page is present and
+the oldest message is not, clicks "Load older messages", then asserts the oldest
+message is reachable and no control remains under either label.
+
+The surface choice is deliberate. A plain 1:1 conversation cannot be used:
+`/conversations/:id` REDIRECTS a 1:1 to its owning contact page, which runs
+`useContactTimeline` - the path with an authoritative cursor. That would leave
+the `before` paging and the section 4.4 heuristic in `useRelayThread` and
+`useGroupThread` with no end-to-end coverage at all, which is precisely the
+riskier half of the change. A relay group renders `useRelayThread` directly.
+
+Accepted coverage gap, stated rather than hidden: the contact-timeline cursor
+path is covered by unit tests only.
+
+Both the member number and every `MessageSid` must be per-run unique, following
+the `uniquePhone` / `uniqueSid` convention in
+`e2e/tests/dashboard-next/a2p-compliance.spec.ts`. The hermetic launcher reuses
+its DynamoDB container across boots and never clears it, so `sid#<providerSid>`
+dedup pointers accumulate; a hardcoded SID makes the inbound silently DROP on
+every run after the first.
 
 This keeps the byte-stable lean world untouched and avoids the global wipe that
 `POST /__dev/performance/reseed` would inflict on every other spec in the run.

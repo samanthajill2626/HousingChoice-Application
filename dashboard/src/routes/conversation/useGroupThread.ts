@@ -125,7 +125,7 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const messages = await getConversationMessages(conversationId, controller.signal);
+      const messages = await getConversationMessages(conversationId, {}, controller.signal);
       if (controller.signal.aborted) return;
       // buildRelayItems is the shared multi-party mapper: it carries
       // relay_sender_key + delivery_recipients onto each bubble, which is

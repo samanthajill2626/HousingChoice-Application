@@ -194,7 +194,7 @@ export function useRelayThread(conversationId: string): RelayThreadState {
       // The scheduled bucket rides along BEST-EFFORT: a failure there must
       // never blank a working thread (it just leaves Upcoming empty).
       const [messages, scheduled] = await Promise.all([
-        getConversationMessages(conversationId, controller.signal),
+        getConversationMessages(conversationId, {}, controller.signal),
         getConversationScheduled(conversationId, controller.signal).catch(
           (): ConversationScheduledPage => ({ scheduled: [] }),
         ),

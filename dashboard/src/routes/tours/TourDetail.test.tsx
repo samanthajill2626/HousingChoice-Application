@@ -1034,7 +1034,11 @@ describe('TourDetail - channel switcher', () => {
       expect.anything(),
     );
     // ...and no single-conversation transcript is fetched for a 1:1 tab at all.
-    expect(getConversationMessages).not.toHaveBeenCalledWith('c-landlord', expect.anything());
+    expect(getConversationMessages).not.toHaveBeenCalledWith(
+      'c-landlord',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('viewing an unread 1:1 tab marks the CONTACT read (inbox fan-out) - never one conversation', async () => {
@@ -1527,7 +1531,11 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     // ...and NOTHING was opened: the group pane still has no thread.
     await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
     expect(screen.getByText('No relay group yet')).toBeInTheDocument();
-    expect(getConversationMessages).not.toHaveBeenCalledWith('g-new', expect.anything());
+    expect(getConversationMessages).not.toHaveBeenCalledWith(
+      'g-new',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('"Send the relay group now" on a pending open FORCES the provision through', async () => {

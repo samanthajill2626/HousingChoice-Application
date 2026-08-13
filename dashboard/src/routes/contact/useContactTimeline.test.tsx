@@ -142,7 +142,7 @@ describe('useContactTimeline', () => {
     expect(screen.getByTestId('source').textContent).toBe('fallback');
     expect(screen.getByTestId('count').textContent).toBe('1');
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
-    expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+    expect(getConversationMessages).toHaveBeenCalledWith('c1', {}, expect.anything());
   });
 
   it('never pulls a MULTI-PARTY thread into the 1:1 fallback timeline', async () => {
@@ -185,7 +185,7 @@ describe('useContactTimeline', () => {
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
-    expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+    expect(getConversationMessages).toHaveBeenCalledWith('c1', {}, expect.anything());
   });
 
   it('threads the server upcoming[] bucket through to state', async () => {

@@ -477,14 +477,23 @@ export function getConversations(signal?: AbortSignal): Promise<ConversationsPag
 
 /** GET /api/conversations/:id/messages - newest-first page of a conversation's
  *  messages (the contact timeline FALLBACK's source). The server wraps the page
- *  under { messages }; we unwrap it here so callers get a plain Message[]. */
+ *  under { messages }; we unwrap it here so callers get a plain Message[].
+ *
+ *  `before` is an EXCLUSIVE tsMsgId bound and pages BACKWARDS (older), which is
+ *  how the thread hooks reach history beyond the newest page. `limit` is
+ *  1..MAX_PAGE_LIMIT (100); the server REJECTS anything outside that range with
+ *  a 400 rather than clamping it. Omitted = 50. */
 export async function getConversationMessages(
   conversationId: string,
+  opts: { limit?: number; before?: string } = {},
   signal?: AbortSignal,
 ): Promise<Message[]> {
   const res = await request<{ messages: Message[] }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-    { ...(signal !== undefined && { signal }) },
+    {
+      query: { limit: opts.limit, before: opts.before },
+      ...(signal !== undefined && { signal }),
+    },
   );
   return res.messages;
 }

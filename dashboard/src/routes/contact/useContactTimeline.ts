@@ -178,7 +178,7 @@ async function loadTimeline(
     const results = await Promise.allSettled(
       conversations.map(async (c) => ({
         id: c.conversationId,
-        messages: await getConversationMessages(c.conversationId, signal),
+        messages: await getConversationMessages(c.conversationId, {}, signal),
       })),
     );
     for (const r of results) {

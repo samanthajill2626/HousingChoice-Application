@@ -125,6 +125,7 @@ then-current branch rather than treating this table as a substitute for source:
 | Existing performance bases, bounds, manifest fields, and cap arithmetic | `app/src/lib/seed/performance.ts:21-81,150-238` |
 | Existing 50/30/20 contact mix and deleted-row cadence to be replaced/reported honestly | `app/src/lib/seed/performance.ts:301-346` |
 | Existing relay-group ratio and deterministic conversation/message generation | `app/src/lib/seed/performance.ts:487-586,730-795` |
+| Existing conversation/message timestamp relationship | `app/src/lib/seed/performance.ts:498-506,565-585` |
 | Existing broadcast recipient embedding | `app/src/lib/seed/performance.ts:589-641` |
 | Native `group_text` row shape | `app/src/lib/seed/lean.ts:227-246`; `app/src/repos/conversationsRepo.ts:35-59,105-130` |
 | Canonical native-group roster identity | `app/src/lib/import/ids.ts:68-76` |
@@ -136,7 +137,7 @@ then-current branch rather than treating this table as a substitute for source:
 | Existing registry and current single Inbox surface | `e2e/performance/routes.ts:475-502` |
 | Existing public CLI option inventories | `e2e/performance/config.ts:59-97` |
 | Lean-first additive performance reset | `app/src/lib/performanceSeed.ts:170-190` |
-| Lean native-group messages and sender keys | `app/src/lib/seed/lean.ts:299-332`; `dashboard/src/lib/memberAttribution.ts:1-13,26-28,39-68` |
+| Live native-group inbound/outbound sender attribution | `app/src/services/groupSend.ts:578-607`; `app/src/routes/webhooks/twilio.ts:1540-1556,1570-1579`; `dashboard/src/lib/memberAttribution.ts:39-68` |
 | App-shell unread badge request and current shell classifier | `dashboard/src/app/UnreadContext.tsx:19-38`; `e2e/performance/collect.ts:109-125` |
 | Current route-key sample, report, and comparison joins | `e2e/performance/types.ts:64-84,148-177`; `e2e/performance/report.ts:264-294`; `e2e/performance/compare.ts:24-30,56-81` |
 
@@ -231,6 +232,15 @@ replacement occurs. In that case `totalMessageCount` is
 requested value, resolved value, fixture-presence state, ordinary message count,
 tail message count, and total message count.
 
+The stored chronology remains valid at every allowed depth. For a non-empty
+designated tail, its oldest message is
+`last_activity_at - (longConversationMessages - 1) minutes`. The designated
+conversation's `created_at` is the earlier of its existing deterministic
+creation instant and that oldest-message instant, so no message predates the
+conversation. With zero messages, retain the existing deterministic creation
+instant. This timestamp resolution is pure, deterministic, and represented in
+the seed rather than performed during measurement.
+
 The tail depth is stored workload, not a render-count assertion. During the
 conversation-detail sample the profiler:
 
@@ -297,8 +307,12 @@ Every native group fixture must satisfy the current production data contract:
 - `last_activity_at`, `created_at`, provider IDs, and message sort keys are
   deterministic and unique for a fixed seed anchor and configuration;
 - every inbound native-group message carries a `relay_sender_key` in the exact
-  `phone#<E164>` form for one roster member, while outbound teammate messages do
-  not invent a member sender key.
+  `phone#<E164>` form for one roster member; its `author` is that member's
+  reviewed tenant, landlord, or partner type, with `unknown` as the honest
+  fallback;
+- every outbound teammate message carries the fixed `relay_sender_key='team'`
+  sentinel used by the live writer so the rendered transcript retains Team
+  attribution after refetch.
 
 The native-group member pool contains active generated performance contacts
 only; the lean contacts are not group-capacity fallbacks. Roster size cycles
@@ -466,13 +480,17 @@ The registry distinguishes identity, application path, and behavior explicitly.
 | --- | --- | --- |
 | `surfaceId` | Unique stable measurement identity | route ordering, sample token, request-evidence join, report map key, aggregation, ranking, baseline comparison, self-QA cardinality, and artifact allowlist |
 | `pathTemplate` | Application route/path contract, such as `/inbox` | cold-path validation, resolver path construction, navigation evidence, and route-template reporting |
+| `coldTarget` | Closed union of `{ kind: 'static', path }` or `{ kind: 'resolved' }` | exact direct-load URL for static/query surfaces, or an instruction that the existing entity resolver supplies the in-memory concrete URL |
 | `behaviorFamily` | Closed internal behavior discriminator, such as `inbox` | Inbox shell/page request classification, family-specific DOM proofs, and other collector special cases that currently compare a literal route key |
 
 The current overloaded `route.key` is removed or narrowed so no consumer can
 silently guess which meaning it carries. Existing surfaces use their current
 route key as `surfaceId` and keep the current path as `pathTemplate`. Inbox uses
 four non-path IDs with the shared `/inbox` path template and `inbox` behavior
-family. Query-string order never becomes identity. The four fixed entries are:
+family. Its four `coldTarget` values are the exact URLs below. Static cold
+resolution uses `coldTarget.path`, never `pathTemplate`; entity detail routes
+use `coldTarget.kind='resolved'` and retain their current resolver. Query-string
+order never becomes identity. The four fixed entries are:
 
 | Surface ID | Cold URL | Selected filter | Initial API query |
 | --- | --- | --- | --- |
@@ -494,16 +512,24 @@ be conflated:
 | `inbox_page_unread` | `filter=unread`, `limit=30`, no cursor | required surface request for `inbox-unread` |
 | `inbox_page_unknown` | `filter=unknown`, `limit=30`, no cursor | required surface request for `inbox-unknown` |
 | `inbox_page_groups` | `filter=groups`, `limit=30`, no cursor | required surface request for `inbox-groups` |
-| `inbox_badge` | `filter=unread`, `limit=100`, no cursor | optional background app-shell request |
+| `inbox_badge` | `filter=unread`, `limit=100`, no cursor | required app-shell request on cold samples; background shell refresh if observed during warm samples |
 
 The collector classifies these tuples in memory from the parsed URL before it
 reduces evidence. Classification uses `behaviorFamily`, never `surfaceId` or a
-literal route-key comparison. Only the matching `inbox_page_*` request can
-satisfy a surface's required endpoint contract or contribute to its reported
-initial Inbox request count/timing. `inbox_badge` remains background evidence
-and cannot satisfy, fail, or inflate the destination page request. This is
-especially load-bearing on `inbox-unread`, where the filter is the same and the
-limit distinguishes the requests.
+literal route-key comparison. The cold `inbox_badge` retains the original
+profiler semantics: it is required shell work, contributes to the existing
+primary API request/byte totals, advances qualifying readiness, and fails the
+sample if its required shell contract fails. On warm samples the already-mounted
+shell does not require a new badge request; a later one remains
+`background_shell` under the existing policy.
+
+Only the matching `inbox_page_*` request can satisfy the page-specific endpoint
+contract or contribute to the new `initialInboxPageRequestCount` and templated
+page-request timing. The badge and page contracts are independently satisfiable,
+so cold `inbox-unread` requires both unread/100 shell work and unread/30 page
+work. General cold API counts and bytes include both, preserving existing metric
+semantics; the page-specific fields include only unread/30. This distinction is
+load-bearing because the filter value alone is identical.
 
 Artifacts store only the closed request-class enum plus the existing templated
 endpoint evidence. They never store raw query strings. An `/api/inbox` request
@@ -646,9 +672,10 @@ In addition to the original closed failure categories:
   the corresponding detail route follows its existing fixture-skip contract;
 - a mismatched Inbox filter value, limit, or unexpected initial cursor is an
   endpoint-contract failure, never rewritten into expected evidence;
-- the fixed page request and optional badge request are classified by their
-  exact safe tuples before evidence reduction, and only the page request can
-  satisfy readiness or page metrics;
+- the fixed page and badge requests are classified by their exact safe tuples
+  before evidence reduction; the badge retains required-cold/background-warm
+  shell semantics, while only the page request can satisfy the page-specific
+  contract and page-specific metrics;
 - a tab that cannot be found exactly is `required_action_missing`, fails the
   warm sample and full self-QA, and never falls back to a different control;
 - a selected tab without a loaded list or exact empty branch times out under the
@@ -676,7 +703,7 @@ are fixed:
 - the profiler CLI owns help and early exits but not seed arithmetic;
 - `e2e/performance/routes.ts` owns stable surface contracts, exact Inbox
   terminals, exact safe request classes, endpoint expectations, and typed warm
-  actions;
+  actions plus the static/resolved cold-target union;
 - `e2e/performance/types.ts` carries `surfaceId`, `pathTemplate`, and closed
   behavior/request classes through samples and request evidence without
   duplicating raw URL values;
@@ -684,7 +711,8 @@ are fixed:
   classification, request attribution, branch evidence, Inbox DOM proofs,
   accessible activation, and safe DOM cardinality off the overloaded route key;
 - readiness/CLI terminal evaluation enforces the Inbox XOR and the fixed-action
-  failure contract;
+  failure contract, and static route resolution navigates to `coldTarget.path`
+  rather than deriving a concrete URL from `pathTemplate`;
 - aggregation, report assembly/sanitization, ranking, comparison, baseline
   parsing, self-QA, contract checkpoints, and their tests migrate every map,
   set, join, allowlist, and compatibility key from route identity to
@@ -704,13 +732,16 @@ Add or update tests for:
   remainder counts;
 - native-group counts, valid `group_text` shapes, canonical identities, roster
   sizes, uniqueness, read/unread coverage, phone-scoped inbound sender keys,
-  outbound sender-key absence, and deterministic messages;
+  inbound reviewed-type/unknown author mapping, outbound `team` sender keys,
+  and deterministic messages;
 - native-roster capacity at 0, 1, 2, 3, 4, and default active-contact counts,
   including pre-lifecycle rejection above capacity;
 - removal of the lean native-group conversation and all of its messages before
   exact performance group generation, including `nativeGroups=0`;
 - ordinary and tail message formulas, parent-zero behavior, bounds, and total
   cap accounting;
+- designated-conversation chronology at zero, the seven-day boundary on both
+  sides, and the 20000-message maximum, proving no message predates its parent;
 - ordinary and large-broadcast recipient formulas, uniqueness, clipping,
   active-generated-tenant pool membership, exclusion of landlord/unknown/deleted
   contacts, lean fallback, parent-zero behavior, and total cap accounting;
@@ -721,12 +752,15 @@ Add or update tests for:
 - local and hosted-dev rejection of every seed option;
 - four stable Inbox surface IDs, exact cold URLs, exact API query values, and no
   initial cursor;
+- static cold targets preserve the three filtered query URLs while all four
+  entries retain the query-free `/inbox` path template; resolved detail cold
+  targets still come only from their resolvers;
 - full route-key identity migration: unique `surfaceId` map/join/order keys,
   retained path templates, behavior-family special cases, report allowlists,
   self-QA keys, and comparison keys;
-- exact distinction between `inbox_badge` unread/100 background traffic and
-  every unread/30 or sibling page request, including an `inbox-unread` sample
-  containing both;
+- exact distinction between required-cold/background-warm `inbox_badge`
+  unread/100 traffic and every unread/30 or sibling page request, including a
+  cold `inbox-unread` sample requiring and accounting for both;
 - selected-tab plus populated/empty terminal alternatives for every filter;
 - terminal XOR rejection when populated and empty branches coexist;
 - warm buffer reset immediately before exact tab activation;
@@ -809,8 +843,9 @@ The feature is acceptable when:
    ranked cold/warm surfaces.
 7. Filtered warm timing begins immediately before the exact tab click after all
    source evidence has been discarded.
-8. The badge unread/100 request can never satisfy or inflate the Inbox page's
-   filter/30 request contract.
+8. The badge unread/100 request retains required cold-shell readiness and
+   primary metrics but can never satisfy or inflate the Inbox page-specific
+   filter/30 contract or page-only metrics.
 9. Missing fixed tabs and contradictory populated/empty branches fail closed.
 10. No Inbox or conversation-history Load more control is exercised.
 11. Seeded conversation depth and observed initial rows are reported as distinct

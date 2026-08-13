@@ -1559,6 +1559,10 @@ keyword copy. The only loss is that the replies are not ours.
    - **Help message** = `HELP_REPLY` (`keyword.help`)
    - **Opt-in confirmation** = `WELCOME_SMS` (`welcome.sms`)
    Do not retype them. Copy from the constant so a character never drifts.
+   OPT-IN CAVEAT: `welcome.sms` alone IS operator-editable (Settings ->
+   Templates -> "Welcome text"). If that override is set for the env, paste
+   the EFFECTIVE text (the override), not the constant - and see the coupling
+   rule below.
 4. Save, then run the keyword canary in step 2.3 against that service - ONE
    branded reply per keyword, plus the sentence probe.
 
@@ -1575,7 +1579,11 @@ keyword copy. The only loss is that the replies are not ours.
 
 Note that an operator `welcomeText` override in Settings no longer affects the
 opt-in confirmation; it reaches the web-form/housing-fair welcome only. The
-keyword confirmation is a console edit.
+keyword confirmation is a console edit. COUPLING RULE: if the two are meant to
+read the same (they were configured identically at setup), an admin editing
+"Welcome text" in Settings must be followed by the same three-step mirror above
+for the opt-in confirmation - otherwise the app's welcome and Twilio's START
+confirmation silently diverge, and nothing in the app will surface it.
 
 ### 4. The migration run
 

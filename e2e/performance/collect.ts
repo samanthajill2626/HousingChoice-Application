@@ -130,7 +130,21 @@ function requestContractIdentity(
 }
 
 export function classifyInboxRequest(rawUrl: string, sanitized: SanitizedRequestUrl): InboxRequestClass | null {
-  if (sanitized.endpointTemplate !== '/api/inbox') return null;
+  return classifyInboxRequestForCollection(rawUrl, sanitized).requestClass;
+}
+
+interface InboxRequestClassification {
+  requestClass: InboxRequestClass | null;
+  endpointContractMismatch: boolean;
+}
+
+function classifyInboxRequestForCollection(
+  rawUrl: string,
+  sanitized: SanitizedRequestUrl,
+): InboxRequestClassification {
+  if (sanitized.endpointTemplate !== '/api/inbox') {
+    return { requestClass: null, endpointContractMismatch: false };
+  }
   try {
     const params = new URL(rawUrl).searchParams;
     const entries = [...params.entries()];
@@ -138,18 +152,18 @@ export function classifyInboxRequest(rawUrl: string, sanitized: SanitizedRequest
       entries.length !== 2
       || entries.filter(([key]) => key === 'filter').length !== 1
       || entries.filter(([key]) => key === 'limit').length !== 1
-    ) return 'inbox_endpoint_contract_failure';
+    ) return { requestClass: null, endpointContractMismatch: true };
     const filter = params.get('filter');
     const limit = params.get('limit');
-    if (filter === 'all' && limit === '30') return 'inbox_page_all';
-    if (filter === 'unread' && limit === '30') return 'inbox_page_unread';
-    if (filter === 'unknown' && limit === '30') return 'inbox_page_unknown';
-    if (filter === 'groups' && limit === '30') return 'inbox_page_groups';
-    if (filter === 'unread' && limit === '100') return 'inbox_badge';
+    if (filter === 'all' && limit === '30') return { requestClass: 'inbox_page_all', endpointContractMismatch: false };
+    if (filter === 'unread' && limit === '30') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
+    if (filter === 'unknown' && limit === '30') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
+    if (filter === 'groups' && limit === '30') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
+    if (filter === 'unread' && limit === '100') return { requestClass: 'inbox_badge', endpointContractMismatch: false };
   } catch {
-    // The endpoint template is already safe; retain only the closed failure code.
+    // Invalid tuple details remain internal; only sanitized request evidence leaves the collector.
   }
-  return 'inbox_endpoint_contract_failure';
+  return { requestClass: null, endpointContractMismatch: true };
 }
 
 function isShellRequest(
@@ -272,6 +286,7 @@ export interface EndedNetworkSample extends NetworkCollectorSnapshot {
   satisfiedRequired: string[];
   consoleCategories: Record<string, number>;
   blockedWrites: BlockedWrite[];
+  endpointContractMismatch: boolean;
 }
 
 export class NetworkCollector {
@@ -294,6 +309,7 @@ export class NetworkCollector {
   #terminalVisible = false;
   #consoleCategories: Record<string, number> = {};
   #blockedWrites: BlockedWrite[] = [];
+  #endpointContractMismatch = false;
   #expectedShapes: Set<string>;
 
   constructor(input: NetworkCollectorInput) {
@@ -320,6 +336,7 @@ export class NetworkCollector {
     this.#terminalVisible = false;
     this.#consoleCategories = {};
     this.#blockedWrites = [];
+    this.#endpointContractMismatch = false;
   }
 
   #active(token: string, timestamp: number): number | null {
@@ -331,6 +348,7 @@ export class NetworkCollector {
     rawUrl: string,
     sanitized: SanitizedRequestUrl,
     inboxRequestClass: InboxRequestClass | null,
+    endpointContractMismatch: boolean,
   ): { role: RequestEvidence['requestRole']; forceUnmatched: boolean } {
     const inboxSurface = (this.#input.behaviorFamily ?? 'standard') === 'inbox';
     const key = requestContractIdentity(
@@ -354,7 +372,7 @@ export class NetworkCollector {
     return {
       role: 'required',
       forceUnmatched: sanitized.resourceClass === 'api'
-        && (!expected || (inboxSurface && inboxRequestClass === 'inbox_endpoint_contract_failure')),
+        && (!expected || (inboxSurface && endpointContractMismatch)),
     };
   }
 
@@ -382,8 +400,15 @@ export class NetworkCollector {
       resourceType: event.type,
     });
     const resourceClass = resourceClassFor(event.type, sanitized);
-    const inboxRequestClass = classifyInboxRequest(event.request.url, sanitized);
-    const { role, forceUnmatched } = this.#roleFor(event.request.url, sanitized, inboxRequestClass);
+    const inboxClassification = classifyInboxRequestForCollection(event.request.url, sanitized);
+    const inboxRequestClass = inboxClassification.requestClass;
+    const { role, forceUnmatched } = this.#roleFor(
+      event.request.url,
+      sanitized,
+      inboxRequestClass,
+      inboxClassification.endpointContractMismatch,
+    );
+    if (inboxClassification.endpointContractMismatch) this.#endpointContractMismatch = true;
     const firstParty = sanitized.originClass === 'first_party';
     const trackedPending = firstParty && role === 'required';
     this.#resourceCounts[resourceClass] += 1;
@@ -512,6 +537,7 @@ export class NetworkCollector {
         satisfiedRequired: [],
         consoleCategories: {},
         blockedWrites: [],
+        endpointContractMismatch: false,
       };
     }
     const snapshot = this.snapshot(token);
@@ -555,6 +581,7 @@ export class NetworkCollector {
         .sort(),
       consoleCategories: { ...this.#consoleCategories },
       blockedWrites: this.#blockedWrites.map((write) => ({ ...write })),
+      endpointContractMismatch: this.#endpointContractMismatch,
     };
   }
 }

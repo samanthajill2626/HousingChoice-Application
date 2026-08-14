@@ -236,7 +236,7 @@ function request(surfaceId: string, mode: 'cold' | 'warm', repeat: number): Requ
 }
 
 function reportInput(outputRoot: string, runId: string) {
-  const samples = [
+  const repeatZeroSamples = [
     sample('/contacts', 'cold', 0),
     sample('inbox-all', 'cold', 0, {
       readyMs: 100,
@@ -263,17 +263,27 @@ function reportInput(outputRoot: string, runId: string) {
       terminalState: 'unknown',
     }),
   ];
+  const samples = [
+    ...repeatZeroSamples,
+    ...[1, 2].flatMap((repeat) => repeatZeroSamples.map((row) => ({
+      ...structuredClone(row),
+      repeat,
+    }))),
+  ];
   return {
     outputRoot,
     runId,
     config: CONFIG,
     target: TARGET,
     samples,
-    requests: [request('/contacts', 'cold', 0), request('/contacts', 'warm', 1)],
-    routeOrders: [
-      { mode: 'cold' as const, repeat: 0, surfaceIds: ['/contacts', 'inbox-all'] },
-      { mode: 'warm' as const, repeat: 0, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
-    ],
+    requests: [0, 1, 2].flatMap((repeat) => [
+      request('/contacts', 'cold', repeat),
+      request('/contacts', 'warm', repeat),
+    ]),
+    routeOrders: [0, 1, 2].flatMap((repeat) => [
+      { mode: 'cold' as const, repeat, surfaceIds: ['/contacts', 'inbox-all'] },
+      { mode: 'warm' as const, repeat, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
+    ]),
     browser: { version: '140.0.7339.12', viewport: { width: 1280, height: 720 } },
     warmup: { performed: true, surfaceId: '/' },
     relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
@@ -586,6 +596,24 @@ describe('writePerformanceReport', () => {
     expect(requestLine.inboxRequestClass).toBeUndefined();
   });
 
+  it('omits a failure-only Inbox marker at the report artifact boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-5e4d3c2b');
+    input.requests = [{
+      ...request('inbox-unread', 'cold', 0),
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      inboxRequestClass: 'inbox_endpoint_contract_failure' as never,
+      unmatchedApi: true,
+    }];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const [requestLine] = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLine.inboxRequestClass).toBeUndefined();
+  });
+
   it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === '/conversations/:conversationId')!;
     const branch = { kind: 'none' } as const;
@@ -723,22 +751,23 @@ describe('writePerformanceReport', () => {
     expect(summary.requests).toBeUndefined();
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
-    expect(summary.routeOrders).toEqual([
-      { mode: 'cold', repeat: 0, surfaceIds: ['/contacts', 'inbox-all'] },
-      { mode: 'warm', repeat: 0, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
-    ]);
+    expect(summary.routeOrders).toEqual(input.routeOrders.map((row) => ({
+      mode: row.mode,
+      repeat: row.repeat,
+      surfaceIds: row.surfaceIds,
+    })));
     expect(summary.manifest.contacts).toBe(100);
 
     const requestLines = requestsText.trim().split(/\r?\n/u).map((line) => JSON.parse(line));
-    expect(requestLines).toHaveLength(4);
+    expect(requestLines).toHaveLength(input.requests.length);
     expect(Object.keys(requestLines[0]).sort()).toEqual([
       'durationMs', 'endpointTemplate', 'method', 'mode', 'originClass', 'outcome',
       'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'surfaceId', 'startOffsetMs',
       'status', 'transferBytes', 'ttfbMs', 'unmatchedApi',
     ].sort());
     expect(requestLines[0]).toMatchObject({ outcome: 'finished', requestRole: 'required' });
-    expect(requestLines[1]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
-    expect(requestLines.slice(2).map((line: { surfaceId: string }) => line.surfaceId))
+    expect(requestLines[2]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
+    expect(requestLines.slice(-sharedPathSurfaces.length).map((line: { surfaceId: string }) => line.surfaceId))
       .toEqual(sharedPathSurfaces.map((surface) => surface.surfaceId));
     expect(requestLines[0].rawUrl).toBeUndefined();
 
@@ -872,7 +901,9 @@ describe('writePerformanceReport', () => {
       ...reportInput(outputRoot, '20260812T123456790Z-eeff0011'),
       baselineJson,
     };
-    currentInput.samples[0] = sample('/contacts', 'cold', 0, { readyMs: 1_000 });
+    currentInput.samples = currentInput.samples.map((row) => (
+      row.surfaceId === '/contacts' && row.mode === 'cold' ? { ...row, readyMs: 1_000 } : row
+    ));
 
     const result = await writePerformanceReport(currentInput);
 
@@ -1107,12 +1138,16 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const surfaceIds = ROUTES.map((route) => route.surfaceId);
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-11223344');
-    baselineInput.samples = surfaceIds.flatMap((key) => [sample(key, 'cold', 0), sample(key, 'warm', 0)]);
-    baselineInput.requests = surfaceIds.flatMap((key) => [request(key, 'cold', 0), request(key, 'warm', 0)]);
-    baselineInput.routeOrders = [
-      { mode: 'cold', repeat: 0, surfaceIds },
-      { mode: 'warm', repeat: 0, surfaceIds },
-    ];
+    baselineInput.samples = [0, 1, 2].flatMap((repeat) => (
+      surfaceIds.flatMap((key) => [sample(key, 'cold', repeat), sample(key, 'warm', repeat)])
+    ));
+    baselineInput.requests = [0, 1, 2].flatMap((repeat) => (
+      surfaceIds.flatMap((key) => [request(key, 'cold', repeat), request(key, 'warm', repeat)])
+    ));
+    baselineInput.routeOrders = [0, 1, 2].flatMap((repeat) => [
+      { mode: 'cold' as const, repeat, surfaceIds },
+      { mode: 'warm' as const, repeat, surfaceIds },
+    ]);
 
     await expect(writePerformanceReport(baselineInput)).resolves.toMatchObject({ status: 'written' });
     const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
@@ -1126,12 +1161,16 @@ describe('writePerformanceReport', () => {
 
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-55667788'),
-      samples: surfaceIds.flatMap((key) => [sample(key, 'cold', 0), sample(key, 'warm', 0)]),
-      requests: surfaceIds.flatMap((key) => [request(key, 'cold', 0), request(key, 'warm', 0)]),
-      routeOrders: [
-        { mode: 'cold' as const, repeat: 0, surfaceIds },
-        { mode: 'warm' as const, repeat: 0, surfaceIds },
-      ],
+      samples: [0, 1, 2].flatMap((repeat) => (
+        surfaceIds.flatMap((key) => [sample(key, 'cold', repeat), sample(key, 'warm', repeat)])
+      )),
+      requests: [0, 1, 2].flatMap((repeat) => (
+        surfaceIds.flatMap((key) => [request(key, 'cold', repeat), request(key, 'warm', repeat)])
+      )),
+      routeOrders: [0, 1, 2].flatMap((repeat) => [
+        { mode: 'cold' as const, repeat, surfaceIds },
+        { mode: 'warm' as const, repeat, surfaceIds },
+      ]),
       baselineJson,
     };
     const current = await writePerformanceReport(currentInput);
@@ -1395,6 +1434,32 @@ describe('writePerformanceReport', () => {
     expect(result.files).not.toContain('comparison.json');
   });
 
+  it.each(['cold', 'warm'] as const)(
+    'rejects a baseline whose declared %s repeats exceed its aggregate sample count',
+    async (mode) => {
+      const outputRoot = await artifactRoot();
+      const baselineInput = reportInput(outputRoot, mode === 'cold'
+        ? '20260812T123456789Z-0607080a'
+        : '20260812T123456789Z-0607080b');
+      await writePerformanceReport(baselineInput);
+      const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+      baseline.environment[`${mode}Repeats`] += 1;
+      const currentInput = {
+        ...reportInput(outputRoot, mode === 'cold'
+          ? '20260812T123456789Z-0708090a'
+          : '20260812T123456789Z-0708090b'),
+        baselineJson: JSON.stringify(baseline),
+      };
+
+      const result = await writePerformanceReport(currentInput);
+
+      expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+      expect(result.files).not.toContain('comparison.json');
+      await expect(readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
   it('returns a partial nonzero report for an Inbox endpoint contract mismatch sample', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-06070809');
@@ -1407,6 +1472,22 @@ describe('writePerformanceReport', () => {
     expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
     const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
     expect(summary.run).toEqual({ status: 'partial', reason: 'endpoint_contract_mismatch' });
+  });
+
+  it('keeps an explicit run partial reason authoritative over a sample mismatch reason', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-08090a0b');
+    input.samples[0] = sample('/contacts', 'cold', 0, {
+      status: 'failed', reason: 'endpoint_contract_mismatch', readyMs: null, terminalState: 'unknown',
+    });
+    Object.assign(input, { partialReason: 'browser_failure' as const });
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.run).toEqual({ status: 'partial', reason: 'browser_failure' });
+    expect(summary.samples[0]).toMatchObject({ status: 'failed', reason: 'endpoint_contract_mismatch' });
   });
 
   it('writes a partial sanitized summary and report with a closed fatal reason', async () => {

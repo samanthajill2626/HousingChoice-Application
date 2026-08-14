@@ -10,13 +10,15 @@ export interface EndpointContract {
   inboxRequestClass?: InboxRequestClass;
 }
 
-export type InboxRequestClass =
-  | 'inbox_page_all'
-  | 'inbox_page_unread'
-  | 'inbox_page_unknown'
-  | 'inbox_page_groups'
-  | 'inbox_badge'
-  | 'inbox_endpoint_contract_failure';
+export const INBOX_REQUEST_CLASSES = Object.freeze([
+  'inbox_page_all',
+  'inbox_page_unread',
+  'inbox_page_unknown',
+  'inbox_page_groups',
+  'inbox_badge',
+] as const);
+
+export type InboxRequestClass = typeof INBOX_REQUEST_CLASSES[number];
 
 export type RouteContractBranch =
   | { kind: 'none' }
@@ -139,7 +141,7 @@ function endpoint(
   endpointTemplate: EndpointTemplate,
   queryKeys: readonly string[] = [],
   requirement: EndpointRequirement = 'required',
-  inboxRequestClass?: Exclude<InboxRequestClass, 'inbox_endpoint_contract_failure'>,
+  inboxRequestClass?: InboxRequestClass,
 ): EndpointContract {
   assertEndpointTemplate(endpointTemplate);
   return Object.freeze({
@@ -153,7 +155,7 @@ function endpoint(
 function required(
   path: EndpointTemplate,
   queryKeys: readonly string[] = [],
-  inboxRequestClass?: Exclude<InboxRequestClass, 'inbox_endpoint_contract_failure'>,
+  inboxRequestClass?: InboxRequestClass,
 ): EndpointContract {
   return endpoint(path, queryKeys, 'required', inboxRequestClass);
 }

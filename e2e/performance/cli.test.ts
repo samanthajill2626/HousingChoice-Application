@@ -882,9 +882,11 @@ describe('top-level profiler sequencing', () => {
     expect(result).toMatchObject({ status: 'failed', reason: 'endpoint_contract_mismatch', surfaceEvidence: null });
     expect(requests).toEqual([expect.objectContaining({
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'],
-      inboxRequestClass: 'inbox_endpoint_contract_failure', unmatchedApi: true,
+      unmatchedApi: true,
     })]);
+    expect(requests[0]).not.toHaveProperty('inboxRequestClass');
     expect(JSON.stringify({ result, requests })).not.toContain('private-value');
+    expect(JSON.stringify({ result, requests })).not.toContain('inbox_endpoint_contract_failure');
   });
 
   it('makes every sampled page wait for a real per-page firewall installation', async () => {

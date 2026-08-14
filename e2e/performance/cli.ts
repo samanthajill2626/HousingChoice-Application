@@ -940,9 +940,7 @@ export function createRealInstrumentation(input: {
           },
           consoleCategories: ended.consoleCategories,
         });
-        const endpointContractMismatch = ended.requests.some(
-          (request) => request.inboxRequestClass === 'inbox_endpoint_contract_failure',
-        );
+        const endpointContractMismatch = ended.endpointContractMismatch;
         const status = endpointContractMismatch
           ? 'failed'
           : readiness.status === 'ready'

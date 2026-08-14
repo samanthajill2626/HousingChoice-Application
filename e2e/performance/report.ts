@@ -11,6 +11,7 @@ import { serializeSelfQaResult, type SelfQaResult } from './selfQa.js';
 import { scanArtifactFiles, type PrivacyViolationCode } from './redact.js';
 import {
   ROUTES,
+  INBOX_REQUEST_CLASSES,
   assertObservedGets,
   expectedBlockedWrites,
   expectedGets,
@@ -92,15 +93,6 @@ const SURFACE_IDS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.sur
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
 const SAFE_RUN_ID = /^\d{8}T\d{9}Z-[0-9a-f]{8}$/u;
-const INBOX_REQUEST_CLASSES: readonly InboxRequestClass[] = [
-  'inbox_page_all',
-  'inbox_page_unread',
-  'inbox_page_unknown',
-  'inbox_page_groups',
-  'inbox_badge',
-  'inbox_endpoint_contract_failure',
-];
-
 export interface ReportBrowserInput {
   version: string;
   viewport: { width: number; height: number };
@@ -1015,6 +1007,11 @@ function requireCompleteBaselineRun(value: unknown): void {
 }
 
 function requireCompleteBaselineAggregates(run: ComparisonRun): void {
+  if (run.aggregates.some((aggregate) => aggregate.sampleCount !== (
+    aggregate.mode === 'cold' ? run.environment.coldRepeats : run.environment.warmRepeats
+  ))) {
+    throw new Error('baseline_schema_invalid');
+  }
   if (run.environment.routeSet.includes(INVALID_BASELINE_ROUTE)) return;
   const expected = new Set(run.environment.routeSet.flatMap((surface) => [
     `cold\u0000${surface}`,
@@ -1386,10 +1383,10 @@ export async function writePerformanceReport(
   const rankings = buildRankings(aggregates);
   let comparison: ComparisonResult | null = null;
   let comparisonStatus: 'not_requested' | 'written' | 'failed' = 'not_requested';
-  const partialReason = samples.some((sample) => sample.reason === 'endpoint_contract_mismatch')
-    ? 'endpoint_contract_mismatch'
-    : input.partialReason && FAILURE_REASONS.includes(input.partialReason)
-      ? input.partialReason
+  const partialReason = input.partialReason && FAILURE_REASONS.includes(input.partialReason)
+    ? input.partialReason
+    : samples.some((sample) => sample.reason === 'endpoint_contract_mismatch')
+      ? 'endpoint_contract_mismatch'
       : null;
   const safetyFailure = cloneSafetyFailure(input.safetyFailure);
 

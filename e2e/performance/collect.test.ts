@@ -296,7 +296,7 @@ describe('checked-in background policy', () => {
     })).toBe('inbox_badge');
     expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=30', {
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
-    })).toBe('inbox_endpoint_contract_failure');
+    })).toBeNull();
 
     const expected: EndpointContract[] = [
       { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_unread' },
@@ -314,10 +314,12 @@ describe('checked-in background policy', () => {
     expect(ended.requests.map((request) => [request.inboxRequestClass, request.requestRole, request.unmatchedApi])).toEqual([
       ['inbox_badge', 'required', false],
       ['inbox_page_unread', 'required', false],
-      ['inbox_endpoint_contract_failure', 'required', true],
+      [undefined, 'required', true],
     ]);
+    expect(ended.endpointContractMismatch).toBe(true);
     expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([3, 90]);
     expect(JSON.stringify(ended)).not.toContain('private-cursor');
+    expect(JSON.stringify(ended)).not.toContain('inbox_endpoint_contract_failure');
 
     const warm = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: expected });
     warm.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });

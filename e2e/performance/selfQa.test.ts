@@ -230,7 +230,7 @@ describe('self-QA closed proof evaluator', () => {
       reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
     });
 
-    expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, status: 'pass' });
+    expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, inboxSurfaceSetMatches: false, status: 'fail' });
     const missingPage = evaluateSelfQa({
       mode: 'narrow', routes, samples,
       requests: requests.filter((entry) => entry.inboxRequestClass !== 'inbox_page_all'),
@@ -322,7 +322,7 @@ describe('self-QA closed proof evaluator', () => {
     });
   });
 
-  it('requires exact 56 full samples and serializes only allowlisted self-QA status', () => {
+  it('requires exact 62 full samples and serializes only allowlisted self-QA status', () => {
     const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm'))).slice(0, 55);
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches, attempts: expectedAttempts('full'),
@@ -333,7 +333,9 @@ describe('self-QA closed proof evaluator', () => {
     const safe = serializeSelfQaResult({ ...result, injectedRaw: 'raw-contact-a' } as never);
     expect(JSON.stringify(safe)).not.toContain('raw-contact-a');
     expect(Object.keys(safe).sort()).toEqual([
-      'coldOk', 'coldRanking', 'countManifest', 'endpointSubset', 'mode', 'noUnmatchedApi',
+      'coldOk', 'coldRanking', 'countManifest', 'endpointSubset',
+      'inboxNoCursor', 'inboxPassiveWritesAbsent', 'inboxRequestClassesMatch', 'inboxSurfaceSetMatches',
+      'mode', 'noUnmatchedApi',
       'outOfSampleWritesAbsent', 'outboxUnchanged', 'privacyScanRequired', 'relayCountMatches', 'routeCount',
       'sampleCardinalityMatches', 'sampleCount', 'stateChecks', 'status', 'supplementalExcluded', 'warmOk', 'warmRanking', 'writeTuplesMatch',
     ]);
@@ -360,6 +362,7 @@ describe('self-QA closed proof evaluator', () => {
         privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true,
         writeTuplesMatch: true,
         outOfSampleWritesAbsent: true,
+        inboxSurfaceSetMatches: true, inboxRequestClassesMatch: true, inboxNoCursor: true, inboxPassiveWritesAbsent: true,
       });
       const written = await writePerformanceReport({ ...base, runId: '20260812T120000000Z-12345678', selfQa: proof } as never);
       expect(written.exitCode).toBe(0);

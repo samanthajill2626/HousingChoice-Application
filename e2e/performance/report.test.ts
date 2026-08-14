@@ -284,6 +284,19 @@ describe('createPerformanceRunId', () => {
 });
 
 describe('writePerformanceReport', () => {
+  it('writes closed v2 comparison metadata without a seed anchor or requested inputs', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-c0dec0de');
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary).toMatchObject({ schemaVersion: 2, registryVersion: 2, workloadVersion: 2 });
+    expect(summary.environment.comparisonWorkload).toMatchObject({ contacts: 100 });
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('anchor');
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('requested');
+  });
+
   it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
     const branch = { kind: 'none' } as const;
@@ -528,8 +541,9 @@ describe('writePerformanceReport', () => {
     expect(summary.schemaVersion).toBe(2);
     expect(Object.keys(summary).sort()).toEqual([
       'aggregates', 'artifacts', 'browser', 'comparison', 'config', 'environment',
-      'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'relayDomCheck', 'revisions',
+      'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'registryVersion', 'relayDomCheck', 'revisions',
       'routeOrders', 'run', 'runtime', 'samples', 'schemaVersion', 'target', 'warmup', 'warnings',
+      'workloadVersion',
     ].sort());
     expect(summary.interceptionScopeVersion).toBe(3);
     expect(summary.config.target).toBe('hermetic');

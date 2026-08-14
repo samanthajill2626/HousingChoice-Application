@@ -191,7 +191,10 @@ export type AggregateRankings = Record<SampleMode, ModeRankings>;
 
 export interface ComparisonEnvironment {
   target: TargetKind;
-  scaleManifest: object | null;
+  registryVersion: number;
+  workloadVersion: number;
+  dataSource: 'synthetic_hermetic' | 'existing_target';
+  comparisonWorkload: ComparisonWorkload | null;
   routeSet: string[];
   browserMajor: number;
   browserChannel: string;
@@ -202,6 +205,33 @@ export interface ComparisonEnvironment {
   interceptionScopeVersion: number;
   settleMs: number;
   pollMs: number;
+}
+
+// This is intentionally a resolved projection. Requested overrides and the
+// deterministic seed anchor describe invocation syntax, not workload identity.
+export interface ComparisonWorkload {
+  workloadModelVersion: number;
+  scale: number;
+  contacts: number;
+  units: number;
+  placements: number;
+  tours: number;
+  conversations: number;
+  nativeGroups: number;
+  nativeGroupMemberSlotCount: number;
+  totalConversations: number;
+  messagesPerConversation: number;
+  resolvedLongConversationMessages: number;
+  ordinaryMessageCount: number;
+  tailMessageCount: number;
+  totalMessageCount: number;
+  broadcasts: number;
+  resolvedRecipientsPerBroadcast: number;
+  resolvedLargeBroadcastRecipients: number;
+  totalRecipientCount: number;
+  relayGroupCount: number;
+  physicalItemCount: number;
+  totalItemCount: number;
 }
 
 export interface RevisionPairInput {
@@ -223,7 +253,10 @@ export interface ComparisonRun {
 
 export type EnvironmentMismatchField =
   | 'target'
-  | 'scale_manifest'
+  | 'registry_version'
+  | 'workload_version'
+  | 'data_source'
+  | 'comparison_workload'
   | 'route_set'
   | 'browser_major'
   | 'browser_channel'

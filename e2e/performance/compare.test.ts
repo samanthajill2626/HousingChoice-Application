@@ -56,11 +56,10 @@ function sample(
 
 const ENVIRONMENT: ComparisonEnvironment = {
   target: 'hermetic',
-  scaleManifest: {
-    anchor: '2026-08-11T00:00:00.000Z',
-    scale: 1,
-    contacts: 100,
-  },
+  registryVersion: 2,
+  workloadVersion: 2,
+  dataSource: 'synthetic_hermetic',
+  comparisonWorkload: null,
   routeSet: ['/shared'],
   browserMajor: 140,
   browserChannel: 'chromium',
@@ -90,6 +89,34 @@ function run(
 }
 
 describe('compareRuns', () => {
+  it('compares only the resolved synthetic workload, not requested syntax or anchor', () => {
+    const baseline = run([sample('/shared', 'cold', 0)], {
+      environment: {
+        ...ENVIRONMENT,
+        comparisonWorkload: { contacts: 100, resolvedRecipientsPerBroadcast: 25 },
+      } as never,
+    });
+    const current = run([sample('/shared', 'cold', 0)], {
+      environment: {
+        ...ENVIRONMENT,
+        comparisonWorkload: { contacts: 100, resolvedRecipientsPerBroadcast: 25 },
+      } as never,
+    });
+
+    expect(compareRuns(baseline, current).mismatches).toEqual([]);
+  });
+
+  it('rejects a changed resolved workload even when requested syntax would look equivalent', () => {
+    const baseline = run([sample('/shared', 'cold', 0)], {
+      environment: { ...ENVIRONMENT, comparisonWorkload: { contacts: 100 } } as never,
+    });
+    const current = run([sample('/shared', 'cold', 0)], {
+      environment: { ...ENVIRONMENT, comparisonWorkload: { contacts: 101 } } as never,
+    });
+
+    expect(compareRuns(baseline, current).mismatches).toContain('comparison_workload');
+  });
+
   it('matches shared-path surface aggregates by surface identity', () => {
     const baseline = run([
       sample('/inbox-all', 'cold', 0, { readyMs: 10 }),
@@ -215,7 +242,10 @@ describe('compareRuns', () => {
 
   it.each([
     ['target', { target: 'local' }],
-    ['scale_manifest', { scaleManifest: { ...ENVIRONMENT.scaleManifest, contacts: 101 } }],
+    ['comparison_workload', { comparisonWorkload: { contacts: 101 } }],
+    ['registry_version', { registryVersion: 3 }],
+    ['workload_version', { workloadVersion: 3 }],
+    ['data_source', { dataSource: 'existing_target' }],
     ['route_set', { routeSet: ['/other'] }],
     ['browser_major', { browserMajor: 141 }],
     ['browser_channel', { browserChannel: 'chrome' }],
@@ -239,19 +269,19 @@ describe('compareRuns', () => {
     expect(comparison.matched).toHaveLength(1);
   });
 
-  it('excludes only the seed anchor and treats route sets as order-independent', () => {
+  it('treats route sets as order-independent', () => {
     const baseline = run([sample('/shared', 'cold', 0)], {
       environment: {
         ...ENVIRONMENT,
         routeSet: ['/b', '/a'],
-        scaleManifest: { anchor: '2026-08-11T00:00:00.000Z', scale: 1, contacts: 100 },
+        comparisonWorkload: { contacts: 100 } as never,
       },
     });
     const current = run([sample('/shared', 'cold', 0)], {
       environment: {
         ...ENVIRONMENT,
         routeSet: ['/a', '/b'],
-        scaleManifest: { anchor: '2027-01-01T00:00:00.000Z', scale: 1, contacts: 100 },
+        comparisonWorkload: { contacts: 100 } as never,
       },
     });
 

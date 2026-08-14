@@ -91,6 +91,10 @@ export interface SelfQaResult {
   warmRanking: boolean;
   writeTuplesMatch: boolean;
   outOfSampleWritesAbsent: boolean;
+  inboxSurfaceSetMatches: boolean;
+  inboxRequestClassesMatch: boolean;
+  inboxNoCursor: boolean;
+  inboxPassiveWritesAbsent: boolean;
 }
 
 const NARROW_KEYS = Object.freeze([
@@ -303,6 +307,38 @@ function endpointSubset(input: EvaluateSelfQaInput): boolean {
   return true;
 }
 
+const INBOX_PAGE_CLASSES = Object.freeze({
+  'inbox-all': 'inbox_page_all',
+  'inbox-unread': 'inbox_page_unread',
+  'inbox-unknown': 'inbox_page_unknown',
+  'inbox-groups': 'inbox_page_groups',
+} as const);
+
+function inboxProof(input: EvaluateSelfQaInput): {
+  surfaceSetMatches: boolean;
+  requestClassesMatch: boolean;
+  noCursor: boolean;
+  passiveWritesAbsent: boolean;
+} {
+  const measured = input.routes.filter((route) => route.behaviorFamily === 'inbox');
+  const ids = measured.map((route) => route.surfaceId);
+  const expectedIds = Object.keys(INBOX_PAGE_CLASSES);
+  const surfaceSetMatches = input.mode === 'full'
+    ? ids.length === expectedIds.length && expectedIds.every((id) => ids.includes(id))
+    : ids.length === 1 && ids[0] === 'inbox-all';
+  const requestClassesMatch = measured.every((route) => input.requests.some((request) =>
+    request.surfaceId === route.surfaceId
+    && request.inboxRequestClass === INBOX_PAGE_CLASSES[route.surfaceId as keyof typeof INBOX_PAGE_CLASSES],
+  ));
+  const noCursor = input.requests
+    .filter((request) => ids.includes(request.surfaceId))
+    .every((request) => !request.queryKeys.includes('cursor'));
+  const passiveWritesAbsent = input.samples
+    .filter((sample) => ids.includes(sample.surfaceId))
+    .every((sample) => sample.blockedWrites.length === 0);
+  return { surfaceSetMatches, requestClassesMatch, noCursor, passiveWritesAbsent };
+}
+
 export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAttempt[] {
   return samples.flatMap((sample) => {
     const surface: SelfQaAttempt['surface'] | null = sample.surfaceId === '/contacts/:contactId'
@@ -344,6 +380,7 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     && coldOk === expectedRoutes
     && warmOk === expectedRoutes;
   const endpointSubsetValue = endpointSubset(input);
+  const inbox = inboxProof(input);
   const noUnmatchedApi = !input.requests.some((request) => request.unmatchedApi);
   const relayCountMatches = input.mode === 'narrow' || (
     input.relayDomCheck !== null
@@ -359,6 +396,7 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const outOfSampleWritesAbsent = (input.outOfSampleWrites ?? []).length === 0;
   const pass = writeTuplesMatch && sampleCardinalityMatches && endpointSubsetValue && noUnmatchedApi
     && relayCountMatches && stateMatches && supplementalExcluded && outOfSampleWritesAbsent
+    && inbox.surfaceSetMatches && inbox.requestClassesMatch && inbox.noCursor && inbox.passiveWritesAbsent
     && input.reportProof.privacyScanRequired
     && input.reportProof.countManifest && input.reportProof.coldRanking && input.reportProof.warmRanking;
   return {
@@ -381,6 +419,10 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     warmRanking: input.reportProof.warmRanking,
     writeTuplesMatch,
     outOfSampleWritesAbsent,
+    inboxSurfaceSetMatches: inbox.surfaceSetMatches,
+    inboxRequestClassesMatch: inbox.requestClassesMatch,
+    inboxNoCursor: inbox.noCursor,
+    inboxPassiveWritesAbsent: inbox.passiveWritesAbsent,
   };
 }
 
@@ -407,5 +449,9 @@ export function serializeSelfQaResult(result: SelfQaResult): SelfQaResult {
     warmRanking: result.warmRanking === true,
     writeTuplesMatch: result.writeTuplesMatch === true,
     outOfSampleWritesAbsent: result.outOfSampleWritesAbsent === true,
+    inboxSurfaceSetMatches: result.inboxSurfaceSetMatches === true,
+    inboxRequestClassesMatch: result.inboxRequestClassesMatch === true,
+    inboxNoCursor: result.inboxNoCursor === true,
+    inboxPassiveWritesAbsent: result.inboxPassiveWritesAbsent === true,
   };
 }

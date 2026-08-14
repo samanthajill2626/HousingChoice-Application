@@ -21,11 +21,14 @@ import {
 import { allEndpointTemplates } from './templates.js';
 import {
   INTERCEPTION_SCOPE_VERSION,
+  PERFORMANCE_REGISTRY_VERSION,
   PERFORMANCE_SCHEMA_VERSION,
+  PERFORMANCE_WORKLOAD_VERSION,
   type AggregateRankings,
   type BlockedWrite,
   type BrowserMetadata,
   type ComparisonEnvironment,
+  type ComparisonWorkload,
   type ComparisonResult,
   type ComparisonRun,
   type FailureReasonCode,
@@ -684,7 +687,10 @@ function comparisonEnvironment(
 ): ComparisonEnvironment {
   return {
     target: config.target,
-    scaleManifest: config.seed,
+    registryVersion: PERFORMANCE_REGISTRY_VERSION,
+    workloadVersion: PERFORMANCE_WORKLOAD_VERSION,
+    dataSource: config.target === 'hermetic' ? 'synthetic_hermetic' : 'existing_target',
+    comparisonWorkload: config.target === 'hermetic' ? comparisonWorkload(config.seed) : null,
     routeSet: [...new Set(samples.map((sample) => sample.surfaceId))].sort(),
     browserMajor: browser.major,
     browserChannel: browser.channel,
@@ -695,6 +701,27 @@ function comparisonEnvironment(
     interceptionScopeVersion: INTERCEPTION_SCOPE_VERSION,
     settleMs: config.settleMs,
     pollMs: config.pollMs,
+  };
+}
+
+function comparisonWorkload(manifest: PerformanceSeedManifest | null): ComparisonWorkload | null {
+  if (manifest === null) return null;
+  return {
+    workloadModelVersion: integer(manifest.workloadModelVersion),
+    scale: integer(manifest.scale), contacts: integer(manifest.contacts), units: integer(manifest.units),
+    placements: integer(manifest.placements), tours: integer(manifest.tours),
+    conversations: integer(manifest.conversations), nativeGroups: integer(manifest.nativeGroups),
+    nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
+    totalConversations: integer(manifest.totalConversations),
+    messagesPerConversation: integer(manifest.messagesPerConversation),
+    resolvedLongConversationMessages: integer(manifest.resolvedLongConversationMessages),
+    ordinaryMessageCount: integer(manifest.ordinaryMessageCount),
+    tailMessageCount: integer(manifest.tailMessageCount), totalMessageCount: integer(manifest.totalMessageCount),
+    broadcasts: integer(manifest.broadcasts),
+    resolvedRecipientsPerBroadcast: integer(manifest.resolvedRecipientsPerBroadcast),
+    resolvedLargeBroadcastRecipients: integer(manifest.resolvedLargeBroadcastRecipients),
+    totalRecipientCount: integer(manifest.totalRecipientCount), relayGroupCount: integer(manifest.relayGroupCount),
+    physicalItemCount: integer(manifest.physicalItemCount), totalItemCount: integer(manifest.totalItemCount),
   };
 }
 
@@ -751,6 +778,8 @@ function parseBaselineJson(text: string): ComparisonRun {
   const candidate = parsed as Record<string, unknown>;
   if (
     candidate.schemaVersion !== PERFORMANCE_SCHEMA_VERSION
+    || candidate.registryVersion !== PERFORMANCE_REGISTRY_VERSION
+    || candidate.workloadVersion !== PERFORMANCE_WORKLOAD_VERSION
     || typeof candidate.environment !== 'object'
     || candidate.environment === null
     || typeof candidate.revisions !== 'object'
@@ -1088,6 +1117,8 @@ export async function writePerformanceReport(
 
   const summary: Record<string, unknown> = {
     schemaVersion: PERFORMANCE_SCHEMA_VERSION,
+    registryVersion: PERFORMANCE_REGISTRY_VERSION,
+    workloadVersion: PERFORMANCE_WORKLOAD_VERSION,
     interceptionScopeVersion: INTERCEPTION_SCOPE_VERSION,
     run: { status: partialReason === null ? 'complete' : 'partial', reason: partialReason },
     config,

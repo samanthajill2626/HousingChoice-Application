@@ -450,6 +450,8 @@ class FakeSamplingPage implements SamplePage {
   readonly lifecycle?: { activeToken: string | null; listenerCount: number };
   sourceReady = true;
   relayLinks = 0;
+  relayChecks = 0;
+  surfaceEvidence = null as SampleResult['surfaceEvidence'];
   clickFailure: Error | null = null;
 
   constructor(
@@ -489,7 +491,12 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async countRelayConversationLinks(): Promise<number> {
+    this.relayChecks += 1;
     return this.relayLinks;
+  }
+
+  async captureSurfaceEvidence(_route: RouteDefinition, _initialInboxPageRequestCount: number): Promise<SampleResult['surfaceEvidence']> {
+    return this.surfaceEvidence;
   }
 }
 
@@ -725,6 +732,34 @@ describe('cold and warm sampling protocol', () => {
       'click:/tours/tour-private',
       'collect:warm:/tours/:tourId',
     ]);
+  });
+
+  it('keeps Inbox measurement passive: only the declared filter action runs and no write tuple is expected', async () => {
+    const events: string[] = [];
+    const page = new FakeSamplingPage(events);
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
+    const destination = staticDestination(route);
+    page.hrefs.add(destination);
+
+    const sample = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 100,
+      resolve: async () => resolved(destination),
+      instrumentation: new FakeInstrumentation(events),
+      token: 'passive-inbox',
+    });
+
+    expect(sample).toMatchObject({ status: 'ok', blockedWrites: [] });
+    expect(events).toEqual([
+      'prepare:/inbox',
+      'source-ready:100',
+      'begin:warm:passive-inbox:/inbox:/inbox?filter=unread',
+      'click:/inbox?filter=unread',
+      'collect:warm:inbox-unread',
+    ]);
+    expect(events.join('|')).not.toMatch(/row|mark-read|notice|retry|load more/iu);
   });
 
   it('maps source, fixture, link, and blocked-readiness outcomes to stable statuses', async () => {
@@ -1026,20 +1061,21 @@ describe('run ordering and warmup policy', () => {
     expect(result.outOfSampleWrites).toEqual([evidence, evidence]);
   });
 
-  it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {
+  it('runs the relay proof once only for a successful inbox-all sample in shuffled hermetic order', async () => {
     const browser = new FakeSamplingBrowser();
     const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
     const result = await collectRunSamples({
       browser,
       storageState: STORAGE_STATE,
       target: 'hermetic',
-      routes: [inbox],
+      routes: [unread, inbox],
       coldRepeats: 1,
       warmRepeats: 2,
       routeOrderSeed: 7,
       sourceTimeoutMs: 100,
       expectedRelayLinkCount: 4,
-      resolveCold: async () => resolved('inbox-all'),
+      resolveCold: async (route) => resolved(staticDestination(route)),
       resolveWarm: async (route, page) => {
         const fake = page as FakeSamplingPage;
         fake.hrefs.add(staticDestination(route));
@@ -1050,9 +1086,10 @@ describe('run ordering and warmup policy', () => {
       tokenFactory: (mode, repeat) => `${mode}-${repeat}`,
     });
 
-    expect(browser.contexts).toHaveLength(3); // discarded warmup, one cold, one reused warm context
+    expect(browser.contexts).toHaveLength(4); // discarded warmup, two cold, one reused warm context
     expect(result.relayDomCheck).toEqual({ expectedCount: 4, renderedCount: 3, shortfall: true });
     expect(Object.keys(result.relayDomCheck ?? {}).sort()).toEqual(['expectedCount', 'renderedCount', 'shortfall']);
+    expect(browser.contexts.at(-1)?.page.relayChecks).toBe(1);
   });
 
   it('retains a sanitized failed sample and closes the warm context when destination collection throws', async () => {

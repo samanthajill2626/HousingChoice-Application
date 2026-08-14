@@ -35,7 +35,7 @@ import type {
   RouteDefinition,
   TerminalContract,
 } from './routes.js';
-import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
+import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, SurfaceEvidence, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
@@ -543,6 +543,68 @@ export function exactTargetMatches(url: string, target: ExactBrowserTarget): boo
   }
 }
 
+function inboxFilterForSurface(surfaceId: string): 'all' | 'unread' | 'unknown' | 'groups' | null {
+  switch (surfaceId) {
+    case 'inbox-all': return 'all';
+    case 'inbox-unread': return 'unread';
+    case 'inbox-unknown': return 'unknown';
+    case 'inbox-groups': return 'groups';
+    default: return null;
+  }
+}
+
+async function inboxGroupsTruncated(
+  page: Page,
+  filter: NonNullable<ReturnType<typeof inboxFilterForSurface>>,
+): Promise<boolean> {
+  const visibleFixedText = async (text: string | RegExp, exact = false): Promise<boolean> => {
+    const locator = page.getByText(text, { ...(exact && { exact: true }) });
+    return await locator.count() > 0 && await locator.first().isVisible();
+  };
+  if (filter === 'all' || filter === 'unknown') {
+    return await visibleFixedText('See all group texts', true);
+  }
+  if (filter === 'unread') {
+    return await visibleFixedText('Browse all group texts (read and unread)', true);
+  }
+  return await visibleFixedText('Not all group texts are shown here.', true)
+    || await visibleFixedText(/^Showing the latest [1-9][0-9]* group texts?\.$/u);
+}
+
+async function countRelayConversationRows(page: Page): Promise<number> {
+  const rows = page.getByRole('list', { name: 'Conversations', exact: true }).getByRole('listitem');
+  const rowCount = await rows.count();
+  let relayCount = 0;
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = rows.nth(index);
+    const [relayLabelCount, groupTextLabelCount, detailLinkCount] = await Promise.all([
+      row.getByText('Relay group', { exact: true }).count(),
+      row.getByText('Group text', { exact: true }).count(),
+      row.locator('a[href^="/conversations/"]').count(),
+    ]);
+    if (relayLabelCount > 0 && groupTextLabelCount === 0 && detailLinkCount > 0) relayCount += 1;
+  }
+  return relayCount;
+}
+
+export async function captureSuccessfulSurfaceEvidence(
+  page: SamplePage,
+  route: RouteDefinition,
+  requests: readonly RequestEvidence[],
+): Promise<SurfaceEvidence> {
+  if (route.behaviorFamily === 'inbox') {
+    const pageClass = route.gets.find((contract) => contract.inboxRequestClass?.startsWith('inbox_page_'))?.inboxRequestClass;
+    const initialInboxPageRequestCount = pageClass === undefined
+      ? 0
+      : requests.filter((request) => request.requestRole === 'required' && request.inboxRequestClass === pageClass).length;
+    return await page.captureSurfaceEvidence(route, initialInboxPageRequestCount);
+  }
+  if (route.surfaceId === '/conversations/:conversationId') {
+    return { kind: 'conversation_detail', initialRenderedMessageCount: null };
+  }
+  return null;
+}
+
 export function createRealSamplePage(input: {
   page: Page;
   context: BrowserContext;
@@ -614,8 +676,20 @@ export function createRealSamplePage(input: {
       }
       return false;
     },
+    async captureSurfaceEvidence(route, initialInboxPageRequestCount): Promise<SurfaceEvidence> {
+      const filter = route.behaviorFamily === 'inbox' ? inboxFilterForSurface(route.surfaceId) : null;
+      if (filter === null) return null;
+      const rows = input.page.getByRole('list', { name: 'Conversations', exact: true }).getByRole('listitem');
+      return {
+        kind: 'inbox',
+        filter,
+        renderedRowCount: await rows.count(),
+        groupsTruncated: await inboxGroupsTruncated(input.page, filter),
+        initialInboxPageRequestCount,
+      };
+    },
     async countRelayConversationLinks(): Promise<number> {
-      return await input.page.locator('a[href^="/conversations/"]').count();
+      return await countRelayConversationRows(input.page);
     },
   };
 }
@@ -847,11 +921,15 @@ export function createRealInstrumentation(input: {
           },
           consoleCategories: ended.consoleCategories,
         });
+        const status = readiness.status === 'ready' ? 'ok' : 'timeout';
+        const surfaceEvidence = status === 'ok'
+          ? await captureSuccessfulSurfaceEvidence(page, route, ended.requests)
+          : null;
         return {
           surfaceId: input.route.surfaceId,
           mode: input.mode,
           repeat: input.repeat,
-          status: readiness.status === 'ready' ? 'ok' : 'timeout',
+          status,
           readyMs: readiness.readyMs,
           navigation: metrics.navigation,
           paint: metrics.paint,
@@ -868,7 +946,7 @@ export function createRealInstrumentation(input: {
           consoleCategories: ended.consoleCategories,
           clientTruncated: metrics.clientTruncated,
           terminalState: readiness.terminalState,
-          surfaceEvidence: null,
+          surfaceEvidence,
           reason: readiness.status === 'ready'
             ? null
             : readiness.terminalState === 'contradictory_terminal'

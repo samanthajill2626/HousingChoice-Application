@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   captureCdpClockAlignment,
+  captureSuccessfulSurfaceEvidence,
   classifyEscapedWriteFailure,
   createRealSamplePage,
   exactTargetMatches,
@@ -54,6 +55,60 @@ class AdapterPage {
       const filter = name === 'All' ? '' : `?filter=${name.toLowerCase()}`;
       this.current = `http://dashboard.test/inbox${filter}`;
     });
+  }
+}
+
+type InboxRowKind = 'contact' | 'relay' | 'group';
+
+class EvidenceLocator {
+  constructor(
+    private readonly rows: readonly { kind: InboxRowKind; detailLink: boolean }[] | null,
+    private readonly row: { kind: InboxRowKind; detailLink: boolean } | null,
+    private readonly matched: boolean,
+  ) {}
+
+  async count(): Promise<number> { return this.rows?.length ?? (this.matched ? 1 : 0); }
+  first(): this { return this; }
+  async isVisible(): Promise<boolean> { return this.matched; }
+  getByRole(role: string): EvidenceLocator {
+    return role === 'listitem' && this.rows !== null
+      ? new EvidenceLocator(this.rows, null, false)
+      : new EvidenceLocator(null, null, false);
+  }
+  nth(index: number): EvidenceLocator {
+    return this.rows === null
+      ? new EvidenceLocator(null, null, false)
+      : new EvidenceLocator(null, this.rows[index] ?? null, this.rows[index] !== undefined);
+  }
+  getByText(text: string, options: { exact?: boolean } = {}): EvidenceLocator {
+    const matched = options.exact === true && (
+      (text === 'Relay group' && this.row?.kind === 'relay')
+      || (text === 'Group text' && this.row?.kind === 'group')
+    );
+    return new EvidenceLocator(null, null, matched);
+  }
+  locator(selector: string): EvidenceLocator {
+    return new EvidenceLocator(null, null, this.row?.detailLink === true && selector === 'a[href^="/conversations/"]');
+  }
+}
+
+class EvidencePage {
+  constructor(
+    private readonly rows: readonly { kind: InboxRowKind; detailLink: boolean }[],
+    private readonly markers: readonly string[],
+  ) {}
+
+  getByRole(role: string, options: { name?: string; exact?: boolean } = {}): EvidenceLocator {
+    if (role === 'list' && options.name === 'Conversations' && options.exact === true) {
+      return new EvidenceLocator(this.rows, null, false);
+    }
+    return new EvidenceLocator(null, null, false);
+  }
+  getByText(text: string | RegExp, options: { exact?: boolean } = {}): EvidenceLocator {
+    const matched = typeof text === 'string'
+      ? options.exact === true && this.markers.includes(text)
+      : this.markers.some((marker) => text.test(marker));
+    return new EvidenceLocator(null, null, matched);
   }
 }
 
@@ -208,6 +263,95 @@ describe('exact browser targets', () => {
     await expect(instrumentation.collectSample({
       page, token: 'filtered-destination', route: unread, branch: { kind: 'none' }, mode: 'warm', repeat: 0,
     })).resolves.toMatchObject({ status: 'timeout', terminalState: 'contradictory_terminal', reason: 'contradictory_terminal' });
+  });
+
+  it('captures only safe Inbox row counts and fixed truncation booleans', async () => {
+    const all = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
+    const unknown = ROUTES.find((route) => route.surfaceId === 'inbox-unknown')!;
+    const groups = ROUTES.find((route) => route.surfaceId === 'inbox-groups')!;
+    const createEvidencePage = (markers: readonly string[], rows = 0) => createRealSamplePage({
+      page: new EvidencePage(
+        Array.from({ length: rows }, () => ({ kind: 'contact' as const, detailLink: false })),
+        markers,
+      ) as never,
+      context: { addInitScript: async () => undefined } as never,
+      contextState: { token: null },
+      firewall: {} as never,
+      baseUrl: 'http://dashboard.test',
+      pageStoreInstaller: (() => undefined) as never,
+    });
+
+    await expect(createEvidencePage(['See all group texts'], 3).captureSurfaceEvidence(all, 1)).resolves.toEqual({
+      kind: 'inbox', filter: 'all', renderedRowCount: 3, groupsTruncated: true, initialInboxPageRequestCount: 1,
+    });
+    await expect(createEvidencePage(['Browse all group texts (read and unread)']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
+      filter: 'unread', groupsTruncated: true,
+    });
+    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(unknown, 1)).resolves.toMatchObject({
+      filter: 'unknown', groupsTruncated: true,
+    });
+    await expect(createEvidencePage(['Showing the latest 1 group text.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
+      filter: 'groups', renderedRowCount: 0, groupsTruncated: true,
+    });
+    await expect(createEvidencePage(['Showing the latest 2 group texts.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
+      groupsTruncated: true,
+    });
+    await expect(createEvidencePage(['Not all group texts are shown here.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
+      groupsTruncated: true,
+    });
+    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
+      groupsTruncated: false,
+    });
+    await expect(createEvidencePage(['Showing the latest 0 group texts.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
+      groupsTruncated: false,
+    });
+  });
+
+  it('counts relay rows only when the exact label and descendant detail link agree', async () => {
+    const page = createRealSamplePage({
+      page: new EvidencePage([
+        { kind: 'contact', detailLink: false },
+        { kind: 'relay', detailLink: true },
+        { kind: 'group', detailLink: true },
+        { kind: 'relay', detailLink: false },
+      ], []) as never,
+      context: { addInitScript: async () => undefined } as never,
+      contextState: { token: null },
+      firewall: {} as never,
+      baseUrl: 'http://dashboard.test',
+      pageStoreInstaller: (() => undefined) as never,
+    });
+
+    await expect(page.countRelayConversationLinks()).resolves.toBe(1);
+  });
+
+  it('attaches evidence only to successful owned Inbox and conversation-detail surfaces', async () => {
+    const page = createRealSamplePage({
+      page: new EvidencePage([], []) as never,
+      context: { addInitScript: async () => undefined } as never,
+      contextState: { token: null },
+      firewall: {} as never,
+      baseUrl: 'http://dashboard.test',
+      pageStoreInstaller: (() => undefined) as never,
+    });
+    const all = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const detail = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    const other = ROUTES.find((route) => route.surfaceId === '/')!;
+    const request = {
+      surfaceId: 'inbox-all', mode: 'cold' as const, repeat: 0, method: 'GET', resourceClass: 'api' as const,
+      originClass: 'first_party' as const, endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'],
+      inboxRequestClass: 'inbox_page_all' as const, startOffsetMs: 0, durationMs: 1, ttfbMs: 1, status: 200,
+      transferBytes: 1, outcome: 'finished' as const, requestRole: 'required' as const, unmatchedApi: false,
+    };
+
+    await expect(captureSuccessfulSurfaceEvidence(page, all, [request])).resolves.toMatchObject({
+      kind: 'inbox', initialInboxPageRequestCount: 1,
+    });
+    await expect(captureSuccessfulSurfaceEvidence(page, detail, [])).resolves.toEqual({
+      kind: 'conversation_detail', initialRenderedMessageCount: null,
+    });
+    await expect(captureSuccessfulSurfaceEvidence(page, other, [])).resolves.toBeNull();
   });
 });
 

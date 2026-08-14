@@ -21,6 +21,7 @@ import type {
   ResourceClass,
   SampleMode,
   SampleResult,
+  SurfaceEvidence,
   TargetKind,
 } from './types.js';
 
@@ -583,6 +584,7 @@ export interface SamplePage {
   prepareWarmSource(route: RouteDefinition): Promise<void>;
   waitForSourceReady(route: RouteDefinition, timeoutMs: number): Promise<boolean>;
   activateWarmAction(route: RouteDefinition, destinationTarget: ExactBrowserTarget): Promise<boolean>;
+  captureSurfaceEvidence(route: RouteDefinition, initialInboxPageRequestCount: number): Promise<SurfaceEvidence>;
   countRelayConversationLinks(): Promise<number>;
 }
 

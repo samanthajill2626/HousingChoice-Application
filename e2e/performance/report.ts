@@ -71,6 +71,7 @@ const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'cleanup_failed',
   'privacy_scan_failed',
   'comparison_failed',
+  'endpoint_contract_mismatch',
   'uncataloged_write_escaped_firewall',
   'unexpected_failure',
 ];
@@ -753,6 +754,7 @@ const BASELINE_COMPARISON_WORKLOAD_KEYS = [
   'longConversationFixturePresent', 'largeBroadcastFixturePresent',
 ] as const;
 const BASELINE_REVISION_KEYS = ['profilerCommit', 'targetAppCommit'] as const;
+const BASELINE_RUN_KEYS = ['status', 'reason'] as const;
 
 function baselineInteger(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -1000,6 +1002,30 @@ function baselineRevisions(value: unknown): ComparisonRun['revisions'] {
   };
 }
 
+function requireCompleteBaselineRun(value: unknown): void {
+  const run = record(value);
+  if (
+    run === null
+    || !hasClosedKeys(run, BASELINE_RUN_KEYS)
+    || run['status'] !== 'complete'
+    || run['reason'] !== null
+  ) {
+    throw new Error('baseline_schema_invalid');
+  }
+}
+
+function requireCompleteBaselineAggregates(run: ComparisonRun): void {
+  if (run.environment.routeSet.includes(INVALID_BASELINE_ROUTE)) return;
+  const expected = new Set(run.environment.routeSet.flatMap((surface) => [
+    `cold\u0000${surface}`,
+    `warm\u0000${surface}`,
+  ]));
+  const actual = new Set(run.aggregates.map((aggregate) => `${aggregate.mode}\u0000${aggregate.surfaceId}`));
+  if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
+    throw new Error('baseline_schema_invalid');
+  }
+}
+
 function createComparisonRun(summary: Record<string, unknown>): ComparisonRun {
   const aggregates = summary['aggregates'];
   if (
@@ -1035,7 +1061,10 @@ function parseBaselineJson(text: string): ComparisonRun {
   ) {
     throw new Error('baseline_schema_invalid');
   }
-  return createComparisonRun(candidate);
+  requireCompleteBaselineRun(candidate['run']);
+  const run = createComparisonRun(candidate);
+  requireCompleteBaselineAggregates(run);
+  return run;
 }
 
 function json(value: unknown): string {
@@ -1357,9 +1386,11 @@ export async function writePerformanceReport(
   const rankings = buildRankings(aggregates);
   let comparison: ComparisonResult | null = null;
   let comparisonStatus: 'not_requested' | 'written' | 'failed' = 'not_requested';
-  const partialReason = input.partialReason && FAILURE_REASONS.includes(input.partialReason)
-    ? input.partialReason
-    : null;
+  const partialReason = samples.some((sample) => sample.reason === 'endpoint_contract_mismatch')
+    ? 'endpoint_contract_mismatch'
+    : input.partialReason && FAILURE_REASONS.includes(input.partialReason)
+      ? input.partialReason
+      : null;
   const safetyFailure = cloneSafetyFailure(input.safetyFailure);
 
   const summary: Record<string, unknown> = {

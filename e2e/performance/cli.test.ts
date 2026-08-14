@@ -4,6 +4,7 @@ import {
   captureCdpClockAlignment,
   captureSuccessfulSurfaceEvidence,
   classifyEscapedWriteFailure,
+  createRealInstrumentation,
   createRealSamplePage,
   exactTargetMatches,
   installProfilerProcessHandlers,
@@ -16,7 +17,7 @@ import {
   targetPath,
   type CliRuntime,
 } from './cli.js';
-import { FirewallEscapedWriteError } from './firewall.js';
+import { createFirewallRecordingToken, FirewallEscapedWriteError } from './firewall.js';
 import type { TerminalUiProbe } from './readiness.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
@@ -721,6 +722,169 @@ describe('top-level profiler sequencing', () => {
     expect(contextState.token).toBeNull();
     expect(off).toHaveBeenCalledOnce();
     expect(detach).toHaveBeenCalledOnce();
+  });
+
+  it('retains a blocked write recorded during delayed post-readiness surface evidence', async () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-all')!;
+    const handlers = new Map<string, (event: unknown) => void>();
+    const cdp = {
+      send: vi.fn(async (method: string) => method === 'Performance.getMetrics'
+        ? { metrics: [{ name: 'Timestamp', value: 1 }] }
+        : {}),
+      on: vi.fn((event: string, listener: (value: unknown) => void) => handlers.set(event, listener)),
+      detach: vi.fn(async () => undefined),
+    };
+    const events: string[] = [];
+    const contextState = { token: null as ReturnType<typeof createFirewallRecordingToken> | null };
+    const page = {
+      rawPage: {
+        context: () => ({ newCDPSession: vi.fn(async () => cdp) }),
+        on: vi.fn(),
+        off: vi.fn(),
+        url: () => 'http://127.0.0.1:9111/inbox',
+        evaluate: vi.fn(async () => ({
+          navigation: { ttfbMs: 1, domContentLoadedMs: 2, loadMs: 3 },
+          paint: { fcpMs: 4, lcpMs: 5 },
+          longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+          domElements: 6,
+        })),
+      },
+      contextState,
+      firewall: {
+        assertHealthy: vi.fn(async () => { events.push('health'); }),
+        drainOutOfSampleEvidence: vi.fn(() => []),
+      },
+      async captureSurfaceEvidence() {
+        events.push('surface:start');
+        contextState.token!.record({
+          method: 'POST',
+          endpointTemplate: '/api/conversations/:conversationId/read',
+          phase: 'destination_mount',
+        });
+        await Promise.resolve();
+        events.push('surface:end');
+        return {
+          kind: 'inbox' as const,
+          filter: 'all' as const,
+          renderedRowCount: 1,
+          groupsTruncated: false,
+          initialInboxPageRequestCount: 0,
+        };
+      },
+    };
+    const instrumentation = createRealInstrumentation({
+      route,
+      mode: 'cold',
+      repeat: 0,
+      baseUrl: 'http://127.0.0.1:9111',
+      readyTimeoutMs: 10,
+      settleMs: 1,
+      pollMs: 1,
+      modules: {
+        collect: { NetworkCollector, summarizePageMetrics },
+        firewall: { createFirewallRecordingToken },
+        readiness: {
+          waitForMeaningfulReady: async () => ({
+            status: 'ready', readyMs: 7, terminalState: 'populated', polls: 1,
+            pendingCount: 0, lastQualifyingOffsetMs: null,
+          }),
+        },
+        routes: { expectedGets: () => [] },
+      },
+      requests: [],
+    } as never);
+
+    await instrumentation.beginSample({
+      page: page as never, token: 'late-write', route, branch: { kind: 'none' },
+      mode: 'cold', repeat: 0, destinationPageUrl: '/inbox',
+    });
+    const result = await instrumentation.collectSample({
+      page: page as never, token: 'late-write', route, branch: { kind: 'none' }, mode: 'cold', repeat: 0,
+    });
+
+    expect(result.blockedWrites).toContainEqual({
+      method: 'POST', endpointTemplate: '/api/conversations/:conversationId/read', phase: 'destination_mount',
+    });
+    expect(events).toEqual(['health', 'surface:start', 'surface:end', 'health']);
+    expect(contextState.token).toBeNull();
+    expect(handlers.has('Network.requestWillBeSent')).toBe(true);
+  });
+
+  it('fails a sample closed when an Inbox request has an invalid page tuple', async () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-all')!;
+    const handlers = new Map<string, (event: any) => void>();
+    const cdp = {
+      send: vi.fn(async (method: string) => method === 'Performance.getMetrics'
+        ? { metrics: [{ name: 'Timestamp', value: 1 }] }
+        : {}),
+      on: vi.fn((event: string, listener: (value: any) => void) => handlers.set(event, listener)),
+      detach: vi.fn(async () => undefined),
+    };
+    const contextState = { token: null as ReturnType<typeof createFirewallRecordingToken> | null };
+    const page = {
+      rawPage: {
+        context: () => ({ newCDPSession: vi.fn(async () => cdp) }),
+        on: vi.fn(),
+        off: vi.fn(),
+        url: () => 'http://127.0.0.1:9111/inbox',
+        evaluate: vi.fn(async () => ({
+          navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
+          paint: { fcpMs: null, lcpMs: null },
+          longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+          domElements: 1,
+        })),
+      },
+      contextState,
+      firewall: { assertHealthy: vi.fn(async () => undefined), drainOutOfSampleEvidence: vi.fn(() => []) },
+      async captureSurfaceEvidence() { return null; },
+    };
+    const requests: import('./types.js').RequestEvidence[] = [];
+    const instrumentation = createRealInstrumentation({
+      route, mode: 'cold', repeat: 0, baseUrl: 'http://127.0.0.1:9111',
+      readyTimeoutMs: 10, settleMs: 1, pollMs: 1,
+      modules: {
+        collect: { NetworkCollector, summarizePageMetrics },
+        firewall: { createFirewallRecordingToken },
+        readiness: {
+          waitForMeaningfulReady: async () => {
+            handlers.get('Network.requestWillBeSent')!({
+              requestId: 'malformed', timestamp: 1.01, type: 'Fetch',
+              request: {
+                method: 'GET',
+                url: 'http://127.0.0.1:9111/api/inbox?filter=private-value&limit=31',
+              },
+            });
+            handlers.get('Network.responseReceived')!({
+              requestId: 'malformed', timestamp: 1.02, response: { status: 200 },
+            });
+            handlers.get('Network.loadingFinished')!({
+              requestId: 'malformed', timestamp: 1.03, encodedDataLength: 10,
+            });
+            return {
+              status: 'ready', readyMs: 5, terminalState: 'populated', polls: 1,
+              pendingCount: 0, lastQualifyingOffsetMs: null,
+            };
+          },
+        },
+        routes: { expectedGets: () => [] },
+      },
+      requests,
+    } as never);
+
+    await instrumentation.beginSample({
+      page: page as never, token: 'bad-inbox', route, branch: { kind: 'none' },
+      mode: 'cold', repeat: 0, destinationPageUrl: '/inbox',
+    });
+    const result = await instrumentation.collectSample({
+      page: page as never, token: 'bad-inbox', route, branch: { kind: 'none' }, mode: 'cold', repeat: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'endpoint_contract_mismatch', surfaceEvidence: null });
+    expect(requests).toEqual([expect.objectContaining({
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'],
+      inboxRequestClass: 'inbox_endpoint_contract_failure', unmatchedApi: true,
+    })]);
+    expect(JSON.stringify({ result, requests })).not.toContain('private-value');
   });
 
   it('makes every sampled page wait for a real per-page firewall installation', async () => {

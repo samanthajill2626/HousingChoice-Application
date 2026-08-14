@@ -76,6 +76,15 @@ function fixtureApi(overrides: Readonly<Record<string, unknown>> = {}): SelfQaAp
 }
 
 function sample(surfaceId: string, mode: 'cold' | 'warm', blockedWrites: SampleResult['blockedWrites'] = []): SampleResult {
+  const inboxFilter = surfaceId === 'inbox-all'
+    ? 'all'
+    : surfaceId === 'inbox-unread'
+      ? 'unread'
+      : surfaceId === 'inbox-unknown'
+        ? 'unknown'
+        : surfaceId === 'inbox-groups'
+          ? 'groups'
+          : null;
   return {
     surfaceId, mode, repeat: 0, status: 'ok', readyMs: 1,
     navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
@@ -84,7 +93,12 @@ function sample(surfaceId: string, mode: 'cold' | 'warm', blockedWrites: SampleR
     resourceTransferBytes: 0,
     resourceCountsByClass: { document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 },
     backgroundRequestCount: 0, backgroundTransferBytes: 0, blockedWrites,
-    consoleCategories: {}, clientTruncated: false, terminalState: 'populated', surfaceEvidence: null, reason: null,
+    consoleCategories: {}, clientTruncated: false, terminalState: 'populated',
+    surfaceEvidence: inboxFilter === null ? null : {
+      kind: 'inbox', filter: inboxFilter, renderedRowCount: 1,
+      groupsTruncated: false, initialInboxPageRequestCount: 1,
+    },
+    reason: null,
   };
 }
 
@@ -137,9 +151,13 @@ function reportProof(samples: readonly SampleResult[]) {
   };
 }
 
-function evaluateFullEndpointRoles(extraRequests: readonly RequestEvidence[]) {
+function evaluateFullEndpointRoles(
+  extraRequests: readonly RequestEvidence[],
+  mutateSamples: (samples: SampleResult[]) => void = () => undefined,
+) {
   const samples = ROUTES.flatMap((route) =>
     (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
+  mutateSamples(samples);
   const requiredRequests = branches.flatMap((observation) => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === observation.surfaceId)!;
     return expectedGets(route, observation.mode, observation.branch).map((contract) => ({
@@ -303,6 +321,20 @@ describe('self-QA closed proof evaluator', () => {
     expect(evaluateFullEndpointRoles([backgroundRefresh])).toMatchObject({
       endpointSubset: true,
       status: 'pass',
+    });
+  });
+
+  it('rejects a duplicate required Inbox page request while keeping badge classification separate', () => {
+    const duplicatePage = evaluateFullEndpointRoles([], (samples) => {
+      const sample = samples.find((row) => row.surfaceId === 'inbox-unread' && row.mode === 'warm')!;
+      sample.surfaceEvidence = {
+        kind: 'inbox', filter: 'unread', renderedRowCount: 1,
+        groupsTruncated: false, initialInboxPageRequestCount: 2,
+      };
+    });
+
+    expect(duplicatePage).toMatchObject({
+      status: 'fail', endpointSubset: true, noUnmatchedApi: true, inboxRequestClassesMatch: false,
     });
   });
 

@@ -30,6 +30,7 @@ export type FailureReasonCode =
   | 'cleanup_failed'
   | 'privacy_scan_failed'
   | 'comparison_failed'
+  | 'endpoint_contract_mismatch'
   | 'uncataloged_write_escaped_firewall'
   | 'unexpected_failure';
 

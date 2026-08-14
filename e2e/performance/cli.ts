@@ -794,11 +794,25 @@ export function createRealInstrumentation(input: {
   let destinationPath = '';
   let destinationTarget: ExactBrowserTarget | null = null;
   let consoleListener: ((message: ConsoleMessage) => void) | null = null;
+  let recordingToken: FirewallRecordingToken | null = null;
+  let onOutOfSampleWrites: ((writes: readonly BlockedWrite[]) => void) | undefined;
   let adaptersActive = false;
+
+  const deactivateRecordingToken = (): BlockedWrite[] => {
+    const activeToken = recordingToken;
+    recordingToken = null;
+    if (page !== null && page.contextState.token === activeToken) page.contextState.token = null;
+    return activeToken?.evidence() ?? [];
+  };
 
   const finishAdapters = async (): Promise<void> => {
     if (!adaptersActive) return;
     adaptersActive = false;
+    const abandonedWrites = deactivateRecordingToken();
+    if (abandonedWrites.length > 0) {
+      onOutOfSampleWrites?.(abandonedWrites.map((write) => ({ ...write, phase: 'out_of_sample' })));
+    }
+    onOutOfSampleWrites = undefined;
     const activePage = page;
     const activeConsoleListener = consoleListener;
     const activeCdp = cdp;
@@ -807,7 +821,6 @@ export function createRealInstrumentation(input: {
     if (activePage !== null && activeConsoleListener !== null) {
       try { activePage.rawPage.off('console', activeConsoleListener); } catch { /* closed cleanup */ }
     }
-    if (activePage !== null) activePage.contextState.token = null;
     if (activeCdp !== null) await activeCdp.detach().catch(() => undefined);
   };
 
@@ -816,6 +829,7 @@ export function createRealInstrumentation(input: {
       page = begin.page as RealPage;
       await page.firewall.assertHealthy();
       begin.onOutOfSampleWrites?.(page.firewall.drainOutOfSampleEvidence());
+      onOutOfSampleWrites = begin.onOutOfSampleWrites;
       adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
@@ -846,7 +860,7 @@ export function createRealInstrumentation(input: {
         if (level !== null) collector?.noteConsole(token, level, message.text(), performance.now());
       };
       page.rawPage.on('console', consoleListener);
-      const recordingToken = input.modules.firewall.createFirewallRecordingToken(
+      recordingToken = input.modules.firewall.createFirewallRecordingToken(
         input.mode === 'cold'
           ? {
               mode: 'cold',
@@ -906,10 +920,6 @@ export function createRealInstrumentation(input: {
             },
           },
         });
-        await page.firewall.assertHealthy();
-        for (const write of page.contextState.token?.evidence() ?? []) collector.noteBlockedWrite(token, write);
-        const ended = collector.endSample(token);
-        input.requests.push(...ended.requests);
         const pageSnapshot = await readPageStoreSnapshot(async () => (
           await page!.rawPage.evaluate(({ sampleToken }) => {
             const host = globalThis as typeof globalThis & {
@@ -918,6 +928,8 @@ export function createRealInstrumentation(input: {
             return host.__hcPerformanceStore?.endSample(sampleToken) ?? null;
           }, { sampleToken: token }) as PageStoreSnapshot | null
         ));
+        const ended = collector.endSample(token);
+        input.requests.push(...ended.requests);
         const metrics = input.modules.collect.summarizePageMetrics({
           mode: input.mode,
           page: pageSnapshot ?? {
@@ -928,10 +940,22 @@ export function createRealInstrumentation(input: {
           },
           consoleCategories: ended.consoleCategories,
         });
-        const status = readiness.status === 'ready' ? 'ok' : 'timeout';
+        const endpointContractMismatch = ended.requests.some(
+          (request) => request.inboxRequestClass === 'inbox_endpoint_contract_failure',
+        );
+        const status = endpointContractMismatch
+          ? 'failed'
+          : readiness.status === 'ready'
+            ? 'ok'
+            : 'timeout';
         const surfaceEvidence = status === 'ok'
           ? await captureSuccessfulSurfaceEvidence(page, route, ended.requests)
           : null;
+        await page.firewall.assertHealthy();
+        const blockedWrites = [
+          ...ended.blockedWrites,
+          ...deactivateRecordingToken(),
+        ];
         return {
           surfaceId: input.route.surfaceId,
           mode: input.mode,
@@ -949,16 +973,18 @@ export function createRealInstrumentation(input: {
           resourceCountsByClass: ended.resourceCountsByClass,
           backgroundRequestCount: ended.backgroundRequestCount,
           backgroundTransferBytes: ended.backgroundTransferBytes,
-          blockedWrites: ended.blockedWrites,
+          blockedWrites,
           consoleCategories: ended.consoleCategories,
           clientTruncated: metrics.clientTruncated,
           terminalState: readiness.terminalState,
           surfaceEvidence,
-          reason: readiness.status === 'ready'
-            ? null
-            : readiness.terminalState === 'contradictory_terminal'
-              ? 'contradictory_terminal'
-              : 'ready_timeout',
+          reason: endpointContractMismatch
+            ? 'endpoint_contract_mismatch'
+            : readiness.status === 'ready'
+              ? null
+              : readiness.terminalState === 'contradictory_terminal'
+                ? 'contradictory_terminal'
+                : 'ready_timeout',
         };
       } finally {
         await finishAdapters();

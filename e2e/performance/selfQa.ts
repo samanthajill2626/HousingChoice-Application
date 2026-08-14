@@ -328,10 +328,17 @@ function inboxProof(input: EvaluateSelfQaInput): {
   const surfaceSetMatches = input.mode === 'full'
     ? ids.length === expectedIds.length && expectedIds.every((id) => ids.includes(id))
     : ids.length === 1 && ids[0] === 'inbox-all';
-  const requestClassesMatch = measured.every((route) => input.requests.some((request) =>
+  const observedRequestClassesMatch = measured.every((route) => input.requests.some((request) =>
     request.surfaceId === route.surfaceId
     && request.inboxRequestClass === INBOX_PAGE_CLASSES[route.surfaceId as keyof typeof INBOX_PAGE_CLASSES],
   ));
+  const exactInitialPageCountsMatch = input.mode !== 'full' || measured.every((route) => {
+    const samples = input.samples.filter((sample) => sample.surfaceId === route.surfaceId);
+    return samples.length > 0 && samples.every((sample) =>
+      sample.surfaceEvidence?.kind === 'inbox'
+      && sample.surfaceEvidence.initialInboxPageRequestCount === 1);
+  });
+  const requestClassesMatch = observedRequestClassesMatch && exactInitialPageCountsMatch;
   const noCursor = input.requests
     .filter((request) => ids.includes(request.surfaceId))
     .every((request) => !request.queryKeys.includes('cursor'));

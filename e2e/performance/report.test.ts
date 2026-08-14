@@ -256,6 +256,12 @@ function reportInput(outputRoot: string, runId: string) {
       readyMs: null,
       terminalState: 'unknown',
     }),
+    sample('/settings/notifications', 'cold', 0, {
+      status: 'skipped_no_fixture',
+      reason: 'fixture_absent',
+      readyMs: null,
+      terminalState: 'unknown',
+    }),
   ];
   return {
     outputRoot,
@@ -1101,25 +1107,31 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const surfaceIds = ROUTES.map((route) => route.surfaceId);
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-11223344');
-    baselineInput.samples = surfaceIds.map((key) => sample(key, 'cold', 0));
-    baselineInput.requests = surfaceIds.map((key) => request(key, 'cold', 0));
-    baselineInput.routeOrders = [{ mode: 'cold', repeat: 0, surfaceIds }];
+    baselineInput.samples = surfaceIds.flatMap((key) => [sample(key, 'cold', 0), sample(key, 'warm', 0)]);
+    baselineInput.requests = surfaceIds.flatMap((key) => [request(key, 'cold', 0), request(key, 'warm', 0)]);
+    baselineInput.routeOrders = [
+      { mode: 'cold', repeat: 0, surfaceIds },
+      { mode: 'warm', repeat: 0, surfaceIds },
+    ];
 
     await expect(writePerformanceReport(baselineInput)).resolves.toMatchObject({ status: 'written' });
     const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
     const baseline = JSON.parse(baselineJson) as Record<string, any>;
 
-    expect(baseline.samples.map((row: SampleResult) => row.surfaceId)).toEqual(surfaceIds);
+    expect([...new Set(baseline.samples.map((row: SampleResult) => row.surfaceId))]).toEqual(surfaceIds);
     expect(baseline.routeOrders[0].surfaceIds).toEqual(surfaceIds);
     expect(baseline.warmup.surfaceId).toBe('/');
-    expect(baseline.aggregates.map((row: { surfaceId: string }) => row.surfaceId)).toEqual(surfaceIds);
+    expect([...new Set(baseline.aggregates.map((row: { surfaceId: string }) => row.surfaceId))]).toEqual(surfaceIds);
     expect(baseline.rankings.cold.readyMs.some((row: { surfaceId: string }) => row.surfaceId === '/')).toBe(true);
 
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-55667788'),
-      samples: surfaceIds.map((key) => sample(key, 'cold', 0)),
-      requests: surfaceIds.map((key) => request(key, 'cold', 0)),
-      routeOrders: [{ mode: 'cold' as const, repeat: 0, surfaceIds }],
+      samples: surfaceIds.flatMap((key) => [sample(key, 'cold', 0), sample(key, 'warm', 0)]),
+      requests: surfaceIds.flatMap((key) => [request(key, 'cold', 0), request(key, 'warm', 0)]),
+      routeOrders: [
+        { mode: 'cold' as const, repeat: 0, surfaceIds },
+        { mode: 'warm' as const, repeat: 0, surfaceIds },
+      ],
       baselineJson,
     };
     const current = await writePerformanceReport(currentInput);
@@ -1347,6 +1359,54 @@ describe('writePerformanceReport', () => {
     expect(await readFile(join(outputRoot, input.runId, 'report.md'), 'utf8'))
       .toContain('comparison_failed');
     expect(JSON.stringify(summary).includes('private.person')).toBe(false);
+  });
+
+  it('rejects a partial baseline before comparison publication', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-02030405');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.run = { status: 'partial', reason: 'browser_failure' };
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456789Z-03040506'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it('rejects a baseline missing one declared route-mode aggregate', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-04050607');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.aggregates = baseline.aggregates.slice(1);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456789Z-05060708'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it('returns a partial nonzero report for an Inbox endpoint contract mismatch sample', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-06070809');
+    input.samples[0] = sample('/contacts', 'cold', 0, {
+      status: 'failed', reason: 'endpoint_contract_mismatch', readyMs: null, terminalState: 'unknown',
+    });
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.run).toEqual({ status: 'partial', reason: 'endpoint_contract_mismatch' });
   });
 
   it('writes a partial sanitized summary and report with a closed fatal reason', async () => {

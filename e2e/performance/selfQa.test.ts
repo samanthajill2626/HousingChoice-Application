@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
 import type { RequestEvidence, SampleResult } from './types.js';
 import { aggregateSamples, buildRankings } from './aggregate.js';
-import { validateObservedRequestRoles } from './collect.js';
 import { expectedGets, resolveBoundSelfQaDetail, ROUTES } from './routes.js';
 import { writePerformanceReport } from './report.js';
 import {
@@ -136,6 +135,27 @@ function reportProof(samples: readonly SampleResult[]) {
     countManifest: true,
     rankings: buildRankings(aggregateSamples(samples)),
   };
+}
+
+function evaluateFullEndpointRoles(extraRequests: readonly RequestEvidence[]) {
+  const samples = ROUTES.flatMap((route) =>
+    (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
+  const requiredRequests = branches.flatMap((observation) => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === observation.surfaceId)!;
+    return expectedGets(route, observation.mode, observation.branch).map((contract) => ({
+      ...request(route.surfaceId, observation.mode, contract.endpointTemplate),
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+    }));
+  });
+  return evaluateSelfQa({
+    mode: 'full', routes: ROUTES, samples, requests: [...requiredRequests, ...extraRequests], branches,
+    attempts: expectedAttempts('full'),
+    stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox']
+      .map((surface) => ({ surface, unchanged: true })) as never,
+    relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
+    supplementalSampleCount: 0, reportProof: reportProof(samples),
+  });
 }
 
 describe('self-QA fixture and state guardian', () => {
@@ -275,30 +295,37 @@ describe('self-QA closed proof evaluator', () => {
     expect(missingPage.endpointSubset).toBe(false);
   });
 
-  it('limits endpoint subset proof to required requests while valid background refresh stays separately declared', () => {
-    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
-    const mode = 'warm' as const;
-    const branch = { kind: 'none' as const };
-    const samples = [sample(route.surfaceId, mode)];
-    const routeBranches = [{ surfaceId: route.surfaceId, mode, repeat: 0, branch }];
-    const requiredRequests = expectedGets(route, mode, branch).map((contract) => ({
-      ...request(route.surfaceId, mode, contract.endpointTemplate),
-      queryKeys: [...contract.queryKeys],
-      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
-    }));
+  it('accepts declared background refresh while retaining all required endpoint proof', () => {
     const backgroundRefresh = {
-      ...request(route.surfaceId, mode, '/api/conversations'),
+      ...request('/contacts/tenants', 'warm', '/api/conversations'),
       requestRole: 'background_refresh' as const,
     };
-    const evaluate = (requests: readonly RequestEvidence[]) => evaluateSelfQa({
-      mode: 'narrow', routes: [route], samples, requests, branches: routeBranches, attempts: [],
-      stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: reportProof(samples),
+    expect(evaluateFullEndpointRoles([backgroundRefresh])).toMatchObject({
+      endpointSubset: true,
+      status: 'pass',
     });
+  });
 
-    expect(validateObservedRequestRoles([backgroundRefresh])).toEqual([]);
-    expect(evaluate([...requiredRequests, backgroundRefresh]).endpointSubset).toBe(true);
-    expect(evaluate([...requiredRequests, { ...backgroundRefresh, requestRole: 'required' }]).endpointSubset).toBe(false);
+  it('rejects an undeclared required endpoint shape', () => {
+    const undeclaredRequired = request('/contacts/tenants', 'warm', '/api/settings');
+    expect(evaluateFullEndpointRoles([undeclaredRequired])).toMatchObject({
+      endpointSubset: false,
+      status: 'fail',
+    });
+  });
+
+  it.each([
+    ['background_refresh', '/api/settings'],
+    ['background_shell', '/api/tours'],
+  ] as const)('fails closed on an undeclared %s endpoint shape', (requestRole, endpointTemplate) => {
+    const undeclaredBackground = {
+      ...request('/contacts/tenants', 'warm', endpointTemplate),
+      requestRole,
+    };
+    expect(evaluateFullEndpointRoles([undeclaredBackground])).toMatchObject({
+      endpointSubset: false,
+      status: 'fail',
+    });
   });
 
   it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {

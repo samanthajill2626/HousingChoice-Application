@@ -1,4 +1,5 @@
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
+import { validateObservedRequestRoles } from './collect.js';
 import {
   assertObservedGets,
   expectedGets,
@@ -284,6 +285,7 @@ function expectedAttempts(mode: SelfQaMode): SelfQaAttempt[] {
 }
 
 function endpointSubset(input: EvaluateSelfQaInput): boolean {
+  if (validateObservedRequestRoles(input.requests).length > 0) return false;
   for (const sample of input.samples) {
     const route = input.routes.find((candidate) => candidate.surfaceId === sample.surfaceId);
     const branch = input.branches.find((candidate) =>

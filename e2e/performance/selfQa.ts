@@ -6,7 +6,7 @@ import {
   type RouteContractBranch,
   type RouteDefinition,
 } from './routes.js';
-import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult } from './types.js';
+import type { AggregateRankings, BlockedWrite, RequestEvidence, SampleMode, SampleResult } from './types.js';
 
 export type SelfQaMode = 'narrow' | 'full';
 export type SelfQaSurface =
@@ -53,8 +53,7 @@ export interface SelfQaBranchObservation {
 export interface SelfQaReportProof {
   privacyScanRequired: boolean;
   countManifest: boolean;
-  coldRanking: boolean;
-  warmRanking: boolean;
+  rankings: AggregateRankings;
 }
 
 export interface EvaluateSelfQaInput {
@@ -339,6 +338,29 @@ function inboxProof(input: EvaluateSelfQaInput): {
   return { surfaceSetMatches, requestClassesMatch, noCursor, passiveWritesAbsent };
 }
 
+function sampleTuple(sample: Pick<SampleResult, 'surfaceId' | 'mode' | 'repeat'>): string {
+  return [sample.surfaceId, sample.mode, sample.repeat].join('|');
+}
+
+function exactSampleCoverage(input: EvaluateSelfQaInput): boolean {
+  const expected = new Set(input.routes.flatMap((route) => [
+    sampleTuple({ surfaceId: route.surfaceId, mode: 'cold', repeat: 0 }),
+    sampleTuple({ surfaceId: route.surfaceId, mode: 'warm', repeat: 0 }),
+  ]));
+  const actual = input.samples.map(sampleTuple);
+  return actual.length === expected.size
+    && new Set(actual).size === expected.size
+    && actual.every((tuple) => expected.has(tuple));
+}
+
+function inboxRanked(input: EvaluateSelfQaInput, mode: SampleMode): boolean {
+  const inboxIds = input.routes
+    .filter((route) => route.behaviorFamily === 'inbox')
+    .map((route) => route.surfaceId);
+  return inboxIds.length > 0 && inboxIds.every((surfaceId) =>
+    input.reportProof.rankings[mode].readyMs.some((row) => row.surfaceId === surfaceId && row.successCount > 0));
+}
+
 export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAttempt[] {
   return samples.flatMap((sample) => {
     const surface: SelfQaAttempt['surface'] | null = sample.surfaceId === '/contacts/:contactId'
@@ -378,7 +400,8 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const sampleCardinalityMatches = input.routes.length === expectedRoutes
     && input.samples.length === expectedRoutes * 2
     && coldOk === expectedRoutes
-    && warmOk === expectedRoutes;
+    && warmOk === expectedRoutes
+    && exactSampleCoverage(input);
   const endpointSubsetValue = endpointSubset(input);
   const inbox = inboxProof(input);
   const noUnmatchedApi = !input.requests.some((request) => request.unmatchedApi);
@@ -394,11 +417,13 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const stateMatches = stateChecks.length === SURFACE_ORDER.length && stateChecks.every((check) => check.unchanged);
   const supplementalExcluded = input.supplementalSampleCount === 0;
   const outOfSampleWritesAbsent = (input.outOfSampleWrites ?? []).length === 0;
+  const coldRanking = inboxRanked(input, 'cold');
+  const warmRanking = inboxRanked(input, 'warm');
   const pass = writeTuplesMatch && sampleCardinalityMatches && endpointSubsetValue && noUnmatchedApi
     && relayCountMatches && stateMatches && supplementalExcluded && outOfSampleWritesAbsent
     && inbox.surfaceSetMatches && inbox.requestClassesMatch && inbox.noCursor && inbox.passiveWritesAbsent
     && input.reportProof.privacyScanRequired
-    && input.reportProof.countManifest && input.reportProof.coldRanking && input.reportProof.warmRanking;
+    && input.reportProof.countManifest && coldRanking && warmRanking;
   return {
     mode: input.mode,
     status: pass ? 'pass' : 'fail',
@@ -415,8 +440,8 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     supplementalExcluded,
     privacyScanRequired: input.reportProof.privacyScanRequired,
     countManifest: input.reportProof.countManifest,
-    coldRanking: input.reportProof.coldRanking,
-    warmRanking: input.reportProof.warmRanking,
+    coldRanking,
+    warmRanking,
     writeTuplesMatch,
     outOfSampleWritesAbsent,
     inboxSurfaceSetMatches: inbox.surfaceSetMatches,

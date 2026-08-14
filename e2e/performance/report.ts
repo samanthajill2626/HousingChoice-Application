@@ -689,7 +689,7 @@ function comparisonEnvironment(
     target: config.target,
     registryVersion: PERFORMANCE_REGISTRY_VERSION,
     workloadVersion: PERFORMANCE_WORKLOAD_VERSION,
-    dataSource: config.target === 'hermetic' ? 'synthetic_hermetic' : 'existing_target',
+    dataSource: config.target === 'hermetic' ? 'synthetic_hermetic' : 'existing',
     comparisonWorkload: config.target === 'hermetic' ? comparisonWorkload(config.seed) : null,
     routeSet: [...new Set(samples.map((sample) => sample.surfaceId))].sort(),
     browserMajor: browser.major,
@@ -708,20 +708,75 @@ function comparisonWorkload(manifest: PerformanceSeedManifest | null): Compariso
   if (manifest === null) return null;
   return {
     workloadModelVersion: integer(manifest.workloadModelVersion),
-    scale: integer(manifest.scale), contacts: integer(manifest.contacts), units: integer(manifest.units),
+    contacts: integer(manifest.contacts), activeContacts: integer(manifest.activeContactCount), units: integer(manifest.units),
     placements: integer(manifest.placements), tours: integer(manifest.tours),
     conversations: integer(manifest.conversations), nativeGroups: integer(manifest.nativeGroups),
-    nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
     totalConversations: integer(manifest.totalConversations),
     messagesPerConversation: integer(manifest.messagesPerConversation),
     resolvedLongConversationMessages: integer(manifest.resolvedLongConversationMessages),
-    ordinaryMessageCount: integer(manifest.ordinaryMessageCount),
-    tailMessageCount: integer(manifest.tailMessageCount), totalMessageCount: integer(manifest.totalMessageCount),
+    totalMessageCount: integer(manifest.totalMessageCount),
+    nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
     broadcasts: integer(manifest.broadcasts),
     resolvedRecipientsPerBroadcast: integer(manifest.resolvedRecipientsPerBroadcast),
     resolvedLargeBroadcastRecipients: integer(manifest.resolvedLargeBroadcastRecipients),
-    totalRecipientCount: integer(manifest.totalRecipientCount), relayGroupCount: integer(manifest.relayGroupCount),
-    physicalItemCount: integer(manifest.physicalItemCount), totalItemCount: integer(manifest.totalItemCount),
+    totalRecipientCount: integer(manifest.totalRecipientCount),
+    recipientPoolSize: integer(manifest.recipientPoolSize),
+    recipientPoolSource: manifest.recipientPoolSource === 'generated_tenants' ? 'generated_tenants' : 'lean_tenant',
+    longConversationFixturePresent: manifest.longConversationFixturePresent === true,
+    largeBroadcastFixturePresent: manifest.largeBroadcastFixturePresent === true,
+  };
+}
+
+function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
+  const workload = record(value);
+  if (workload === null) return null;
+  return {
+    workloadModelVersion: integer(workload['workloadModelVersion']),
+    contacts: integer(workload['contacts']),
+    activeContacts: integer(workload['activeContacts']),
+    units: integer(workload['units']),
+    placements: integer(workload['placements']),
+    tours: integer(workload['tours']),
+    conversations: integer(workload['conversations']),
+    nativeGroups: integer(workload['nativeGroups']),
+    nativeGroupMemberSlotCount: integer(workload['nativeGroupMemberSlotCount']),
+    totalConversations: integer(workload['totalConversations']),
+    messagesPerConversation: integer(workload['messagesPerConversation']),
+    resolvedLongConversationMessages: integer(workload['resolvedLongConversationMessages']),
+    totalMessageCount: integer(workload['totalMessageCount']),
+    broadcasts: integer(workload['broadcasts']),
+    resolvedRecipientsPerBroadcast: integer(workload['resolvedRecipientsPerBroadcast']),
+    resolvedLargeBroadcastRecipients: integer(workload['resolvedLargeBroadcastRecipients']),
+    totalRecipientCount: integer(workload['totalRecipientCount']),
+    recipientPoolSize: integer(workload['recipientPoolSize']),
+    recipientPoolSource: workload['recipientPoolSource'] === 'generated_tenants' ? 'generated_tenants' : 'lean_tenant',
+    longConversationFixturePresent: workload['longConversationFixturePresent'] === true,
+    largeBroadcastFixturePresent: workload['largeBroadcastFixturePresent'] === true,
+  };
+}
+
+function baselineEnvironment(value: unknown): ComparisonEnvironment {
+  const environment = record(value);
+  if (environment === null) throw new Error('baseline_schema_invalid');
+  return {
+    target: environment['target'] === 'local' || environment['target'] === 'hosted-dev' ? environment['target'] : 'hermetic',
+    registryVersion: integer(environment['registryVersion']),
+    workloadVersion: integer(environment['workloadVersion']),
+    dataSource: environment['dataSource'] === 'synthetic_hermetic' ? 'synthetic_hermetic' : 'existing',
+    comparisonWorkload: baselineComparisonWorkload(environment['comparisonWorkload']),
+    routeSet: Array.isArray(environment['routeSet']) ? environment['routeSet'].map(surfaceId).sort() : [],
+    browserMajor: integer(environment['browserMajor']),
+    browserChannel: typeof environment['browserChannel'] === 'string' ? environment['browserChannel'] : '',
+    viewport: {
+      width: integer(record(environment['viewport'])?.['width']),
+      height: integer(record(environment['viewport'])?.['height']),
+    },
+    coldRepeats: integer(environment['coldRepeats']),
+    warmRepeats: integer(environment['warmRepeats']),
+    routeOrderSeed: integer(environment['routeOrderSeed']),
+    interceptionScopeVersion: integer(environment['interceptionScopeVersion']),
+    settleMs: integer(environment['settleMs']),
+    pollMs: integer(environment['pollMs']),
   };
 }
 
@@ -764,7 +819,7 @@ function createComparisonRun(summary: Record<string, unknown>): ComparisonRun {
   }
   return {
     schemaVersion: summary['schemaVersion'] as number,
-    environment: summary['environment'] as ComparisonEnvironment,
+    environment: baselineEnvironment(summary['environment']),
     revisions: summary['revisions'] as ComparisonRun['revisions'],
     aggregates,
   };

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
 import type { RequestEvidence, SampleResult } from './types.js';
+import { aggregateSamples, buildRankings } from './aggregate.js';
 import { expectedGets, resolveBoundSelfQaDetail, ROUTES } from './routes.js';
 import { writePerformanceReport } from './report.js';
 import {
@@ -128,6 +129,14 @@ function expectedAttempts(mode: 'narrow' | 'full'): SelfQaAttempt[] {
   return rows;
 }
 
+function reportProof(samples: readonly SampleResult[]) {
+  return {
+    privacyScanRequired: true,
+    countManifest: true,
+    rankings: buildRankings(aggregateSamples(samples)),
+  };
+}
+
 describe('self-QA fixture and state guardian', () => {
   it('proves all six private fixtures, source links, owners, backrefs, unread state, and separation', async () => {
     await expect(proveSelfQaFixtures(RAW, fixtureApi())).resolves.toEqual(bindings);
@@ -204,11 +213,34 @@ describe('self-QA closed proof evaluator', () => {
       mode: 'full', routes: ROUTES, samples, requests, branches,
       attempts, stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
-      supplementalSampleCount: 0, reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      supplementalSampleCount: 0, reportProof: reportProof(samples),
     });
     expect(result.status).toBe('pass');
     expect(result.writeTuplesMatch).toBe(true);
     expect(result.sampleCount).toBe(62);
+  });
+
+  it('rejects a missing inbox-unknown pair even when duplicate inbox-all samples preserve 62 total samples', () => {
+    const exact = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
+    const removed = exact.filter((entry) => entry.surfaceId !== 'inbox-unknown');
+    const duplicate = exact.filter((entry) => entry.surfaceId === 'inbox-all');
+    const samples = [...removed, ...duplicate];
+    const requests = ROUTES.filter((route) => route.behaviorFamily === 'inbox').flatMap((route) =>
+      (['cold', 'warm'] as const).flatMap((mode) => expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      }))));
+    const result = evaluateSelfQa({
+      mode: 'full', routes: ROUTES, samples, requests, branches, attempts: expectedAttempts('full'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
+      supplementalSampleCount: 0, reportProof: reportProof(samples),
+    });
+
+    expect(result).toMatchObject({
+      status: 'fail', sampleCount: 62, coldOk: 31, warmOk: 31,
+      sampleCardinalityMatches: false, coldRanking: false, warmRanking: false,
+    });
   });
 
   it('keeps shared-path self-QA samples and requests joined by surface identity', () => {
@@ -227,7 +259,7 @@ describe('self-QA closed proof evaluator', () => {
       mode: 'narrow', routes, samples, requests, branches, attempts: expectedAttempts('narrow'),
       stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
 
     expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, inboxSurfaceSetMatches: false, status: 'fail' });
@@ -237,7 +269,7 @@ describe('self-QA closed proof evaluator', () => {
       branches, attempts: expectedAttempts('narrow'),
       stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(missingPage.endpointSubset).toBe(false);
   });
@@ -268,7 +300,7 @@ describe('self-QA closed proof evaluator', () => {
       stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
       supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.status).toBe('fail');
     expect(result.outOfSampleWritesAbsent).toBe(false);
@@ -298,7 +330,7 @@ describe('self-QA closed proof evaluator', () => {
     const result = evaluateSelfQa({
       mode: 'narrow', routes: selected, samples, requests: [], branches: branches.filter((row) => selected.some((route) => route.surfaceId === row.surfaceId)),
       attempts: mutate(expectedAttempts('narrow')), stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.status).toBe('fail');
     expect(result.writeTuplesMatch).toBe(false);
@@ -313,12 +345,12 @@ describe('self-QA closed proof evaluator', () => {
       mode: 'full', routes: ROUTES, samples, requests: [badRequest], branches, attempts: expectedAttempts('full'),
       stateChecks: [{ surface: 'outbox', unchanged: false }],
       relayDomCheck: { expectedCount: 20, renderedCount: 19, shortfall: true }, supplementalSampleCount: 1,
-      reportProof: { privacyScanRequired: true, countManifest: false, coldRanking: true, warmRanking: false },
+      reportProof: { ...reportProof(samples), countManifest: false },
     });
     expect(result).toMatchObject({
       status: 'fail', endpointSubset: false, noUnmatchedApi: false, relayCountMatches: false,
       outboxUnchanged: false, sampleCardinalityMatches: false, supplementalExcluded: false,
-      countManifest: false, coldRanking: true, warmRanking: false,
+      countManifest: false, coldRanking: true, warmRanking: true,
     });
   });
 
@@ -327,7 +359,7 @@ describe('self-QA closed proof evaluator', () => {
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches, attempts: expectedAttempts('full'),
       stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.sampleCardinalityMatches).toBe(false);
     const safe = serializeSelfQaResult({ ...result, injectedRaw: 'raw-contact-a' } as never);

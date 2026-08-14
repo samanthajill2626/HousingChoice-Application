@@ -195,6 +195,19 @@ describe('aggregateSamples', () => {
 });
 
 describe('buildRankings', () => {
+  it('ranks all four same-path Inbox surfaces independently in both modes', () => {
+    const inboxIds = ['inbox-all', 'inbox-unread', 'inbox-unknown', 'inbox-groups'];
+    const rows = aggregateSamples(inboxIds.flatMap((surfaceId, index) => [
+      sample(surfaceId, 'cold', 0, { readyMs: index + 1 }),
+      sample(surfaceId, 'warm', 0, { readyMs: index + 10 }),
+    ]));
+
+    const rankings = buildRankings(rows);
+
+    expect(rankings.cold.readyMs.map((row) => row.surfaceId).sort()).toEqual([...inboxIds].sort());
+    expect(rankings.warm.readyMs.map((row) => row.surfaceId).sort()).toEqual([...inboxIds].sort());
+  });
+
   it('ranks cold and warm independently and preserves stable ties', () => {
     const rows = aggregateSamples([
       sample('/first', 'cold', 0, { readyMs: 10 }),

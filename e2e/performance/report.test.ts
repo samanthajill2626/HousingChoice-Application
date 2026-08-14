@@ -292,9 +292,77 @@ describe('writePerformanceReport', () => {
 
     const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
     expect(summary).toMatchObject({ schemaVersion: 2, registryVersion: 2, workloadVersion: 2 });
-    expect(summary.environment.comparisonWorkload).toMatchObject({ contacts: 100 });
+    expect(summary.environment.comparisonWorkload).toMatchObject({
+      contacts: 100,
+      activeContacts: 85,
+      recipientPoolSize: 81,
+      recipientPoolSource: 'generated_tenants',
+      longConversationFixturePresent: true,
+      largeBroadcastFixturePresent: true,
+    });
+    expect(Object.keys(summary.environment.comparisonWorkload).sort()).toEqual([
+      'activeContacts', 'broadcasts', 'contacts', 'conversations', 'largeBroadcastFixturePresent',
+      'longConversationFixturePresent', 'messagesPerConversation', 'nativeGroupMemberSlotCount',
+      'nativeGroups', 'placements', 'recipientPoolSize', 'recipientPoolSource',
+      'resolvedLargeBroadcastRecipients', 'resolvedLongConversationMessages',
+      'resolvedRecipientsPerBroadcast', 'totalConversations', 'totalMessageCount',
+      'totalRecipientCount', 'tours', 'units', 'workloadModelVersion',
+    ]);
     expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('anchor');
     expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('requested');
+  });
+
+  it('sanitizes every closed comparison-workload pool and fixture field before persistence', async () => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, '20260812T123456789Z-01234567');
+    const input = {
+      ...base,
+      config: {
+        ...base.config,
+        seed: {
+          ...base.config.seed!,
+          activeContactCount: 'raw-contact-id',
+          recipientPoolSize: -1,
+          recipientPoolSource: 'private.person@example.com',
+          longConversationFixturePresent: 'yes',
+          largeBroadcastFixturePresent: 'yes',
+        } as never,
+      },
+    };
+
+    await writePerformanceReport(input);
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.environment.comparisonWorkload).toMatchObject({
+      activeContacts: 0,
+      recipientPoolSize: 0,
+      recipientPoolSource: 'lean_tenant',
+      longConversationFixturePresent: false,
+      largeBroadcastFixturePresent: false,
+    });
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('raw-contact-id');
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('private.person@example.com');
+  });
+
+  it.each(['local', 'hosted-dev'] as const)('labels %s artifacts as existing data with no synthetic workload', async (target) => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, target === 'local' ? '20260812T123456789Z-01234568' : '20260812T123456789Z-01234569');
+    const input = {
+      ...base,
+      config: { ...base.config, target, seed: null },
+      target: {
+        target,
+        proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+        profilerCommit: null,
+        targetAppCommit: null,
+        targetVersionStatus: 'unverified',
+      } as TargetMetadata,
+    };
+
+    await writePerformanceReport(input);
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.environment).toMatchObject({ dataSource: 'existing', comparisonWorkload: null });
   });
 
   it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
@@ -742,6 +810,27 @@ describe('writePerformanceReport', () => {
     expect(comparison.matched[0].metrics.readyMs.absolute).toBe(100);
     expect(await readFile(join(outputRoot, currentInput.runId, 'comparison.md'), 'utf8'))
       .toContain('Target app revision changed: no');
+  });
+
+  it('reports an old 28-surface, pre-projection baseline as explicitly comparison-workload incompatible', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-aabbccde');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet = ROUTES.slice(0, 28).map((route) => route.surfaceId);
+    baseline.environment.comparisonWorkload = { workloadModelVersion: 2, contacts: 100 };
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0012'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('comparison_workload');
+    expect(comparison.mismatches).toContain('route_set');
   });
 
   it('round-trips every registry route through artifacts and a generated baseline', async () => {

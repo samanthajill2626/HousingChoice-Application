@@ -245,7 +245,7 @@ describe('compareRuns', () => {
     ['comparison_workload', { comparisonWorkload: { contacts: 101 } }],
     ['registry_version', { registryVersion: 3 }],
     ['workload_version', { workloadVersion: 3 }],
-    ['data_source', { dataSource: 'existing_target' }],
+    ['data_source', { dataSource: 'existing' }],
     ['route_set', { routeSet: ['/other'] }],
     ['browser_major', { browserMajor: 141 }],
     ['browser_channel', { browserChannel: 'chrome' }],

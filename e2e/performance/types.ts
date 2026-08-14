@@ -193,7 +193,7 @@ export interface ComparisonEnvironment {
   target: TargetKind;
   registryVersion: number;
   workloadVersion: number;
-  dataSource: 'synthetic_hermetic' | 'existing_target';
+  dataSource: 'synthetic_hermetic' | 'existing';
   comparisonWorkload: ComparisonWorkload | null;
   routeSet: string[];
   browserMajor: number;
@@ -211,8 +211,8 @@ export interface ComparisonEnvironment {
 // deterministic seed anchor describe invocation syntax, not workload identity.
 export interface ComparisonWorkload {
   workloadModelVersion: number;
-  scale: number;
   contacts: number;
+  activeContacts: number;
   units: number;
   placements: number;
   tours: number;
@@ -222,16 +222,15 @@ export interface ComparisonWorkload {
   totalConversations: number;
   messagesPerConversation: number;
   resolvedLongConversationMessages: number;
-  ordinaryMessageCount: number;
-  tailMessageCount: number;
   totalMessageCount: number;
   broadcasts: number;
   resolvedRecipientsPerBroadcast: number;
   resolvedLargeBroadcastRecipients: number;
   totalRecipientCount: number;
-  relayGroupCount: number;
-  physicalItemCount: number;
-  totalItemCount: number;
+  recipientPoolSize: number;
+  recipientPoolSource: 'generated_tenants' | 'lean_tenant';
+  longConversationFixturePresent: boolean;
+  largeBroadcastFixturePresent: boolean;
 }
 
 export interface RevisionPairInput {

@@ -37,6 +37,7 @@ import type {
 } from './routes.js';
 import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, SurfaceEvidence, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
+import { aggregateSamples, buildRankings } from './aggregate.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
 import { allEndpointTemplates } from './templates.js';
@@ -1407,8 +1408,11 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           reportProof: {
             privacyScanRequired: true,
             countManifest: runConfig.seed !== null,
-            coldRanking: true,
-            warmRanking: true,
+            rankings: buildRankings(aggregateSamples(result.samples, selectedRoutes.map((route) => ({
+              surfaceId: route.surfaceId,
+              surfaceScaleBearing: route.surfaceScaleBearing,
+              loadScaleBearing: route.loadScaleBearing,
+            })))),
           },
         });
       }

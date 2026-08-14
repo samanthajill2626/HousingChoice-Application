@@ -854,10 +854,31 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function hasClosedKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length && actualKeys.every((key) => keys.includes(key));
+}
+
+function baselineFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function baselineNonnegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function baselineSummary(value: unknown): boolean {
   const summary = record(value);
-  return summary !== null && (summary['median'] === null
-    || (typeof summary['median'] === 'number' && Number.isFinite(summary['median'])));
+  if (summary === null || !hasClosedKeys(summary, ['median', 'min', 'max', 'p95'])) return false;
+
+  const median = summary['median'];
+  const min = summary['min'];
+  const max = summary['max'];
+  const p95 = summary['p95'];
+  if (median === null && min === null && max === null) return p95 === null;
+  if (!baselineFiniteNumber(median) || !baselineFiniteNumber(min) || !baselineFiniteNumber(max)) return false;
+  if (min > median || median > max) return false;
+  return p95 === null || (baselineFiniteNumber(p95) && min <= p95 && p95 <= max);
 }
 
 function baselineAggregate(value: unknown): value is RouteModeAggregate {
@@ -865,19 +886,52 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
   const metrics = record(aggregate?.['metrics']);
   const resources = record(metrics?.['resourceCountsByClass']);
   const statuses = record(aggregate?.['statusCounts']);
+  const noise = record(aggregate?.['noise']);
+  const sampleCount = aggregate?.['sampleCount'];
+  const successCount = aggregate?.['successCount'];
+  const lowSampleCount = aggregate?.['lowSampleCount'];
+  const warnings = aggregate?.['warnings'];
+  const statusCountTotal = statuses === null
+    ? Number.NaN
+    : SAMPLE_STATUSES.reduce((total, status) => total + Number(statuses[status]), 0);
   return aggregate !== null
+    && hasClosedKeys(aggregate, [
+      'surfaceId', 'mode', 'sampleCount', 'successCount', 'statusCounts', 'lowSampleCount', 'warnings',
+      'surfaceScaleBearing', 'loadScaleBearing', 'clientTruncated', 'metrics', 'noise',
+    ])
     && surfaceId(aggregate['surfaceId']) === aggregate['surfaceId']
     && (aggregate['mode'] === 'cold' || aggregate['mode'] === 'warm')
+    && baselineNonnegativeInteger(sampleCount)
+    && baselineNonnegativeInteger(successCount)
     && metrics !== null
+    && hasClosedKeys(metrics, [
+      'readyMs', 'apiRequestCount', 'apiTransferBytes', 'longTaskTotalMs', 'domElements', 'resourceCountsByClass',
+    ])
     && baselineSummary(metrics['readyMs'])
     && baselineSummary(metrics['apiRequestCount'])
     && baselineSummary(metrics['apiTransferBytes'])
     && baselineSummary(metrics['longTaskTotalMs'])
     && baselineSummary(metrics['domElements'])
     && resources !== null
+    && hasClosedKeys(resources, RESOURCE_CLASSES)
     && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass]))
     && statuses !== null
-    && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0);
+    && hasClosedKeys(statuses, SAMPLE_STATUSES)
+    && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0)
+    && Number.isSafeInteger(statusCountTotal)
+    && statusCountTotal === sampleCount
+    && statuses['ok'] === successCount
+    && typeof lowSampleCount === 'boolean'
+    && lowSampleCount === (successCount < 3)
+    && Array.isArray(warnings)
+    && (lowSampleCount ? warnings.length === 1 && warnings[0] === 'low_sample_count' : warnings.length === 0)
+    && typeof aggregate['surfaceScaleBearing'] === 'boolean'
+    && typeof aggregate['loadScaleBearing'] === 'boolean'
+    && typeof aggregate['clientTruncated'] === 'boolean'
+    && noise !== null
+    && hasClosedKeys(noise, ['backgroundRequestCount', 'backgroundTransferBytes'])
+    && baselineSummary(noise['backgroundRequestCount'])
+    && baselineSummary(noise['backgroundTransferBytes']);
 }
 
 function baselineRevisions(value: unknown): ComparisonRun['revisions'] {

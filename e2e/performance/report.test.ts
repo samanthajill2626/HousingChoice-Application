@@ -1094,6 +1094,49 @@ describe('writePerformanceReport', () => {
     expect(result.files).not.toContain('comparison.json');
   });
 
+  it('rejects malformed aggregate text without persisting it in the current run', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e9');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.aggregates[0].noise.backgroundTransferBytes = 'private.person@example.com';
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f9'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['a missing numeric-summary member', (baseline: Record<string, any>) => {
+      delete baseline.aggregates[0].metrics.readyMs.min;
+    }],
+    ['impossible status and success counts', (baseline: Record<string, any>) => {
+      baseline.aggregates[0].statusCounts.ok += 1;
+    }],
+  ])('rejects a baseline with %s aggregate data before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e8');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f8'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
   it.each([
     ['an array', []],
     ['an invalid revision member', { profilerCommit: 'private.person@example.com', targetAppCommit: '1234567' }],

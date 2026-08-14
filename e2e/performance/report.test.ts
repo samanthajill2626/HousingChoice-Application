@@ -1075,6 +1075,67 @@ describe('writePerformanceReport', () => {
     expect(result.files).not.toContain('comparison.json');
   });
 
+  it('rejects duplicate baseline aggregate identities before they can control a comparison', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e5');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    const duplicate = structuredClone(baseline.aggregates[0]);
+    duplicate.metrics.readyMs.median = 9_999;
+    baseline.aggregates.push(duplicate);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f5'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each([
+    ['an array', []],
+    ['an invalid revision member', { profilerCommit: 'private.person@example.com', targetAppCommit: '1234567' }],
+  ])('rejects a baseline with revisions as %s without persisting malformed revision text', async (_label, revisions) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e6');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.revisions = revisions;
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f6'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    const summaryText = await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8');
+    expect(summaryText).not.toContain('private.person@example.com');
+  });
+
+  it('keeps a closed null revision pair comparison-compatible for an unverified target', async () => {
+    const outputRoot = await artifactRoot();
+    const target = { ...TARGET, profilerCommit: null, targetAppCommit: null, targetVersionStatus: 'unverified' as const };
+    const baselineInput = { ...reportInput(outputRoot, '20260812T123456790Z-b1c2d3e7'), target };
+    await writePerformanceReport(baselineInput);
+    const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f7'),
+      target,
+      baselineJson,
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'controlled', warnings: ['target_version_unverified'] });
+    expect(comparison.revisions.baseline).toEqual({ profilerCommit: null, targetAppCommit: null });
+  });
+
   it('keeps the current report and returns a nonzero comparison failure for invalid baseline JSON', async () => {
     const outputRoot = await artifactRoot();
     const input = {

@@ -880,15 +880,35 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
     && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0);
 }
 
+function baselineRevisions(value: unknown): ComparisonRun['revisions'] {
+  const revisions = record(value);
+  if (revisions === null) throw new Error('baseline_schema_invalid');
+  const revision = (candidate: unknown): string | null => {
+    if (candidate === null) return null;
+    if (typeof candidate !== 'string') throw new Error('baseline_schema_invalid');
+    const normalized = normalizedRevision(candidate);
+    if (normalized === null) throw new Error('baseline_schema_invalid');
+    return normalized;
+  };
+  return {
+    profilerCommit: revision(revisions['profilerCommit']),
+    targetAppCommit: revision(revisions['targetAppCommit']),
+  };
+}
+
 function createComparisonRun(summary: Record<string, unknown>): ComparisonRun {
   const aggregates = summary['aggregates'];
-  if (!Array.isArray(aggregates) || !aggregates.every(baselineAggregate)) {
+  if (
+    !Array.isArray(aggregates)
+    || !aggregates.every(baselineAggregate)
+    || new Set(aggregates.map((aggregate) => `${aggregate.mode}\u0000${aggregate.surfaceId}`)).size !== aggregates.length
+  ) {
     throw new Error('baseline_schema_invalid');
   }
   return {
     schemaVersion: summary['schemaVersion'] as number,
     environment: baselineEnvironment(summary['environment']),
-    revisions: summary['revisions'] as ComparisonRun['revisions'],
+    revisions: baselineRevisions(summary['revisions']),
     aggregates,
   };
 }
@@ -905,8 +925,6 @@ function parseBaselineJson(text: string): ComparisonRun {
     || candidate.workloadVersion !== PERFORMANCE_WORKLOAD_VERSION
     || typeof candidate.environment !== 'object'
     || candidate.environment === null
-    || typeof candidate.revisions !== 'object'
-    || candidate.revisions === null
     || !Array.isArray(candidate.aggregates)
   ) {
     throw new Error('baseline_schema_invalid');

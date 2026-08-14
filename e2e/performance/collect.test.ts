@@ -17,6 +17,7 @@ import {
   type SamplePage,
 } from './collect.js';
 import {
+  expectedGets,
   ROUTES,
   type EndpointContract,
   type ExactBrowserTarget,
@@ -847,6 +848,39 @@ describe('cold and warm sampling protocol', () => {
       'collect:warm:inbox-unread',
     ]);
     expect(events.join('|')).not.toMatch(/row|mark-read|notice|retry|load more/iu);
+  });
+
+  it('begins Inbox All immediately before its exact Inbox link and retains the page request contract', async () => {
+    const events: string[] = [];
+    const page = new FakeSamplingPage(events);
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-all')!;
+    page.hrefs.add('/inbox');
+
+    expect(expectedGets(route, 'warm', { kind: 'none' })).toEqual([{
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      requirement: 'required',
+      inboxRequestClass: 'inbox_page_all',
+    }]);
+
+    const sample = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 100,
+      resolve: async () => resolved('/inbox'),
+      instrumentation: new FakeInstrumentation(events),
+      token: 'inbox-all-link',
+    });
+
+    expect(sample.status).toBe('ok');
+    expect(events).toEqual([
+      'prepare:/',
+      'source-ready:100',
+      'begin:warm:inbox-all-link:/:/inbox',
+      'click:/inbox',
+      'collect:warm:inbox-all',
+    ]);
   });
 
   it('maps source, fixture, link, and blocked-readiness outcomes to stable statuses', async () => {

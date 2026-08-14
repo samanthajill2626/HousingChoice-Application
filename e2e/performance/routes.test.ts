@@ -269,26 +269,31 @@ describe('route registry completeness', () => {
       surfaceId: route.surfaceId,
       pathTemplate: route.pathTemplate,
       coldTarget: route.coldTarget,
+      sourceTarget: route.source.target,
       action: route.source.action,
       terminal: route.terminal.empty.map((locator) => locator.name),
     }))).toEqual([
       {
         surfaceId: 'inbox-all', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox' },
-        action: { kind: 'tab', name: 'All' },
+        sourceTarget: { path: '/', query: { kind: 'absent' } },
+        action: { kind: 'link', href: '/inbox' },
         terminal: ['No conversations yet'],
       },
       {
         surfaceId: 'inbox-unread', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unread' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Unread' },
         terminal: ["You're all caught up"],
       },
       {
         surfaceId: 'inbox-unknown', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unknown' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Unknown' },
         terminal: ['No unknown numbers'],
       },
       {
         surfaceId: 'inbox-groups', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=groups' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Groups' },
         terminal: ['No group texts yet'],
       },
@@ -447,19 +452,26 @@ describe('route registry completeness', () => {
     expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
   });
 
-  it('requires an exact bare Inbox All source before every Inbox activation', () => {
-    const inbox = ROUTES.filter((route) => route.surfaceId.startsWith('inbox-'));
+  it('keeps the exact Inbox navigation link separate from canonical All source consumers', () => {
+    const all = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const filtered = ROUTES.filter((route) => ['inbox-unread', 'inbox-unknown', 'inbox-groups'].includes(route.surfaceId));
     const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    const canonicalAllConsumers = [...filtered, conversation];
 
-    expect([...inbox, conversation].map((route) => route.source.target)).toEqual([
-      { path: '/inbox', query: { kind: 'absent' } }, { path: '/inbox', query: { kind: 'absent' } },
+    expect(all.source).toMatchObject({
+      target: { path: '/', query: { kind: 'absent' } },
+      ready: { role: 'heading', name: 'Today', exactness: 'exact' },
+      action: { kind: 'link', href: '/inbox' },
+    });
+    expect(canonicalAllConsumers.map((route) => route.source.target)).toEqual([
       { path: '/inbox', query: { kind: 'absent' } }, { path: '/inbox', query: { kind: 'absent' } },
       { path: '/inbox', query: { kind: 'absent' } },
+      { path: '/inbox', query: { kind: 'absent' } },
     ]);
-    expect([...inbox, conversation].every((route) => route.source.ready === inbox[0]!.source.ready)).toBe(true);
-    expect([...inbox, conversation].every((route) => route.source.sourceTerminal !== undefined)).toBe(true);
-    expect([...inbox, conversation].map((route) => route.source.sourceSelected)).toEqual([
-      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+    expect(canonicalAllConsumers.every((route) => route.source.ready === filtered[0]!.source.ready)).toBe(true);
+    expect(canonicalAllConsumers.every((route) => route.source.sourceTerminal !== undefined)).toBe(true);
+    expect(conversation.source.action).toEqual({ kind: 'link', href: ':resolved_cold_target' });
+    expect(canonicalAllConsumers.map((route) => route.source.sourceSelected)).toEqual([
       { role: 'tab', name: 'All', exactness: 'exact', selected: true },
       { role: 'tab', name: 'All', exactness: 'exact', selected: true },
       { role: 'tab', name: 'All', exactness: 'exact', selected: true },

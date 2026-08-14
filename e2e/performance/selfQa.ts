@@ -291,7 +291,8 @@ function endpointSubset(input: EvaluateSelfQaInput): boolean {
     if (route === undefined || branch === undefined) return false;
     const observed = input.requests
       .filter((request) => request.surfaceId === sample.surfaceId && request.mode === sample.mode
-        && request.repeat === sample.repeat && request.resourceClass === 'api')
+        && request.repeat === sample.repeat && request.resourceClass === 'api'
+        && request.requestRole === 'required')
       .map((request) => ({
         endpointTemplate: request.endpointTemplate as never,
         queryKeys: request.queryKeys,

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
 import type { RequestEvidence, SampleResult } from './types.js';
 import { aggregateSamples, buildRankings } from './aggregate.js';
+import { validateObservedRequestRoles } from './collect.js';
 import { expectedGets, resolveBoundSelfQaDetail, ROUTES } from './routes.js';
 import { writePerformanceReport } from './report.js';
 import {
@@ -272,6 +273,32 @@ describe('self-QA closed proof evaluator', () => {
       reportProof: reportProof(samples),
     });
     expect(missingPage.endpointSubset).toBe(false);
+  });
+
+  it('limits endpoint subset proof to required requests while valid background refresh stays separately declared', () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
+    const mode = 'warm' as const;
+    const branch = { kind: 'none' as const };
+    const samples = [sample(route.surfaceId, mode)];
+    const routeBranches = [{ surfaceId: route.surfaceId, mode, repeat: 0, branch }];
+    const requiredRequests = expectedGets(route, mode, branch).map((contract) => ({
+      ...request(route.surfaceId, mode, contract.endpointTemplate),
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+    }));
+    const backgroundRefresh = {
+      ...request(route.surfaceId, mode, '/api/conversations'),
+      requestRole: 'background_refresh' as const,
+    };
+    const evaluate = (requests: readonly RequestEvidence[]) => evaluateSelfQa({
+      mode: 'narrow', routes: [route], samples, requests, branches: routeBranches, attempts: [],
+      stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
+      reportProof: reportProof(samples),
+    });
+
+    expect(validateObservedRequestRoles([backgroundRefresh])).toEqual([]);
+    expect(evaluate([...requiredRequests, backgroundRefresh]).endpointSubset).toBe(true);
+    expect(evaluate([...requiredRequests, { ...backgroundRefresh, requestRole: 'required' }]).endpointSubset).toBe(false);
   });
 
   it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {

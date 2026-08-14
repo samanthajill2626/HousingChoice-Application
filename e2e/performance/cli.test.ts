@@ -512,6 +512,16 @@ describe('exact browser targets', () => {
     await expect(captureSuccessfulSurfaceEvidence(page, all, [request])).resolves.toMatchObject({
       kind: 'inbox', initialInboxPageRequestCount: 1,
     });
+    const aborted = { ...request, outcome: 'aborted' as const, status: null, transferBytes: null };
+    await expect(captureSuccessfulSurfaceEvidence(page, all, [aborted, request])).resolves.toMatchObject({
+      kind: 'inbox', initialInboxPageRequestCount: 1,
+    });
+    await expect(captureSuccessfulSurfaceEvidence(page, all, [request, { ...request, startOffsetMs: 2 }])).resolves.toMatchObject({
+      kind: 'inbox', initialInboxPageRequestCount: 2,
+    });
+    await expect(captureSuccessfulSurfaceEvidence(page, all, [aborted])).resolves.toMatchObject({
+      kind: 'inbox', initialInboxPageRequestCount: 0,
+    });
     await expect(captureSuccessfulSurfaceEvidence(page, detail, [])).resolves.toEqual({
       kind: 'conversation_detail', initialRenderedMessageCount: null,
     });

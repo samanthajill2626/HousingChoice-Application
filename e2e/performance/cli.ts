@@ -603,7 +603,11 @@ export async function captureSuccessfulSurfaceEvidence(
     const pageClass = route.gets.find((contract) => contract.inboxRequestClass?.startsWith('inbox_page_'))?.inboxRequestClass;
     const initialInboxPageRequestCount = pageClass === undefined
       ? 0
-      : requests.filter((request) => request.requestRole === 'required' && request.inboxRequestClass === pageClass).length;
+      : requests.filter((request) =>
+        request.outcome === 'finished'
+        && request.requestRole === 'required'
+        && request.inboxRequestClass === pageClass,
+      ).length;
     return await page.captureSurfaceEvidence(route, initialInboxPageRequestCount);
   }
   if (route.surfaceId === '/conversations/:conversationId') {

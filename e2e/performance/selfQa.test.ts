@@ -336,6 +336,18 @@ describe('self-QA closed proof evaluator', () => {
     expect(duplicatePage).toMatchObject({
       status: 'fail', endpointSubset: true, noUnmatchedApi: true, inboxRequestClassesMatch: false,
     });
+
+    const abortedOnlyPage = evaluateFullEndpointRoles([], (samples) => {
+      const sample = samples.find((row) => row.surfaceId === 'inbox-unread' && row.mode === 'warm')!;
+      sample.surfaceEvidence = {
+        kind: 'inbox', filter: 'unread', renderedRowCount: 1,
+        groupsTruncated: false, initialInboxPageRequestCount: 0,
+      };
+    });
+
+    expect(abortedOnlyPage).toMatchObject({
+      status: 'fail', endpointSubset: true, noUnmatchedApi: true, inboxRequestClassesMatch: false,
+    });
   });
 
   it('rejects an undeclared required endpoint shape', () => {

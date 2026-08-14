@@ -833,6 +833,57 @@ describe('writePerformanceReport', () => {
     expect(comparison.mismatches).toContain('route_set');
   });
 
+  it('keeps a baseline with a duplicate route-set member uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd4');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet.push(baseline.environment.routeSet[0]);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0017'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('route_set');
+  });
+
+  it.each([
+    ['invalid member', (baseline: Record<string, any>) => {
+      baseline.environment.routeSet[0] = 'private.person@example.com';
+    }],
+    ['missing route set', (baseline: Record<string, any>) => {
+      delete baseline.environment.routeSet;
+    }],
+    ['non-array route set', (baseline: Record<string, any>) => {
+      baseline.environment.routeSet = { private: 'person@example.com' };
+    }],
+  ])('keeps a baseline with a %s uncontrolled without persisting malformed route data', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd5');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0018'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain('route_set');
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
   it.each([
     ['invalid data source', 'data_source', (baseline: Record<string, any>) => {
       baseline.environment.dataSource = 'private.person@example.com';

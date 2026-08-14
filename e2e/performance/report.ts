@@ -749,6 +749,15 @@ function baselineSurfaceId(value: unknown): string {
   return typeof value === 'string' && SURFACE_IDS.has(value) ? value : INVALID_BASELINE_ROUTE;
 }
 
+function baselineRouteSet(value: unknown): string[] {
+  if (!Array.isArray(value)) return [INVALID_BASELINE_ROUTE];
+  const routeSet = value.map(baselineSurfaceId);
+  if (routeSet.includes(INVALID_BASELINE_ROUTE) || new Set(routeSet).size !== routeSet.length) {
+    return [INVALID_BASELINE_ROUTE];
+  }
+  return routeSet.sort();
+}
+
 function invalidBaselineComparisonWorkload(): ComparisonWorkload {
   return {
     workloadModelVersion: INVALID_BASELINE_INTEGER,
@@ -821,9 +830,7 @@ function baselineEnvironment(value: unknown): ComparisonEnvironment {
       ? dataSource
       : INVALID_BASELINE_DATA_SOURCE,
     comparisonWorkload: baselineComparisonWorkload(environment['comparisonWorkload']),
-    routeSet: Array.isArray(environment['routeSet'])
-      ? environment['routeSet'].map(baselineSurfaceId).sort()
-      : [INVALID_BASELINE_ROUTE],
+    routeSet: baselineRouteSet(environment['routeSet']),
     browserMajor: baselineInteger(environment['browserMajor']),
     browserChannel: environment['browserChannel'] === 'chromium' || environment['browserChannel'] === 'chrome'
       ? environment['browserChannel']

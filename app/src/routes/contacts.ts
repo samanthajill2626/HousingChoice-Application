@@ -545,10 +545,19 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   }
   // Tenant housing authority (edit form). camelCase — it's the byHousingAuthority
   // GSI hash key, so writing it re-indexes the contact for broadcast targeting.
+  //
+  // Being an INDEX KEY is also why this field cannot use the ''-clears-it
+  // convention the plain text fields above use: DynamoDB rejects an empty
+  // string on a key attribute ("The AttributeValue for a key attribute cannot
+  // contain an empty string"), so a SET of '' fails the whole PATCH. Clearing
+  // maps to null → REMOVE (same as `role` below), which is also the correct
+  // index semantics: the contact leaves the sparse partition rather than
+  // joining an '' one. `changedFields` still records the edit — provenance and
+  // AI-suggestion handling key off field PRESENCE in the body, not the value.
   if ('housingAuthority' in b) {
     const v = b['housingAuthority'];
     if (typeof v !== 'string') return { error: 'housingAuthority must be a string' };
-    patch['housingAuthority'] = v;
+    patch['housingAuthority'] = v.length > 0 ? v : null;
     changedFields.push('housingAuthority');
   }
   // Tenant agency (edit form) - the helper org that assists the tenant (Hope Atlanta,

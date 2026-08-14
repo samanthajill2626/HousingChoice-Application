@@ -48,7 +48,7 @@ import type { ContactType } from '../../repos/contactsRepo.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
 import { groupMemberKey } from '../../services/groupMembers.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
-import { normalizeAddress } from './addresses.js';
+import { normalizeAddress, parseUnitAddress } from './addresses.js';
 import type { CsvRow } from './csv.js';
 import type { MergedPerson } from './merge.js';
 import type { PlanResult } from './plan.js';
@@ -925,14 +925,33 @@ function resolvePerson(
         ? LANDLORD_STATUSES
         : NON_TENANT_STATUSES;
   const rawStatus = (row?.status ?? '').trim();
-  if (rawStatus && !validStatuses.includes(rawStatus)) {
-    warnings.push(
-      `${person.rowKey}: status ${JSON.stringify(rawStatus)} is not a legal ${type} status - ` +
-        `using the derived suggestion (${person.suggestedStatus}) instead.`,
-    );
+  let status: string;
+  if (rawStatus && validStatuses.includes(rawStatus)) {
+    status = rawStatus;
+  } else {
+    // The derived suggestion gets the SAME per-type check. It was computed from
+    // the EXPORT's type signals, so a review that RETYPES the row (her "Keep
+    // tenant" answers, tenant->landlord corrections) leaves it speaking the old
+    // type's vocabulary - and an off-vocabulary value stored here lands in the
+    // byTypeStatus GSI where the type's own facets never look. needs_review is
+    // legal for every type and is the honest state for a retyped row: neither
+    // the column nor the stale suggestion is a decision anyone made about the
+    // NEW type.
+    status = validStatuses.includes(person.suggestedStatus)
+      ? person.suggestedStatus
+      : 'needs_review';
+    if (rawStatus) {
+      warnings.push(
+        `${person.rowKey}: status ${JSON.stringify(rawStatus)} is not a legal ${type} status - ` +
+          `using ${status} instead.`,
+      );
+    } else if (status !== person.suggestedStatus) {
+      warnings.push(
+        `${person.rowKey}: derived status ${JSON.stringify(person.suggestedStatus)} is not legal ` +
+          `for ${type} (the review changed this row's type) - using needs_review.`,
+      );
+    }
   }
-  const status =
-    rawStatus && validStatuses.includes(rawStatus) ? rawStatus : person.suggestedStatus;
   const notes = (row?.notes ?? '').trim();
 
   const housingAuthority = housingAuthorityFor(person.airtableTenant?.voucherProgram);
@@ -1255,7 +1274,14 @@ async function upsertUnit(
   plan: PlanResult,
 ): Promise<void> {
   const address = (row.address ?? '').trim();
+  // IDENTITY STAYS ON THE RAW STRING. The unitId is seeded from the normalized
+  // cell, never from the parsed parts - re-deriving it from the parse would
+  // re-mint every unitId and duplicate the entire book on the next run.
   const unitId = unitIdForAddress(normalizeAddress(address));
+  // ...but what we STORE is the structured Address the app's contract expects
+  // (parseUnitAddress; a plain string reaches the flyer as no address at all and
+  // the reminder composer as a verbatim postal blob).
+  const parsedAddress = parseUnitAddress(address);
 
   const sets: string[] = [
     'address = :address',
@@ -1266,7 +1292,7 @@ async function upsertUnit(
   ];
   const names: Record<string, string> = { '#status': 'status' };
   const values: Record<string, unknown> = {
-    ':address': address,
+    ':address': parsedAddress,
     ':status': mapUnitStatus(row.status ?? ''),
     ':createdAt': importedAt,
     ':importSource': IMPORT_SOURCE,

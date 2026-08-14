@@ -622,6 +622,25 @@ describe('ContactEditForm', () => {
     expect(sent).toMatchObject({ firstName: 'TashaX' });
   });
 
+  it('emptying a stored authority DOES reach the PATCH as an empty string', async () => {
+    // The clear-it wire contract the server's ''-to-REMOVE translation depends
+    // on: this is a real value change, so unlike the two no-op cases above it
+    // must be sent. The server turns the '' into a REMOVE because
+    // housingAuthority is a GSI key attribute and DynamoDB rejects '' there.
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta (AHA)' };
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.clear(screen.getByLabelText(/Housing authority/i));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ housingAuthority: '' }),
+      ),
+    );
+  });
+
   it('an untouched agency does not ride the PATCH either', async () => {
     const user = userEvent.setup();
     const stored: Contact = { ...TENANT, agency: 'Hope  Atlanta' };

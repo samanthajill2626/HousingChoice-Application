@@ -14,9 +14,16 @@
 // dev/prod run assertHousingChoiceAccount() FIRST (scripts/lib/hcAws.mjs) - the
 // default credential chain on this machine belongs to an UNRELATED account and
 // is never used.
+//
+// STAGE CONFIG: each stage also loads its operator env file (.env for local,
+// .env.dev / .env.prod for the AWS stages - required there), so the parity
+// gate's identity vars and phase 2's Twilio credentials come from the same
+// gitignored files the rest of the tooling uses. Shell values win over the
+// file. See the stage-config block below.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
@@ -25,6 +32,7 @@ import {
   HC_PROFILE,
   HC_REGION,
 } from '../../scripts/lib/hcAws.mjs';
+import { parseDotenv } from '../../scripts/lib/secretsCore.mjs';
 // Retained from the group-texting side: the pre-write group-identity parity
 // gate below reads config. `getDocumentClient` is NOT retained - main's --env
 // stage resolution builds the client with the account guard instead.
@@ -85,6 +93,68 @@ if (!quoDir || !airtableDir || !reviewDir || !TARGETS.includes(targetEnv as Targ
   process.exit(2);
 }
 const target = targetEnv as TargetEnv;
+
+// ---------------------------------------------------------------------------
+// Stage config file (Cameron 2026-08-13). Each stage reads the same gitignored
+// operator env file the rest of the tooling uses, so the identity/Twilio
+// config does not have to be re-declared on the command line every run:
+//   local -> .env       (optional local overrides)
+//   dev   -> .env.dev   (required - the dev stack's operator config, the same
+//   prod  -> .env.prod    values secrets:push mirrors to Parameter Store)
+// Precedence mirrors scripts/lib/devMode.mjs: real environment > file > stage
+// default. Only the SHELL can override a file value, so what this run compares
+// in the parity gate is what the target stage is actually deployed with.
+//
+// The DB target is unaffected: endpoint/prefix/credentials come from --env in
+// the stage-resolution block below, and .env.dev/.env.prod never carry
+// TABLE_PREFIX or DYNAMODB_ENDPOINT (Terraform-owned, secrets denylist).
+//
+// dev/prod also default MESSAGING_DRIVER=twilio, exactly like the dev loop's
+// live mode: deployed stacks inherit `twilio` from NODE_ENV=production, which
+// a locally-run CLI does not have. Without this, phase 2 would silently build
+// its rail service on the CONSOLE driver and report all 132 rails failed.
+// ---------------------------------------------------------------------------
+const repoRoot = join(fileURLToPath(import.meta.url), '..', '..', '..');
+const STAGE_ENV_FILES: Record<TargetEnv, { file: string; required: boolean }> = {
+  local: { file: '.env', required: false },
+  dev: { file: '.env.dev', required: true },
+  prod: { file: '.env.prod', required: true },
+};
+const stageFile = STAGE_ENV_FILES[target];
+const stageFilePath = join(repoRoot, stageFile.file);
+if (existsSync(stageFilePath)) {
+  let fileEnv: Record<string, string> = {};
+  try {
+    fileEnv = parseDotenv(readFileSync(stageFilePath, 'utf8'));
+  } catch (err) {
+    console.error(
+      `${stageFile.file} is not valid dotenv: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
+  let applied = 0;
+  for (const [key, value] of Object.entries(fileEnv)) {
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+      applied += 1;
+    }
+  }
+  console.log(
+    `stage config: ${stageFile.file} (${applied} value(s) loaded; shell env wins on overlap)`,
+  );
+} else if (stageFile.required) {
+  console.error(
+    `--env ${target} reads ${stageFile.file} at the repo root, and it does not exist.\n` +
+      `It holds the ${target} stack's operator config (TWILIO_* credentials, BUSINESS_PHONE_NUMBER,\n` +
+      `GROUP_IDENTITY_EXCLUDED_NUMBERS - the same values secrets:push mirrors to Parameter Store).\n` +
+      `In a feature WORKTREE it is absent by default (gitignored files do not carry over): copy it\n` +
+      `from the main checkout, or copy ${stageFile.file}.example and fill it in.`,
+  );
+  process.exit(1);
+}
+if (target !== 'local' && process.env.MESSAGING_DRIVER === undefined) {
+  process.env.MESSAGING_DRIVER = 'twilio';
+}
 
 for (const [label, dir] of [
   ['--quo', quoDir],
@@ -186,6 +256,13 @@ if (target === 'local') {
   );
 }
 
+// Physical table names come from the RESOLVED stage, never ambient env vars.
+// ONE definition, used by every repo/read below: the parity gate's pool-number
+// read once omitted it and silently queried the DEFAULT hc-local- prefix on
+// AWS - "Requested resource not found" on every dev/prod run, dry runs
+// included.
+const stageEnv = { ...process.env, TABLE_PREFIX: prefix };
+
 console.log(`\ntarget stage    : ${target}${target === 'prod' ? '  *** PRODUCTION ***' : ''}`);
 console.log(`target endpoint : ${endpoint ?? `AWS ${HC_REGION} (profile ${HC_PROFILE})`}`);
 console.log(`table prefix    : ${prefix}`);
@@ -207,11 +284,11 @@ console.log(`mode            : ${dryRun ? 'DRY RUN (no writes)' : 'WRITE'}`);
 // rehearsal surfaces the mismatch too.
 //
 // THE GATE'S OWN PRECONDITION FIRST (adversarial finding 1). loadConfig() reads
-// ambient process.env and there is no dotenv here, so an unset
-// GROUP_IDENTITY_EXCLUDED_NUMBERS silently means "compare against nothing" and
-// refuses EVERY documented invocation, dry run included. Both vars must be
-// declared in THIS shell, and the refusal says which and where the value comes
-// from.
+// ambient process.env, and an unset GROUP_IDENTITY_EXCLUDED_NUMBERS silently
+// means "compare against nothing" and refuses EVERY documented invocation, dry
+// run included. Both vars normally arrive via the stage env file loaded above
+// (.env.dev / .env.prod hold the deployed values); the shell can override, and
+// the refusal says which var is missing and where the value comes from.
 try {
   assertGroupIdentityEnvDeclared(process.env);
 } catch (err) {
@@ -227,13 +304,16 @@ try {
   // are subtracted from BOTH sides, so comparing without them turns any pool
   // number in either list into a FALSE mismatch - a new single point of refusal
   // on cutover day, and on the rehearsal dry run that is supposed to de-risk it.
-  poolNumbers = await readPoolNumbersForParity(() => createPoolNumbersRepo({ doc }).listActive(), {
-    onRetry: (attempt, err) =>
-      console.warn(
-        `  ! pool-number read failed (attempt ${attempt}): ` +
-          `${err instanceof Error ? err.message : String(err)} - retrying`,
-      ),
-  });
+  poolNumbers = await readPoolNumbersForParity(
+    () => createPoolNumbersRepo({ doc, env: stageEnv }).listActive(),
+    {
+      onRetry: (attempt, err) =>
+        console.warn(
+          `  ! pool-number read failed (attempt ${attempt}): ` +
+            `${err instanceof Error ? err.message : String(err)} - retrying`,
+        ),
+    },
+  );
 } catch (err) {
   if (!(err instanceof PoolNumbersUnavailableError)) throw err;
   console.error(`\n${err.message}`);
@@ -277,8 +357,7 @@ const report = await runApply({
   review: { contacts: review.contacts, groups: review.groups, units: review.units },
   importedAt,
   dryRun,
-  // Physical table names come from the RESOLVED stage, never ambient env vars.
-  env: { ...process.env, TABLE_PREFIX: prefix },
+  env: stageEnv,
   onProgress: (label, done, total) => {
     if (label !== lastLabel) {
       if (lastLabel) process.stdout.write('\n');
@@ -349,7 +428,6 @@ if (dryRun) console.log('\nDRY RUN - nothing was written.');
 if (!dryRun && !skipConvert) {
   console.log('\nphase 2: converting group threads to native group texts');
 
-  const stageEnv = { ...process.env, TABLE_PREFIX: prefix };
   const conversationsRepo = createConversationsRepo({ doc, env: stageEnv });
   const contactsRepo = createContactsRepo({ doc, env: stageEnv });
 
@@ -395,7 +473,12 @@ if (!dryRun && !skipConvert) {
     conversationsRepo,
     contactsRepo,
     expected,
-    rail: createGroupRailService({ config }),
+    // The STAGE repo must be injected: left to its default, the rail service
+    // builds its own conversations repo on the ambient doc client + default
+    // hc-local- prefix, and its first getById throws "Requested resource not
+    // found" on every dev/prod row - before Twilio is ever contacted, and
+    // before recordRailFailure can stamp a reason.
+    rail: createGroupRailService({ config, conversationsRepo }),
     ownNumbers: plan.quo.ownNumbers,
     exclusions: {
       businessPhoneNumber: config.businessPhoneNumber,

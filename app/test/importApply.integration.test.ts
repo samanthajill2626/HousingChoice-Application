@@ -344,6 +344,35 @@ describe.skipIf(!reachable)('import:apply', () => {
     });
   });
 
+  it('a RETYPED row never stores the old type vocabulary - it lands needs_review', async () => {
+    // REGRESSION. The per-type status guard checked the workbook column but
+    // trusted `suggestedStatus` blindly - and the suggestion was derived from
+    // the EXPORT's type signals, so a review that retypes a row (her "Keep
+    // tenant" answers) left it speaking the old type's vocabulary. The guard
+    // then rejected the illegal column value and stored an equally illegal
+    // fallback ("active" on a tenant), off-vocabulary for the byTypeStatus GSI
+    // the type's own facets query.
+    const review = cleanReview();
+    const row = [...review.contacts.values()].find((r) => r.phone === PHONES.landlord)!;
+    // The generated workbook pre-fills his landlord suggestion ("active");
+    // retype him to tenant, where that value is not in the vocabulary.
+    row.type = 'tenant';
+
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const item = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.landlord) },
+      }),
+    );
+    expect(item.Item).toMatchObject({ type: 'tenant', status: 'needs_review' });
+    expect(report.warnings.some((w) => w.includes('not a legal tenant status'))).toBe(true);
+
+    // Restore the fixture shape for the tests that follow.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+  });
+
   it('excludes a dropped person and skips their thread', async () => {
     const review = cleanReview();
     const row = [...review.contacts.values()].find((r) => r.phone === PHONES.orphan)!;

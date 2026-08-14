@@ -809,7 +809,7 @@ function invalidBaselineComparisonWorkload(): ComparisonWorkload {
 
 function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
   const workload = record(value);
-  if (value === null || value === undefined) return null;
+  if (value === null) return null;
   if (workload === null) return invalidBaselineComparisonWorkload();
   if (!hasNoUnknownKeys(workload, BASELINE_COMPARISON_WORKLOAD_KEYS)) {
     throw new Error('baseline_schema_invalid');

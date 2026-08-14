@@ -365,6 +365,78 @@ describe('writePerformanceReport', () => {
     expect(summary.environment).toMatchObject({ dataSource: 'existing', comparisonWorkload: null });
   });
 
+  it.each([
+    ['local', 'missing', (baseline: Record<string, any>) => { delete baseline.environment.comparisonWorkload; }],
+    ['local', 'array', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = []; }],
+    ['local', 'object', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = {}; }],
+    ['local', 'scalar', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = 'private.person@example.com'; }],
+    ['hosted-dev', 'missing', (baseline: Record<string, any>) => { delete baseline.environment.comparisonWorkload; }],
+    ['hosted-dev', 'array', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = []; }],
+    ['hosted-dev', 'object', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = {}; }],
+    ['hosted-dev', 'scalar', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = 'private.person@example.com'; }],
+  ] as const)('does not control %s existing-data comparisons with a %s workload marker', async (target, _shape, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineBase = reportInput(outputRoot, '20260812T123456789Z-01234570');
+    const targetMetadata: TargetMetadata = {
+      target,
+      proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+      profilerCommit: null,
+      targetAppCommit: null,
+      targetVersionStatus: 'unverified',
+    };
+    const baselineInput = {
+      ...baselineBase,
+      config: { ...baselineBase.config, target, seed: null },
+      target: targetMetadata,
+    };
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...baselineInput,
+      runId: '20260812T123456790Z-01234570',
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    await expect(writePerformanceReport(currentInput)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain('comparison_workload');
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each(['local', 'hosted-dev'] as const)('keeps %s existing-data comparisons compatible with an explicit null workload marker', async (target) => {
+    const outputRoot = await artifactRoot();
+    const baselineBase = reportInput(outputRoot, '20260812T123456789Z-01234571');
+    const targetMetadata: TargetMetadata = {
+      target,
+      proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+      profilerCommit: null,
+      targetAppCommit: null,
+      targetVersionStatus: 'unverified',
+    };
+    const baselineInput = {
+      ...baselineBase,
+      config: { ...baselineBase.config, target, seed: null },
+      target: targetMetadata,
+    };
+    await writePerformanceReport(baselineInput);
+    const baseline = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
+    const currentInput = {
+      ...baselineInput,
+      runId: '20260812T123456790Z-01234571',
+      baselineJson: baseline,
+    };
+
+    await expect(writePerformanceReport(currentInput)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'controlled' });
+  });
+
   it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
     const branch = { kind: 'none' } as const;

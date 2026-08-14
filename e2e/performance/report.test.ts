@@ -852,6 +852,25 @@ describe('writePerformanceReport', () => {
     expect(comparison.mismatches).toContain('route_set');
   });
 
+  it('keeps a noncanonical baseline route-set order uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd6');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet.reverse();
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0019'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('route_set');
+  });
+
   it.each([
     ['invalid member', (baseline: Record<string, any>) => {
       baseline.environment.routeSet[0] = 'private.person@example.com';
@@ -1135,6 +1154,61 @@ describe('writePerformanceReport', () => {
 
     expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
     expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each([
+    ['a non-null p95 with one successful sample', (baseline: Record<string, any>) => {
+      baseline.aggregates[0].metrics.readyMs.p95 = baseline.aggregates[0].metrics.readyMs.median;
+    }],
+    ['a non-null summary with zero successful samples', (baseline: Record<string, any>) => {
+      const aggregate = baseline.aggregates[0];
+      aggregate.successCount = 0;
+      aggregate.statusCounts.ok = 0;
+      aggregate.statusCounts.failed = 1;
+      aggregate.lowSampleCount = true;
+      aggregate.warnings = ['low_sample_count'];
+    }],
+  ])('rejects %s before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3ea');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3fa'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each([
+    ['root', (baseline: Record<string, any>) => { baseline.untrusted = 'private.person@example.com'; }],
+    ['environment', (baseline: Record<string, any>) => { baseline.environment.untrusted = 'private.person@example.com'; }],
+    ['comparison workload', (baseline: Record<string, any>) => {
+      baseline.environment.comparisonWorkload.untrusted = 'private.person@example.com';
+    }],
+    ['revisions', (baseline: Record<string, any>) => { baseline.revisions.untrusted = 'private.person@example.com'; }],
+  ])('rejects an extra %s field before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3eb');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3fb'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
   });
 
   it.each([

@@ -734,6 +734,25 @@ const INVALID_BASELINE_BROWSER_CHANNEL = 'invalid_browser_channel';
 const INVALID_BASELINE_ROUTE = 'invalid_baseline_route';
 const INVALID_BASELINE_INTEGER = -1;
 const INVALID_BASELINE_BOOLEAN = 'invalid_boolean' as unknown as boolean;
+const BASELINE_ROOT_KEYS = [
+  'schemaVersion', 'registryVersion', 'workloadVersion', 'interceptionScopeVersion', 'run', 'config', 'target',
+  'revisions', 'manifest', 'browser', 'runtime', 'environment', 'samples', 'outOfSampleWrites', 'aggregates',
+  'rankings', 'routeOrders', 'warmup', 'relayDomCheck', 'warnings', 'comparison', 'artifacts',
+] as const;
+const OPTIONAL_BASELINE_ROOT_KEYS = ['safetyFailure', 'selfQa'] as const;
+const BASELINE_ENVIRONMENT_KEYS = [
+  'target', 'registryVersion', 'workloadVersion', 'dataSource', 'comparisonWorkload', 'routeSet', 'browserMajor',
+  'browserChannel', 'viewport', 'coldRepeats', 'warmRepeats', 'routeOrderSeed', 'interceptionScopeVersion',
+  'settleMs', 'pollMs',
+] as const;
+const BASELINE_COMPARISON_WORKLOAD_KEYS = [
+  'workloadModelVersion', 'contacts', 'activeContacts', 'units', 'placements', 'tours', 'conversations',
+  'nativeGroups', 'nativeGroupMemberSlotCount', 'totalConversations', 'messagesPerConversation',
+  'resolvedLongConversationMessages', 'totalMessageCount', 'broadcasts', 'resolvedRecipientsPerBroadcast',
+  'resolvedLargeBroadcastRecipients', 'totalRecipientCount', 'recipientPoolSize', 'recipientPoolSource',
+  'longConversationFixturePresent', 'largeBroadcastFixturePresent',
+] as const;
+const BASELINE_REVISION_KEYS = ['profilerCommit', 'targetAppCommit'] as const;
 
 function baselineInteger(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -752,10 +771,14 @@ function baselineSurfaceId(value: unknown): string {
 function baselineRouteSet(value: unknown): string[] {
   if (!Array.isArray(value)) return [INVALID_BASELINE_ROUTE];
   const routeSet = value.map(baselineSurfaceId);
-  if (routeSet.includes(INVALID_BASELINE_ROUTE) || new Set(routeSet).size !== routeSet.length) {
+  if (
+    routeSet.includes(INVALID_BASELINE_ROUTE)
+    || new Set(routeSet).size !== routeSet.length
+    || routeSet.some((route, index) => index > 0 && routeSet[index - 1]!.localeCompare(route) >= 0)
+  ) {
     return [INVALID_BASELINE_ROUTE];
   }
-  return routeSet.sort();
+  return routeSet;
 }
 
 function invalidBaselineComparisonWorkload(): ComparisonWorkload {
@@ -788,6 +811,12 @@ function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
   const workload = record(value);
   if (value === null || value === undefined) return null;
   if (workload === null) return invalidBaselineComparisonWorkload();
+  if (!hasNoUnknownKeys(workload, BASELINE_COMPARISON_WORKLOAD_KEYS)) {
+    throw new Error('baseline_schema_invalid');
+  }
+  if (!hasClosedKeys(workload, BASELINE_COMPARISON_WORKLOAD_KEYS)) {
+    return invalidBaselineComparisonWorkload();
+  }
   const recipientPoolSource = workload['recipientPoolSource'];
   return {
     workloadModelVersion: baselineInteger(workload['workloadModelVersion']),
@@ -818,7 +847,13 @@ function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
 
 function baselineEnvironment(value: unknown): ComparisonEnvironment {
   const environment = record(value);
-  if (environment === null) throw new Error('baseline_schema_invalid');
+  if (
+    environment === null
+    || !hasNoUnknownKeys(environment, BASELINE_ENVIRONMENT_KEYS)
+    || !hasNoUnknownKeys(record(environment['viewport']) ?? {}, ['width', 'height'])
+  ) {
+    throw new Error('baseline_schema_invalid');
+  }
   const dataSource = environment['dataSource'];
   return {
     target: environment['target'] === 'hermetic' || environment['target'] === 'local' || environment['target'] === 'hosted-dev'
@@ -859,6 +894,17 @@ function hasClosedKeys(value: Record<string, unknown>, keys: readonly string[]):
   return actualKeys.length === keys.length && actualKeys.every((key) => keys.includes(key));
 }
 
+function hasNoUnknownKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function hasCanonicalBaselineRootKeys(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value);
+  return BASELINE_ROOT_KEYS.every((key) => keys.includes(key))
+    && keys.every((key) => BASELINE_ROOT_KEYS.includes(key as typeof BASELINE_ROOT_KEYS[number])
+      || OPTIONAL_BASELINE_ROOT_KEYS.includes(key as typeof OPTIONAL_BASELINE_ROOT_KEYS[number]));
+}
+
 function baselineFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
@@ -867,7 +913,7 @@ function baselineNonnegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-function baselineSummary(value: unknown): boolean {
+function baselineSummary(value: unknown, successCount: number): boolean {
   const summary = record(value);
   if (summary === null || !hasClosedKeys(summary, ['median', 'min', 'max', 'p95'])) return false;
 
@@ -876,9 +922,11 @@ function baselineSummary(value: unknown): boolean {
   const max = summary['max'];
   const p95 = summary['p95'];
   if (median === null && min === null && max === null) return p95 === null;
+  if (successCount === 0) return false;
   if (!baselineFiniteNumber(median) || !baselineFiniteNumber(min) || !baselineFiniteNumber(max)) return false;
   if (min > median || median > max) return false;
-  return p95 === null || (baselineFiniteNumber(p95) && min <= p95 && p95 <= max);
+  if (successCount < 20) return p95 === null;
+  return baselineFiniteNumber(p95) && min <= p95 && p95 <= max;
 }
 
 function baselineAggregate(value: unknown): value is RouteModeAggregate {
@@ -907,14 +955,14 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
     && hasClosedKeys(metrics, [
       'readyMs', 'apiRequestCount', 'apiTransferBytes', 'longTaskTotalMs', 'domElements', 'resourceCountsByClass',
     ])
-    && baselineSummary(metrics['readyMs'])
-    && baselineSummary(metrics['apiRequestCount'])
-    && baselineSummary(metrics['apiTransferBytes'])
-    && baselineSummary(metrics['longTaskTotalMs'])
-    && baselineSummary(metrics['domElements'])
+    && baselineSummary(metrics['readyMs'], successCount)
+    && baselineSummary(metrics['apiRequestCount'], successCount)
+    && baselineSummary(metrics['apiTransferBytes'], successCount)
+    && baselineSummary(metrics['longTaskTotalMs'], successCount)
+    && baselineSummary(metrics['domElements'], successCount)
     && resources !== null
     && hasClosedKeys(resources, RESOURCE_CLASSES)
-    && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass]))
+    && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass], successCount))
     && statuses !== null
     && hasClosedKeys(statuses, SAMPLE_STATUSES)
     && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0)
@@ -930,13 +978,15 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
     && typeof aggregate['clientTruncated'] === 'boolean'
     && noise !== null
     && hasClosedKeys(noise, ['backgroundRequestCount', 'backgroundTransferBytes'])
-    && baselineSummary(noise['backgroundRequestCount'])
-    && baselineSummary(noise['backgroundTransferBytes']);
+    && baselineSummary(noise['backgroundRequestCount'], successCount)
+    && baselineSummary(noise['backgroundTransferBytes'], successCount);
 }
 
 function baselineRevisions(value: unknown): ComparisonRun['revisions'] {
   const revisions = record(value);
-  if (revisions === null) throw new Error('baseline_schema_invalid');
+  if (revisions === null || !hasClosedKeys(revisions, BASELINE_REVISION_KEYS)) {
+    throw new Error('baseline_schema_invalid');
+  }
   const revision = (candidate: unknown): string | null => {
     if (candidate === null) return null;
     if (typeof candidate !== 'string') throw new Error('baseline_schema_invalid');
@@ -974,6 +1024,8 @@ function parseBaselineJson(text: string): ComparisonRun {
   }
   const candidate = parsed as Record<string, unknown>;
   if (
+    !hasCanonicalBaselineRootKeys(candidate)
+    ||
     candidate.schemaVersion !== PERFORMANCE_SCHEMA_VERSION
     || candidate.registryVersion !== PERFORMANCE_REGISTRY_VERSION
     || candidate.workloadVersion !== PERFORMANCE_WORKLOAD_VERSION

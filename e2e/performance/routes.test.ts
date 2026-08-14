@@ -24,6 +24,7 @@ import {
   type ResolverDom,
   type RouteContractBranch,
 } from './routes.js';
+import { sanitizeRequestUrl } from './templates.js';
 
 const EXPECTED_KEYS = [
   '/', '/contacts', '/contacts/tenants', '/contacts/landlords', '/contacts/unknown',
@@ -112,7 +113,8 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/users/me?#required', '/api/contacts/:contactId/timeline?#required',
     '/api/placements?#required', '/api/units?#required',
     '/api/contacts/:contactId/listings-sent?#required', '/api/contacts/:contactId/media?#required',
-    '/api/contacts/:contactId/relay-groups?#required', ...CONTACT_SHAPES,
+    '/api/contacts/:contactId/relay-groups?#required', '/api/contacts/:contactId/group-threads?#required',
+    ...CONTACT_SHAPES,
     '/api/conversations?#conditional', '/api/conversations/:conversationId/messages?#conditional',
     '/api/tours?tenantId#required',
   ],
@@ -404,8 +406,25 @@ describe('route registry completeness', () => {
     });
 
     const numbers = ROUTES.find((route) => route.surfaceId === '/settings/numbers')!;
-    expect(numbers.terminal.populatedAlternatives).toHaveLength(4);
+    expect(numbers.terminal.structure).toEqual([
+      { role: 'heading', name: 'Our number', exactness: 'exact' },
+      { role: 'heading', name: 'Relay group numbers', exactness: 'exact' },
+    ]);
+    expect(numbers.terminal.populatedAlternatives).toHaveLength(2);
+    expect(numbers.terminal.emptyAlternatives).toHaveLength(2);
     expect(numbers.terminal.populatedAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
+    expect(numbers.terminal.emptyAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
+    expect(numbers.terminal.emptyAlternatives.flat()).toContainEqual({
+      role: 'text',
+      name: 'No relay group numbers yet - a number is provisioned with the first relay group.',
+      exactness: 'exact',
+    });
+
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    expect(conversation.terminal.populatedAlternatives).toEqual([[
+      { role: 'text', name: 'Relay group', exactness: 'exact' },
+      { role: 'link', name: 'Back to inbox', exactness: 'exact' },
+    ]]);
 
     const voice = ROUTES.find((route) => route.surfaceId === '/settings/voice')!;
     expect(voice.terminal.populatedAlternatives.map((alternative) => alternative.length)).toEqual([1, 2]);
@@ -484,6 +503,18 @@ describe('endpoint and write contracts', () => {
       .toContain('/api/tours?unitId#required');
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'other', landlordUnitCount: 0 })))
       .not.toContain('/api/tours?tenantId#required');
+    expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'other', landlordUnitCount: 0 })))
+      .toContain('/api/contacts/:contactId/group-threads?#required');
+    expect(sanitizeRequestUrl({
+      rawUrl: 'http://127.0.0.1:9111/api/contacts/private-contact-id/group-threads',
+      method: 'GET',
+      firstPartyOrigin: 'http://127.0.0.1:9111',
+      resourceType: 'Fetch',
+    })).toMatchObject({
+      endpointTemplate: '/api/contacts/:contactId/group-threads',
+      queryKeys: [],
+      unmatchedApi: false,
+    });
     const unit = ROUTES.find((route) => route.surfaceId === '/listings/:unitId')!;
     expect(shape(expectedGets(unit, 'warm', { kind: 'unit_detail', hasLandlord: true })))
       .toContain('/api/contacts/:contactId?#required');

@@ -120,7 +120,7 @@ describe('performance seed destructive boundary', () => {
     })).toThrow();
   });
 
-  it('queries paginated lean messages and addresses only the injected lane during cleanup', async () => {
+  it('queries profiler-excluded lean message partitions and addresses only the injected lane during cleanup', async () => {
     const config = loadConfig({
       NODE_ENV: 'test',
       CF_ORIGIN_SECRET: 'test-origin-secret',
@@ -130,25 +130,35 @@ describe('performance seed destructive boundary', () => {
     const namespace = createTableNamespace(config);
     const leanNativeConversation = SEED.conversations.find((conversation) => conversation.type === 'group_text');
     if (!leanNativeConversation) throw new Error('lean_native_group_missing');
-    const firstPageKey = { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' };
-    let queryCount = 0;
+    const leanConnectingRelay = SEED.conversations.find((conversation) =>
+      conversation.type === 'relay_group'
+      && conversation.status === 'connecting'
+      && conversation.relay_status === 'relay_group#connecting');
+    if (!leanConnectingRelay) throw new Error('lean_connecting_relay_missing');
+    const leanNativeConversationId = leanNativeConversation.conversationId;
+    const leanConnectingRelayId = leanConnectingRelay.conversationId;
+    if (typeof leanNativeConversationId !== 'string' || typeof leanConnectingRelayId !== 'string') {
+      throw new Error('lean_group_conversation_id_missing');
+    }
+    const firstPageKey = { conversationId: leanNativeConversationId, tsMsgId: 'first' };
+    const queryCounts = new Map<string, number>();
     const send = vi.fn(async (command: QueryCommand | BatchWriteCommand | DeleteCommand) => {
       if (command instanceof QueryCommand) {
-        queryCount += 1;
+        const conversationId = command.input.ExpressionAttributeValues?.[':conversationId'];
+        if (typeof conversationId !== 'string') throw new Error('missing_conversation_id');
+        const queryCount = (queryCounts.get(conversationId) ?? 0) + 1;
+        queryCounts.set(conversationId, queryCount);
         expect(command.input.TableName).toBe(namespace.tableNameFor('messages'));
-        expect(command.input.ExpressionAttributeValues).toEqual({ ':conversationId': leanNativeConversation.conversationId });
-        if (queryCount === 2) {
+        expect([leanNativeConversationId, leanConnectingRelayId]).toContain(conversationId);
+        if (conversationId === leanNativeConversationId && queryCount === 2) {
           expect(command.input.ExclusiveStartKey).toEqual(firstPageKey);
         }
-        return queryCount === 1
-          ? { Items: [{ tsMsgId: 'first' }], LastEvaluatedKey: firstPageKey }
-          : { Items: [{ tsMsgId: 'second' }] };
-      }
-      if (command instanceof DeleteCommand) {
-        expect(command.input).toEqual({
-          TableName: namespace.tableNameFor('conversations'),
-          Key: { conversationId: leanNativeConversation.conversationId },
-        });
+        if (conversationId === leanNativeConversationId) {
+          return queryCount === 1
+            ? { Items: [{ tsMsgId: 'first' }], LastEvaluatedKey: firstPageKey }
+            : { Items: [{ tsMsgId: 'second' }] };
+        }
+        return { Items: [] };
       }
       return {};
     });
@@ -161,7 +171,10 @@ describe('performance seed destructive boundary', () => {
       doc: { send } as unknown as DynamoDBDocumentClient,
     });
 
-    expect(queryCount).toBe(2);
+    expect(Object.fromEntries(queryCounts)).toEqual({
+      [leanNativeConversationId]: 2,
+      [leanConnectingRelayId]: 1,
+    });
     const batchDeleteKeys = send.mock.calls.flatMap(([command]) => {
       if (!(command instanceof BatchWriteCommand)) return [];
       const requestItems = command.input.RequestItems ?? {};
@@ -171,8 +184,14 @@ describe('performance seed destructive boundary', () => {
       return messageDeletes;
     }).map((request) => request.DeleteRequest?.Key);
     expect(batchDeleteKeys).toEqual([
-      { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' },
-      { conversationId: leanNativeConversation.conversationId, tsMsgId: 'second' },
+      { conversationId: leanNativeConversationId, tsMsgId: 'first' },
+      { conversationId: leanNativeConversationId, tsMsgId: 'second' },
+    ]);
+    const deletedConversationIds = send.mock.calls.flatMap(([command]) =>
+      command instanceof DeleteCommand ? [command.input.Key?.['conversationId']] : []);
+    expect(deletedConversationIds).toEqual([
+      leanNativeConversationId,
+      leanConnectingRelayId,
     ]);
     const addressedTables = send.mock.calls.flatMap(([command]) => {
       const input = (command as QueryCommand | BatchWriteCommand | DeleteCommand).input as {
@@ -216,6 +235,12 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
   const leanNativeConversation = SEED.conversations.find((conversation) => conversation.type === 'group_text');
   const leanNativeConversationId = leanNativeConversation?.conversationId;
   if (typeof leanNativeConversationId !== 'string') throw new Error('lean_native_group_missing');
+  const leanConnectingRelay = SEED.conversations.find((conversation) =>
+    conversation.type === 'relay_group'
+    && conversation.status === 'connecting'
+    && conversation.relay_status === 'relay_group#connecting');
+  const leanConnectingRelayId = leanConnectingRelay?.conversationId;
+  if (typeof leanConnectingRelayId !== 'string') throw new Error('lean_connecting_relay_missing');
 
   beforeAll(async () => {
     for (const spec of TABLES) {
@@ -342,22 +367,15 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     const connecting = await readers.conversations.listRelayGroups('connecting');
     expect(open).toMatchObject({ truncated: false });
     expect(connecting).toMatchObject({ truncated: false });
-    // Count the GENERATED share only (this test's own subject), not the whole
-    // partition. resetPerformanceData reseeds the LEAN profile first
-    // (performanceSeed.ts), and lean carries one `connecting` relay_group as the
-    // group-texting conversion fixture - so the raw partition legitimately holds
-    // 501. Asserting the absolute count made this test a tripwire for anything
-    // lean ever adds, which is not what "without truncation" is about; the
-    // `truncated: false` assertions above are.
-    const generated = (items: typeof open.items) =>
-      items.filter((item) => item.conversationId.startsWith('perf-'));
-    expect(generated(open.items)).toHaveLength(500);
-    expect(generated(connecting.items)).toHaveLength(500);
+    expect(open.items).toHaveLength(500);
+    expect(connecting.items).toHaveLength(500);
+    expect(open.items.length + connecting.items.length).toBe(manifest.relayGroupCount);
+    expect(connecting.items.map((item) => item.conversationId)).not.toContain(leanConnectingRelayId);
     expect(open.items.every((item) => item.relay_status === 'relay_group#open')).toBe(true);
     expect(connecting.items.every((item) => item.relay_status === 'relay_group#connecting')).toBe(true);
   }, 300_000);
 
-  it('replaces the lean native group with the exact generated group workload in its own lane', async () => {
+  it('replaces lean group fixtures with exact generated native and relay workloads in its own lane', async () => {
     const defaultManifest = await resetPerformanceData({ config: configB, input: {}, anchor });
     const defaultGroups = await readers.conversations.listGroupTexts({ limit: 100 });
     expect(defaultManifest.nativeGroups).toBe(21);
@@ -367,6 +385,19 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     expect(defaultGroups.items.map((item) => item.last_activity_at)).toEqual(
       [...defaultGroups.items].map((item) => item.last_activity_at).sort().reverse(),
     );
+    const defaultOpenRelays = await readers.conversations.listRelayGroups('open');
+    const defaultConnectingRelays = await readers.conversations.listRelayGroups('connecting');
+    expect(defaultOpenRelays.truncated).toBe(false);
+    expect(defaultConnectingRelays.truncated).toBe(false);
+    expect(defaultOpenRelays.items.length + defaultConnectingRelays.items.length)
+      .toBe(defaultManifest.relayGroupCount);
+    expect(defaultConnectingRelays.items.map((item) => item.conversationId)).not.toContain(leanConnectingRelayId);
+    expect(await readers.messages.listByConversation(leanConnectingRelayId, { limit: 100 })).toEqual([]);
+    const leanRelayConversation = await doc.send(new GetCommand({
+      TableName: nsB.tableNameFor('conversations'),
+      Key: { conversationId: leanConnectingRelayId },
+    }));
+    expect(leanRelayConversation.Item).toBeUndefined();
 
     const defaultInboxDeps = {
       conversationsRepo: readers.conversations,

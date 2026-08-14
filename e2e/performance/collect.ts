@@ -324,7 +324,7 @@ export class NetworkCollector {
     inboxRequestClass: InboxRequestClass | null,
   ): { role: RequestEvidence['requestRole']; forceUnmatched: boolean } {
     const inboxSurface = (this.#input.behaviorFamily ?? 'standard') === 'inbox';
-    const key = inboxSurface
+    const key = inboxSurface || inboxRequestClass === 'inbox_badge'
       ? contractIdentity(sanitized, inboxRequestClass)
       : contractIdentity(sanitized);
     const shape = contractShape(sanitized);

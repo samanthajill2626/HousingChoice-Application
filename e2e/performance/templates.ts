@@ -74,6 +74,7 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/api/contacts/:contactId/suggestions',
   '/api/contacts/:contactId/listings-sent',
   '/api/contacts/:contactId/relay-groups',
+  '/api/contacts/:contactId/group-threads',
   '/api/contacts/:contactId/email-conversation',
   '/api/contacts/:contactId/conversation',
   '/api/contacts/:contactId/emails/:emailKey',

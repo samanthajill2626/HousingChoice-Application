@@ -196,6 +196,59 @@ describe('CDP request collection', () => {
 });
 
 describe('checked-in background policy', () => {
+  it('matches the cold shell badge by its closed class on standard routes and keeps warm badge traffic in the background', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    const badPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30&cursor=private-cursor';
+    const expected: EndpointContract[] = [{
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      requirement: 'required',
+      inboxRequestClass: 'inbox_badge',
+    }];
+
+    const cold = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'cold',
+      repeat: 0,
+      expectedGets: expected,
+    });
+    cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(cold, 'badge', 10.1, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    start(cold, 'bad-page', 10.3, badPage);
+    cold.loadingFinished('sample-1', { requestId: 'bad-page', timestamp: 10.4, encodedDataLength: 30 });
+    expect(cold.endSample('sample-1').requests.map((request) => [
+      request.inboxRequestClass,
+      request.requestRole,
+      request.unmatchedApi,
+    ])).toEqual([
+      ['inbox_badge', 'required', false],
+      ['inbox_endpoint_contract_failure', 'required', true],
+    ]);
+
+    const warm = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'warm',
+      repeat: 0,
+      expectedGets: [],
+    });
+    warm.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(warm, 'badge', 10.1, badge);
+    warm.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    expect(warm.endSample('sample-1').requests).toEqual([
+      expect.objectContaining({
+        inboxRequestClass: 'inbox_badge',
+        requestRole: 'background_shell',
+        unmatchedApi: false,
+      }),
+    ]);
+  });
+
   it('classifies closed Inbox page and badge tuples before evidence redaction', () => {
     const firstPartyOrigin = 'http://127.0.0.1:9111';
     const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30';

@@ -12,6 +12,7 @@ import {
   readPageStoreSnapshot,
   runDirectMain,
   runProfiler,
+  terminalStateFor,
   targetPath,
   type CliRuntime,
 } from './cli.js';
@@ -55,6 +56,60 @@ class AdapterPage {
       const filter = name === 'All' ? '' : `?filter=${name.toLowerCase()}`;
       this.current = `http://dashboard.test/inbox${filter}`;
     });
+  }
+}
+
+class TerminalProofLocator {
+  constructor(
+    private readonly page: TerminalProofPage,
+    private readonly present: boolean,
+  ) {}
+
+  async count(): Promise<number> { return this.present ? 1 : 0; }
+  first(): this { return this; }
+  async isVisible(): Promise<boolean> { return this.present; }
+  or(other: TerminalProofLocator): TerminalProofLocator {
+    return new TerminalProofLocator(this.page, this.present || other.present);
+  }
+  locator(selector: string): TerminalProofLocator {
+    return new TerminalProofLocator(this.page, this.present && selector === 'xpath=ancestor::*[@aria-labelledby][1]');
+  }
+  getByRole(role: string, options: { name?: string | RegExp } = {}): TerminalProofLocator {
+    return this.page.role(role, options.name, this.present);
+  }
+  getByText(text: string | RegExp): TerminalProofLocator {
+    return this.page.text(text, this.present);
+  }
+}
+
+class TerminalProofPage {
+  constructor(
+    private readonly roles: readonly Readonly<{ role: string; name?: string }>[],
+    private readonly texts: readonly string[],
+  ) {}
+
+  private matches(actual: string | undefined, expected: string | RegExp | undefined): boolean {
+    if (expected === undefined) return actual === undefined;
+    if (actual === undefined) return false;
+    return typeof expected === 'string' ? actual === expected : expected.test(actual);
+  }
+  role(role: string, name: string | RegExp | undefined, parentPresent = true): TerminalProofLocator {
+    return new TerminalProofLocator(
+      this,
+      parentPresent && this.roles.some((entry) => entry.role === role && this.matches(entry.name, name)),
+    );
+  }
+  text(text: string | RegExp, parentPresent = true): TerminalProofLocator {
+    return new TerminalProofLocator(
+      this,
+      parentPresent && this.texts.some((entry) => typeof text === 'string' ? entry === text : text.test(entry)),
+    );
+  }
+  getByRole(role: string, options: { name?: string | RegExp } = {}): TerminalProofLocator {
+    return this.role(role, options.name);
+  }
+  getByText(text: string | RegExp): TerminalProofLocator {
+    return this.text(text);
   }
 }
 
@@ -140,6 +195,49 @@ function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRunt
 }
 
 describe('exact browser targets', () => {
+  it('proves the live relay conversation and relay-number terminals through exact DOM roles and text', async () => {
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    const numbers = ROUTES.find((route) => route.surfaceId === '/settings/numbers')!;
+    const relayConversation = new TerminalProofPage(
+      [{ role: 'link', name: 'Back to inbox' }],
+      ['Relay group'],
+    );
+    const staleConversation = new TerminalProofPage(
+      [{ role: 'link', name: 'Back to inbox' }],
+      ['Group text'],
+    );
+    await expect(terminalStateFor(relayConversation as never, conversation.terminal)).resolves.toBe('populated');
+    await expect(terminalStateFor(staleConversation as never, conversation.terminal)).resolves.toBe('unknown');
+
+    const numberRoles = [
+      { role: 'heading', name: 'Our number' },
+      { role: 'heading', name: 'Relay group numbers' },
+    ] as const;
+    const populatedNumbers = new TerminalProofPage(
+      [...numberRoles, { role: 'list', name: 'Pool number counts' }],
+      ['Not set'],
+    );
+    const emptyNumbers = new TerminalProofPage(
+      numberRoles,
+      ['Not set', 'No relay group numbers yet - a number is provisioned with the first relay group.'],
+    );
+    const contradictoryNumbers = new TerminalProofPage(
+      [...numberRoles, { role: 'list', name: 'Pool number counts' }],
+      ['Not set', 'No relay group numbers yet - a number is provisioned with the first relay group.'],
+    );
+    const staleNumbers = new TerminalProofPage(
+      [
+        { role: 'heading', name: 'Our number' },
+        { role: 'heading', name: 'Group text numbers' },
+      ],
+      ['Not set', 'No group text numbers yet - a number is provisioned with the first group text.'],
+    );
+    await expect(terminalStateFor(populatedNumbers as never, numbers.terminal)).resolves.toBe('populated');
+    await expect(terminalStateFor(emptyNumbers as never, numbers.terminal)).resolves.toBe('empty');
+    await expect(terminalStateFor(contradictoryNumbers as never, numbers.terminal)).resolves.toBe('contradictory_terminal');
+    await expect(terminalStateFor(staleNumbers as never, numbers.terminal)).resolves.toBe('unknown');
+  });
+
   it('accepts only normalized query-equivalent targets and rejects extra source state', () => {
     expect(targetPath({ path: '/inbox', query: { kind: 'absent' } })).toBe('/inbox');
     expect(targetPath({ path: '/inbox', query: { kind: 'fixed', values: { filter: 'unread' } } })).toBe('/inbox?filter=unread');

@@ -469,7 +469,7 @@ async function groupVisible(
   return combine === 'all' ? values.every(Boolean) : values.some(Boolean);
 }
 
-async function terminalStateFor(
+export async function terminalStateFor(
   page: Page,
   terminal: TerminalContract,
   selected?: LocatorContract,

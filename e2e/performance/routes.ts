@@ -306,7 +306,8 @@ const CONTACT_DETAIL_BASE_GETS = Object.freeze([
   required('/api/users/me'), required('/api/contacts/:contactId/timeline'),
   required('/api/placements'), required('/api/units'),
   required('/api/contacts/:contactId/listings-sent'), required('/api/contacts/:contactId/media'),
-  required('/api/contacts/:contactId/relay-groups'), ...CONTACT_LIVE_WALK,
+  required('/api/contacts/:contactId/relay-groups'), required('/api/contacts/:contactId/group-threads'),
+  ...CONTACT_LIVE_WALK,
   conditional('/api/conversations'), conditional('/api/conversations/:conversationId/messages'),
 ]);
 const UNIT_DETAIL_BASE_GETS = Object.freeze([
@@ -423,15 +424,13 @@ const NUMBER_STATES = [
   locator('text', 'Not set', 'exact', 'Our number'),
   locator('text', '^(?:\\([0-9]{3}\\) [0-9]{3}-[0-9]{4}|\\+[0-9]{8,15})$', 'regex', 'Our number'),
 ] as const;
-const POOL_NUMBER_STATES = [
-  locator('list', 'Pool number counts'),
-  locator('text', 'No group text numbers yet - a number is provisioned with the first group text.'),
-] as const;
 const NUMBER_TERMINAL = terminalAlternatives(
-  crossProduct([], NUMBER_STATES, POOL_NUMBER_STATES),
-  [],
+  crossProduct([], NUMBER_STATES, [locator('list', 'Pool number counts')]),
+  crossProduct([], NUMBER_STATES, [
+    locator('text', 'No relay group numbers yet - a number is provisioned with the first relay group.'),
+  ]),
   [locator('text', "Couldn't load our number."), L.alert],
-  [locator('heading', 'Our number'), locator('heading', 'Group text numbers')],
+  [locator('heading', 'Our number'), locator('heading', 'Relay group numbers')],
 );
 const CONTACT_DETAIL_TERMINAL = terminal(
   [locator('heading', '^Details(?: Edit contact details)?$', 'regex'), locator('region', 'Communications and activity')], [], [L.alert], [], 'all',
@@ -439,7 +438,7 @@ const CONTACT_DETAIL_TERMINAL = terminal(
 const UNIT_DETAIL_TERMINAL = terminal([locator('heading', undefined, 'role_only'), locator('heading', 'Photos')], [], [L.alert], [], 'all');
 const TOUR_DETAIL_TERMINAL = terminal([locator('link', 'Back to tours')], [], [L.alert]);
 const PLACEMENT_DETAIL_TERMINAL = terminal([locator('link', 'Back to placements')], [], [L.alert]);
-const CONVERSATION_DETAIL_TERMINAL = terminal([locator('text', 'Group text'), locator('link', 'Back to inbox')], [], [L.alert], [], 'all');
+const CONVERSATION_DETAIL_TERMINAL = terminal([locator('text', 'Relay group'), locator('link', 'Back to inbox')], [], [L.alert], [], 'all');
 const BROADCAST_DETAIL_TERMINAL = terminal(
   [locator('list', 'Recipients')],
   [locator('text', 'No recipients recorded yet.')], [L.alert], [locator('heading', 'Recipients')],
@@ -655,8 +654,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176' },
     '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:77-132' },
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
-    '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,232-253' },
-    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:79-165; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
+    '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
+    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1228-1239; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
     '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:110-185; dashboard/src/routes/listing/ListingDetail.tsx:184-185' },
     '/tours/:tourId': { base: 'dashboard/src/routes/tours/useTourChannels.ts:100-289; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/placements/:placementId': { base: 'dashboard/src/routes/placements/usePlacementChannels.ts:101-299; dashboard/src/routes/shared/useRoster.ts:75-137' },
@@ -709,12 +708,12 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/voice': 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176',
     '/settings/system': 'dashboard/src/routes/settings/QuietHoursSection.tsx:135-155; dashboard/src/routes/settings/FlagPills.tsx:41-69; dashboard/src/routes/settings/AlarmGrid.tsx:43-95; dashboard/src/routes/settings/RecentErrors.tsx:69-129',
     '/settings/ai-runs': 'dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47',
-    '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,232-253',
+    '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,207-244',
     '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:152; dashboard/src/routes/contact/Card.tsx:18-25',
     '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1180-1187',
     '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:551',
     '/placements/:placementId': 'dashboard/src/routes/placements/PlacementDetail.tsx:515',
-    '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:379',
+    '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:397-402',
     '/broadcasts/:broadcastId': 'dashboard/src/routes/broadcasts/BroadcastResults.tsx:159-162',
   } as const),
   resolvers: Object.freeze({

@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import pino from 'pino';
 import {
   assertLocalInboxProfileTarget,
+  createInboxProfilePlan,
   createTimedRepository,
   summarizeInboxTrace,
   type InboxTraceEvent,
@@ -35,14 +36,6 @@ const doc = DynamoDBDocumentClient.from(client, {
 const env = { ...process.env, TABLE_PREFIX: tablePrefix };
 const logger = pino({ level: 'silent' });
 
-const cases: ReadonlyArray<{ caseId: string; filter: InboxFilter; limit: number }> = [
-  { caseId: 'all-page', filter: 'all', limit: 25 },
-  { caseId: 'unread-page', filter: 'unread', limit: 25 },
-  { caseId: 'unknown-page', filter: 'unknown', limit: 25 },
-  { caseId: 'groups-page', filter: 'groups', limit: 25 },
-  { caseId: 'unread-badge', filter: 'unread', limit: 100 },
-];
-
 const trace: InboxTraceEvent[] = [];
 const samples: Array<{
   caseId: string;
@@ -54,66 +47,64 @@ const samples: Array<{
   hasNextCursor: boolean;
   groupsTruncated: boolean;
 }> = [];
-const repeats = 1;
-
 try {
-  for (const profileCase of cases) {
-    for (let repeat = 0; repeat < repeats; repeat += 1) {
-      const originMs = performance.now();
-      const context = {
-        caseId: profileCase.caseId,
-        repeat,
-        originMs,
-        nowMs: () => performance.now(),
-        wallNow: () => new Date().toISOString(),
-      };
-      const repoDeps = { doc, env, logger };
-      const page = await aggregateInbox(
-        { filter: profileCase.filter, limit: profileCase.limit },
-        {
-          logger,
-          conversationsRepo: createTimedRepository(
-            'conversations',
-            createConversationsRepo(repoDeps),
-            trace,
-            context,
-          ),
-          contactsRepo: createTimedRepository(
-            'contacts',
-            createContactsRepo(repoDeps),
-            trace,
-            context,
-          ),
-          messagesRepo: createTimedRepository(
-            'messages',
-            createMessagesRepo(repoDeps),
-            trace,
-            context,
-          ),
-          placementsRepo: createTimedRepository(
-            'placements',
-            createPlacementsRepo(repoDeps),
-            trace,
-            context,
-          ),
-        },
-      );
-      const durationMs = performance.now() - originMs;
-      samples.push({
-        caseId: profileCase.caseId,
-        filter: profileCase.filter,
-        limit: profileCase.limit,
-        repeat,
-        durationMs,
-        rowCount: page.rows.length,
-        hasNextCursor: page.nextCursor !== null,
-        groupsTruncated: page.groupsTruncated === true,
-      });
-      console.log(
-        `${profileCase.caseId}: ${durationMs.toFixed(1)} ms, ` +
-        `${page.rows.length} rows, ${trace.filter((event) => event.caseId === profileCase.caseId).length} timed calls`,
-      );
-    }
+  for (const profileCase of createInboxProfilePlan()) {
+    const { repeat } = profileCase;
+    const originMs = performance.now();
+    const context = {
+      caseId: profileCase.caseId,
+      repeat,
+      originMs,
+      nowMs: () => performance.now(),
+      wallNow: () => new Date().toISOString(),
+    };
+    const repoDeps = { doc, env, logger };
+    const page = await aggregateInbox(
+      { filter: profileCase.filter, limit: profileCase.limit },
+      {
+        logger,
+        conversationsRepo: createTimedRepository(
+          'conversations',
+          createConversationsRepo(repoDeps),
+          trace,
+          context,
+        ),
+        contactsRepo: createTimedRepository(
+          'contacts',
+          createContactsRepo(repoDeps),
+          trace,
+          context,
+        ),
+        messagesRepo: createTimedRepository(
+          'messages',
+          createMessagesRepo(repoDeps),
+          trace,
+          context,
+        ),
+        placementsRepo: createTimedRepository(
+          'placements',
+          createPlacementsRepo(repoDeps),
+          trace,
+          context,
+        ),
+      },
+    );
+    const durationMs = performance.now() - originMs;
+    samples.push({
+      caseId: profileCase.caseId,
+      filter: profileCase.filter,
+      limit: profileCase.limit,
+      repeat,
+      durationMs,
+      rowCount: page.rows.length,
+      hasNextCursor: page.nextCursor !== null,
+      groupsTruncated: page.groupsTruncated === true,
+    });
+    console.log(
+      `${profileCase.caseId}: ${durationMs.toFixed(1)} ms, ` +
+      `${page.rows.length} rows, ` +
+      `${trace.filter((event) => event.caseId === profileCase.caseId && event.repeat === repeat).length} timed calls`,
+    );
   }
 
   const runId = `${new Date().toISOString().replace(/[-:.]/g, '')}-${process.pid}`;

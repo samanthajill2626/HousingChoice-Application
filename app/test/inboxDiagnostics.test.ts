@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertLocalInboxProfileTarget,
+  createInboxProfilePlan,
   createTimedRepository,
   summarizeInboxTrace,
   type InboxTraceEvent,
 } from '../src/lib/inboxDiagnostics.js';
+
+describe('createInboxProfilePlan', () => {
+  it('runs five comparable samples with dashboard page size 30 and badge size 100', () => {
+    const plan = createInboxProfilePlan();
+
+    expect(plan).toHaveLength(25);
+    expect(plan.filter((sample) => sample.repeat === 0)).toEqual([
+      { caseId: 'all-page', filter: 'all', limit: 30, repeat: 0 },
+      { caseId: 'unread-page', filter: 'unread', limit: 30, repeat: 0 },
+      { caseId: 'unknown-page', filter: 'unknown', limit: 30, repeat: 0 },
+      { caseId: 'groups-page', filter: 'groups', limit: 30, repeat: 0 },
+      { caseId: 'unread-badge', filter: 'unread', limit: 100, repeat: 0 },
+    ]);
+    expect([...new Set(plan.map((sample) => sample.repeat))]).toEqual([0, 1, 2, 3, 4]);
+  });
+});
 
 describe('createTimedRepository', () => {
   it('records the real async repository result with absolute and relative timing', async () => {

@@ -24,6 +24,23 @@ interface Seed {
   /** Latest message per conversationId (drives channel/direction/preview). */
   latestMessage?: Record<string, Partial<MessageItem>>;
   placements?: Record<string, { stage: string }>;
+  participantConversationLookupError?: Error;
+}
+
+interface InboxCallCounts {
+  findByPhone: number;
+  findByParticipantPhone: number;
+  listByConversation: number;
+  getPlacementById: number;
+}
+
+function emptyCallCounts(): InboxCallCounts {
+  return {
+    findByPhone: 0,
+    findByParticipantPhone: 0,
+    listByConversation: 0,
+    getPlacementById: 0,
+  };
 }
 
 /**
@@ -31,7 +48,7 @@ interface Seed {
  * repos' contractual semantics. listByLastActivity encodes its paging position
  * as a `{ idx }` key (the raw LastEvaluatedKey the route base64s into a cursor).
  */
-function makeDeps(seed: Seed): InboxRouterDeps {
+function makeDeps(seed: Seed, calls?: InboxCallCounts): InboxRouterDeps {
   // Newest-activity-first total order over the OPEN conversations, the by
   // LastActivity GSI's descending sort.
   const ordered = [...seed.conversations]
@@ -73,6 +90,10 @@ function makeDeps(seed: Seed): InboxRouterDeps {
         };
       },
       async findByParticipantPhone(phone: string) {
+        if (calls !== undefined) calls.findByParticipantPhone += 1;
+        if (seed.participantConversationLookupError !== undefined) {
+          throw seed.participantConversationLookupError;
+        }
         return seed.conversations.filter((c) => c.participant_phone === phone);
       },
       // Mirrors the real repo: one relay status partition, newest-activity-first.
@@ -98,6 +119,7 @@ function makeDeps(seed: Seed): InboxRouterDeps {
     } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
     contactsRepo: {
       async findByPhone(phone: string) {
+        if (calls !== undefined) calls.findByPhone += 1;
         return contactByPhone(phone);
       },
       async getById(contactId: string) {
@@ -106,12 +128,14 @@ function makeDeps(seed: Seed): InboxRouterDeps {
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
       async listByConversation(conversationId: string) {
+        if (calls !== undefined) calls.listByConversation += 1;
         const latest = seed.latestMessage?.[conversationId];
         return latest ? [latest as MessageItem] : [];
       },
     } as unknown as NonNullable<InboxRouterDeps['messagesRepo']>,
     placementsRepo: {
       async getById(placementId: string) {
+        if (calls !== undefined) calls.getPlacementById += 1;
         const c = seed.placements?.[placementId];
         return c ? ({ placementId, stage: c.stage } as unknown) : undefined;
       },
@@ -427,6 +451,166 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(baseSeed));
     expect(unknown.rows.every((r) => r.needsTriage)).toBe(true);
     expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
+  });
+
+  it('skips message hydration for a read no-contact row under unread', async () => {
+    const calls = emptyCallCounts();
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps({
+        contacts: [],
+        conversations: [
+          conv({
+            conversationId: 'conv-read-unknown',
+            participant_phone: '+14045550101',
+            last_activity_at: '2026-06-12T10:00:00.000Z',
+            type: 'unknown_1to1',
+            unread_count: 0,
+          }),
+        ],
+        latestMessage: {
+          'conv-read-unknown': { type: 'sms', direction: 'inbound', body: 'already read' },
+        },
+      }, calls),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(calls).toEqual({
+      findByPhone: 1,
+      findByParticipantPhone: 0,
+      listByConversation: 0,
+      getPlacementById: 0,
+    });
+  });
+
+  it('uses the contact-wide unread sum before skipping known-contact hydration', async () => {
+    const calls = emptyCallCounts();
+    const contact: ContactItem = {
+      contactId: 'contact-multi',
+      type: 'tenant',
+      phone: '+14045550102',
+      phones: [
+        { phone: '+14045550102', primary: true },
+        { phone: '+14045550103', primary: false },
+      ],
+    };
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps({
+        contacts: [contact],
+        conversations: [
+          conv({
+            conversationId: 'conv-new-read',
+            participant_phone: '+14045550102',
+            last_activity_at: '2026-06-12T10:00:00.000Z',
+            unread_count: 0,
+          }),
+          conv({
+            conversationId: 'conv-old-unread',
+            participant_phone: '+14045550103',
+            last_activity_at: '2026-06-11T10:00:00.000Z',
+            unread_count: 2,
+          }),
+        ],
+      }, calls),
+    );
+
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({ contactId: 'contact-multi', unreadCount: 2 });
+    expect(calls.findByParticipantPhone).toBe(2);
+    expect(calls.listByConversation).toBe(1);
+  });
+
+  it('skips message and placement hydration for a known contact with no unread threads', async () => {
+    const calls = emptyCallCounts();
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps({
+        contacts: [{ contactId: 'contact-read', type: 'tenant', phone: '+14045550104' }],
+        conversations: [
+          conv({
+            conversationId: 'conv-read',
+            participant_phone: '+14045550104',
+            last_activity_at: '2026-06-12T10:00:00.000Z',
+            unread_count: 0,
+            placementId: 'placement-read',
+          }),
+        ],
+        latestMessage: {
+          'conv-read': { type: 'sms', direction: 'inbound', body: 'already read' },
+        },
+        placements: { 'placement-read': { stage: 'searching' } },
+      }, calls),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(calls).toEqual({
+      findByPhone: 1,
+      findByParticipantPhone: 1,
+      listByConversation: 0,
+      getPlacementById: 0,
+    });
+  });
+
+  it('rejects a resolved non-unknown contact before conversation and message hydration', async () => {
+    const calls = emptyCallCounts();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 30 },
+      makeDeps({
+        contacts: [{ contactId: 'contact-tenant', type: 'tenant', phone: '+14045550105' }],
+        conversations: [
+          conv({
+            conversationId: 'conv-tenant',
+            participant_phone: '+14045550105',
+            last_activity_at: '2026-06-12T10:00:00.000Z',
+            unread_count: 1,
+            placementId: 'placement-tenant',
+          }),
+        ],
+        latestMessage: {
+          'conv-tenant': { type: 'sms', direction: 'inbound', body: 'known tenant' },
+        },
+        placements: { 'placement-tenant': { stage: 'searching' } },
+      }, calls),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(calls).toEqual({
+      findByPhone: 1,
+      findByParticipantPhone: 0,
+      listByConversation: 0,
+      getPlacementById: 0,
+    });
+  });
+
+  it('keeps a failed contact-conversation lookup excluded from unread without downstream hydration', async () => {
+    const calls = emptyCallCounts();
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps({
+        contacts: [{ contactId: 'contact-degraded', type: 'tenant', phone: '+14045550106' }],
+        conversations: [
+          conv({
+            conversationId: 'conv-degraded',
+            participant_phone: '+14045550106',
+            last_activity_at: '2026-06-12T10:00:00.000Z',
+            unread_count: 3,
+          }),
+        ],
+        latestMessage: {
+          'conv-degraded': { type: 'sms', direction: 'inbound', body: 'not trustworthy' },
+        },
+        participantConversationLookupError: new Error('lookup unavailable'),
+      }, calls),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(calls).toEqual({
+      findByPhone: 1,
+      findByParticipantPhone: 1,
+      listByConversation: 0,
+      getPlacementById: 0,
+    });
   });
 
   it('placementContext present {placementId,label} when the representative conversation has a placementId', async () => {

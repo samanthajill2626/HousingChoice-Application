@@ -31,6 +31,32 @@ export interface InboxTimingContext {
   wallNow: () => string;
 }
 
+export interface InboxProfilePlanEntry {
+  caseId: string;
+  filter: 'all' | 'unread' | 'unknown' | 'groups';
+  limit: number;
+  repeat: number;
+}
+
+/**
+ * The fixed comparison workload for the manual Inbox repository profiler.
+ * Dashboard pages request 30 rows; the app-level badge requests 100. Five
+ * repeats provide comparable dispersion without mutating the local data.
+ */
+export function createInboxProfilePlan(): InboxProfilePlanEntry[] {
+  const cases = [
+    { caseId: 'all-page', filter: 'all', limit: 30 },
+    { caseId: 'unread-page', filter: 'unread', limit: 30 },
+    { caseId: 'unknown-page', filter: 'unknown', limit: 30 },
+    { caseId: 'groups-page', filter: 'groups', limit: 30 },
+    { caseId: 'unread-badge', filter: 'unread', limit: 100 },
+  ] as const;
+
+  return cases.flatMap((profileCase) =>
+    Array.from({ length: 5 }, (_, repeat) => ({ ...profileCase, repeat })),
+  );
+}
+
 function countResult(value: unknown): number {
   if (value === undefined || value === null) return 0;
   if (Array.isArray(value)) return value.length;

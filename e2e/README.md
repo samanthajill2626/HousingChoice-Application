@@ -116,7 +116,7 @@ upper bound unless this table gives one.
 | `--base-url` | `--base-url=URL`, required outside hermetic mode. Local accepts only HTTP loopback port 5174; hosted-dev requires HTTPS. |
 | `--login-email` | `--login-email=EMAIL`, an existing local user identity; forbidden for hermetic mode. |
 | `--browser-channel` | `--browser-channel=chromium|chrome`, default chromium. Hermetic accepts only chromium. |
-| `--self-qa` | `--self-qa=narrow|full`, hermetic diagnostic mode. It requires default scale 1, one cold and warm repeat, and no explicit seed override. |
+| `--self-qa` | `--self-qa=narrow|full`, hermetic diagnostic mode. It requires default scale 1, one cold and warm repeat, and no explicit non-scale seed override. |
 | `--headed` | `--headed`, use a visible browser; required for hosted-dev and forbidden for hermetic mode. |
 | `--print-config` | `--print-config`, print one resolved safe configuration JSON value without lifecycle, network, or browser work. |
 | `--contract-checkpoint` | `--contract-checkpoint`, run the locked hermetic contract workload; it has the same default scale-1 and one-repeat lock as self-QA and is mutually exclusive with it. |
@@ -165,8 +165,8 @@ does not promise current latency changes while the application reads a bounded i
 page.
 
 Use these parser-valid examples. The first five cover standard scaling, each tail,
-safe config inspection, and a controlled baseline; the later target examples remain
-human-only where stated.
+safe config inspection, and a controlled baseline; the local and hosted-dev target
+examples above remain human-only where stated.
 
 ```powershell
 npm run perf:pages -- hermetic --scale=7

@@ -96,11 +96,15 @@ class EvidencePage {
   constructor(
     private readonly rows: readonly { kind: InboxRowKind; detailLink: boolean }[],
     private readonly markers: readonly string[],
+    private readonly links: readonly string[] = [],
   ) {}
 
   getByRole(role: string, options: { name?: string; exact?: boolean } = {}): EvidenceLocator {
     if (role === 'list' && options.name === 'Conversations' && options.exact === true) {
       return new EvidenceLocator(this.rows, null, false);
+    }
+    if (role === 'link' && options.exact === true && typeof options.name === 'string') {
+      return new EvidenceLocator(null, null, this.links.includes(options.name));
     }
     return new EvidenceLocator(null, null, false);
   }
@@ -270,10 +274,11 @@ describe('exact browser targets', () => {
     const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
     const unknown = ROUTES.find((route) => route.surfaceId === 'inbox-unknown')!;
     const groups = ROUTES.find((route) => route.surfaceId === 'inbox-groups')!;
-    const createEvidencePage = (markers: readonly string[], rows = 0) => createRealSamplePage({
+    const createEvidencePage = (markers: readonly string[], rows = 0, links: readonly string[] = []) => createRealSamplePage({
       page: new EvidencePage(
         Array.from({ length: rows }, () => ({ kind: 'contact' as const, detailLink: false })),
         markers,
+        links,
       ) as never,
       context: { addInitScript: async () => undefined } as never,
       contextState: { token: null },
@@ -282,13 +287,13 @@ describe('exact browser targets', () => {
       pageStoreInstaller: (() => undefined) as never,
     });
 
-    await expect(createEvidencePage(['See all group texts'], 3).captureSurfaceEvidence(all, 1)).resolves.toEqual({
+    await expect(createEvidencePage([], 3, ['See all group texts']).captureSurfaceEvidence(all, 1)).resolves.toEqual({
       kind: 'inbox', filter: 'all', renderedRowCount: 3, groupsTruncated: true, initialInboxPageRequestCount: 1,
     });
-    await expect(createEvidencePage(['Browse all group texts (read and unread)']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
+    await expect(createEvidencePage([], 0, ['Browse all group texts (read and unread)']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
       filter: 'unread', groupsTruncated: true,
     });
-    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(unknown, 1)).resolves.toMatchObject({
+    await expect(createEvidencePage([], 0, ['See all group texts']).captureSurfaceEvidence(unknown, 1)).resolves.toMatchObject({
       filter: 'unknown', groupsTruncated: true,
     });
     await expect(createEvidencePage(['Showing the latest 1 group text.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
@@ -300,7 +305,13 @@ describe('exact browser targets', () => {
     await expect(createEvidencePage(['Not all group texts are shown here.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({
       groupsTruncated: true,
     });
-    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
+    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(all, 1)).resolves.toMatchObject({
+      groupsTruncated: false,
+    });
+    await expect(createEvidencePage(['See all group texts']).captureSurfaceEvidence(unknown, 1)).resolves.toMatchObject({
+      groupsTruncated: false,
+    });
+    await expect(createEvidencePage(['Browse all group texts (read and unread)']).captureSurfaceEvidence(unread, 1)).resolves.toMatchObject({
       groupsTruncated: false,
     });
     await expect(createEvidencePage(['Showing the latest 0 group texts.']).captureSurfaceEvidence(groups, 1)).resolves.toMatchObject({

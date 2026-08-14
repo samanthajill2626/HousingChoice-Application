@@ -561,11 +561,15 @@ async function inboxGroupsTruncated(
     const locator = page.getByText(text, { ...(exact && { exact: true }) });
     return await locator.count() > 0 && await locator.first().isVisible();
   };
+  const visibleFixedLink = async (name: string): Promise<boolean> => {
+    const locator = page.getByRole('link', { name, exact: true });
+    return await locator.count() > 0 && await locator.first().isVisible();
+  };
   if (filter === 'all' || filter === 'unknown') {
-    return await visibleFixedText('See all group texts', true);
+    return await visibleFixedLink('See all group texts');
   }
   if (filter === 'unread') {
-    return await visibleFixedText('Browse all group texts (read and unread)', true);
+    return await visibleFixedLink('Browse all group texts (read and unread)');
   }
   return await visibleFixedText('Not all group texts are shown here.', true)
     || await visibleFixedText(/^Showing the latest [1-9][0-9]* group texts?\.$/u);

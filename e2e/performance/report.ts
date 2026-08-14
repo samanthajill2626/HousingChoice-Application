@@ -727,37 +727,83 @@ function comparisonWorkload(manifest: PerformanceSeedManifest | null): Compariso
   };
 }
 
+const INVALID_BASELINE_TARGET = 'invalid_target' as ComparisonEnvironment['target'];
 const INVALID_BASELINE_DATA_SOURCE = 'invalid_data_source' as ComparisonEnvironment['dataSource'];
 const INVALID_BASELINE_RECIPIENT_POOL_SOURCE = 'invalid_recipient_pool_source' as ComparisonWorkload['recipientPoolSource'];
+const INVALID_BASELINE_BROWSER_CHANNEL = 'invalid_browser_channel';
+const INVALID_BASELINE_ROUTE = 'invalid_baseline_route';
+const INVALID_BASELINE_INTEGER = -1;
+const INVALID_BASELINE_BOOLEAN = 'invalid_boolean' as unknown as boolean;
+
+function baselineInteger(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : INVALID_BASELINE_INTEGER;
+}
+
+function baselineBoolean(value: unknown): boolean {
+  return typeof value === 'boolean' ? value : INVALID_BASELINE_BOOLEAN;
+}
+
+function baselineSurfaceId(value: unknown): string {
+  return typeof value === 'string' && SURFACE_IDS.has(value) ? value : INVALID_BASELINE_ROUTE;
+}
+
+function invalidBaselineComparisonWorkload(): ComparisonWorkload {
+  return {
+    workloadModelVersion: INVALID_BASELINE_INTEGER,
+    contacts: INVALID_BASELINE_INTEGER,
+    activeContacts: INVALID_BASELINE_INTEGER,
+    units: INVALID_BASELINE_INTEGER,
+    placements: INVALID_BASELINE_INTEGER,
+    tours: INVALID_BASELINE_INTEGER,
+    conversations: INVALID_BASELINE_INTEGER,
+    nativeGroups: INVALID_BASELINE_INTEGER,
+    nativeGroupMemberSlotCount: INVALID_BASELINE_INTEGER,
+    totalConversations: INVALID_BASELINE_INTEGER,
+    messagesPerConversation: INVALID_BASELINE_INTEGER,
+    resolvedLongConversationMessages: INVALID_BASELINE_INTEGER,
+    totalMessageCount: INVALID_BASELINE_INTEGER,
+    broadcasts: INVALID_BASELINE_INTEGER,
+    resolvedRecipientsPerBroadcast: INVALID_BASELINE_INTEGER,
+    resolvedLargeBroadcastRecipients: INVALID_BASELINE_INTEGER,
+    totalRecipientCount: INVALID_BASELINE_INTEGER,
+    recipientPoolSize: INVALID_BASELINE_INTEGER,
+    recipientPoolSource: INVALID_BASELINE_RECIPIENT_POOL_SOURCE,
+    longConversationFixturePresent: INVALID_BASELINE_BOOLEAN,
+    largeBroadcastFixturePresent: INVALID_BASELINE_BOOLEAN,
+  };
+}
 
 function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
   const workload = record(value);
-  if (workload === null) return null;
+  if (value === null || value === undefined) return null;
+  if (workload === null) return invalidBaselineComparisonWorkload();
   const recipientPoolSource = workload['recipientPoolSource'];
   return {
-    workloadModelVersion: integer(workload['workloadModelVersion']),
-    contacts: integer(workload['contacts']),
-    activeContacts: integer(workload['activeContacts']),
-    units: integer(workload['units']),
-    placements: integer(workload['placements']),
-    tours: integer(workload['tours']),
-    conversations: integer(workload['conversations']),
-    nativeGroups: integer(workload['nativeGroups']),
-    nativeGroupMemberSlotCount: integer(workload['nativeGroupMemberSlotCount']),
-    totalConversations: integer(workload['totalConversations']),
-    messagesPerConversation: integer(workload['messagesPerConversation']),
-    resolvedLongConversationMessages: integer(workload['resolvedLongConversationMessages']),
-    totalMessageCount: integer(workload['totalMessageCount']),
-    broadcasts: integer(workload['broadcasts']),
-    resolvedRecipientsPerBroadcast: integer(workload['resolvedRecipientsPerBroadcast']),
-    resolvedLargeBroadcastRecipients: integer(workload['resolvedLargeBroadcastRecipients']),
-    totalRecipientCount: integer(workload['totalRecipientCount']),
-    recipientPoolSize: integer(workload['recipientPoolSize']),
+    workloadModelVersion: baselineInteger(workload['workloadModelVersion']),
+    contacts: baselineInteger(workload['contacts']),
+    activeContacts: baselineInteger(workload['activeContacts']),
+    units: baselineInteger(workload['units']),
+    placements: baselineInteger(workload['placements']),
+    tours: baselineInteger(workload['tours']),
+    conversations: baselineInteger(workload['conversations']),
+    nativeGroups: baselineInteger(workload['nativeGroups']),
+    nativeGroupMemberSlotCount: baselineInteger(workload['nativeGroupMemberSlotCount']),
+    totalConversations: baselineInteger(workload['totalConversations']),
+    messagesPerConversation: baselineInteger(workload['messagesPerConversation']),
+    resolvedLongConversationMessages: baselineInteger(workload['resolvedLongConversationMessages']),
+    totalMessageCount: baselineInteger(workload['totalMessageCount']),
+    broadcasts: baselineInteger(workload['broadcasts']),
+    resolvedRecipientsPerBroadcast: baselineInteger(workload['resolvedRecipientsPerBroadcast']),
+    resolvedLargeBroadcastRecipients: baselineInteger(workload['resolvedLargeBroadcastRecipients']),
+    totalRecipientCount: baselineInteger(workload['totalRecipientCount']),
+    recipientPoolSize: baselineInteger(workload['recipientPoolSize']),
     recipientPoolSource: recipientPoolSource === 'generated_tenants' || recipientPoolSource === 'lean_tenant'
       ? recipientPoolSource
       : INVALID_BASELINE_RECIPIENT_POOL_SOURCE,
-    longConversationFixturePresent: workload['longConversationFixturePresent'] === true,
-    largeBroadcastFixturePresent: workload['largeBroadcastFixturePresent'] === true,
+    longConversationFixturePresent: baselineBoolean(workload['longConversationFixturePresent']),
+    largeBroadcastFixturePresent: baselineBoolean(workload['largeBroadcastFixturePresent']),
   };
 }
 
@@ -766,26 +812,32 @@ function baselineEnvironment(value: unknown): ComparisonEnvironment {
   if (environment === null) throw new Error('baseline_schema_invalid');
   const dataSource = environment['dataSource'];
   return {
-    target: environment['target'] === 'local' || environment['target'] === 'hosted-dev' ? environment['target'] : 'hermetic',
-    registryVersion: integer(environment['registryVersion']),
-    workloadVersion: integer(environment['workloadVersion']),
+    target: environment['target'] === 'hermetic' || environment['target'] === 'local' || environment['target'] === 'hosted-dev'
+      ? environment['target']
+      : INVALID_BASELINE_TARGET,
+    registryVersion: baselineInteger(environment['registryVersion']),
+    workloadVersion: baselineInteger(environment['workloadVersion']),
     dataSource: dataSource === 'synthetic_hermetic' || dataSource === 'existing'
       ? dataSource
       : INVALID_BASELINE_DATA_SOURCE,
     comparisonWorkload: baselineComparisonWorkload(environment['comparisonWorkload']),
-    routeSet: Array.isArray(environment['routeSet']) ? environment['routeSet'].map(surfaceId).sort() : [],
-    browserMajor: integer(environment['browserMajor']),
-    browserChannel: typeof environment['browserChannel'] === 'string' ? environment['browserChannel'] : '',
+    routeSet: Array.isArray(environment['routeSet'])
+      ? environment['routeSet'].map(baselineSurfaceId).sort()
+      : [INVALID_BASELINE_ROUTE],
+    browserMajor: baselineInteger(environment['browserMajor']),
+    browserChannel: environment['browserChannel'] === 'chromium' || environment['browserChannel'] === 'chrome'
+      ? environment['browserChannel']
+      : INVALID_BASELINE_BROWSER_CHANNEL,
     viewport: {
-      width: integer(record(environment['viewport'])?.['width']),
-      height: integer(record(environment['viewport'])?.['height']),
+      width: baselineInteger(record(environment['viewport'])?.['width']),
+      height: baselineInteger(record(environment['viewport'])?.['height']),
     },
-    coldRepeats: integer(environment['coldRepeats']),
-    warmRepeats: integer(environment['warmRepeats']),
-    routeOrderSeed: integer(environment['routeOrderSeed']),
-    interceptionScopeVersion: integer(environment['interceptionScopeVersion']),
-    settleMs: integer(environment['settleMs']),
-    pollMs: integer(environment['pollMs']),
+    coldRepeats: baselineInteger(environment['coldRepeats']),
+    warmRepeats: baselineInteger(environment['warmRepeats']),
+    routeOrderSeed: baselineInteger(environment['routeOrderSeed']),
+    interceptionScopeVersion: baselineInteger(environment['interceptionScopeVersion']),
+    settleMs: baselineInteger(environment['settleMs']),
+    pollMs: baselineInteger(environment['pollMs']),
   };
 }
 

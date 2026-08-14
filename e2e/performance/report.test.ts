@@ -867,6 +867,94 @@ describe('writePerformanceReport', () => {
     expect(summaryText).not.toContain('private.person@example.com');
   });
 
+  it.each([
+    ['invalid target', 'target', (baseline: Record<string, any>) => {
+      baseline.environment.target = 'private.person@example.com';
+    }],
+    ['missing target', 'target', (baseline: Record<string, any>) => {
+      delete baseline.environment.target;
+    }],
+  ])('keeps a baseline with %s uncontrolled without persisting malformed target text', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd1');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0014'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain(mismatch);
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['missing zero-valued workload count', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.totalMessageCount;
+    }],
+    ['missing false fixture flag', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.longConversationFixturePresent;
+    }],
+  ])('keeps a baseline with %s uncontrolled instead of normalizing it to a valid workload value', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, '20260812T123456790Z-aabbccd2');
+    const input = {
+      ...base,
+      config: {
+        ...base.config,
+        seed: {
+          ...base.config.seed!,
+          totalMessageCount: 0,
+          longConversationFixturePresent: false,
+        },
+      },
+    };
+    await writePerformanceReport(input);
+    const baseline = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0015'),
+      config: input.config,
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain(mismatch);
+  });
+
+  it('keeps a baseline with a missing zero-valued viewport field uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd3');
+    baselineInput.browser = { version: '140.0.7339.12', viewport: { width: 0, height: 720 } };
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    delete baseline.environment.viewport.width;
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0016'),
+      browser: baselineInput.browser,
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('viewport');
+  });
+
   it('round-trips every registry route through artifacts and a generated baseline', async () => {
     const outputRoot = await artifactRoot();
     const surfaceIds = ROUTES.map((route) => route.surfaceId);

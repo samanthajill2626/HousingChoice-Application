@@ -833,6 +833,40 @@ describe('writePerformanceReport', () => {
     expect(comparison.mismatches).toContain('route_set');
   });
 
+  it.each([
+    ['invalid data source', 'data_source', (baseline: Record<string, any>) => {
+      baseline.environment.dataSource = 'private.person@example.com';
+    }],
+    ['missing data source', 'data_source', (baseline: Record<string, any>) => {
+      delete baseline.environment.dataSource;
+    }],
+    ['invalid recipient pool source', 'comparison_workload', (baseline: Record<string, any>) => {
+      baseline.environment.comparisonWorkload.recipientPoolSource = 'private.person@example.com';
+    }],
+    ['missing recipient pool source', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.recipientPoolSource;
+    }],
+  ])('keeps a baseline with %s uncontrolled without persisting its raw value', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccdf');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0013'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain(mismatch);
+    const summaryText = await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8');
+    expect(summaryText).not.toContain('private.person@example.com');
+  });
+
   it('round-trips every registry route through artifacts and a generated baseline', async () => {
     const outputRoot = await artifactRoot();
     const surfaceIds = ROUTES.map((route) => route.surfaceId);

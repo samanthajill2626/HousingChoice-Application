@@ -727,9 +727,13 @@ function comparisonWorkload(manifest: PerformanceSeedManifest | null): Compariso
   };
 }
 
+const INVALID_BASELINE_DATA_SOURCE = 'invalid_data_source' as ComparisonEnvironment['dataSource'];
+const INVALID_BASELINE_RECIPIENT_POOL_SOURCE = 'invalid_recipient_pool_source' as ComparisonWorkload['recipientPoolSource'];
+
 function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
   const workload = record(value);
   if (workload === null) return null;
+  const recipientPoolSource = workload['recipientPoolSource'];
   return {
     workloadModelVersion: integer(workload['workloadModelVersion']),
     contacts: integer(workload['contacts']),
@@ -749,7 +753,9 @@ function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
     resolvedLargeBroadcastRecipients: integer(workload['resolvedLargeBroadcastRecipients']),
     totalRecipientCount: integer(workload['totalRecipientCount']),
     recipientPoolSize: integer(workload['recipientPoolSize']),
-    recipientPoolSource: workload['recipientPoolSource'] === 'generated_tenants' ? 'generated_tenants' : 'lean_tenant',
+    recipientPoolSource: recipientPoolSource === 'generated_tenants' || recipientPoolSource === 'lean_tenant'
+      ? recipientPoolSource
+      : INVALID_BASELINE_RECIPIENT_POOL_SOURCE,
     longConversationFixturePresent: workload['longConversationFixturePresent'] === true,
     largeBroadcastFixturePresent: workload['largeBroadcastFixturePresent'] === true,
   };
@@ -758,11 +764,14 @@ function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
 function baselineEnvironment(value: unknown): ComparisonEnvironment {
   const environment = record(value);
   if (environment === null) throw new Error('baseline_schema_invalid');
+  const dataSource = environment['dataSource'];
   return {
     target: environment['target'] === 'local' || environment['target'] === 'hosted-dev' ? environment['target'] : 'hermetic',
     registryVersion: integer(environment['registryVersion']),
     workloadVersion: integer(environment['workloadVersion']),
-    dataSource: environment['dataSource'] === 'synthetic_hermetic' ? 'synthetic_hermetic' : 'existing',
+    dataSource: dataSource === 'synthetic_hermetic' || dataSource === 'existing'
+      ? dataSource
+      : INVALID_BASELINE_DATA_SOURCE,
     comparisonWorkload: baselineComparisonWorkload(environment['comparisonWorkload']),
     routeSet: Array.isArray(environment['routeSet']) ? environment['routeSet'].map(surfaceId).sort() : [],
     browserMajor: integer(environment['browserMajor']),

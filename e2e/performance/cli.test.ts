@@ -84,7 +84,7 @@ class TerminalProofLocator {
 
 class TerminalProofPage {
   constructor(
-    private readonly roles: readonly Readonly<{ role: string; name?: string }>[],
+    private readonly roles: readonly Readonly<{ role: string; name?: string; selected?: boolean }>[],
     private readonly texts: readonly string[],
   ) {}
 
@@ -93,10 +93,17 @@ class TerminalProofPage {
     if (actual === undefined) return false;
     return typeof expected === 'string' ? actual === expected : expected.test(actual);
   }
-  role(role: string, name: string | RegExp | undefined, parentPresent = true): TerminalProofLocator {
+  role(
+    role: string,
+    name: string | RegExp | undefined,
+    parentPresent = true,
+    selected?: boolean,
+  ): TerminalProofLocator {
     return new TerminalProofLocator(
       this,
-      parentPresent && this.roles.some((entry) => entry.role === role && this.matches(entry.name, name)),
+      parentPresent && this.roles.some((entry) => entry.role === role
+        && this.matches(entry.name, name)
+        && (selected === undefined || entry.selected === selected)),
     );
   }
   text(text: string | RegExp, parentPresent = true): TerminalProofLocator {
@@ -105,8 +112,8 @@ class TerminalProofPage {
       parentPresent && this.texts.some((entry) => typeof text === 'string' ? entry === text : text.test(entry)),
     );
   }
-  getByRole(role: string, options: { name?: string | RegExp } = {}): TerminalProofLocator {
-    return this.role(role, options.name);
+  getByRole(role: string, options: { name?: string | RegExp; selected?: boolean } = {}): TerminalProofLocator {
+    return this.role(role, options.name, true, options.selected);
   }
   getByText(text: string | RegExp): TerminalProofLocator {
     return this.text(text);
@@ -195,6 +202,53 @@ function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRunt
 }
 
 describe('exact browser targets', () => {
+  it('requires Inbox destination selection and tablist independently of activation kind', async () => {
+    const cli = await import('./cli.js') as typeof import('./cli.js') & {
+      terminalStateForRoute: (
+        page: never,
+        route: (typeof ROUTES)[number],
+      ) => Promise<'populated' | 'empty' | 'error' | 'unknown' | 'contradictory_terminal'>;
+    };
+    const all = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    expect(all.source.action).toEqual({ kind: 'link', href: '/inbox' });
+
+    const populated = (selectedName: string, includeTablist = true, selected = true) => new TerminalProofPage(
+      [
+        ...(includeTablist ? [{ role: 'tablist', name: 'Inbox filters' }] : []),
+        { role: 'tab', name: selectedName, selected },
+        { role: 'list', name: 'Conversations' },
+      ],
+      [],
+    );
+    await expect(cli.terminalStateForRoute(populated('All') as never, all)).resolves.toBe('populated');
+    await expect(cli.terminalStateForRoute(populated('All', true, false) as never, all)).resolves.toBe('unknown');
+    await expect(cli.terminalStateForRoute(populated('All', false) as never, all)).resolves.toBe('unknown');
+
+    const empty = new TerminalProofPage(
+      [
+        { role: 'tablist', name: 'Inbox filters' },
+        { role: 'tab', name: 'All', selected: true },
+      ],
+      ['No conversations yet'],
+    );
+    await expect(cli.terminalStateForRoute(empty as never, all)).resolves.toBe('empty');
+    const contradictory = new TerminalProofPage(
+      [
+        { role: 'tablist', name: 'Inbox filters' },
+        { role: 'tab', name: 'All', selected: true },
+        { role: 'list', name: 'Conversations' },
+      ],
+      ['No conversations yet'],
+    );
+    await expect(cli.terminalStateForRoute(contradictory as never, all)).resolves.toBe('contradictory_terminal');
+
+    for (const route of ROUTES.filter((candidate) => candidate.behaviorFamily === 'inbox' && candidate !== all)) {
+      const expected = route.label.slice('Inbox: '.length);
+      await expect(cli.terminalStateForRoute(populated('All') as never, route)).resolves.toBe('unknown');
+      await expect(cli.terminalStateForRoute(populated(expected) as never, route)).resolves.toBe('populated');
+    }
+  });
+
   it('proves the live relay conversation and relay-number terminals through exact DOM roles and text', async () => {
     const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
     const numbers = ROUTES.find((route) => route.surfaceId === '/settings/numbers')!;

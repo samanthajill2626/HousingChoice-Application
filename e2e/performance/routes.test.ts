@@ -240,6 +240,31 @@ describe('route registry completeness', () => {
     ])).toThrow('selected_locator_must_be_exact_tab');
   });
 
+  it('requires an exact selected destination tab for every Inbox surface', () => {
+    const inbox = ROUTES.filter((route) => route.behaviorFamily === 'inbox');
+    expect(inbox.map((route) => route.destinationSelected)).toEqual([
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Unread', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Unknown', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Groups', exactness: 'exact', selected: true },
+    ]);
+    expect(inbox.every((route) => route.terminal.structure.some((locator) => locator.role === 'tablist'
+      && locator.name === 'Inbox filters' && locator.exactness === 'exact'))).toBe(true);
+
+    const all = inbox[0]!;
+    for (const destinationSelected of [
+      undefined,
+      { role: 'button', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'contains', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact' },
+    ] as const) {
+      expect(() => assertRouteRegistry([
+        ...ROUTES.filter((route) => route !== all),
+        { ...all, destinationSelected } as never,
+      ])).toThrow('inbox_destination_selected_must_be_exact_tab');
+    }
+  });
+
   it('has no legacy identity aliases in persisted or joining performance sources', () => {
     const sources = [
       'types.ts', 'routes.ts', 'collect.ts', 'aggregate.ts', 'compare.ts', 'report.ts', 'selfQa.ts', 'cli.ts',

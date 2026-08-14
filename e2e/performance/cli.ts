@@ -475,7 +475,8 @@ export async function terminalStateFor(
   selected?: LocatorContract,
 ): Promise<SampleResult['terminalState']> {
   if (await groupVisible(page, terminal.error, 'any')) return 'error';
-  const [populated, empty, selectionSatisfied] = await Promise.all([
+  const [structureSatisfied, populated, empty, selectionSatisfied] = await Promise.all([
+    terminal.structure.length === 0 ? Promise.resolve(true) : groupVisible(page, terminal.structure, 'all'),
     terminalAlternativeVisible(
     terminal.populatedAlternatives,
     (contract) => visible(page, contract),
@@ -486,6 +487,7 @@ export async function terminalStateFor(
     ),
     selected === undefined ? Promise.resolve(true) : visible(page, selected),
   ]);
+  if (!structureSatisfied) return 'unknown';
   if (!selectionSatisfied) return 'unknown';
   if (populated && empty) return 'contradictory_terminal';
   if (populated) return 'populated';
@@ -493,11 +495,11 @@ export async function terminalStateFor(
   return 'unknown';
 }
 
-async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
-  const selected = route.source.action.kind === 'tab'
-    ? { role: 'tab', name: route.source.action.name, exactness: 'exact' as const, selected: true as const }
-    : undefined;
-  return terminalStateFor(page, route.terminal, selected);
+export async function terminalStateForRoute(
+  page: Page,
+  route: RouteDefinition,
+): Promise<SampleResult['terminalState']> {
+  return terminalStateFor(page, route.terminal, route.destinationSelected);
 }
 
 export async function readPageStoreSnapshot(
@@ -898,7 +900,7 @@ export function createRealInstrumentation(input: {
               return values.every(Boolean);
             },
             async terminalState(): Promise<SampleResult['terminalState']> {
-              const state = await terminalState(page!.rawPage, route);
+              const state = await terminalStateForRoute(page!.rawPage, route);
               if (state !== 'unknown') collector?.markTerminalVisible(token);
               return state;
             },

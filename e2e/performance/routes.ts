@@ -87,6 +87,7 @@ export interface RouteDefinition {
   viewportDependency: 'desktop_chrome';
   resolver: ResolverName;
   source: WarmSourceContract;
+  destinationSelected?: LocatorContract;
   terminal: TerminalContract;
   gets: readonly EndpointContract[];
   surfaceScaleBearing: boolean;
@@ -380,7 +381,12 @@ const PLACEMENT_TERMINAL = terminal(
   [locator('alert', "We couldn't load placements. Please try again.")], [locator('searchbox', 'Search placements')],
 );
 function inboxTerminal(emptyTitle: string): TerminalContract {
-  return terminal([locator('list', 'Conversations')], [locator('text', emptyTitle)], [L.alert]);
+  return terminal(
+    [locator('list', 'Conversations')],
+    [locator('text', emptyTitle)],
+    [L.alert],
+    [locator('tablist', 'Inbox filters')],
+  );
 }
 function emailTerminal(quarantine: boolean): TerminalContract {
   return terminal(
@@ -490,6 +496,7 @@ interface RowInput {
   requiredRole?: 'staff' | 'admin';
   resolver?: ResolverName;
   source: WarmSourceContract;
+  destinationSelected?: LocatorContract;
   terminal: TerminalContract;
   gets: readonly EndpointContract[];
   surfaceScaleBearing: boolean;
@@ -511,6 +518,7 @@ function row(input: RowInput): RouteDefinition {
     viewportDependency: 'desktop_chrome' as const,
     resolver: input.resolver ?? 'static',
     source: input.source,
+    ...(input.destinationSelected !== undefined && { destinationSelected: input.destinationSelected }),
     terminal: input.terminal,
     gets: input.gets,
     surfaceScaleBearing: input.surfaceScaleBearing,
@@ -535,7 +543,8 @@ const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templa
     gets,
   );
 const INBOX_ALL_SOURCE_TERMINAL = inboxTerminal('No conversations yet');
-const INBOX_ALL_SOURCE_SELECTED = locator('tab', 'All', 'exact', undefined, true);
+const inboxDestinationSelected = (name: string) => locator('tab', name, 'exact', undefined, true);
+const INBOX_ALL_SOURCE_SELECTED = inboxDestinationSelected('All');
 const INBOX_SOURCE = (label: string, gets: readonly EndpointContract[]) =>
   source('/inbox', L.inbox, tab(label), gets, INBOX_ALL_SOURCE_TERMINAL, INBOX_ALL_SOURCE_SELECTED);
 const INBOX_DETAIL_SOURCE = (gets: readonly EndpointContract[]) =>
@@ -553,10 +562,10 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, link('/tours/closed'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: 'inbox-unknown', label: 'Inbox: Unknown', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unknown' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unknown', inboxGets('inbox_page_unknown')), terminal: inboxTerminal('No unknown numbers'), gets: inboxGets('inbox_page_unknown'), surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: 'inbox-groups', label: 'Inbox: Groups', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=groups' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Groups', inboxGets('inbox_page_groups')), terminal: inboxTerminal('No group texts yet'), gets: inboxGets('inbox_page_groups'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), destinationSelected: inboxDestinationSelected('All'), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), destinationSelected: inboxDestinationSelected('Unread'), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unknown', label: 'Inbox: Unknown', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unknown' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unknown', inboxGets('inbox_page_unknown')), destinationSelected: inboxDestinationSelected('Unknown'), terminal: inboxTerminal('No unknown numbers'), gets: inboxGets('inbox_page_unknown'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-groups', label: 'Inbox: Groups', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=groups' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Groups', inboxGets('inbox_page_groups')), destinationSelected: inboxDestinationSelected('Groups'), terminal: inboxTerminal('No group texts yet'), gets: inboxGets('inbox_page_groups'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, link('/email/quarantine'), EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -621,6 +630,16 @@ export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
     }
     assertSelectedLocator(route.source.ready);
     if (route.source.sourceSelected !== undefined) assertSelectedLocator(route.source.sourceSelected);
+    if (route.behaviorFamily === 'inbox'
+      && (route.destinationSelected === undefined
+        || route.destinationSelected.role !== 'tab'
+        || route.destinationSelected.exactness !== 'exact'
+        || route.destinationSelected.selected !== true
+        || route.destinationSelected.name === undefined
+        || route.destinationSelected.name.length === 0)) {
+      throw new Error('inbox_destination_selected_must_be_exact_tab');
+    }
+    if (route.destinationSelected !== undefined) assertSelectedLocator(route.destinationSelected);
     if (route.source.sourceTerminal !== undefined) assertTerminalLocators(route.source.sourceTerminal);
     assertTerminalLocators(route.terminal);
   }

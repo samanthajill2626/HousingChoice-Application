@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  PUBLIC_OPTION_CATALOG,
+  parseProfilerArgs,
   parseRunConfig,
+  renderProfilerHelp,
+  toHermeticReseedPayload,
   toSafeRunConfig,
   type RunConfig,
   type SafeRunConfig,
@@ -22,13 +26,16 @@ const parse = (argv: string[]) =>
 const SELF_QA_BASE = ['hermetic', '--scale=1', '--cold-repeats=1', '--warm-repeats=1'];
 const OVERRIDES = [
   '--contacts=100',
-  '--units=25',
+  '--units=16',
   '--placements=50',
   '--tours=50',
   '--conversations=100',
   '--messages-per-conversation=10',
   '--broadcasts=10',
   '--recipients-per-broadcast=25',
+  '--native-groups=21',
+  '--long-conversation-messages=10',
+  '--large-broadcast-recipients=25',
 ] as const;
 
 describe('parseRunConfig', () => {
@@ -56,10 +63,16 @@ describe('parseRunConfig', () => {
     });
     expect(config.seed).toMatchObject({
       anchor: NOW.toISOString(),
+      units: 16,
+      nativeGroups: 21,
       contacts: 100,
       messagesPerConversation: 10,
+      resolvedLongConversationMessages: 10,
       recipientsPerBroadcast: 25,
+      resolvedLargeBroadcastRecipients: 25,
     });
+    expect(toSafeRunConfig(config).seed).toEqual(config.seed);
+    expect(toSafeRunConfig(config).requestedSeedInput).toEqual({});
   });
 
   it('parses every numeric control and a resolved comparison path', () => {
@@ -72,9 +85,12 @@ describe('parseRunConfig', () => {
       '--placements=13',
       '--tours=14',
       '--conversations=15',
+      '--native-groups=5',
       '--messages-per-conversation=16',
+      '--long-conversation-messages=17',
       '--broadcasts=17',
       '--recipients-per-broadcast=18',
+      '--large-broadcast-recipients=19',
       '--cold-repeats=4',
       '--warm-repeats=5',
       '--ready-timeout-ms=6000',
@@ -106,9 +122,30 @@ describe('parseRunConfig', () => {
       placements: 13,
       tours: 14,
       conversations: 15,
+      nativeGroups: 5,
       messagesPerConversation: 16,
+      requestedLongConversationMessages: 17,
       broadcasts: 17,
       recipientsPerBroadcast: 18,
+      requestedLargeBroadcastRecipients: 19,
+    });
+    expect(toSafeRunConfig(config).requestedSeedInput).toEqual({
+      scale: 2,
+      contacts: 11,
+      units: 12,
+      placements: 13,
+      tours: 14,
+      conversations: 15,
+      nativeGroups: 5,
+      messagesPerConversation: 16,
+      longConversationMessages: 17,
+      broadcasts: 17,
+      recipientsPerBroadcast: 18,
+      largeBroadcastRecipients: 19,
+    });
+    expect(toHermeticReseedPayload(config)).toEqual({
+      input: toSafeRunConfig(config).requestedSeedInput,
+      anchor: NOW.toISOString(),
     });
   });
 
@@ -129,7 +166,7 @@ describe('parseRunConfig', () => {
   });
 
   it.each(['narrow', 'full'] as const)(
-    'rejects all eight explicit count or density overrides under %s self-QA',
+    'rejects all explicit non-scale seed overrides under %s self-QA',
     (mode) => {
       for (const override of OVERRIDES) {
         expect(() => parse([...SELF_QA_BASE, `--self-qa=${mode}`, override])).toThrow(
@@ -169,15 +206,16 @@ describe('parseRunConfig', () => {
   });
 
   it.each(['local', 'hosted-dev'] as const)(
-    '%s forbids scale, every override, self-QA, and the checkpoint',
+    '%s forbids every explicitly supplied seed option, self-QA, and the checkpoint',
     (target) => {
       const base =
         target === 'local'
           ? [target, '--base-url=http://localhost:5174']
           : [target, '--base-url=https://dev.example.test', '--headed'];
       const forbidden = [
-        '--scale=1',
-        ...OVERRIDES,
+        ...PUBLIC_OPTION_CATALOG
+          .filter((option) => option.seedInput !== undefined)
+          .map((option) => `--${option.name}=1`),
         '--self-qa=narrow',
         '--self-qa=full',
         '--contract-checkpoint',
@@ -281,10 +319,68 @@ describe('parseRunConfig', () => {
       }
     }
   });
+
+  it('keeps all seed parsing, target rejection, and help inventory on one public catalog', () => {
+    const seedOptions = PUBLIC_OPTION_CATALOG.filter((option) => option.seedInput !== undefined);
+    expect(seedOptions.map((option) => option.name)).toEqual([
+      'scale',
+      'contacts',
+      'units',
+      'placements',
+      'tours',
+      'conversations',
+      'native-groups',
+      'messages-per-conversation',
+      'long-conversation-messages',
+      'broadcasts',
+      'recipients-per-broadcast',
+      'large-broadcast-recipients',
+    ]);
+
+    const help = renderProfilerHelp();
+    for (const option of PUBLIC_OPTION_CATALOG) {
+      expect(help).toContain(`--${option.name}`);
+    }
+    expect(new Set([...help.matchAll(/^\s+--([a-z-]+)/gmu)].map((match) => match[1])).size)
+      .toBe(PUBLIC_OPTION_CATALOG.length);
+  });
+
+  it('keeps the documented public options in help and every profiler example parser-valid', () => {
+    const readme = readFileSync(resolve(REPO_ROOT, 'e2e/README.md'), 'utf8');
+    const reference = readme.match(
+      /### Profiler CLI reference\r?\n([\s\S]*?)\r?\n### Local imported-data target/u,
+    )?.[1];
+    expect(reference).toBeDefined();
+
+    const documentedOptions = new Set(
+      [...reference!.matchAll(/--([a-z][a-z-]*)(?:=\S+)?/gu)].map((match) => match[1]!),
+    );
+    expect([...documentedOptions].sort()).toEqual(
+      PUBLIC_OPTION_CATALOG.map((option) => option.name).sort(),
+    );
+
+    const help = renderProfilerHelp();
+    for (const option of documentedOptions) expect(help).toContain(`--${option}`);
+
+    const commands = [...readme.matchAll(/^npm run perf:pages -- (.+)$/gmu)]
+      .map((match) => match[1]!.trim().split(/\s+/u));
+    expect(commands.length).toBeGreaterThanOrEqual(5);
+    for (const argv of commands) expect(() => parseProfilerArgs(argv)).not.toThrow();
+  });
+
+  it('returns help before target parsing or resolver dependencies are touched', () => {
+    const randomRouteOrderSeed = vi.fn(() => 1);
+    for (const argv of [['--help'], ['hermetic', '--help'], ['-h']]) {
+      const parsed = parseProfilerArgs(argv, { randomRouteOrderSeed });
+      expect(parsed.kind).toBe('help');
+      if (parsed.kind === 'help') expect(parsed.text).toBe(renderProfilerHelp());
+    }
+    expect(randomRouteOrderSeed).not.toHaveBeenCalled();
+  });
 });
 
 describe('toSafeRunConfig', () => {
-  it('constructs a fresh allowlisted hermetic object with a counts-only seed manifest', () => {
+  it('constructs a fresh allowlisted hermetic object with the canonical seed manifest', () => {
     const internal = Object.assign(parse(['hermetic', '--baseline=secret/baseline.json']), {
       credential: 'credential-sentinel',
       redirect: 'redirect-sentinel',
@@ -293,7 +389,7 @@ describe('toSafeRunConfig', () => {
     const serialized = JSON.stringify(safe);
 
     expect(safe).not.toBe(internal);
-    expect(safe.seed).toMatchObject({ contacts: 100, anchor: NOW.toISOString() });
+    expect(safe.seed).toMatchObject({ workloadModelVersion: 2, contacts: 100, anchor: NOW.toISOString() });
     expect(Object.keys(safe).sort()).toEqual(
       [
         'browserChannel',
@@ -304,6 +400,7 @@ describe('toSafeRunConfig', () => {
         'pollMs',
         'readyTimeoutMs',
         'routeOrderSeed',
+        'requestedSeedInput',
         'seed',
         'selfQa',
         'settleMs',

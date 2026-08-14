@@ -167,7 +167,7 @@ describe('dev gating - performance reseed', () => {
     });
 
     const res = await request(app).post('/__dev/performance/reseed').send({
-      input: { contacts: 1, units: 0, placements: 0, tours: 0, conversations: 0, broadcasts: 0 },
+      input: { contacts: 1, units: 0, placements: 0, tours: 0, conversations: 0, nativeGroups: 0, broadcasts: 0 },
       anchor: manifest.anchor,
     });
 
@@ -189,6 +189,37 @@ describe('dev gating - performance reseed', () => {
 
     expect(res.status).toBe(400);
     expect(performanceReseed).not.toHaveBeenCalled();
+  });
+
+  it('forwards expanded camelCase workload inputs only after shared validation succeeds', async () => {
+    const performanceReseed = vi.fn().mockResolvedValue({ ok: 'manifest' });
+    const app = buildApp({ config, devRouter: createDevRouter({ config, performanceReseed }) });
+    const input = {
+      contacts: 10,
+      conversations: 5,
+      nativeGroups: 4,
+      messagesPerConversation: 2,
+      longConversationMessages: 7,
+      broadcasts: 2,
+      recipientsPerBroadcast: 2,
+      largeBroadcastRecipients: 5,
+    };
+
+    const res = await request(app).post('/__dev/performance/reseed').send({
+      input,
+      anchor: '2026-08-11T12:00:00.000Z',
+    });
+
+    expect(res.status).toBe(200);
+    expect(performanceReseed).toHaveBeenCalledWith(expect.objectContaining({ input }));
+
+    const invalid = await request(app).post('/__dev/performance/reseed').send({
+      input: { ...input, longConversationMessages: 1 },
+      anchor: '2026-08-11T12:00:00.000Z',
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body).toEqual({ error: 'invalid_performance_seed_input' });
+    expect(performanceReseed).toHaveBeenCalledOnce();
   });
 
   it('rejects a non-loopback caller before parsing input or invoking the reset boundary', async () => {

@@ -1,4 +1,5 @@
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
+import { validateObservedRequestRoles } from './collect.js';
 import {
   assertObservedGets,
   expectedGets,
@@ -6,7 +7,7 @@ import {
   type RouteContractBranch,
   type RouteDefinition,
 } from './routes.js';
-import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult } from './types.js';
+import type { AggregateRankings, BlockedWrite, RequestEvidence, SampleMode, SampleResult } from './types.js';
 
 export type SelfQaMode = 'narrow' | 'full';
 export type SelfQaSurface =
@@ -44,7 +45,7 @@ export interface SelfQaAttempt {
 }
 
 export interface SelfQaBranchObservation {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   branch: RouteContractBranch;
@@ -53,8 +54,7 @@ export interface SelfQaBranchObservation {
 export interface SelfQaReportProof {
   privacyScanRequired: boolean;
   countManifest: boolean;
-  coldRanking: boolean;
-  warmRanking: boolean;
+  rankings: AggregateRankings;
 }
 
 export interface EvaluateSelfQaInput {
@@ -91,12 +91,16 @@ export interface SelfQaResult {
   warmRanking: boolean;
   writeTuplesMatch: boolean;
   outOfSampleWritesAbsent: boolean;
+  inboxSurfaceSetMatches: boolean;
+  inboxRequestClassesMatch: boolean;
+  inboxNoCursor: boolean;
+  inboxPassiveWritesAbsent: boolean;
 }
 
 const NARROW_KEYS = Object.freeze([
   '/contacts/tenants',
   '/contacts/:contactId',
-  '/inbox',
+  'inbox-all',
   '/conversations/:conversationId',
 ] as const);
 
@@ -250,7 +254,7 @@ export function routesForSelfQa(
 ): readonly RouteDefinition[] {
   if (mode === 'full') return Object.freeze([...registry]);
   return Object.freeze(NARROW_KEYS.map((key) => {
-    const route = registry.find((candidate) => candidate.key === key);
+    const route = registry.find((candidate) => candidate.surfaceId === key);
     if (route === undefined) throw new Error('self_qa_route_missing');
     return route;
   }));
@@ -281,34 +285,101 @@ function expectedAttempts(mode: SelfQaMode): SelfQaAttempt[] {
 }
 
 function endpointSubset(input: EvaluateSelfQaInput): boolean {
+  if (validateObservedRequestRoles(input.requests).length > 0) return false;
   for (const sample of input.samples) {
-    const route = input.routes.find((candidate) => candidate.key === sample.routeKey);
+    const route = input.routes.find((candidate) => candidate.surfaceId === sample.surfaceId);
     const branch = input.branches.find((candidate) =>
-      candidate.routeKey === sample.routeKey && candidate.mode === sample.mode && candidate.repeat === sample.repeat);
+      candidate.surfaceId === sample.surfaceId && candidate.mode === sample.mode && candidate.repeat === sample.repeat);
     if (route === undefined || branch === undefined) return false;
     const observed = input.requests
-      .filter((request) => request.routeKey === sample.routeKey && request.mode === sample.mode
-        && request.repeat === sample.repeat && request.resourceClass === 'api')
+      .filter((request) => request.surfaceId === sample.surfaceId && request.mode === sample.mode
+        && request.repeat === sample.repeat && request.resourceClass === 'api'
+        && request.requestRole === 'required')
       .map((request) => ({
         endpointTemplate: request.endpointTemplate as never,
         queryKeys: request.queryKeys,
+        ...(request.inboxRequestClass !== undefined && { inboxRequestClass: request.inboxRequestClass }),
         requirement: 'required' as const,
         outcome: request.outcome,
       }));
-    if (assertObservedGets(expectedGets(route, sample.mode, branch.branch), observed).undeclared.length > 0) return false;
+    const endpointResult = assertObservedGets(expectedGets(route, sample.mode, branch.branch), observed);
+    if (endpointResult.undeclared.length > 0) return false;
+    if (route.behaviorFamily === 'inbox' && endpointResult.missingRequired.length > 0) return false;
   }
   return true;
 }
 
+const INBOX_PAGE_CLASSES = Object.freeze({
+  'inbox-all': 'inbox_page_all',
+  'inbox-unread': 'inbox_page_unread',
+  'inbox-unknown': 'inbox_page_unknown',
+  'inbox-groups': 'inbox_page_groups',
+} as const);
+
+function inboxProof(input: EvaluateSelfQaInput): {
+  surfaceSetMatches: boolean;
+  requestClassesMatch: boolean;
+  noCursor: boolean;
+  passiveWritesAbsent: boolean;
+} {
+  const measured = input.routes.filter((route) => route.behaviorFamily === 'inbox');
+  const ids = measured.map((route) => route.surfaceId);
+  const expectedIds = Object.keys(INBOX_PAGE_CLASSES);
+  const surfaceSetMatches = input.mode === 'full'
+    ? ids.length === expectedIds.length && expectedIds.every((id) => ids.includes(id))
+    : ids.length === 1 && ids[0] === 'inbox-all';
+  const observedRequestClassesMatch = measured.every((route) => input.requests.some((request) =>
+    request.surfaceId === route.surfaceId
+    && request.inboxRequestClass === INBOX_PAGE_CLASSES[route.surfaceId as keyof typeof INBOX_PAGE_CLASSES],
+  ));
+  const exactInitialPageCountsMatch = input.mode !== 'full' || measured.every((route) => {
+    const samples = input.samples.filter((sample) => sample.surfaceId === route.surfaceId);
+    return samples.length > 0 && samples.every((sample) =>
+      sample.surfaceEvidence?.kind === 'inbox'
+      && sample.surfaceEvidence.initialInboxPageRequestCount === 1);
+  });
+  const requestClassesMatch = observedRequestClassesMatch && exactInitialPageCountsMatch;
+  const noCursor = input.requests
+    .filter((request) => ids.includes(request.surfaceId))
+    .every((request) => !request.queryKeys.includes('cursor'));
+  const passiveWritesAbsent = input.samples
+    .filter((sample) => ids.includes(sample.surfaceId))
+    .every((sample) => sample.blockedWrites.length === 0);
+  return { surfaceSetMatches, requestClassesMatch, noCursor, passiveWritesAbsent };
+}
+
+function sampleTuple(sample: Pick<SampleResult, 'surfaceId' | 'mode' | 'repeat'>): string {
+  return [sample.surfaceId, sample.mode, sample.repeat].join('|');
+}
+
+function exactSampleCoverage(input: EvaluateSelfQaInput): boolean {
+  const expected = new Set(input.routes.flatMap((route) => [
+    sampleTuple({ surfaceId: route.surfaceId, mode: 'cold', repeat: 0 }),
+    sampleTuple({ surfaceId: route.surfaceId, mode: 'warm', repeat: 0 }),
+  ]));
+  const actual = input.samples.map(sampleTuple);
+  return actual.length === expected.size
+    && new Set(actual).size === expected.size
+    && actual.every((tuple) => expected.has(tuple));
+}
+
+function inboxRanked(input: EvaluateSelfQaInput, mode: SampleMode): boolean {
+  const inboxIds = input.routes
+    .filter((route) => route.behaviorFamily === 'inbox')
+    .map((route) => route.surfaceId);
+  return inboxIds.length > 0 && inboxIds.every((surfaceId) =>
+    input.reportProof.rankings[mode].readyMs.some((row) => row.surfaceId === surfaceId && row.successCount > 0));
+}
+
 export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAttempt[] {
   return samples.flatMap((sample) => {
-    const surface: SelfQaAttempt['surface'] | null = sample.routeKey === '/contacts/:contactId'
+    const surface: SelfQaAttempt['surface'] | null = sample.surfaceId === '/contacts/:contactId'
       ? 'contact_detail'
-      : sample.routeKey === '/conversations/:conversationId'
+      : sample.surfaceId === '/conversations/:conversationId'
         ? 'conversation_detail'
-        : sample.routeKey === '/tours/:tourId'
+        : sample.surfaceId === '/tours/:tourId'
           ? 'tour_group'
-          : sample.routeKey === '/placements/:placementId'
+          : sample.surfaceId === '/placements/:placementId'
             ? 'placement_group'
             : null;
     if (surface === null) return [];
@@ -335,12 +406,14 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const writeTuplesMatch = expected.size === actual.size && [...expected].every((key) => actual.has(key));
   const coldOk = input.samples.filter((sample) => sample.mode === 'cold' && sample.status === 'ok').length;
   const warmOk = input.samples.filter((sample) => sample.mode === 'warm' && sample.status === 'ok').length;
-  const expectedRoutes = input.mode === 'full' ? 28 : 4;
+  const expectedRoutes = input.mode === 'full' ? 31 : 4;
   const sampleCardinalityMatches = input.routes.length === expectedRoutes
     && input.samples.length === expectedRoutes * 2
     && coldOk === expectedRoutes
-    && warmOk === expectedRoutes;
+    && warmOk === expectedRoutes
+    && exactSampleCoverage(input);
   const endpointSubsetValue = endpointSubset(input);
+  const inbox = inboxProof(input);
   const noUnmatchedApi = !input.requests.some((request) => request.unmatchedApi);
   const relayCountMatches = input.mode === 'narrow' || (
     input.relayDomCheck !== null
@@ -354,10 +427,13 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const stateMatches = stateChecks.length === SURFACE_ORDER.length && stateChecks.every((check) => check.unchanged);
   const supplementalExcluded = input.supplementalSampleCount === 0;
   const outOfSampleWritesAbsent = (input.outOfSampleWrites ?? []).length === 0;
+  const coldRanking = inboxRanked(input, 'cold');
+  const warmRanking = inboxRanked(input, 'warm');
   const pass = writeTuplesMatch && sampleCardinalityMatches && endpointSubsetValue && noUnmatchedApi
     && relayCountMatches && stateMatches && supplementalExcluded && outOfSampleWritesAbsent
+    && inbox.surfaceSetMatches && inbox.requestClassesMatch && inbox.noCursor && inbox.passiveWritesAbsent
     && input.reportProof.privacyScanRequired
-    && input.reportProof.countManifest && input.reportProof.coldRanking && input.reportProof.warmRanking;
+    && input.reportProof.countManifest && coldRanking && warmRanking;
   return {
     mode: input.mode,
     status: pass ? 'pass' : 'fail',
@@ -374,10 +450,14 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     supplementalExcluded,
     privacyScanRequired: input.reportProof.privacyScanRequired,
     countManifest: input.reportProof.countManifest,
-    coldRanking: input.reportProof.coldRanking,
-    warmRanking: input.reportProof.warmRanking,
+    coldRanking,
+    warmRanking,
     writeTuplesMatch,
     outOfSampleWritesAbsent,
+    inboxSurfaceSetMatches: inbox.surfaceSetMatches,
+    inboxRequestClassesMatch: inbox.requestClassesMatch,
+    inboxNoCursor: inbox.noCursor,
+    inboxPassiveWritesAbsent: inbox.passiveWritesAbsent,
   };
 }
 
@@ -404,5 +484,9 @@ export function serializeSelfQaResult(result: SelfQaResult): SelfQaResult {
     warmRanking: result.warmRanking === true,
     writeTuplesMatch: result.writeTuplesMatch === true,
     outOfSampleWritesAbsent: result.outOfSampleWritesAbsent === true,
+    inboxSurfaceSetMatches: result.inboxSurfaceSetMatches === true,
+    inboxRequestClassesMatch: result.inboxRequestClassesMatch === true,
+    inboxNoCursor: result.inboxNoCursor === true,
+    inboxPassiveWritesAbsent: result.inboxPassiveWritesAbsent === true,
   };
 }

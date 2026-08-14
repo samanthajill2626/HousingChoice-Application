@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BACKGROUND_REFRESH_GETS,
   NetworkCollector,
+  classifyInboxRequest,
   classifyConsoleMessage,
   collectColdSample,
   collectRunSamples,
@@ -16,8 +17,10 @@ import {
   type SamplePage,
 } from './collect.js';
 import {
+  expectedGets,
   ROUTES,
   type EndpointContract,
+  type ExactBrowserTarget,
   type ResolverResult,
   type RouteContractBranch,
   type RouteDefinition,
@@ -31,7 +34,7 @@ const REQUIRED_CONTACTS: EndpointContract[] = [{
 
 function collector(mode: 'cold' | 'warm' = 'cold', expectedGets: readonly EndpointContract[] = REQUIRED_CONTACTS): NetworkCollector {
   const value = new NetworkCollector({
-    firstPartyOrigin: 'http://127.0.0.1:9111', routeKey: '/contacts/tenants', mode, repeat: 0, expectedGets,
+    firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId: '/contacts/tenants', mode, repeat: 0, expectedGets,
   });
   value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
   return value;
@@ -194,6 +197,139 @@ describe('CDP request collection', () => {
 });
 
 describe('checked-in background policy', () => {
+  it('uses the class-qualified cold badge identity for completion and later shell refreshes on standard routes', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    const expected: EndpointContract[] = [{
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      requirement: 'required',
+      inboxRequestClass: 'inbox_badge',
+    }];
+
+    const cold = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'cold',
+      repeat: 0,
+      expectedGets: expected,
+    });
+    cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(cold, 'badge-first', 10.1, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge-first', timestamp: 10.2, encodedDataLength: 20 });
+    cold.markTerminalVisible('sample-1');
+    start(cold, 'badge-refresh', 10.3, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge-refresh', timestamp: 10.4, encodedDataLength: 30 });
+    const ended = cold.endSample('sample-1');
+    expect(ended.requests.map((request) => [
+      request.inboxRequestClass,
+      request.requestRole,
+      request.unmatchedApi,
+    ])).toEqual([
+      ['inbox_badge', 'required', false],
+      ['inbox_badge', 'background_shell', false],
+    ]);
+    expect(ended.satisfiedRequired).toEqual(['/api/inbox?filter&limit#inbox_badge']);
+    expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([1, 20]);
+    expect([ended.backgroundRequestCount, ended.backgroundTransferBytes]).toEqual([1, 30]);
+
+    const warm = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'warm',
+      repeat: 0,
+      expectedGets: [],
+    });
+    warm.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(warm, 'badge', 10.1, badge);
+    warm.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    expect(warm.endSample('sample-1').requests).toEqual([
+      expect.objectContaining({
+        inboxRequestClass: 'inbox_badge',
+        requestRole: 'background_shell',
+        unmatchedApi: false,
+      }),
+    ]);
+  });
+
+  it('keeps unread page traffic distinct from the standard-route badge completion identity', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const value = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'cold',
+      repeat: 0,
+      expectedGets: [{
+        endpointTemplate: '/api/inbox',
+        queryKeys: ['filter', 'limit'],
+        requirement: 'required',
+        inboxRequestClass: 'inbox_badge',
+      }],
+    });
+    value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(value, 'unread-page', 10.1, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30');
+    value.loadingFinished('sample-1', { requestId: 'unread-page', timestamp: 10.2, encodedDataLength: 20 });
+
+    const ended = value.endSample('sample-1');
+    expect(ended.requests).toEqual([
+      expect.objectContaining({
+        inboxRequestClass: 'inbox_page_unread',
+        requestRole: 'required',
+        unmatchedApi: true,
+      }),
+    ]);
+    expect(ended.satisfiedRequired).toEqual([]);
+  });
+
+  it('classifies closed Inbox page and badge tuples before evidence redaction', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30';
+    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    expect(classifyInboxRequest(unreadPage, {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_page_unread');
+    expect(classifyInboxRequest(badge, {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_badge');
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=30', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBeNull();
+
+    const expected: EndpointContract[] = [
+      { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_unread' },
+      { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_badge' },
+    ];
+    const cold = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'cold', repeat: 0, expectedGets: expected });
+    cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(cold, 'badge', 10.1, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    start(cold, 'page', 10.3, unreadPage);
+    cold.loadingFinished('sample-1', { requestId: 'page', timestamp: 10.4, encodedDataLength: 30 });
+    start(cold, 'bad', 10.5, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30&cursor=private-cursor');
+    cold.loadingFinished('sample-1', { requestId: 'bad', timestamp: 10.6, encodedDataLength: 40 });
+    const ended = cold.endSample('sample-1');
+    expect(ended.requests.map((request) => [request.inboxRequestClass, request.requestRole, request.unmatchedApi])).toEqual([
+      ['inbox_badge', 'required', false],
+      ['inbox_page_unread', 'required', false],
+      [undefined, 'required', true],
+    ]);
+    expect(ended.endpointContractMismatch).toBe(true);
+    expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([3, 90]);
+    expect(JSON.stringify(ended)).not.toContain('private-cursor');
+    expect(JSON.stringify(ended)).not.toContain('inbox_endpoint_contract_failure');
+
+    const warm = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: expected });
+    warm.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(warm, 'badge', 10.1, badge);
+    warm.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    start(warm, 'page', 10.3, unreadPage);
+    warm.loadingFinished('sample-1', { requestId: 'page', timestamp: 10.4, encodedDataLength: 30 });
+    expect(warm.endSample('sample-1').requests.map((request) => request.requestRole)).toEqual(['background_shell', 'required']);
+  });
+
   it('rejects undeclared background shapes without reclassifying them', () => {
     expect(validateObservedRequestRoles([{
       ...requestEvidence('/api/settings', 'background_refresh'),
@@ -224,12 +360,12 @@ describe('checked-in background policy', () => {
   it('keeps every declared timer/SSE shape required initially and backgrounds only its later exact repeat', () => {
     for (const [index, declaration] of BACKGROUND_REFRESH_GETS.entries()) {
       for (const declared of declaration.shapes) {
-        const routeKey = declared.endpointTemplate === '/api/inbox'
+        const surfaceId = declared.endpointTemplate === '/api/inbox'
           ? '/inbox'
           : declared.endpointTemplate === '/api/unmatched-email' ? '/email' : '/fixture';
         const expected: EndpointContract[] = [{ ...declared, requirement: 'required' }];
         const value = new NetworkCollector({
-          firstPartyOrigin: 'http://127.0.0.1:9111', routeKey, mode: 'warm', repeat: index, expectedGets: expected,
+          firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId, mode: 'warm', repeat: index, expectedGets: expected,
         });
         value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
         const pathname = declared.endpointTemplate.replace(/:[A-Za-z][A-Za-z0-9]*/g, 'fixture-1');
@@ -272,9 +408,11 @@ describe('checked-in background policy', () => {
   });
 
   it('keeps the inbox destination load required and labels its later SSE repeat background_refresh', () => {
-    const gets: EndpointContract[] = [{ endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required' }];
+    const gets: EndpointContract[] = [{
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_all',
+    }];
     const value = new NetworkCollector({
-      firstPartyOrigin: 'http://127.0.0.1:9111', routeKey: '/inbox', mode: 'warm', repeat: 0, expectedGets: gets,
+      firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId: 'inbox-all', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: gets,
     });
     value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
     const url = 'http://127.0.0.1:9111/api/inbox?filter=all&limit=30';
@@ -324,7 +462,7 @@ function requestEvidence(
   requestRole: 'required' | 'background_refresh' | 'background_shell',
 ): import('./types.js').RequestEvidence {
   return {
-    routeKey: '/fixture', mode: 'warm', repeat: 0, method: 'GET', resourceClass: 'api',
+    surfaceId: '/fixture', mode: 'warm', repeat: 0, method: 'GET', resourceClass: 'api',
     originClass: 'first_party', endpointTemplate, queryKeys: [], startOffsetMs: 0,
     durationMs: 1, ttfbMs: 1, status: 200, transferBytes: 1, outcome: 'finished',
     requestRole, unmatchedApi: false,
@@ -369,9 +507,9 @@ describe('numeric page and console instrumentation', () => {
 
 const STORAGE_STATE: InMemoryStorageState = { cookies: [], origins: [] };
 
-function blankResult(routeKey: string, mode: 'cold' | 'warm', repeat: number): SampleResult {
+function blankResult(surfaceId: string, mode: 'cold' | 'warm', repeat: number): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
@@ -391,6 +529,7 @@ function blankResult(routeKey: string, mode: 'cold' | 'warm', repeat: number): S
     consoleCategories: {},
     clientTruncated: false,
     terminalState: 'populated',
+    surfaceEvidence: null,
     reason: null,
   };
 }
@@ -401,6 +540,8 @@ class FakeSamplingPage implements SamplePage {
   readonly lifecycle?: { activeToken: string | null; listenerCount: number };
   sourceReady = true;
   relayLinks = 0;
+  relayChecks = 0;
+  surfaceEvidence = null as SampleResult['surfaceEvidence'];
   clickFailure: Error | null = null;
 
   constructor(
@@ -420,7 +561,7 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async prepareWarmSource(route: RouteDefinition): Promise<void> {
-    this.events.push(`prepare:${route.source.path}`);
+    this.events.push(`prepare:${targetPath(route.source.target)}`);
     if (this.lifecycle !== undefined) {
       this.events.push(`prepare-lifecycle:${this.lifecycle.activeToken ?? 'none'}:${this.lifecycle.listenerCount}`);
     }
@@ -431,7 +572,8 @@ class FakeSamplingPage implements SamplePage {
     return this.sourceReady;
   }
 
-  async clickExactHref(href: string): Promise<boolean> {
+  async activateWarmAction(_route: RouteDefinition, destinationTarget: ExactBrowserTarget): Promise<boolean> {
+    const href = targetPath(destinationTarget);
     if (this.clickFailure !== null) throw this.clickFailure;
     if (!this.hrefs.has(href)) return false;
     this.events.push(`click:${href}`);
@@ -439,7 +581,12 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async countRelayConversationLinks(): Promise<number> {
+    this.relayChecks += 1;
     return this.relayLinks;
+  }
+
+  async captureSurfaceEvidence(_route: RouteDefinition, _initialInboxPageRequestCount: number): Promise<SampleResult['surfaceEvidence']> {
+    return this.surfaceEvidence;
   }
 }
 
@@ -529,9 +676,9 @@ class FakeInstrumentation implements SampleInstrumentation {
   }
 
   async collectSample(input: { route: RouteDefinition; mode: 'cold' | 'warm'; repeat: number }): Promise<SampleResult> {
-    this.events.push(`collect:${input.mode}:${input.route.key}`);
+    this.events.push(`collect:${input.mode}:${input.route.surfaceId}`);
     if (this.throwOnCollect) throw new Error('collector_failed');
-    const result = blankResult(input.route.key, input.mode, input.repeat);
+    const result = blankResult(input.route.surfaceId, input.mode, input.repeat);
     if (this.blockedTimeout) {
       result.status = 'timeout';
       result.readyMs = null;
@@ -545,8 +692,27 @@ class FakeInstrumentation implements SampleInstrumentation {
   }
 }
 
+function target(path: string): ExactBrowserTarget {
+  const parsed = new URL(path, 'http://target.invalid');
+  const filter = parsed.searchParams.get('filter');
+  return filter === null
+    ? { path: parsed.pathname, query: { kind: 'absent' } }
+    : { path: parsed.pathname, query: { kind: 'fixed', values: { filter: filter as 'unread' | 'unknown' | 'groups' } } };
+}
+
+function targetPath(targetValue: ExactBrowserTarget): string {
+  return targetValue.query.kind === 'absent'
+    ? targetValue.path
+    : `${targetValue.path}?${new URLSearchParams(targetValue.query.values).toString()}`;
+}
+
 function resolved(path: string, branch: RouteContractBranch = { kind: 'none' }): ResolverResult {
-  return { kind: 'resolved', coldPath: path, warmHref: path, branch };
+  return { kind: 'resolved', coldPath: path, warmTarget: target(path), branch };
+}
+
+function staticDestination(route: RouteDefinition): string {
+  if (route.coldTarget.kind !== 'static') throw new Error('static destination required');
+  return route.coldTarget.path;
 }
 
 describe('cold and warm sampling protocol', () => {
@@ -628,7 +794,7 @@ describe('cold and warm sampling protocol', () => {
     const events: string[] = [];
     const context = new FakeSamplingContext(events);
     const page = context.page;
-    const route = ROUTES.find((candidate) => candidate.key === '/tours/:tourId')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/tours/:tourId')!;
     page.hrefs.add('/tours/tour-private');
     const instrumentation = new FakeInstrumentation(events);
     const branch = { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true } as const;
@@ -658,8 +824,69 @@ describe('cold and warm sampling protocol', () => {
     ]);
   });
 
+  it('keeps Inbox measurement passive: only the declared filter action runs and no write tuple is expected', async () => {
+    const events: string[] = [];
+    const page = new FakeSamplingPage(events);
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
+    const destination = staticDestination(route);
+    page.hrefs.add(destination);
+
+    const sample = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 100,
+      resolve: async () => resolved(destination),
+      instrumentation: new FakeInstrumentation(events),
+      token: 'passive-inbox',
+    });
+
+    expect(sample).toMatchObject({ status: 'ok', blockedWrites: [] });
+    expect(events).toEqual([
+      'prepare:/inbox',
+      'source-ready:100',
+      'begin:warm:passive-inbox:/inbox:/inbox?filter=unread',
+      'click:/inbox?filter=unread',
+      'collect:warm:inbox-unread',
+    ]);
+    expect(events.join('|')).not.toMatch(/row|mark-read|notice|retry|load more/iu);
+  });
+
+  it('begins Inbox All immediately before its exact Inbox link and retains the page request contract', async () => {
+    const events: string[] = [];
+    const page = new FakeSamplingPage(events);
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-all')!;
+    page.hrefs.add('/inbox');
+
+    expect(expectedGets(route, 'warm', { kind: 'none' })).toEqual([{
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      requirement: 'required',
+      inboxRequestClass: 'inbox_page_all',
+    }]);
+
+    const sample = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 100,
+      resolve: async () => resolved('/inbox'),
+      instrumentation: new FakeInstrumentation(events),
+      token: 'inbox-all-link',
+    });
+
+    expect(sample.status).toBe('ok');
+    expect(events).toEqual([
+      'prepare:/',
+      'source-ready:100',
+      'begin:warm:inbox-all-link:/:/inbox',
+      'click:/inbox',
+      'collect:warm:inbox-all',
+    ]);
+  });
+
   it('maps source, fixture, link, and blocked-readiness outcomes to stable statuses', async () => {
-    const route = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/:contactId')!;
     for (const [resolver, status] of [
       [{ kind: 'skip', reason: 'fixture_absent' }, 'skipped_no_fixture'],
       [{ kind: 'skip', reason: 'fixture_not_navigable' }, 'skipped_fixture_not_navigable'],
@@ -737,14 +964,27 @@ describe('cold and warm sampling protocol', () => {
       token: 'missing-link',
     });
     expect(missingLink.status).toBe('skipped_fixture_not_navigable');
+
+    const missingTab = await collectWarmSample({
+      page: new FakeSamplingPage([]),
+      route: ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/inbox'),
+      instrumentation: new FakeInstrumentation([]),
+      token: 'missing-tab',
+    });
+    expect(missingTab).toMatchObject({
+      status: 'skipped_required_action_missing', reason: 'required_action_missing',
+    });
   });
 
   it('disposes a begun warm sample before the shared page prepares the next route', async () => {
     const events: string[] = [];
     const lifecycle = { activeToken: null as string | null, listenerCount: 0 };
     const page = new FakeSamplingPage(events, lifecycle);
-    const firstRoute = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
-    const secondRoute = ROUTES.find((candidate) => candidate.key === '/tours/:tourId')!;
+    const firstRoute = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/:contactId')!;
+    const secondRoute = ROUTES.find((candidate) => candidate.surfaceId === '/tours/:tourId')!;
     const firstInstrumentation = new FakeInstrumentation(events, lifecycle);
 
     const first = await collectWarmSample({
@@ -780,7 +1020,7 @@ describe('cold and warm sampling protocol', () => {
     const events: string[] = [];
     const lifecycle = { activeToken: null as string | null, listenerCount: 0 };
     const page = new FakeSamplingPage(events, lifecycle);
-    const route = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/:contactId')!;
     const instrumentation = new FakeInstrumentation(events, lifecycle);
     page.hrefs.add('/contacts/private');
     page.clickFailure = new Error('click_failed');
@@ -802,13 +1042,13 @@ describe('cold and warm sampling protocol', () => {
 
 describe('run ordering and warmup policy', () => {
   it('uses a deterministic Fisher-Yates base order and repeat rotation without mutating declaration order', () => {
-    const keys = ROUTES.slice(0, 6).map((route) => route.key);
-    const first = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.key);
-    const again = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.key);
-    const different = deterministicRouteOrder(ROUTES.slice(0, 6), 1235).map((route) => route.key);
+    const keys = ROUTES.slice(0, 6).map((route) => route.surfaceId);
+    const first = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.surfaceId);
+    const again = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.surfaceId);
+    const different = deterministicRouteOrder(ROUTES.slice(0, 6), 1235).map((route) => route.surfaceId);
     expect(first).toEqual(again);
     expect(first).not.toEqual(different);
-    expect(ROUTES.slice(0, 6).map((route) => route.key)).toEqual(keys);
+    expect(ROUTES.slice(0, 6).map((route) => route.surfaceId)).toEqual(keys);
   });
 
   it.each([
@@ -827,18 +1067,19 @@ describe('run ordering and warmup policy', () => {
       warmRepeats: 2,
       routeOrderSeed: 99,
       sourceTimeoutMs: 100,
-      resolveCold: async (route) => resolved(route.key),
+      resolveCold: async (route) => resolved(route.surfaceId),
       resolveWarm: async (route, page) => {
-        (page as FakeSamplingPage).hrefs.add(route.source.href);
-        return resolved(route.source.href);
+        const destination = staticDestination(route);
+        (page as FakeSamplingPage).hrefs.add(destination);
+        return resolved(destination);
       },
       instrumentationFor: () => new FakeInstrumentation([]),
-      tokenFactory: (mode, repeat, route) => `${mode}-${repeat}-${route.key}`,
+      tokenFactory: (mode, repeat, route) => `${mode}-${repeat}-${route.surfaceId}`,
     });
 
-    expect(result.warmup).toEqual(warmup ? { performed: true, routeKey: '/' } : { performed: false, routeKey: null });
+    expect(result.warmup).toEqual(warmup ? { performed: true, surfaceId: '/' } : { performed: false, surfaceId: null });
     expect(result.orders).toHaveLength(4);
-    expect(result.orders[0]!.routeKeys).not.toEqual(result.orders[1]!.routeKeys);
+    expect(result.orders[0]!.surfaceIds).not.toEqual(result.orders[1]!.surfaceIds);
     expect(result.samples).toHaveLength(12);
     expect(result.lowSampleCount).toBe(true);
     if (warmup) expect(result.samples.every((sample) => sample.repeat >= 0)).toBe(true);
@@ -891,10 +1132,11 @@ describe('run ordering and warmup policy', () => {
       routeOrderSeed: 7,
       sourceTimeoutMs: 100,
       signal: controller.signal,
-      resolveCold: async (route) => resolved(route.key),
+      resolveCold: async (route) => resolved(route.surfaceId),
       resolveWarm: async (route, page) => {
-        (page as FakeSamplingPage).hrefs.add(route.source.href);
-        return resolved(route.source.href);
+        const destination = staticDestination(route);
+        (page as FakeSamplingPage).hrefs.add(destination);
+        return resolved(destination);
       },
       instrumentationFor: (route, mode, repeat) => {
         const value = new FakeInstrumentation([]);
@@ -942,33 +1184,35 @@ describe('run ordering and warmup policy', () => {
     expect(result.outOfSampleWrites).toEqual([evidence, evidence]);
   });
 
-  it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {
+  it('runs the relay proof once only for a successful inbox-all sample in shuffled hermetic order', async () => {
     const browser = new FakeSamplingBrowser();
-    const inbox = ROUTES.find((route) => route.key === '/inbox')!;
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
     const result = await collectRunSamples({
       browser,
       storageState: STORAGE_STATE,
       target: 'hermetic',
-      routes: [inbox],
+      routes: [unread, inbox],
       coldRepeats: 1,
       warmRepeats: 2,
       routeOrderSeed: 7,
       sourceTimeoutMs: 100,
       expectedRelayLinkCount: 4,
-      resolveCold: async () => resolved('/inbox'),
+      resolveCold: async (route) => resolved(staticDestination(route)),
       resolveWarm: async (route, page) => {
         const fake = page as FakeSamplingPage;
-        fake.hrefs.add(route.source.href);
+        fake.hrefs.add(staticDestination(route));
         fake.relayLinks = 3;
-        return resolved(route.source.href);
+        return resolved(staticDestination(route));
       },
       instrumentationFor: () => new FakeInstrumentation([]),
       tokenFactory: (mode, repeat) => `${mode}-${repeat}`,
     });
 
-    expect(browser.contexts).toHaveLength(3); // discarded warmup, one cold, one reused warm context
+    expect(browser.contexts).toHaveLength(4); // discarded warmup, two cold, one reused warm context
     expect(result.relayDomCheck).toEqual({ expectedCount: 4, renderedCount: 3, shortfall: true });
     expect(Object.keys(result.relayDomCheck ?? {}).sort()).toEqual(['expectedCount', 'renderedCount', 'shortfall']);
+    expect(browser.contexts.at(-1)?.page.relayChecks).toBe(1);
   });
 
   it('retains a sanitized failed sample and closes the warm context when destination collection throws', async () => {
@@ -995,7 +1239,7 @@ describe('run ordering and warmup policy', () => {
       },
     });
     expect(result.samples.at(-1)).toMatchObject({
-      routeKey: '/', mode: 'warm', status: 'failed', reason: 'browser_failure',
+      surfaceId: '/', mode: 'warm', status: 'failed', reason: 'browser_failure',
     });
     expect(JSON.stringify(result)).not.toContain('collector_failed');
     expect(browser.contexts.at(-1)?.closed).toBe(true);

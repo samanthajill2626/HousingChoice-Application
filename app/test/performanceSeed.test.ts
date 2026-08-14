@@ -1,18 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LISTING_STATUSES, PLACEMENT_STAGES, TENANT_STATUSES, LANDLORD_STATUSES } from '../src/lib/statusModel.js';
 import { TOUR_STATUSES } from '../src/lib/toursModel.js';
+import { conversationIdForGroup } from '../src/lib/import/ids.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import {
   PERFORMANCE_SEED_BOUNDS,
   generatePerformanceSeed,
+  nativeGroupCapacity,
   resolvePerformanceSeedConfig,
   resolvePerformanceSelfQaFixtures,
   toPerformanceSeedManifest,
   validatePerformanceConversation,
   type PerformanceSeedInput,
+  type PerformanceSeedManifest,
 } from '../src/lib/seed/performance.js';
 
 const ANCHOR = '2026-08-11T16:00:00.000Z';
+
+type OptionalKeyOf<T> = {
+  [Key in keyof T]-?: {} extends Pick<T, Key> ? Key : never;
+}[keyof T];
+type AssertNoOptionalKeys<Keys extends never> = Keys;
+type PerformanceSeedManifestHasNoOptionalKeys = AssertNoOptionalKeys<OptionalKeyOf<PerformanceSeedManifest>>;
+const performanceSeedManifestHasNoOptionalKeys: PerformanceSeedManifestHasNoOptionalKeys = undefined as never;
 
 const zeroWorld = (overrides: PerformanceSeedInput = {}): PerformanceSeedInput => ({
   scale: 1,
@@ -21,6 +31,7 @@ const zeroWorld = (overrides: PerformanceSeedInput = {}): PerformanceSeedInput =
   placements: 0,
   tours: 0,
   conversations: 0,
+  nativeGroups: 0,
   messagesPerConversation: 0,
   broadcasts: 0,
   recipientsPerBroadcast: 0,
@@ -35,22 +46,43 @@ describe('resolvePerformanceSeedConfig', () => {
       anchor: ANCHOR,
       scale: 1,
       contacts: 100,
-      units: 25,
+      units: 16,
       placements: 50,
       tours: 50,
       conversations: 100,
+      nativeGroups: 21,
+      totalConversations: 121,
       messagesPerConversation: 10,
+      requestedLongConversationMessages: 10,
+      resolvedLongConversationMessages: 10,
+      longConversationFixturePresent: true,
+      ordinaryMessageCount: 1_200,
+      tailMessageCount: 10,
+      totalMessageCount: 1_210,
       broadcasts: 10,
       recipientsPerBroadcast: 25,
-      messageCount: 1_000,
+      requestedLargeBroadcastRecipients: 25,
+      resolvedLargeBroadcastRecipients: 25,
+      largeBroadcastFixturePresent: true,
+      messageCount: 1_210,
       requestedRecipientCount: 250,
       resolvedRecipientCount: 250,
+      totalRecipientCount: 250,
+      tenantCount: 95,
+      landlordCount: 4,
+      unknownCount: 1,
+      activeTenantCount: 81,
+      activeLandlordCount: 3,
+      activeUnknownCount: 1,
+      activeContactCount: 85,
+      deletedContactCount: 15,
+      nativeGroupMemberSlotCount: 63,
       requestedRelayGroupCount: 20,
       relayGroupCount: 20,
       clippedRelayGroupCount: 0,
       fixedUnmatchedEmailCount: 4,
-      physicalItemCount: 1_339,
-      totalItemCount: 1_589,
+      physicalItemCount: 1_561,
+      totalItemCount: 1_874,
     });
   });
 
@@ -59,21 +91,25 @@ describe('resolvePerformanceSeedConfig', () => {
 
     expect(config).toMatchObject({
       contacts: 10_000,
-      units: 2_500,
+      units: 1_600,
       placements: 5_000,
       tours: 5_000,
       conversations: 10_000,
+      nativeGroups: 2_100,
+      totalConversations: 12_100,
       messagesPerConversation: 10,
       broadcasts: 1_000,
       recipientsPerBroadcast: 25,
-      messageCount: 100_000,
+      messageCount: 121_000,
+      totalMessageCount: 121_000,
       requestedRecipientCount: 25_000,
       resolvedRecipientCount: 25_000,
       requestedRelayGroupCount: 2_000,
       relayGroupCount: 1_000,
       clippedRelayGroupCount: 1_000,
-      physicalItemCount: 133_504,
-      totalItemCount: 158_504,
+      physicalItemCount: 155_704,
+      nativeGroupMemberSlotCount: 6_300,
+      totalItemCount: 187_004,
     });
   });
 
@@ -86,9 +122,12 @@ describe('resolvePerformanceSeedConfig', () => {
         placements: 9,
         tours: 10,
         conversations: 11,
+        nativeGroups: 12,
         messagesPerConversation: 12,
+        longConversationMessages: 13,
         broadcasts: 13,
         recipientsPerBroadcast: 6,
+        largeBroadcastRecipients: 7,
       },
       ANCHOR,
     );
@@ -100,10 +139,13 @@ describe('resolvePerformanceSeedConfig', () => {
       placements: 9,
       tours: 10,
       conversations: 11,
+      nativeGroups: 12,
       messagesPerConversation: 12,
+      requestedLongConversationMessages: 13,
       broadcasts: 13,
       recipientsPerBroadcast: 6,
-      messageCount: 132,
+      requestedLargeBroadcastRecipients: 7,
+      messageCount: 277,
       requestedRecipientCount: 78,
       resolvedRecipientCount: 78,
     });
@@ -115,15 +157,24 @@ describe('resolvePerformanceSeedConfig', () => {
     ['placements', 0, 20_000],
     ['tours', 0, 20_000],
     ['conversations', 0, 20_000],
+    ['nativeGroups', 0, 20_000],
     ['broadcasts', 0, 20_000],
     ['messagesPerConversation', 0, 100],
+    ['longConversationMessages', 0, 20_000],
     ['recipientsPerBroadcast', 0, 1_000],
+    ['largeBroadcastRecipients', 0, 1_000],
   ] as const)('accepts the exact lower and upper %s bounds', (key, lower, upper) => {
-    const lowerConfig = resolvePerformanceSeedConfig(zeroWorld({ [key]: lower }), ANCHOR);
-    const upperConfig = resolvePerformanceSeedConfig(zeroWorld({ [key]: upper }), ANCHOR);
+    const base = key === 'nativeGroups' ? zeroWorld({ contacts: 20_000 }) : zeroWorld();
+    const lowerConfig = resolvePerformanceSeedConfig({ ...base, [key]: lower }, ANCHOR);
+    const upperConfig = resolvePerformanceSeedConfig({ ...base, [key]: upper }, ANCHOR);
 
-    expect(lowerConfig[key]).toBe(lower);
-    expect(upperConfig[key]).toBe(upper);
+    const resolvedKey = key === 'longConversationMessages'
+      ? 'requestedLongConversationMessages'
+      : key === 'largeBroadcastRecipients'
+        ? 'requestedLargeBroadcastRecipients'
+        : key;
+    expect(lowerConfig[resolvedKey]).toBe(lower);
+    expect(upperConfig[resolvedKey]).toBe(upper);
   });
 
   it.each([
@@ -145,15 +196,24 @@ describe('resolvePerformanceSeedConfig', () => {
     ['conversations', -1],
     ['conversations', 20_001],
     ['conversations', 1.5],
+    ['nativeGroups', -1],
+    ['nativeGroups', 20_001],
+    ['nativeGroups', 1.5],
     ['messagesPerConversation', -1],
     ['messagesPerConversation', 101],
     ['messagesPerConversation', 1.5],
+    ['longConversationMessages', -1],
+    ['longConversationMessages', 20_001],
+    ['longConversationMessages', 1.5],
     ['broadcasts', -1],
     ['broadcasts', 20_001],
     ['broadcasts', 1.5],
     ['recipientsPerBroadcast', -1],
     ['recipientsPerBroadcast', 1_001],
     ['recipientsPerBroadcast', 1.5],
+    ['largeBroadcastRecipients', -1],
+    ['largeBroadcastRecipients', 1_001],
+    ['largeBroadcastRecipients', 1.5],
   ] as const)('rejects an invalid or non-integer %s value', (key, value) => {
     const input = key === 'scale' ? { scale: value } : zeroWorld({ [key]: value });
 
@@ -165,7 +225,10 @@ describe('resolvePerformanceSeedConfig', () => {
       scale: { min: 1, max: 100 },
       entityCount: { min: 0, max: 20_000 },
       messagesPerConversation: { min: 0, max: 100 },
+      longConversationMessages: { min: 0, max: 20_000 },
       recipientsPerBroadcast: { min: 0, max: 1_000 },
+      largeBroadcastRecipients: { min: 0, max: 1_000 },
+      nativeGroups: { min: 0, max: 20_000 },
       relayGroups: { max: 1_000 },
       totalItems: { max: 250_000 },
     });
@@ -215,6 +278,100 @@ describe('resolvePerformanceSeedConfig', () => {
     ).toThrow('totalItemCount');
   });
 
+  it.each([
+    [0, 0, 0, 0],
+    [1, 0, 0, 1],
+    [2, 0, 0, 2],
+    [24, 0, 0, 24],
+    [25, 1, 0, 24],
+    [99, 3, 0, 96],
+    [100, 4, 1, 95],
+    [101, 4, 1, 96],
+  ] as const)('uses the 95/4/1 allocation for %i generated contacts', (contacts, landlords, unknown, tenants) => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ contacts }), ANCHOR);
+    const { tables } = generatePerformanceSeed(config);
+
+    expect(config.landlordCount).toBe(landlords);
+    expect(config.unknownCount).toBe(unknown);
+    expect(config.tenantCount).toBe(tenants);
+    expect(tables.contacts.filter((row) => row.type === 'landlord')).toHaveLength(landlords);
+    expect(tables.contacts.filter((row) => row.type === 'unknown')).toHaveLength(unknown);
+    expect(tables.contacts.filter((row) => row.type === 'tenant')).toHaveLength(tenants);
+    expect(config.activeContactCount + config.deletedContactCount).toBe(contacts);
+    expect(tables.contacts.filter((row) => row.deleted_at === undefined)).toHaveLength(config.activeContactCount);
+  });
+
+  it.each([
+    [0, 0],
+    [1, 0],
+    [2, 1],
+    [3, 4],
+    [4, 11],
+    [100, 20_000],
+    [20_000, 20_000],
+  ] as const)('saturates native roster capacity for %i active contacts at %i', (activeContacts, capacity) => {
+    expect(nativeGroupCapacity(activeContacts)).toBe(capacity);
+  });
+
+  it('resolves native schedules, tails, clips, and logical work before generation', () => {
+    const native = resolvePerformanceSeedConfig(zeroWorld({ contacts: 5, nativeGroups: 4 }), ANCHOR);
+    const tail = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 100, conversations: 2, messagesPerConversation: 3, longConversationMessages: 7, broadcasts: 2, recipientsPerBroadcast: 3, largeBroadcastRecipients: 8 }),
+      ANCHOR,
+    );
+    const clipped = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 5, broadcasts: 2, recipientsPerBroadcast: 1_000, largeBroadcastRecipients: 1_000 }),
+      ANCHOR,
+    );
+
+    expect(native).toMatchObject({ nativeGroupCapacity: 11, nativeGroupRosterSizes: [2, 3, 4, 2], nativeGroupMemberSlotCount: 11 });
+    expect(tail).toMatchObject({
+      longConversationFixturePresent: true,
+      ordinaryMessageCount: 3,
+      tailMessageCount: 7,
+      totalMessageCount: 10,
+      physicalItemCount: 118,
+      totalRecipientCount: 11,
+      totalItemCount: 129,
+    });
+    expect(clipped).toMatchObject({
+      recipientPoolSize: 4,
+      recipientsPerBroadcast: 1_000,
+      resolvedRecipientsPerBroadcast: 4,
+      requestedOrdinaryRecipientCount: 1_000,
+      resolvedOrdinaryRecipientCount: 4,
+      clippedOrdinaryRecipientCount: 996,
+      resolvedLargeBroadcastRecipients: 4,
+      totalRecipientCount: 8,
+      clippedLargeBroadcastRecipients: 996,
+    });
+  });
+
+  it('makes tails absent when their parent population is zero and rejects impossible native groups', () => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 5, nativeGroups: 2, messagesPerConversation: 5, longConversationMessages: 5 }),
+      ANCHOR,
+    );
+
+    expect(config).toMatchObject({
+      totalConversations: 2,
+      longConversationFixturePresent: false,
+      resolvedLongConversationMessages: 0,
+      ordinaryMessageCount: 10,
+      tailMessageCount: 0,
+      totalMessageCount: 10,
+      largeBroadcastFixturePresent: false,
+      resolvedLargeBroadcastRecipients: 0,
+      clippedLargeBroadcastRecipients: 0,
+      physicalItemCount: 21,
+      nativeGroupMemberSlotCount: 5,
+      totalItemCount: 26,
+    });
+    expect(() => resolvePerformanceSeedConfig(zeroWorld({ contacts: 5, nativeGroups: 12 }), ANCHOR)).toThrow('nativeGroups');
+    expect(() => resolvePerformanceSeedConfig(zeroWorld({ messagesPerConversation: 2, longConversationMessages: 1 }), ANCHOR)).toThrow('longConversationMessages');
+    expect(() => resolvePerformanceSeedConfig(zeroWorld({ recipientsPerBroadcast: 2, largeBroadcastRecipients: 1 }), ANCHOR)).toThrow('largeBroadcastRecipients');
+  });
+
   it('captures one anchor when none is supplied and normalizes an explicit ISO anchor', () => {
     const now = vi.fn(() => new Date('2026-08-11T12:34:56.789Z'));
 
@@ -227,12 +384,17 @@ describe('resolvePerformanceSeedConfig', () => {
     expect(() => resolvePerformanceSeedConfig({}, 'not-an-anchor')).toThrow('anchor');
   });
 
-  it('builds a detached counts-only manifest', () => {
+  it('builds a detached manifest with every workload field required by its public type', () => {
     const config = resolvePerformanceSeedConfig({}, ANCHOR);
     const manifest = toPerformanceSeedManifest(config);
+    const manifestContract: PerformanceSeedManifest = manifest;
 
     expect(manifest).toEqual(config);
     expect(manifest).not.toBe(config);
+    expect(manifestContract).toEqual(manifest);
+    expect(manifest.workloadModelVersion).toBe(2);
+    expect(performanceSeedManifestHasNoOptionalKeys).toBeUndefined();
+    expect(Object.keys(manifest).sort()).toEqual(Object.keys(config).sort());
   });
 });
 
@@ -253,11 +415,11 @@ describe('generatePerformanceSeed', () => {
     ]);
     expect(Object.fromEntries(Object.entries(generated.tables).map(([table, rows]) => [table, rows.length]))).toEqual({
       contacts: 100,
-      units: 25,
+      units: 16,
       placements: 50,
       tours: 50,
-      conversations: 100,
-      messages: 1_000,
+      conversations: 121,
+      messages: 1_210,
       broadcasts: 10,
       unmatched_email: 4,
     });
@@ -279,15 +441,15 @@ describe('generatePerformanceSeed', () => {
   it('covers fixed contact, unit, placement, and tour ratios with every indexed field', () => {
     const { tables } = generatePerformanceSeed(resolvePerformanceSeedConfig({}, ANCHOR));
 
-    expect(tables.contacts.filter((row) => row.type === 'tenant')).toHaveLength(50);
-    expect(tables.contacts.filter((row) => row.type === 'landlord')).toHaveLength(30);
-    expect(tables.contacts.filter((row) => row.type === 'unknown')).toHaveLength(20);
+    expect(tables.contacts.filter((row) => row.type === 'tenant')).toHaveLength(95);
+    expect(tables.contacts.filter((row) => row.type === 'landlord')).toHaveLength(4);
+    expect(tables.contacts.filter((row) => row.type === 'unknown')).toHaveLength(1);
     expect(new Set(tables.contacts.filter((row) => row.type === 'tenant').map((row) => row.status))).toEqual(
       new Set(TENANT_STATUSES),
     );
-    expect(new Set(tables.contacts.filter((row) => row.type === 'landlord').map((row) => row.status))).toEqual(
-      new Set(LANDLORD_STATUSES),
-    );
+    expect(tables.contacts.filter((row) => row.type === 'landlord').every(
+      (row) => row.status !== undefined && new Set<string>(LANDLORD_STATUSES).has(row.status),
+    )).toBe(true);
     expect(tables.contacts.filter((row) => row.deleted_at !== undefined)).toHaveLength(15);
     expect(new Set(tables.contacts.map((row) => row.phone))).toHaveLength(100);
     expect(new Set(tables.contacts.map((row) => row.email))).toHaveLength(100);
@@ -302,7 +464,7 @@ describe('generatePerformanceSeed', () => {
     }
 
     expect(new Set(tables.units.map((row) => row.status))).toEqual(new Set(LISTING_STATUSES));
-    expect(tables.units.filter((row) => row.deleted_at !== undefined)).toHaveLength(4);
+    expect(tables.units.filter((row) => row.deleted_at !== undefined)).toHaveLength(3);
     for (const row of tables.units) {
       expect(row).toMatchObject({
         unitId: expect.stringMatching(/^perf-unit-[0-9]{5}$/),
@@ -414,11 +576,15 @@ describe('generatePerformanceSeed', () => {
         created_at: expect.any(String),
       });
     }
-    expect(tables.messages).toHaveLength(config.messageCount);
+    expect(tables.messages).toHaveLength(config.totalMessageCount);
     for (const conversation of tables.conversations) {
       expect(() => validatePerformanceConversation(conversation)).not.toThrow();
       const messages = byConversation.get(conversation.conversationId) ?? [];
-      expect(messages).toHaveLength(config.messagesPerConversation);
+      expect(messages).toHaveLength(
+        conversation.type === 'relay_group' && conversation.status === 'open' && conversation.conversationId === 'perf-conversation-00000'
+          ? config.resolvedLongConversationMessages
+          : config.messagesPerConversation,
+      );
       expect(messages.map((row) => row.tsMsgId)).toEqual([...messages.map((row) => row.tsMsgId)].sort());
       expect(conversation).toMatchObject({
         last_activity_at: expect.any(String),
@@ -427,6 +593,148 @@ describe('generatePerformanceSeed', () => {
         created_at: expect.any(String),
       });
     }
+  });
+
+  it('generates unique canonical native groups with typed rosters and native sender attribution', () => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ contacts: 100, nativeGroups: 21, conversations: 1, messagesPerConversation: 2 }), ANCHOR);
+    const { tables } = generatePerformanceSeed(config);
+    const groups = tables.conversations.filter((row) => row.type === 'group_text');
+    const messagesByConversation = new Map<string, typeof tables.messages>();
+    for (const message of tables.messages) {
+      const rows = messagesByConversation.get(message.conversationId) ?? [];
+      rows.push(message);
+      messagesByConversation.set(message.conversationId, rows);
+    }
+
+    expect(groups).toHaveLength(config.nativeGroups);
+    expect(groups.map((group) => group.participants?.length)).toEqual(config.nativeGroupRosterSizes);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(groups.length);
+    expect(groups.some((group) => group.unread_count === 0)).toBe(true);
+    expect(groups.some((group) => (group.unread_count ?? 0) > 0)).toBe(true);
+    for (const group of groups) {
+      const roster = group.participants ?? [];
+      expect(group).toMatchObject({ status: 'group_open', ai_mode: 'manual' });
+      expect(group.pool_number).toBeUndefined();
+      expect(group.relay_status).toBeUndefined();
+      expect(group.participant_phone).toBeUndefined();
+      expect(group.participants_version).toBeUndefined();
+      expect(group.owner).toBeUndefined();
+      expect(group.ever_member_phones).toBeUndefined();
+      expect(group.conversationId).toBe(conversationIdForGroup(roster.map((participant) => participant.phone)));
+      expect(roster.every((participant) => participant.contactId.startsWith('perf-contact-'))).toBe(true);
+      for (const message of messagesByConversation.get(group.conversationId) ?? []) {
+        if (message.direction === 'inbound') {
+          expect(message.relay_sender_key).toMatch(/^phone#\+1555[0-9]{7}$/);
+          expect(['tenant', 'landlord', 'unknown']).toContain(message.author);
+        } else {
+          expect(message.author).toBe('teammate');
+          expect(message.relay_sender_key).toBe('team');
+        }
+      }
+    }
+    expect(config.nativeGroupMemberSlotCount).toBe(groups.reduce((total, group) => total + (group.participants?.length ?? 0), 0));
+  });
+
+  it.each([0, 1, 2, 3, 4, 5])('accepts every feasible native count for an active pool of %i', (activeContacts) => {
+    const contacts = activeContacts === 0 ? 0 : activeContacts + 1;
+    const base = zeroWorld({ contacts, messagesPerConversation: 0 });
+    const capacity = nativeGroupCapacity(activeContacts);
+
+    for (let requested = 0; requested <= capacity; requested += 1) {
+      expect(resolvePerformanceSeedConfig({ ...base, nativeGroups: requested }, ANCHOR).nativeGroups).toBe(requested);
+    }
+    expect(() => resolvePerformanceSeedConfig({ ...base, nativeGroups: capacity + 1 }, ANCHOR)).toThrow('nativeGroups');
+  });
+
+  it('keeps the remaining native iterators in rotation after the larger sizes exhaust', () => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ contacts: 5, nativeGroups: 11, messagesPerConversation: 0 }), ANCHOR);
+    const groups = generatePerformanceSeed(config).tables.conversations.filter((row) => row.type === 'group_text');
+
+    expect(config.nativeGroupRosterSizes).toEqual([2, 3, 4, 2, 3, 2, 3, 2, 3, 2, 2]);
+    expect(groups.map((group) => group.participants?.length)).toEqual(config.nativeGroupRosterSizes);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(11);
+  });
+
+  it('materializes only the requested native groups at the 20000 cap-valid zero-density boundary', () => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 20_000, nativeGroups: 20_000, messagesPerConversation: 0, longConversationMessages: 0 }),
+      ANCHOR,
+    );
+    const groups = generatePerformanceSeed(config).tables.conversations.filter((row) => row.type === 'group_text');
+
+    expect(config.nativeGroups).toBe(20_000);
+    expect(groups).toHaveLength(20_000);
+    expect(new Set(groups.map((group) => group.conversationId))).toHaveLength(20_000);
+    expect(() => resolvePerformanceSeedConfig({ contacts: 20_000, nativeGroups: 20_000 }, ANCHOR)).toThrow('totalItemCount');
+  });
+
+  it.each([
+    ['scale 1', resolvePerformanceSeedConfig({}, ANCHOR)],
+    ['scale 7', resolvePerformanceSeedConfig({ scale: 7 }, ANCHOR)],
+    ['cap-valid zero-density', resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 20_000, nativeGroups: 20_000, messagesPerConversation: 0, longConversationMessages: 0 }),
+      ANCHOR,
+    )],
+  ] as const)('visits and materializes no extra native roster combinations at %s', (_name, config) => {
+    let visited = 0;
+    let materialized = 0;
+    const materializedRosterSizes: number[] = [];
+
+    generatePerformanceSeed(config, {
+      onNativeRosterVisited: () => { visited += 1; },
+      onNativeRosterMaterialized: (roster?: readonly unknown[]) => {
+        materialized += 1;
+        materializedRosterSizes.push(roster?.length ?? -1);
+      },
+    });
+
+    expect(visited).toBe(config.nativeGroups);
+    expect(materialized).toBe(config.nativeGroups);
+    expect(materializedRosterSizes).toEqual(config.nativeGroupRosterSizes);
+  });
+
+  it('reconciles every generated table and embedded recipient map to manifest totals', () => {
+    const { tables, manifest } = generatePerformanceSeed(resolvePerformanceSeedConfig({}, ANCHOR));
+    const physicalItemCount = Object.values(tables).reduce((total, table) => total + table.length, 0);
+    const nativeGroupMemberSlotCount = tables.conversations
+      .filter((conversation) => conversation.type === 'group_text')
+      .reduce((total, conversation) => total + (conversation.participants?.length ?? 0), 0);
+    const totalRecipientCount = tables.broadcasts
+      .reduce((total, broadcast) => total + Object.keys(broadcast.recipients).length, 0);
+
+    expect(physicalItemCount).toBe(manifest.physicalItemCount);
+    expect(nativeGroupMemberSlotCount).toBe(manifest.nativeGroupMemberSlotCount);
+    expect(totalRecipientCount).toBe(manifest.totalRecipientCount);
+  });
+
+  it.each([0, 10, 10_080, 10_081, 10_082, 20_000])('replaces the relay fixture message depth at %i without backdating messages beyond its parent', (longConversationMessages) => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 100, conversations: 1, nativeGroups: 2, messagesPerConversation: 0, longConversationMessages }),
+      ANCHOR,
+    );
+    const { tables } = generatePerformanceSeed(config);
+    const fixture = tables.conversations.find((row) => row.conversationId === 'perf-conversation-00000');
+    const fixtureMessages = tables.messages.filter((row) => row.conversationId === fixture?.conversationId);
+
+    expect(fixtureMessages).toHaveLength(longConversationMessages);
+    expect(fixtureMessages.every((row) => row.created_at >= (fixture?.created_at ?? ''))).toBe(true);
+    expect(tables.messages).toHaveLength(config.totalMessageCount);
+  });
+
+  it('uses active generated tenant recipients and makes the large terminal broadcast the fixture', () => {
+    const config = resolvePerformanceSeedConfig(
+      zeroWorld({ contacts: 100, broadcasts: 3, recipientsPerBroadcast: 2, largeBroadcastRecipients: 25 }),
+      ANCHOR,
+    );
+    const { tables } = generatePerformanceSeed(config);
+    const eligible = new Set(tables.contacts.filter((contact) => contact.type === 'tenant' && contact.deleted_at === undefined).map((contact) => contact.contactId));
+
+    expect(Object.keys(tables.broadcasts[0]?.recipients ?? {})).toHaveLength(config.resolvedLargeBroadcastRecipients);
+    expect(Object.keys(tables.broadcasts[1]?.recipients ?? {})).toHaveLength(config.resolvedRecipientsPerBroadcast);
+    expect(tables.broadcasts.every((broadcast) => Object.keys(broadcast.recipients).every((contactId) => eligible.has(contactId)))).toBe(true);
+    expect(tables.broadcasts.every((broadcast) => new Set(Object.keys(broadcast.recipients)).size === Object.keys(broadcast.recipients).length)).toBe(true);
+    const fallback = generatePerformanceSeed(resolvePerformanceSeedConfig(zeroWorld({ contacts: 0, broadcasts: 1, recipientsPerBroadcast: 2, largeBroadcastRecipients: 2 }), ANCHOR));
+    expect(Object.keys(fallback.tables.broadcasts[0]?.recipients ?? {})).toEqual(['contact-tenant-0001']);
   });
 
   it('clips relay groups without dropping conversations and enforces status-valid sparse fields', () => {
@@ -492,10 +800,10 @@ describe('generatePerformanceSeed', () => {
   });
 
   it.each([
-    ['generated parents', {}, { tenant: /^perf-contact-/, landlord: /^perf-contact-/, unit: /^perf-unit-/ }],
+    ['generated parents', {}, { tenant: /^perf-contact-/, landlord: /^contact-landlord-0001$/, unit: /^perf-unit-/ }],
     ['lean tenant', { contacts: 0 }, { tenant: /^contact-tenant-0001$/, landlord: /^contact-landlord-0001$/, unit: /^perf-unit-/ }],
     ['lean unit and landlord', { units: 0, contacts: 1 }, { tenant: /^perf-contact-/, landlord: /^contact-landlord-0001$/, unit: /^unit-0001$/ }],
-    ['no conversations', { conversations: 0 }, { tenant: /^perf-contact-/, landlord: /^perf-contact-/, unit: /^perf-unit-/ }],
+    ['no conversations', { conversations: 0 }, { tenant: /^perf-contact-/, landlord: /^contact-landlord-0001$/, unit: /^perf-unit-/ }],
   ] as const)('resolves the %s parent-child vector without changing requested entity counts', (_name, overrides, expected) => {
     const input = { ...zeroWorld(), contacts: 10, units: 2, placements: 2, tours: 2, conversations: 2, messagesPerConversation: 2, broadcasts: 2, recipientsPerBroadcast: 4, ...overrides };
     const config = resolvePerformanceSeedConfig(input, ANCHOR);
@@ -616,9 +924,12 @@ describe('resolvePerformanceSelfQaFixtures', () => {
     { placements: 49 },
     { tours: 49 },
     { conversations: 99 },
+    { nativeGroups: 20 },
     { messagesPerConversation: 9 },
+    { requestedLongConversationMessages: 9 },
     { broadcasts: 9 },
     { recipientsPerBroadcast: 24 },
+    { requestedLargeBroadcastRecipients: 24 },
   ] as const;
 
   it.each(changedConfigs)('rejects a non-default scale-1 fixture world %j', (patch) => {

@@ -7,7 +7,18 @@ export interface EndpointContract {
   endpointTemplate: EndpointTemplate;
   queryKeys: readonly string[];
   requirement: EndpointRequirement;
+  inboxRequestClass?: InboxRequestClass;
 }
+
+export const INBOX_REQUEST_CLASSES = Object.freeze([
+  'inbox_page_all',
+  'inbox_page_unread',
+  'inbox_page_unknown',
+  'inbox_page_groups',
+  'inbox_badge',
+] as const);
+
+export type InboxRequestClass = typeof INBOX_REQUEST_CLASSES[number];
 
 export type RouteContractBranch =
   | { kind: 'none' }
@@ -26,6 +37,7 @@ export interface LocatorContract {
   exactness: LocatorExactness;
   name?: string;
   scope?: string;
+  selected?: true;
 }
 
 export interface TerminalContract {
@@ -38,30 +50,50 @@ export interface TerminalContract {
   emptyAlternatives: readonly (readonly LocatorContract[])[];
 }
 
-export interface WarmSourceContract {
+export type InboxFilterQuery = 'unread' | 'unknown' | 'groups';
+
+export type ExactQueryState =
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'fixed'; values: Readonly<{ filter: InboxFilterQuery }> }>;
+
+export interface ExactBrowserTarget {
   path: string;
+  query: ExactQueryState;
+}
+
+export type WarmAction =
+  | Readonly<{ kind: 'link'; href: string }>
+  | Readonly<{ kind: 'tab'; name: string }>;
+
+export interface WarmSourceContract {
+  target: ExactBrowserTarget;
   ready: LocatorContract;
-  click: LocatorContract;
-  href: string;
-  exactHref: true;
+  sourceTerminal?: TerminalContract;
+  sourceSelected?: LocatorContract;
+  action: WarmAction;
   viewportDependency: 'desktop_chrome';
   gets: readonly EndpointContract[];
 }
 
 export type ResolverName = 'static' | 'contact' | 'unit' | 'tour' | 'placement' | 'conversation' | 'broadcast';
+export type BehaviorFamily = 'standard' | 'inbox';
+export type ColdTarget = Readonly<{ kind: 'static'; path: string }> | Readonly<{ kind: 'resolved' }>;
 
 export interface RouteDefinition {
-  key: string;
+  surfaceId: string;
   label: string;
   pathTemplate: string;
+  coldTarget: ColdTarget;
+  behaviorFamily: BehaviorFamily;
   requiredRole: 'staff' | 'admin';
   viewportDependency: 'desktop_chrome';
   resolver: ResolverName;
   source: WarmSourceContract;
+  destinationSelected?: LocatorContract;
   terminal: TerminalContract;
   gets: readonly EndpointContract[];
   surfaceScaleBearing: boolean;
-  sourceLoadScaleBearing: boolean;
+  loadScaleBearing: boolean;
   targetStructuralNote: string | null;
   streamExclusions: readonly ['/api/events'];
   blockedSurface: 'none' | 'contact_detail' | 'conversation_detail' | 'thread_detail';
@@ -109,17 +141,23 @@ function endpoint(
   endpointTemplate: EndpointTemplate,
   queryKeys: readonly string[] = [],
   requirement: EndpointRequirement = 'required',
+  inboxRequestClass?: InboxRequestClass,
 ): EndpointContract {
   assertEndpointTemplate(endpointTemplate);
   return Object.freeze({
     endpointTemplate,
     queryKeys: Object.freeze([...queryKeys].sort()),
     requirement,
+    ...(inboxRequestClass !== undefined && { inboxRequestClass }),
   });
 }
 
-function required(path: EndpointTemplate, queryKeys: readonly string[] = []): EndpointContract {
-  return endpoint(path, queryKeys, 'required');
+function required(
+  path: EndpointTemplate,
+  queryKeys: readonly string[] = [],
+  inboxRequestClass?: InboxRequestClass,
+): EndpointContract {
+  return endpoint(path, queryKeys, 'required', inboxRequestClass);
 }
 
 function conditional(path: EndpointTemplate, queryKeys: readonly string[] = []): EndpointContract {
@@ -131,8 +169,12 @@ function locator(
   name?: string,
   exactness: LocatorExactness = 'exact',
   scope?: string,
+  selected?: true,
 ): LocatorContract {
-  return Object.freeze({ role, exactness, ...(name !== undefined && { name }), ...(scope !== undefined && { scope }) });
+  return Object.freeze({
+    role, exactness, ...(name !== undefined && { name }), ...(scope !== undefined && { scope }),
+    ...(selected !== undefined && { selected }),
+  });
 }
 
 function terminal(
@@ -194,7 +236,7 @@ function crossProduct(
 
 const COLD_SHELL_GETS = Object.freeze([
   required('/auth/me'),
-  required('/api/inbox', ['filter', 'limit']),
+  required('/api/inbox', ['filter', 'limit'], 'inbox_badge'),
   required('/api/unmatched-email', ['filter']),
 ]);
 
@@ -245,7 +287,9 @@ const PLACEMENT_LIST_GETS = Object.freeze([
   ...UNIT_LIVE_WALK,
   ...UNIT_DELETED_WALK,
 ]);
-const INBOX_GETS = Object.freeze([required('/api/inbox', ['filter', 'limit'])]);
+function inboxGets(requestClass: Extract<InboxRequestClass, `inbox_page_${string}`>): readonly EndpointContract[] {
+  return Object.freeze([required('/api/inbox', ['filter', 'limit'], requestClass)]);
+}
 const EMAIL_GETS = Object.freeze([required('/api/unmatched-email', ['filter']), ...CONTACT_LIVE_WALK]);
 const BROADCAST_LIST_GETS = Object.freeze([required('/api/broadcasts', ['limit'])]);
 
@@ -265,7 +309,8 @@ const CONTACT_DETAIL_BASE_GETS = Object.freeze([
   required('/api/users/me'), required('/api/contacts/:contactId/timeline'),
   required('/api/placements'), required('/api/units'),
   required('/api/contacts/:contactId/listings-sent'), required('/api/contacts/:contactId/media'),
-  required('/api/contacts/:contactId/relay-groups'), ...CONTACT_LIVE_WALK,
+  required('/api/contacts/:contactId/relay-groups'), required('/api/contacts/:contactId/group-threads'),
+  ...CONTACT_LIVE_WALK,
   conditional('/api/conversations'), conditional('/api/conversations/:conversationId/messages'),
 ]);
 const UNIT_DETAIL_BASE_GETS = Object.freeze([
@@ -337,10 +382,14 @@ const PLACEMENT_TERMINAL = terminal(
   [locator('list', undefined, 'role_only')], [locator('text', 'No active placements.')],
   [locator('alert', "We couldn't load placements. Please try again.")], [locator('searchbox', 'Search placements')],
 );
-const INBOX_TERMINAL = terminal(
-  [locator('list', 'Conversations')],
-  [locator('text', 'No conversations yet'), locator('text', 'The inbox turns on with its backend')], [L.alert],
-);
+function inboxTerminal(emptyTitle: string): TerminalContract {
+  return terminal(
+    [locator('list', 'Conversations')],
+    [locator('text', emptyTitle)],
+    [L.alert],
+    [locator('tablist', 'Inbox filters')],
+  );
+}
 function emailTerminal(quarantine: boolean): TerminalContract {
   return terminal(
     [locator('list', quarantine ? 'Quarantined email' : 'Unmatched email')],
@@ -383,15 +432,13 @@ const NUMBER_STATES = [
   locator('text', 'Not set', 'exact', 'Our number'),
   locator('text', '^(?:\\([0-9]{3}\\) [0-9]{3}-[0-9]{4}|\\+[0-9]{8,15})$', 'regex', 'Our number'),
 ] as const;
-const POOL_NUMBER_STATES = [
-  locator('list', 'Pool number counts'),
-  locator('text', 'No group text numbers yet - a number is provisioned with the first group text.'),
-] as const;
 const NUMBER_TERMINAL = terminalAlternatives(
-  crossProduct([], NUMBER_STATES, POOL_NUMBER_STATES),
-  [],
+  crossProduct([], NUMBER_STATES, [locator('list', 'Pool number counts')]),
+  crossProduct([], NUMBER_STATES, [
+    locator('text', 'No relay group numbers yet - a number is provisioned with the first relay group.'),
+  ]),
   [locator('text', "Couldn't load our number."), L.alert],
-  [locator('heading', 'Our number'), locator('heading', 'Group text numbers')],
+  [locator('heading', 'Our number'), locator('heading', 'Relay group numbers')],
 );
 const CONTACT_DETAIL_TERMINAL = terminal(
   [locator('heading', '^Details(?: Edit contact details)?$', 'regex'), locator('region', 'Communications and activity')], [], [L.alert], [], 'all',
@@ -399,37 +446,59 @@ const CONTACT_DETAIL_TERMINAL = terminal(
 const UNIT_DETAIL_TERMINAL = terminal([locator('heading', undefined, 'role_only'), locator('heading', 'Photos')], [], [L.alert], [], 'all');
 const TOUR_DETAIL_TERMINAL = terminal([locator('link', 'Back to tours')], [], [L.alert]);
 const PLACEMENT_DETAIL_TERMINAL = terminal([locator('link', 'Back to placements')], [], [L.alert]);
-const CONVERSATION_DETAIL_TERMINAL = terminal([locator('text', 'Group text'), locator('link', 'Back to inbox')], [], [L.alert], [], 'all');
+const CONVERSATION_DETAIL_TERMINAL = terminal([locator('text', 'Relay group'), locator('link', 'Back to inbox')], [], [L.alert], [], 'all');
 const BROADCAST_DETAIL_TERMINAL = terminal(
   [locator('list', 'Recipients')],
   [locator('text', 'No recipients recorded yet.')], [L.alert], [locator('heading', 'Recipients')],
 );
 
+function exactTarget(path: string): ExactBrowserTarget {
+  return Object.freeze({ path, query: Object.freeze({ kind: 'absent' as const }) });
+}
+
+export function exactTargetFromPath(path: string): ExactBrowserTarget {
+  const parsed = new URL(path, 'http://target.invalid');
+  const entries = [...parsed.searchParams.entries()];
+  if (entries.length === 0) return exactTarget(parsed.pathname);
+  if (entries.length === 1 && entries[0]?.[0] === 'filter'
+    && (entries[0][1] === 'unread' || entries[0][1] === 'unknown' || entries[0][1] === 'groups')) {
+    return Object.freeze({
+      path: parsed.pathname,
+      query: Object.freeze({ kind: 'fixed' as const, values: Object.freeze({ filter: entries[0][1] }) }),
+    });
+  }
+  throw new Error('invalid_exact_query_state');
+}
+
 function source(
   path: string,
   ready: LocatorContract,
-  clickRole: string,
-  clickName: string,
-  href: string,
+  action: WarmAction,
   gets: readonly EndpointContract[],
+  sourceTerminal?: TerminalContract,
+  sourceSelected?: LocatorContract,
 ): WarmSourceContract {
   return Object.freeze({
-    path,
+    target: exactTargetFromPath(path),
     ready,
-    click: locator(clickRole, clickName),
-    href,
-    exactHref: true as const,
+    ...(sourceTerminal !== undefined && { sourceTerminal }),
+    ...(sourceSelected !== undefined && { sourceSelected }),
+    action,
     viewportDependency: 'desktop_chrome' as const,
     gets,
   });
 }
 
 interface RowInput {
-  key: string;
+  surfaceId: string;
   label: string;
+  pathTemplate?: string;
+  coldTarget?: ColdTarget;
+  behaviorFamily?: BehaviorFamily;
   requiredRole?: 'staff' | 'admin';
   resolver?: ResolverName;
   source: WarmSourceContract;
+  destinationSelected?: LocatorContract;
   terminal: TerminalContract;
   gets: readonly EndpointContract[];
   surfaceScaleBearing: boolean;
@@ -440,67 +509,145 @@ interface RowInput {
 
 function row(input: RowInput): RouteDefinition {
   return Object.freeze({
-    key: input.key,
+    surfaceId: input.surfaceId,
     label: input.label,
-    pathTemplate: input.key,
+    pathTemplate: input.pathTemplate ?? input.surfaceId,
+    coldTarget: input.coldTarget ?? (input.resolver === undefined || input.resolver === 'static'
+      ? Object.freeze({ kind: 'static' as const, path: input.surfaceId })
+      : Object.freeze({ kind: 'resolved' as const })),
+    behaviorFamily: input.behaviorFamily ?? 'standard',
     requiredRole: input.requiredRole ?? 'staff',
     viewportDependency: 'desktop_chrome' as const,
     resolver: input.resolver ?? 'static',
     source: input.source,
+    ...(input.destinationSelected !== undefined && { destinationSelected: input.destinationSelected }),
     terminal: input.terminal,
     gets: input.gets,
     surfaceScaleBearing: input.surfaceScaleBearing,
-    sourceLoadScaleBearing: input.loadScaleBearing,
+    loadScaleBearing: input.loadScaleBearing,
     targetStructuralNote: input.targetStructuralNote ?? null,
     streamExclusions: NEVER_STREAM,
     blockedSurface: input.blockedSurface ?? 'none',
   });
 }
 
-const NAV_TODAY = (target: string, label: string, gets: readonly EndpointContract[]) => source('/', L.today, 'link', label, target, gets);
-const CONTACT_SOURCE = (target: string, label: string, gets: readonly EndpointContract[]) => source('/contacts', L.contacts, 'link', label, target, gets);
+const link = (href: string): WarmAction => Object.freeze({ kind: 'link', href });
+const tab = (name: string): WarmAction => Object.freeze({ kind: 'tab', name });
+const NAV_TODAY = (target: string, label: string, gets: readonly EndpointContract[]) => source('/', L.today, link(target), gets);
+const CONTACT_SOURCE = (target: string, label: string, gets: readonly EndpointContract[]) => source('/contacts', L.contacts, link(target), gets);
 const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templates', gets: readonly EndpointContract[] = TEMPLATE_GETS) =>
   source(
     from,
     from === '/settings/team'
       ? locator('table', undefined, 'role_only')
       : locator('textbox', '^Missed-call auto-text [0-9]+/320$', 'regex'),
-    'tab',
-    label,
-    target,
+    tab(label),
     gets,
   );
+const INBOX_ALL_SOURCE_TERMINAL = inboxTerminal('No conversations yet');
+const inboxDestinationSelected = (name: string) => locator('tab', name, 'exact', undefined, true);
+const INBOX_ALL_SOURCE_SELECTED = inboxDestinationSelected('All');
+const INBOX_SOURCE = (label: string, gets: readonly EndpointContract[]) =>
+  source('/inbox', L.inbox, tab(label), gets, INBOX_ALL_SOURCE_TERMINAL, INBOX_ALL_SOURCE_SELECTED);
+const INBOX_DETAIL_SOURCE = (gets: readonly EndpointContract[]) =>
+  source('/inbox', L.inbox, link(':resolved_cold_target'), gets, INBOX_ALL_SOURCE_TERMINAL, INBOX_ALL_SOURCE_SELECTED);
 
 export const ROUTES: readonly RouteDefinition[] = Object.freeze([
-  row({ key: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts', label: 'Contacts', source: NAV_TODAY('/contacts', 'Contacts', TODAY_GETS), terminal: contactListTerminal('Contacts'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/tenants', label: 'Tenants', source: CONTACT_SOURCE('/contacts/tenants', 'Tenants', CONTACT_LIVE_WALK), terminal: contactListTerminal('Tenants'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/landlords', label: 'Landlords', source: CONTACT_SOURCE('/contacts/landlords', 'Landlords', CONTACT_LIVE_WALK), terminal: contactListTerminal('Landlords'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/unknown', label: 'Unknown', source: CONTACT_SOURCE('/contacts/unknown', 'Unknown', CONTACT_LIVE_WALK), terminal: contactListTerminal('Unknown'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/contacts/deleted', label: 'Deleted contacts', source: CONTACT_SOURCE('/contacts/deleted', 'Deleted', CONTACT_LIVE_WALK), terminal: contactListTerminal('Deleted'), gets: CONTACT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, 'link', 'Deleted', '/listings/deleted', UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, 'link', 'Closed', '/tours/closed', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/inbox', label: 'Inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), terminal: INBOX_TERMINAL, gets: INBOX_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, 'link', 'Quarantine', '/email/quarantine', EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ key: '/settings/team', label: 'Team', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/team', 'Team'), terminal: TEAM_TERMINAL, gets: TEAM_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/templates', label: 'Templates', source: SETTINGS_SOURCE('/settings/templates', 'Templates', '/settings/team', TEAM_GETS), terminal: TEMPLATE_TERMINAL, gets: TEMPLATE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/notifications', label: 'Notifications', source: SETTINGS_SOURCE('/settings/notifications', 'Notifications'), terminal: NOTIFICATION_TERMINAL, gets: NOTIFICATION_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/voice', label: 'Voice', source: SETTINGS_SOURCE('/settings/voice', 'Voice'), terminal: VOICE_TERMINAL, gets: VOICE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/system', label: 'System status', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/system', 'System status'), terminal: SYSTEM_TERMINAL, gets: SYSTEM_GETS, surfaceScaleBearing: false, loadScaleBearing: false, targetStructuralNote: 'alarms_and_errors_differ_by_target' }),
-  row({ key: '/settings/ai-runs', label: 'AI run log', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/ai-runs', 'AI run log'), terminal: AI_RUN_TERMINAL, gets: AI_RUN_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/settings/numbers', label: 'Phone numbers', source: SETTINGS_SOURCE('/settings/numbers', 'Phone numbers'), terminal: NUMBER_TERMINAL, gets: NUMBER_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
-  row({ key: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), 'link', 'resolved_exact_href', ':warmHref', CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
-  row({ key: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, 'link', 'resolved_exact_href', ':warmHref', UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ key: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, 'link', 'resolved_exact_href', ':warmHref', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ key: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, 'link', 'resolved_exact_href', ':warmHref', PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ key: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', INBOX_GETS), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
-  row({ key: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
+  row({ surfaceId: '/', label: 'Today', source: source('/contacts', L.contacts, link('/'), CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts', label: 'Contacts', source: NAV_TODAY('/contacts', 'Contacts', TODAY_GETS), terminal: contactListTerminal('Contacts'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/tenants', label: 'Tenants', source: CONTACT_SOURCE('/contacts/tenants', 'Tenants', CONTACT_LIVE_WALK), terminal: contactListTerminal('Tenants'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/landlords', label: 'Landlords', source: CONTACT_SOURCE('/contacts/landlords', 'Landlords', CONTACT_LIVE_WALK), terminal: contactListTerminal('Landlords'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/unknown', label: 'Unknown', source: CONTACT_SOURCE('/contacts/unknown', 'Unknown', CONTACT_LIVE_WALK), terminal: contactListTerminal('Unknown'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/contacts/deleted', label: 'Deleted contacts', source: CONTACT_SOURCE('/contacts/deleted', 'Deleted', CONTACT_LIVE_WALK), terminal: contactListTerminal('Deleted'), gets: CONTACT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, link('/listings/deleted'), UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, link('/tours/closed'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), destinationSelected: inboxDestinationSelected('All'), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), destinationSelected: inboxDestinationSelected('Unread'), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unknown', label: 'Inbox: Unknown', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unknown' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unknown', inboxGets('inbox_page_unknown')), destinationSelected: inboxDestinationSelected('Unknown'), terminal: inboxTerminal('No unknown numbers'), gets: inboxGets('inbox_page_unknown'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-groups', label: 'Inbox: Groups', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=groups' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Groups', inboxGets('inbox_page_groups')), destinationSelected: inboxDestinationSelected('Groups'), terminal: inboxTerminal('No group texts yet'), gets: inboxGets('inbox_page_groups'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, link('/email/quarantine'), EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/settings/team', label: 'Team', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/team', 'Team'), terminal: TEAM_TERMINAL, gets: TEAM_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/templates', label: 'Templates', source: SETTINGS_SOURCE('/settings/templates', 'Templates', '/settings/team', TEAM_GETS), terminal: TEMPLATE_TERMINAL, gets: TEMPLATE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/notifications', label: 'Notifications', source: SETTINGS_SOURCE('/settings/notifications', 'Notifications'), terminal: NOTIFICATION_TERMINAL, gets: NOTIFICATION_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/voice', label: 'Voice', source: SETTINGS_SOURCE('/settings/voice', 'Voice'), terminal: VOICE_TERMINAL, gets: VOICE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/system', label: 'System status', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/system', 'System status'), terminal: SYSTEM_TERMINAL, gets: SYSTEM_GETS, surfaceScaleBearing: false, loadScaleBearing: false, targetStructuralNote: 'alarms_and_errors_differ_by_target' }),
+  row({ surfaceId: '/settings/ai-runs', label: 'AI run log', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/ai-runs', 'AI run log'), terminal: AI_RUN_TERMINAL, gets: AI_RUN_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/settings/numbers', label: 'Phone numbers', source: SETTINGS_SOURCE('/settings/numbers', 'Phone numbers'), terminal: NUMBER_TERMINAL, gets: NUMBER_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  row({ surfaceId: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), link(':resolved_cold_target'), CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
+  row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, link(':resolved_cold_target'), UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
+  row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, link(':resolved_cold_target'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
+  row({ surfaceId: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, link(':resolved_cold_target'), PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
+  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: INBOX_DETAIL_SOURCE(inboxGets('inbox_page_all')), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
+  row({ surfaceId: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, link(':resolved_cold_target'), BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
 ]);
+
+export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
+  const assertSelectedLocator = (locator: LocatorContract): void => {
+    if (locator.selected === true && (locator.role !== 'tab' || locator.exactness !== 'exact')) {
+      throw new Error('selected_locator_must_be_exact_tab');
+    }
+  };
+  const assertTerminalLocators = (terminal: TerminalContract): void => {
+    for (const locator of [
+      ...terminal.structure,
+      ...terminal.populated,
+      ...terminal.empty,
+      ...terminal.error,
+      ...terminal.populatedAlternatives.flat(),
+      ...terminal.emptyAlternatives.flat(),
+    ]) assertSelectedLocator(locator);
+  };
+  const surfaceIds = new Set<string>();
+  for (const route of routes) {
+    if (surfaceIds.has(route.surfaceId)) throw new Error('duplicate_surface_id');
+    surfaceIds.add(route.surfaceId);
+    if (route.resolver === 'static' && route.coldTarget.kind !== 'static') {
+      throw new Error('static_cold_target_required');
+    }
+    if (route.resolver !== 'static' && route.coldTarget.kind !== 'resolved') {
+      throw new Error('resolved_cold_target_required');
+    }
+    if (route.source.target.query.kind === 'fixed'
+      && !['unread', 'unknown', 'groups'].includes(route.source.target.query.values.filter)) {
+      throw new Error('invalid_exact_query_state');
+    }
+    if (route.source.action.kind === 'tab' && route.source.action.name.length === 0) {
+      throw new Error('tab_action_name_required');
+    }
+    if (route.source.action.kind === 'link' && route.source.action.href.length === 0) {
+      throw new Error('link_action_href_required');
+    }
+    if (route.source.action.kind === 'link' && route.coldTarget.kind === 'static'
+      && route.source.action.href !== route.coldTarget.path) {
+      throw new Error('static_link_target_required');
+    }
+    if (route.source.action.kind === 'link' && route.coldTarget.kind === 'resolved'
+      && route.source.action.href !== ':resolved_cold_target') {
+      throw new Error('resolved_link_target_required');
+    }
+    assertSelectedLocator(route.source.ready);
+    if (route.source.sourceSelected !== undefined) assertSelectedLocator(route.source.sourceSelected);
+    if (route.behaviorFamily === 'inbox'
+      && (route.destinationSelected === undefined
+        || route.destinationSelected.role !== 'tab'
+        || route.destinationSelected.exactness !== 'exact'
+        || route.destinationSelected.selected !== true
+        || route.destinationSelected.name === undefined
+        || route.destinationSelected.name.length === 0)) {
+      throw new Error('inbox_destination_selected_must_be_exact_tab');
+    }
+    if (route.destinationSelected !== undefined) assertSelectedLocator(route.destinationSelected);
+    if (route.source.sourceTerminal !== undefined) assertTerminalLocators(route.source.sourceTerminal);
+    assertTerminalLocators(route.terminal);
+  }
+}
+
+assertRouteRegistry(ROUTES);
 
 export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   endpoints: Object.freeze({
@@ -515,7 +662,10 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
     '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
-    '/inbox': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-unknown': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-groups': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
     '/email': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
     '/email/quarantine': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
     '/broadcasts': { base: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108' },
@@ -525,8 +675,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176' },
     '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:77-132' },
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
-    '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,232-253' },
-    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:79-165; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
+    '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
+    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1228-1239; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
     '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:110-185; dashboard/src/routes/listing/ListingDetail.tsx:184-185' },
     '/tours/:tourId': { base: 'dashboard/src/routes/tours/useTourChannels.ts:100-289; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/placements/:placementId': { base: 'dashboard/src/routes/placements/usePlacementChannels.ts:101-299; dashboard/src/routes/shared/useRoster.ts:75-137' },
@@ -566,7 +716,10 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
     '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
-    '/inbox': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-unknown': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-groups': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     '/email': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
     '/email/quarantine': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
     '/broadcasts': 'dashboard/src/routes/broadcasts/BroadcastsList.tsx:130-140',
@@ -576,12 +729,12 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/voice': 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176',
     '/settings/system': 'dashboard/src/routes/settings/QuietHoursSection.tsx:135-155; dashboard/src/routes/settings/FlagPills.tsx:41-69; dashboard/src/routes/settings/AlarmGrid.tsx:43-95; dashboard/src/routes/settings/RecentErrors.tsx:69-129',
     '/settings/ai-runs': 'dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47',
-    '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,232-253',
+    '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,207-244',
     '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:152; dashboard/src/routes/contact/Card.tsx:18-25',
     '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1180-1187',
     '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:551',
     '/placements/:placementId': 'dashboard/src/routes/placements/PlacementDetail.tsx:515',
-    '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:379',
+    '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:397-402',
     '/broadcasts/:broadcastId': 'dashboard/src/routes/broadcasts/BroadcastResults.tsx:159-162',
   } as const),
   resolvers: Object.freeze({
@@ -621,7 +774,7 @@ export const CONTACT_INBOX_PROBE: ProbeDefinition = Object.freeze({ key: 'contac
 export const UNMATCHED_EMAIL_PROBE: ProbeDefinition = Object.freeze({ key: 'unmatched_email_probe', blockedSurface: 'unmatched_email_probe' });
 
 function contractKey(contract: EndpointContract): string {
-  return `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}`;
+  return `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}#${contract.inboxRequestClass ?? ''}`;
 }
 
 function freezeContracts(contracts: readonly EndpointContract[]): readonly EndpointContract[] {
@@ -635,7 +788,7 @@ function freezeContracts(contracts: readonly EndpointContract[]): readonly Endpo
 }
 
 function selectedDestination(route: RouteDefinition, branch: RouteContractBranch): readonly EndpointContract[] {
-  if (route.key === '/contacts/:contactId') {
+  if (route.surfaceId === '/contacts/:contactId') {
     if (branch.kind !== 'contact_detail') throw new Error('route_branch_mismatch');
     if (branch.contactType === 'tenant') return [...route.gets, required('/api/tours', ['tenantId'])];
     if (branch.contactType === 'landlord' && branch.landlordUnitCount > 0) {
@@ -643,11 +796,11 @@ function selectedDestination(route: RouteDefinition, branch: RouteContractBranch
     }
     return route.gets;
   }
-  if (route.key === '/listings/:unitId') {
+  if (route.surfaceId === '/listings/:unitId') {
     if (branch.kind !== 'unit_detail') throw new Error('route_branch_mismatch');
     return branch.hasLandlord ? [...route.gets, required('/api/contacts/:contactId')] : route.gets;
   }
-  if (route.key === '/tours/:tourId' || route.key === '/placements/:placementId') {
+  if (route.surfaceId === '/tours/:tourId' || route.surfaceId === '/placements/:placementId') {
     if (branch.kind !== 'thread_detail') throw new Error('route_branch_mismatch');
     return [...route.gets, ...(branch.thread === 'group_thread' ? GROUP_THREAD_GETS : PERSON_THREAD_GETS)];
   }
@@ -664,11 +817,11 @@ export function expectedGets(
   // These two warm-only class changes are audited in
   // CONTRACT_SOURCE_LEDGER.warmRequirementClassifications. They model sibling
   // route persistence; they are not checkpoint-driven contract weakening.
-  if (mode === 'warm' && route.key === '/email/quarantine') {
+  if (mode === 'warm' && route.surfaceId === '/email/quarantine') {
     destination = destination.map((contract) => contract.endpointTemplate === '/api/unmatched-email'
       ? contract
       : { ...contract, requirement: 'conditional' });
-  } else if (mode === 'warm' && route.key === '/tours/closed') {
+  } else if (mode === 'warm' && route.surfaceId === '/tours/closed') {
     destination = destination.map((contract) => contract.endpointTemplate === '/api/tours'
       && contract.queryKeys.length === 1
       && contract.queryKeys[0] === 'status'
@@ -682,16 +835,18 @@ export function assertObservedGets(
   declared: readonly EndpointContract[],
   observed: readonly ObservedEndpointContract[],
 ): { missingRequired: EndpointContract[]; undeclared: EndpointContract[] } {
-  const declarationShapes = new Set(declared.map((contract) => `${contract.endpointTemplate}?${contract.queryKeys.join('&')}`));
+  const endpointShape = (contract: Pick<EndpointContract, 'endpointTemplate' | 'queryKeys' | 'inboxRequestClass'>): string =>
+    `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}#${contract.inboxRequestClass ?? ''}`;
+  const declarationShapes = new Set(declared.map(endpointShape));
   const observedShapes = new Set(observed
     .filter((contract) =>
       (contract.outcome === undefined || contract.outcome === 'finished')
       && (contract.status === undefined || contract.status === null
         || (contract.status >= 200 && contract.status < 300)))
-    .map((contract) => `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`));
+    .map(endpointShape));
   return {
-    missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(`${contract.endpointTemplate}?${contract.queryKeys.join('&')}`)),
-    undeclared: observed.filter((contract) => !declarationShapes.has(`${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`)),
+    missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(endpointShape(contract))),
+    undeclared: observed.filter((contract) => !declarationShapes.has(endpointShape(contract))),
   };
 }
 
@@ -762,11 +917,11 @@ export interface ResolverDom {
 }
 
 export type ResolverResult =
-  | { kind: 'resolved'; coldPath: string; warmHref: string; branch: RouteContractBranch }
-  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' | 'unresolved_branch' };
+  | { kind: 'resolved'; coldPath: string; warmTarget: ExactBrowserTarget; branch: RouteContractBranch }
+  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'required_action_missing' | 'source_not_ready' | 'unresolved_branch' };
 
 export function resolverSkipSampleResult(
-  routeKey: string,
+  surfaceId: string,
   mode: SampleMode,
   repeat: number,
   reason: Extract<ResolverResult, { kind: 'skip' }>['reason'],
@@ -775,11 +930,13 @@ export function resolverSkipSampleResult(
     ? 'skipped_no_fixture'
     : reason === 'fixture_not_navigable'
       ? 'skipped_fixture_not_navigable'
+      : reason === 'required_action_missing'
+        ? 'skipped_required_action_missing'
       : reason === 'source_not_ready'
         ? 'skipped_source_not_ready'
         : 'skipped_unresolved_branch';
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status,
@@ -799,6 +956,7 @@ export function resolverSkipSampleResult(
     consoleCategories: {},
     clientTruncated: false,
     terminalState: 'unknown',
+    surfaceEvidence: null,
     reason,
   };
 }
@@ -826,7 +984,7 @@ async function bindResolved(
     return { kind: 'skip', reason: 'source_not_ready' };
   }
   if (!await dom.hasExactLink(href)) return { kind: 'skip', reason: 'fixture_not_navigable' };
-  return { kind: 'resolved', coldPath: href, warmHref: href, branch };
+  return { kind: 'resolved', coldPath: href, warmTarget: exactTargetFromPath(href), branch };
 }
 
 export interface BoundSelfQaFixtures {
@@ -837,24 +995,24 @@ export interface BoundSelfQaFixtures {
 }
 
 export function resolveBoundSelfQaDetail(
-  routeKey: string,
+  surfaceId: string,
   fixtures: Readonly<BoundSelfQaFixtures>,
   dom: ResolverDom,
 ): Promise<ResolverResult> {
-  if (routeKey === '/contacts/:contactId') {
+  if (surfaceId === '/contacts/:contactId') {
     return bindResolved(dom, `/contacts/${fixtures.contact_detail}`, {
       kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0,
     });
   }
-  if (routeKey === '/conversations/:conversationId') {
+  if (surfaceId === '/conversations/:conversationId') {
     return bindResolved(dom, `/conversations/${fixtures.conversation_detail}`, { kind: 'none' });
   }
-  if (routeKey === '/tours/:tourId') {
+  if (surfaceId === '/tours/:tourId') {
     return bindResolved(dom, `/tours/${fixtures.tour_id}`, {
       kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });
   }
-  if (routeKey === '/placements/:placementId') {
+  if (surfaceId === '/placements/:placementId') {
     return bindResolved(dom, `/placements/${fixtures.placement_id}`, {
       kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });

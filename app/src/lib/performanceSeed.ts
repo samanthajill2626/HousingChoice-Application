@@ -1,5 +1,7 @@
 import {
   BatchWriteCommand,
+  DeleteCommand,
+  QueryCommand,
   type BatchWriteCommandInput,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
@@ -40,6 +42,7 @@ import { createSuggestionResolutionRepo } from '../repos/suggestionResolutionRep
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { SEED } from './seed/lean.js';
 
 const TABLE_BASES: Readonly<Record<keyof PerformanceSeedTables, string>> = Object.freeze({
   contacts: 'contacts',
@@ -54,6 +57,68 @@ const TABLE_BASES: Readonly<Record<keyof PerformanceSeedTables, string>> = Objec
 
 type Sleep = (milliseconds: number) => Promise<void>;
 type DocumentWriteRequest = NonNullable<BatchWriteCommandInput['RequestItems']>[string][number];
+
+function leanProfilerConversationIds(): readonly string[] {
+  const nativeGroups = SEED.conversations.filter((conversation) => conversation.type === 'group_text');
+  const connectingRelays = SEED.conversations.filter((conversation) =>
+    conversation.type === 'relay_group'
+    && conversation.status === 'connecting'
+    && conversation.relay_status === 'relay_group#connecting');
+  if (nativeGroups.length !== 1 || connectingRelays.length !== 1) {
+    throw new Error('lean_profiler_group_contract_invalid');
+  }
+  const conversationIds = [nativeGroups[0]!.conversationId, connectingRelays[0]!.conversationId];
+  if (!conversationIds.every((conversationId): conversationId is string =>
+    typeof conversationId === 'string' && conversationId.length > 0)
+    || new Set(conversationIds).size !== conversationIds.length) {
+    throw new Error('lean_profiler_group_contract_invalid');
+  }
+  return Object.freeze(conversationIds);
+}
+
+async function deleteLeanProfilerGroups(deps: {
+  doc: DynamoDBDocumentClient;
+  namespace: TableNamespace;
+}): Promise<void> {
+  const messagesTable = deps.namespace.tableNameFor('messages');
+  for (const conversationId of leanProfilerConversationIds()) {
+    const deletes: DocumentWriteRequest[] = [];
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const page = await deps.doc.send(new QueryCommand({
+        TableName: messagesTable,
+        KeyConditionExpression: 'conversationId = :conversationId',
+        ExpressionAttributeValues: { ':conversationId': conversationId },
+        ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+      }));
+      for (const item of page.Items ?? []) {
+        if (typeof item['tsMsgId'] !== 'string') throw new Error('lean_profiler_message_key_invalid');
+        deletes.push({ DeleteRequest: { Key: { conversationId, tsMsgId: item['tsMsgId'] } } });
+      }
+      exclusiveStartKey = page.LastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+
+    for (let offset = 0; offset < deletes.length; offset += 25) {
+      let pending: Record<string, DocumentWriteRequest[]> = {
+        [messagesTable]: deletes.slice(offset, offset + 25),
+      };
+      for (let attempt = 1; ; attempt += 1) {
+        const response = await deps.doc.send(new BatchWriteCommand({ RequestItems: pending }));
+        pending = (response.UnprocessedItems ?? {}) as Record<string, DocumentWriteRequest[]>;
+        const remaining = Object.values(pending).reduce((sum, requests) => sum + requests.length, 0);
+        if (remaining === 0) break;
+        if (attempt >= 5) {
+          throw new Error(`performance_seed_batch_exhausted attempts=${attempt} remaining=${remaining}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(25 * 2 ** (attempt - 1), 400)));
+      }
+    }
+    await deps.doc.send(new DeleteCommand({
+      TableName: deps.namespace.tableNameFor('conversations'),
+      Key: { conversationId },
+    }));
+  }
+}
 
 function isLocalEndpoint(endpoint: string): boolean {
   try {
@@ -179,13 +244,20 @@ export async function resetPerformanceData(deps: {
   assertPerformanceBoundary(deps.config);
   const namespace = createTableNamespace(deps.config);
   const reset = deps.reset ?? resetLocalData;
-  await reset({ config: deps.config, logger: deps.logger, profile: 'lean', namespace });
-  const generated = generatePerformanceSeed(resolved);
-  await writePerformanceSeed({
-    config: deps.config,
-    namespace,
-    tables: generated.tables,
-    ...(deps.doc !== undefined && { doc: deps.doc }),
-  });
-  return generated.manifest;
+  const doc = deps.doc ?? createDocumentClient({ config: deps.config });
+  const ownsDoc = deps.doc === undefined;
+  try {
+    await reset({ config: deps.config, logger: deps.logger, profile: 'lean', namespace });
+    await deleteLeanProfilerGroups({ doc, namespace });
+    const generated = generatePerformanceSeed(resolved);
+    await writePerformanceSeed({
+      config: deps.config,
+      namespace,
+      tables: generated.tables,
+      doc,
+    });
+    return generated.manifest;
+  } finally {
+    if (ownsDoc) doc.destroy();
+  }
 }

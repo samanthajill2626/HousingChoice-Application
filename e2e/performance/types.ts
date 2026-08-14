@@ -1,4 +1,6 @@
-export const PERFORMANCE_SCHEMA_VERSION = 1 as const;
+export const PERFORMANCE_SCHEMA_VERSION = 2 as const;
+export const PERFORMANCE_REGISTRY_VERSION = 2 as const;
+export const PERFORMANCE_WORKLOAD_VERSION = 2 as const;
 export const INTERCEPTION_SCOPE_VERSION = 3 as const;
 
 export type TargetKind = 'hermetic' | 'local' | 'hosted-dev';
@@ -10,6 +12,7 @@ export type SampleStatus =
   | 'blocked_write_dependency'
   | 'skipped_no_fixture'
   | 'skipped_fixture_not_navigable'
+  | 'skipped_required_action_missing'
   | 'skipped_source_not_ready'
   | 'skipped_unresolved_branch';
 export type FailureReasonCode =
@@ -20,11 +23,14 @@ export type FailureReasonCode =
   | 'blocked_write_prevented_ready'
   | 'fixture_absent'
   | 'fixture_not_navigable'
+  | 'required_action_missing'
+  | 'contradictory_terminal'
   | 'source_not_ready'
   | 'unresolved_branch'
   | 'cleanup_failed'
   | 'privacy_scan_failed'
   | 'comparison_failed'
+  | 'endpoint_contract_mismatch'
   | 'uncataloged_write_escaped_firewall'
   | 'unexpected_failure';
 
@@ -61,8 +67,19 @@ export interface BlockedWrite {
 
 export type ResourceClass = 'document' | 'script' | 'style' | 'font' | 'image' | 'api' | 'other';
 
+export type SurfaceEvidence =
+  | {
+      kind: 'inbox';
+      filter: 'all' | 'unread' | 'unknown' | 'groups';
+      renderedRowCount: number;
+      groupsTruncated: boolean;
+      initialInboxPageRequestCount: number;
+    }
+  | { kind: 'conversation_detail'; initialRenderedMessageCount: number | null }
+  | null;
+
 export interface RequestEvidence {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   method: string;
@@ -70,6 +87,7 @@ export interface RequestEvidence {
   originClass: 'first_party' | 'third_party';
   endpointTemplate: string;
   queryKeys: string[];
+  inboxRequestClass?: import('./routes.js').InboxRequestClass;
   startOffsetMs: number;
   durationMs: number | null;
   ttfbMs: number | null;
@@ -81,7 +99,7 @@ export interface RequestEvidence {
 }
 
 export interface SampleResult {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   status: SampleStatus;
@@ -104,7 +122,8 @@ export interface SampleResult {
   blockedWrites: BlockedWrite[];
   consoleCategories: Record<string, number>;
   clientTruncated: boolean;
-  terminalState: 'populated' | 'empty' | 'error' | 'unknown';
+  terminalState: 'populated' | 'empty' | 'error' | 'contradictory_terminal' | 'unknown';
+  surfaceEvidence: SurfaceEvidence;
   reason: FailureReasonCode | null;
 }
 
@@ -126,9 +145,9 @@ export interface NumericSummary {
 export type SampleStatusCounts = Record<SampleStatus, number>;
 
 export interface RouteScaleMetadata {
-  key: string;
+  surfaceId: string;
   surfaceScaleBearing: boolean;
-  sourceLoadScaleBearing: boolean;
+  loadScaleBearing: boolean;
 }
 
 export interface AggregateMetrics {
@@ -146,7 +165,7 @@ export interface AggregateNoise {
 }
 
 export interface RouteModeAggregate {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   sampleCount: number;
   successCount: number;
@@ -173,7 +192,10 @@ export type AggregateRankings = Record<SampleMode, ModeRankings>;
 
 export interface ComparisonEnvironment {
   target: TargetKind;
-  scaleManifest: object | null;
+  registryVersion: number;
+  workloadVersion: number;
+  dataSource: 'synthetic_hermetic' | 'existing';
+  comparisonWorkload: ComparisonWorkload | null;
   routeSet: string[];
   browserMajor: number;
   browserChannel: string;
@@ -184,6 +206,32 @@ export interface ComparisonEnvironment {
   interceptionScopeVersion: number;
   settleMs: number;
   pollMs: number;
+}
+
+// This is intentionally a resolved projection. Requested overrides and the
+// deterministic seed anchor describe invocation syntax, not workload identity.
+export interface ComparisonWorkload {
+  workloadModelVersion: number;
+  contacts: number;
+  activeContacts: number;
+  units: number;
+  placements: number;
+  tours: number;
+  conversations: number;
+  nativeGroups: number;
+  nativeGroupMemberSlotCount: number;
+  totalConversations: number;
+  messagesPerConversation: number;
+  resolvedLongConversationMessages: number;
+  totalMessageCount: number;
+  broadcasts: number;
+  resolvedRecipientsPerBroadcast: number;
+  resolvedLargeBroadcastRecipients: number;
+  totalRecipientCount: number;
+  recipientPoolSize: number;
+  recipientPoolSource: 'generated_tenants' | 'lean_tenant';
+  longConversationFixturePresent: boolean;
+  largeBroadcastFixturePresent: boolean;
 }
 
 export interface RevisionPairInput {
@@ -205,7 +253,10 @@ export interface ComparisonRun {
 
 export type EnvironmentMismatchField =
   | 'target'
-  | 'scale_manifest'
+  | 'registry_version'
+  | 'workload_version'
+  | 'data_source'
+  | 'comparison_workload'
   | 'route_set'
   | 'browser_major'
   | 'browser_channel'
@@ -223,7 +274,7 @@ export interface MetricDelta {
 }
 
 export interface ComparisonEntryRef {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
 }
 

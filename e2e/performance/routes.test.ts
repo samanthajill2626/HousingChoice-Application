@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   APP_ROUTE_EXCLUSIONS,
+  assertRouteRegistry,
   CONTACT_INBOX_PROBE,
   CONTRACT_SOURCE_LEDGER,
   ROUTES,
@@ -23,11 +24,13 @@ import {
   type ResolverDom,
   type RouteContractBranch,
 } from './routes.js';
+import { sanitizeRequestUrl } from './templates.js';
 
 const EXPECTED_KEYS = [
   '/', '/contacts', '/contacts/tenants', '/contacts/landlords', '/contacts/unknown',
   '/contacts/deleted', '/listings', '/listings/deleted', '/tours', '/tours/closed',
-  '/placements', '/inbox', '/email', '/email/quarantine', '/broadcasts',
+  '/placements', 'inbox-all', 'inbox-unread', 'inbox-unknown', 'inbox-groups',
+  '/email', '/email/quarantine', '/broadcasts',
   '/settings/team', '/settings/templates', '/settings/notifications', '/settings/voice',
   '/settings/system', '/settings/ai-runs', '/settings/numbers', '/contacts/:contactId',
   '/listings/:unitId', '/tours/:tourId', '/placements/:placementId',
@@ -42,7 +45,7 @@ const THREADS: RouteContractBranch[] = [
 
 const SHELL_SHAPES = [
   '/auth/me?#required',
-  '/api/inbox?filter&limit#required',
+  '/api/inbox?filter&limit#required#inbox_badge',
   '/api/unmatched-email?filter#required',
 ] as const;
 const CONTACT_SHAPES = [
@@ -85,7 +88,10 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/contacts?deleted&type#required', '/api/contacts?cursor&deleted&type#conditional',
     ...UNIT_SHAPES, ...UNIT_DELETED_SHAPES,
   ],
-  '/inbox': ['/api/inbox?filter&limit#required'],
+  'inbox-all': ['/api/inbox?filter&limit#required#inbox_page_all'],
+  'inbox-unread': ['/api/inbox?filter&limit#required#inbox_page_unread'],
+  'inbox-unknown': ['/api/inbox?filter&limit#required#inbox_page_unknown'],
+  'inbox-groups': ['/api/inbox?filter&limit#required#inbox_page_groups'],
   '/email': ['/api/unmatched-email?filter#required', ...CONTACT_SHAPES],
   '/email/quarantine': [
     '/api/unmatched-email?filter#required',
@@ -107,7 +113,8 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/users/me?#required', '/api/contacts/:contactId/timeline?#required',
     '/api/placements?#required', '/api/units?#required',
     '/api/contacts/:contactId/listings-sent?#required', '/api/contacts/:contactId/media?#required',
-    '/api/contacts/:contactId/relay-groups?#required', ...CONTACT_SHAPES,
+    '/api/contacts/:contactId/relay-groups?#required', '/api/contacts/:contactId/group-threads?#required',
+    ...CONTACT_SHAPES,
     '/api/conversations?#conditional', '/api/conversations/:conversationId/messages?#conditional',
     '/api/tours?tenantId#required',
   ],
@@ -142,7 +149,7 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
 
 function shape(contracts: readonly EndpointContract[]): string[] {
   return contracts.map((contract) =>
-    `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}`,
+    `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}${contract.inboxRequestClass === undefined ? '' : `#${contract.inboxRequestClass}`}`,
   );
 }
 
@@ -189,10 +196,87 @@ class FakeDom implements ResolverDom {
 }
 
 describe('route registry completeness', () => {
-  it('has exactly 28 unique template-only bindings and no excluded surface', () => {
-    expect(ROUTES.map((route) => route.key)).toEqual(EXPECTED_KEYS);
-    expect(new Set(ROUTES.map((route) => route.key)).size).toBe(28);
-    expect(ROUTES).toHaveLength(28);
+  it('uses stable surface IDs separate from diagnostic path templates', () => {
+    expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(31);
+    expect(ROUTES.filter((route) => route.resolver === 'static').every((route) => route.coldTarget.kind === 'static')).toBe(true);
+    expect(ROUTES.filter((route) => route.resolver !== 'static').every((route) => route.coldTarget.kind === 'resolved')).toBe(true);
+    expect(() => assertRouteRegistry([
+      ...ROUTES,
+      { ...ROUTES[0]!, surfaceId: '/', pathTemplate: '/inbox' },
+    ])).toThrow('duplicate_surface_id');
+  });
+
+  it('accepts separate surface identities that share the inbox path template', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    expect(() => assertRouteRegistry([
+      ...ROUTES,
+      { ...inbox, surfaceId: 'inbox-extra-all' },
+      { ...inbox, surfaceId: 'inbox-extra-unread' },
+    ])).not.toThrow();
+  });
+
+  it('rejects selected state on non-exact tab locators anywhere in the registry contract', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    expect(() => assertRouteRegistry([
+      ...ROUTES.filter((route) => route !== inbox),
+      {
+        ...inbox,
+        source: {
+          ...inbox.source,
+          sourceSelected: { role: 'button', name: 'All', exactness: 'exact', selected: true },
+        },
+      },
+    ])).toThrow('selected_locator_must_be_exact_tab');
+    expect(() => assertRouteRegistry([
+      ...ROUTES.filter((route) => route !== inbox),
+      {
+        ...inbox,
+        terminal: {
+          ...inbox.terminal,
+          populated: [{ role: 'tab', name: 'All', exactness: 'contains', selected: true }],
+        },
+      },
+    ])).toThrow('selected_locator_must_be_exact_tab');
+  });
+
+  it('requires an exact selected destination tab for every Inbox surface', () => {
+    const inbox = ROUTES.filter((route) => route.behaviorFamily === 'inbox');
+    expect(inbox.map((route) => route.destinationSelected)).toEqual([
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Unread', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Unknown', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'Groups', exactness: 'exact', selected: true },
+    ]);
+    expect(inbox.every((route) => route.terminal.structure.some((locator) => locator.role === 'tablist'
+      && locator.name === 'Inbox filters' && locator.exactness === 'exact'))).toBe(true);
+
+    const all = inbox[0]!;
+    for (const destinationSelected of [
+      undefined,
+      { role: 'button', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'contains', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact' },
+    ] as const) {
+      expect(() => assertRouteRegistry([
+        ...ROUTES.filter((route) => route !== all),
+        { ...all, destinationSelected } as never,
+      ])).toThrow('inbox_destination_selected_must_be_exact_tab');
+    }
+  });
+
+  it('has no legacy identity aliases in persisted or joining performance sources', () => {
+    const sources = [
+      'types.ts', 'routes.ts', 'collect.ts', 'aggregate.ts', 'compare.ts', 'report.ts', 'selfQa.ts', 'cli.ts',
+    ].map((file) => readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')).join('\n');
+    expect(sources).not.toMatch(/\brouteKeys?\b/u);
+    expect(sources).not.toMatch(/\bsourceLoadScaleBearing\b/u);
+  });
+
+  it('has exactly 31 unique template-only bindings and no excluded surface', () => {
+    expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(31);
+    expect(ROUTES).toHaveLength(31);
     expect(APP_ROUTE_EXCLUSIONS).toEqual([
       { route: '/p/:unitId', reason: 'public' },
       { route: '/join', reason: 'public' },
@@ -202,7 +286,43 @@ describe('route registry completeness', () => {
       { route: '*', reason: 'catch_all' },
     ]);
     expect(ROUTES.every((route) => !/[0-9a-f]{8}-[0-9a-f-]{27,}/i.test(route.pathTemplate))).toBe(true);
-    expect(ROUTES.every((route) => route.pathTemplate === route.key)).toBe(true);
+    expect(ROUTES.filter((route) => route.behaviorFamily !== 'inbox').every((route) => route.pathTemplate === route.surfaceId)).toBe(true);
+  });
+
+  it('registers each Inbox filter as an exact independently-ranked surface', () => {
+    expect(ROUTES.filter((route) => route.behaviorFamily === 'inbox').map((route) => ({
+      surfaceId: route.surfaceId,
+      pathTemplate: route.pathTemplate,
+      coldTarget: route.coldTarget,
+      sourceTarget: route.source.target,
+      action: route.source.action,
+      terminal: route.terminal.empty.map((locator) => locator.name),
+    }))).toEqual([
+      {
+        surfaceId: 'inbox-all', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox' },
+        sourceTarget: { path: '/', query: { kind: 'absent' } },
+        action: { kind: 'link', href: '/inbox' },
+        terminal: ['No conversations yet'],
+      },
+      {
+        surfaceId: 'inbox-unread', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unread' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
+        action: { kind: 'tab', name: 'Unread' },
+        terminal: ["You're all caught up"],
+      },
+      {
+        surfaceId: 'inbox-unknown', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unknown' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
+        action: { kind: 'tab', name: 'Unknown' },
+        terminal: ['No unknown numbers'],
+      },
+      {
+        surfaceId: 'inbox-groups', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=groups' },
+        sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
+        action: { kind: 'tab', name: 'Groups' },
+        terminal: ['No group texts yet'],
+      },
+    ]);
   });
 
   it('mechanically matches App route elements and proves generated placeholders are empty', () => {
@@ -231,7 +351,7 @@ describe('route registry completeness', () => {
     const rawPaths = [...relative.filter((path) => !settingsChildren.some((child) => child.endsWith(path))), ...settingsChildren, ...indexPath];
     const excluded = new Set(['/p/:unitId', '/join', '/broadcasts/new', '/settings', '*']);
     expect([...new Set(rawPaths)].filter((path) => !excluded.has(path)).sort())
-      .toEqual([...EXPECTED_KEYS].sort());
+      .toEqual([...EXPECTED_KEYS.filter((key) => !key.startsWith('inbox-')), '/inbox'].sort());
     expect(appSource).toContain('{allNavTargets()');
     expect(appSource).toContain('.filter(({ to }) => !IMPLEMENTED.has(to))');
     expect(appSource).toContain('path={to.slice(1)}');
@@ -244,10 +364,12 @@ describe('route registry completeness', () => {
       expect(route.viewportDependency).toBe('desktop_chrome');
       expect(route.source.viewportDependency).toBe('desktop_chrome');
       expect(route.terminal.viewportDependency).toBe('desktop_chrome');
-      expect(route.source.exactHref).toBe(true);
+      expect(route.source).not.toHaveProperty('click');
+      expect(route.source).not.toHaveProperty('href');
+      expect(route.source).not.toHaveProperty('exactHref');
+      expect(['link', 'tab']).toContain(route.source.action.kind);
       for (const locator of [
         route.source.ready,
-        route.source.click,
         ...route.terminal.structure,
         ...route.terminal.populated,
         ...route.terminal.empty,
@@ -258,10 +380,10 @@ describe('route registry completeness', () => {
         if (locator.exactness === 'role_only') expect(locator).not.toHaveProperty('name');
       }
     }
-    expect(ROUTES.find((route) => route.key === '/settings/system')?.targetStructuralNote)
+    expect(ROUTES.find((route) => route.surfaceId === '/settings/system')?.targetStructuralNote)
       .toBe('alarms_and_errors_differ_by_target');
-    expect(ROUTES.find((route) => route.key === '/tours/:tourId')?.sourceLoadScaleBearing).toBe(false);
-    expect(ROUTES.find((route) => route.key === '/placements/:placementId')?.sourceLoadScaleBearing).toBe(false);
+    expect(ROUTES.find((route) => route.surfaceId === '/tours/:tourId')?.loadScaleBearing).toBe(false);
+    expect(ROUTES.find((route) => route.surfaceId === '/placements/:placementId')?.loadScaleBearing).toBe(false);
   });
 
   it('cites every endpoint binding, branch, terminal, resolver, blocked write, and background rule', () => {
@@ -274,8 +396,8 @@ describe('route registry completeness', () => {
     const terminalSources = CONTRACT_SOURCE_LEDGER.terminals as Readonly<Record<string, string>>;
 
     for (const route of ROUTES) {
-      cited(endpointSources[route.key]?.base);
-      cited(terminalSources[route.key]);
+      cited(endpointSources[route.surfaceId]?.base);
+      cited(terminalSources[route.surfaceId]);
       cited(CONTRACT_SOURCE_LEDGER.resolvers[route.resolver]);
     }
     expect(Object.keys(CONTRACT_SOURCE_LEDGER.warmRequirementClassifications).sort()).toEqual([
@@ -300,27 +422,44 @@ describe('route registry completeness', () => {
   });
 
   it('models terminal alternatives without requiring mutually exclusive states together', () => {
-    const tours = ROUTES.find((route) => route.key === '/tours')!;
+    const tours = ROUTES.find((route) => route.surfaceId === '/tours')!;
     expect(tours.terminal.populatedAlternatives).toHaveLength(2);
     expect(tours.terminal.populatedAlternatives.every((alternative) => alternative.length === 1)).toBe(true);
     expect(tours.terminal.emptyAlternatives).toHaveLength(1);
     expect(tours.terminal.emptyAlternatives[0]).toHaveLength(2);
 
-    const system = ROUTES.find((route) => route.key === '/settings/system')!;
+    const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
     expect(system.terminal.populatedAlternatives).toHaveLength(9);
     expect(system.terminal.populatedAlternatives.every((alternative) => alternative.length === 4)).toBe(true);
     expect(system.terminal.populatedAlternatives[0]?.[1]).toMatchObject({
       role: 'listitem', name: 'Environment: ', exactness: 'prefix',
     });
 
-    const numbers = ROUTES.find((route) => route.key === '/settings/numbers')!;
-    expect(numbers.terminal.populatedAlternatives).toHaveLength(4);
+    const numbers = ROUTES.find((route) => route.surfaceId === '/settings/numbers')!;
+    expect(numbers.terminal.structure).toEqual([
+      { role: 'heading', name: 'Our number', exactness: 'exact' },
+      { role: 'heading', name: 'Relay group numbers', exactness: 'exact' },
+    ]);
+    expect(numbers.terminal.populatedAlternatives).toHaveLength(2);
+    expect(numbers.terminal.emptyAlternatives).toHaveLength(2);
     expect(numbers.terminal.populatedAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
+    expect(numbers.terminal.emptyAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
+    expect(numbers.terminal.emptyAlternatives.flat()).toContainEqual({
+      role: 'text',
+      name: 'No relay group numbers yet - a number is provisioned with the first relay group.',
+      exactness: 'exact',
+    });
 
-    const voice = ROUTES.find((route) => route.key === '/settings/voice')!;
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    expect(conversation.terminal.populatedAlternatives).toEqual([[
+      { role: 'text', name: 'Relay group', exactness: 'exact' },
+      { role: 'link', name: 'Back to inbox', exactness: 'exact' },
+    ]]);
+
+    const voice = ROUTES.find((route) => route.surfaceId === '/settings/voice')!;
     expect(voice.terminal.populatedAlternatives.map((alternative) => alternative.length)).toEqual([1, 2]);
 
-    const broadcast = ROUTES.find((route) => route.key === '/broadcasts/:broadcastId')!;
+    const broadcast = ROUTES.find((route) => route.surfaceId === '/broadcasts/:broadcastId')!;
     expect(broadcast.terminal.populatedAlternatives).toHaveLength(1);
     expect(broadcast.terminal.populatedAlternatives[0]).toHaveLength(1);
     expect(broadcast.terminal.populatedAlternatives[0]?.[0]).toMatchObject({
@@ -330,30 +469,57 @@ describe('route registry completeness', () => {
   });
 
   it('waits for the selected settings source data branch before timing the tab click', () => {
-    const templates = ROUTES.find((route) => route.key === '/settings/templates')!;
-    expect(templates.source.path).toBe('/settings/team');
+    const templates = ROUTES.find((route) => route.surfaceId === '/settings/templates')!;
+    expect(templates.source.target).toEqual({ path: '/settings/team', query: { kind: 'absent' } });
     expect(templates.source.ready).toMatchObject({ role: 'table', exactness: 'role_only' });
-    const system = ROUTES.find((route) => route.key === '/settings/system')!;
-    expect(system.source.path).toBe('/settings/templates');
+    const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
+    expect(system.source.target).toEqual({ path: '/settings/templates', query: { kind: 'absent' } });
     expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
+  });
+
+  it('keeps the exact Inbox navigation link separate from canonical All source consumers', () => {
+    const all = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const filtered = ROUTES.filter((route) => ['inbox-unread', 'inbox-unknown', 'inbox-groups'].includes(route.surfaceId));
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+    const canonicalAllConsumers = [...filtered, conversation];
+
+    expect(all.source).toMatchObject({
+      target: { path: '/', query: { kind: 'absent' } },
+      ready: { role: 'heading', name: 'Today', exactness: 'exact' },
+      action: { kind: 'link', href: '/inbox' },
+    });
+    expect(canonicalAllConsumers.map((route) => route.source.target)).toEqual([
+      { path: '/inbox', query: { kind: 'absent' } }, { path: '/inbox', query: { kind: 'absent' } },
+      { path: '/inbox', query: { kind: 'absent' } },
+      { path: '/inbox', query: { kind: 'absent' } },
+    ]);
+    expect(canonicalAllConsumers.every((route) => route.source.ready === filtered[0]!.source.ready)).toBe(true);
+    expect(canonicalAllConsumers.every((route) => route.source.sourceTerminal !== undefined)).toBe(true);
+    expect(conversation.source.action).toEqual({ kind: 'link', href: ':resolved_cold_target' });
+    expect(canonicalAllConsumers.map((route) => route.source.sourceSelected)).toEqual([
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+    ]);
   });
 });
 
 describe('endpoint and write contracts', () => {
   it('deep-compares exact cold and warm shapes for every route', () => {
     for (const route of ROUTES) {
-      const branch = branchFor(route.key);
+      const branch = branchFor(route.surfaceId);
       const warm = expectedGets(route, 'warm', branch);
       const cold = expectedGets(route, 'cold', branch);
-      const expectedWarm = EXPECTED_WARM[route.key as keyof typeof EXPECTED_WARM];
-      const coldDestination = route.key === '/tours/closed'
+      const expectedWarm = EXPECTED_WARM[route.surfaceId as keyof typeof EXPECTED_WARM];
+      const coldDestination = route.surfaceId === '/tours/closed'
         ? EXPECTED_WARM['/tours']
-        : route.key === '/email/quarantine'
+        : route.surfaceId === '/email/quarantine'
           ? EXPECTED_WARM['/email']
           : expectedWarm;
       const expectedCold = [...new Set([...SHELL_SHAPES, ...coldDestination])];
-      expect(shape(warm), `${route.key} warm`).toEqual(expectedWarm);
-      expect(shape(cold), `${route.key} cold`).toEqual(expectedCold);
+      expect(shape(warm), `${route.surfaceId} warm`).toEqual(expectedWarm);
+      expect(shape(cold), `${route.surfaceId} cold`).toEqual(expectedCold);
       expect(Object.isFrozen(warm)).toBe(true);
       expect(shape(warm)).not.toEqual(expect.arrayContaining([
         '/auth/me?#required', '/api/events?#required',
@@ -367,14 +533,26 @@ describe('endpoint and write contracts', () => {
   });
 
   it('keeps branch choices exact and required/conditional behavior closed', () => {
-    const contact = ROUTES.find((route) => route.key === '/contacts/:contactId')!;
+    const contact = ROUTES.find((route) => route.surfaceId === '/contacts/:contactId')!;
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 })))
       .toContain('/api/tours?tenantId#required');
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 2 })))
       .toContain('/api/tours?unitId#required');
     expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'other', landlordUnitCount: 0 })))
       .not.toContain('/api/tours?tenantId#required');
-    const unit = ROUTES.find((route) => route.key === '/listings/:unitId')!;
+    expect(shape(expectedGets(contact, 'warm', { kind: 'contact_detail', contactType: 'other', landlordUnitCount: 0 })))
+      .toContain('/api/contacts/:contactId/group-threads?#required');
+    expect(sanitizeRequestUrl({
+      rawUrl: 'http://127.0.0.1:9111/api/contacts/private-contact-id/group-threads',
+      method: 'GET',
+      firstPartyOrigin: 'http://127.0.0.1:9111',
+      resourceType: 'Fetch',
+    })).toMatchObject({
+      endpointTemplate: '/api/contacts/:contactId/group-threads',
+      queryKeys: [],
+      unmatchedApi: false,
+    });
+    const unit = ROUTES.find((route) => route.surfaceId === '/listings/:unitId')!;
     expect(shape(expectedGets(unit, 'warm', { kind: 'unit_detail', hasLandlord: true })))
       .toContain('/api/contacts/:contactId?#required');
     expect(shape(expectedGets(unit, 'warm', { kind: 'unit_detail', hasLandlord: false })))
@@ -390,10 +568,16 @@ describe('endpoint and write contracts', () => {
     });
     expect(assertObservedGets([required], [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }]))
       .toEqual({ missingRequired: [required], undeclared: [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }] });
+
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
+    const page = expectedGets(inbox, 'warm', NONE)[0]!;
+    const badge: EndpointContract = { ...page, inboxRequestClass: 'inbox_badge' };
+    expect(assertObservedGets([page], [badge])).toEqual({ missingRequired: [page], undeclared: [badge] });
+    expect(assertObservedGets([page], [page])).toEqual({ missingRequired: [], undeclared: [] });
   });
 
   it('preserves exact write surfaces and legitimate two-phase multiplicity', () => {
-    const conversation = ROUTES.find((route) => route.key === '/conversations/:conversationId')!;
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
     expect([...expectedBlockedWrites(conversation, 'cold', NONE)]).toEqual([
       'conversation_detail|POST|/api/conversations/:conversationId/read|destination_mount',
     ]);
@@ -402,7 +586,7 @@ describe('endpoint and write contracts', () => {
       'conversation_detail|POST|/api/conversations/:conversationId/read|destination_mount',
     ]);
     for (const key of ['/tours/:tourId', '/placements/:placementId']) {
-      const route = ROUTES.find((candidate) => candidate.key === key)!;
+      const route = ROUTES.find((candidate) => candidate.surfaceId === key)!;
       expect([...expectedBlockedWrites(route, 'cold', THREADS[0]!)]).toContain(
         'group_thread|POST|/api/conversations/:conversationId/read|destination_mount',
       );
@@ -423,11 +607,11 @@ describe('endpoint and write contracts', () => {
     const frozen = expectedBlockedWrites(conversation, 'warm', NONE);
     expect(Object.isFrozen(frozen)).toBe(true);
     expect((frozen as unknown as { add?: unknown }).add).toBeUndefined();
-    expect(ROUTES).toHaveLength(28);
+    expect(ROUTES).toHaveLength(31);
   });
 
   it('matches the current contact detail heading including its accessible edit action', () => {
-    const contact = ROUTES.find((route) => route.key === '/contacts/:contactId')!;
+    const contact = ROUTES.find((route) => route.surfaceId === '/contacts/:contactId')!;
     expect(contact.terminal.populated[0]).toMatchObject({
       role: 'heading', name: '^Details(?: Edit contact details)?$', exactness: 'regex',
     });
@@ -444,7 +628,7 @@ describe('representative resolvers', () => {
     api.pages.set('/api/contacts?cursor=private-cursor&limit=100&type=tenant', [{ contacts: [], nextCursor: null }]);
     const result = await resolveContactDetail(api, new FakeDom(new Set(['/contacts/contact-private-b'])));
     expect(result).toEqual({
-      kind: 'resolved', coldPath: '/contacts/contact-private-b', warmHref: '/contacts/contact-private-b',
+      kind: 'resolved', coldPath: '/contacts/contact-private-b', warmTarget: { path: '/contacts/contact-private-b', query: { kind: 'absent' } },
       branch: { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 },
     });
     expect(Object.keys(result)).not.toContain('contactId');
@@ -463,6 +647,7 @@ describe('representative resolvers', () => {
     expect(JSON.stringify(branches)).not.toMatch(/private|contactId|unitId|conversationId/);
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_absent').status).toBe('skipped_no_fixture');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_not_navigable').status).toBe('skipped_fixture_not_navigable');
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'required_action_missing').status).toBe('skipped_required_action_missing');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'source_not_ready').status).toBe('skipped_source_not_ready');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'unresolved_branch').status).toBe('skipped_unresolved_branch');
   });
@@ -493,7 +678,7 @@ describe('representative resolvers', () => {
       { kind: 'relay_group', conversationId: 'conv-private' },
     ] }]);
     await expect(resolveConversationDetail(inboxApi, new FakeDom(new Set(['/conversations/conv-private']))))
-      .resolves.toMatchObject({ kind: 'resolved', warmHref: '/conversations/conv-private' });
+      .resolves.toMatchObject({ kind: 'resolved', warmTarget: { path: '/conversations/conv-private', query: { kind: 'absent' } } });
 
     const broadcastApi = new FakeApi();
     broadcastApi.pages.set('/api/broadcasts?limit=50', [{ broadcasts: [
@@ -501,7 +686,7 @@ describe('representative resolvers', () => {
       { broadcastId: 'bcast-private', status: 'failed' },
     ], nextCursor: 'must-not-page' }]);
     await expect(resolveBroadcastDetail(broadcastApi, new FakeDom(new Set(['/broadcasts/bcast-private']))))
-      .resolves.toMatchObject({ kind: 'resolved', warmHref: '/broadcasts/bcast-private' });
+      .resolves.toMatchObject({ kind: 'resolved', warmTarget: { path: '/broadcasts/bcast-private', query: { kind: 'absent' } } });
     expect(broadcastApi.calls).toEqual(['/api/broadcasts?limit=50']);
   });
 
@@ -533,7 +718,7 @@ describe('representative resolvers', () => {
     ] }]);
     const result = await resolveTourDetail(api, new FakeDom(new Set(['/tours/tour-private']), resolverNow));
     expect(result).toMatchObject({
-      kind: 'resolved', warmHref: '/tours/tour-private',
+      kind: 'resolved', warmTarget: { path: '/tours/tour-private', query: { kind: 'absent' } },
       branch: { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: false },
     });
     expect(api.calls[0]).toContain(range.from);

@@ -26,7 +26,11 @@ class FakeClock implements ReadinessClock {
   }
 }
 
-function uiAt(clock: FakeClock, at: number, state: 'populated' | 'empty' | 'error' = 'populated'): TerminalUiProbe {
+function uiAt(
+  clock: FakeClock,
+  at: number,
+  state: 'populated' | 'empty' | 'error' | 'contradictory_terminal' | 'unknown' = 'populated',
+): TerminalUiProbe {
   return {
     urlMatches: async () => true,
     structureVisible: async () => clock.now() >= at,
@@ -147,6 +151,18 @@ describe('meaningful readiness', () => {
       status: 'timeout', readyMs: null, terminalState: 'error',
       pendingCount: 1, lastQualifyingOffsetMs: 250,
     });
+  });
+
+  it.each(['error', 'contradictory_terminal', 'unknown'] as const)('does not treat %s as ready', async (state) => {
+    const clock = new FakeClock();
+    const result = await waitForMeaningfulReady({
+      token: `sample-${state}`, clock, nodeOriginMs: 0, timeoutMs: 300,
+      ui: uiAt(clock, 0, state),
+      network: networkFrom(clock, () => ({ pendingCount: 0, lastQualifyingOffsetMs: 0 })),
+      settleWindowMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'timeout', readyMs: null, terminalState: state });
   });
 });
 

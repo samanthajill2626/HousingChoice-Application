@@ -30,6 +30,7 @@ export interface RunConfig {
   contractCheckpoint: boolean;
   selfQa: SelfQaMode | null;
   printConfig: boolean;
+  seedInput: PerformanceSeedInput | null;
   seed: ResolvedPerformanceSeedConfig | null;
 }
 
@@ -47,6 +48,7 @@ export interface SafeRunConfig {
   routeOrderSeed: number;
   contractCheckpoint: boolean;
   selfQa: SelfQaMode | null;
+  requestedSeedInput?: PerformanceSeedInput | null;
   seed: PerformanceSeedManifest | null;
 }
 
@@ -56,44 +58,78 @@ export interface ParseRunConfigDeps {
   randomRouteOrderSeed?: () => number;
 }
 
-const VALUE_OPTIONS = new Set([
-  'scale',
-  'contacts',
-  'units',
-  'placements',
-  'tours',
-  'conversations',
-  'messages-per-conversation',
-  'broadcasts',
-  'recipients-per-broadcast',
-  'cold-repeats',
-  'warm-repeats',
-  'ready-timeout-ms',
-  'source-timeout-ms',
-  'login-timeout-ms',
-  'settle-ms',
-  'poll-ms',
-  'route-order-seed',
-  'baseline',
-  'base-url',
-  'login-email',
-  'browser-channel',
-  'self-qa',
+export interface PublicOption {
+  name: string;
+  kind: 'value' | 'flag';
+  seedInput?: keyof PerformanceSeedInput;
+  help: string;
+}
+
+/** This is the single parser/help/target-restriction inventory for public options. */
+export const PUBLIC_OPTION_CATALOG: readonly PublicOption[] = Object.freeze([
+  { name: 'scale', kind: 'value', seedInput: 'scale', help: 'Hermetic-only dimensionless multiplier; default 1, inclusive 1..100; scales breadth defaults, while explicit overrides win and resolved work counts toward the cap.' },
+  { name: 'contacts', kind: 'value', seedInput: 'contacts', help: 'Hermetic-only contact rows; default 100 times scale, inclusive 0..20000; overrides breadth and contributes physical cap work.' },
+  { name: 'units', kind: 'value', seedInput: 'units', help: 'Hermetic-only unit rows; default 16 times scale, inclusive 0..20000; overrides breadth and contributes physical cap work.' },
+  { name: 'placements', kind: 'value', seedInput: 'placements', help: 'Hermetic-only placement rows; default 50 times scale, inclusive 0..20000; overrides breadth and contributes physical cap work.' },
+  { name: 'tours', kind: 'value', seedInput: 'tours', help: 'Hermetic-only tour rows; default 50 times scale, inclusive 0..20000; overrides breadth and contributes physical cap work.' },
+  { name: 'conversations', kind: 'value', seedInput: 'conversations', help: 'Hermetic-only relay conversation rows; default 100 times scale, inclusive 0..20000; tail replacement needs one and messages contribute cap work.' },
+  { name: 'native-groups', kind: 'value', seedInput: 'nativeGroups', help: 'Hermetic-only native group rows; default 21 times scale, inclusive 0..20000; needs two active generated contacts and exact roster capacity, and member slots contribute logical cap work.' },
+  { name: 'messages-per-conversation', kind: 'value', seedInput: 'messagesPerConversation', help: 'Hermetic-only ordinary stored messages per conversation; default 10, inclusive 0..100; scale-invariant density and physical cap work.' },
+  { name: 'long-conversation-messages', kind: 'value', seedInput: 'longConversationMessages', help: 'Hermetic-only tail stored messages; derives from ordinary density, inclusive 0..20000, at least ordinary density, and replaces one relay fixture in physical cap work.' },
+  { name: 'broadcasts', kind: 'value', seedInput: 'broadcasts', help: 'Hermetic-only broadcast rows; default 10 times scale, inclusive 0..20000; large replacement needs one and contributes physical cap work.' },
+  { name: 'recipients-per-broadcast', kind: 'value', seedInput: 'recipientsPerBroadcast', help: 'Hermetic-only ordinary recipients per broadcast; default 25, inclusive 0..1000; scale-invariant, clipped to tenant pool, and contributes logical cap work.' },
+  { name: 'large-broadcast-recipients', kind: 'value', seedInput: 'largeBroadcastRecipients', help: 'Hermetic-only large-fixture recipients; derives from ordinary density, inclusive 0..1000, at least ordinary density, clipped to tenant pool, and contributes logical cap work.' },
+  { name: 'cold-repeats', kind: 'value', help: 'Positive cold sample repeat count (default 3).' },
+  { name: 'warm-repeats', kind: 'value', help: 'Positive warm sample repeat count (default 3).' },
+  { name: 'ready-timeout-ms', kind: 'value', help: 'Positive readiness timeout in milliseconds.' },
+  { name: 'source-timeout-ms', kind: 'value', help: 'Positive source-action timeout in milliseconds.' },
+  { name: 'login-timeout-ms', kind: 'value', help: 'Positive login timeout in milliseconds.' },
+  { name: 'settle-ms', kind: 'value', help: 'Positive settle window in milliseconds; at least poll interval.' },
+  { name: 'poll-ms', kind: 'value', help: 'Positive readiness poll interval in milliseconds.' },
+  { name: 'route-order-seed', kind: 'value', help: 'Positive deterministic route-order seed.' },
+  { name: 'baseline', kind: 'value', help: 'Comparison summary path.' },
+  { name: 'base-url', kind: 'value', help: 'Existing-data target URL; required outside hermetic mode.' },
+  { name: 'login-email', kind: 'value', help: 'Existing local user email; forbidden for hermetic mode.' },
+  { name: 'browser-channel', kind: 'value', help: 'Browser channel: chromium or chrome; hermetic uses chromium.' },
+  { name: 'self-qa', kind: 'value', help: 'Diagnostic mode: narrow or full; requires default hermetic workload.' },
+  { name: 'headed', kind: 'flag', help: 'Use a visible browser; required for hosted-dev.' },
+  { name: 'print-config', kind: 'flag', help: 'Print resolved safe configuration without lifecycle work.' },
+  { name: 'contract-checkpoint', kind: 'flag', help: 'Run the locked contract checkpoint workload.' },
+  { name: 'help', kind: 'flag', help: 'Print this help without validating a target (alias: -h).' },
 ]);
 
-const FLAG_OPTIONS = new Set(['headed', 'print-config', 'contract-checkpoint']);
-const SEED_OPTION_NAMES = [
-  'scale',
-  'contacts',
-  'units',
-  'placements',
-  'tours',
-  'conversations',
-  'messages-per-conversation',
-  'broadcasts',
-  'recipients-per-broadcast',
-] as const;
-const OVERRIDE_OPTION_NAMES = SEED_OPTION_NAMES.slice(1);
+const optionByName = new Map(PUBLIC_OPTION_CATALOG.map((option) => [option.name, option]));
+const seedOptions = PUBLIC_OPTION_CATALOG.filter((option) => option.seedInput !== undefined);
+const overrideOptionNames = seedOptions
+  .filter((option) => option.name !== 'scale')
+  .map((option) => option.name);
+
+export function renderProfilerHelp(): string {
+  const options = PUBLIC_OPTION_CATALOG.map((option) => (
+    `  --${option.name}${option.kind === 'value' ? '=VALUE' : ''}\n    ${option.help}`
+  )).join('\n');
+  return [
+    'Usage: npm run perf:pages -- <hermetic|local|hosted-dev> [options]',
+    '',
+    'Hermetic seed options are unavailable for local and hosted-dev. Seeded conversation depth is storage workload; samples measure passive initial readiness and never click Load more. All resolved physical rows, native member slots, and broadcast recipients count toward the total-work cap.',
+    '',
+    'Options:',
+    options,
+    '',
+    'Examples:',
+    '  npm run perf:pages -- hermetic --scale=7',
+    '  npm run perf:pages -- hermetic --scale=1 --long-conversation-messages=2000',
+    '  npm run perf:pages -- hermetic --large-broadcast-recipients=1000',
+    '  npm run perf:pages -- hermetic --scale=7 --print-config',
+    '  npm run perf:pages -- local --base-url=http://localhost:5174',
+    '  npm run perf:pages -- hosted-dev --base-url=https://dev.example.test --headed',
+    '',
+  ].join('\n');
+}
+
+export type ParsedProfilerArgs =
+  | { kind: 'help'; text: string }
+  | { kind: 'run'; config: RunConfig };
 
 function parseOptions(argv: string[]): {
   target: TargetKind;
@@ -117,12 +153,14 @@ function parseOptions(argv: string[]): {
     if (explicit.has(name)) throw new Error(`--${name} may be supplied only once`);
     explicit.add(name);
 
-    if (FLAG_OPTIONS.has(name)) {
+    const option = optionByName.get(name);
+    if (option === undefined) throw new Error(`--${name} is not supported`);
+
+    if (option.kind === 'flag') {
       if (separator >= 0) throw new Error(`--${name} does not accept a value`);
       flags.add(name);
       continue;
     }
-    if (!VALUE_OPTIONS.has(name)) throw new Error(`--${name} is not supported`);
 
     const value = separator >= 0 ? token.slice(separator + 1) : rest[++index];
     if (value === undefined || value.startsWith('--')) {
@@ -183,17 +221,13 @@ function assertForbidden(explicit: Set<string>, names: readonly string[], contex
 }
 
 function seedInput(values: Map<string, string>): PerformanceSeedInput {
-  return {
-    scale: seedInteger(values, 'scale'),
-    contacts: seedInteger(values, 'contacts'),
-    units: seedInteger(values, 'units'),
-    placements: seedInteger(values, 'placements'),
-    tours: seedInteger(values, 'tours'),
-    conversations: seedInteger(values, 'conversations'),
-    messagesPerConversation: seedInteger(values, 'messages-per-conversation'),
-    broadcasts: seedInteger(values, 'broadcasts'),
-    recipientsPerBroadcast: seedInteger(values, 'recipients-per-broadcast'),
-  };
+  const input: PerformanceSeedInput = {};
+  for (const option of seedOptions) {
+    if (option.seedInput === undefined) continue;
+    const value = seedInteger(values, option.name);
+    if (value !== undefined) input[option.seedInput] = value;
+  }
+  return input;
 }
 
 function assertLockedDiagnosticMode(
@@ -206,19 +240,22 @@ function assertLockedDiagnosticMode(
   if (
     seed.scale !== 1 ||
     seed.contacts !== 100 ||
-    seed.units !== 25 ||
+    seed.units !== 16 ||
     seed.placements !== 50 ||
     seed.tours !== 50 ||
     seed.conversations !== 100 ||
+    seed.nativeGroups !== 21 ||
     seed.messagesPerConversation !== 10 ||
+    seed.resolvedLongConversationMessages !== 10 ||
     seed.broadcasts !== 10 ||
     seed.recipientsPerBroadcast !== 25 ||
+    seed.resolvedLargeBroadcastRecipients !== 25 ||
     coldRepeats !== 1 ||
     warmRepeats !== 1
   ) {
     throw new Error(`${modeOption} requires default scale 1 and one cold and warm repeat`);
   }
-  for (const name of OVERRIDE_OPTION_NAMES) {
+  for (const name of overrideOptionNames) {
     if (explicit.has(name)) throw new Error(`${modeOption} rejects --${name}`);
   }
 }
@@ -236,7 +273,7 @@ export function parseRunConfig(argv: string[], deps: ParseRunConfigDeps = {}): R
   }
 
   if (target !== 'hermetic') {
-    assertForbidden(explicit, [...SEED_OPTION_NAMES, 'self-qa', 'contract-checkpoint'], target);
+    assertForbidden(explicit, [...seedOptions.map((option) => option.name), 'self-qa', 'contract-checkpoint'], target);
   } else {
     assertForbidden(explicit, ['base-url', 'login-email', 'headed'], target);
   }
@@ -266,10 +303,10 @@ export function parseRunConfig(argv: string[], deps: ParseRunConfigDeps = {}): R
     'route-order-seed',
     (deps.randomRouteOrderSeed ?? (() => randomInt(1, 2_147_483_647)))(),
   );
-  const seed =
-    target === 'hermetic'
-      ? resolvePerformanceSeedConfig(seedInput(values), undefined, deps.now ?? (() => new Date()))
-      : null;
+  const resolvedSeedInput = target === 'hermetic' ? seedInput(values) : null;
+  const seed = resolvedSeedInput === null
+    ? null
+    : resolvePerformanceSeedConfig(resolvedSeedInput, undefined, deps.now ?? (() => new Date()));
 
   if (seed && selfQa !== null) {
     assertLockedDiagnosticMode('--self-qa', seed, coldRepeats, warmRepeats, explicit);
@@ -298,8 +335,17 @@ export function parseRunConfig(argv: string[], deps: ParseRunConfigDeps = {}): R
     contractCheckpoint,
     selfQa,
     printConfig: flags.has('print-config'),
+    seedInput: resolvedSeedInput,
     seed,
   };
+}
+
+export function parseProfilerArgs(
+  argv: string[],
+  deps: ParseRunConfigDeps = {},
+): ParsedProfilerArgs {
+  if (argv.includes('--help') || argv.includes('-h')) return { kind: 'help', text: renderProfilerHelp() };
+  return { kind: 'run', config: parseRunConfig(argv, deps) };
 }
 
 export function toSafeRunConfig(config: RunConfig): SafeRunConfig {
@@ -317,6 +363,25 @@ export function toSafeRunConfig(config: RunConfig): SafeRunConfig {
     routeOrderSeed: config.routeOrderSeed,
     contractCheckpoint: config.contractCheckpoint,
     selfQa: config.selfQa,
+    requestedSeedInput: config.seedInput === null ? null : copySeedInput(config.seedInput),
     seed: config.seed === null ? null : toPerformanceSeedManifest(config.seed),
   };
+}
+
+function copySeedInput(input: PerformanceSeedInput): PerformanceSeedInput {
+  const copy: PerformanceSeedInput = {};
+  for (const option of seedOptions) {
+    if (option.seedInput === undefined) continue;
+    const value = input[option.seedInput];
+    if (value !== undefined) copy[option.seedInput] = value;
+  }
+  return copy;
+}
+
+export function toHermeticReseedPayload(config: RunConfig): {
+  input: PerformanceSeedInput;
+  anchor: string;
+} {
+  if (config.seed === null || config.seedInput === null) throw new Error('hermetic seed required');
+  return { input: copySeedInput(config.seedInput), anchor: config.seed.anchor };
 }

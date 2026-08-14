@@ -214,6 +214,30 @@ describe('route registry completeness', () => {
     ])).not.toThrow();
   });
 
+  it('rejects selected state on non-exact tab locators anywhere in the registry contract', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    expect(() => assertRouteRegistry([
+      ...ROUTES.filter((route) => route !== inbox),
+      {
+        ...inbox,
+        source: {
+          ...inbox.source,
+          sourceSelected: { role: 'button', name: 'All', exactness: 'exact', selected: true },
+        },
+      },
+    ])).toThrow('selected_locator_must_be_exact_tab');
+    expect(() => assertRouteRegistry([
+      ...ROUTES.filter((route) => route !== inbox),
+      {
+        ...inbox,
+        terminal: {
+          ...inbox.terminal,
+          populated: [{ role: 'tab', name: 'All', exactness: 'contains', selected: true }],
+        },
+      },
+    ])).toThrow('selected_locator_must_be_exact_tab');
+  });
+
   it('has no legacy identity aliases in persisted or joining performance sources', () => {
     const sources = [
       'types.ts', 'routes.ts', 'collect.ts', 'aggregate.ts', 'compare.ts', 'report.ts', 'selfQa.ts', 'cli.ts',

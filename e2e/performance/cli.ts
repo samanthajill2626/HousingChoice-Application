@@ -711,6 +711,7 @@ export function createRealInstrumentation(input: {
   let token = '';
   let nodeOriginMs = 0;
   let destinationPath = '';
+  let destinationTarget: ExactBrowserTarget | null = null;
   let consoleListener: ((message: ConsoleMessage) => void) | null = null;
   let adaptersActive = false;
 
@@ -737,6 +738,7 @@ export function createRealInstrumentation(input: {
       adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
+      destinationTarget = exactTargetFromPath(destinationPath);
       collector = new input.modules.collect.NetworkCollector({
         firstPartyOrigin: input.baseUrl,
         surfaceId: input.route.surfaceId,
@@ -809,13 +811,7 @@ export function createRealInstrumentation(input: {
           ui: {
             async urlMatches(): Promise<boolean> {
               await page!.firewall.assertHealthy({ settle: false });
-              try {
-                return new URL(page!.rawPage.url()).pathname === new URL(
-                  absoluteUrl(input.baseUrl, destinationPath),
-                ).pathname;
-              } catch {
-                return false;
-              }
+              return destinationTarget !== null && exactTargetMatches(page!.rawPage.url(), destinationTarget);
             },
             async structureVisible(): Promise<boolean> {
               if (route.terminal.structure.length === 0) return true;
@@ -873,7 +869,11 @@ export function createRealInstrumentation(input: {
           clientTruncated: metrics.clientTruncated,
           terminalState: readiness.terminalState,
           surfaceEvidence: null,
-          reason: readiness.status === 'ready' ? null : 'ready_timeout',
+          reason: readiness.status === 'ready'
+            ? null
+            : readiness.terminalState === 'contradictory_terminal'
+              ? 'contradictory_terminal'
+              : 'ready_timeout',
         };
       } finally {
         await finishAdapters();

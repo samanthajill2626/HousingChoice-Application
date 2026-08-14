@@ -628,6 +628,21 @@ describe('writePerformanceReport', () => {
     ]));
   });
 
+  it('retains contradictory terminal as the closed timeout reason in the sanitized artifact', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-c0de0001');
+    input.samples = [sample('inbox-unread', 'warm', 0, {
+      status: 'timeout', reason: 'contradictory_terminal', readyMs: null, terminalState: 'contradictory_terminal',
+    })];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.samples[0]).toMatchObject({
+      status: 'timeout', reason: 'contradictory_terminal', terminalState: 'contradictory_terminal',
+    });
+  });
+
   it('preserves out-of-sample evidence at run scope and emits its own checkpoint mismatch', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-eeee4444');

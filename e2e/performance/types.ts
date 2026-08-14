@@ -24,6 +24,7 @@ export type FailureReasonCode =
   | 'fixture_absent'
   | 'fixture_not_navigable'
   | 'required_action_missing'
+  | 'contradictory_terminal'
   | 'source_not_ready'
   | 'unresolved_branch'
   | 'cleanup_failed'

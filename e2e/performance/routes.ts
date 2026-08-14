@@ -577,6 +577,21 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
 ]);
 
 export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
+  const assertSelectedLocator = (locator: LocatorContract): void => {
+    if (locator.selected === true && (locator.role !== 'tab' || locator.exactness !== 'exact')) {
+      throw new Error('selected_locator_must_be_exact_tab');
+    }
+  };
+  const assertTerminalLocators = (terminal: TerminalContract): void => {
+    for (const locator of [
+      ...terminal.structure,
+      ...terminal.populated,
+      ...terminal.empty,
+      ...terminal.error,
+      ...terminal.populatedAlternatives.flat(),
+      ...terminal.emptyAlternatives.flat(),
+    ]) assertSelectedLocator(locator);
+  };
   const surfaceIds = new Set<string>();
   for (const route of routes) {
     if (surfaceIds.has(route.surfaceId)) throw new Error('duplicate_surface_id');
@@ -605,6 +620,10 @@ export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
       && route.source.action.href !== ':resolved_cold_target') {
       throw new Error('resolved_link_target_required');
     }
+    assertSelectedLocator(route.source.ready);
+    if (route.source.sourceSelected !== undefined) assertSelectedLocator(route.source.sourceSelected);
+    if (route.source.sourceTerminal !== undefined) assertTerminalLocators(route.source.sourceTerminal);
+    assertTerminalLocators(route.terminal);
   }
 }
 

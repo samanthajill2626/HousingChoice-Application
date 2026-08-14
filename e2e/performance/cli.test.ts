@@ -15,9 +15,10 @@ import {
   type CliRuntime,
 } from './cli.js';
 import { FirewallEscapedWriteError } from './firewall.js';
+import type { TerminalUiProbe } from './readiness.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
-import type { SampleBrowser, SampleInstrumentation } from './collect.js';
+import { NetworkCollector, summarizePageMetrics, type SampleBrowser, type SampleInstrumentation } from './collect.js';
 
 class AdapterLocator {
   constructor(
@@ -131,6 +132,82 @@ describe('exact browser targets', () => {
     raw.missingTab = true;
     await page.prepareWarmSource(unread);
     expect(await page.activateWarmAction(unread, unreadTarget)).toBe(false);
+  });
+
+  it('keeps a filtered destination non-ready when the real adapter returns to bare Inbox and preserves contradictory terminal evidence', async () => {
+    const raw = new AdapterPage();
+    raw.current = 'http://dashboard.test/inbox?filter=unread';
+    const cdp = {
+      send: vi.fn(async (method: string) => method === 'Performance.getMetrics'
+        ? { metrics: [{ name: 'Timestamp', value: 1 }] }
+        : {}),
+      on: vi.fn(),
+      detach: vi.fn(async () => undefined),
+    };
+    const rawWithProtocol = Object.assign(raw, {
+      context: () => ({ newCDPSession: vi.fn(async () => cdp) }),
+      on: vi.fn(),
+      off: vi.fn(),
+      evaluate: vi.fn(async () => ({
+        navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
+        paint: { fcpMs: null, lcpMs: null },
+        longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+        domElements: 1,
+      })),
+    });
+    const firewall = {
+      assertHealthy: vi.fn(async () => undefined),
+      drainOutOfSampleEvidence: vi.fn(() => []),
+    };
+    const page = createRealSamplePage({
+      page: rawWithProtocol as never,
+      context: { addInitScript: async () => undefined } as never,
+      contextState: { token: null },
+      firewall: firewall as never,
+      baseUrl: 'http://dashboard.test',
+      pageStoreInstaller: (() => undefined) as never,
+    });
+    const unread = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
+    const instrumentation = (await import('./cli.js')).createRealInstrumentation({
+      route: unread,
+      mode: 'warm',
+      repeat: 0,
+      baseUrl: 'http://dashboard.test',
+      readyTimeoutMs: 10,
+      settleMs: 0,
+      pollMs: 1,
+      modules: {
+        collect: { NetworkCollector, summarizePageMetrics },
+        firewall: { createFirewallRecordingToken: () => ({ evidence: () => [] }) },
+        readiness: {
+          waitForMeaningfulReady: async ({ ui }: { ui: Pick<TerminalUiProbe, 'urlMatches'> }) => {
+            expect(await ui.urlMatches()).toBe(true);
+            raw.current = 'http://dashboard.test/inbox';
+            expect(await ui.urlMatches()).toBe(false);
+            return {
+              status: 'timeout', readyMs: null, terminalState: 'contradictory_terminal', polls: 2,
+              pendingCount: 0, lastQualifyingOffsetMs: null,
+            };
+          },
+        },
+        routes: { expectedGets: () => [] },
+      },
+      requests: [],
+    } as never);
+
+    await instrumentation.beginSample({
+      page,
+      token: 'filtered-destination',
+      route: unread,
+      branch: { kind: 'none' },
+      mode: 'warm',
+      repeat: 0,
+      sourcePageUrl: '/inbox',
+      destinationPageUrl: '/inbox?filter=unread',
+    });
+    await expect(instrumentation.collectSample({
+      page, token: 'filtered-destination', route: unread, branch: { kind: 'none' }, mode: 'warm', repeat: 0,
+    })).resolves.toMatchObject({ status: 'timeout', terminalState: 'contradictory_terminal', reason: 'contradictory_terminal' });
   });
 });
 

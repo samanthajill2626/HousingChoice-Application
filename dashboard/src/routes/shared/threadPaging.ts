@@ -6,8 +6,19 @@
 // arrive, the refetched newest page no longer contains the entries that fell out
 // of the window - and those entries are not in any older page either, because
 // they were never fetched as one. Replacing state would leave a HOLE in the
-// middle of the transcript. Merging by id cannot, because nothing already seen is
-// ever dropped.
+// middle of the transcript. Merging by id keeps everything already seen, so it
+// cannot drop an entry the client has ALREADY read.
+//
+// It is NOT a guarantee of a continuous transcript, and an earlier version of
+// this comment wrongly claimed it was. Merging fills no gap it never fetched: if
+// MORE THAN ONE PAGE of new entries lands between two refetches, the newest page
+// no longer overlaps what is held, and the union is two blocks with an
+// unfetched, INVISIBLE hole between them - the transcript reads as continuous.
+// Volume alone does not get there (every persisted message schedules a refetch),
+// so the realistic trigger is a gap in the SSE stream - a backgrounded tab, a
+// sleep, a reconnect - because the stream has no replay and the hooks do not
+// resync on reconnect. Tracked in
+// docs/issues/thread-merge-leaves-a-hole-after-an-sse-gap.md.
 //
 // Accepted consequence: an entry deleted server-side lingers in an open thread
 // until the operator navigates away. Messages are not deleted in this product,

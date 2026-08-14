@@ -346,6 +346,31 @@ describe('useGroupThread paging', () => {
     expect(screen.getByTestId('ids')).not.toHaveTextContent('m100');
   });
 
+  // The armed-timer-survives-a-switch case. Filtering SSE events by
+  // conversationId narrows the window but does not close it: the filter runs
+  // when the event ARRIVES, and the switch happens after the timer is armed.
+  it('does not let a refetch armed before a switch write the old thread into the new one', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(3, 100)); // g1: m100..m102
+    const { rerender } = render(<Probe conversationId="g1" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m100,m101,m102'));
+
+    act(() => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'g1' });
+    });
+
+    getConversationMessages.mockResolvedValueOnce(page(2, 200)); // g2: m200, m201
+    rerender(<Probe conversationId="g2" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m200,m201'));
+
+    await act(async () => {
+      await flushDebounce();
+    });
+
+    expect(screen.getByTestId('ids')).toHaveTextContent('m200,m201');
+    expect(screen.getByTestId('ids')).not.toHaveTextContent('m100');
+    expect(getConversationMessages).toHaveBeenCalledTimes(2);
+  });
+
   // Adjudication A4, as in the relay suite: the first load goes through
   // mergeTimelineItems([], fresh), so same-instant messages sort by ascending id
   // on the first paint instead of reshuffling on the first SSE refetch.

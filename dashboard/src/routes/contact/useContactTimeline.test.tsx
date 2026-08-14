@@ -804,6 +804,40 @@ describe('useContactTimeline paging', () => {
     expect(screen.getByTestId('p-ids')).not.toHaveTextContent('a');
   });
 
+  // The armed-timer-survives-a-switch case. This hook is the one that does NOT
+  // remount across a contactId change - ContactDetail re-renders the same
+  // instance - so a timer armed for contact A is still live for contact B, and
+  // merge-by-id would make the resulting contamination permanent.
+  it('does not let a refetch armed before a switch write the old contact into the new one', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    const { rerender } = render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a'));
+
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('z', '2026-08-13T11:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    rerender(<PagingProbe contactId="p2" />);
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('z'));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    expect(screen.getByTestId('p-ids')).toHaveTextContent('z');
+    expect(screen.getByTestId('p-ids')).not.toHaveTextContent('a');
+    expect(getContactTimeline).toHaveBeenCalledTimes(2);
+  });
+
   // A4: the first load REPLACES, but it must still route through
   // mergeTimelineItems so the ordering contract is identical before and after any
   // merge. normalizeServerItems returns 0 on an `at` tie and JS sort is stable, so

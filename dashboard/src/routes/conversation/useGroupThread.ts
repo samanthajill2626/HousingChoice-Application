@@ -299,11 +299,20 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     }, REFETCH_DEBOUNCE_MS);
   }, [fetchNow]);
 
+  // Keyed on `conversationId`, NOT `[]` - see useRelayThread for the full
+  // reasoning. An armed timer captured the old `fetchNow` and would write the
+  // previous thread's page into this instance after a switch; merge-by-id makes
+  // that permanent rather than transient. This hook FILTERS SSE events by
+  // conversationId, which narrows the window but does not close it: the filter
+  // runs when the event arrives, and the switch happens after the timer is armed.
   useEffect(
     () => () => {
-      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+      if (debounceRef.current !== undefined) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = undefined;
+      }
     },
-    [],
+    [conversationId],
   );
 
   // FILTERED to THIS thread (adversarial 20). `/api/events` is one org-wide

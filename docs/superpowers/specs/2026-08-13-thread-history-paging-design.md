@@ -109,8 +109,21 @@ setServerItems(prev => mergeById(prev, olderPage))   // Load older
 
 `mergeById` unions by id and prefers the FRESHEST copy for ids present in both,
 so delivery-status updates still land. Nothing the client has already seen is
-ever dropped, which closes the gap. Result ordering stays chronological by the
-existing sort.
+ever dropped, which closes the window-shift gap above. Result ordering stays
+chronological by the existing sort.
+
+**What merging does NOT guarantee** (corrected after the final review; the
+original wording here overclaimed): it fills no gap it never fetched. If more
+than ONE PAGE of new entries lands between two refetches, the newest page no
+longer overlaps what is held, and the union is two blocks with an unfetched hole
+between them - and unlike the truncation this feature replaces, that hole is
+invisible, because the transcript reads as continuous. Volume alone does not
+reach it, since every persisted message schedules a refetch; the realistic
+trigger is a gap in the SSE stream (a backgrounded tab, a sleep, a reconnect),
+which has no replay and no resync. Tracked as
+`thread-merge-leaves-a-hole-after-an-sse-gap`. Merging remains the right default
+- it strictly dominates replacing, which dropped paged-in history on every
+refetch - but it is a mitigation, not a proof of continuity.
 
 Accepted consequence: an entry deleted server-side lingers in an open thread
 until the operator navigates away. Messages are not deleted in this product, and
@@ -243,6 +256,19 @@ unmount in the same commit as the final prepend - the pass where `hasOlder`
 flips false - so the restored offset would under-shoot by the control's own
 height on the last "Load older" of every thread. Outside, only prepended content
 changes the height, and the delta math is exact.
+
+**Corrected after live measurement.** The delta math IS exact outside the
+container - that half held. What this reasoning missed is that the control's
+unmount still REFLOWS the container it sits above: `.streamWrap` is a flex
+column, so when the row disappears on the final click `.stream` grows into the
+vacated space and its top edge moves up by the control's height. Measured at
+41.78px in Chromium, against 0.69px on every non-final click. Moving the control
+outside converted a scroll-offset error into a layout shift of the same
+magnitude rather than eliminating it. No unit test can see it (jsdom performs no
+layout) and the e2e assertion compares `scrollTop` to `scrollHeight`, both
+internal to `.stream`. Tracked as
+`load-older-control-unmount-jumps-the-reader`, deferred by the human with the
+remedy left open.
 
 The subtle part is scroll. The existing layout effect at
 `Timeline.tsx:1132-1153` reacts to a grown item count by setting `hasNewBelow`,

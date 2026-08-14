@@ -51,6 +51,13 @@ exhausted, on a thread the operator has already paged back through at least once
 No content is lost or duplicated. It is filed rather than fixed because every
 remedy is a UX decision rather than a mechanical correction.
 
+**Decision (2026-08-14).** Reviewed at the merge gate and DEFERRED by the human:
+ship the branch, fix this later. It is not a merge blocker - one ~42px jump, once
+per thread, at the moment history is exhausted, with nothing lost or duplicated.
+The remedy stays open because all three candidates below are UX/copy calls rather
+than mechanical corrections. Spec section 4.5 now carries the correction to its
+own reasoning.
+
 **Suggested fix.** Three candidates, in preference order:
 
 1. Replace the control with a static end-of-history marker in the SAME 42px slot

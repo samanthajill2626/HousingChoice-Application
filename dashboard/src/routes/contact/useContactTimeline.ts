@@ -520,11 +520,21 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     }, REFETCH_DEBOUNCE_MS);
   }, [fetchNow]);
 
+  // Keyed on the same identity `fetchNow` is - `[contactId, kinds]`, NOT `[]`.
+  // An armed timer captured the old `fetchNow`, so surviving a contact switch
+  // (or a kinds change) means reading the PREVIOUS feed and writing it into this
+  // instance, which is now showing a different one. Merge-by-id makes that
+  // permanent rather than transient, and this hook is the one that does not
+  // remount across a contactId change (ContactDetail re-renders the same
+  // instance), so nothing else would clear it.
   useEffect(
     () => () => {
-      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+      if (debounceRef.current !== undefined) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = undefined;
+      }
     },
-    [],
+    [contactId, kinds],
   );
 
   useEventStream({

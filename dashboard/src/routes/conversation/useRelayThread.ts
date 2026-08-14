@@ -387,11 +387,25 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     }, REFETCH_DEBOUNCE_MS);
   }, [fetchNow]);
 
+  // Keyed on `conversationId`, NOT `[]`. An armed timer captured the old
+  // `fetchNow` - and with it the old conversationId - so if it survives a thread
+  // switch it reads thread A and writes the result into this same hook instance,
+  // which is now showing thread B. The in-flight abort above cannot help: the
+  // stale timer starts a BRAND NEW request after the switch, with its own
+  // controller.
+  //
+  // This structure predates paging, where the damage was transient (the next
+  // refetch for B replaced it). Under merge-by-id it is permanent - A's rows are
+  // unioned into B and nothing removes them - so the cleanup has to run on the
+  // switch, not just on unmount.
   useEffect(
     () => () => {
-      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+      if (debounceRef.current !== undefined) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = undefined;
+      }
     },
-    [],
+    [conversationId],
   );
 
   useEventStream({

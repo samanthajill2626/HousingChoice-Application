@@ -352,6 +352,42 @@ describe('useRelayThread paging', () => {
     expect(screen.getByTestId('ids')).not.toHaveTextContent('m100');
   });
 
+  // A debounced refetch armed for the PREVIOUS thread must not survive the
+  // switch. The timer captured the old `fetchNow` (and with it the old
+  // conversationId), so if it fires after the switch it reads thread A and
+  // writes the result into the hook instance now showing thread B. Under the
+  // pre-paging replace semantics that was transient - the next refetch for B
+  // overwrote it. Under merge-by-id it is PERMANENT: A's rows are unioned in
+  // and nothing ever removes them.
+  it('does not let a refetch armed before a switch write the old thread into the new one', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(3, 100)); // c1: m100..m102
+    const { rerender } = render(<Probe conversationId="c1" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m100,m101,m102'));
+
+    // An org-wide event arms the 300ms timer while c1 is still mounted. The relay
+    // hook subscribes UNFILTERED, so any message in the org arms it.
+    act(() => {
+      lastHandlers.onMessagePersisted?.({ conversationId: 'c1' });
+    });
+
+    // The operator switches threads inside the debounce window.
+    getConversationMessages.mockResolvedValueOnce(page(2, 200)); // c2: m200, m201
+    rerender(<Probe conversationId="c2" />);
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('m200,m201'));
+
+    // Let the armed timer's deadline pass. If it survived the switch it fetches
+    // c1 again and merges m100..m102 into c2's transcript.
+    await act(async () => {
+      await flushDebounce();
+    });
+
+    expect(screen.getByTestId('ids')).toHaveTextContent('m200,m201');
+    expect(screen.getByTestId('ids')).not.toHaveTextContent('m100');
+    // Two reads total: c1's first load and c2's first load. A third means the
+    // stale timer fired.
+    expect(getConversationMessages).toHaveBeenCalledTimes(2);
+  });
+
   // Adjudication A4. buildRelayItems returns 0 for equal `at` and JS sort is
   // stable, so a raw page keeps NEWEST-FIRST order within a tie, while
   // mergeTimelineItems breaks the tie by ASCENDING id. Routing the first load

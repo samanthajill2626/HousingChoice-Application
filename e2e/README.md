@@ -83,31 +83,132 @@ that individual run and names the target. Their first end-to-end executions are
 human-owned: before merge they have guard unit evidence only. This repository does
 not automate either target.
 
-### Hermetic scale and controls
+### Profiler CLI reference
 
-Scale 1 adds 100 contacts, 25 properties, 50 placements, 50 tours, 100
-conversations, and 10 broadcasts. It keeps the densities at 10 messages per
-conversation and 25 recipients per broadcast. Scale multiplies entity counts, not
-the two densities. An explicit entity option replaces that scale-derived count:
+The public syntax is `npm run perf:pages -- <hermetic|local|hosted-dev> [options]`.
+Validation and workload resolution finish before a hermetic lane starts or any table
+is cleared. All numeric values are safe integers. A positive value has no separate
+upper bound unless this table gives one.
 
-```powershell
-npm run perf:pages -- hermetic --scale=10 --contacts=2500 --messages-per-conversation=20 --cold-repeats=5 --warm-repeats=5 --route-order-seed=240812
+| Option | Syntax, default, and restriction |
+| --- | --- |
+| `--scale` | `--scale=INTEGER`, default 1, inclusive 1..100. Hermetic only. It scales breadth defaults; explicit breadth overrides win. |
+| `--contacts` | `--contacts=INTEGER`, default `100 * scale`, inclusive 0..20000. Hermetic only. |
+| `--units` | `--units=INTEGER`, default `16 * scale`, inclusive 0..20000. Hermetic only; the staff UI calls these Properties. |
+| `--placements` | `--placements=INTEGER`, default `50 * scale`, inclusive 0..20000. Hermetic only. |
+| `--tours` | `--tours=INTEGER`, default `50 * scale`, inclusive 0..20000. Hermetic only. |
+| `--conversations` | `--conversations=INTEGER`, default `100 * scale`, inclusive 0..20000. Hermetic only; this is the existing relay-conversation population. |
+| `--native-groups` | `--native-groups=INTEGER`, default `21 * scale`, inclusive 0..20000. Hermetic only. It is the exact native group-text population, not additive to lean. |
+| `--messages-per-conversation` | `--messages-per-conversation=INTEGER`, default 10, inclusive 0..100. Hermetic only; scale-invariant ordinary stored density for relay and native conversations. |
+| `--long-conversation-messages` | `--long-conversation-messages=INTEGER`, derived from ordinary messages when omitted, inclusive 0..20000, and at least ordinary messages when supplied. Hermetic only. |
+| `--broadcasts` | `--broadcasts=INTEGER`, default `10 * scale`, inclusive 0..20000. Hermetic only. |
+| `--recipients-per-broadcast` | `--recipients-per-broadcast=INTEGER`, default 25, inclusive 0..1000. Hermetic only; scale-invariant ordinary density. |
+| `--large-broadcast-recipients` | `--large-broadcast-recipients=INTEGER`, derived from ordinary recipients when omitted, inclusive 0..1000, and at least ordinary recipients when supplied. Hermetic only. |
+| `--cold-repeats` | `--cold-repeats=POSITIVE_INTEGER`, default 3. |
+| `--warm-repeats` | `--warm-repeats=POSITIVE_INTEGER`, default 3. |
+| `--ready-timeout-ms` | `--ready-timeout-ms=POSITIVE_INTEGER`, default 120000 milliseconds. |
+| `--source-timeout-ms` | `--source-timeout-ms=POSITIVE_INTEGER`, default 120000 milliseconds. |
+| `--login-timeout-ms` | `--login-timeout-ms=POSITIVE_INTEGER`, default 300000 milliseconds. |
+| `--settle-ms` | `--settle-ms=POSITIVE_INTEGER`, default 500 milliseconds and at least `--poll-ms`. |
+| `--poll-ms` | `--poll-ms=POSITIVE_INTEGER`, default 100 milliseconds. |
+| `--route-order-seed` | `--route-order-seed=POSITIVE_INTEGER`, random when omitted. Keep it fixed for controlled comparisons. |
+| `--baseline` | `--baseline=SUMMARY_PATH`, an earlier compatible safe `summary.json`; it requests a comparison but never enforces a performance budget. |
+| `--base-url` | `--base-url=URL`, required outside hermetic mode. Local accepts only HTTP loopback port 5174; hosted-dev requires HTTPS. |
+| `--login-email` | `--login-email=EMAIL`, an existing local user identity; forbidden for hermetic mode. |
+| `--browser-channel` | `--browser-channel=chromium|chrome`, default chromium. Hermetic accepts only chromium. |
+| `--self-qa` | `--self-qa=narrow|full`, hermetic diagnostic mode. It requires default scale 1, one cold and warm repeat, and no explicit seed override. |
+| `--headed` | `--headed`, use a visible browser; required for hosted-dev and forbidden for hermetic mode. |
+| `--print-config` | `--print-config`, print one resolved safe configuration JSON value without lifecycle, network, or browser work. |
+| `--contract-checkpoint` | `--contract-checkpoint`, run the locked hermetic contract workload; it has the same default scale-1 and one-repeat lock as self-QA and is mutually exclusive with it. |
+| `--help` | `--help` (or `-h`), print help before target validation. |
+
+All seed options, `--self-qa`, and `--contract-checkpoint` are forbidden for
+existing-data local and hosted-dev targets. The hermetic target forbids
+`--base-url`, `--login-email`, `--headed`, and a non-chromium browser channel.
+Local and hosted-dev profile only the target data already present: they never seed,
+reseed, import, or modify it.
+
+Scale 1 resolves to 100 generated contacts, 16 units, 21 native groups, 50
+placements, 50 tours, 100 relay conversations, and 10 broadcasts. Generated contacts
+use a deterministic approximately 95/4/1 tenant/landlord/unknown mix; the manifest
+separates generated and active totals. Scale changes only breadth, not ordinary
+message or recipient density. Scale 7 resolves to 700 contacts, 112 units, and 147
+native groups, a calibration-shaped approximation of the authorized aggregate local
+observation, not a copied dataset or production claim.
+
+The native group count must fit the active generated-contact roster capacity
+`C(activeContacts,2) + C(activeContacts,3) + C(activeContacts,4)` and a positive
+count needs at least two active generated contacts. Native groups are never clipped.
+The long fixture replaces one eligible relay conversation when `conversations > 0`;
+otherwise its resolved tail is zero. The large fixture replaces one broadcast when
+`broadcasts > 0`; otherwise its resolved count is zero. Ordinary and large broadcast
+counts clip to the active generated tenant pool, or the explicit lean-tenant fallback
+when that pool is empty. The manifest reports requested, resolved, clipped,
+fixture-present, pool-source, and pool-size values.
+
+The count manifest records these formulas, including all resolved clipping:
+
+```text
+totalConversations = conversations + nativeGroups
+totalMessageCount = (totalConversations - 1) * messagesPerConversation + resolvedLongConversationMessages
+  when the relay fixture exists; otherwise totalConversations * messagesPerConversation
+totalRecipientCount = (broadcasts - 1) * resolvedRecipientsPerBroadcast + resolvedLargeBroadcastRecipients
+  when the broadcast fixture exists; otherwise 0
+physicalItemCount = contacts + units + placements + tours + totalConversations + totalMessageCount + broadcasts + 4
+totalItemCount = physicalItemCount + nativeGroupMemberSlotCount + totalRecipientCount <= 250000
 ```
 
-Other count overrides are `--units`, `--placements`, `--tours`,
-`--conversations`, `--broadcasts`, and `--recipients-per-broadcast`. Validation
-happens before a lane starts or any data is cleared. Use `--print-config` to validate
-a noninteractive command and inspect only its safe resolved configuration:
+Conversation depth is stored workload, not an assertion that all stored history is
+rendered initially. The profiler measures passive initial meaningful readiness and a
+safe numeric initial message-row count when available. It never clicks Load more and
+does not promise current latency changes while the application reads a bounded initial
+page.
+
+Use these parser-valid examples. The first five cover standard scaling, each tail,
+safe config inspection, and a controlled baseline; the later target examples remain
+human-only where stated.
 
 ```powershell
-npm run perf:pages -- hermetic --scale=10 --print-config
+npm run perf:pages -- hermetic --scale=7
+npm run perf:pages -- hermetic --scale=1 --long-conversation-messages=2000
+npm run perf:pages -- hermetic --large-broadcast-recipients=1000
+npm run perf:pages -- hermetic --scale=7 --print-config
+npm run perf:pages -- hermetic --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242 --baseline=e2e/.artifacts/performance/PRIOR_RUN/summary.json
 ```
 
+`--print-config` is the no-side-effect preflight workflow: inspect its safe resolved
+manifest before a browser run, then use that manifest as the controlled-run record.
 The hermetic target owns a positive e2e lane, resets only that lane, writes the
 synthetic performance world, profiles it, and stops only the launcher it started.
-It never clears lane 0 or stops shared DynamoDB Local. The count manifest printed
-by `--print-config` and stored with the report is the authority for the resolved
-totals.
+It never clears lane 0 or stops shared DynamoDB Local.
+
+### Inbox workload and passive measurement
+
+The profiler ranks four independent Inbox surface IDs: `inbox-all`,
+`inbox-unread`, `inbox-unknown`, and `inbox-groups`. Their cold URLs are `/inbox`,
+`/inbox?filter=unread`, `/inbox?filter=unknown`, and `/inbox?filter=groups`.
+Their exact initial page requests are respectively
+`GET /api/inbox?filter=all&limit=30`,
+`GET /api/inbox?filter=unread&limit=30`,
+`GET /api/inbox?filter=unknown&limit=30`, and
+`GET /api/inbox?filter=groups&limit=30`, with no cursor accepted as profiler evidence.
+The shell's unread badge is separately classified traffic:
+`GET /api/inbox?filter=unread&limit=100`. It is not the 30-row page request.
+
+Every Inbox warm sample first returns to canonical bare `/inbox` with the exact All
+tab selected, then begins timing immediately before one exact named tab activation.
+The destination must end in exactly one terminal branch: populated Conversations
+list, that filter's exact empty copy, or error alert. The four filter samples never
+open a row, click Load more, retry, mark read, or otherwise run an Inbox workflow.
+Their request evidence is passive and records the distinct Inbox request class. In
+full self-QA, relay-only DOM proof compares the rendered relay-link count on
+`inbox-all` against the expected relay population; native groups do not satisfy it.
+
+Full self-QA requires the exact 31 registered surfaces and 62 successful one-cold /
+one-warm samples, all four Inbox surfaces in both rankings, all four page classes,
+the separate badge class, no Inbox cursor evidence, no Inbox sample writes, exact
+relay-only proof, healthy watchdog, and privacy/state/cleanup proofs. It fails closed
+if a surface is absent, duplicated, or misclassified.
 
 Profiler ownership is fail-closed. The runner acquires an exclusive same-worktree
 marker, ignores an inherited `E2E_LANE`, selects a free lane, and gives its launcher
@@ -250,6 +351,11 @@ resolved counts/densities, route set, browser major/channel, viewport, repeat co
 route-order seed, firewall version, settle window, and poll interval identical for a
 controlled comparison. A changed app revision is the intended experimental variable;
 a missing revision is warned as `target_version_unverified`.
+
+This workload model starts comparison lineage version 2. Baselines from the discarded
+earlier calibration are intentionally incompatible: do not relabel, edit, or compare
+them. A compatible baseline has the same workload model, registry and surface set,
+resolved comparison workload, request-evidence schema, and controlled environment.
 
 ### Reading the report
 

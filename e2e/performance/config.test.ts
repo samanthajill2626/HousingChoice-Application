@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
@@ -343,6 +343,29 @@ describe('parseRunConfig', () => {
     }
     expect(new Set([...help.matchAll(/^\s+--([a-z-]+)/gmu)].map((match) => match[1])).size)
       .toBe(PUBLIC_OPTION_CATALOG.length);
+  });
+
+  it('keeps the documented public options in help and every profiler example parser-valid', () => {
+    const readme = readFileSync(resolve(REPO_ROOT, 'e2e/README.md'), 'utf8');
+    const reference = readme.match(
+      /### Profiler CLI reference\r?\n([\s\S]*?)\r?\n### Local imported-data target/u,
+    )?.[1];
+    expect(reference).toBeDefined();
+
+    const documentedOptions = new Set(
+      [...reference!.matchAll(/--([a-z][a-z-]*)(?:=\S+)?/gu)].map((match) => match[1]!),
+    );
+    expect([...documentedOptions].sort()).toEqual(
+      PUBLIC_OPTION_CATALOG.map((option) => option.name).sort(),
+    );
+
+    const help = renderProfilerHelp();
+    for (const option of documentedOptions) expect(help).toContain(`--${option}`);
+
+    const commands = [...readme.matchAll(/^npm run perf:pages -- (.+)$/gmu)]
+      .map((match) => match[1]!.trim().split(/\s+/u));
+    expect(commands.length).toBeGreaterThanOrEqual(5);
+    for (const argv of commands) expect(() => parseProfilerArgs(argv)).not.toThrow();
   });
 
   it('returns help before target parsing or resolver dependencies are touched', () => {

@@ -120,6 +120,15 @@ function contractIdentity(
   return `${contractShape(contract)}#${inboxRequestClass ?? contract.inboxRequestClass ?? ''}`;
 }
 
+function requestContractIdentity(
+  behaviorFamily: RouteDefinition['behaviorFamily'],
+  request: SanitizedRequestUrl,
+  inboxRequestClass: InboxRequestClass | null,
+): string {
+  const classAware = behaviorFamily === 'inbox' || inboxRequestClass === 'inbox_badge';
+  return contractIdentity(request, classAware ? inboxRequestClass : undefined);
+}
+
 export function classifyInboxRequest(rawUrl: string, sanitized: SanitizedRequestUrl): InboxRequestClass | null {
   if (sanitized.endpointTemplate !== '/api/inbox') return null;
   try {
@@ -324,9 +333,11 @@ export class NetworkCollector {
     inboxRequestClass: InboxRequestClass | null,
   ): { role: RequestEvidence['requestRole']; forceUnmatched: boolean } {
     const inboxSurface = (this.#input.behaviorFamily ?? 'standard') === 'inbox';
-    const key = inboxSurface || inboxRequestClass === 'inbox_badge'
-      ? contractIdentity(sanitized, inboxRequestClass)
-      : contractIdentity(sanitized);
+    const key = requestContractIdentity(
+      this.#input.behaviorFamily ?? 'standard',
+      sanitized,
+      inboxRequestClass,
+    );
     const shape = contractShape(sanitized);
     const expected = this.#expectedShapes.has(key);
     const completed = this.#completedFullUrls.has(rawUrl);
@@ -420,15 +431,14 @@ export class NetworkCollector {
     const bytes = encodedDataLength !== null && Number.isFinite(encodedDataLength)
       ? Math.max(0, encodedDataLength)
       : null;
-    const key = (this.#input.behaviorFamily ?? 'standard') === 'inbox'
-      ? contractIdentity(pending.sanitized, pending.inboxRequestClass)
-      : contractIdentity(pending.sanitized);
+    const key = requestContractIdentity(
+      this.#input.behaviorFamily ?? 'standard',
+      pending.sanitized,
+      pending.inboxRequestClass,
+    );
     if (outcome === 'finished') {
       this.#completedFullUrls.add(pending.rawUrl);
-      const expectedIdentity = (this.#input.behaviorFamily ?? 'standard') === 'inbox'
-        ? contractIdentity(pending.sanitized, pending.inboxRequestClass)
-        : contractIdentity(pending.sanitized);
-      if (this.#expectedShapes.has(expectedIdentity)) {
+      if (this.#expectedShapes.has(key)) {
         this.#satisfiedRequired.add(key);
       }
     }

@@ -196,10 +196,9 @@ describe('CDP request collection', () => {
 });
 
 describe('checked-in background policy', () => {
-  it('matches the cold shell badge by its closed class on standard routes and keeps warm badge traffic in the background', () => {
+  it('uses the class-qualified cold badge identity for completion and later shell refreshes on standard routes', () => {
     const firstPartyOrigin = 'http://127.0.0.1:9111';
     const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
-    const badPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30&cursor=private-cursor';
     const expected: EndpointContract[] = [{
       endpointTemplate: '/api/inbox',
       queryKeys: ['filter', 'limit'],
@@ -216,18 +215,23 @@ describe('checked-in background policy', () => {
       expectedGets: expected,
     });
     cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
-    start(cold, 'badge', 10.1, badge);
-    cold.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
-    start(cold, 'bad-page', 10.3, badPage);
-    cold.loadingFinished('sample-1', { requestId: 'bad-page', timestamp: 10.4, encodedDataLength: 30 });
-    expect(cold.endSample('sample-1').requests.map((request) => [
+    start(cold, 'badge-first', 10.1, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge-first', timestamp: 10.2, encodedDataLength: 20 });
+    cold.markTerminalVisible('sample-1');
+    start(cold, 'badge-refresh', 10.3, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge-refresh', timestamp: 10.4, encodedDataLength: 30 });
+    const ended = cold.endSample('sample-1');
+    expect(ended.requests.map((request) => [
       request.inboxRequestClass,
       request.requestRole,
       request.unmatchedApi,
     ])).toEqual([
       ['inbox_badge', 'required', false],
-      ['inbox_endpoint_contract_failure', 'required', true],
+      ['inbox_badge', 'background_shell', false],
     ]);
+    expect(ended.satisfiedRequired).toEqual(['/api/inbox?filter&limit#inbox_badge']);
+    expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([1, 20]);
+    expect([ended.backgroundRequestCount, ended.backgroundTransferBytes]).toEqual([1, 30]);
 
     const warm = new NetworkCollector({
       firstPartyOrigin,
@@ -247,6 +251,36 @@ describe('checked-in background policy', () => {
         unmatchedApi: false,
       }),
     ]);
+  });
+
+  it('keeps unread page traffic distinct from the standard-route badge completion identity', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const value = new NetworkCollector({
+      firstPartyOrigin,
+      surfaceId: '/contacts/tenants',
+      behaviorFamily: 'standard',
+      mode: 'cold',
+      repeat: 0,
+      expectedGets: [{
+        endpointTemplate: '/api/inbox',
+        queryKeys: ['filter', 'limit'],
+        requirement: 'required',
+        inboxRequestClass: 'inbox_badge',
+      }],
+    });
+    value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(value, 'unread-page', 10.1, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30');
+    value.loadingFinished('sample-1', { requestId: 'unread-page', timestamp: 10.2, encodedDataLength: 20 });
+
+    const ended = value.endSample('sample-1');
+    expect(ended.requests).toEqual([
+      expect.objectContaining({
+        inboxRequestClass: 'inbox_page_unread',
+        requestRole: 'required',
+        unmatchedApi: true,
+      }),
+    ]);
+    expect(ended.satisfiedRequired).toEqual([]);
   });
 
   it('classifies closed Inbox page and badge tuples before evidence redaction', () => {

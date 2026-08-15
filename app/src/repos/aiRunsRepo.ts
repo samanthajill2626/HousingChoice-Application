@@ -23,7 +23,7 @@ import type { RepoDeps } from './conversationsRepo.js';
 export type RunTrigger = 'sms' | 'voice' | 'triage' | 'email';
 export type RunOutcome = 'applied' | 'no_op' | 'skipped' | 'failed';
 export type SkipReason = 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
-export type RunErrorKind = 'refusal' | 'parse' | 'driver' | 'complete' | 'repo';
+export type RunErrorKind = 'refusal' | 'parse' | 'truncated' | 'driver' | 'complete' | 'repo';
 
 export interface RunError {
   kind: RunErrorKind;

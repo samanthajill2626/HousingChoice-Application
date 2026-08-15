@@ -105,6 +105,27 @@ describe('AiRunsSection', () => {
     expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('not addressed');
     expect(screen.getByRole('row', { name: /^phone/ })).toHaveTextContent('superseded by human edit');
   });
+  it('shows WHY a failed run failed - the pane used to render "failed" and drop the cause entirely', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, outcome: 'failed', error: {
+      kind: 'truncated', parked: true, attempts: 4,
+      message: 'Anthropic extraction hit the 4096-token output cap (4096 output tokens) and returned an incomplete response (stop_reason: max_tokens)',
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const failure = screen.getByRole('region', { name: 'Run failure' });
+    expect(failure).toHaveTextContent('truncated');
+    expect(failure).toHaveTextContent('stop_reason: max_tokens');
+    // `attempts` counts the PRIOR consecutive failures, so a stored 4 is this
+    // run being the fifth - the off-by-one an operator would otherwise make.
+    expect(failure).toHaveTextContent('Attempt 5');
+    // The operationally load-bearing half: nothing retries a parked row.
+    expect(failure).toHaveTextContent(/parked/i);
+  });
+
+  it('shows no failure block on a run that did not fail', () => {
+    renderSection();
+    expect(screen.queryByRole('region', { name: 'Run failure' })).not.toBeInTheDocument();
+  });
+
   it('shows model fingerprint and token usage in the detail header', () => { renderSection(); const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement; expect(header).toHaveTextContent('abcdef123456'); expect(header).toHaveTextContent('12 input tokens'); expect(header).toHaveTextContent('4 output tokens'); });
   it('shows truncation plus chars and hash evidence for a FULL window', () => { renderSection(); const table = screen.getByRole('table', { name: 'Window messages' }); expect(within(table).getByRole('columnheader', { name: 'Truncated' })).toBeInTheDocument(); expect(within(table).getByRole('columnheader', { name: 'Chars' })).toBeInTheDocument(); expect(within(table).getByRole('columnheader', { name: 'Hash' })).toBeInTheDocument(); expect(table).toHaveTextContent('yes'); });
   it('renders the current hash status instead of implying changed text still matches', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toHaveTextContent('mismatch'); });

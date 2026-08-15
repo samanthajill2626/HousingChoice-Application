@@ -1017,9 +1017,31 @@ write one (additive `notes` appends are not field writes and are never demoted).
 |---|---|---|
 | `AI_EXTRACTION_ENABLED` | `false` in production, `true` otherwise | Master kill switch. When off, the webhook schedules nothing and the worker starts no poll - the feature is inert. |
 | `EXTRACTION_DRIVER` | `anthropic` in production, `console` otherwise | LLM driver. `anthropic` = real call; `console` = logs a summary and returns nothing (keeps local dev offline); `fake` = deterministic test seam. **`fake` is REFUSED by the prod config validator** (throws at boot). |
-| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. |
+| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget is model-sensitive. |
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
 | `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
+
+**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver sends
+`thinking: {type:'disabled'}` explicitly and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
+in `app/src/adapters/extraction.ts`) for the JSON alone. **Never drop that parameter.** What an ABSENT
+`thinking` means is decided per model - `claude-opus-4-8` runs without thinking, `claude-sonnet-5` runs
+adaptive thinking - and `max_tokens` caps thinking and response text *together*. Omitting it therefore
+lets a model swap silently hand the JSON budget to reasoning tokens with no other change in the repo.
+That is exactly what broke prod extraction on **2026-08-15**: the model had moved to `claude-sonnet-5`,
+every large run stopped dead on the cap, and the failures surfaced only as `extraction poll: row failed`.
+After any model change, watch the AI run log for `truncated` failures and raise `MAX_OUTPUT_TOKENS` if
+the new model writes longer. `voice` runs are the largest output by construction (a `speakerRoles` pair
+per `Speaker N` label on top of the all-required object), so they truncate first.
+
+**Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
+row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
+There is no manual un-park step and none is needed: `scheduleExtraction` is an unconditional sliding
+upsert, so the **next inbound message on that conversation re-arms the row**, and a successful
+`complete()` REMOVEs `attempts` outright, clearing the counter. The real residue is different and worth
+naming: a conversation that was parked and then **went quiet is never retried**, so the facts in that
+window stay unextracted. After fixing a systemic extraction fault, audit the run log for parked runs and
+decide per conversation whether to re-trigger one manually - it is a data-completeness gap, not a
+pending failure.
 
 **Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
 `POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the

@@ -83,8 +83,8 @@ locals {
   # receipt rule into the shared set, which dev must have applied first (see the
   # inbound_mail module header + RUNBOOK).
   mail_domain          = "mail.housingchoice.org"
-  mail_domain_phase    = 0
-  manage_mail_rule_set = false
+  mail_domain_phase    = 1
+  manage_mail_rule_set = true
 
   # Relay Event Streams sink (T10, relay number buying strategy). false = the
   # twilio-events module is INERT: a normal apply provisions no Twilio sink and

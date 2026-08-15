@@ -1235,12 +1235,70 @@ npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --revi
 npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
-For a LOCAL run the two identity vars usually still ride the shell (local `.env`
-files rarely declare them):
+**The current input set** lives in one folder, three subdirectories, one copy of
+each file - `--quo` at `quo-export`, `--airtable` at `airtable-export`,
+`--review` at `workbook-reviewed`:
+
+```
+W:\AI Projects\Housing Choice\Import Review\2026-08-15\
+```
+
+Its README states provenance and lists the superseded workbook folders it
+replaces. The cutover export on 2026-08-17 gets its own dated folder in the same
+shape.
+
+### The LOCAL run
+
+Local resolves far less for itself than dev/prod do, because `.env` is a
+near-empty local-dev file rather than a stack's operator config. Everything the
+run needs rides the shell.
+
+Start the local stack FIRST and leave it running:
 
 ```powershell
-$env:BUSINESS_PHONE_NUMBER = "+15550009999"; $env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "+16782842537"; npm run import:apply:local -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+npm run dev -- --local --mock
 ```
+
+`--mock` is not optional if you want group texts. It starts fake-twilio on
+:8889, which is the only thing on a local box that can hold a group rail;
+without it the driver defaults to `console`, which refuses every rail operation
+and ends the conversion incomplete with all rails failed. `--local` also
+recreates the `hc-local-*` tables on every boot, so local data is transient by
+design: boot first, import second, re-import after any restart.
+
+Then, in a second terminal:
+
+```powershell
+$env:MESSAGING_DRIVER="twilio"; $env:TWILIO_API_BASE_URL="http://localhost:8889"; $env:TWILIO_CONVERSATIONS_SERVICE_SID="ISfake000000000000000000000000000"; $env:TWILIO_ACCOUNT_SID="ACfake000000000000000000000000000"; $env:TWILIO_API_KEY_SID="SKfake000000000000000000000000000"; $env:TWILIO_API_KEY_SECRET="fake-secret"; $env:TWILIO_AUTH_TOKEN="hermetic-shared-twilio-token"; $env:TWILIO_MESSAGING_SERVICE_SID="MGfake000000000000000000000000000"; $env:BUSINESS_PHONE_NUMBER="+15550009999"; $env:GROUP_IDENTITY_EXCLUDED_NUMBERS="+16782842537"; npm run import:apply:local -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+```
+
+Why each block is there:
+
+- `MESSAGING_DRIVER` + `TWILIO_API_BASE_URL` point the REAL driver at
+  fake-twilio, exactly as the e2e harness does. A local NODE_ENV defaults the
+  driver to `console`.
+- `TWILIO_CONVERSATIONS_SERVICE_SID` is REQUIRED as of 2026-08-15, on every
+  stage. The account's DEFAULT Conversations service was deleted in favour of
+  one explicit service per environment, so unset no longer means "use the
+  default" - it means addressing a service that does not exist. `loadConfig()`
+  runs at import time in this script too, so an unset value is a startup
+  refusal naming the key rather than a rail that lands where no webhook points.
+  `ISfake000000000000000000000000000` is the value `--mock` pins, and
+  fake-twilio answers on any service SID, so both sides agree.
+- The remaining `TWILIO_*` fakes are what the twilio driver demands before it
+  will construct at all. Same values as the mock lane.
+- `BUSINESS_PHONE_NUMBER` is the MOCK number, because `--mock` forces that as
+  the app's business number and the import should write for the identity the
+  running stack uses. Do not substitute the real number on local: fake-twilio
+  treats any `from` that is not its own app number as a relay POOL leg, so the
+  mismatch shows up as spurious relay groups on the first dashboard send. The
+  parity gate is indifferent - it subtracts the business number from both sides
+  before comparing.
+- `GROUP_IDENTITY_EXCLUDED_NUMBERS` is the REAL Quo org number even on local.
+  This one is the parity gate, and it has to match the export.
+
+To skip rails entirely on a console-driver local run, add `--skip-convert`: the
+data lands and the group threads stay relay groups.
 
 **Worktree note:** the env files are gitignored, so a feature worktree does not
 have them. Running `import:apply:dev` from a worktree needs `.env.dev` copied in

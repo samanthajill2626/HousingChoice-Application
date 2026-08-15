@@ -255,3 +255,91 @@ describe('mount order', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-env fence: ChatServiceSid must match the configured Conversations service
+// ---------------------------------------------------------------------------
+//
+// Signature validation proves the post came from our Twilio ACCOUNT, not from
+// THIS env's Conversations service. Two envs sharing an account each pin their
+// own service, so a mis-pointed post-webhook URL in the console would otherwise
+// file another environment's events against our conversationSids, silently.
+describe('POST /webhooks/twilio/conversations - Conversations service fence', () => {
+  const OUR_SERVICE = 'IS4375c839d35a4622993d0a6039b56cbe'; // the captured payloads' sid
+
+  it('accepts an event whose ChatServiceSid matches the configured service', async () => {
+    const receipts = recordingReceipts();
+    const { app } = makeWebhookHarness({
+      groupReceipts: receipts,
+      env: { TWILIO_CONVERSATIONS_SERVICE_SID: OUR_SERVICE },
+    });
+
+    const res = await signedTwilioPost(app, PATH, DELIVERY_PARAMS);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, outcome: 'applied' });
+    expect(receipts.calls).toHaveLength(1);
+  });
+
+  it('IGNORES a foreign-service onDeliveryUpdated without touching the receipts pipeline', async () => {
+    const receipts = recordingReceipts();
+    const { app } = makeWebhookHarness({
+      groupReceipts: receipts,
+      env: { TWILIO_CONVERSATIONS_SERVICE_SID: 'ISthisenvsownservice' },
+    });
+
+    const res = await signedTwilioPost(app, PATH, DELIVERY_PARAMS);
+
+    // 200, not 4xx: a foreign event never becomes ours, so a retry cannot help.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, ignored: true, reason: 'foreign_service' });
+    expect(receipts.calls).toEqual([]);
+  });
+
+  it('logs the foreign event at ERROR so it reaches the error alarm, not just the log', async () => {
+    // Level >= 50 is what `hc-<env>-error-logs` and the Recent Errors query key
+    // on. At WARN this condition is invisible: the far side gets a healthy 200,
+    // and the env that SHOULD have received the event sees nothing - a missing
+    // onMessageAdded writes no cross-check deadline row, so that guardrail
+    // cannot detect the silence either.
+    const { app, capture } = makeWebhookHarness({
+      env: { TWILIO_CONVERSATIONS_SERVICE_SID: 'ISthisenvsownservice' },
+    });
+
+    await signedTwilioPost(app, PATH, DELIVERY_PARAMS);
+
+    expect(
+      capture.atLevel(50).some((l) => l['event'] === 'conversations_event_foreign_service'),
+    ).toBe(true);
+  });
+
+  it('IGNORES a foreign-service onMessageAdded without feeding the cross-check ledger', async () => {
+    // A foreign event counted here would skew the guardrail balance and alarm on
+    // healthy traffic in BOTH environments.
+    const crossCheck = recordingCrossCheck();
+    const { app } = makeWebhookHarness({
+      groupCrossCheck: crossCheck,
+      env: { TWILIO_CONVERSATIONS_SERVICE_SID: 'ISthisenvsownservice' },
+    });
+
+    const res = await signedTwilioPost(app, PATH, MESSAGE_ADDED_PARAMS);
+
+    expect(res.status).toBe(200);
+    expect(crossCheck.events).toEqual([]);
+  });
+
+  it('does NOT fence when no service is configured - the account-default env keeps working', async () => {
+    // Unset means the account default, whose sid we do not carry, so fencing
+    // would reject everything. Historical behavior must be preserved exactly.
+    const receipts = recordingReceipts();
+    const { app } = makeWebhookHarness({ groupReceipts: receipts });
+
+    const res = await signedTwilioPost(app, PATH, {
+      ...DELIVERY_PARAMS,
+      ChatServiceSid: 'ISsomeothersidentirely',
+    });
+
+    expect(res.status).toBe(200);
+    expect(receipts.calls).toHaveLength(1);
+  });
+});

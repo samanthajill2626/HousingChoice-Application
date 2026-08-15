@@ -239,6 +239,12 @@ if (mockRedirect) {
     // only-if-absent (loop below), so a real .env value still wins.
     TWILIO_VI_SERVICE_SID: 'GAfakeservice',
     VOICE_TRANSCRIPT_RECONCILE_SECONDS: '2',
+    // Native group texting: pin a Conversations SERVICE so --mock exercises the
+    // service-scoped REST shape a deployed env uses. fake-twilio serves both REST
+    // prefixes, and its signer reads this SAME var to stamp ChatServiceSid on
+    // Conversations webhooks so the app's cross-env fence passes. Applied
+    // only-if-absent (loop below), so a real .env value still wins.
+    TWILIO_CONVERSATIONS_SERVICE_SID: 'ISfake000000000000000000000000000',
     // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's
     // verified cell. The local seed (devReset → seedInboundVoiceLineHolder) uses
     // the hardcoded SEED_INBOUND_VOICE_CELL fake, so nothing is injected here (the

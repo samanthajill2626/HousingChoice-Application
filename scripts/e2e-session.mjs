@@ -171,6 +171,24 @@ const childEnv = {
   // default (Number('0') is falsy in the config parse), so 2 is the intended value.
   TWILIO_VI_SERVICE_SID: process.env.TWILIO_VI_SERVICE_SID ?? 'GAfakeservice',
   VOICE_TRANSCRIPT_RECONCILE_SECONDS: process.env.VOICE_TRANSCRIPT_RECONCILE_SECONDS ?? '2',
+  // --- Native group texting: the Conversations SERVICE rails are created under ---
+  // Pinned so the lane exercises the SERVICE-SCOPED wire shape
+  // (/v1/Services/<sid>/Conversations...), which is what a deployed env sharing a
+  // Twilio account with another env must use - not the account-default shape.
+  // fake-twilio mounts its Conversations REST router at BOTH prefixes, so the REST
+  // half needs no counterpart. The WEBHOOK half does: with this set the app fences
+  // out events whose ChatServiceSid differs, so the fake's signer reads this SAME
+  // var (it inherits childEnv) to stamp its Conversations webhooks - the
+  // TWILIO_VI_SERVICE_SID alignment pattern.
+  // `||` after a trim, NOT `??`: `??` preserves an ambient '' or whitespace, and
+  // the two sides then DISAGREE - loadConfig normalizes blank to undefined (fence
+  // off, default-scope REST) while the fake signer falls back to its own literal.
+  // The lane would pass while exercising neither the service-scoped path nor the
+  // fence, with these comments still claiming it did. A blank ambient value means
+  // "not set", so treat it that way.
+  TWILIO_CONVERSATIONS_SERVICE_SID:
+    (process.env.TWILIO_CONVERSATIONS_SERVICE_SID ?? '').trim() ||
+    'ISfake000000000000000000000000000',
   // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's verified
   // cell. The local seed (devReset → seedInboundVoiceLineHolder) uses the hardcoded
   // SEED_INBOUND_VOICE_CELL fake, so nothing is injected here (the deprecated

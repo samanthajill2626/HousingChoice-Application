@@ -37,6 +37,7 @@ const prodBase = {
   TWILIO_API_KEY_SECRET: 'secret',
   TWILIO_AUTH_TOKEN: 'token',
   TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
   TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
   BUSINESS_PHONE_NUMBER: '+15555550100',
 };
@@ -105,6 +106,7 @@ describe('GROUP_IDENTITY_EXCLUDED_NUMBERS - tiers 2 and 3 (unset)', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
     });
     expect(cfg.groupIdentityExcludedNumbers).toEqual([]);
   });

@@ -29,6 +29,7 @@ describe('messaging driver honors TWILIO_API_BASE_URL', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
+      TWILIO_CONVERSATIONS_SERVICE_SID: 'IStest',
       TWILIO_API_BASE_URL: `http://127.0.0.1:${addr.port}`,
       BUSINESS_PHONE_NUMBER: '+15550009999',
       // The A2P kill-switch defaults OFF for the twilio driver; enable it so the

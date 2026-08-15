@@ -32,6 +32,7 @@ const prodBase = {
   TWILIO_API_KEY_SECRET: 'secret',
   TWILIO_AUTH_TOKEN: 'token',
   TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
   // A real (non-mock) twilio config must carry the Event Streams webhook secret.
   TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
   BUSINESS_PHONE_NUMBER: '+15555550100',
@@ -52,6 +53,7 @@ describe('relayLiveProvisioning resolution', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
     });
     expect(cfg.relayLiveProvisioning).toBe(true);
   });
@@ -68,6 +70,7 @@ describe('relayLiveProvisioning resolution', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
     });
     expect(cfg.relayLiveProvisioning).toBe(false);
   });
@@ -83,6 +86,7 @@ describe('relayLiveProvisioning resolution', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
       TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
     });
     expect(cfg.relayLiveProvisioning).toBe(true);
@@ -98,6 +102,7 @@ describe('relayLiveProvisioning resolution', () => {
       TWILIO_API_KEY_SECRET: 'secret',
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGxxx',
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'ISxxx',
       TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
     });
     expect(cfg.relayLiveProvisioning).toBe(false);

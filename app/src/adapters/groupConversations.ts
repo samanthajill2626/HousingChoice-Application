@@ -214,28 +214,43 @@ interface ConversationContextLike {
 }
 
 /**
+ * The rail-bearing surface this adapter uses. The twilio v6 SDK exposes the SAME
+ * shape twice - once at `client.conversations.v1` (the account's DEFAULT
+ * Conversations service) and once at `client.conversations.v1.services(sid)` (an
+ * explicit service). `ConversationsScopeLike` is that common shape, so the
+ * adapter resolves ONE of them at construction and every call site is scope-
+ * agnostic thereafter.
+ */
+export interface ConversationsScopeLike {
+  conversations: ((sidOrUniqueName: string) => ConversationContextLike) & {
+    create(params: {
+      uniqueName?: string;
+      friendlyName?: string;
+      messagingServiceSid?: string;
+    }): Promise<ConversationInstanceLike>;
+  };
+  conversationWithParticipants: {
+    create(params: {
+      uniqueName?: string;
+      friendlyName?: string;
+      messagingServiceSid?: string;
+      participant?: string[];
+    }): Promise<ConversationInstanceLike>;
+  };
+}
+
+/**
  * The slice of twilio v6's `client.conversations.v1` this adapter uses. Same
  * discipline as `TwilioClientLike` in messaging.ts: a structural type so tests
  * inject a four-method fake while the real SDK client remains assignable.
+ *
+ * `services` is OPTIONAL so a fake that only models the default scope stays
+ * assignable; the constructor demands it only when a service SID is configured.
  */
 export interface TwilioConversationsClientLike {
   conversations: {
-    v1: {
-      conversations: ((sidOrUniqueName: string) => ConversationContextLike) & {
-        create(params: {
-          uniqueName?: string;
-          friendlyName?: string;
-          messagingServiceSid?: string;
-        }): Promise<ConversationInstanceLike>;
-      };
-      conversationWithParticipants: {
-        create(params: {
-          uniqueName?: string;
-          friendlyName?: string;
-          messagingServiceSid?: string;
-          participant?: string[];
-        }): Promise<ConversationInstanceLike>;
-      };
+    v1: ConversationsScopeLike & {
+      services?: (serviceSid: string) => ConversationsScopeLike;
     };
   };
 }
@@ -314,6 +329,12 @@ export interface TwilioGroupConversationsDriverDeps {
   /** The CAMPAIGN-BEARING messaging service (MGxxx) every rail is pinned to. */
   messagingServiceSid: string;
   /**
+   * The Conversations Service (ISxxx) rails are created under. Absent = the
+   * account's DEFAULT service (historical behavior). See
+   * `config.twilioConversationsServiceSid` for why an env wants its own.
+   */
+  conversationsServiceSid?: string;
+  /**
    * A2P kill switch (config.smsSendingEnabled). `false` refuses every POST
    * before it reaches Twilio. Rail CREATION stays allowed: creating a
    * Conversation and attaching participants transmits nothing to any handset
@@ -329,6 +350,12 @@ export interface TwilioGroupConversationsDriverDeps {
 
 export class TwilioGroupConversationsDriver implements GroupConversationsPort {
   private readonly client: TwilioConversationsClientLike;
+  /**
+   * The resolved rail scope - an explicit Conversations Service when one is
+   * configured, else the account default. Resolved ONCE here so no call site has
+   * to know which it is.
+   */
+  private readonly scope: ConversationsScopeLike;
   private readonly log: Logger;
 
   constructor(private readonly deps: TwilioGroupConversationsDriverDeps) {
@@ -345,6 +372,33 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
         }),
       });
     this.log = deps.logger ?? defaultLogger;
+
+    // Resolve the rail scope. A configured service SID is load-bearing for
+    // cross-env isolation, so a client that cannot honour it is a HARD failure
+    // rather than a silent fall back to the shared default service - falling
+    // back is exactly the collision this setting exists to prevent.
+    const v1 = this.client.conversations.v1;
+    const serviceSid = deps.conversationsServiceSid;
+    if (serviceSid !== undefined && serviceSid.length > 0) {
+      if (typeof v1.services !== 'function') {
+        throw new Error(
+          'TwilioGroupConversationsDriver: conversationsServiceSid is set but the Conversations ' +
+            'client exposes no services() accessor - refusing to fall back to the shared default service.',
+        );
+      }
+      this.scope = v1.services(serviceSid);
+      this.log.info(
+        { event: 'group_rail_scope', conversationsServiceSid: serviceSid },
+        'group rails scoped to an explicit Conversations service',
+      );
+    } else {
+      this.scope = v1;
+      this.log.info(
+        { event: 'group_rail_scope' },
+        'group rails using the account DEFAULT Conversations service (no TWILIO_CONVERSATIONS_SERVICE_SID)',
+      );
+    }
+
     if (!deps.messagingServiceSid.startsWith('MG')) {
       // Log-only (never a boot throw): the fake-twilio stack uses synthetic
       // sids. A wrong-but-present value would silently attribute group traffic
@@ -368,7 +422,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
 
     if (total <= MAX_RAIL_PARTICIPANTS) {
       try {
-        const created = await this.client.conversations.v1.conversationWithParticipants.create({
+        const created = await this.scope.conversationWithParticipants.create({
           uniqueName: input.uniqueName,
           ...(input.friendlyName !== undefined && { friendlyName: input.friendlyName }),
           messagingServiceSid: this.deps.messagingServiceSid,
@@ -418,7 +472,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
   private async createWithIndividualAdds(
     input: CreateGroupConversationInput,
   ): Promise<CreateGroupConversationResult> {
-    const conversation = await this.client.conversations.v1.conversations.create({
+    const conversation = await this.scope.conversations.create({
       uniqueName: input.uniqueName,
       ...(input.friendlyName !== undefined && { friendlyName: input.friendlyName }),
       messagingServiceSid: this.deps.messagingServiceSid,
@@ -443,7 +497,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     conversationSid: string,
     adds: { address: string; params: Record<string, string | undefined> }[],
   ): Promise<GroupParticipantFailure[]> {
-    const context = this.client.conversations.v1.conversations(conversationSid);
+    const context = this.scope.conversations(conversationSid);
     const failures: GroupParticipantFailure[] = [];
     for (const add of adds) {
       try {
@@ -482,7 +536,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
   async fetchByUniqueName(uniqueName: string): Promise<GroupConversationRef | undefined> {
     try {
       // A UniqueName addresses the resource in place of its SID.
-      const found = await this.client.conversations.v1.conversations(uniqueName).fetch();
+      const found = await this.scope.conversations(uniqueName).fetch();
       return toConversationRef(found);
     } catch (err) {
       if (twilioStatus(err) === 404 || twilioErrorCode(err) === '20404') return undefined;
@@ -494,7 +548,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
 
   async removeConversation(conversationSid: string): Promise<boolean> {
     try {
-      await this.client.conversations.v1.conversations(conversationSid).remove();
+      await this.scope.conversations(conversationSid).remove();
       this.log.warn(
         { event: 'group_rail_conversation_deleted', conversationSid },
         'deleted a dead Conversations rail so its UniqueName can be rebuilt',
@@ -552,7 +606,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     // NO xTwilioWebhookEnabled: see the module header.
     let message;
     try {
-      message = await this.client.conversations.v1
+      message = await this.scope
         .conversations(input.conversationSid)
         .messages.create({ author: input.author, body: input.body });
     } catch (err) {
@@ -613,7 +667,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     // short map as an MB-map "mismatch" - the safe direction, but a diagnosis
     // that names the wrong cause. Reading one extra makes the over-cap case
     // detectable, and says so.
-    const list = await this.client.conversations.v1
+    const list = await this.scope
       .conversations(conversationSid)
       .participants.list({ limit: MAX_RAIL_PARTICIPANTS + 1 });
     if (list.length > MAX_RAIL_PARTICIPANTS) {
@@ -733,6 +787,9 @@ export function createGroupConversationsAdapter(
     apiKeySid: config.twilioApiKeySid,
     apiKeySecret: config.twilioApiKeySecret,
     messagingServiceSid: config.twilioMessagingServiceSid,
+    ...(config.twilioConversationsServiceSid !== undefined && {
+      conversationsServiceSid: config.twilioConversationsServiceSid,
+    }),
     sendingEnabled: config.smsSendingEnabled,
     ...(config.twilioApiBaseUrl !== undefined && { apiBaseUrl: config.twilioApiBaseUrl }),
     ...(deps.twilioClient !== undefined && { client: deps.twilioClient }),

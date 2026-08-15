@@ -169,6 +169,23 @@ export interface AppConfig {
   /** A2P Messaging Service (MGxxx) all outbound sends go through. */
   twilioMessagingServiceSid?: string;
   /**
+   * Conversations Service (ISxxx) that native group-texting RAILS are created
+   * under. Optional. UNSET means the account's DEFAULT Conversations service -
+   * the historical behavior, and what an env keeps until it is given its own
+   * service.
+   *
+   * WHY THIS EXISTS: a Conversations Service owns BOTH its webhook configuration
+   * and its UniqueName namespace, and the default service is one per ACCOUNT. So
+   * two envs sharing a Twilio account and both using the default service share
+   * one post-webhook URL (only one env can receive `onDeliveryUpdated` /
+   * `onMessageAdded`) AND one UniqueName namespace - and because a rail's
+   * UniqueName IS our conversationId (uuidv5 over the roster minus our own
+   * numbers), the SAME roster in two envs derives the SAME UniqueName and one
+   * env silently ADOPTS the other's live rail. Giving each env its own service
+   * separates both. See docs/issues/shared-conversations-service-cross-env.md.
+   */
+  twilioConversationsServiceSid?: string;
+  /**
    * Dev-only override of the Twilio REST base URL (e.g. http://localhost:8889 for
    * the fake-twilio service). Redirects the real TwilioMessagingDriver to a fake
    * host so the production driver path is exercised in tests. REJECTED in
@@ -615,6 +632,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       'TWILIO_API_KEY_SECRET',
       'TWILIO_AUTH_TOKEN',
       'TWILIO_MESSAGING_SERVICE_SID',
+      // REQUIRED since the account's DEFAULT Conversations service was DELETED
+      // (2026-08-15) in favour of one explicit service per env. Unset used to
+      // mean "use the default"; it now means "address a service that does not
+      // exist", and the failure is quiet in the worst way - rail creation either
+      // errors deep in a job or lands rails somewhere no configured webhook
+      // points at, so group threads exist with no delivery receipts and no
+      // cross-check. Fail at boot instead: loadConfig() runs at import time in
+      // every process (app, worker, AND the import/convert scripts), so this
+      // turns a silent wrong-service into a loud, immediate refusal that names
+      // the key.
+      'TWILIO_CONVERSATIONS_SERVICE_SID',
     ].filter((key) => !env[key]);
     if (missing.length > 0) {
       throw new Error(
@@ -1275,6 +1303,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN,
     twilioEventsWebhookSecret: env.TWILIO_EVENTS_WEBHOOK_SECRET,
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
+    twilioConversationsServiceSid: env.TWILIO_CONVERSATIONS_SERVICE_SID?.trim() || undefined,
     twilioApiBaseUrl: twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? twilioApiBaseUrl : undefined,
     twilioViServiceSid: env.TWILIO_VI_SERVICE_SID?.trim() || undefined,
     voiceTranscriptReconcileSeconds,

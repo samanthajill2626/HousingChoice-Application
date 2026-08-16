@@ -12,14 +12,15 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { backfillUnreadFlag } from '../scripts/backfill-unread-flag.js';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { createConversationsRepo, UNREAD_FLAG_VALUE } from '../src/repos/conversationsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -264,5 +265,268 @@ describe.skipIf(!reachable)('byUnread index + unread_flag against DynamoDB Local
     const ids = await unreadIds(100);
     expect(ids).toContain(conv.conversationId);
     expect(ids.some((id) => id.startsWith('phone#') || id.startsWith('email#'))).toBe(false);
+  });
+});
+
+// --- backfill:unread-flag round-trip ---------------------------------------
+// The script's own tables, seeded with RAW legacy-shaped rows (whole-item Puts,
+// exactly how a pre-migration table looks) so every one of the four rules runs
+// against real DynamoDB rather than a fake. Its own throwaway prefix keeps its
+// contacts/messages tables out of the suite above.
+describe.skipIf(!reachable)('backfill:unread-flag against DynamoDB Local (throwaway prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-bfill-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+
+  const bases = ['conversations', 'contacts', 'messages'] as const;
+  const convTable = tableName('conversations', testEnv);
+  const contactsTable = tableName('contacts', testEnv);
+  const messagesTable = tableName('messages', testEnv);
+
+  const DELETED_AT = '2026-08-10T00:00:00.000Z';
+  const PHONE_LIVE = '+15550100301';
+  const PHONE_DELETED_FRESH = '+15550100302';
+  const PHONE_DELETED_STALE = '+15550100303';
+
+  /** Every conversation row keyed by id - the byte-comparison baseline. */
+  async function allConversations(): Promise<Record<string, Record<string, unknown>>> {
+    const { Items } = await doc.send(new ScanCommand({ TableName: convTable }));
+    const byId: Record<string, Record<string, unknown>> = {};
+    for (const item of (Items ?? []) as Array<Record<string, unknown>>) {
+      byId[String(item['conversationId'])] = item;
+    }
+    return byId;
+  }
+
+  beforeAll(async () => {
+    for (const base of bases) {
+      await ensureTable(client, getTableSpec(base), tableName(base, testEnv));
+    }
+
+    // CONTACTS: two soft-deleted (the retroactive delete rule's population), one
+    // live (proves the pre-pass discriminates), one phone-pointer row (proves
+    // the pre-pass skips pointers rather than reading them as contacts).
+    for (const contact of [
+      { contactId: 'contact-live', phone: PHONE_LIVE, type: 'tenant', status: 'active' },
+      {
+        contactId: 'contact-deleted-fresh',
+        phone: PHONE_DELETED_FRESH,
+        type: 'tenant',
+        status: 'active',
+        deleted_at: DELETED_AT,
+      },
+      {
+        contactId: 'contact-deleted-stale',
+        phone: PHONE_DELETED_STALE,
+        type: 'tenant',
+        status: 'active',
+        deleted_at: DELETED_AT,
+      },
+      { contactId: `phoneref#${PHONE_LIVE}`, phone: PHONE_LIVE, phone_ref: true, phone_ref_owner: 'contact-live' },
+    ]) {
+      await doc.send(new PutCommand({ TableName: contactsTable, Item: contact }));
+    }
+
+    // CONVERSATIONS: one row per rule, plus a pointer row and an
+    // already-correct row so skip is exercised in both of its shapes.
+    for (const conv of [
+      // rule 5 -> remove: read, but still carrying the flag.
+      {
+        conversationId: 'conv-flagged-read',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: PHONE_LIVE,
+        last_activity_at: '2026-08-01T01:00:00.000Z',
+        unread_count: 0,
+        unread_flag: UNREAD_FLAG_VALUE,
+      },
+      // rule 4 -> stamp: the migration proper.
+      {
+        conversationId: 'conv-unflagged-unread',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: PHONE_LIVE,
+        last_activity_at: '2026-08-01T02:00:00.000Z',
+        unread_count: 2,
+      },
+      // rule 2 -> closedReset: closed while unread, flagged (both must clear).
+      {
+        conversationId: 'conv-closed-relay',
+        type: 'relay_group',
+        status: 'closed',
+        participant_phone: '+15550100399',
+        pool_number: '+15550100399',
+        last_activity_at: '2026-08-01T03:00:00.000Z',
+        unread_count: 3,
+        unread_flag: UNREAD_FLAG_VALUE,
+      },
+      // rule 3 -> probe -> stamp: a GENUINE resurfacing (inbound after delete).
+      {
+        conversationId: 'conv-deleted-fresh',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: PHONE_DELETED_FRESH,
+        last_activity_at: '2026-08-11T00:00:00.000Z',
+        unread_count: 1,
+      },
+      // rule 3 -> probe -> deletedReset: nothing since the delete.
+      {
+        conversationId: 'conv-deleted-stale',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: PHONE_DELETED_STALE,
+        last_activity_at: '2026-08-09T00:00:00.000Z',
+        unread_count: 1,
+      },
+      // rule 1 -> skip: key-only pointer partition.
+      { conversationId: `phone#${PHONE_LIVE}`, ref_conversationId: 'conv-flagged-read' },
+      // rule 6 -> skip: already correct, and must stay byte-identical.
+      {
+        conversationId: 'conv-correct-unread',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: PHONE_LIVE,
+        last_activity_at: '2026-08-01T04:00:00.000Z',
+        unread_count: 2,
+        unread_flag: UNREAD_FLAG_VALUE,
+      },
+    ]) {
+      await doc.send(new PutCommand({ TableName: convTable, Item: conv }));
+    }
+
+    // MESSAGES: the newest message on each deleted-contact thread is what the
+    // probe reads. Ordering is by tsMsgId (newest-first), so the resurfacing
+    // thread's post-delete inbound must ALSO be its newest key.
+    for (const message of [
+      {
+        conversationId: 'conv-deleted-fresh',
+        tsMsgId: '2026-08-09T00:00:00.000Z#m1',
+        direction: 'outbound',
+        created_at: '2026-08-09T00:00:00.000Z',
+      },
+      {
+        conversationId: 'conv-deleted-fresh',
+        tsMsgId: '2026-08-11T00:00:00.000Z#m2',
+        direction: 'inbound',
+        created_at: '2026-08-11T00:00:00.000Z', // AFTER the delete -> resurfaces
+      },
+      {
+        conversationId: 'conv-deleted-stale',
+        tsMsgId: '2026-08-09T00:00:00.000Z#m1',
+        direction: 'inbound',
+        created_at: '2026-08-09T00:00:00.000Z', // BEFORE the delete -> no resurfacing
+      },
+    ]) {
+      await doc.send(new PutCommand({ TableName: messagesTable, Item: message }));
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    for (const base of bases) {
+      await deleteTableIfExists(client, tableName(base, testEnv));
+    }
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  const EXPECTED_COUNTS = {
+    scanned: 7,
+    stamped: 2, // conv-unflagged-unread + the resurfacing probe
+    removed: 1, // conv-flagged-read
+    skipped: 2, // the pointer row + conv-correct-unread
+    closedReset: 1, // conv-closed-relay
+    deletedReset: 1, // conv-deleted-stale
+    probed: 2, // both deleted-contact threads
+  };
+
+  it('--dry-run reports the full plan and writes NOTHING', async () => {
+    const before = await allConversations();
+
+    const counts = await backfillUnreadFlag({ doc, env: testEnv, dryRun: true });
+    expect(counts).toEqual(EXPECTED_COUNTS);
+
+    // Not "looks the same" - every row, every attribute, unchanged.
+    expect(await allConversations()).toEqual(before);
+  });
+
+  it('the live run applies all four rules, with the right end state per row', async () => {
+    const counts = await backfillUnreadFlag({ doc, env: testEnv });
+    expect(counts).toEqual(EXPECTED_COUNTS);
+
+    const after = await allConversations();
+
+    // rule 5: the stale flag is GONE (absent, not empty), count untouched.
+    expect('unread_flag' in (after['conv-flagged-read'] ?? {})).toBe(false);
+    expect(after['conv-flagged-read']?.['unread_count']).toBe(0);
+
+    // rule 4: stamped, count untouched.
+    expect(after['conv-unflagged-unread']?.['unread_flag']).toBe(UNREAD_FLAG_VALUE);
+    expect(after['conv-unflagged-unread']?.['unread_count']).toBe(2);
+
+    // rule 2: closed relay zeroed AND unflagged, status left alone.
+    expect(after['conv-closed-relay']?.['unread_count']).toBe(0);
+    expect('unread_flag' in (after['conv-closed-relay'] ?? {})).toBe(false);
+    expect(after['conv-closed-relay']?.['status']).toBe('closed');
+
+    // rule 3a: the genuine resurfacing SURVIVED - stamped, count preserved.
+    // This is the whole reason the probe exists instead of a blanket reset.
+    expect(after['conv-deleted-fresh']?.['unread_flag']).toBe(UNREAD_FLAG_VALUE);
+    expect(after['conv-deleted-fresh']?.['unread_count']).toBe(1);
+
+    // rule 3b: nothing since the delete -> zeroed, unflagged.
+    expect(after['conv-deleted-stale']?.['unread_count']).toBe(0);
+    expect('unread_flag' in (after['conv-deleted-stale'] ?? {})).toBe(false);
+
+    // rule 1: the pointer row is byte-identical (two attributes, no unread).
+    expect(after[`phone#${PHONE_LIVE}`]).toEqual({
+      conversationId: `phone#${PHONE_LIVE}`,
+      ref_conversationId: 'conv-flagged-read',
+    });
+
+    // rule 6: already correct, untouched.
+    expect(after['conv-correct-unread']?.['unread_flag']).toBe(UNREAD_FLAG_VALUE);
+    expect(after['conv-correct-unread']?.['unread_count']).toBe(2);
+  });
+
+  it('the backfilled rows are the exact byUnread residents afterwards', async () => {
+    // The end-to-end point of the whole script: index membership, read through
+    // the real GSI rather than inferred from the item shapes above.
+    const repo = createConversationsRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const { items } = await repo.queryUnreadPage({ limit: 100 });
+    expect(items.map((c) => c.conversationId).sort()).toEqual([
+      'conv-correct-unread',
+      'conv-deleted-fresh',
+      'conv-unflagged-unread',
+    ]);
+  });
+
+  it('re-running is idempotent: no further writes, identical end state', async () => {
+    const before = await allConversations();
+
+    const counts = await backfillUnreadFlag({ doc, env: testEnv });
+    // Everything already sits in its target state. conv-deleted-fresh is still
+    // unread with a deleted owner, so it is probed and re-stamped every run -
+    // the conditional write makes that a no-op, which is exactly why the write
+    // guards the state it transitions FROM.
+    expect(counts).toEqual({
+      scanned: 7,
+      stamped: 1,
+      removed: 0,
+      // The other six: the pointer row, and five rows already in target state.
+      skipped: 6,
+      closedReset: 0,
+      deletedReset: 0,
+      probed: 1,
+    });
+    // Every row is accounted for exactly once - no row silently unvisited.
+    expect(
+      counts.stamped + counts.removed + counts.skipped + counts.closedReset + counts.deletedReset,
+    ).toBe(counts.scanned);
+
+    expect(await allConversations()).toEqual(before);
   });
 });

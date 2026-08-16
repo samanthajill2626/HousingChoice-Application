@@ -1035,13 +1035,16 @@ per `Speaker N` label on top of the all-required object), so they truncate first
 
 **Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
 row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
-There is no manual un-park step and none is needed: `scheduleExtraction` is an unconditional sliding
-upsert, so the **next inbound message on that conversation re-arms the row**, and a successful
-`complete()` REMOVEs `attempts` outright, clearing the counter. The real residue is different and worth
-naming: a conversation that was parked and then **went quiet is never retried**, so the facts in that
-window stay unextracted. After fixing a systemic extraction fault, audit the run log for parked runs and
-decide per conversation whether to re-trigger one manually - it is a data-completeness gap, not a
-pending failure.
+That park write is **conditional**: if something re-armed the row while the run was failing - an inbound
+message, or a press of the button below - the REMOVE is refused, only the error and attempt count are
+recorded, and the row stays armed at its fresh `dueAt`. Two things re-arm a parked row:
+`scheduleExtraction` is an unconditional sliding upsert, so the **next inbound message on that
+conversation re-arms it**; and the **Run AI extraction** action on the contact page arms every eligible
+1:1 thread for an immediate run. A successful `complete()` REMOVEs `attempts` outright, clearing the
+counter. The real residue is worth naming: a conversation that was parked and then **went quiet is never
+retried automatically**, so the facts in that window stay unextracted until someone presses the button.
+After fixing a systemic extraction fault, audit the run log for parked runs and decide per conversation
+whether to re-trigger one - it is a data-completeness gap, not a pending failure.
 
 **Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
 `POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the

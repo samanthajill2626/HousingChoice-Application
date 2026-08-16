@@ -518,7 +518,10 @@ export const TABLES: readonly TableSpec[] = [
     // while BOTH its GSI key attributes are present, so the repo must REMOVE both
     // key attrs together to retire a row from an index.
     //   byDueAt   - poll query for due conversations. Present ONLY while a run is
-    //               scheduled; claim/complete/park REMOVE _duePartition AND dueAt.
+    //               scheduled; claim/complete REMOVE _duePartition AND dueAt.
+    //               Park REMOVEs them too, but CONDITIONALLY (repo `fail`): a
+    //               row re-armed during the failing run keeps its fresh dueAt
+    //               and stays indexed.
     //   byOwner   - a contact's pending suggestions (review UI). Only suggestion
     //               rows carry ownerContactId.
     //   byPending - all pending suggestions, newest-first by createdAt (Today

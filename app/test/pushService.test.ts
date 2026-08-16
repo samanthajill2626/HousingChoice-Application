@@ -65,6 +65,42 @@ describe('pushService.sendToUser', () => {
     expect(sentTo.sort()).toEqual(['https://fcm.googleapis.com/fcm/send/a', 'https://fcm.googleapis.com/fcm/send/b']);
   });
 
+  it('forwards ttlSeconds to the adapter, and sends NO options when unset', async () => {
+    // TTL is the stale-pre-ring guard (observed 2026-08-16: Android deferred a
+    // high-urgency push under doze, then flushed it MINUTES after its call
+    // ended). Time-sensitive kinds declare a TTL; everything else must keep
+    // web-push's late-is-better-than-never default, so unset must reach the
+    // adapter as undefined - not as { ttlSeconds: undefined }.
+    const config = loadConfig(VAPID_ENV);
+    const fakeUsers = makeFakeUsersRepo([
+      testUserItem({
+        push_subscriptions: [
+          { ...sub('https://fcm.googleapis.com/fcm/send/a'), created_at: '2026-06-01T00:00:00.000Z' },
+        ],
+      }),
+    ]);
+    const seenOptions: unknown[] = [];
+    const adapter: WebPushAdapter = {
+      async sendToSubscription(_subscription, _payload, options) {
+        seenOptions.push(options);
+        return { result: 'sent', statusCode: 201 };
+      },
+    };
+    const service = createPushService({ config, usersRepo: fakeUsers.repo, adapter });
+
+    await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'pre_ring',
+      payload: { title: 'Incoming call' },
+      ttlSeconds: 60,
+    });
+    await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'missed_call',
+      payload: { title: 'Missed call' },
+    });
+
+    expect(seenOptions).toEqual([{ ttlSeconds: 60 }, undefined]);
+  });
+
   it('prunes Gone (404/410) subscriptions from the user record', async () => {
     const config = loadConfig(VAPID_ENV);
     const fakeUsers = makeFakeUsersRepo([

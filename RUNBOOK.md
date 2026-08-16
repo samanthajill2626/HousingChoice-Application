@@ -1220,6 +1220,22 @@ do **not** apply to it.
 - **If it's stuck silent and won't change:** Android locks a category's importance once created and
   the app can't raise it afterward. If toggling the category doesn't take, **uninstall and
   reinstall the PWA** to recreate the channel fresh, then re-grant permission.
+- **Battery optimization DELAYS delivery even when everything above is right (observed live
+  2026-08-16).** Every push is sent `urgency: high`, but Android defers delivery while the device
+  dozes and then flushes the whole backlog when the FCM connection wakes - on prod this arrived as
+  "the test push (screen on) is instant, but call pushes land 15-30 minutes late, in a clump."
+  On any handset that must receive CALL alerts (the founder's, the inbound-voice-line holder's):
+  **Settings -> Apps -> [PWA] -> Battery -> Unrestricted**, and the same for **Chrome** (the WebAPK
+  delegates to it). On Samsung, ALSO check **Settings -> Battery -> Background usage limits** and
+  make sure neither Chrome nor the PWA is in "Deep sleeping apps." Data Saver, if on, needs Chrome
+  exempted too. Verify with the "worst case" drill: screen off, unplugged, wait 10+ minutes, then
+  have someone else call the business number - the pre-ring push must beat the ring.
+- **A late flush can LOOK like missing notifications.** Same-`tag` notifications replace each other
+  in place (pre-ring, missed-call and voicemail for one call share the CallSid as their tag), so
+  when a deferred backlog lands at once, several calls' worth of pushes collapse into one or two
+  shade entries and the earlier ones appear to have never arrived. Since 2026-08-16 the pre-ring
+  push carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather than delivered
+  minutes late; missed-call and voicemail keep the late-is-better-than-never default deliberately.
 
 ### iPhone (installed PWA, iOS 16.4+)
 

@@ -61,43 +61,26 @@ self.addEventListener('push', (event) => {
     }
   }
 
-  const title = data.title || 'HousingChoice';
-  // Pre-ring and missed-call alerts are time-sensitive (the founder must see
-  // them BEFORE/around a live call), so they get the strongest on-screen
-  // treatment we can ask for.
-  const timeSensitive = data.kind === 'missed_call' || data.kind === 'pre_ring';
-  const tag = data.callId || data.conversationId || undefined;
-  const options = {
-    body: data.body || '',
-    // The icons ship in the manifest set; reuse the maskable icon.
-    icon: '/icons/icon-192.png',
-    badge: '/icons/badge-72.png',
-    // Carry ONLY the known routing fields to notificationclick — never a
-    // payload-supplied url (C1: no open-redirect sink).
-    data: {
-      kind: data.kind,
-      callId: data.callId,
-      conversationId: data.conversationId,
-    },
-    // Android shows action buttons; iOS ignores them (tap deep-links instead).
-    actions: Array.isArray(data.actions) ? data.actions.slice(0, 2) : undefined,
-    // HEADS-UP / "bubble" treatment: a vibration pattern is the key nudge that
-    // makes Android surface the notification as an on-screen banner (a "peek")
-    // instead of filing it silently into the shade. (iOS ignores `vibrate` but
-    // honors the banner per the user's per-PWA notification settings — there is
-    // no code lever for heads-up on iOS; see PHASE1_CHANGE_ORDER_3 notes.)
-    vibrate: [200, 100, 200],
-    // `renotify` re-alerts (peeks again) when a later push reuses the same tag,
-    // instead of swapping the existing one in place silently. It REQUIRES a tag
-    // — setting it without one throws — so gate it on tag presence.
-    renotify: timeSensitive && Boolean(tag),
-    // Time-sensitive alerts stay on screen until acted on.
-    requireInteraction: timeSensitive,
-    tag,
-  };
-
-  event.waitUntil(self.registration.showNotification(title, options));
+  // Title + options come from the tested builder (mirror of src/sw/display.ts).
+  // Per-kind tags keep one call's pre_ring / missed_call / voicemail alerts as
+  // SEPARATE shade entries (they used to share the bare CallSid and replace
+  // each other - fixed 2026-08-16); closing stale tags first drops the now-
+  // pointless "Incoming call" alert once the call resolved to missed/voicemail.
+  const built = buildNotificationOptions(data);
+  event.waitUntil(
+    closeStaleNotifications(data).then(() =>
+      self.registration.showNotification(built.title, built.options),
+    ),
+  );
 });
+
+/* Close notifications this push makes stale (mirror-driven: staleTagsFor). */
+async function closeStaleNotifications(data) {
+  for (const tag of staleTagsFor(data)) {
+    const stale = await self.registration.getNotifications({ tag });
+    for (const n of stale) n.close();
+  }
+}
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
@@ -111,10 +94,79 @@ self.addEventListener('notificationclick', (event) => {
 });
 
 /* ===========================================================================
+ * MIRROR of src/sw/display.ts (tested in display.test.ts). Keep in sync.
+ * A classic service worker can't import the ES module, so these pure functions
+ * are duplicated here (minus TS types). They decide the notification's title,
+ * options and TAG - per-kind tags ("<kind>:<id>") keep one call's alerts as
+ * separate shade entries - and which earlier notifications a push closes.
+ * ======================================================================== */
+
+/* The notification tag: "<kind>:<id>" so different kinds about the same
+ * call/conversation get their own shade entries, while repeats of the SAME
+ * kind (e.g. more texts in one thread) coalesce in place. Bare id when the
+ * payload has no kind; undefined (no coalescing) when it has no id. */
+function notificationTag(data) {
+  const d = data || {};
+  const id = d.callId || d.conversationId || undefined;
+  if (!id) return undefined;
+  return d.kind ? `${d.kind}:${id}` : id;
+}
+
+/* Build the Notification title + options. Pre-ring and missed-call alerts are
+ * time-sensitive (the founder must see them BEFORE/around a live call), so
+ * they get the strongest on-screen treatment we can ask for: renotify (peek
+ * again on a same-tag repeat; REQUIRES a tag - setting it tagless throws) and
+ * requireInteraction (stay on screen until acted on). Every push vibrates -
+ * the vibration pattern is the key nudge that makes Android surface a
+ * heads-up banner instead of filing the notification silently into the shade.
+ * (iOS ignores `vibrate` but honors the banner per the user's per-PWA
+ * notification settings - no code lever for heads-up on iOS; see
+ * PHASE1_CHANGE_ORDER_3 notes.) */
+function buildNotificationOptions(data) {
+  const d = data || {};
+  const timeSensitive = d.kind === 'missed_call' || d.kind === 'pre_ring';
+  const tag = notificationTag(d);
+  return {
+    title: d.title || 'HousingChoice',
+    options: {
+      body: d.body || '',
+      // The icons ship in the manifest set; reuse the maskable icon.
+      icon: '/icons/icon-192.png',
+      badge: '/icons/badge-72.png',
+      // Carry ONLY the known routing fields to notificationclick - never a
+      // payload-supplied url (C1: no open-redirect sink).
+      data: {
+        kind: d.kind,
+        callId: d.callId,
+        conversationId: d.conversationId,
+      },
+      // Android shows action buttons; iOS ignores them (tap deep-links instead).
+      actions: Array.isArray(d.actions) ? d.actions.slice(0, 2) : undefined,
+      vibrate: [200, 100, 200],
+      renotify: timeSensitive && Boolean(tag),
+      requireInteraction: timeSensitive,
+      tag,
+    },
+  };
+}
+
+/* Tags of notifications this push makes STALE: missed_call/voicemail mean the
+ * call is over, so its "Incoming call" (pre_ring) alert is noise - close it.
+ * Missed-call and voicemail entries deliberately coexist, like a native
+ * phone app's. */
+function staleTagsFor(data) {
+  const d = data || {};
+  if ((d.kind === 'missed_call' || d.kind === 'voicemail') && d.callId) {
+    return [`pre_ring:${d.callId}`];
+  }
+  return [];
+}
+
+/* ===========================================================================
  * MIRROR of src/sw/route.ts (tested in route.test.ts). Keep in sync.
  * A classic service worker can't import the ES module, so these pure functions
  * are duplicated here verbatim. They guarantee the click target is same-origin
- * and on a fixed allow-list — see the C1 note in the header comment.
+ * and on a fixed allow-list - see the C1 note in the header comment.
  * ======================================================================== */
 
 /* True when `id` is a plausible opaque id safe to embed in a path segment:

@@ -1230,12 +1230,16 @@ do **not** apply to it.
   make sure neither Chrome nor the PWA is in "Deep sleeping apps." Data Saver, if on, needs Chrome
   exempted too. Verify with the "worst case" drill: screen off, unplugged, wait 10+ minutes, then
   have someone else call the business number - the pre-ring push must beat the ring.
-- **A late flush can LOOK like missing notifications.** Same-`tag` notifications replace each other
-  in place (pre-ring, missed-call and voicemail for one call share the CallSid as their tag), so
-  when a deferred backlog lands at once, several calls' worth of pushes collapse into one or two
-  shade entries and the earlier ones appear to have never arrived. Since 2026-08-16 the pre-ring
-  push carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather than delivered
-  minutes late; missed-call and voicemail keep the late-is-better-than-never default deliberately.
+- **A late flush used to LOOK like missing notifications.** Same-`tag` notifications replace each
+  other in place, and pre-ring, missed-call and voicemail for one call originally shared the bare
+  CallSid as their tag - a deferred backlog collapsed several calls' worth of pushes into one or
+  two shade entries. Fixed 2026-08-16: tags are now per-kind (`<kind>:<CallSid>`), so one call's
+  alerts coexist as separate entries like a native phone app's; the only deliberate replacement
+  left is that a missed-call or voicemail push CLOSES the call's now-stale "Incoming call" alert
+  (dashboard/public/sw.js, tested mirror dashboard/src/sw/display.ts). Since the same date the
+  pre-ring push also carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather
+  than delivered minutes late; missed-call and voicemail keep the late-is-better-than-never
+  default deliberately.
 
 ### iPhone (installed PWA, iOS 16.4+)
 

@@ -230,4 +230,38 @@ describe('POST /api/contacts/:contactId/extraction-run', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('schedule_failed');
   });
+
+  it('audits the press that started NOTHING too, with scheduled: 0', async () => {
+    // Design 4.5 step 6 calls the entry unconditional: an audit that cannot
+    // distinguish a press that started three runs from one that started none
+    // has lost most of its value for a money-spending action.
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    world.failManualExtractionFor.add('conv-a');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(500);
+    const entry = world.auditEvents.find((e) => e.event_type === 'extraction_run_requested');
+    expect(entry).toBeDefined();
+    expect(entry!.entityKey).toBe('contacts#c-1');
+    expect(entry!.payload).toMatchObject({ scheduled: 0, failed: 1 });
+  });
+
+  it('a THROWING audit append still answers 200 with the queued list', async () => {
+    // By this point the queued runs will bill. A 500 from the observability
+    // write would carry no reason code, so the UI would render "could not be
+    // started - try again" over a press that in fact started runs.
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    seedConversation(world, 'conv-b', 'unknown_1to1');
+    world.failAuditAppendFor.add('extraction_run_requested');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(200);
+    expect(res.body.scheduled.sort()).toEqual(['conv-a', 'conv-b']);
+    expect(res.body.failed).toEqual([]);
+    expect(typeof res.body.requestId).toBe('string');
+    expect(world.auditEvents.find((e) => e.event_type === 'extraction_run_requested'))
+      .toBeUndefined();
+  });
 });

@@ -2029,20 +2029,37 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         failed.push(conv.conversationId);
       }
     }
+    // UNCONDITIONAL (design 4.5 step 6) and BEST-EFFORT, in that order.
+    //
+    // Unconditional: the entry is written for every press, including the one
+    // that started nothing - an audit that cannot distinguish a press that
+    // started three runs from one that started none is most of the value gone,
+    // and the counts are what make that distinction.
+    //
+    // Best-effort: by the time this runs the queued runs will bill. An
+    // unguarded throw becomes a 500 whose body carries no reason code, which
+    // the UI renders as "Extraction could not be started - try again" - the
+    // exact false "nothing happened" report the partial-failure rule exists to
+    // prevent, on a press that already spent money. So an audit fault is logged
+    // (ids only) and the response stands.
+    try {
+      await audit.append(`contacts#${contactId}`, 'extraction_run_requested', {
+        actor: req.user?.userId,
+        requestId,
+        scheduled: scheduled.length,
+        failed: failed.length,
+      });
+    } catch (err) {
+      log.error(
+        { err, contactId, requestId, scheduled: scheduled.length, failed: failed.length },
+        'manual extraction audit append failed (best-effort)',
+      );
+    }
     if (scheduled.length === 0) {
       res.status(500).json({ error: 'schedule_failed' });
       return;
     }
 
-    // The counts are most of the audit value for an action that spends money:
-    // without them the entry cannot distinguish a press that started three runs
-    // from one that started none.
-    await audit.append(`contacts#${contactId}`, 'extraction_run_requested', {
-      actor: req.user?.userId,
-      requestId,
-      scheduled: scheduled.length,
-      failed: failed.length,
-    });
     log.info(
       { contactId, requestId, scheduled: scheduled.length, failed: failed.length, actor: req.user?.userId },
       'manual extraction run requested',

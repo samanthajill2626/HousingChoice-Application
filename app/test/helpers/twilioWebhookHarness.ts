@@ -306,6 +306,10 @@ export interface FakeWorld {
    *  caller can be tested on a partial failure (some writes land, one does not)
    *  and on a total one. Add before the request; the call is not recorded. */
   failManualExtractionFor: Set<string>;
+  /** event_type values whose audit append must THROW, so a route can be tested
+   *  on an observability write failing AFTER its real work committed. Add
+   *  before the request; the entry is not recorded. */
+  failAuditAppendFor: Set<string>;
   extractionRepo: ExtractionRepo;
   /** In-memory AI run-log seam shared by suggestion resolution routes. */
   aiRuns: AiRunsRepo;
@@ -362,6 +366,8 @@ export function createFakeWorld(): FakeWorld {
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
   const auditEvents: FakeWorld['auditEvents'] = [];
+  // event_type values whose audit append throws (observability-failure tests).
+  const failAuditAppendFor: FakeWorld['failAuditAppendFor'] = new Set<string>();
   const touches: FakeWorld['touches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
@@ -1675,6 +1681,11 @@ export function createFakeWorld(): FakeWorld {
 
   const auditRepo: AuditRepo = {
     async append(entityKey, eventType, payload) {
+      // Injected observability-write failure: throws BEFORE recording, so the
+      // entry never looks appended.
+      if (failAuditAppendFor.has(eventType)) {
+        throw new Error(`fake audit append failure for ${eventType}`);
+      }
       // Mirror the REAL item shape (M2): `event_type`, plus a top-level
       // `actorId` lifted from payload.actor (the byActor GSI key, M1), so tests
       // exercise the actual attributes production writes — not a fake alias.
@@ -3368,6 +3379,7 @@ export function createFakeWorld(): FakeWorld {
     extractionSchedules,
     manualExtractionRequests,
     failManualExtractionFor,
+    failAuditAppendFor,
     extractionRepo,
     aiRuns,
     suggestionResolutions: suggestionResolutionFake.items,

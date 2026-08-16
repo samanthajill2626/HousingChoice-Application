@@ -104,7 +104,21 @@ type ExtractionState =
       failedThreads: number;
       errorKind?: string;
     }
-  | { phase: 'done'; tone: 'status' | 'alert'; message: string };
+  | {
+      phase: 'done';
+      tone: 'status' | 'alert';
+      message: string;
+      /** Carried through from the running state: a thread that was never queued
+       *  is one no run is coming for, and dropping the fact at resolution would
+       *  leave the operator with an outcome that silently omits it. */
+      failedThreads?: number;
+    };
+
+/** The partial-failure sentence, identical in the running and resolved states. */
+function failedThreadsCopy(failedThreads: number): string {
+  if (failedThreads <= 0) return '';
+  return ` ${failedThreads} thread${failedThreads === 1 ? '' : 's'} could not be queued.`;
+}
 
 export function ContactDetail(): React.JSX.Element {
   const { contactId = '' } = useParams<{ contactId: string }>();
@@ -219,10 +233,21 @@ export function ContactDetail(): React.JSX.Element {
         if (pending.size > 0) {
           return { ...prev, pending, wrote, suggested, ...(errorKind !== undefined && { errorKind }) };
         }
+        const unqueued = prev.failedThreads > 0 ? { failedThreads: prev.failedThreads } : {};
         if (errorKind !== undefined) {
-          return { phase: 'done', tone: 'alert', message: extractionFailureCopy(errorKind) };
+          return {
+            phase: 'done',
+            tone: 'alert',
+            message: extractionFailureCopy(errorKind),
+            ...unqueued,
+          };
         }
-        return { phase: 'done', tone: 'status', message: extractionAppliedCopy(wrote, suggested) };
+        return {
+          phase: 'done',
+          tone: 'status',
+          message: extractionAppliedCopy(wrote, suggested),
+          ...unqueued,
+        };
       });
     },
   });
@@ -234,11 +259,14 @@ export function ContactDetail(): React.JSX.Element {
   useEffect(() => {
     if (extraction.phase !== 'running') return undefined;
     const timer = setTimeout(() => {
-      setExtraction({
+      setExtraction((prev) => ({
         phase: 'done',
         tone: 'status',
         message: 'Still running - check Settings > AI runs.',
-      });
+        ...(prev.phase === 'running' && prev.failedThreads > 0
+          ? { failedThreads: prev.failedThreads }
+          : {}),
+      }));
     }, RUN_INDICATOR_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [extraction.phase]);
@@ -613,15 +641,13 @@ export function ContactDetail(): React.JSX.Element {
         <div className={styles.extractionBanner} role="status" aria-label="AI extraction">
           <span>
             {`Running AI extraction${extraction.pending.size > 1 ? ` on ${extraction.pending.size} threads` : ''}...`}
-            {extraction.failedThreads > 0
-              ? ` ${extraction.failedThreads} thread${extraction.failedThreads === 1 ? '' : 's'} could not be queued.`
-              : ''}
+            {failedThreadsCopy(extraction.failedThreads)}
           </span>
         </div>
       ) : null}
       {extraction.phase === 'done' ? (
         <div className={styles.extractionBanner} role={extraction.tone} aria-label="AI extraction">
-          <span>{extraction.message}</span>
+          <span>{`${extraction.message}${failedThreadsCopy(extraction.failedThreads ?? 0)}`}</span>
           <Button
             variant="secondary"
             size="sm"

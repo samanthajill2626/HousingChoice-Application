@@ -1354,6 +1354,56 @@ describe('ContactDetail', () => {
       );
     });
 
+    it('still reports the unqueued threads once the run RESOLVES', async () => {
+      // A thread that was never queued is one no run is coming for. Dropping it
+      // at resolution would leave the operator with an outcome that silently
+      // omits a thread the running banner had already told them about.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/updated 1 field/i);
+      expect(resolved).toHaveTextContent(/1 thread could not be queued/i);
+    });
+
+    it('carries the unqueued threads into a FAILED resolution too', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b', 'conv-c'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'driver',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/extraction failed/i);
+      expect(resolved).toHaveTextContent(/2 threads could not be queued/i);
+    });
+
     it.each([
       ['extraction_disabled', /turned off/i],
       ['ineligible_contact_type', /only tenants and untriaged/i],

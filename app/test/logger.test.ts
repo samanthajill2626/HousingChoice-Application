@@ -3,7 +3,7 @@
 // carries correlationId === requestId. M0.4's CloudWatch metric filter
 // mirrors isOrphanLogLine().
 import { describe, expect, it } from 'vitest';
-import { newBootId, newJobRunId, newRequestId, runWithContext } from '../src/lib/context.js';
+import { newBootId, newJobRunId, newPollRunId, newRequestId, runWithContext } from '../src/lib/context.js';
 import { installProcessErrorHandlers } from '../src/lib/errors.js';
 import { createLogger, isOrphanLogLine } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -49,6 +49,40 @@ describe('logger: orphan-log detection', () => {
     });
 
     expect(capture.lines[0]!['correlationId']).toBe(jobRunId);
+  });
+
+  it('a poll-tick line inside a pollRunId context is NOT an orphan (correlationId === pollRunId)', () => {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const pollRunId = newPollRunId();
+
+    runWithContext({ pollRunId }, () => {
+      log.info({ count: 1 }, 'extraction poll: processing due rows');
+    });
+
+    const line = capture.lines[0]!;
+    expect(line['correlationId']).toBe(pollRunId);
+    expect(isOrphanLogLine(line)).toBe(false);
+  });
+
+  it('pollRunId outranks bootId, and jobRunId outranks pollRunId', () => {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const bootId = newBootId();
+    const pollRunId = newPollRunId();
+    const jobRunId = newJobRunId();
+
+    // A tick inside a booted process: the TICK is the unit of work.
+    runWithContext({ bootId, pollRunId }, () => {
+      log.info('poll tick');
+    });
+    // A job dispatched from inside that tick: the JOB is the unit of work.
+    runWithContext({ bootId, pollRunId, jobRunId }, () => {
+      log.info('job started inside a tick');
+    });
+
+    expect(capture.lines[0]!['correlationId']).toBe(pollRunId);
+    expect(capture.lines[1]!['correlationId']).toBe(jobRunId);
   });
 
   it('a process-lifecycle line inside a boot context is NOT an orphan (correlationId === bootId)', () => {

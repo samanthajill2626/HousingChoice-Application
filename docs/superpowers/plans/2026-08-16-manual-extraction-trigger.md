@@ -1178,13 +1178,16 @@ in this task** - do not assume it:
 the pattern the fake already uses for recording `scheduleExtraction` calls
 (`app/test/helpers/twilioWebhookHarness.ts:2886`).
 
-**(b) The kill switch off.** The contacts router reads `aiExtractionEnabled`
-from its deps (`app/src/routes/contacts.ts:142,889`). Give `makeWebhookHarness`
-an options argument that forwards it, so the refusal is testable at all:
+**(b) The kill switch off.** No new harness option - `HarnessOptions.env`
+(`app/test/helpers/twilioWebhookHarness.ts:3369`) already merges env overrides
+into the harness config, and `app/src/routes/api.ts:740` wires
+`config.aiExtractionEnabled` into the contacts router from that config. A new
+dep-level option would be ignored by that hard wiring; the env override is the
+seam that works today:
 
 ```ts
   it('refuses when the kill switch is off', async () => {
-    const { app, world } = makeWebhookHarness({ aiExtractionEnabled: false });
+    const { app, world } = makeWebhookHarness({ env: { AI_EXTRACTION_ENABLED: 'false' } });
     seedContact(world, { contactId: 'c-1', type: 'tenant' });
     seedConversation(world, 'conv-a', 'tenant_1to1');
     const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
@@ -1197,14 +1200,15 @@ an options argument that forwards it, so the refusal is testable at all:
     seedContact(world, { contactId: 'c-1', type: 'tenant' });
     seedConversation(world, 'conv-a', 'tenant_1to1');
     await auth(request(app).post('/api/contacts/c-1/extraction-run'));
-    const entry = world.auditEntries.find((e) => e.action === 'extraction_run_requested');
+    const entry = world.auditEvents.find((e) => e.event_type === 'extraction_run_requested');
     expect(entry).toBeDefined();
     expect(entry!.payload).toMatchObject({ scheduled: 1, failed: 0 });
   });
 ```
 
-Read how the harness records audit appends before writing that last assertion -
-`world.auditEntries` is the expected shape but confirm the property name.
+The collection is `world.auditEvents` with fields `entityKey` / `event_type` /
+`actorId` / `payload` (`app/test/helpers/twilioWebhookHarness.ts:208-213`) -
+verified, not guessed.
 
 Then the partial-failure pair:
 
@@ -1372,17 +1376,29 @@ function emitRunCompleted(payload: Record<string, unknown>): void {
   capturedHandlers.onAiRunCompleted?.(payload);
 }
 
-async function pressRun(): Promise<void> {
+async function pressRun(opts: { fakeTimers?: boolean } = {}): Promise<void> {
   const { default: userEvent } = await import('@testing-library/user-event');
-  const user = userEvent.setup();
+  // Under fake timers user-event ^14 hangs unless it is told how to advance
+  // them (its internal delay awaits a setTimeout that nothing fires).
+  const user = userEvent.setup(
+    opts.fakeTimers ? { advanceTimers: vi.advanceTimersByTime.bind(vi) } : undefined,
+  );
   await user.click(screen.getByRole('button', { name: /more actions/i }));
   await user.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
 }
 ```
 
-If `emitRunCompleted` produces an act() warning in practice, wrap it using
-whatever `act` import the file already has - do not add a module-level one that
-conflicts with the dynamic-import idiom.
+`RUN_INDICATOR_TIMEOUT_MS` is exported from the component for exactly this
+test - extend the file's import at `ContactDetail.test.tsx:70`:
+
+```tsx
+import { ContactDetail, RUN_INDICATOR_TIMEOUT_MS } from './ContactDetail.js';
+```
+
+The timeout test wraps its flushes in `act` - import it from
+`@testing-library/react` alongside the file's existing imports if it is not
+already there, and wrap `emitRunCompleted`'s dispatch in `act` too if it
+produces an act() warning in practice.
 
 Confirm the kebab button's accessible name against `ContactActionsMenu.tsx`
 before using `/more actions/i`.
@@ -1418,12 +1434,22 @@ describe('Run AI extraction', () => {
   });
 
   it('times out to the still-running copy when no event arrives', async () => {
+    // Fake-timer idiom per RemindersPanel.test.tsx:293-306 and test/setup.ts:
+    // the global Date pin must be released BEFORE useFakeTimers (vitest throws
+    // a self-explanatory error otherwise), flushes go through
+    // advanceTimersByTimeAsync inside act, and the press wires advanceTimers
+    // into user-event so its internal delays do not hang.
+    vi.useRealTimers();
     vi.useFakeTimers();
     try {
       renderAt('k1');
-      await pressRun();
-      vi.advanceTimersByTime(RUN_INDICATOR_TIMEOUT_MS + 1);
-      expect(await screen.findByRole('status')).toHaveTextContent(/still running/i);
+      // Flush the initial getContact fetch so the kebab exists.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await pressRun({ fakeTimers: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(RUN_INDICATOR_TIMEOUT_MS + 1); });
+      // Synchronous assert: the state change already flushed inside act, and
+      // findByRole's polling is itself timer-based under fake timers.
+      expect(screen.getByRole('status')).toHaveTextContent(/still running/i);
     } finally {
       vi.useRealTimers();
     }
@@ -1896,9 +1922,9 @@ the earlier habit.
 
 **Three pieces of test infrastructure are BUILT by this plan, not assumed:**
 `makeHarness`'s `jobEvents` recorder (Task 4 step 1), `createFakeWorld`'s
-`failManualExtractionFor` set and `makeWebhookHarness`'s `aiExtractionEnabled`
-option (Task 5 step 1), and the test file's `capturedHandlers` seam plus
-`conversationIdFor` (Tasks 6 and 7).
+`failManualExtractionFor` set (Task 5 step 1; the kill switch needs NO new
+option - `HarnessOptions.env` already covers it), and the test file's
+`capturedHandlers` seam plus `conversationIdFor` (Tasks 6 and 7).
 
 **3. Type consistency.** `requestManualExtraction(conversationId, dueAt, requestId)` is identical in Tasks 1, 5. `fail(conversationId, error, nextDueAt, {claimed, listedDueAt, manual})` is defined in Task 2 and called with that shape in Task 2 step 5. `AiRunCompletedEvent` fields match across Task 4 (backend) and Task 6 (dashboard). `RunDraft.requestId` is set in Task 1 and read in Task 4; `.wrote`/`.suggested` set in Task 3, read in Task 4; `.claimed` set and read in Task 2.
 

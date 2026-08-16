@@ -45,7 +45,7 @@ const THREADS: RouteContractBranch[] = [
 
 const SHELL_SHAPES = [
   '/auth/me?#required',
-  '/api/inbox?filter&limit#required#inbox_badge',
+  '/api/inbox/unread-count?#required#inbox_badge',
   '/api/unmatched-email?filter#required',
 ] as const;
 const CONTACT_SHAPES = [
@@ -571,6 +571,10 @@ describe('endpoint and write contracts', () => {
 
     const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
     const page = expectedGets(inbox, 'warm', NONE)[0]!;
+    // SYNTHETIC: the real badge is /api/inbox/unread-count now, so this pair can
+    // no longer occur in a run. It is kept because the property under test is
+    // that assertObservedGets compares the CLASS as well as the shape - proven
+    // here on two contracts that differ ONLY by class.
     const badge: EndpointContract = { ...page, inboxRequestClass: 'inbox_badge' };
     expect(assertObservedGets([page], [badge])).toEqual({ missingRequired: [page], undeclared: [badge] });
     expect(assertObservedGets([page], [page])).toEqual({ missingRequired: [], undeclared: [] });

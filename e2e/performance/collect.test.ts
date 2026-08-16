@@ -199,10 +199,10 @@ describe('CDP request collection', () => {
 describe('checked-in background policy', () => {
   it('uses the class-qualified cold badge identity for completion and later shell refreshes on standard routes', () => {
     const firstPartyOrigin = 'http://127.0.0.1:9111';
-    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    const badge = 'http://127.0.0.1:9111/api/inbox/unread-count';
     const expected: EndpointContract[] = [{
-      endpointTemplate: '/api/inbox',
-      queryKeys: ['filter', 'limit'],
+      endpointTemplate: '/api/inbox/unread-count',
+      queryKeys: [],
       requirement: 'required',
       inboxRequestClass: 'inbox_badge',
     }];
@@ -230,7 +230,7 @@ describe('checked-in background policy', () => {
       ['inbox_badge', 'required', false],
       ['inbox_badge', 'background_shell', false],
     ]);
-    expect(ended.satisfiedRequired).toEqual(['/api/inbox?filter&limit#inbox_badge']);
+    expect(ended.satisfiedRequired).toEqual(['/api/inbox/unread-count?#inbox_badge']);
     expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([1, 20]);
     expect([ended.backgroundRequestCount, ended.backgroundTransferBytes]).toEqual([1, 30]);
 
@@ -263,8 +263,8 @@ describe('checked-in background policy', () => {
       mode: 'cold',
       repeat: 0,
       expectedGets: [{
-        endpointTemplate: '/api/inbox',
-        queryKeys: ['filter', 'limit'],
+        endpointTemplate: '/api/inbox/unread-count',
+        queryKeys: [],
         requirement: 'required',
         inboxRequestClass: 'inbox_badge',
       }],
@@ -287,20 +287,29 @@ describe('checked-in background policy', () => {
   it('classifies closed Inbox page and badge tuples before evidence redaction', () => {
     const firstPartyOrigin = 'http://127.0.0.1:9111';
     const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30';
-    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    const badge = 'http://127.0.0.1:9111/api/inbox/unread-count';
     expect(classifyInboxRequest(unreadPage, {
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
     })).toBe('inbox_page_unread');
+    // The badge is classified by PATH ALONE now: no query tuple to read, so the
+    // arity guard and the filter/limit arms below it never see this request.
     expect(classifyInboxRequest(badge, {
-      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+      endpointTemplate: '/api/inbox/unread-count', queryKeys: [], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
     })).toBe('inbox_badge');
+    // The retired shape. A page read at limit=100 is a CONTRACT MISMATCH now, not
+    // a badge: the dashboard never asks /api/inbox for 100 rows, and letting this
+    // tuple keep the badge class would hide a real page regression behind a shell
+    // classification.
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&limit=100', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBeNull();
     expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=30', {
       endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
     })).toBeNull();
 
     const expected: EndpointContract[] = [
       { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_unread' },
-      { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_badge' },
+      { endpointTemplate: '/api/inbox/unread-count', queryKeys: [], requirement: 'required', inboxRequestClass: 'inbox_badge' },
     ];
     const cold = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'cold', repeat: 0, expectedGets: expected });
     cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
@@ -344,13 +353,13 @@ describe('checked-in background policy', () => {
       'dashboard/src/routes/settings/useSystemStatus.ts:124-132',
       'dashboard/src/routes/tours/RemindersPanel.tsx:188-208',
       'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
-      'dashboard/src/app/UnreadContext.tsx:19,52-115',
+      'dashboard/src/app/UnreadContext.tsx:48,168-292',
       'dashboard/src/routes/today/useToday.ts:39,126-145',
-      'dashboard/src/routes/inbox/useInbox.ts:49,139-155',
+      'dashboard/src/routes/inbox/useInbox.ts:77,249-266',
       'dashboard/src/routes/email/useUnmatchedEmail.ts:69,142-158',
       'dashboard/src/routes/shared/useRoster.ts:98-137',
-      'dashboard/src/routes/tours/useTourChannels.ts:100,221-241',
-      'dashboard/src/routes/placements/usePlacementChannels.ts:101,229-249',
+      'dashboard/src/routes/tours/useTourChannels.ts:102,228-255',
+      'dashboard/src/routes/placements/usePlacementChannels.ts:103,236-263',
       'dashboard/src/routes/contact/useContactTimeline.ts:91,320-337',
       'dashboard/src/routes/broadcasts/useBroadcastResults.ts:41,120-138',
     ]);
@@ -363,6 +372,11 @@ describe('checked-in background policy', () => {
         const surfaceId = declared.endpointTemplate === '/api/inbox'
           ? '/inbox'
           : declared.endpointTemplate === '/api/unmatched-email' ? '/email' : '/fixture';
+        // The declaration carries the request class for a shape the classifier
+        // keys on, so the synthesized contract is the one the collector really
+        // matches. Without it the nav badge's declared shape would look
+        // undeclared to #roleFor (whose key is class-aware for inbox_badge) and
+        // every request in this loop would collapse to background_shell.
         const expected: EndpointContract[] = [{ ...declared, requirement: 'required' }];
         const value = new NetworkCollector({
           firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId, mode: 'warm', repeat: index, expectedGets: expected,
@@ -378,16 +392,26 @@ describe('checked-in background policy', () => {
         value.markTerminalVisible('sample-1');
         start(value, 'repeat', 10.3, url);
         value.loadingFinished('sample-1', { requestId: 'repeat', timestamp: 10.4, encodedDataLength: 2 });
+        // The nav badge is SHELL work on every route (routes.ts COLD_SHELL_GETS),
+        // so isShellRequest owns its repeat and the background role it earns is
+        // background_SHELL. It is declared here because UnreadContext is a live
+        // SSE reader that re-requests it - the declaration is a source
+        // fingerprint, not a claim that the badge can ever be background_refresh.
+        const laterRole = declared.inboxRequestClass === 'inbox_badge'
+          ? 'background_shell'
+          : 'background_refresh';
         expect(value.endSample('sample-1').requests.map((row) => row.requestRole), declaration.sourceFingerprint)
-          .toEqual(['required', 'background_refresh']);
+          .toEqual(['required', laterRole]);
       }
     }
   });
 
   it('keeps cold shell initial work required and later exact repeats as background_shell', () => {
-    const shell: EndpointContract[] = [{ endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required' }];
+    const shell: EndpointContract[] = [{
+      endpointTemplate: '/api/inbox/unread-count', queryKeys: [], requirement: 'required', inboxRequestClass: 'inbox_badge',
+    }];
     const value = collector('cold', shell);
-    const url = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    const url = 'http://127.0.0.1:9111/api/inbox/unread-count';
     start(value, 'first', 10.1, url);
     value.loadingFinished('sample-1', { requestId: 'first', timestamp: 10.2, encodedDataLength: 10 });
     start(value, 'repeat', 10.3, url);

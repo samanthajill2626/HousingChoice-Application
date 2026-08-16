@@ -8,18 +8,35 @@ import {
 } from '../src/lib/inboxDiagnostics.js';
 
 describe('createInboxProfilePlan', () => {
-  it('runs five comparable samples with dashboard page size 30 and badge size 100', () => {
+  it('runs five comparable samples: four dashboard pages at 30 rows and the badge endpoint', () => {
     const plan = createInboxProfilePlan();
 
     expect(plan).toHaveLength(25);
     expect(plan.filter((sample) => sample.repeat === 0)).toEqual([
-      { caseId: 'all-page', filter: 'all', limit: 30, repeat: 0 },
-      { caseId: 'unread-page', filter: 'unread', limit: 30, repeat: 0 },
-      { caseId: 'unknown-page', filter: 'unknown', limit: 30, repeat: 0 },
-      { caseId: 'groups-page', filter: 'groups', limit: 30, repeat: 0 },
-      { caseId: 'unread-badge', filter: 'unread', limit: 100, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 30, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 30, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 30, repeat: 0 },
+      { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 30, repeat: 0 },
+      { kind: 'unread-badge-endpoint', caseId: 'unread-badge', repeat: 0 },
     ]);
     expect([...new Set(plan.map((sample) => sample.repeat))]).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('gives the badge case NO filter and NO limit - it drives the count endpoint', () => {
+    const plan = createInboxProfilePlan();
+    const badge = plan.filter((entry) => entry.kind === 'unread-badge-endpoint');
+
+    expect(badge).toHaveLength(5);
+    for (const entry of badge) {
+      // The retired workload asked /api/inbox for filter=unread&limit=100. The
+      // badge has no page shape at all now, so a filter or a limit reappearing
+      // here means the profiler drifted back onto aggregateInbox.
+      expect(entry).not.toHaveProperty('filter');
+      expect(entry).not.toHaveProperty('limit');
+    }
+    // Every remaining case is a dashboard PAGE read, all at the dashboard's 30.
+    expect([...new Set(plan.flatMap((entry) => (entry.kind === 'inbox-page' ? [entry.limit] : [])))])
+      .toEqual([30]);
   });
 });
 

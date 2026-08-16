@@ -117,6 +117,7 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/api/conversations/:conversationId',
   '/api/conversations',
   '/api/inbox/read',
+  '/api/inbox/unread-count',
   '/api/inbox/:contactId/read',
   '/api/inbox',
   '/api/unmatched-email/:unmatchedId/create-contact',

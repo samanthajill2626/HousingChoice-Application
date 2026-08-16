@@ -28,6 +28,12 @@ import type {
 export interface BackgroundEndpointShape {
   endpointTemplate: EndpointTemplate;
   queryKeys: readonly string[];
+  /** Set when the collector classifies this shape as an Inbox request. The role
+   *  a repeat earns depends on it: an `inbox_badge` shape is SHELL work on every
+   *  route, so `isShellRequest` claims it and its repeat is `background_shell`,
+   *  never `background_refresh`. Declaring it here keeps the shape ledger and the
+   *  classifier from drifting apart silently. */
+  inboxRequestClass?: InboxRequestClass;
 }
 
 export interface BackgroundRefreshDeclaration {
@@ -36,8 +42,16 @@ export interface BackgroundRefreshDeclaration {
   shapes: readonly BackgroundEndpointShape[];
 }
 
-function shape(endpointTemplate: EndpointTemplate, queryKeys: readonly string[] = []): BackgroundEndpointShape {
-  return Object.freeze({ endpointTemplate, queryKeys: Object.freeze([...queryKeys].sort()) });
+function shape(
+  endpointTemplate: EndpointTemplate,
+  queryKeys: readonly string[] = [],
+  inboxRequestClass?: InboxRequestClass,
+): BackgroundEndpointShape {
+  return Object.freeze({
+    endpointTemplate,
+    queryKeys: Object.freeze([...queryKeys].sort()),
+    ...(inboxRequestClass !== undefined && { inboxRequestClass }),
+  });
 }
 
 // This is deliberately a source fingerprint ledger, not a permissive endpoint
@@ -50,7 +64,7 @@ const BACKGROUND_REFRESH_DECLARATIONS: BackgroundRefreshDeclaration[] = [
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.placementNudges, trigger: 'timer', shapes: [shape('/api/placements/:placementId/nudges')] },
   {
     sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unreadShell, trigger: 'sse',
-    shapes: [shape('/api/inbox', ['filter', 'limit']), shape('/api/unmatched-email', ['filter'])],
+    shapes: [shape('/api/inbox/unread-count', [], 'inbox_badge'), shape('/api/unmatched-email', ['filter'])],
   },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.today, trigger: 'sse', shapes: [shape('/api/today', ['day', 'toursFrom', 'toursTo'])] },
   { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.inbox, trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
@@ -73,8 +87,12 @@ const BACKGROUND_SHAPES = new Set(
   BACKGROUND_REFRESH_GETS.flatMap((declaration) => declaration.shapes.map(contractShape)),
 );
 
+// REPLACED, not extended: after the badge moved to its own endpoint no
+// /api/inbox?filter&limit request can be shell work (isShellRequest only claims
+// the unmatched-email shape and the inbox_badge class), so leaving the old
+// literal here would permit a shape nothing can produce.
 const BACKGROUND_SHELL_SHAPES = new Set([
-  '/api/inbox?filter&limit',
+  '/api/inbox/unread-count?',
   '/api/unmatched-email?filter',
 ]);
 
@@ -142,6 +160,13 @@ function classifyInboxRequestForCollection(
   rawUrl: string,
   sanitized: SanitizedRequestUrl,
 ): InboxRequestClassification {
+  // The nav badge is classified by PATH ALONE - it carries no query tuple at
+  // all. This has to sit ahead of BOTH the non-/api/inbox early return (the
+  // count endpoint is a different template) and the two-key arity guard below
+  // (which would reject a query-less request outright).
+  if (sanitized.endpointTemplate === '/api/inbox/unread-count') {
+    return { requestClass: 'inbox_badge', endpointContractMismatch: false };
+  }
   if (sanitized.endpointTemplate !== '/api/inbox') {
     return { requestClass: null, endpointContractMismatch: false };
   }
@@ -159,7 +184,9 @@ function classifyInboxRequestForCollection(
     if (filter === 'unread' && limit === '30') return { requestClass: 'inbox_page_unread', endpointContractMismatch: false };
     if (filter === 'unknown' && limit === '30') return { requestClass: 'inbox_page_unknown', endpointContractMismatch: false };
     if (filter === 'groups' && limit === '30') return { requestClass: 'inbox_page_groups', endpointContractMismatch: false };
-    if (filter === 'unread' && limit === '100') return { requestClass: 'inbox_badge', endpointContractMismatch: false };
+    // No `filter=unread&limit=100` arm any more: that was the OLD badge shape.
+    // A page read at limit 100 now falls through to the contract mismatch below,
+    // which is what it is - the dashboard only ever asks this endpoint for 30.
   } catch {
     // Invalid tuple details remain internal; only sanitized request evidence leaves the collector.
   }

@@ -193,9 +193,12 @@ test("a manual run reads aged history that an automatic run cannot see", async (
   const chip = page.getByRole("group", { name: "AI suggestion for pets" });
   await expect(chip).toBeVisible({ timeout: 15_000 });
   await expect(chip).toContainText('AI heard "Two cats"');
+  // The run suggested and wrote nothing, so the banner names only the half that
+  // happened. It must NOT say "Updated 0 fields" - see ContactDetail's
+  // extractionAppliedCopy, which live self-QA corrected.
   await expect(
     page.getByRole("status", { name: /ai extraction/i }),
-  ).toContainText("Updated 0 fields, 1 suggestion.");
+  ).toContainText("1 suggestion to review.");
 
   // ---- And the run is recorded as manual ----
   await openRunLog(page, contactId);

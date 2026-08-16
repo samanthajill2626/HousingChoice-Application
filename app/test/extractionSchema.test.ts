@@ -13,6 +13,7 @@ import {
   renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
+import { housingAuthorityFor } from '../src/lib/import/apply.js';
 
 // The structured-outputs contract: every object level carries
 // additionalProperties:false and NONE of the unsupported constraint keywords
@@ -65,7 +66,7 @@ describe('EXTRACTION_SCHEMA', () => {
 });
 
 describe('HOUSING_AUTHORITY_VOCAB', () => {
-  it('lists the exact controlled vocabulary (13 entries)', () => {
+  it('lists the exact controlled vocabulary (14 entries)', () => {
     expect(HOUSING_AUTHORITY_VOCAB).toEqual([
       'Jonesboro (JHA)',
       'Fulton County',
@@ -80,7 +81,19 @@ describe('HOUSING_AUTHORITY_VOCAB', () => {
       'DCA',
       'McDonough',
       'East Point',
+      'Dekalb County Housing',
     ]);
+  });
+
+  it('agrees with the IMPORTER on DeKalb, character for character', () => {
+    // The invariant that actually matters, and the one a hand-written vocabulary
+    // silently breaks: broadcast audience resolution is an exact hash match on
+    // the byHousingAuthority GSI, so an AI-extracted tenant and an imported
+    // tenant only land in the same audience if these two strings are identical.
+    // Asserting the literal would pass while both drifted together; asserting
+    // MEMBERSHIP of the importer's own output is what pins them to each other.
+    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb Housing'));
+    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb County Housing'));
   });
 });
 
@@ -339,6 +352,17 @@ describe('prompt builders', () => {
   it('system prompt lists every housing-authority vocabulary value', () => {
     const sys = buildExtractionSystemPrompt();
     for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
+  });
+
+  it('system prompt tells the model to SURFACE an off-vocabulary authority, not drop it', () => {
+    // Run 4bf0cf42: the client named DeKalb County, the vocabulary had no entry,
+    // and the model did exactly as told - op "none", fact discarded, nothing
+    // reached a human. A closed vocabulary is right for the FIELD (it is a GSI
+    // hash), but it must not be the only exit: an unlisted authority is a real
+    // answer that belongs in the notes.
+    const sys = buildExtractionSystemPrompt();
+    expect(sys).toContain('Housing authority stated:');
+    expect(sys).toMatch(/NOT on that list/);
   });
 
   it('system prompt frames the mixed transcript and states the [unknown]/voicemail rules', () => {

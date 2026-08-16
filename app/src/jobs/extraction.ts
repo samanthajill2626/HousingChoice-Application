@@ -290,12 +290,28 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
+  /** The press this run answers, carried from the due row (manual runs only). */
+  requestId?: string;
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
 }
 
 /** Allocate a draft before processing so the outer backstop retains all evidence. */
 export function newRunDraft(row: DueExtractionItem, startedAt: string): RunDraft {
-  return { runId: randomUUID(), startedAt, conversationId: row.conversationId, trigger: row.channel, displaced: [] };
+  const manual = row.manualRequested === true;
+  // The `?? 'manual'` arm is a totality device, not a second labelling rule. A
+  // row with no `channel` can only have been created by
+  // requestManualExtraction, which always sets the flag - and every
+  // flag-clearing site also de-arms the row, so listDue cannot return a
+  // channel-less row without the flag.
+  const trigger: RunTrigger = manual ? 'manual' : (row.channel ?? 'manual');
+  return {
+    runId: randomUUID(),
+    startedAt,
+    conversationId: row.conversationId,
+    trigger,
+    ...(row.requestId !== undefined && { requestId: row.requestId }),
+    displaced: [],
+  };
 }
 
 /** Only a lost claim and a defensive malformed due row are deliberately unrecorded. */

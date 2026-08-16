@@ -48,12 +48,18 @@ export interface DueExtractionItem {
   /** PK - `due#<conversationId>`. */
   itemId: string;
   conversationId: string;
-  /** What scheduled the run: an inbound text (sms), an inbound email (email),
-   *  a fresh call transcript (voice), or a human triage flip to tenant
-   *  (triage). voice/triage runs bypass the job's client-freshness gate -
-   *  their signal is content the cursor logic can't see (a late transcript /
-   *  newly-applicable tenant facts); sms/email runs use the cursor gate. */
-  channel: 'sms' | 'voice' | 'triage' | 'email';
+  /** What scheduled the run through an INBOUND path. OPTIONAL because a manual
+   *  press can create a row that no inbound path ever scheduled - see
+   *  requestManualExtraction, which deliberately does not write it. */
+  channel?: 'sms' | 'voice' | 'triage' | 'email';
+  /** Sticky manual marker (sparse). Set by requestManualExtraction, REMOVEd by
+   *  claim and by fail's park branch. The single source of truth for the job's
+   *  gate waivers and the recorded trigger - an inbound sliding dueAt forward
+   *  cannot erase it. */
+  manualRequested?: true;
+  /** Correlates one press to the one run it produces (sparse). Cleared wherever
+   *  manualRequested is, so a dead press's key can never ride a later run. */
+  requestId?: string;
   /** ISO - byDueAt GSI range key; present ONLY while a run is scheduled. */
   dueAt?: string;
   /** byDueAt GSI hash key (fixed 'due'); present ONLY while scheduled (sparse). */
@@ -124,12 +130,21 @@ export interface ExtractionRepo {
     channel: 'sms' | 'voice' | 'triage' | 'email',
     dueAt: string,
   ): Promise<void>;
+  /**
+   * Arm a row for an IMMEDIATE manual run. Same sliding upsert as
+   * scheduleExtraction, plus manualRequested and the caller's requestId, and
+   * deliberately WITHOUT touching `channel` - `channel` has no clearing site,
+   * so a 'manual' value stored there would outlive the flag and could later
+   * label an automatic run as manual in the run log.
+   */
+  requestManualExtraction(conversationId: string, dueAt: string, requestId: string): Promise<void>;
   /** All scheduled due items with dueAt <= now (byDueAt GSI; paginated). */
   listDue(nowIso: string): Promise<DueExtractionItem[]>;
   /**
    * Atomically claim a due item BEFORE running: SET claimedAt, REMOVE
-   * _duePartition + dueAt, conditional on the row still being scheduled AND its
-   * dueAt still equal to `listedDueAt` (the value listDue returned). Returns
+   * _duePartition + dueAt + manualRequested + requestId, conditional on the row
+   * still being scheduled AND its dueAt still equal to `listedDueAt` (the value
+   * listDue returned). Returns
    * false when the item slid forward or was already claimed - the sliding-
    * debounce correctness hinges on the `dueAt = listedDueAt` clause.
    */
@@ -221,6 +236,37 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       log.debug({ conversationId, dueAt }, 'extraction scheduled (sliding upsert)');
     },
 
+    async requestManualExtraction(conversationId, dueAt, requestId) {
+      const now = new Date().toISOString();
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { itemId: dueId(conversationId) },
+          UpdateExpression:
+            'SET #dueAt = :dueAt, #dp = :dp, #manual = :manual, #requestId = :requestId, #conversationId = :conversationId, #updatedAt = :updatedAt, #createdAt = if_not_exists(#createdAt, :now)',
+          ExpressionAttributeNames: {
+            '#dueAt': 'dueAt',
+            '#dp': '_duePartition',
+            '#manual': 'manualRequested',
+            '#requestId': 'requestId',
+            '#conversationId': 'conversationId',
+            '#updatedAt': 'updatedAt',
+            '#createdAt': 'createdAt',
+          },
+          ExpressionAttributeValues: {
+            ':dueAt': dueAt,
+            ':dp': 'due',
+            ':manual': true,
+            ':requestId': requestId,
+            ':conversationId': conversationId,
+            ':updatedAt': now,
+            ':now': now,
+          },
+        }),
+      );
+      log.debug({ conversationId, requestId }, 'manual extraction requested');
+    },
+
     async listDue(nowIso) {
       // Query the byDueAt GSI: all scheduled rows (fixed 'due' partition) with
       // dueAt <= now. Paginate with LastEvaluatedKey so rows beyond the 1 MB
@@ -258,13 +304,15 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
           new UpdateCommand({
             TableName: table,
             Key: { itemId: dueId(conversationId) },
-            UpdateExpression: 'SET #claimedAt = :claimedAt REMOVE #dp, #dueAt',
+            UpdateExpression: 'SET #claimedAt = :claimedAt REMOVE #dp, #dueAt, #manual, #requestId',
             ConditionExpression:
               'attribute_exists(#dp) AND #dueAt <= :now AND #dueAt = :listedDueAt',
             ExpressionAttributeNames: {
               '#dp': '_duePartition',
               '#dueAt': 'dueAt',
               '#claimedAt': 'claimedAt',
+              '#manual': 'manualRequested',
+              '#requestId': 'requestId',
             },
             ExpressionAttributeValues: {
               ':claimedAt': nowIso,

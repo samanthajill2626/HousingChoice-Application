@@ -347,6 +347,55 @@ describe('extractionRepo.scheduleExtraction', () => {
 });
 
 // ---------------------------------------------------------------------------
+// requestManualExtraction - the sticky manual marker
+// ---------------------------------------------------------------------------
+
+describe('extractionRepo.requestManualExtraction', () => {
+  it('arms the row with the flag and the request id, and never writes channel', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.requestManualExtraction('conv-1', T1, 'req-abc');
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T1);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.manualRequested).toBe(true);
+    expect(item!.requestId).toBe('req-abc');
+    expect(item!.channel).toBeUndefined();
+  });
+
+  it('leaves an existing channel untouched when a press lands on a scheduled row', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    const item = await repo.getDue('conv-1');
+    expect(item!.channel).toBe('sms');
+    expect(item!.manualRequested).toBe(true);
+    expect(item!.dueAt).toBe(T2);
+  });
+
+  it('scheduleExtraction never sets the flag or a request id', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    const item = await repo.getDue('conv-1');
+    expect(item!.manualRequested).toBeUndefined();
+    expect(item!.requestId).toBeUndefined();
+  });
+
+  it('claim removes the flag and the request id with the index keys', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.requestManualExtraction('conv-1', T1, 'req-abc');
+    expect(await repo.claim('conv-1', T2, T1)).toBe(true);
+    const item = await repo.getDue('conv-1');
+    expect(item!.manualRequested).toBeUndefined();
+    expect(item!.requestId).toBeUndefined();
+    expect(item!._duePartition).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // listDue - only scheduled + past-due
 // ---------------------------------------------------------------------------
 

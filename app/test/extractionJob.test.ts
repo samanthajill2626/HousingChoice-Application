@@ -162,6 +162,7 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
   );
   return {
     scheduleExtraction: vi.fn(async () => {}),
+    requestManualExtraction: vi.fn(async () => {}),
     listDue: vi.fn(async () => dueRows),
     claim: vi.fn(async () => claimResult),
     complete: vi.fn(async () => {}),

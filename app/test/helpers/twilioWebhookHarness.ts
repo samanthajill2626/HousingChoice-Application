@@ -298,6 +298,10 @@ export interface FakeWorld {
    *  API-side schedule sites, e.g. the triage re-extraction hook). The WEBHOOK
    *  schedule path keeps asserting via opts.extractionRepo. */
   extractionSchedules: { conversationId: string; channel: string; dueAt: string }[];
+  /** requestManualExtraction calls through the world extraction repo, in order.
+   *  Recorded exactly like extractionSchedules: this fake keeps NO due-row
+   *  state, so a press is observable only as the call it made. */
+  manualExtractionRequests: { conversationId: string; dueAt: string; requestId: string }[];
   extractionRepo: ExtractionRepo;
   /** In-memory AI run-log seam shared by suggestion resolution routes. */
   aiRuns: AiRunsRepo;
@@ -2794,6 +2798,8 @@ export function createFakeWorld(): FakeWorld {
   const suggestions = new Map<string, SuggestionItem>();
   // API-side scheduleExtraction calls (triage re-extraction hook), in order.
   const extractionSchedules: FakeWorld['extractionSchedules'] = [];
+  // API-side requestManualExtraction calls (the manual trigger route), in order.
+  const manualExtractionRequests: FakeWorld['manualExtractionRequests'] = [];
   const placementNudgesRepo: PlacementNudgesRepo = {
     async create(input: { placementId: string; kind: NudgeKind; dueAt: string }) {
       const now = new Date().toISOString();
@@ -2887,6 +2893,11 @@ export function createFakeWorld(): FakeWorld {
       // Recorded for API-side schedule-site assertions (triage re-extraction);
       // the WEBHOOK schedule path keeps asserting via opts.extractionRepo.
       extractionSchedules.push({ conversationId, channel, dueAt });
+    },
+    async requestManualExtraction(conversationId, dueAt, requestId) {
+      // This fake keeps no due-row state (the due-item methods below are
+      // stubs), so a press is recorded, not simulated.
+      manualExtractionRequests.push({ conversationId, dueAt, requestId });
     },
     async listDue() {
       return [];
@@ -3344,6 +3355,7 @@ export function createFakeWorld(): FakeWorld {
     pendingRosterActionsRepo,
     suggestions,
     extractionSchedules,
+    manualExtractionRequests,
     extractionRepo,
     aiRuns,
     suggestionResolutions: suggestionResolutionFake.items,

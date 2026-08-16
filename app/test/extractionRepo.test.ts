@@ -172,6 +172,39 @@ function conditionHolds(
   throw new Error(`fake doc: unsupported condition clause "${clause}"`);
 }
 
+/**
+ * Reject any `#name` / `:value` an expression REFERENCES but never DECLARES.
+ *
+ * Real DynamoDB answers a ValidationException to an undeclared placeholder and
+ * the whole write fails. Without this check the fake instead reads such a name
+ * as a missing attribute and such a value as `undefined`, both of which degrade
+ * to a FALSE sub-clause - and under a disjunct the sibling arm then carries the
+ * condition to TRUE. That is the shape that makes a suite lie: every re-arm
+ * survival test here asserts the condition REFUSING the write, so dropping (say)
+ * the `:listedDueAt` binding would leave them all green while every fail() write
+ * 400s in production. The names/values maps are the same ones the real repo
+ * builds, so this checks the production expression, not a copy of it.
+ */
+function assertPlaceholdersDeclared(
+  expressions: (string | undefined)[],
+  names: Record<string, string>,
+  values: Record<string, unknown>,
+): void {
+  for (const expr of expressions) {
+    if (expr === undefined) continue;
+    for (const token of expr.match(/#\w+/g) ?? []) {
+      if (!(token in names)) {
+        throw new Error(`fake doc: undeclared ExpressionAttributeName ${token} in "${expr}"`);
+      }
+    }
+    for (const token of expr.match(/:\w+/g) ?? []) {
+      if (!(token in values)) {
+        throw new Error(`fake doc: undeclared ExpressionAttributeValue ${token} in "${expr}"`);
+      }
+    }
+  }
+}
+
 /** Apply combined `SET ... REMOVE ... ADD ...` (with if_not_exists in SET). */
 function applyUpdate(
   expr: string,
@@ -329,6 +362,7 @@ function makeFakeDoc(): FakeDoc {
         const values = cmd.input.ExpressionAttributeValues ?? {};
         const existing = store.get(key.itemId);
         const cond = cmd.input.ConditionExpression;
+        assertPlaceholdersDeclared([cond, cmd.input.UpdateExpression], names, values);
         if (cond && !conditionHolds(cond, names, values, existing)) {
           throw new ConditionalCheckFailedException({ message: 'update cond', $metadata: {} });
         }
@@ -760,7 +794,12 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect(item!._duePartition).toBe('due');
     expect(item!.manualRequested).toBe(true);
     expect(item!.requestId).toBe('req-abc');
+    // Spec 7 quadrant 4 asks for all three at once: the press survives, the
+    // ERROR is recorded, and the row does not park underneath it - so the
+    // fallback write has to happen AND has to be the scheduling-free one.
     expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+    expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).toContain('conv-1');
   });
 
   it('quadrant 4 - claim THREW and an INBOUND re-armed: the inbound survives', async () => {

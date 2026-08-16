@@ -248,7 +248,9 @@ proportionally to one page.
    message probe per request - counted in 4.4's cost model and covered by
    the accrual tripwire.)
 3. Emits candidates in index order up to `opts.maxRows`, then STOPS PULLING.
-   Returns `{ candidates, scanPosition?, consumedAll, truncated, capped }`:
+   Returns `{ candidates, scanPosition?, consumedAll, truncated, capped,
+   remainingBudget }` (remainingBudget is what 4.5's loop threads into the
+   next collect call):
    - `capped` = maxRows stopped emission;
    - `consumedAll` = the item SUPPLY ran out - the iterator's scan
      exhausted with every yielded item consumed into a candidate or
@@ -287,14 +289,17 @@ undocumented tie order):
   (~4.7KB JSON -> ~6.3KB base64url) plus the rest of the request line stays
   inside CloudFront's 8,192-byte quota with margin. THE SERVER NEVER MINTS
   A CURSOR IT WOULD REJECT: when emitting the next cursor would push the
-  seen-set past SEEN_SET_MAX, the page returns `nextCursor: null` instead -
-  the feed ends at ~4 pages (120+ unread contact rows), which has no
-  product meaning to exceed (the badge caps at 100, and triage is
-  top-down: marking rows read is what reaches deeper unread). The 400 for
-  an over-limit or malformed cursor remains only for tampered input.
-  Hydration-dropped candidates DO stay in the seen-set (they were
-  consumed), so a bulk mark-read race can spend the depth allowance faster;
-  accepted - the next reconcile refetch resets paging from the top.
+  seen-set past SEEN_SET_MAX, the page returns `nextCursor: null` AND sets
+  `InboxPage.truncated` (round-4 finding: the depth cap must not be the
+  one early-end path with no signal - see 4.5 step 3) - the feed ends at
+  ~4 pages (120+ unread contact rows), which has no product meaning to
+  exceed (the badge caps at 100, and triage is top-down: marking rows read
+  is what reaches deeper unread). The 400 for an over-limit or malformed
+  cursor remains only for tampered input. Hydration-dropped candidates DO
+  stay in the seen-set (they were consumed), so a bulk mark-read race can
+  spend the depth allowance faster - possibly within page one's fill loop;
+  the truncated flag covers that case too, and the race's own SSE events
+  trigger the reconcile refetch that resets paging from the top.
 - CURSOR CONTENT (stated decision): the seen-set puts opaque contactIds in
   a GET query param, hence CloudFront access logs and any http.url
   telemetry attribute. contactIds already appear in request URLs today
@@ -329,9 +334,14 @@ undocumented tie order):
   unread thread costs an index slot + a contact resolution + a message
   probe per request (the round-2 probe short-circuit is withdrawn - 4.3
   step 2). This endpoint is the highest-frequency call in the app (every
-  SPA boot + every debounced conversation event per connected dashboard) -
-  the rate-limited accrual WARN (4.3) is the signal to revisit before the
-  accrual classes make this expensive.
+  SPA boot + every debounced conversation event per connected dashboard).
+  TWO rate-limited tripwires, because the two costs grow independently
+  (round-4 finding: the scanned-items WARN alone misses the probe cost -
+  tens of deleted residents degrade this endpoint long before 500 scanned
+  items): the scanned-items WARN (4.3, threshold 500) and a
+  DELETED-RESIDENT PROBE WARN when a single request issues more than
+  UNREAD_DELETED_PROBE_WARN = 25 resurfacing probes. Both through
+  lib/rateLimitedWarn.ts; both are the signal to revisit accrual.
 - Registered above the `/:contactId/read` param route; no collision with
   existing inbox routes (GET `/`, POST `/read`, POST `/:contactId/read`).
 - Error posture: normal 500; the client collapses any error to "no badge".
@@ -372,16 +382,22 @@ today's pager provides, inbox.ts:755-800):
    consumedAll, budget exhaustion, or the depth cap - so the dashboard's
    empty-state and Load-more gating (Inbox.tsx:130-158, both keyed on
    `rows.length`) keep working.
-3. BUDGET-TRUNCATED EMPTY PAGE (round-3 finding: v3 showed "You're all
-   caught up" over unreachable unread - a false all-clear): the InboxPage
-   wire shape gains an optional `truncated?: true`, set ONLY when the
-   request budget expired before the page could fill (any filter's unread
-   branch; never set elsewhere). The dashboard renders the ERROR state
-   (its existing retry affordance) instead of the all-caught-up empty
-   state when `rows.length === 0 && truncated` - a small declared client
-   change. Reachability requires ~2000 consecutive invisible index items
-   (post-lazy-iterator), so this is a tripwire path, but it must not lie
-   to the user when it fires.
+3. EARLY-END SIGNALING (rounds 3-4): the InboxPage wire shape gains an
+   optional `truncated?: true`, set on the unread branch ONLY, whenever
+   the feed ended for a NON-NATURAL reason: the request budget expired
+   before the page could fill, or the SEEN_SET_MAX depth cap ended paging
+   (4.3). Never set elsewhere. Client handling (declared, small):
+   - `rows.length === 0 && truncated` on the FIRST page: render the
+     honest failure state ("Couldn't load unread conversations") with the
+     existing retry affordance - and NOTE (round-4 precision): retry
+     refetches the same prefix with a fresh budget and may fail again
+     until the underlying accrual is addressed; the point of this state
+     is not lying ("all caught up"), not guaranteed recovery.
+   - rows present + truncated (including when a LOAD-MORE page reports
+     it - useInbox must surface the flag from loadMore responses too, not
+     only fetchFirstPage): the list simply ends; no new affordance.
+     Declared and accepted - the signal exists on the wire for a future
+     affordance without another schema change.
 
 DECLARED BEHAVIOR CHANGE - PAGE COMPOSITION: today's `filter=unread` page one
 is up to `limit` CONTACT rows PLUS all unread relay rows PLUS all unread
@@ -464,8 +480,14 @@ the 1:1 bucket - preserving per-conversation type/timestamp semantics.
 - CAP: FILTER-THEN-CAP, explicitly (round-3 finding: the other order lets a
   burst of unread group/relay threads starve the 1:1 sections): drive the
   layer-1 iterator, keep only 1:1-bucket items, and stop after
-  TODAY_UNREAD_CAP = 100 KEPT conversations - announcing truncation via the
-  existing warnIfCapped (today.ts:354-356).
+  TODAY_UNREAD_CAP = 100 KEPT conversations. Truncation announcements
+  (round-4 precision): the cap announcement goes through the warnIfCapped
+  mechanism with the EXPLICIT threshold TODAY_UNREAD_CAP (the current
+  helper hardcodes GROUP_FETCH_LIMIT as both threshold and logged value,
+  today.ts:354-356 - it needs the threshold as a parameter), and a
+  budget-expired underfilled pass (iterator stopped by the request budget
+  before the cap) logs its own rate-limited WARN rather than passing
+  silently.
   SELECTION CHANGE: the newest-100-unread by activity, rather than
   unread-within-the-first-100-open. The NUMERIC bound is unchanged but the
   REALIZED payload is larger on unread-heavy data (today only the unread
@@ -669,7 +691,13 @@ EXISTING TEST SURFACES THAT CHANGE (enumerated; real builder work):
   `unread-badge` case switches to driving the unread-count function; a
   `unread-page` case stays on aggregateInbox at limit 30.
 - dashboard: AppFrame.test.tsx's useUnread stub (:6-8) and Inbox.test.tsx's
-  baseState factory (:13-25) gain the new fields.
+  baseState factory (:13-25) gain the new fields; useInbox surfaces
+  `truncated` from BOTH fetchFirstPage and loadMore responses (round-4
+  precision: today it reads page flags only in fetchFirstPage).
+- InboxPage lives in TWO places under an explicit field-for-field contract
+  (app/src/routes/inbox.ts:118-129 and dashboard/src/api/types.ts:
+  2685-2695) - the new `truncated?: true` field is added to BOTH in the
+  same commit.
 
 NEW TESTS:
 

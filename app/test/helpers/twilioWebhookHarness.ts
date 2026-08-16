@@ -3489,6 +3489,13 @@ export interface HarnessOptions {
    * route sent (body/author/automated) with no provider and no network.
    */
   sendMessageService?: SendMessageService;
+  /**
+   * The raw byUnread scan budget for ONE request (inbox-unread-index). Set it
+   * small to drive the `truncated` posture - the unread reads then report a
+   * floor after that many raw index items instead of walking UNREAD_WALK_LIMIT
+   * (2000) of them. Omit for the production budget.
+   */
+  unreadWalkLimit?: number;
 }
 
 export interface Harness {
@@ -3634,6 +3641,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.systemStatusService !== undefined && {
         systemStatusService: opts.systemStatusService,
       }),
+      // inbox-unread-index: the byUnread scan budget, forwarded to the routers
+      // that walk that index (the badge + the unread page).
+      ...(opts.unreadWalkLimit !== undefined && { unreadWalkLimit: opts.unreadWalkLimit }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair
     // signup writes the same contacts/conversations/units the authed API reads,

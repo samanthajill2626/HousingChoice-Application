@@ -76,6 +76,12 @@ import {
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
+import {
+  BADGE_COUNT_CAP,
+  collectUnreadRows,
+  UNREAD_WALK_LIMIT,
+  warnDeletedProbes,
+} from '../lib/unreadFeed.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
@@ -128,6 +134,24 @@ export interface InboxPage {
   groupsTruncated?: boolean;
 }
 
+/**
+ * The nav badge's payload (spec 4.4). It counts VISIBLE INBOX ROWS - one per
+ * contact however many unread threads it owns, one per unknown number, one per
+ * relay group, one per native group thread.
+ *
+ * `capped` and `truncated` are SEPARATE fields because the client treats them
+ * differently: a capped count is a ceiling rendered "99+" and must NOT be
+ * decremented on mark-read, while a truncated count is small and real-so-far
+ * and SHOULD still decrement.
+ */
+export interface InboxUnreadCount {
+  unreadCount: number;
+  /** BADGE_COUNT_CAP stopped the count (the number is a floor at the cap). */
+  capped: boolean;
+  /** The request's raw-scan budget stopped the walk first (also a floor). */
+  truncated: boolean;
+}
+
 // --- Deps (injectable; default to the real repos, like TodayRouterDeps) ------
 
 export interface InboxRouterDeps {
@@ -137,6 +161,14 @@ export interface InboxRouterDeps {
   messagesRepo?: MessagesRepo;
   placementsRepo?: PlacementsRepo;
   events?: EventBus;
+  /**
+   * TEST SEAM: the raw byUnread items ONE request may scan before it gives up
+   * and reports a floor. Production leaves it undefined and takes
+   * UNREAD_WALK_LIMIT; a route test sets it small so the `truncated` posture is
+   * reachable without seeding thousands of rows. Threaded in from
+   * ApiRouterDeps.
+   */
+  unreadWalkLimit?: number;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -898,6 +930,50 @@ export async function aggregateInbox(
   return { rows, nextCursor, ...(groupsTruncated && { groupsTruncated: true }) };
 }
 
+/**
+ * Count the unread inbox ROWS for the nav badge (spec 4.4).
+ *
+ * ONE `collectUnreadRows` call over the sparse byUnread index, capped at
+ * BADGE_COUNT_CAP. Because layer 1 is lazy and layer 2 stops at the cap, an
+ * empty index costs a single Query and a busy one scans only far enough to find
+ * 100 rows - never the whole index.
+ *
+ * NO HYDRATION: no previews, no placement labels, no latest-message reads. The
+ * deleted-contact resurfacing probe inside the collector is the one message read
+ * this path performs, and it is a VISIBILITY rule (spec 4.3 step 2), not
+ * presentation.
+ *
+ * Repo reads are NOT caught here: an index failure is a normal 500 and the
+ * client collapses any error to "no badge" (spec 4.4).
+ */
+export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnreadCount> {
+  const log = deps.logger ?? defaultLogger;
+  const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+
+  const result = await collectUnreadRows(
+    { conversations, contacts, messages, logger: log },
+    {
+      maxRows: BADGE_COUNT_CAP,
+      budget: deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT,
+    },
+  );
+  // ONE collect IS the whole request here, so this collect's probe total is the
+  // request total the tripwire wants. The shared module-scope limiter (the same
+  // instance the unread PAGE fires) owns the threshold - do not re-test it here.
+  warnDeletedProbes(log, result.deletedProbes);
+
+  // Deliberately no per-request INFO line: this is the highest-frequency call in
+  // the app (every SPA boot plus every debounced conversation event, per
+  // connected dashboard). The two rate-limited WARN tripwires are the signal.
+  return {
+    unreadCount: result.candidates.length,
+    capped: result.capped,
+    truncated: result.truncated,
+  };
+}
+
 // --- Router ------------------------------------------------------------------
 
 /** Parse + clamp ?limit= into 1..MAX_INBOX_LIMIT; default DEFAULT_INBOX_LIMIT. */
@@ -948,6 +1024,21 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       }
       log.error({ err }, 'inbox feed failed');
       throw err; // Express 5 forwards async throws to the error handler.
+    }
+  });
+
+  // GET /api/inbox/unread-count -> { unreadCount, capped, truncated }
+  // The nav badge's cheap read (spec 4.4): ONE index-backed collect, no
+  // hydration. Registered ABOVE the /:contactId/read param route - Express
+  // matches in REGISTRATION order, so a param route placed first would claim
+  // "unread-count" as a contactId. Today the param route is a POST two segments
+  // deep and cannot collide; keeping this above it is what makes that stay true.
+  router.get('/unread-count', async (_req, res) => {
+    try {
+      res.json(await countUnreadRows(deps));
+    } catch (err) {
+      log.error({ err }, 'inbox unread count failed');
+      throw err; // Express 5 forwards async throws to the error handler (500).
     }
   });
 

@@ -16,7 +16,11 @@ import {
   ORIGIN_SECRET,
 } from './helpers/twilioWebhookHarness.js';
 import { conversationsForContact } from '../src/lib/contactThreads.js';
-import { encodeGroupCursor, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import {
+  encodeGroupCursor,
+  GROUP_TEXT_STATUS,
+  type ConversationItem,
+} from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
@@ -581,6 +585,256 @@ describe('POST /api/inbox/read { phone } — unknown number (C8)', () => {
     // which would 404 with a different message).
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('no_conversation_for_phone');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/inbox/unread-count (spec 4.4) - the nav badge's cheap read.
+//
+// EVERY unread fixture below carries `unread_flag: 'unread'`, because the badge
+// reads the SPARSE byUnread index rather than the open partition: a row with an
+// unread_count but no flag is simply NOT in the index. The real writers stamp
+// the flag inside incrementUnread; these fixtures write the world map directly,
+// so they have to state it, and a flagless one would dead-end the test
+// green-and-empty while proving nothing.
+// ---------------------------------------------------------------------------
+
+interface BadgeCallCounts {
+  queryUnreadPage: number;
+  findByPhone: number;
+  listByConversation: number;
+}
+
+/**
+ * A world whose three unread-path repos are wrapped in counting proxies (the
+ * recording-world idiom from groupTextWebhook.test.ts). The badge's whole claim
+ * is ONE index Query and NO hydration; only a call count can tell "cheap" from
+ * "cheap-looking", and the proxy forwards to the real fake so the counted run
+ * is the same run the assertions read.
+ */
+function countingWorld(): { world: World; calls: BadgeCallCounts } {
+  const world = createFakeWorld();
+  const calls: BadgeCallCounts = { queryUnreadPage: 0, findByPhone: 0, listByConversation: 0 };
+  const counted = <T extends object>(repo: T): T =>
+    new Proxy(repo, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (typeof prop === 'string' && prop in calls) {
+            calls[prop as keyof BadgeCallCounts] += 1;
+          }
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+  world.conversationsRepo = counted(world.conversationsRepo);
+  world.contactsRepo = counted(world.contactsRepo);
+  world.messagesRepo = counted(world.messagesRepo);
+  return { world, calls };
+}
+
+/** Distinct, ordered timestamps for the bulk fixtures. */
+const isoAt = (minutes: number): string =>
+  new Date(Date.UTC(2026, 5, 10, 10, 0, 0) + minutes * 60_000).toISOString();
+
+describe('GET /api/inbox/unread-count (badge)', () => {
+  it('401 without a session cookie', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/inbox/unread-count')
+      .set('x-origin-verify', ORIGIN_SECRET);
+    expect(res.status).toBe(401);
+  });
+
+  it('a fully-read world costs ONE index query and zero hydration reads', async () => {
+    const { world, calls } = countingWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContact(world, { contactId: 'c-read', type: 'tenant', phone: '+15550000001' });
+    // Read row: unread_count 0 AND no flag - exactly what resetUnread leaves.
+    seedConversation(world, 'conv-read', {
+      participant_phone: '+15550000001',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 0,
+    });
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ unreadCount: 0, capped: false, truncated: false });
+    // The empty-index cost, pinned exhaustively: one Query, no contact
+    // resolution, no message read.
+    expect(calls).toEqual({ queryUnreadPage: 1, findByPhone: 0, listByConversation: 0 });
+  });
+
+  it('counts one row per contact, plus group and OPEN relay rows - a CLOSED relay is excluded', async () => {
+    const { app, world } = makeWebhookHarness();
+    for (const [i, id] of ['c-a', 'c-b', 'c-c'].entries()) {
+      seedContact(world, { contactId: id, type: 'tenant', phone: `+1555000010${i}` });
+      seedConversation(world, `conv-${id}`, {
+        participant_phone: `+1555000010${i}`,
+        last_activity_at: isoAt(i),
+        unread_count: i + 1,
+        unread_flag: 'unread',
+      });
+    }
+    seedConversation(world, 'conv-group-text', {
+      participant_phone: '+15559990002',
+      type: 'group_text',
+      status: GROUP_TEXT_STATUS,
+      last_activity_at: isoAt(10),
+      unread_count: 4,
+      unread_flag: 'unread',
+    });
+    seedConversation(world, 'conv-relay-open', {
+      participant_phone: '+15559990001',
+      pool_number: '+15559990001',
+      type: 'relay_group',
+      status: 'open',
+      last_activity_at: isoAt(11),
+      unread_count: 5,
+      unread_flag: 'unread',
+      participants: [{ contactId: 'c-a', phone: '+15550000100' }],
+    });
+    // A CLOSED relay group that is still flagged: the close-reset zeroes both,
+    // so this row can only exist as accrual (a pre-reset row, or a lagging GSI
+    // image). The VISIBILITY rule - not index membership - is what drops it.
+    seedConversation(world, 'conv-relay-closed', {
+      participant_phone: '+15559990003',
+      pool_number: '+15559990003',
+      type: 'relay_group',
+      status: 'closed',
+      last_activity_at: isoAt(12),
+      unread_count: 6,
+      unread_flag: 'unread',
+      participants: [{ contactId: 'c-b', phone: '+15550000101' }],
+    });
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ unreadCount: 5, capped: false, truncated: false });
+  });
+
+  it('counts a multi-thread contact ONCE, however many of its threads are unread', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-multi',
+      type: 'tenant',
+      phone: '+15550000201',
+      email: 'multi@example.com',
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+    // The second number goes through the repo so its phone-pointer item exists
+    // (the byPhone resolution path a non-primary number actually relies on).
+    await world.contactsRepo.addPhone('c-multi', { phone: '+15550000202' });
+    seedConversation(world, 'conv-multi-a', {
+      participant_phone: '+15550000201',
+      last_activity_at: isoAt(1),
+      unread_count: 2,
+      unread_flag: 'unread',
+    });
+    seedConversation(world, 'conv-multi-b', {
+      participant_phone: '+15550000202',
+      last_activity_at: isoAt(2),
+      unread_count: 3,
+      unread_flag: 'unread',
+    });
+    seedConversation(world, 'conv-multi-email', {
+      participant_phone: '',
+      participant_email: 'multi@example.com',
+      last_activity_at: isoAt(3),
+      unread_count: 1,
+      unread_flag: 'unread',
+    });
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(200);
+    // ONE row for the person - the badge counts ROWS, not threads or messages.
+    expect(res.body).toEqual({ unreadCount: 1, capped: false, truncated: false });
+  });
+
+  it('caps at 100 candidates and says so (the 99+ contract)', async () => {
+    const { app, world } = makeWebhookHarness();
+    for (let i = 0; i < 101; i++) {
+      const phone = `+1555${2000000 + i}`;
+      seedConversation(world, `conv-many-${i}`, {
+        participant_phone: phone,
+        type: 'unknown_1to1',
+        last_activity_at: isoAt(i),
+        unread_count: 1,
+        unread_flag: 'unread',
+      });
+    }
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ unreadCount: 100, capped: true, truncated: false });
+  });
+
+  it('reports truncated (NOT capped) when the raw scan budget runs out first', async () => {
+    const { world } = countingWorld();
+    // The budget seam: ApiRouterDeps.unreadWalkLimit, forwarded into the inbox
+    // router. Two raw items of allowance against five unread rows.
+    const { app } = makeWebhookHarness({ world, unreadWalkLimit: 2 });
+    for (let i = 0; i < 5; i++) {
+      const phone = `+1555${3000000 + i}`;
+      seedConversation(world, `conv-budget-${i}`, {
+        participant_phone: phone,
+        type: 'unknown_1to1',
+        last_activity_at: isoAt(i),
+        unread_count: 1,
+        unread_flag: 'unread',
+      });
+    }
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(200);
+    // A truncated count is small and REAL-SO-FAR (the client still decrements
+    // it); a capped count is a ceiling. They are distinct fields for exactly
+    // that reason, so pin both.
+    expect(res.body).toEqual({ unreadCount: 2, capped: false, truncated: true });
+  });
+
+  it('500s when the index read throws (the client collapses any error to "no badge")', async () => {
+    const world = createFakeWorld();
+    const repo = world.conversationsRepo;
+    world.conversationsRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop !== 'queryUnreadPage') return Reflect.get(target, prop, receiver) as unknown;
+        return async () => {
+          throw new Error('byUnread unavailable');
+        };
+      },
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+  });
+
+  it('is matched by its own route, not swallowed by the :contactId param route', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A contact whose id IS the literal path segment. The badge route is
+    // registered ABOVE /:contactId/read; if a param route ever moved above it
+    // (or a GET /:contactId were added there), this request would answer with
+    // that contact's payload instead of the count.
+    seedContact(world, { contactId: 'unread-count', type: 'tenant', phone: '+15550000301' });
+
+    const res = await auth(request(app).get('/api/inbox/unread-count'));
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['capped', 'truncated', 'unreadCount']);
+
+    // ...and the reverse: the badge route did not annex the param route's
+    // namespace - POST /api/inbox/<id>/read still reaches the fan-out handler.
+    const fanOut = await auth(request(app).post('/api/inbox/unread-count/read'));
+    expect(fanOut.status).toBe(200);
+    expect(fanOut.body).toEqual({ ok: true });
   });
 });
 

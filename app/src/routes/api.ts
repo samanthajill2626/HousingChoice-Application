@@ -356,6 +356,14 @@ export interface ApiRouterDeps {
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
   sseHeartbeatMs?: number;
+  /**
+   * Test seam: the raw byUnread items ONE request may scan before the unread
+   * reads report a floor (inbox-unread-index). Production leaves it undefined
+   * and takes UNREAD_WALK_LIMIT; a route test sets it small so the `truncated`
+   * posture is reachable without seeding thousands of rows. ONE seam, forwarded
+   * to every router that walks that index.
+   */
+  unreadWalkLimit?: number;
 }
 
 // --- Inbox cursor (opaque to clients) ---------------------------------------
@@ -1077,6 +1085,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      // The byUnread scan budget (test seam): the badge and the unread page both
+      // read it off InboxRouterDeps, so it is forwarded once, here.
+      ...(deps.unreadWalkLimit !== undefined && { unreadWalkLimit: deps.unreadWalkLimit }),
     }),
   );
   // Unmatched-email triage (email-channel B3; requireAuth via the /api mount -

@@ -1046,6 +1046,45 @@ retried automatically**, so the facts in that window stay unextracted until some
 After fixing a systemic extraction fault, audit the run log for parked runs and decide per conversation
 whether to re-trigger one - it is a data-completeness gap, not a pending failure.
 
+**Run AI extraction (the operator's button).** On a contact page, the **More actions** menu carries
+**Run AI extraction**. It arms every eligible 1:1 thread of that contact - phone AND email threads,
+`tenant_1to1` and `unknown_1to1` only - for an immediate run, then returns; the same worker poll does
+the work, so the wait is the poll interval plus the run itself (roughly 5-40 seconds). The status
+banner on the contact page reports the outcome, including an outcome that changed nothing, and stops
+claiming to know if the run does not report back in time ("Still running - check Settings > AI runs.").
+Suggestions and auto-applied writes appear without a reload.
+
+**Each press bills one real model call per eligible thread.** A contact with three eligible threads
+costs three calls. Repeated presses on the same contact collapse into one run while the row is still
+waiting (the due row is a sliding upsert), but presses across different contacts do not collapse.
+Every press is recorded in the audit trail (`extraction_run_requested` on `contacts#<contactId>`, with
+the scheduled/failed counts), and every run it produces lands in **Settings > AI runs** with
+`trigger: manual` - that page, not the banner, is where to look afterwards.
+
+**A press waives the 30-day age floor, for that run only.** An ordinary run drops every message older
+than 30 days before building its window; a manual run reads the whole newest-50 page regardless of age,
+and also bypasses the "nothing new since the cursor" gate, so pressing again on an already-extracted
+thread really does re-run it. The waiver lives on the due row and is cleared when the run is claimed,
+so it never leaks into the next automatic run on that conversation. The newest-50 message cap and the
+60k-character window budget still apply, so a very long imported history is still truncated to its
+newest page.
+
+**The seven refusals** (each renders its own sentence in the banner):
+
+| Reason | Status | What it means |
+|---|---|---|
+| `contact_not_found` | 404 | No such contact (or the id is a phone-pointer row, not a contact). |
+| `contact_deleted` | 409 | The contact is soft-deleted. Deliberate: do not spend money writing facts onto a record staff have removed from view. Restore the contact first. |
+| `extraction_disabled` | 409 | `AI_EXTRACTION_ENABLED` is off in this environment - the whole feature is inert, not just the button. |
+| `ineligible_contact_type` | 409 | The contact is a landlord, partner, or team member. Only tenants and untriaged (unknown) contacts are extracted. |
+| `no_conversations` | 409 | The contact has no threads at all - nothing to read. |
+| `no_eligible_conversations` | 409 | Threads exist, but none is a 1:1 tenant/unknown thread (e.g. only a relay group or a landlord thread). Check the thread's TYPE, not the data. |
+| `schedule_failed` | 500 | Every scheduling write failed, so nothing was queued and nothing will bill. Safe to press again. |
+
+A press that queues SOME threads and fails others answers success, not failure: the banner names how
+many threads could not be queued and carries that count through to the resolved message. Those threads
+produce no run.
+
 **Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
 `POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the
 debounce (so you need not wait it out) and responds `{ processed, failed }`. This mirrors the

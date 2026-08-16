@@ -161,6 +161,15 @@ export interface ConversationItem {
   /** Inbound messages since the last POST /:id/read (M1.2 unread tracking). */
   unread_count?: number;
   /**
+   * Sparse byUnread GSI HASH - present IFF unread_count > 0 (the constant
+   * string 'unread'). Maintained ONLY by incrementUnread / resetUnread and the
+   * relay-close / contact-delete resets; status and type transitions leave it
+   * alone. Never exposed on a constructed wire shape (it does ride the raw
+   * item returned by GET /api/conversations/:conversationId - accepted:
+   * internal client, ignores unknown fields).
+   */
+  unread_flag?: 'unread';
+  /**
    * The placement this relay_group is the thread for (M1.10): the
    * conversation→placement BACK-REFERENCE. It lets the voice masked-call seam resolve
    * the landlord-leg target (placement→unit.primary_contact) and the

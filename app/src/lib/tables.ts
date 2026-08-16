@@ -170,6 +170,21 @@ export const TABLES: readonly TableSpec[] = [
         rangeKey: { name: 'last_activity_at', type: 'S' },
         sparse: true,
       },
+      // Sparse unread index (design 2026-08-16): unread_flag exists ONLY while
+      // unread_count > 0, maintained atomically by incrementUnread /
+      // resetUnread (+ the relay-close and contact-delete resets), so unread
+      // discovery costs O(actual unread) instead of a walk of the whole open
+      // partition. The HASH value is the CONSTANT string 'unread' - encoding
+      // status/type into it would obligate every lifecycle writer to maintain
+      // the attribute; readers filter the projected live status/type instead.
+      // last_activity_at is required on every conversation, so unread_flag is
+      // the single controlled key attribute and REMOVEing it retires the row.
+      {
+        indexName: 'byUnread',
+        hashKey: { name: 'unread_flag', type: 'S' },
+        rangeKey: { name: 'last_activity_at', type: 'S' },
+        sparse: true,
+      },
     ],
   },
   {

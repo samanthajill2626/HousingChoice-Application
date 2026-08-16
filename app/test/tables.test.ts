@@ -161,7 +161,7 @@ describe('tables.ts — the table contract', () => {
     expect(byProperty?.sparse).toBe(true);
   });
 
-  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus', () => {
+  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus, byUnread', () => {
     const t = spec('conversations');
     expect(t.hashKey.name).toBe('conversationId');
     expect(t.rangeKey).toBeUndefined();
@@ -171,6 +171,7 @@ describe('tables.ts — the table contract', () => {
       'byLastActivity',
       'byPoolNumber',
       'byRelayStatus',
+      'byUnread',
     ]);
     // byParticipantEmail: sparse email-participant index (email channel v1).
     const byParticipantEmail = t.gsis.find((g) => g.indexName === 'byParticipantEmail');
@@ -183,6 +184,15 @@ describe('tables.ts — the table contract', () => {
     expect(byRelayStatus?.sparse).toBe(true);
     expect(byRelayStatus?.hashKey.name).toBe('relay_status');
     expect(byRelayStatus?.rangeKey?.name).toBe('last_activity_at');
+    // byUnread: sparse unread index (design 2026-08-16). The HASH attribute is
+    // the single controlled one - last_activity_at is required on every
+    // conversation, so REMOVEing unread_flag is what retires a row.
+    const byUnread = t.gsis.find((g) => g.indexName === 'byUnread');
+    expect(byUnread?.sparse).toBe(true);
+    expect(byUnread?.hashKey.name).toBe('unread_flag');
+    expect(byUnread?.hashKey.type).toBe('S');
+    expect(byUnread?.rangeKey?.name).toBe('last_activity_at');
+    expect(byUnread?.rangeKey?.type).toBe('S');
   });
 
   it('messages: PK conversationId, SK ts#msgId; stream on; no GSIs', () => {

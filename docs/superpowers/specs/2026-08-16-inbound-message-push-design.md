@@ -64,11 +64,15 @@ Planner-settled technical decisions:
   site: a push must never delay or fail a webhook ack or the email
   ingest. This copies the pre_ring pattern (voice.ts:623-633).
 - D12 Truncation: every push title/body passes through a shared
-  capPushText() helper at the send sites - title capped at 100 chars,
-  body at 300 chars, ASCII "..." appended on truncation. Rationale: an
-  uncapped matched-email body can be the stored body text (capped at
-  100KB at ingest), and a web-push payload over ~4KB is REJECTED by the
-  push service (counted failed, silently lost) - the cap must be
+  capPushText() helper (new module app/src/lib/pushText.ts) at the send
+  sites - title capped at 100, body at 300, counted in CODE POINTS
+  (Array.from, so surrogate pairs/emoji are never split), with ASCII
+  "..." appended on truncation and the RESULT INCLUDING the suffix never
+  exceeding the cap. Rationale: an uncapped matched-email body can be
+  the stored body text (capped at 100KB at ingest), and a web-push
+  payload over ~4KB is REJECTED by the push service with a non-Gone
+  status - counted failed, subscription kept, so the oversize push
+  fails silently and would fail again forever. The cap must be
   server-side at the send site.
 
 ## 3. What gets built
@@ -85,13 +89,20 @@ Behavior:
   zeroed result. Never one line per user.
 - Otherwise: usersRepo.listAll() ONCE, then fan out over the returned
   items directly - listAll already returns full items including
-  push_subscriptions; sendToAll must NOT re-read each user via findById.
-  Users with zero subscriptions are skipped silently (no I/O, no log
-  line).
+  push_subscriptions; the SEND path must NOT re-read each user via
+  findById. (The PRUNE path is the exception: a Gone endpoint triggers
+  removePushSubscription, which internally re-reads the user - that is
+  the existing exceptional path, unchanged.) Users with zero
+  subscriptions are skipped silently (no I/O, no log line).
 - The per-device loop (allowlist prune, Gone prune, transient keep) is
   shared with sendToUser via an internal helper so the two methods
   cannot drift; sendToUser keeps its exact current behavior and log
-  lines (the voice paths and their tests are untouched).
+  lines (the voice paths and their tests are untouched). Logging
+  precision: the per-device EXCEPTION warns inside the shared loop
+  (allowlist prune, transient failure) are kept in BOTH methods - they
+  are rare and diagnostic. What sendToAll drops are sendToUser's
+  per-CALL info lines ("no subscriptions", "sendToUser complete"),
+  replaced by the one aggregate line below.
 - Per-USER isolation: one failing user never aborts the fan-out (the
   voice founder-loop shape, voice.ts:1858-1864).
 - If listAll() itself throws: log error, return zeroed result - never
@@ -161,7 +172,7 @@ Two sites:
       created === true && row.status === 'unmatched' && !reingest
 
   All three conjuncts are load-bearing: putUnmatched uses a
-  DETERMINISTIC id (um-<sha256(bucket/key)>), so an SQS redelivery that
+  DETERMINISTIC id (um-<sha256(bucket/key)[:32]>), so an SQS redelivery that
   died between putUnmatched and the object-marker claim re-puts the same
   row with created === false and must not re-push; rows created with
   status 'quarantined' (oversize / parse-fail / virus / spam-unknown) or
@@ -197,7 +208,12 @@ Shared helpers this feature EXTRACTS (authorized refactors):
   the inbox's exact precedence chain (member names -> placement_tag ->
   formatted pool_number -> "Relay group") currently inlined in
   routes/inbox.ts relayRowFor (:619-635). inbox.ts is re-pointed to the
-  helper so push/inbox parity holds by construction.
+  helper so push/inbox parity holds by construction. SCOPE GUARD: only
+  inbox.ts relayRowFor is re-pointed. Other relay-label chains in the
+  app (notably poolNumbersAdmin.ts serverLabel, which is a DELIBERATELY
+  different precedence pinned by its own test) are NOT consolidated -
+  the helper's doc comment must say so, so a later maintainer does not
+  "finish" a consolidation that was never intended.
 - contactDisplayName(contact) in app/src/lib (new small module): the
   firstName/lastName join with trimming. Used by the new push sites
   ONLY; the five existing private copies (routes/contacts.ts,
@@ -212,7 +228,7 @@ kind 'message' (has a conversationId; tag becomes message:<convId>):
 | 1:1 SMS (+ closed-group intercept) | contactDisplayName(contact), else the conversation's participant_display_name, else formatPhoneForDisplay(From) | body rules below |
 | Relay-group inbound | relayThreadLabel(relay) | "<sender>: <Body>" where <sender> = roster sender.name, else contactDisplayName(senderContact), else formatPhoneForDisplay(From); media-only: "<sender> sent an attachment." |
 | Native group text | groupThreadLabel(thread.participants) (the canonical title, lib/groupTitle.ts:29) | "<sender>: <Body>" with the same sender fallback chain (roster/contact name, else phone); media-only: "<sender> sent an attachment." |
-| Matched email | contactDisplayName(contact), else the parsed from-name, else the from address | subject if non-empty, else the stored message body text (the field capped at 100KB at ingest), through capPushText |
+| Matched email | contactDisplayName(threadContact) - the contact binding thread() actually receives (the tier-5 roster/thread contact, or the tier-6 findByEmail match), NOT the bare tier-6 lookup when the thread resolved differently - else the parsed from-name, else the from address | subject if non-empty, else the stored message body text (the field capped at 100KB at ingest), through capPushText |
 
 Body rules for SMS/MMS (1:1 and closed-group rows):
 
@@ -240,6 +256,13 @@ payload):
 |-------|------|
 | parsed from-name, else the from address | subject, else the stored 180-char snippet |
 
+The unmatched notification is a QUEUE entry wearing the NEWEST
+arrival's copy: because the tag is queue-level (3.5), each new
+unmatched email replaces the shade entry in place, so only the latest
+sender/subject is visible there. Earlier arrivals' identities live
+only on /email. This is deliberate - the entry represents the queue,
+its copy represents the latest item.
+
 ### 3.5 Client change (dashboard service worker)
 
 Tested-mirror pattern (dashboard/src/sw/display.ts + route.ts are the
@@ -254,7 +277,10 @@ BOTH must be updated). Three behavior changes:
   would not alert - the opposite of native messaging. (The existing
   renotify expression is timeSensitive && Boolean(tag); it becomes a
   distinct alerting set: time-sensitive kinds keep requireInteraction,
-  and message/unmatched_email join them for renotify only.)
+  and message/unmatched_email join them for renotify only.) Caveat,
+  stated honestly: renotify is an Android/Chrome lever (the deployed
+  target - the org runs Android PWAs); iOS Safari same-tag re-alert
+  behavior is UNVERIFIED and not a ship gate here.
 - UNMATCHED TAG (queue-level): notificationTag returns 'unmatched_email'
   (the bare kind, no id) for kind 'unmatched_email'. ONE shade entry
   for the whole triage queue, replaced in place by each new unmatched
@@ -327,7 +353,11 @@ No catalog entries, no new channel in MessageDef.
   realistically a handful of POSTs, hard-bounded by 10 per user.
 - Group fan-in is safe by construction: ONE inbound group/relay message
   produces ONE message row (relay fan-out sends provider SMS, never new
-  rows), so the 132 imported group threads multiply nothing.
+  rows), so the 132 imported group threads multiply nothing. Stated
+  consequence of title parity: imported rosters are NAMELESS, so their
+  group-push titles render from member phones/contact names (e.g.
+  "With (555) 010-0002 & ..."), exactly as the inbox does today;
+  titles improve as contacts get named, with no push-side work.
 - ACCEPTED (by D2, stated honestly): bursts across N DISTINCT
   conversations do not coalesce - N replies to a broadcast are N
   alerting notifications, exactly as a native SMS app behaves with N
@@ -349,11 +379,14 @@ No catalog entries, no new channel in MessageDef.
 - ACCEPTED RISK (write path): subscription pruning is a whole-list
   read-modify-write with no version condition (usersRepo.ts:581-631).
   Moving prunes onto the message path from two processes (app webhook +
-  mail worker, fire-and-forget) makes a prune-overlapping-a-resubscribe
-  lost-update possible: the fresh subscription can be silently
-  clobbered. At team scale this needs a Gone endpoint and a re-subscribe
-  on the same user item in the same instant; recovery is re-toggling
-  notifications in Settings. Accepted; the builder files
+  mail worker, fire-and-forget) makes lost-updates possible in two
+  shapes: a prune overlapping a re-subscribe silently clobbers the
+  fresh subscription, and two concurrent prunes of DIFFERENT dead
+  endpoints on the same user can resurrect one of them (each stale
+  read still contains the other's endpoint). Both need overlapping
+  writes on one user item in the same instant; recovery is the next
+  Gone prune or re-toggling notifications in Settings. Accepted at
+  team scale; the builder files
   docs/issues/push-subscription-prune-rmw-lost-update.md and amends the
   stale premise comment at usersRepo.ts:585-587.
 - The sends are serial per user/device and fire-and-forget off the
@@ -364,8 +397,10 @@ No catalog entries, no new channel in MessageDef.
 Unit (app):
 
 - pushService.sendToAll: fan-out across users using the listAll items
-  (NO per-user findById - pinned by asserting the fake repo's findById
-  is never called), zero-subscription users skipped silently, per-user
+  (NO per-user findById on the SEND path - pinned by asserting the fake
+  repo's findById is never called in a fan-out with NO Gone endpoints;
+  a Gone-prune case may legitimately read via removePushSubscription),
+  zero-subscription users skipped silently, per-user
   failure isolation, listAll-throw safety, unconfigured single-log
   no-op, ONE aggregate log line, aggregate tally, TTL absence (adapter
   receives undefined options - pins D9), PII (payload never logged),
@@ -455,3 +490,8 @@ Readers/renderers and type-surface impacts:
   Settings > Notifications > enable, then prove delivery with the
   existing "Send test notification" button. A user who never subscribes
   receives nothing, silently, by design.
+- OPERATOR AWARENESS (local dev): a live-mode `npm run dev` loop with
+  real VAPID keys now fires REAL pushes to every subscribed staff
+  device on every inbound text/email it ingests - consistent with the
+  established live-dev comms posture (real Twilio/SES), but new for
+  push. The hermetic e2e lane is unaffected (no VAPID).

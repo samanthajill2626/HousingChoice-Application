@@ -161,11 +161,23 @@ export interface ExtractionRepo {
    * landed during the failing run - the park branch permanently, since the row
    * then leaves the due index with nothing left to re-arm it.
    *
-   * The condition depends on how the run reached this point, which is why the
-   * caller passes `claimed`:
-   *   claimed  -> attribute_not_exists(_duePartition)  (the claim un-armed it)
-   *   !claimed -> dueAt = :listedDueAt                 (claim threw; never un-armed)
-   * Each path asserts exactly what it knows, and neither needs an OR.
+   * ONE predicate serves both paths:
+   *
+   *   attribute_not_exists(_duePartition) OR dueAt = :listedDueAt
+   *
+   * The first arm covers the normal path, where the claim removed the index
+   * keys. The second arm covers a claim that THREW without un-arming the row:
+   * without it that path could never satisfy the condition, so it would never
+   * back off and never park, and the poll would retry the row every interval
+   * forever - an unbounded billed retry loop.
+   *
+   * Deliberately NOT a per-path conjunct keyed on whether the claim returned.
+   * `claim` rethrows everything that is not a ConditionalCheckFailedException,
+   * so a throw does NOT mean the write was not applied: a claim whose update
+   * committed and whose response was then lost leaves the row un-armed while
+   * the job believes the claim failed. A per-path `dueAt = :listedDueAt` is
+   * false there, so the row would be stranded de-armed with nothing to re-arm
+   * it and no reaper. The first arm of the disjunct self-heals exactly that.
    *
    * On a condition failure a second, scheduling-free update records only
    * lastError and attempts, leaving the fresh dueAt and marker alone.
@@ -174,7 +186,7 @@ export interface ExtractionRepo {
     conversationId: string,
     error: string,
     nextDueAt: string | null,
-    opts: { claimed: boolean; listedDueAt: string; manual: boolean },
+    opts: { listedDueAt: string; manual: boolean },
   ): Promise<void>;
   getDue(conversationId: string): Promise<DueExtractionItem | undefined>;
   /**
@@ -378,14 +390,15 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       //
       // BOTH branches are conditional on nobody having re-armed the row since it
       // was listed, so a press (or an inbound) that landed during the failing
-      // run survives. The predicate is chosen per path from `opts.claimed`; see
-      // the interface doc. A failed condition falls back to a scheduling-free
+      // run survives. ONE disjunct serves both paths - see the interface doc for
+      // why a per-path conjunct strands a row whose claim landed but whose
+      // response was lost. A failed condition falls back to a scheduling-free
       // update that records the error only.
       const common = {
         TableName: table,
         Key: { itemId: dueId(conversationId) },
       };
-      const condition = opts.claimed ? 'attribute_not_exists(#dp)' : '#dueAt = :listedDueAt';
+      const condition = 'attribute_not_exists(#dp) OR #dueAt = :listedDueAt';
 
       const scheduling = async (): Promise<void> => {
         if (nextDueAt !== null) {
@@ -408,8 +421,8 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
                 ':dueAt': nextDueAt,
                 ':dp': 'due',
                 ':one': 1,
+                ':listedDueAt': opts.listedDueAt,
                 ...(opts.manual && { ':manual': true }),
-                ...(!opts.claimed && { ':listedDueAt': opts.listedDueAt }),
               },
             }),
           );
@@ -436,7 +449,7 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
             ExpressionAttributeValues: {
               ':error': error,
               ':one': 1,
-              ...(!opts.claimed && { ':listedDueAt': opts.listedDueAt }),
+              ':listedDueAt': opts.listedDueAt,
             },
           }),
         );

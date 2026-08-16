@@ -3,7 +3,8 @@
 //
 // In-memory twin of DynamoDB, mirroring app/test/placementNudgesRepo.test.ts:
 // a tiny fake doc client that EVALUATES the ConditionExpressions the repo builds
-// (attribute_exists / attribute_not_exists AND ISO-string comparisons), applies
+// (attribute_exists / attribute_not_exists and ISO-string comparisons, joined by
+// AND and/or OR with DynamoDB's precedence), applies
 // combined SET / REMOVE / ADD UpdateExpressions in-memory (incl. if_not_exists),
 // and answers GSI Queries with present-and-equal key semantics so a row is only
 // "indexed" while ALL its GSI key attributes are present (models sparse GSIs).
@@ -67,9 +68,62 @@ function attrOf(token: string, names: Record<string, string>): string {
 }
 
 /**
- * Evaluate an AND-joined chain of attribute_exists / attribute_not_exists and
- * `#attr <op> :val` comparisons (op in =,<=,<,>=,>). A missing left operand makes
- * the comparison / attribute_exists false (models an absent GSI key attribute).
+ * Split a boolean expression on `keyword` at paren depth 0. Whitespace around
+ * the keyword is required, so an attribute alias that merely contains the
+ * letters (`#brand`) is never a split point.
+ */
+function splitBoolean(expr: string, keyword: 'AND' | 'OR'): string[] {
+  const pattern = new RegExp(`\\s+${keyword}\\s+`, 'gi');
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < expr.length; i += 1) {
+    const ch = expr[i];
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 0) continue;
+    pattern.lastIndex = i;
+    const m = pattern.exec(expr);
+    if (m !== null && m.index === i) {
+      parts.push(expr.slice(start, i));
+      start = i + m[0].length;
+      i = start - 1;
+    }
+  }
+  parts.push(expr.slice(start));
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/** True when the whole expression is ONE parenthesized group: `( ... )`. */
+function isWrapped(expr: string): boolean {
+  if (!expr.startsWith('(') || !expr.endsWith(')')) return false;
+  let depth = 0;
+  for (let i = 0; i < expr.length; i += 1) {
+    if (expr[i] === '(') depth += 1;
+    else if (expr[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return i === expr.length - 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * Evaluate a boolean chain of attribute_exists / attribute_not_exists and
+ * `#attr <op> :val` comparisons (op in =,<=,<,>=,>), joined by AND and/or OR
+ * with DynamoDB's precedence (OR loosest, then AND, then a parenthesized group
+ * or a bare clause). A missing left operand makes the comparison /
+ * attribute_exists false (models an absent GSI key attribute).
+ *
+ * Every arm is evaluated - deliberately no short-circuit - so a clause this
+ * fake cannot parse still THROWS instead of hiding behind a true sibling. That
+ * throw is what keeps these tests non-vacuous.
  */
 function conditionHolds(
   expr: string,
@@ -77,38 +131,45 @@ function conditionHolds(
   values: Record<string, unknown>,
   row: Row | undefined,
 ): boolean {
-  return expr.split(/\s+AND\s+/i).every((clauseRaw) => {
-    const clause = clauseRaw.trim();
-    const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w]+)\s*\)$/.exec(clause);
-    if (fn) {
-      const attr = attrOf(fn[2]!, names);
-      const exists = row !== undefined && row[attr] !== undefined;
-      return fn[1] === 'attribute_exists' ? exists : !exists;
+  const ors = splitBoolean(expr, 'OR');
+  if (ors.length > 1) {
+    return ors.map((part) => conditionHolds(part, names, values, row)).some((held) => held);
+  }
+  const ands = splitBoolean(expr, 'AND');
+  if (ands.length > 1) {
+    return ands.map((part) => conditionHolds(part, names, values, row)).every((held) => held);
+  }
+  const clause = expr.trim();
+  if (isWrapped(clause)) return conditionHolds(clause.slice(1, -1), names, values, row);
+  const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w]+)\s*\)$/.exec(clause);
+  if (fn) {
+    const attr = attrOf(fn[2]!, names);
+    const exists = row !== undefined && row[attr] !== undefined;
+    return fn[1] === 'attribute_exists' ? exists : !exists;
+  }
+  const cmp = /^([#\w]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/.exec(clause);
+  if (cmp) {
+    if (row === undefined) return false;
+    const left = row[attrOf(cmp[1]!, names)];
+    if (left === undefined) return false;
+    const l = left as string;
+    const r = values[cmp[3]!] as string;
+    switch (cmp[2]) {
+      case '=':
+        return l === r;
+      case '<=':
+        return l <= r;
+      case '<':
+        return l < r;
+      case '>=':
+        return l >= r;
+      case '>':
+        return l > r;
+      default:
+        throw new Error(`fake doc: unsupported operator ${cmp[2]}`);
     }
-    const cmp = /^([#\w]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/.exec(clause);
-    if (cmp) {
-      if (row === undefined) return false;
-      const left = row[attrOf(cmp[1]!, names)];
-      if (left === undefined) return false;
-      const l = left as string;
-      const r = values[cmp[3]!] as string;
-      switch (cmp[2]) {
-        case '=':
-          return l === r;
-        case '<=':
-          return l <= r;
-        case '<':
-          return l < r;
-        case '>=':
-          return l >= r;
-        case '>':
-          return l > r;
-        default:
-          throw new Error(`fake doc: unsupported operator ${cmp[2]}`);
-      }
-    }
-    throw new Error(`fake doc: unsupported condition clause "${clause}"`);
-  });
+  }
+  throw new Error(`fake doc: unsupported condition clause "${clause}"`);
 }
 
 /** Apply combined `SET ... REMOVE ... ADD ...` (with if_not_exists in SET). */
@@ -492,7 +553,7 @@ describe('extractionRepo.complete', () => {
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
     // arm attempts=1 + lastError
-    await repo.fail('conv-1', 'boom', T3, { claimed: true, listedDueAt: T1, manual: false });
+    await repo.fail('conv-1', 'boom', T3, { listedDueAt: T1, manual: false });
     await repo.claim('conv-1', FUTURE, T3);
     await repo.complete('conv-1', 'msg-42', T2);
 
@@ -505,6 +566,45 @@ describe('extractionRepo.complete', () => {
     // Persists as the conversation cursor record, out of the due index.
     expect(item!._duePartition).toBeUndefined();
     expect(item!.dueAt).toBeUndefined();
+  });
+
+  // Re-arm survival, the complete half of the pair (the fail half is below).
+  // complete's UpdateExpression touches neither dueAt/_duePartition nor the
+  // manual marker, so a re-arm that lands mid-run keeps its own schedule. That
+  // is behaviour, not an accident: adding dueAt to complete's REMOVE list would
+  // silently delete a press.
+  it('a PRESS landing during a claimed run survives that run.complete', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.complete('conv-1', 'msg-42', T3);
+
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.manualRequested).toBe(true);
+    expect(item!.requestId).toBe('req-abc');
+    expect(item!.cursor).toBe('msg-42');
+    expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).toContain('conv-1');
+  });
+
+  it('an INBOUND re-arm landing during a claimed run survives that run.complete', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.scheduleExtraction('conv-1', 'sms', T2);
+    await repo.complete('conv-1', 'msg-42', T3);
+
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.cursor).toBe('msg-42');
+    expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).toContain('conv-1');
   });
 });
 
@@ -521,7 +621,7 @@ describe('extractionRepo.fail', () => {
     await repo.claim('conv-1', T2, T1);
 
     // First failure re-arms: attempts=1, back in the due index at nextDueAt.
-    await repo.fail('conv-1', 'driver timeout', T3, { claimed: true, listedDueAt: T1, manual: false });
+    await repo.fail('conv-1', 'driver timeout', T3, { listedDueAt: T1, manual: false });
     let item = await repo.getDue('conv-1');
     expect(item!.attempts).toBe(1);
     expect(item!.dueAt).toBe(T3);
@@ -531,7 +631,7 @@ describe('extractionRepo.fail', () => {
 
     // Claim + fail again with null nextDueAt -> park: attempts=2, out of the index.
     await repo.claim('conv-1', FUTURE, T3);
-    await repo.fail('conv-1', 'gave up', null, { claimed: true, listedDueAt: T3, manual: false });
+    await repo.fail('conv-1', 'gave up', null, { listedDueAt: T3, manual: false });
     item = await repo.getDue('conv-1');
     expect(item!.attempts).toBe(2);
     expect(item!._duePartition).toBeUndefined();
@@ -542,10 +642,16 @@ describe('extractionRepo.fail', () => {
 });
 
 describe('extractionRepo.fail - re-arm survival', () => {
-  const opts = (over: Partial<{ claimed: boolean; listedDueAt: string; manual: boolean }> = {}) =>
-    ({ claimed: true, listedDueAt: T1, manual: false, ...over });
+  const opts = (over: Partial<{ listedDueAt: string; manual: boolean }> = {}) =>
+    ({ listedDueAt: T1, manual: false, ...over });
 
-  it('claimed, nobody re-armed: backs off normally', async () => {
+  // The four quadrants of the disjunct
+  // `attribute_not_exists(_duePartition) OR dueAt = :listedDueAt`:
+  // claim-succeeded x re-armed-or-not, and claim-threw x re-armed-or-not.
+  // "Claim threw" is modelled by never calling claim, so the row is still
+  // armed at the value listDue returned.
+
+  it('quadrant 1 - claimed, nobody re-armed: backs off normally', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
@@ -557,7 +663,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect(item!.lastError).toBe('boom');
   });
 
-  it('claimed, a press re-armed: the press survives and the error is still recorded', async () => {
+  it('quadrant 2 - claimed, a press re-armed: the press survives and the error is still recorded', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
@@ -568,6 +674,20 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect(item!.dueAt).toBe(T2);
     expect(item!.manualRequested).toBe(true);
     expect(item!.requestId).toBe('req-abc');
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
+
+  it('quadrant 2 - claimed, an INBOUND re-armed: the inbound survives and the error is still recorded', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.scheduleExtraction('conv-1', 'sms', T2);
+    await repo.fail('conv-1', 'boom', T3, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2); // NOT pushed out to the backoff time
+    expect(item!._duePartition).toBe('due');
     expect(item!.attempts).toBe(1);
     expect(item!.lastError).toBe('boom');
   });
@@ -585,27 +705,115 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect(item!.requestId).toBe('req-abc');
   });
 
-  it('claim THREW and nobody re-armed: still backs off, and can still park', async () => {
+  it('claimed, an INBOUND re-armed, and the run PARKS: the inbound is not deleted', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
-    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    await repo.claim('conv-1', T2, T1);
+    await repo.scheduleExtraction('conv-1', 'sms', T2);
+    await repo.fail('conv-1', 'boom', null, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+    expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).toContain('conv-1');
+  });
+
+  it('quadrant 3 - claim THREW and nobody re-armed: still backs off, and can still park', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.fail('conv-1', 'boom', T3, opts());
     expect((await repo.getDue('conv-1'))!.dueAt).toBe(T3);
-    await repo.fail('conv-1', 'boom', null, opts({ claimed: false, listedDueAt: T3 }));
+    // The unbounded-retry regression: without the `dueAt = :listedDueAt` arm
+    // this path could never satisfy the condition, so the row would never back
+    // off and never park - it would re-list and re-bill every poll forever.
+    await repo.fail('conv-1', 'boom', null, opts({ listedDueAt: T3 }));
     const parked = await repo.getDue('conv-1');
     expect(parked!._duePartition).toBeUndefined();
     expect(parked!.dueAt).toBeUndefined();
+    expect(parked!.attempts).toBe(2);
   });
 
-  it('claim THREW and a press re-armed: the press survives', async () => {
+  it('quadrant 4 - claim THREW and a press re-armed: the press survives and the error is recorded', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
-    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    await repo.fail('conv-1', 'boom', T3, opts());
     const item = await repo.getDue('conv-1');
     expect(item!.dueAt).toBe(T2);
     expect(item!.manualRequested).toBe(true);
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
+
+  it('quadrant 4 - claim THREW, a press re-armed, and this run would PARK: the row does NOT park underneath it', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.fail('conv-1', 'boom', null, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.manualRequested).toBe(true);
+    expect(item!.requestId).toBe('req-abc');
+    expect(item!.attempts).toBe(1);
+  });
+
+  it('quadrant 4 - claim THREW and an INBOUND re-armed: the inbound survives', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.scheduleExtraction('conv-1', 'sms', T2);
+    await repo.fail('conv-1', 'boom', T3, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
+
+  it('the claim write LANDED but its response was lost: the row RE-ARMS instead of being stranded', async () => {
+    // repo.claim rethrows everything that is not a
+    // ConditionalCheckFailedException, so a throw does NOT mean the write was
+    // not applied. Here DynamoDB commits the claim and the response is then
+    // lost, so the row is already un-armed while the job believes the claim
+    // failed. A per-path `dueAt = :listedDueAt` predicate is false in that
+    // state, and the row would be left de-armed with nothing to re-arm it and
+    // no reaper. The disjunct's attribute_not_exists arm self-heals it.
+    const { doc } = makeFakeDoc();
+    const lossy = {
+      send: async (cmd: unknown) => {
+        const send = doc.send as unknown as (c: unknown) => Promise<unknown>;
+        const out = await send(cmd);
+        if (
+          cmd instanceof UpdateCommand &&
+          String(cmd.input.UpdateExpression).includes('#claimedAt')
+        ) {
+          throw new Error('socket hang up');
+        }
+        return out;
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const repo = repoWith(lossy);
+
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await expect(repo.claim('conv-1', T2, T1)).rejects.toThrow('socket hang up');
+    const afterClaim = await repo.getDue('conv-1');
+    expect(afterClaim!.claimedAt).toBe(T2); // the write DID land ...
+    expect(afterClaim!._duePartition).toBeUndefined(); // ... and un-armed the row
+
+    await repo.fail('conv-1', 'socket hang up', T3, opts());
+
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T3);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('socket hang up');
+    expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).toContain('conv-1');
   });
 
   it('a manual run re-arms WITH the flag; an automatic one does not', async () => {

@@ -438,7 +438,6 @@ describe('runDueExtractions', () => {
     // now + DEBOUNCE * 2^1 = now + 60s
     const expected = new Date(Date.parse(NOW) + DEBOUNCE * 2).toISOString();
     expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('driver boom'), expected, {
-      claimed: true,
       listedDueAt: dueRow().dueAt!,
       manual: false,
     });
@@ -464,7 +463,6 @@ describe('runDueExtractions', () => {
 
     expect(out).toEqual({ processed: 0, failed: 1 });
     expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.any(String), null, {
-      claimed: true,
       listedDueAt: dueRow().dueAt!,
       manual: false,
     });
@@ -490,7 +488,6 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 0, failed: 1 });
     const expected = new Date(Date.parse(NOW) + DEBOUNCE).toISOString();
     expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected, {
-      claimed: true,
       listedDueAt: dueRow().dueAt!,
       manual: false,
     });

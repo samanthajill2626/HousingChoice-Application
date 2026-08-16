@@ -303,9 +303,6 @@ export interface RunDraft {
   suggested?: number;
   /** The press this run answers, carried from the due row (manual runs only). */
   requestId?: string;
-  /** False when repo.claim THREW - the row was never un-armed, which changes
-   *  which condition fail() may assert. */
-  claimed?: boolean;
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
 }
 
@@ -398,9 +395,9 @@ async function processRow(
   let claimed: boolean;
   try {
     claimed = await repo.claim(conversationId, nowIso, listedDueAt);
-    draft.claimed = claimed;
   } catch (err) {
-    draft.claimed = false;
+    // A throw does NOT tell us whether the claim's write landed, which is why
+    // fail() asserts a disjunct rather than a per-path predicate.
     return failed('repo', err);
   }
   if (!claimed) {
@@ -709,12 +706,11 @@ export async function runDueExtractions(
       if (draft.error !== undefined) draft.error = { ...draft.error, attempts, parked };
       try {
         await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt, {
-          claimed: draft.claimed === true,
           // UNREACHABLE today: processRow returns { record: false } when dueAt is
           // absent, so a row without one never gets here. It exists only to
           // satisfy the optional type. If that guard ever moves, an empty
-          // listedDueAt would make the not-claimed condition never match and
-          // resurrect the unbounded-retry bug this condition exists to prevent.
+          // listedDueAt would make the second arm of fail's condition never
+          // match, leaving only the un-armed arm to keep the row terminating.
           listedDueAt: row.dueAt ?? '',
           manual: row.manualRequested === true,
         });

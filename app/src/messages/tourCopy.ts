@@ -15,7 +15,7 @@
 // graceful empty shape, so there is nothing to degrade to HERE. Every caller is
 // required to contain it - send paths claim-skip the rung with
 // 'invalid_schedule', read paths fall back to body: '' - because an uncontained
-// throw means either a 500 on a read path or an unclaimed row retried every 60s
+// throw means either a 500 on a read path or an unclaimed row retried every poll
 // forever. See the spec's section 5 and W6/W7.
 import type { Address } from '../lib/address.js';
 import { formatStreet } from '../lib/address.js';

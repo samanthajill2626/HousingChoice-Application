@@ -29,8 +29,11 @@ describe('EVENT_BRIDGE_URL config', () => {
 });
 
 describe('WORKER_POLL_INTERVAL_MS config', () => {
-  it('workerPollIntervalMs defaults to 60000 when unset', () => {
-    expect(loadConfig({ ...base, NODE_ENV: 'development' }).workerPollIntervalMs).toBe(60000);
+  // 30000 since 2026-08-16, lowered from 60000 so a scheduled run starts nearer
+  // its due time. Kept in step with the .env examples, which set the same value
+  // explicitly - this default is only the backup for an unsynced env.
+  it('workerPollIntervalMs defaults to 30000 when unset', () => {
+    expect(loadConfig({ ...base, NODE_ENV: 'development' }).workerPollIntervalMs).toBe(30000);
   });
 
   it('workerPollIntervalMs parses a positive integer', () => {

@@ -87,7 +87,7 @@ export interface ExtractionJobDeps {
   /**
    * The run-log writer. REQUIRED so a missed construction site is a typecheck
    * failure, not a silently empty log. All three sites must supply it:
-   * worker.ts (the 60s poll), routes/dev.ts (the deterministic dev tick), and
+   * worker.ts (the worker poll), routes/dev.ts (the deterministic dev tick), and
    * the unit-test harness. Missing the dev tick would leave the log permanently
    * empty in e2e and local development - the exact place this feature is first
    * exercised (design 8).

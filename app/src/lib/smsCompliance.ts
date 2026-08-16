@@ -16,12 +16,22 @@
 // pins each one against the spec to guard against drift.
 
 /**
- * The registered A2P brand name shown in all SMS-facing copy (spec §1).
- * If the founder switches to a registered DBA (e.g. "HousingChoice"), this ONE
- * line changes and every filed string below follows. The internal/dashboard
- * name stays "HousingChoice" regardless — do NOT use SMS_BRAND_NAME there.
+ * The brand name shown in all SMS-facing copy (spec section 1). Changed
+ * 2026-08-15 (founder decision) from the legal entity name "Tenant Place LLC"
+ * to the trade name "HousingChoice", so every text carries the name tenants and
+ * landlords actually know us by. This ONE line is the single point of change --
+ * every filed string below follows from it.
+ *
+ * The A2P brand/DBA registration is tracked separately and is NOT changed by
+ * this constant, so the code is deliberately ahead of the filing:
+ * TODO(sms-brand-diverges-from-registered-a2p-brand).
+ *
+ * This still is NOT the dashboard/internal name, even though the two strings
+ * now happen to match: internal UI hardcodes "HousingChoice" on its own. If the
+ * SMS-facing brand ever moves again, only this constant follows it -- do NOT
+ * import SMS_BRAND_NAME into dashboard chrome to spare a literal.
  */
-export const SMS_BRAND_NAME = 'Tenant Place LLC';
+export const SMS_BRAND_NAME = 'HousingChoice';
 
 /** Public policy links embedded in the web-form consent copy (spec §3.1). The
  *  "Privacy Policy" and "Terms" words link to these. */

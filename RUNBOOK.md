@@ -921,6 +921,26 @@ number purchased via REST is then recognized as a pool number by an inbound mask
 that point at [docs/RCS-integration-contract.md](docs/RCS-integration-contract.md); there is **no
 real RCS behavior** in the fake.
 
+### Worker poll cadence (`WORKER_POLL_INTERVAL_MS`)
+
+One interval drives **five** due-row polls in `worker.ts`: tour reminders, placement
+nudges, roster actions, conversation-fact extraction, and group guardrails. Lowered
+from 60000 to **30000** on 2026-08-16 so a scheduled run starts nearer its due time.
+
+**Owed on the next deploy:** the var was previously absent from every `.env`, so both
+dev and prod were running the in-code default. `.env.dev.example` and
+`.env.prod.example` now carry `WORKER_POLL_INTERVAL_MS=30000` - sync the real `.env`
+files before deploying, or the env keeps whatever the code default is at that commit.
+
+Why halving is safe rather than twice the work: a tick with nothing due is a single
+Query per poll against a **sparse** `byDueAt` index that returns no rows, and every
+poll claims a row before acting, so overlapping ticks cannot double-fire. The cost is
+a handful of empty Queries a minute.
+
+**Floor:** do not set it below `AI_EXTRACTION_DEBOUNCE_MS` (30000). The debounce
+exists to collapse a burst of inbound texts into one extraction run; polling faster
+than the debounce cannot make that run happen sooner, it only spends reads.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule
@@ -1032,6 +1052,16 @@ every large run stopped dead on the cap, and the failures surfaced only as `extr
 After any model change, watch the AI run log for `truncated` failures and raise `MAX_OUTPUT_TOKENS` if
 the new model writes longer. `voice` runs are the largest output by construction (a `speakerRoles` pair
 per `Speaker N` label on top of the all-required object), so they truncate first.
+
+**Housing authority: why an extracted one sometimes arrives as a suggestion.** The field is free
+text, not a closed vocabulary. `lib/housingAuthority.ts` collapses known variants to one spelling
+("Dekalb Housing" -> "Dekalb County Housing") because broadcast audience resolution is an exact hash
+match on the `byHousingAuthority` GSI, and passes anything else through verbatim. An authority we
+already recognise is WRITTEN; one we have never seen is SUGGESTED, so a human confirms before a
+brand-new string becomes a GSI hash value - a transcript can mishear, and clients name caseworker
+agencies and cities too. If you see the same authority repeatedly arriving as a suggestion, that is
+the signal to add its spelling (and any variants) to `CANONICAL_AUTHORITY` in that file - the only
+remaining code change in this area. A brand-new authority needs no code change to be recorded.
 
 **Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
 row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
@@ -1254,6 +1284,26 @@ do **not** apply to it.
 - **If it's stuck silent and won't change:** Android locks a category's importance once created and
   the app can't raise it afterward. If toggling the category doesn't take, **uninstall and
   reinstall the PWA** to recreate the channel fresh, then re-grant permission.
+- **Battery optimization DELAYS delivery even when everything above is right (observed live
+  2026-08-16).** Every push is sent `urgency: high`, but Android defers delivery while the device
+  dozes and then flushes the whole backlog when the FCM connection wakes - on prod this arrived as
+  "the test push (screen on) is instant, but call pushes land 15-30 minutes late, in a clump."
+  On any handset that must receive CALL alerts (the founder's, the inbound-voice-line holder's):
+  **Settings -> Apps -> [PWA] -> Battery -> Unrestricted**, and the same for **Chrome** (the WebAPK
+  delegates to it). On Samsung, ALSO check **Settings -> Battery -> Background usage limits** and
+  make sure neither Chrome nor the PWA is in "Deep sleeping apps." Data Saver, if on, needs Chrome
+  exempted too. Verify with the "worst case" drill: screen off, unplugged, wait 10+ minutes, then
+  have someone else call the business number - the pre-ring push must beat the ring.
+- **A late flush used to LOOK like missing notifications.** Same-`tag` notifications replace each
+  other in place, and pre-ring, missed-call and voicemail for one call originally shared the bare
+  CallSid as their tag - a deferred backlog collapsed several calls' worth of pushes into one or
+  two shade entries. Fixed 2026-08-16: tags are now per-kind (`<kind>:<CallSid>`), so one call's
+  alerts coexist as separate entries like a native phone app's; the only deliberate replacement
+  left is that a missed-call or voicemail push CLOSES the call's now-stale "Incoming call" alert
+  (dashboard/public/sw.js, tested mirror dashboard/src/sw/display.ts). Since the same date the
+  pre-ring push also carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather
+  than delivered minutes late; missed-call and voicemail keep the late-is-better-than-never
+  default deliberately.
 
 ### iPhone (installed PWA, iOS 16.4+)
 
@@ -1621,7 +1671,9 @@ reports a `LastEvaluatedKey`, re-run it until it does not.
    from memory - a trailing slash or a stale host is the whole failure mode.
 3. **Production-service keyword canary.** Requires step 3b ("Keyword
    auto-replies (Advanced Opt-Out)") to have been done on the PROD messaging
-   service first. From a test handset, to the business number:
+   service first. On DEV the same canary applies, except every reply is
+   prefixed `HC DEV: ` (step 3b) - assert the prefix plus the constant, not the
+   constant alone. From a test handset, to the business number:
    - `HELP` -> exactly ONE reply, and it is our `HELP_REPLY` copy. (Expect our
      webhook NOT to be called at all: Twilio consumes HELP.)
    - `STOP` -> exactly ONE reply, and it is our `STOP_CONFIRMATION` copy. Then
@@ -1729,8 +1781,20 @@ keyword copy. The only loss is that the replies are not ours.
    - **Opt-in confirmation** = `OPT_IN_CONFIRMATION` (`keyword.optin`)
    Do not retype them. Copy from the constant so a character never drifts.
    All three are compliance-locked constants; none is operator-editable.
+   **On DEV only, prefix each of the three with `HC DEV: `** so a stray text
+   from the dev service is instantly recognizable as non-production. That
+   prefix is the ONE sanctioned deviation from verbatim; everything after it
+   still matches the constant character for character.
 4. Save, then run the keyword canary in step 2.3 against that service - ONE
    branded reply per keyword, plus the sentence probe.
+
+**Verified state (2026-08-16, Cameron).** Dev and prod are consistent and both
+carry the CURRENT `HousingChoice` copy, dev with the `HC DEV: ` prefix. Note
+the consoles were updated BEFORE the brand change shipped, which inverts the
+usual order below; until the app is deployed, keyword replies say
+"HousingChoice" while app-SENT copy (web-form welcome, missed-call auto-text,
+relay intro) still says "Tenant Place LLC" on the deployed build. The window
+closes on the next deploy of each env - nothing to redo in the console.
 
 **Changing the copy later** - three steps, in this order, always:
 

@@ -64,7 +64,7 @@ export type ReminderSkipReason =
   /** SEND time (the poll's claim-skip): the rung's scheduledAt cannot produce a
    *  time, so no body can be composed. Retired rather than retried - an
    *  uncontained compose failure would leave the row unclaimed and re-listed by
-   *  listDue every 60s forever. NOT an arm-time reason: armTourReminders never
+   *  listDue every poll forever. NOT an arm-time reason: armTourReminders never
    *  reaches this claim-skip, because `new Date(scheduledAt).toISOString()`
    *  throws a raw RangeError straight out of the arm call first. (READ paths hit
    *  the same uncomposable rung but degrade to body:'' - they stamp nothing.) */

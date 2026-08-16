@@ -354,15 +354,20 @@ describe('prompt builders', () => {
     for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
   });
 
-  it('system prompt tells the model to SURFACE an off-vocabulary authority, not drop it', () => {
+  it('system prompt offers the authority list as SPELLINGS, never as permitted values', () => {
     // Run 4bf0cf42: the client named DeKalb County, the vocabulary had no entry,
-    // and the model did exactly as told - op "none", fact discarded, nothing
-    // reached a human. A closed vocabulary is right for the FIELD (it is a GSI
-    // hash), but it must not be the only exit: an unlisted authority is a real
-    // answer that belongs in the notes.
+    // and the model did exactly as told - op "none", fact discarded. The first
+    // fix routed unlisted authorities to a noteLine, which stopped the data loss
+    // but kept the AI as the only writer of this field that could not fill it.
+    // The list is now a spelling hint, so the model records what it heard and
+    // the apply layer decides write-vs-suggest.
     const sys = buildExtractionSystemPrompt();
-    expect(sys).toContain('Housing authority stated:');
-    expect(sys).toMatch(/NOT on that list/);
+    expect(sys).toMatch(/NOT exhaustive/);
+    expect(sys).toMatch(/record what they said/);
+    // The old gate and its workaround must both be gone - either one left
+    // behind would still tell the model to answer "none" for a new authority.
+    expect(sys).not.toContain('Housing authority stated:');
+    expect(sys).not.toMatch(/housingAuthority MUST be exactly one/);
   });
 
   it('system prompt frames the mixed transcript and states the [unknown]/voicemail rules', () => {

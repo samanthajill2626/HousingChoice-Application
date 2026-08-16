@@ -22,6 +22,7 @@ const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
+const { configureJobQueues } = await import('./jobs/queueWiring.js');
 const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
 const { sharedA2pBucket } = await import('./lib/tokenBucket.js');
 const { drainRateLimitedWarns } = await import('./lib/rateLimitedWarn.js');
@@ -108,6 +109,39 @@ const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
 // dispatches them off the SQS consumer below; the app's local in-process path
 // (index.ts) calls the SAME function, so the two processes can never drift.
 registerAllJobHandlers({ tokenBucket: a2pBucket });
+
+// The worker is a PRODUCER too, not just a consumer: handlers enqueue their own
+// continuations and retries (voice.reconcileTranscript's attempt+1,
+// relay.numberReady -> relay.intro, broadcast.send's next batch, relay fan-out
+// backoff, messaging.retrySend). Every one of those calls jobs.enqueue(), which
+// needs the same adapters the app process wires.
+//
+// PROD INCIDENT 2026-08-16: this block did not exist. The worker booted clean and
+// consumed jobs fine, so nothing looked wrong - but every enqueue INSIDE a handler
+// threw 'no OutboundQueueAdapter configured'. A voicemail's reconcile retry could
+// never advance its attempt counter, so the exhaustion backstop never ran and the
+// call sat on "Transcribing..." forever; a relay group's intro message was never
+// queued. Hence the shared helper (jobs/queueWiring.ts) rather than a second copy
+// of the app's block: two processes that must agree now read from one function.
+// Deliberately BEFORE the consumers start - a process that cannot enqueue must
+// not take work.
+const jobQueues = await configureJobQueues({
+  config,
+  logger,
+  dispatch: dispatchJob,
+  tokenBucket: a2pBucket,
+  // Local runs only (no SQS): fire delayed continuations after a real timeout.
+  // unref() so a pending backoff never blocks shutdown. Ignored on the SQS path.
+  scheduleTimer: (run, delaySeconds) => {
+    setTimeout(run, delaySeconds * 1000).unref();
+  },
+});
+runWithContext(bootContext, () => {
+  for (const notice of jobQueues.notices) {
+    if (notice.level === 'warn') logger.warn(notice.data ?? {}, notice.message);
+    else logger.info(notice.data ?? {}, notice.message);
+  }
+});
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker
@@ -242,7 +276,8 @@ runWithContext(bootContext, () => {
   );
 });
 
-// Tour-reminder poll: runs every 60s, stateless (state is the DynamoDB rows).
+// Tour-reminder poll: runs on the shared WORKER_POLL_INTERVAL_MS cadence
+// (30s by default), stateless (state is the DynamoDB rows).
 // Dynamic imports mirror the SQS consumer pattern above — DynamoDB client is
 // created lazily (at first poll) so the worker boots fast and errors surface
 // at poll time, not boot time. The setInterval is .unref()'d so it doesn't
@@ -301,7 +336,7 @@ runWithContext(bootContext, () => {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Placement application-nudge poll: same stateless 60s cadence as the
+// Placement application-nudge poll: same stateless shared cadence as the
 // tour-reminder poll above (state is the DynamoDB placementNudges rows). Deps
 // are built once, lazily imported like the tour block; the 1:1 nudge send goes
 // through sendMessageService only (no messaging adapter — landlord/tenant rungs
@@ -395,7 +430,7 @@ runWithContext(bootContext, () => {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Conversation-fact-extraction poll: same stateless 60s cadence (state is the
+// Conversation-fact-extraction poll: same stateless shared cadence (state is the
 // DynamoDB ai_extraction rows). Gated on config.aiExtractionEnabled - dormant
 // when the feature flag is off (default in deployed envs). Deps built once,
 // lazily imported like the polls above; the driver is selected from config
@@ -461,7 +496,7 @@ if (config.aiExtractionEnabled) {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Native group texting: the guardrail duties (T6.3). Same 60s poll as every
+// Native group texting: the guardrail duties (T6.3). Same shared poll as every
 // other block, but the duties are CADENCED behind a conditional claim on a
 // settings record, so this poll is nearly always a no-op read - the cross-check
 // and staleness sweeps act every five minutes and the two liveness WARNs act

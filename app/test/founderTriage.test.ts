@@ -156,6 +156,12 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(xml).toContain('/webhooks/twilio/voice/recording');
     // The dial reports completion to the status route.
     expect(xml).toContain('/webhooks/twilio/voice/status');
+    // An EXPLICIT ring timeout SHORTER than carrier voicemail pickup (~25-30s),
+    // never Twilio's 30s default. The default let the holder's carrier
+    // voicemail ANSWER the bridge on a ring-through; the whisper then played
+    // ~14s to a machine while the caller heard silence and hung up before our
+    // <Record> arrived (live prod call, 2026-08-16).
+    expect(xml).toContain('timeout="20"');
 
     // Pre-ring push sent to the founder (admin) BEFORE the dial, masked body.
     expect(world.pushSends).toHaveLength(1);

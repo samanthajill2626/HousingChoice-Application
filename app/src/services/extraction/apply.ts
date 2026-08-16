@@ -19,7 +19,8 @@ import { SuggestionDismissedError } from '../../repos/extractionRepo.js';
 import type { createExtractionRepo, SuggestionItem } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
-import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB, normalizeSuggestionValue } from './schema.js';
+import { EXTRACTABLE_FIELDS, normalizeSuggestionValue } from './schema.js';
+import { housingAuthorityFor, isKnownAuthority } from '../../lib/housingAuthority.js';
 import {
   ADDRESS_PART_KEYS,
   cleanAddressParts,
@@ -113,10 +114,24 @@ function coerceField(field: ExtractableField, raw: string | undefined): Coerced 
       return { ok: false, reason: 'porting is not true|false' };
     }
     case 'housingAuthority': {
-      if (!HOUSING_AUTHORITY_VOCAB.includes(trimmed)) {
-        return { ok: false, reason: 'housingAuthority is off-vocabulary' };
-      }
-      return { ok: true, value: trimmed };
+      // FREE TEXT, normalized - never a closed vocabulary (Cameron, 2026-08-09
+      // for the importer; 2026-08-16 for extraction). This branch used to reject
+      // anything outside HOUSING_AUTHORITY_VOCAB, which made the AI the only one
+      // of the three writers to this field that could not record a real answer:
+      // a human types free text into ContactEditForm, the importer passes
+      // unknown values through verbatim, and the extractor alone dropped them.
+      // A client saying "DeKalb County" is data, not a validation error.
+      //
+      // housingAuthorityFor collapses known variants to one spelling (the GSI is
+      // an exact hash, so "Dekalb Housing" and "Dekalb County Housing" would be
+      // two audiences) and returns anything else verbatim. Whether the RESULT is
+      // recognised decides write vs suggest at the call site, not here - a
+      // novel authority is valid, just not yet trusted.
+      if (trimmed.length === 0) return { ok: false, reason: 'empty after trim' };
+      if (trimmed.length > MAX_TEXT_CHARS) return { ok: false, reason: 'exceeds 120 chars' };
+      const normalized = housingAuthorityFor(trimmed);
+      if (normalized === undefined) return { ok: false, reason: 'empty after trim' };
+      return { ok: true, value: normalized };
     }
     default: {
       // firstName / lastName / pets / evictions / tenure - free text.
@@ -219,7 +234,27 @@ export async function applyExtraction(
       continue;
     }
 
-    if (fieldOp.op === 'write' && ctx.hasInferredRoleContent !== true) {
+    // A housing authority we have never seen is valid but not yet trusted, so it
+    // is SUGGESTED rather than written. The importer's input is a curated
+    // Airtable column and a human typing into ContactEditForm is a human
+    // deciding; this one is a phone transcript, where a mishearing or a client
+    // naming their caseworker's agency looks identical to a real new authority.
+    // One confirmation is cheap, and it is also the moment someone notices a
+    // genuinely new authority worth adding to the canonical spellings.
+    //
+    // Deliberately NOT pushed onto demotedFields: that list feeds the
+    // `ai_extraction_demoted` audit, which means Layer-3 inferred-role demotion
+    // specifically. The per-decision `demotedFrom: 'write'` below records this
+    // one accurately without overloading that audit's meaning.
+    const novelAuthority =
+      field === 'housingAuthority' && !isKnownAuthority(String(coerced.value));
+    if (novelAuthority && fieldOp.op === 'write') {
+      logger.debug(
+        { contactId, field, known: false },
+        'extraction: unrecognised housing authority demoted to a suggestion',
+      );
+    }
+    if (fieldOp.op === 'write' && ctx.hasInferredRoleContent !== true && !novelAuthority) {
       writePatch[field] = coerced.value;
       writePatch[`${field}_source`] = sourceStamp;
       auditFields.push({
@@ -241,7 +276,13 @@ export async function applyExtraction(
       // op === 'suggest', OR a demoted op:'write' (inferred-role content, spec
       // Layer 3): route the write through the SAME suggest path - no direct write,
       // no <field>_source provenance stamped (nothing is written).
-      if (fieldOp.op === 'write') demotedFields.push(field);
+      // Gate on the CAUSE, not merely on "was a write". Before the novel-
+      // authority demotion existed these were the same statement - the only way
+      // to reach this branch with op:'write' was inferred-role content - but
+      // they are no longer, and `demotedFields` feeds the Layer-3
+      // `ai_extraction_demoted` audit specifically. Being explicit keeps a
+      // novel-authority demotion out of an audit that would misattribute it.
+      if (fieldOp.op === 'write' && ctx.hasInferredRoleContent === true) demotedFields.push(field);
       // Belt-and-braces: skip when the suggestion string-equals the current value.
       const currentValue = contact[field] !== undefined ? String(contact[field]) : undefined;
       const suggestedValue = String(coerced.value);

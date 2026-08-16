@@ -28,10 +28,19 @@ backwards:
   `HOUSING_AUTHORITY_VOCAB` (`app/src/services/extraction/schema.ts:45-58`) holds
   `'Jonesboro (JHA)'`, `'Fulton County'`, `'Atlanta (AHA)'`, `'Clayton County'`, `'College Park'`,
   `'Georgia Housing Voucher (GHV)'`, `'Step Up'`, `'Claratel'`, `'Hope Atlanta'`, `'HUD VASH'`,
-  `'DCA'`, `'McDonough'`, `'East Point'`. `extraction/apply.ts:97-102` validates against it and
-  stores verbatim; extraction is on by default outside production (`config.ts:775`). That file's
-  own comment calls these "EXACT strings as stored in our data" - which is false against every
-  seed.
+  `'DCA'`, `'McDonough'`, `'East Point'`, and (since 2026-08-15) `'Dekalb County Housing'`.
+  Extraction is on by default outside production (`config.ts:775`). That file's own comment calls
+  these "EXACT strings as stored in our data" - which is false against every seed.
+
+  **Updated 2026-08-16.** This list is no longer a gate. `extraction/apply.ts` used to reject
+  anything outside it, which made the AI the only one of the three writers to this field that
+  could not record a real answer - a human types free text into `ContactEditForm` and the importer
+  passes unknown values through verbatim. It now normalizes through the shared
+  `lib/housingAuthority.ts` and accepts the result, suggesting rather than writing when the value
+  is unrecognised; the vocabulary is a spelling hint in the prompt and the `ContactEditForm`
+  datalist. That removes the asymmetry but does NOT close this issue: the two field names, the two
+  vocabularies, and the absence of any authority registry are all untouched, and adding a
+  *variant* spelling still requires a code change.
 - **Slugs are dev-fixture residue, never a product decision.** `atlanta_housing` first appears in
   commit `01371194` ("M0.3: local dev environment"), whose payload is `app/scripts/db-seed.ts`.
   From there they leaked into two input placeholders (`ContactEditForm.tsx:486`,

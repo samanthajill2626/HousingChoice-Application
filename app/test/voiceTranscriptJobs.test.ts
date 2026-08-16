@@ -256,6 +256,112 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
     expect(call.transcript_status).toBe('failed');
   });
 
+  // REGRESSION (prod 2026-08-16, CA113f18...): a ~1s voicemail made Twilio VI end
+  // the transcript at status 'error'. The branch only knew 'failed' - Twilio's
+  // enum also carries 'error' and 'canceled' (adapters/messaging.ts) - so a
+  // TERMINAL failure read as "still working" and the call sat on "Transcribing..."
+  // indefinitely. Every terminal-failure status must close the lifecycle at once.
+  for (const status of ['error', 'canceled'] as const) {
+    it(`reconcile: VI status ${status} stamps transcript_status failed immediately (no re-enqueue)`, async () => {
+      register(testConfig());
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTterm', { status, customerKey: CALL_SID, sentences: [] });
+      await enqueueImmediate(RECONCILE_VOICE_TRANSCRIPT_JOB, {
+        callSid: CALL_SID,
+        transcriptSid: 'GTterm',
+        attempt: 1,
+      });
+      await queueAdapter.settle();
+      const call = world.messages.find((m) => m.provider_sid === CALL_SID)!;
+      expect(call.transcript_status).toBe('failed');
+      // Terminal means terminal: no attempt-2 retry is queued for a dead transcript.
+      expect(queueAdapter.delayed).toHaveLength(0);
+    });
+  }
+
+  // A NON-terminal status must still ride the retry chain (guards the allowlist
+  // above from swallowing in-flight work).
+  for (const status of ['queued', 'new'] as const) {
+    it(`reconcile: VI status ${status} is treated as in-flight (re-enqueues attempt 2)`, async () => {
+      register(testConfig());
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTwip', { status, customerKey: CALL_SID, sentences: [] });
+      await enqueueImmediate(RECONCILE_VOICE_TRANSCRIPT_JOB, {
+        callSid: CALL_SID,
+        transcriptSid: 'GTwip',
+        attempt: 1,
+      });
+      await queueAdapter.settle();
+      expect(world.messages.find((m) => m.provider_sid === CALL_SID)!.transcript_status).toBe('pending');
+      expect(queueAdapter.delayed).toHaveLength(1);
+      expect(queueAdapter.delayed[0]!.envelope.payload).toEqual({
+        callSid: CALL_SID,
+        transcriptSid: 'GTwip',
+        attempt: 2,
+      });
+    });
+  }
+
+  // REGRESSION (prod 2026-08-16): the worker could not enqueue at all, so the
+  // attempt+1 re-enqueue THREW and the attempt counter never advanced - making
+  // the "exhausted -> stamp failed" backstop unreachable and leaving the call on
+  // "Transcribing..." forever. The backstop must not depend on the very thing it
+  // is backing up: an enqueue failure closes the lifecycle NOW.
+  it('reconcile: a re-enqueue failure still stamps failed rather than leaving pending forever', async () => {
+    register(testConfig());
+    seedCall({ transcript_status: 'pending' });
+    world.viTranscripts.set('GTwip', { status: 'in-progress', customerKey: CALL_SID, sentences: [] });
+    queueAdapter.enqueue = async () => {
+      throw new Error('no OutboundQueueAdapter configured');
+    };
+    await dispatchJob({
+      jobName: RECONCILE_VOICE_TRANSCRIPT_JOB,
+      payload: { callSid: CALL_SID, transcriptSid: 'GTwip', attempt: 1 },
+    });
+    const call = world.messages.find((m) => m.provider_sid === CALL_SID)!;
+    expect(call.transcript_status).toBe('failed');
+    expect(world.emitted.some((e) => e.event === 'message.persisted')).toBe(true);
+    expect(JSON.stringify(capture.lines)).toContain('re-enqueue failed');
+  });
+
+  // The same backstop on the CREATE leg, which has the identical retry shape.
+  it('create: a retry re-enqueue failure still stamps failed rather than leaving pending forever', async () => {
+    register(testConfig());
+    seedCall({ transcript_status: 'pending' });
+    world.viCreateError = new Error('twilio down');
+    queueAdapter.enqueue = async () => {
+      throw new Error('no OutboundQueueAdapter configured');
+    };
+    await dispatchJob({
+      jobName: CREATE_VOICE_TRANSCRIPT_JOB,
+      payload: { callSid: CALL_SID, recordingSid: RECORDING_SID, attempt: 1 },
+    });
+    expect(world.messages.find((m) => m.provider_sid === CALL_SID)!.transcript_status).toBe('failed');
+    expect(JSON.stringify(capture.lines)).toContain('re-enqueue failed');
+  });
+
+  // Same enqueue-can-throw class, third site: the reconcile hand-off AFTER a
+  // SUCCESSFUL create. Letting it throw would fail the job, and SQS redelivery
+  // would re-run the CREATE leg - minting a SECOND VI transcript for one call
+  // (the duplicate-create path adjudication F1 closed on the inline route in
+  // voice.ts, but never here). Swallow it: the transcript already exists at
+  // Twilio and the completion webhook still delivers it.
+  it('create: a reconcile hand-off failure after a successful create does NOT throw or re-create', async () => {
+    register(testConfig());
+    seedCall({ transcript_status: 'pending' });
+    queueAdapter.enqueue = async () => {
+      throw new Error('no OutboundQueueAdapter configured');
+    };
+    await expect(
+      dispatchJob({
+        jobName: CREATE_VOICE_TRANSCRIPT_JOB,
+        payload: { callSid: CALL_SID, recordingSid: RECORDING_SID, attempt: 1 },
+      }),
+    ).resolves.toBeUndefined();
+    expect(world.viCreates).toHaveLength(1); // created ONCE, never retried
+    expect(JSON.stringify(capture.lines)).toContain('reconcile enqueue failed after successful create');
+  });
+
   it('never logs the transcript text (PII, doc section 9)', async () => {
     register(testConfig());
     seedCall({ transcript_status: 'pending' });

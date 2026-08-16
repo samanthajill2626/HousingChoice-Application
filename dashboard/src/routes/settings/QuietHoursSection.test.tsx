@@ -37,7 +37,7 @@ const SETTINGS: OrgSettings = {
 };
 
 /** The read-only built-in welcome body served alongside the settings. */
-const DEFAULT_WELCOME = 'Welcome to Tenant Place! Reply STOP to unsubscribe, HELP for help.';
+const DEFAULT_WELCOME = 'Welcome to HousingChoice! Reply STOP to unsubscribe, HELP for help.';
 
 /** Wrap a settings record in the GET/PUT wire shape. */
 function wrap(settings: OrgSettings): SettingsResponse {

@@ -35,7 +35,7 @@ import { callTimeline, uniqueVoicePhone, verifyCell } from '../../fixtures/voice
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // --- Filed A2P copy (VERBATIM mirror of app/src/lib/smsCompliance.ts) ---
-const SMS_BRAND_NAME = 'Tenant Place LLC';
+const SMS_BRAND_NAME = 'HousingChoice';
 const WELCOME_SMS = `Welcome to ${SMS_BRAND_NAME}! You're signed up for new properties that accept your voucher, plus tour reminders and updates. Msg frequency varies. Msg & data rates may apply. Reply STOP to unsubscribe, HELP for help.`;
 const STOP_CONFIRMATION = `You have successfully been unsubscribed. You will not receive any more messages from this number. Reply START to resubscribe.`;
 const HELP_REPLY = `${SMS_BRAND_NAME}: housing listing alerts for voucher holders. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out. More info: tenant.place.`;

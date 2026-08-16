@@ -16,7 +16,7 @@
 //                       3). INBOUND, not activity: a staff reply must never be
 //                       able to silence the detector.
 //
-// CADENCE, NOT PER-POLL. The worker polls every 60s; these duties act ONCE per
+// CADENCE, NOT PER-POLL. The worker polls on WORKER_POLL_INTERVAL_MS; these duties act ONCE per
 // elapsed period. The gate is a conditional claim on a settings record, so it
 // holds across processes rather than in a variable one process owns.
 //
@@ -76,7 +76,7 @@ const DAY = 24 * HOUR;
 /**
  * How often each duty acts. The two alarm sweeps run at five minutes - fast
  * enough that a broken webhook is noticed the same morning, slow enough that the
- * 60s poll is nearly free. The two liveness WARNs are DAILY: they compare
+ * per-poll cost is nearly free. The two liveness WARNs are DAILY: they compare
  * multi-day windows, so running them more often would only repeat the same line.
  */
 export const GROUP_DUTY_PERIOD_MS: Record<GroupGuardrailDuty, number> = {

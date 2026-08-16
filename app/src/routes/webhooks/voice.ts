@@ -213,6 +213,31 @@ const PRE_RING_PAUSE_FALLBACK_SECONDS = 2;
 /** Same sane bound the Settings PUT validates (routes/settings.ts). */
 const MAX_PRE_RING_PAUSE_SECONDS = 10;
 
+/**
+ * Seconds the founder-bridge <Dial> RINGS before giving up and offering OUR
+ * voicemail. Twilio's default is 30 - LONGER than typical US carrier voicemail
+ * pickup (~25-30s), so a ring-through let the holder's CARRIER voicemail
+ * answer the bridge leg; the press-1 whisper then played ~14s to an answering
+ * machine while the caller heard silence, and the caller hung up right as our
+ * <Record> was delivered (observed live on prod 2026-08-16, call CA19ba...).
+ * 20s reliably expires BEFORE carrier voicemail, so a ring-through goes: pause
+ * (2-5s) + <=20s ring -> our voicemail prompt, with no dead-air window. A
+ * DECLINE can still divert to carrier voicemail on some carriers (decline !=
+ * busy) - the whisper gate already refuses that (no keypress -> hang up ->
+ * voicemail), this timeout just removes the ring-through case entirely.
+ */
+const FOUNDER_BRIDGE_RING_TIMEOUT_SECONDS = 20;
+
+/**
+ * Queue lifetime for the pre-ring push. A pre-ring alert describes a ~30s
+ * moment; Android defers even high-urgency pushes while dozing and then
+ * flushes the backlog, and an unexpired pre-ring arrived MINUTES after its
+ * call ended (observed 2026-08-16) - pure noise, and it made delivery look
+ * broken. Better dropped than stale. missed_call/voicemail deliberately have
+ * NO TTL: for those, late is better than never.
+ */
+const PRE_RING_PUSH_TTL_SECONDS = 60;
+
 /** Voicemail ceiling (spec 4.1: "records up to a 2-minute message"). */
 const VOICEMAIL_MAX_LENGTH_SECONDS = 120;
 /**
@@ -646,6 +671,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       recordingStatusCallbackEvent: ['completed'],
       recordingStatusCallbackMethod: 'POST',
       answerOnBridge: true,
+      // Ring shorter than carrier voicemail's pickup - see the constant's note.
+      timeout: FOUNDER_BRIDGE_RING_TIMEOUT_SECONDS,
       action: `${baseUrl}/webhooks/twilio/voice/status`,
       method: 'POST',
     });
@@ -721,7 +748,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       conversationId,
     };
     try {
-      await pushService.sendToUser(holderUserId, { kind: 'pre_ring', payload });
+      await pushService.sendToUser(holderUserId, {
+        kind: 'pre_ring',
+        payload,
+        // Short queue lifetime: a pre-ring delivered after its call is over is
+        // noise, not information (see PRE_RING_PUSH_TTL_SECONDS).
+        ttlSeconds: PRE_RING_PUSH_TTL_SECONDS,
+      });
     } catch (err) {
       log.warn({ err, callSid, userId: holderUserId }, 'founder triage: pre-ring push failed — continuing');
     }

@@ -2693,4 +2693,11 @@ export interface InboxPage {
    *  total - the partition cannot produce one without walking it (spec 11).
    *  Absent means nothing was withheld. */
   groupsTruncated?: boolean;
+  /** TRUE when the UNREAD feed ended for a NON-NATURAL reason (spec 4.5 step 3):
+   *  the request's raw-scan budget expired before the page filled, or the
+   *  seen-set depth cap ended paging. Present ONLY on a `filter=unread`
+   *  response - never on all/unknown/groups. Absent means the feed ended because
+   *  it ran out of unread rows, which is the ordinary case.
+   *  MIRROR of app/src/routes/inbox.ts InboxPage - keep field-for-field. */
+  truncated?: true;
 }

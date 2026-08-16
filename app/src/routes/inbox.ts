@@ -79,8 +79,12 @@ import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   BADGE_COUNT_CAP,
   collectUnreadRows,
+  isUnreadVisible,
   UNREAD_WALK_LIMIT,
   warnDeletedProbes,
+  warnUnreadScanned,
+  type UnreadCandidate,
+  type UnreadScanPosition,
 } from '../lib/unreadFeed.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -132,6 +136,12 @@ export interface InboxPage {
    *  budget. There is NO exact total - the partition cannot produce one without
    *  walking it (spec 11). Absent means "nothing was withheld". */
   groupsTruncated?: boolean;
+  /** TRUE when the UNREAD feed ended for a NON-NATURAL reason (spec 4.5 step 3):
+   *  the request's raw-scan budget expired before the page filled, or the
+   *  SEEN_SET_MAX depth cap ended paging. Set on the `filter=unread` branch
+   *  ONLY - never on all/unknown/groups. Absent means the feed ended because it
+   *  ran out of unread rows, which is the ordinary case. */
+  truncated?: true;
 }
 
 /**
@@ -203,21 +213,21 @@ export const INBOX_FILTERS: ReadonlySet<string> = new Set<InboxFilter>([
 export const GROUP_PAGE_ONE_LIMIT = 50;
 
 /**
- * The unread group read is an ACCEPTED FULL PARTITION WALK (spec 4.2 + 15.10),
- * NOT bounded work: unread state is not in the partition key, so there is no way
- * to ask DynamoDB for "the unread ones". Every unread group thread must appear
- * under `filter=unread` because the nav badge counts those rows - a cap here
- * silently undercounts the badge. The walk is what the contract says it is; this
- * number is only the repo walk's ceiling (20 pages x 100 rows).
+ * How many contactIds the unread cursor's SEEN-SET may carry (spec 4.3).
+ *
+ * The binding constraint is the TRANSPORT, not Node: CloudFront's URL limit is a
+ * fixed 8,192 bytes and fronts every deployed environment, so an oversized
+ * cursor would fail in dev/prod but not locally. 100 ids (~4.7KB of JSON ->
+ * ~6.3KB base64url) plus the rest of the request line stays inside that quota
+ * with margin, and ends the feed at ~4 pages (120+ unread contact rows), which
+ * has no product meaning to exceed: the badge caps at 100 and triage is
+ * top-down.
+ *
+ * THE SERVER NEVER MINTS A CURSOR IT WOULD REJECT - past this, the page returns
+ * `nextCursor: null` AND `truncated: true` rather than a cursor the decoder
+ * below would 400. That 400 exists for TAMPERED input only.
  */
-const GROUP_UNREAD_WALK_LIMIT = 2000;
-
-/**
- * Growth threshold for that walk (spec 4.2). At the known scale (132 threads)
- * the walk is ~2 query pages. Past this many group threads the unread read wants
- * a materialized counter instead - the WARN is the trigger to file it.
- */
-const GROUP_UNREAD_GROWTH_THRESHOLD = 500;
+const SEEN_SET_MAX = 100;
 
 export function isInboxFilter(value: unknown): value is InboxFilter {
   return typeof value === 'string' && INBOX_FILTERS.has(value);
@@ -265,7 +275,75 @@ function decodeCursor(cursor: string): Record<string, unknown> {
   if (typeof (parsed as { t?: unknown }).t === 'string') {
     throw new InboxBadRequestError('cursor does not match this filter');
   }
+  // The SAME namespacing in the other direction (spec 4.3): `filter=unread`
+  // pages the byUnread index with its own `{u,a,c,s}` cursor. Replaying it here
+  // would hand DynamoDB a key with the wrong hash attribute for the 'open'
+  // partition. A numeric `u` tag where none belongs is a 400, never a Query.
+  if (typeof (parsed as { u?: unknown }).u === 'number') {
+    throw new InboxBadRequestError('cursor does not match this filter');
+  }
   return parsed as Record<string, unknown>;
+}
+
+// --- The unread cursor (spec 4.3) -------------------------------------------
+// A DIFFERENT cursor namespace from the one above: `{u:1, a, c, s}` where (a,c)
+// is the byUnread scan position and `s` is the SEEN-SET of contactIds already
+// emitted on this and every prior page. Resume is therefore an EXACT position
+// plus pure set membership - no ordering comparison, no re-read of a contact's
+// threads, deterministic under `last_activity_at` ties.
+
+interface UnreadCursor {
+  /** Namespace tag. Any other value is a cursor from another filter -> 400. */
+  u: 1;
+  /** The scan position's `last_activity_at` (the index's range key). */
+  a: string;
+  /** The scan position's conversationId (the trailing table key). */
+  c: string;
+  /** Contact ids already emitted - suppressed on the next page. */
+  s: string[];
+}
+
+function encodeUnreadCursor(position: UnreadScanPosition, seen: ReadonlySet<string>): string {
+  const payload: UnreadCursor = {
+    u: 1,
+    a: position.lastActivityAt,
+    c: position.conversationId,
+    s: [...seen],
+  };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode + VALIDATE an unread cursor. Unlike `decodeCursor` (whose payload is a
+ * repo-defined LastEvaluatedKey we deliberately do not over-validate), every
+ * field here is ours, so every field is checked: a tampered `s` is what would
+ * otherwise let a client push an unbounded array into the resume path.
+ */
+function decodeUnreadCursor(cursor: string): UnreadCursor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  const payload = parsed as { u?: unknown; a?: unknown; c?: unknown; s?: unknown };
+  // A cursor minted under `all`/`unknown` (a bare LastEvaluatedKey) or under
+  // `groups` (the repo's `{t,k}`) carries no `u:1` and lands here.
+  if (payload.u !== 1) throw new InboxBadRequestError('cursor does not match this filter');
+  if (typeof payload.a !== 'string' || typeof payload.c !== 'string') {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (!Array.isArray(payload.s)) throw new InboxBadRequestError('invalid cursor');
+  // The server never mints one this long (it returns `truncated` instead), so
+  // an over-long seen-set can only be tampered input.
+  if (payload.s.length > SEEN_SET_MAX) throw new InboxBadRequestError('invalid cursor');
+  if (payload.s.some((id) => typeof id !== 'string')) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  return { u: 1, a: payload.a, c: payload.c, s: payload.s as string[] };
 }
 
 // --- Pure helpers (no I/O) ---------------------------------------------------
@@ -388,11 +466,16 @@ export async function aggregateInbox(
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
 
   const { filter, limit, cursor } = opts;
-  // Under `filter=groups` the cursor belongs to the GROUP partition (the repo's
-  // own tagged cursor) and is decoded by listGroupTexts, not here - decoding it
-  // as an 'open'-partition LastEvaluatedKey is precisely the cross-partition
-  // replay the namespacing exists to prevent.
-  const startKey = filter !== 'groups' && cursor !== undefined ? decodeCursor(cursor) : undefined;
+  // ONLY `all` and `unknown` page the 'open' partition, so ONLY they decode the
+  // cursor here. The other two filters own their own cursor NAMESPACE and decode
+  // it themselves: `groups` inside listGroupTexts (the repo's tagged `{t,k}`),
+  // `unread` via decodeUnreadCursor (the `{u,a,c,s}` index cursor) in its branch
+  // below. Decoding either of those as an 'open'-partition LastEvaluatedKey is
+  // precisely the cross-partition replay the namespacing exists to prevent.
+  const startKey =
+    (filter === 'all' || filter === 'unknown') && cursor !== undefined
+      ? decodeCursor(cursor)
+      : undefined;
 
   // Per-request memoization (each contact/placement/user resolved at most once).
   const contactConvsCache = new Map<string, ConversationItem[]>();
@@ -472,6 +555,11 @@ export async function aggregateInbox(
   const passesFilter = (row: InboxRow): boolean => {
     switch (filter) {
       case 'unread':
+        // UNREACHABLE since spec 4.5 (the unread branch returns before any
+        // caller of this runs) but NOT removable: the switch is exhaustive over
+        // InboxFilter with no `default:`, so deleting the arm is a type error -
+        // and re-adding a `default:` is exactly how a new filter ships as a
+        // silent no-op.
         return row.unreadCount > 0;
       case 'unknown':
         return row.needsTriage;
@@ -483,10 +571,125 @@ export async function aggregateInbox(
   };
 
   /**
+   * THE contact row: presentation hydration (latest message, placement label),
+   * the deleted-contact resurfacing predicate, and the row literal.
+   *
+   * EXTRACTED, NEVER FORKED - both read paths call it: the open-partition pager
+   * (rowForConversation, below) and the index-backed unread page. That is what
+   * stops the two surfaces drifting into rendering the same contact
+   * differently.
+   *
+   * SINGLE-CAUSE RETURN: `undefined` means exactly one thing - resurfacing hid
+   * a soft-deleted row. Every other reason to skip a contact belongs to the
+   * CALLER (the filter arms, the newest-conversation identity guard, the dedupe
+   * set), and each caller records its own dedupe entry when this returns a row
+   * (the pager -> emittedContacts; the unread loop -> its seen-set). That is
+   * observably identical to adding it here, since the add only ever happened
+   * when a row was about to be returned.
+   *
+   * PHONE/EMAIL COME FROM `maxConv`, not from a caller-iterated conversation.
+   * On the pager path those coincide by construction - its identity guard only
+   * lets a contact emit while iterating the very conversation `newestOf` chose -
+   * so this is byte-identical there; the unread path passes its own hydrated
+   * `maxConv`.
+   */
+  const buildContactRow = async (
+    contact: ContactItem,
+    convs: ConversationItem[],
+    maxConv: ConversationItem,
+    unreadSum: number,
+    deleted: boolean,
+  ): Promise<InboxRow | undefined> => {
+    // Recomputed rather than taken as a parameter: `roleFromContact` is a
+    // MODULE-LEVEL pure derivation over `contact` alone, and the caller hands us
+    // the same contact object it derived its own `role` from, so the two values
+    // are identical by construction.
+    const role = roleFromContact(contact);
+    const phone = maxConv.participant_phone;
+    const email = maxConv.participant_email;
+    const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
+    if (deleted) {
+      // Surface ONLY while SOME conversation of this contact is unread AND that
+      // conversation's newest message is an inbound from AFTER the deletion.
+      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
+      // thread looks fresh": a contact owns one thread per participant key, so
+      // the unread and the fresh inbound can sit on different threads. Mixing
+      // them broke the rule both ways - a pre-deletion unread on thread A kept
+      // the row up forever after thread B's fresh inbound was read (single-conv
+      // mark-read from a placement/tour pane), and a newer empty/outbound thread
+      // buried a genuinely unread fresh inbound on an older one.
+      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
+      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
+      // Absent createdAt (no readable message row) -> never counts as new.
+      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
+        dir === 'inbound' &&
+        typeof at === 'string' &&
+        typeof contact.deleted_at === 'string' &&
+        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
+        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
+        // can momentarily hide a resurfaced row until the next inbound lands.
+        at > contact.deleted_at;
+
+      let resurfaces = false;
+      for (const c of convs) {
+        // Only an unread thread can resurface the row (spec Decision 3), so read
+        // threads are never probed.
+        if (unreadOf(c) === 0) continue;
+        // maxConv's latest is already in hand for presentation - reuse it rather
+        // than re-reading the same conversation.
+        const latest =
+          c.conversationId === maxConv.conversationId
+            ? { direction, createdAt }
+            : await latestMessageOf(c.conversationId, c);
+        if (isFreshInbound(latest.direction, latest.createdAt)) {
+          resurfaces = true;
+          break; // one qualifying thread is enough
+        }
+      }
+      if (!resurfaces) return undefined;
+    }
+
+    let placementContext: { placementId: string; label: string } | undefined;
+    if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
+      const label = await placementLabel(maxConv.placementId);
+      if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
+    }
+
+    // A type='unknown' contact IS an untriaged inbound (it just already has a
+    // record) - so it needs triage and belongs under the "unknown" filter, exactly
+    // like a no-contact number. Keying triage off the ROLE (not "no contact
+    // record") is what makes both cases surface.
+    // Name fallback when the contact has no resolved name: the formatted phone
+    // for a phone thread, else the email address for an email-only thread (never
+    // undefined - email-only contacts lack a phone).
+    const fallbackLabel =
+      phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
+    return {
+      kind: 'contact',
+      contactId: contact.contactId,
+      ...(maxConv.participant_phone !== undefined && { phone: maxConv.participant_phone }),
+      name: nameFromContact(contact) ?? fallbackLabel,
+      role,
+      ...(placementContext !== undefined && { placementContext }),
+      unreadCount: unreadSum,
+      preview,
+      channel,
+      direction,
+      lastActivityAt: maxConv.last_activity_at,
+      needsTriage: role === 'unknown',
+      ...(deleted && { deleted: true }),
+    };
+  };
+
+  /**
    * Build the row for a single raw conversation (or return undefined when this
    * conversation does NOT emit one: a relay_group, an already-emitted contact,
    * or a contact whose newest conversation is elsewhere). Pure of paging — the
    * caller owns the page-fill / boundary bookkeeping.
+   *
+   * THE OPEN-PARTITION PATH ONLY (filters `all` and `unknown`). `filter=unread`
+   * returns from its own index-backed branch before the pager runs, so the
+   * unread arms below are unreachable today - see their comments.
    */
   const rowForConversation = async (conv: ConversationItem): Promise<InboxRow | undefined> => {
     // relay_group threads are emitted by the SEPARATE relay source (relayRowFor
@@ -521,6 +724,9 @@ export async function aggregateInbox(
       if (phone === undefined) return undefined;
       // Unread is already carried on the conversation row. A read unknown number
       // cannot pass this filter, so do not fetch a latest message just to reject it.
+      // DEAD ARM (spec 4.5): `filter=unread` no longer reaches this function -
+      // it returns from the index-backed branch before the pager runs. Kept
+      // because `filter` is a runtime value and this is still its right answer.
       if (filter === 'unread' && unreadOf(conv) === 0) return undefined;
       // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
@@ -562,82 +768,20 @@ export async function aggregateInbox(
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
     // This must use the contact-wide sum, not unreadOf(conv): an older phone or
     // email thread can be unread while the representative newest thread is read.
+    // DEAD ARM (spec 4.5), same reason as the unknown-branch arm above.
     if (filter === 'unread' && unreadSum === 0) return undefined;
-    // Deleted fast-path: nothing unread → hidden, no message read needed.
+    // Deleted fast-path: nothing unread -> hidden, no message read needed. NOT
+    // dead - it still runs for `all` and `unknown`.
     if (deleted && unreadSum === 0) return undefined;
-    const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
-    if (deleted) {
-      // Surface ONLY while SOME conversation of this contact is unread AND that
-      // conversation's newest message is an inbound from AFTER the deletion.
-      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
-      // thread looks fresh": a contact owns one thread per participant key, so
-      // the unread and the fresh inbound can sit on different threads. Mixing
-      // them broke the rule both ways — a pre-deletion unread on thread A kept
-      // the row up forever after thread B's fresh inbound was read (single-conv
-      // mark-read from a placement/tour pane), and a newer empty/outbound thread
-      // buried a genuinely unread fresh inbound on an older one.
-      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
-      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
-      // Absent createdAt (no readable message row) → never counts as new.
-      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
-        dir === 'inbound' &&
-        typeof at === 'string' &&
-        typeof contact.deleted_at === 'string' &&
-        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
-        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
-        // can momentarily hide a resurfaced row until the next inbound lands.
-        at > contact.deleted_at;
 
-      let resurfaces = false;
-      for (const c of convs) {
-        // Only an unread thread can resurface the row (spec Decision 3), so read
-        // threads are never probed.
-        if (unreadOf(c) === 0) continue;
-        // maxConv's latest is already in hand for presentation — reuse it rather
-        // than re-reading the same conversation.
-        const latest =
-          c.conversationId === maxConv.conversationId
-            ? { direction, createdAt }
-            : await latestMessageOf(c.conversationId, c);
-        if (isFreshInbound(latest.direction, latest.createdAt)) {
-          resurfaces = true;
-          break; // one qualifying thread is enough
-        }
-      }
-      if (!resurfaces) return undefined;
-    }
-
-    let placementContext: { placementId: string; label: string } | undefined;
-    if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
-      const label = await placementLabel(maxConv.placementId);
-      if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
-    }
-
+    const row = await buildContactRow(contact, convs, maxConv, unreadSum, deleted);
+    // undefined here means exactly one thing: resurfacing hid a deleted row.
+    if (row === undefined) return undefined;
+    // The dedupe entry moves CALLER-SIDE with the extraction. It used to sit
+    // just above the row literal, which ran iff a row was about to be returned -
+    // so this is the same observable behavior at the same moment.
     emittedContacts.add(contact.contactId);
-    // A type='unknown' contact IS an untriaged inbound (it just already has a
-    // record) — so it needs triage and belongs under the "unknown" filter, exactly
-    // like a no-contact number. Keying triage off the ROLE (not "no contact
-    // record") is what makes both cases surface.
-    // Name fallback when the contact has no resolved name: the formatted phone
-    // for a phone thread, else the email address for an email-only thread (never
-    // undefined - email-only contacts lack a phone).
-    const fallbackLabel =
-      phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
-    return {
-      kind: 'contact',
-      contactId: contact.contactId,
-      ...(maxConv.participant_phone !== undefined && { phone: maxConv.participant_phone }),
-      name: nameFromContact(contact) ?? fallbackLabel,
-      role,
-      ...(placementContext !== undefined && { placementContext }),
-      unreadCount: unreadSum,
-      preview,
-      channel,
-      direction,
-      lastActivityAt: maxConv.last_activity_at,
-      needsTriage: role === 'unknown',
-      ...(deleted && { deleted: true }),
-    };
+    return row;
   };
 
   /**
@@ -763,6 +907,198 @@ export async function aggregateInbox(
       // Here `truncated` can only mean the repo's walk budget stopped early -
       // the caller's limit produces a nextCursor instead.
       ...(page.truncated && { groupsTruncated: true }),
+    };
+  }
+
+  // --- filter=unread: the sparse byUnread index IS the feed --------------------
+  // A SINGLE unified stream (spec 4.5): contacts, unknown numbers, relay groups
+  // and native group threads all come from ONE index walk, newest-first, up to
+  // `limit` rows TOTAL - so nothing below this point runs under this filter.
+  // That is what makes "skip the relay merge", "skip the group source" and
+  // "groupsTruncated is never set under unread" structural facts rather than
+  // three more conditionals: the open-partition pager and both merge blocks are
+  // simply out of reach. This branch keeps its OWN cursor state and never reads
+  // or writes `startKey`, which stays the page-one sentinel for filter=all.
+  if (filter === 'unread') {
+    const resume = cursor !== undefined ? decodeUnreadCursor(cursor) : undefined;
+    // THE SEEN-SET: every contact emitted as a candidate on this page or any
+    // prior one. Suppression is pure set membership - no ordering comparison, no
+    // re-read of a contact's threads - so it is deterministic under
+    // last_activity_at ties. It ACCUMULATES across the fill loop's iterations
+    // too: without that, iteration 2 re-emits a contact iteration 1 already
+    // emitted, which is a duplicate React key on one page.
+    const seen = new Set<string>(resume?.s ?? []);
+    let scanPosition: UnreadScanPosition | undefined =
+      resume === undefined ? undefined : { lastActivityAt: resume.a, conversationId: resume.c };
+    // ONE raw-scan budget for the whole REQUEST (spec 4.3), threaded into and
+    // back out of every collect. `unreadWalkLimit` is the deps test seam.
+    const startingBudget = deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT;
+    let remainingBudget = startingBudget;
+    // Both tripwires are REQUEST-level: this loop makes MANY collects, and a
+    // per-collect threshold could never fire for a request that spent a little
+    // in each of many of them.
+    let deletedProbes = 0;
+    const unreadRows: InboxRow[] = [];
+    let consumedAll = false;
+    let budgetSpent = false;
+
+    /** Turn ONE candidate into a row, or drop it (spec 4.5 hydration). */
+    const hydrateUnread = async (candidate: UnreadCandidate): Promise<InboxRow | undefined> => {
+      if (candidate.kind === 'contact') {
+        // The freshest available sources, per-request cached exactly as the
+        // pager's are. They resolve via the participant GSIs, which lag
+        // INDEPENDENTLY of byUnread (spec 6) - hence the drop below.
+        const convs = await contactConversations(candidate.contact);
+        const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
+        const maxConv = newestOf(convs);
+        // A fresh sum of 0 DROPS the row - today's passesFilter contract, moved
+        // to hydration. (A zero sum is also the only way `convs` can be empty,
+        // so the maxConv guard is belt-and-braces for the type.)
+        if (unreadSum === 0 || maxConv === undefined) return undefined;
+        // NOTE the newest-conversation IDENTITY GUARD is deliberately ABSENT
+        // here: row identity is the seen-set, and `newestOf` picks only the
+        // REPRESENTATION (phone / lastActivityAt / placement / latest-message
+        // source). A contact whose newest thread is READ and whose older thread
+        // is unread MUST render - carrying the guard over would drop it.
+        return await buildContactRow(
+          candidate.contact,
+          convs,
+          maxConv,
+          unreadSum,
+          isDeleted(candidate.contact),
+        );
+      }
+
+      // Every non-contact candidate maps onto exactly ONE index item, so a
+      // single point read (an eventually-consistent base-table GetItem,
+      // typically fresher than any GSI - ConsistentRead deliberately not used)
+      // refreshes status + unread_count. A row the index still lists but the
+      // base table reports read or closed is dropped right here.
+      const fresh = await conversations.getById(candidate.conversation.conversationId);
+      if (fresh === undefined || !isUnreadVisible(fresh)) return undefined;
+      if (candidate.kind !== 'unknown') {
+        // The two multi-party kinds reuse the pager's builders verbatim.
+        // groupRowFor is deliberately NOT relayRowFor: that one's status
+        // normalizer has an 'open' catch-all, which would report a group_open
+        // thread to the dashboard as a plain open relay group.
+        return candidate.kind === 'relay_group' ? await relayRowFor(fresh) : groupRowFor(fresh);
+      }
+      // The unknown-number row, built inline rather than extracted: the pager's
+      // literal reads its driving conversation directly, and ~10 duplicated
+      // lines are cheaper than a second parameterized helper (plan round 4).
+      const { channel, direction, preview } = await latestMessageOf(fresh.conversationId, fresh);
+      return {
+        kind: 'unknown',
+        phone: candidate.phone,
+        name: formatPhoneForDisplay(candidate.phone) ?? candidate.phone,
+        role: 'unknown',
+        unreadCount: unreadOf(fresh),
+        preview,
+        channel,
+        direction,
+        lastActivityAt: fresh.last_activity_at,
+        needsTriage: true,
+      };
+    };
+
+    // FILL-OR-EXHAUST (spec 4.5 step 1) - the same invariant the open-partition
+    // pager provides: collect -> hydrate -> drop -> refill, until the page is
+    // full, the SUPPLY runs out, or the request budget does. It TERMINATES
+    // because the only non-breaking outcome is `capped`, which by definition
+    // consumed at least one raw item, so `remainingBudget` strictly decreases.
+    for (;;) {
+      const collected = await collectUnreadRows(
+        { conversations, contacts, messages, logger: log },
+        {
+          maxRows: limit - unreadRows.length,
+          budget: remainingBudget,
+          ...(scanPosition !== undefined && { startAfter: scanPosition }),
+          excludeContactIds: seen,
+        },
+      );
+      deletedProbes += collected.deletedProbes;
+      remainingBudget = collected.remainingBudget;
+      if (collected.scanPosition !== undefined) scanPosition = collected.scanPosition;
+
+      for (const candidate of collected.candidates) {
+        // The seen-set grows for EVERY contact candidate, kept or dropped: a
+        // dropped candidate still consumed its scan range, and re-emitting it
+        // on the next iteration would duplicate a row key on one page.
+        if (candidate.kind === 'contact') seen.add(candidate.contactId);
+        const row = await hydrateUnread(candidate);
+        if (row !== undefined) unreadRows.push(row);
+      }
+
+      if (unreadRows.length >= limit) break; // page full
+      if (collected.consumedAll) {
+        consumedAll = true;
+        break;
+      }
+      if (collected.truncated || remainingBudget === 0) {
+        budgetSpent = true;
+        break;
+      }
+      // Otherwise the collect stopped at its cap and hydration dropped rows -
+      // go again from the new scan position to refill the page.
+    }
+
+    // Both tripwires fire ONCE, on the REQUEST total. The scanned total is
+    // exactly `startingBudget - remainingBudget` because ONE budget is threaded
+    // through every collect; the in-collector WARN is per-walk and would miss a
+    // request that scanned 200 in each of three collects.
+    warnDeletedProbes(log, deletedProbes);
+    warnUnreadScanned(log, startingBudget - remainingBudget);
+
+    // Rows sort by DISPLAYED lastActivityAt, as every other filter does. The
+    // stream ordered them by newest UNREAD activity, and for a multi-thread
+    // contact whose newest thread is read the two differ - spec 4.5's declared
+    // ordering nuance.
+    unreadRows.sort((a, b) =>
+      a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
+    );
+
+    // nextCursor keys on CONSUMPTION, never on scan state (spec 4.5 step 2);
+    // `truncated` names a NON-NATURAL end (step 3).
+    let unreadCursor: string | null = null;
+    let truncated = false;
+    if (scanPosition === undefined) {
+      // Nothing consumed at all (an empty index, or a cursor already past the
+      // end): no position to resume from, and nothing was withheld.
+      unreadCursor = null;
+    } else if (seen.size > SEEN_SET_MAX) {
+      // THE DEPTH CAP, checked BEFORE consumedAll on purpose: past this many ids
+      // the server can no longer mint a cursor it would itself accept, so paging
+      // is over regardless of what the supply looks like - and round 4's rule is
+      // that the cap must never be the one early-end path carrying no signal.
+      truncated = true;
+    } else if (consumedAll) {
+      unreadCursor = null; // the natural end
+    } else if (budgetSpent) {
+      truncated = true;
+    } else {
+      unreadCursor = encodeUnreadCursor(scanPosition, seen);
+    }
+    // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
+    // the dashboard's empty-state and Load-more gating both key on rows.length.
+    // Defensive: every break above that can leave the page empty already yields
+    // null, and this keeps that true if the loop ever grows another exit.
+    if (unreadRows.length === 0) unreadCursor = null;
+
+    log.info(
+      {
+        filter,
+        count: unreadRows.length,
+        scanned: startingBudget - remainingBudget,
+        seen: seen.size,
+        hasMore: unreadCursor !== null,
+        ...(truncated && { truncated: true }),
+      },
+      'inbox feed assembled',
+    );
+    return {
+      rows: unreadRows,
+      nextCursor: unreadCursor,
+      ...(truncated && { truncated: true as const }),
     };
   }
 
@@ -897,18 +1233,12 @@ export async function aggregateInbox(
   // `unknown` never contains group rows (needsTriage is always false), so skip
   // the query outright rather than reading a partition to throw it all away.
   if (startKey === undefined && filter !== 'unknown') {
-    // UNREAD IS AN ACCEPTED FULL PARTITION WALK (spec 4.2 / 15.10), not bounded
-    // work: unread is not in the partition key. The nav badge counts the rows of
-    // a `filter=unread` page, so capping here would silently undercount it.
-    const unreadWalk = filter === 'unread';
-    const readLimit = unreadWalk ? GROUP_UNREAD_WALK_LIMIT : GROUP_PAGE_ONE_LIMIT;
-    const page = await readGroupSource(readLimit);
-    if (unreadWalk && page.items.length > GROUP_UNREAD_GROWTH_THRESHOLD) {
-      log.warn(
-        { walked: page.items.length, threshold: GROUP_UNREAD_GROWTH_THRESHOLD },
-        'inbox: group unread walk past the growth threshold - time to materialize unread counts',
-      );
-    }
+    // Only `filter=all` reaches here now (`groups` and `unread` returned above),
+    // so the read is always the page-one cap. The unread FULL PARTITION WALK
+    // this block used to run - and its growth WARN - died with spec 4.5: unread
+    // group rows come from the byUnread index like every other unread row, and
+    // page-one overflow of ANY kind is reachable through the unread cursor.
+    const page = await readGroupSource(GROUP_PAGE_ONE_LIMIT);
     // TRUNCATED means "rows this filter would have shown were withheld": the
     // repo's walk budget stopped early, or (page-one only) the cap did.
     groupsTruncated = page.truncated || page.nextCursor !== undefined;

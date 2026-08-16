@@ -140,6 +140,33 @@ export function warnDeletedProbes(logger: Logger | undefined, probes: number): v
   );
 }
 
+/**
+ * Fire the scanned-items tripwire for a REQUEST's raw-scan total.
+ *
+ * The sibling of `warnDeletedProbes`, and it exists for the same reason: the
+ * iterator's own tripwire (below) fires on PER-WALK state, so a request whose
+ * fill-or-exhaust loop scans 200 raw items in each of three collects trips
+ * nothing while spec 4.3 defines the tripwire as 500 scanned PER REQUEST. A
+ * multi-collect caller accumulates `budget - remainingBudget` and calls this
+ * once. No-ops at or below the threshold.
+ *
+ * It is bound to the SAME module-scope limiter as the in-iterator warn, never a
+ * second instance - so when a single request manages to trip both, the limiter
+ * swallows the duplicate instead of emitting the line twice.
+ */
+export function warnUnreadScanned(logger: Logger | undefined, scanned: number): void {
+  if (scanned <= UNREAD_WALK_WARN) return;
+  warnWalkScanned(
+    logger,
+    {
+      event: 'unread_walk_scan_tripwire',
+      scanned,
+      threshold: UNREAD_WALK_WARN,
+    },
+    'unread feed: raw byUnread scan passed the walk tripwire - revisit index accrual',
+  );
+}
+
 /** A position in the byUnread stream: the index's (RANGE, table key) tuple. */
 export interface UnreadScanPosition {
   lastActivityAt: string;

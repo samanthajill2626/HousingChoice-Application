@@ -424,7 +424,7 @@ export async function runDueTourReminders(
 /**
  * Retire a rung the poll cannot deliver (claim-skip): stamps skippedAt +
  * skipReason so the row leaves listDue exactly once (instead of being
- * re-listed and re-skipped every 60s forever — the perpetual "sending
+ * re-listed and re-skipped every poll forever — the perpetual "sending
  * shortly" bug), and tells live surfaces to refetch so the panel flips to
  * its "Skipped - <reason>" chip.
  */

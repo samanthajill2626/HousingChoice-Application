@@ -242,7 +242,8 @@ runWithContext(bootContext, () => {
   );
 });
 
-// Tour-reminder poll: runs every 60s, stateless (state is the DynamoDB rows).
+// Tour-reminder poll: runs on the shared WORKER_POLL_INTERVAL_MS cadence
+// (30s by default), stateless (state is the DynamoDB rows).
 // Dynamic imports mirror the SQS consumer pattern above — DynamoDB client is
 // created lazily (at first poll) so the worker boots fast and errors surface
 // at poll time, not boot time. The setInterval is .unref()'d so it doesn't
@@ -301,7 +302,7 @@ runWithContext(bootContext, () => {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Placement application-nudge poll: same stateless 60s cadence as the
+// Placement application-nudge poll: same stateless shared cadence as the
 // tour-reminder poll above (state is the DynamoDB placementNudges rows). Deps
 // are built once, lazily imported like the tour block; the 1:1 nudge send goes
 // through sendMessageService only (no messaging adapter — landlord/tenant rungs
@@ -395,7 +396,7 @@ runWithContext(bootContext, () => {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Conversation-fact-extraction poll: same stateless 60s cadence (state is the
+// Conversation-fact-extraction poll: same stateless shared cadence (state is the
 // DynamoDB ai_extraction rows). Gated on config.aiExtractionEnabled - dormant
 // when the feature flag is off (default in deployed envs). Deps built once,
 // lazily imported like the polls above; the driver is selected from config
@@ -456,7 +457,7 @@ if (config.aiExtractionEnabled) {
   }, config.workerPollIntervalMs).unref();
 }
 
-// Native group texting: the guardrail duties (T6.3). Same 60s poll as every
+// Native group texting: the guardrail duties (T6.3). Same shared poll as every
 // other block, but the duties are CADENCED behind a conditional claim on a
 // settings record, so this poll is nearly always a no-op read - the cross-check
 // and staleness sweeps act every five minutes and the two liveness WARNs act

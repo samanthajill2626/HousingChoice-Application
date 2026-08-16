@@ -608,10 +608,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`PORT must be a valid TCP port, got: ${env.PORT}`);
   }
 
-  // Worker poll cadence (ms) for the three stateless polls (worker.ts). Default
-  // 60000; fail-fast on a non-positive-integer so a QA typo never silently
-  // disables or hot-loops the polls.
-  const workerPollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? 60000);
+  // Worker poll cadence (ms) for the FIVE stateless polls that share it (tour
+  // reminders, placement nudges, roster actions, extraction, group guardrails -
+  // worker.ts). Default 30000; fail-fast on a non-positive-integer so a QA typo
+  // never silently disables or hot-loops the polls.
+  //
+  // The default is kept in step with the .env examples deliberately. This value
+  // is only a backup - deployed envs set WORKER_POLL_INTERVAL_MS explicitly -
+  // but a backup that disagrees with the examples is a trap for anyone reading
+  // one and assuming the other, and for any env that has not been synced yet.
+  const workerPollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? 30000);
   if (!Number.isInteger(workerPollIntervalMs) || workerPollIntervalMs <= 0) {
     throw new Error(
       `WORKER_POLL_INTERVAL_MS must be a positive integer (milliseconds), got: ${env.WORKER_POLL_INTERVAL_MS}`,

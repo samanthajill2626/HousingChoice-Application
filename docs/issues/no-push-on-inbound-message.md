@@ -59,3 +59,27 @@ is not a one-liner:
 - **PII.** The push body is rendered on a lock screen. The voice pushes carry a
   caller label; a message push must not spill message content beyond whatever
   the founder accepts on a lock screen.
+
+**Design decisions (operator, 2026-08-16).** All four questions above are
+settled; the guiding principle is "this is a texting app at its most basic
+function - mirror how the native messaging apps behave":
+
+- **Who receives it: everyone with notifications turned on.** No owner or
+  assignment filtering - every user with an active push subscription gets the
+  message push. Opting out is turning notifications off on the device/PWA.
+- **Volume: native-messaging-app semantics.** Per-conversation coalescing via
+  the notification tag (the display mirror in dashboard/src/sw/display.ts now
+  yields `message:<conversationId>`, replacing in place per thread the way an
+  SMS app keeps one entry per thread). No additional server-side throttle.
+- **Quiet hours: device do-not-disturb ONLY.** The device's own DND applies
+  automatically at the OS layer - that is the whole quiet gate. Org quiet
+  hours must NOT gate staff-facing pushes; that setting is outbound-only.
+- **PII: include everything, like a native SMS app.** Sender and full message
+  content go in the push. Lock-screen content hiding is the user's own device
+  setting, not something the server pre-censors.
+- **Scope note:** "message" means any inbound message channel - SMS and email
+  both (email is a first-class channel since email-channel-v1).
+
+Delivery: via the feature workflow (brainstorm remainder -> spec -> plan ->
+mission build), queued to start once the 2026-08-16 voice-notification work
+(call-push tag fix + deploy + live re-tests) is finished.

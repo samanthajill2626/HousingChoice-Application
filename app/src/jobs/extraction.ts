@@ -292,6 +292,9 @@ export interface RunDraft {
   notedLines?: number;
   /** The press this run answers, carried from the due row (manual runs only). */
   requestId?: string;
+  /** False when repo.claim THREW - the row was never un-armed, which changes
+   *  which condition fail() may assert. */
+  claimed?: boolean;
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
 }
 
@@ -381,7 +384,9 @@ async function processRow(
   let claimed: boolean;
   try {
     claimed = await repo.claim(conversationId, nowIso, listedDueAt);
+    draft.claimed = claimed;
   } catch (err) {
+    draft.claimed = false;
     return failed('repo', err);
   }
   if (!claimed) {
@@ -677,7 +682,16 @@ export async function runDueExtractions(
       logger.error({ conversationId: row.conversationId, attempts, parked }, 'extraction poll: row failed');
       if (draft.error !== undefined) draft.error = { ...draft.error, attempts, parked };
       try {
-        await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt);
+        await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt, {
+          claimed: draft.claimed === true,
+          // UNREACHABLE today: processRow returns { record: false } when dueAt is
+          // absent, so a row without one never gets here. It exists only to
+          // satisfy the optional type. If that guard ever moves, an empty
+          // listedDueAt would make the not-claimed condition never match and
+          // resurrect the unbounded-retry bug this condition exists to prevent.
+          listedDueAt: row.dueAt ?? '',
+          manual: row.manualRequested === true,
+        });
       } catch (failErr) {
         logger.error({ conversationId: row.conversationId, err: failErr }, 'extraction poll: fail() write errored');
       }

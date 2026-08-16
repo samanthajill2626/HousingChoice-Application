@@ -491,7 +491,8 @@ describe('extractionRepo.complete', () => {
 
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
-    await repo.fail('conv-1', 'boom', T3); // arm attempts=1 + lastError
+    // arm attempts=1 + lastError
+    await repo.fail('conv-1', 'boom', T3, { claimed: true, listedDueAt: T1, manual: false });
     await repo.claim('conv-1', FUTURE, T3);
     await repo.complete('conv-1', 'msg-42', T2);
 
@@ -520,7 +521,7 @@ describe('extractionRepo.fail', () => {
     await repo.claim('conv-1', T2, T1);
 
     // First failure re-arms: attempts=1, back in the due index at nextDueAt.
-    await repo.fail('conv-1', 'driver timeout', T3);
+    await repo.fail('conv-1', 'driver timeout', T3, { claimed: true, listedDueAt: T1, manual: false });
     let item = await repo.getDue('conv-1');
     expect(item!.attempts).toBe(1);
     expect(item!.dueAt).toBe(T3);
@@ -530,13 +531,106 @@ describe('extractionRepo.fail', () => {
 
     // Claim + fail again with null nextDueAt -> park: attempts=2, out of the index.
     await repo.claim('conv-1', FUTURE, T3);
-    await repo.fail('conv-1', 'gave up', null);
+    await repo.fail('conv-1', 'gave up', null, { claimed: true, listedDueAt: T3, manual: false });
     item = await repo.getDue('conv-1');
     expect(item!.attempts).toBe(2);
     expect(item!._duePartition).toBeUndefined();
     expect(item!.dueAt).toBeUndefined();
     expect(item!.lastError).toBe('gave up');
     expect((await repo.listDue(FUTURE)).map((r) => r.conversationId)).not.toContain('conv-1');
+  });
+});
+
+describe('extractionRepo.fail - re-arm survival', () => {
+  const opts = (over: Partial<{ claimed: boolean; listedDueAt: string; manual: boolean }> = {}) =>
+    ({ claimed: true, listedDueAt: T1, manual: false, ...over });
+
+  it('claimed, nobody re-armed: backs off normally', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.fail('conv-1', 'boom', T3, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T3);
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
+
+  it('claimed, a press re-armed: the press survives and the error is still recorded', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.fail('conv-1', 'boom', T3, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!.manualRequested).toBe(true);
+    expect(item!.requestId).toBe('req-abc');
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
+
+  it('claimed, a press re-armed, and the run PARKS: the press is not deleted', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.claim('conv-1', T2, T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.fail('conv-1', 'boom', null, opts());
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!._duePartition).toBe('due');
+    expect(item!.requestId).toBe('req-abc');
+  });
+
+  it('claim THREW and nobody re-armed: still backs off, and can still park', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    expect((await repo.getDue('conv-1'))!.dueAt).toBe(T3);
+    await repo.fail('conv-1', 'boom', null, opts({ claimed: false, listedDueAt: T3 }));
+    const parked = await repo.getDue('conv-1');
+    expect(parked!._duePartition).toBeUndefined();
+    expect(parked!.dueAt).toBeUndefined();
+  });
+
+  it('claim THREW and a press re-armed: the press survives', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!.manualRequested).toBe(true);
+  });
+
+  it('a manual run re-arms WITH the flag; an automatic one does not', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.requestManualExtraction('conv-1', T1, 'req-abc');
+    await repo.claim('conv-1', T2, T1);
+    await repo.fail('conv-1', 'boom', T3, opts({ manual: true }));
+    expect((await repo.getDue('conv-1'))!.manualRequested).toBe(true);
+
+    await repo.scheduleExtraction('conv-2', 'sms', T1);
+    await repo.claim('conv-2', T2, T1);
+    await repo.fail('conv-2', 'boom', T3, opts());
+    expect((await repo.getDue('conv-2'))!.manualRequested).toBeUndefined();
+  });
+
+  it('parking REMOVEs BOTH the flag and the request id', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.requestManualExtraction('conv-1', T1, 'req-abc');
+    await repo.claim('conv-1', T2, T1);
+    await repo.fail('conv-1', 'boom', null, opts({ manual: true }));
+    const item = await repo.getDue('conv-1');
+    expect(item!.manualRequested).toBeUndefined();
+    expect(item!.requestId).toBeUndefined();
   });
 });
 

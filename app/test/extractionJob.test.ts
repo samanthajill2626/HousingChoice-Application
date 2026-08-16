@@ -414,7 +414,11 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 0, failed: 1 });
     // now + DEBOUNCE * 2^1 = now + 60s
     const expected = new Date(Date.parse(NOW) + DEBOUNCE * 2).toISOString();
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('driver boom'), expected);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('driver boom'), expected, {
+      claimed: true,
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
     expect(h.repo.complete).not.toHaveBeenCalled();
   });
 
@@ -436,7 +440,11 @@ describe('runDueExtractions', () => {
     const out = await runDueExtractions(NOW, h.deps);
 
     expect(out).toEqual({ processed: 0, failed: 1 });
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.any(String), null);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.any(String), null, {
+      claimed: true,
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
   });
 
   it('refusal error follows the failure path', async () => {
@@ -458,7 +466,11 @@ describe('runDueExtractions', () => {
 
     expect(out).toEqual({ processed: 0, failed: 1 });
     const expected = new Date(Date.parse(NOW) + DEBOUNCE).toISOString();
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected, {
+      claimed: true,
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
   });
 
   it('call transcript: parses the four line forms into voice utterances', async () => {

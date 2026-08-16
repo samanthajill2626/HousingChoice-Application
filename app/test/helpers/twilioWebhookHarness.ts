@@ -302,6 +302,10 @@ export interface FakeWorld {
    *  Recorded exactly like extractionSchedules: this fake keeps NO due-row
    *  state, so a press is observable only as the call it made. */
   manualExtractionRequests: { conversationId: string; dueAt: string; requestId: string }[];
+  /** conversationIds whose requestManualExtraction must THROW, so a fan-out
+   *  caller can be tested on a partial failure (some writes land, one does not)
+   *  and on a total one. Add before the request; the call is not recorded. */
+  failManualExtractionFor: Set<string>;
   extractionRepo: ExtractionRepo;
   /** In-memory AI run-log seam shared by suggestion resolution routes. */
   aiRuns: AiRunsRepo;
@@ -2800,6 +2804,8 @@ export function createFakeWorld(): FakeWorld {
   const extractionSchedules: FakeWorld['extractionSchedules'] = [];
   // API-side requestManualExtraction calls (the manual trigger route), in order.
   const manualExtractionRequests: FakeWorld['manualExtractionRequests'] = [];
+  // conversationIds whose requestManualExtraction throws (fan-out failure tests).
+  const failManualExtractionFor: FakeWorld['failManualExtractionFor'] = new Set<string>();
   const placementNudgesRepo: PlacementNudgesRepo = {
     async create(input: { placementId: string; kind: NudgeKind; dueAt: string }) {
       const now = new Date().toISOString();
@@ -2895,6 +2901,11 @@ export function createFakeWorld(): FakeWorld {
       extractionSchedules.push({ conversationId, channel, dueAt });
     },
     async requestManualExtraction(conversationId, dueAt, requestId) {
+      // Injected write failure for fan-out callers: throws BEFORE recording, so
+      // a failed thread never looks scheduled.
+      if (failManualExtractionFor.has(conversationId)) {
+        throw new Error(`fake requestManualExtraction failure for ${conversationId}`);
+      }
       // This fake keeps no due-row state (the due-item methods below are
       // stubs), so a press is recorded, not simulated.
       manualExtractionRequests.push({ conversationId, dueAt, requestId });
@@ -3356,6 +3367,7 @@ export function createFakeWorld(): FakeWorld {
     suggestions,
     extractionSchedules,
     manualExtractionRequests,
+    failManualExtractionFor,
     extractionRepo,
     aiRuns,
     suggestionResolutions: suggestionResolutionFake.items,

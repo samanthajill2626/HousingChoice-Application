@@ -30,6 +30,7 @@ import type {
   ScheduledUpdatedEvent,
   TourUpdatedEvent,
   SuggestionUpdatedEvent,
+  AiRunCompletedEvent,
   UnmatchedEmailUpdatedEvent,
 } from './types.js';
 
@@ -50,6 +51,9 @@ export interface EventStreamHandlers {
   /** A contact's pending AI suggestions changed (extraction ran, or one was
    *  accepted/dismissed) - the contact page + Today refetch. */
   onSuggestionUpdated?: (event: SuggestionUpdatedEvent) => void;
+  /** An extraction run finished (manual-extraction-trigger 4.4b) - the contact
+   *  page's manual-run indicator resolves on the press's own requestId. */
+  onAiRunCompleted?: (event: AiRunCompletedEvent) => void;
   /** An unmatched-email row was created or transitioned (email-channel-v1 B6) -
    *  the Email nav badge + the /email triage page refetch. */
   onUnmatchedEmailUpdated?: (event: UnmatchedEmailUpdatedEvent) => void;
@@ -209,6 +213,12 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
         markActivity();
         const data = parse<SuggestionUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onSuggestionUpdated, data);
+      });
+
+      source.addEventListener('ai_run.completed', (ev) => {
+        markActivity();
+        const data = parse<AiRunCompletedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onAiRunCompleted, data);
       });
 
       source.addEventListener('unmatched_email.updated', (ev) => {

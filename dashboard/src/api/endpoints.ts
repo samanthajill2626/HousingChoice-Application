@@ -1493,6 +1493,26 @@ export async function restoreContact(contactId: string): Promise<Contact> {
   return res.contact;
 }
 
+/** POST /api/contacts/:contactId/extraction-run - ask the extraction pipeline to
+ *  re-read this contact's 1:1 threads NOW, waiving the 30-day transcript cutoff
+ *  and the "nothing new since the cursor" gate (manual-extraction-trigger 4.5).
+ *  Takes no body. Returns the ONE `requestId` shared by every thread this press
+ *  queued (the correlation key the `ai_run.completed` indicator waits on),
+ *  `scheduled` (the conversationIds queued) and `failed` (those whose write did
+ *  not land - a partial failure is still a 200).
+ *
+ *  Throws ApiError - the caller branches on `.code`: 404 contact_not_found; 409
+ *  contact_deleted / extraction_disabled / ineligible_contact_type /
+ *  no_conversations / no_eligible_conversations; 500 schedule_failed. */
+export async function runExtraction(
+  contactId: string,
+): Promise<{ requestId: string; scheduled: string[]; failed: string[] }> {
+  return request<{ requestId: string; scheduled: string[]; failed: string[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/extraction-run`,
+    { method: 'POST' },
+  );
+}
+
 // --- Dev-only auth (/__dev, /auth/dev-login) --------------------------------
 // These reach the hermetic-LOCAL dev router, mounted ONLY in the local dev/e2e
 // stack and 404 (router absent) in every deployed env. The UI uses devPing() to

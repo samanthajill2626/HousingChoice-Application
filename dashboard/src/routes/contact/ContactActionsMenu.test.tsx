@@ -9,6 +9,7 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
   const onToggleVoiceOptOut = props.onToggleVoiceOptOut ?? vi.fn();
   const onDelete = props.onDelete ?? vi.fn();
   const onRestore = props.onRestore ?? vi.fn();
+  const onRunExtraction = props.onRunExtraction ?? vi.fn();
   render(
     <ContactActionsMenu
       onEdit={onEdit}
@@ -19,12 +20,14 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
       deleted={props.deleted ?? false}
       onDelete={onDelete}
       onRestore={onRestore}
+      onRunExtraction={onRunExtraction}
       {...(props.optOutBusy !== undefined && { optOutBusy: props.optOutBusy })}
       {...(props.voiceOptOutBusy !== undefined && { voiceOptOutBusy: props.voiceOptOutBusy })}
       {...(props.deleteBusy !== undefined && { deleteBusy: props.deleteBusy })}
+      {...(props.extractionBusy !== undefined && { extractionBusy: props.extractionBusy })}
     />,
   );
-  return { onEdit, onToggleOptOut, onToggleVoiceOptOut, onDelete, onRestore };
+  return { onEdit, onToggleOptOut, onToggleVoiceOptOut, onDelete, onRestore, onRunExtraction };
 }
 
 describe('ContactActionsMenu', () => {
@@ -106,6 +109,24 @@ describe('ContactActionsMenu', () => {
     setup({ deleteBusy: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
     expect(screen.getByRole('menuitem', { name: /Delete contact/i })).toBeDisabled();
+  });
+
+  it('fires onRunExtraction and closes the menu', async () => {
+    const user = userEvent.setup();
+    const { onRunExtraction } = setup();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Run AI extraction/i }));
+    expect(onRunExtraction).toHaveBeenCalledTimes(1);
+    // Like every sibling item it calls setOpen(false), so a second query for the
+    // item cannot find a stale node.
+    expect(screen.queryByRole('menuitem', { name: /Run AI extraction/i })).toBeNull();
+  });
+
+  it('disables the extraction item while a run is in flight', async () => {
+    const user = userEvent.setup();
+    setup({ extractionBusy: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(screen.getByRole('menuitem', { name: /Run AI extraction/i })).toBeDisabled();
   });
 
   it('closes on Escape', async () => {

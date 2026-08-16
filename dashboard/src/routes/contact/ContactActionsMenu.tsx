@@ -5,6 +5,9 @@
 // and a Delete/Restore action. The toggles reflect + flip current state; the
 // parent owns the request + applies the returned contact. Delete asks the parent
 // to confirm first (it opens a confirm dialog).
+// "Run AI extraction" (manual-extraction-trigger 4.6) follows the same contract:
+// the parent POSTs and owns the running indicator; this file only reports the
+// press and reflects the busy flag.
 import { useEffect, useRef, useState } from 'react';
 import styles from './ContactActionsMenu.module.css';
 
@@ -30,6 +33,11 @@ export interface ContactActionsMenuProps {
   onRestore: () => void;
   /** True while a delete/restore request is in flight (disables that item). */
   deleteBusy?: boolean;
+  /** Start a manual AI extraction run; the parent does the request and renders
+   *  the running indicator (manual-extraction-trigger 4.6). */
+  onRunExtraction: () => void;
+  /** True from the press until the run reports back (disables that item). */
+  extractionBusy?: boolean;
 }
 
 export function ContactActionsMenu({
@@ -44,6 +52,8 @@ export function ContactActionsMenu({
   onDelete,
   onRestore,
   deleteBusy = false,
+  onRunExtraction,
+  extractionBusy = false,
 }: ContactActionsMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -112,6 +122,18 @@ export function ContactActionsMenu({
             }}
           >
             {copied ? 'Copied ✓' : 'Copy link to contact'}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={styles.item}
+            disabled={extractionBusy}
+            onClick={() => {
+              setOpen(false);
+              onRunExtraction();
+            }}
+          >
+            Run AI extraction
           </button>
           <div className={styles.divider} />
           <button

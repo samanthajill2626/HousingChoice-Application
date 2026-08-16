@@ -19,18 +19,20 @@
 // (status, opt-out, phone/suggestion changes). Narrow widths lead with comms + a
 // segmented Comms | Profile toggle.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
   deleteContact,
   restoreContact,
+  runExtraction,
   setContactOptOut,
   setContactVoiceOptOut,
   setTenantStatus,
   suggestionResolutionErrorMessage,
   updateContact,
+  useEventStream,
   LANDLORD_STATUSES,
   LANDLORD_STATUS_LABELS,
   TENANT_STATUSES,
@@ -79,6 +81,31 @@ import styles from './ContactDetail.module.css';
 
 type Pane = 'comms' | 'profile';
 
+/** How long the manual-extraction indicator waits before it stops claiming to
+ *  know (manual-extraction-trigger 4.6). Comfortably above the observed 5-40s
+ *  (a 30s worker poll plus the run itself), because the poll can be delayed by a
+ *  long-running row ahead of this one in the same pass. Exported for the test. */
+export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
+
+/** The manual-run indicator's three states. `running` accumulates across the
+ *  press's scheduled threads: it resolves only once EVERY one has reported, so
+ *  one failing thread cannot hide what the others found. */
+type ExtractionState =
+  | { phase: 'idle' }
+  | {
+      phase: 'running';
+      /** '' until the POST answers - no event can match an empty key, which is
+       *  what keeps a same-instant unrelated run from resolving this press. */
+      requestId: string;
+      pending: Set<string>;
+      wrote: number;
+      suggested: number;
+      /** Threads the server could not queue at all (a partial-failure 200). */
+      failedThreads: number;
+      errorKind?: string;
+    }
+  | { phase: 'done'; tone: 'status' | 'alert'; message: string };
+
 export function ContactDetail(): React.JSX.Element {
   const { contactId = '' } = useParams<{ contactId: string }>();
   const navigate = useNavigate();
@@ -107,6 +134,10 @@ export function ContactDetail(): React.JSX.Element {
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // The manual "Run AI extraction" press and its indicator (4.6). Session-local:
+  // a reload shows the current facts instead, which by then are usually the
+  // result of the run.
+  const [extraction, setExtraction] = useState<ExtractionState>({ phase: 'idle' });
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -122,6 +153,9 @@ export function ContactDetail(): React.JSX.Element {
     setStatusBusy(false);
     setSuggestionBusy(null);
     setSuggestionError(null);
+    // Same reason: a manual run pressed on contact A must not appear to be
+    // running on contact B (its requestId could never resolve here anyway).
+    setExtraction({ phase: 'idle' });
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -131,6 +165,83 @@ export function ContactDetail(): React.JSX.Element {
   // Viewing the contact page (while the tab is visible) marks its comms read —
   // so the Inbox unread badge clears once you've actually seen the messages here.
   useMarkContactRead(contactId);
+
+  // --- Manual AI extraction (manual-extraction-trigger 4.6) ------------------
+  // These three hooks MUST stay above the loading/error early returns below, or
+  // the page renders a different number of hooks per pass and crashes.
+
+  const onRunExtraction = useCallback(async (): Promise<void> => {
+    // Busy from the PRESS, not from the response: otherwise a double-click fires
+    // two POSTs before the first one resolves.
+    setExtraction({
+      phase: 'running',
+      requestId: '',
+      pending: new Set(),
+      wrote: 0,
+      suggested: 0,
+      failedThreads: 0,
+    });
+    try {
+      const res = await runExtraction(contactId);
+      setExtraction({
+        phase: 'running',
+        requestId: res.requestId,
+        pending: new Set(res.scheduled),
+        wrote: 0,
+        suggested: 0,
+        failedThreads: res.failed.length,
+      });
+    } catch (err) {
+      // The server is the only gate (4.6), so every refusal arrives here rather
+      // than being predicted client-side.
+      setExtraction({ phase: 'done', tone: 'alert', message: extractionRefusalCopy(err) });
+    }
+  }, [contactId]);
+
+  // Resolution waits for EVERY scheduled thread before it decides, so one
+  // failing thread does not hide what the others found. An event carrying some
+  // other requestId is ignored - that is what stops an unrelated inbound run
+  // resolving this operator's indicator.
+  useEventStream({
+    onAiRunCompleted: (e) => {
+      setExtraction((prev) => {
+        if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
+          return prev;
+        }
+        const pending = new Set(prev.pending);
+        pending.delete(e.conversationId);
+        const wrote = prev.wrote + e.wrote;
+        const suggested = prev.suggested + e.suggested;
+        // First failure wins the copy; 'driver' stands for "failed, kind not
+        // reported" and maps to the generic sentence.
+        const errorKind =
+          prev.errorKind ?? (e.outcome === 'failed' ? (e.errorKind ?? 'driver') : undefined);
+        if (pending.size > 0) {
+          return { ...prev, pending, wrote, suggested, ...(errorKind !== undefined && { errorKind }) };
+        }
+        if (errorKind !== undefined) {
+          return { phase: 'done', tone: 'alert', message: extractionFailureCopy(errorKind) };
+        }
+        return { phase: 'done', tone: 'status', message: extractionAppliedCopy(wrote, suggested) };
+      });
+    },
+  });
+
+  // The indicator must never spin forever: the event can be legitimately late
+  // (an inbound message sliding dueAt forward) or lost (an unset
+  // EVENT_BRIDGE_URL drops the worker-to-app hop). Keyed on `phase` only, so the
+  // POST answering mid-run does not restart the clock.
+  useEffect(() => {
+    if (extraction.phase !== 'running') return undefined;
+    const timer = setTimeout(() => {
+      setExtraction({
+        phase: 'done',
+        tone: 'status',
+        message: 'Still running - check Settings > AI runs.',
+      });
+    }, RUN_INDICATOR_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [extraction.phase]);
 
   // Load the full contact roster so the edit dialog can link relationships to
   // existing contacts (finding #1). Called unconditionally (hooks rules); the
@@ -475,6 +586,8 @@ export function ContactDetail(): React.JSX.Element {
             onDelete={() => setConfirmingDelete(true)}
             onRestore={onRestore}
             deleteBusy={deleteBusy}
+            onRunExtraction={() => void onRunExtraction()}
+            extractionBusy={extraction.phase === 'running'}
           />
         </div>
       </header>
@@ -488,6 +601,34 @@ export function ContactDetail(): React.JSX.Element {
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
+          </Button>
+        </div>
+      ) : null}
+
+      {/* The manual AI extraction indicator (4.6). This is the operator's ONLY
+          feedback that the press did anything, so it is load-bearing. The
+          aria-label keeps it distinguishable from the page's Spinners, which
+          also carry role="status". */}
+      {extraction.phase === 'running' ? (
+        <div className={styles.extractionBanner} role="status" aria-label="AI extraction">
+          <span>
+            {`Running AI extraction${extraction.pending.size > 1 ? ` on ${extraction.pending.size} threads` : ''}...`}
+            {extraction.failedThreads > 0
+              ? ` ${extraction.failedThreads} thread${extraction.failedThreads === 1 ? '' : 's'} could not be queued.`
+              : ''}
+          </span>
+        </div>
+      ) : null}
+      {extraction.phase === 'done' ? (
+        <div className={styles.extractionBanner} role={extraction.tone} aria-label="AI extraction">
+          <span>{extraction.message}</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            onClick={() => setExtraction({ phase: 'idle' })}
+          >
+            Dismiss
           </Button>
         </div>
       ) : null}
@@ -754,5 +895,50 @@ export function ContactDetail(): React.JSX.Element {
       }
     }
     return parts.join(' - ');
+  }
+}
+
+// --- Manual-extraction copy (manual-extraction-trigger 4.6) ------------------
+// Every string here is written in the operator's terms, never the job's enum.
+// The message catalog does not cover this surface: it carries outbound contact
+// copy on the sms/voice/email channels, not dashboard banners.
+
+/** The aggregate a finished run reports. `wrote` are fields the run applied
+ *  itself; `suggested` are the ones parked as review chips. */
+function extractionAppliedCopy(wrote: number, suggested: number): string {
+  if (wrote + suggested === 0) return 'Ran - nothing new to extract.';
+  return `Updated ${wrote} field${wrote === 1 ? '' : 's'}, ${suggested} suggestion${suggested === 1 ? '' : 's'}.`;
+}
+
+/** `truncated` gets its own actionable sentence: it is the one failure an
+ *  operator can do something about, and the likeliest one here - a manual run
+ *  waives the age cutoff, so it sends the widest windows the system produces. */
+function extractionFailureCopy(errorKind: string): string {
+  return errorKind === 'truncated'
+    ? 'Extraction ran out of room - the transcript may be too long.'
+    : 'Extraction failed - see Settings > AI runs.';
+}
+
+/** A refusal from the endpoint. `ApiError.message` is the RAW code and must
+ *  never be shown, so the copy always comes from `.code`; an unrecognised
+ *  failure (including a network drop, which is not an ApiError at all) gets the
+ *  generic retry sentence rather than silence. */
+function extractionRefusalCopy(err: unknown): string {
+  const code = err instanceof ApiError ? err.code : undefined;
+  switch (code) {
+    case 'extraction_disabled':
+      return 'AI extraction is turned off for this environment.';
+    case 'ineligible_contact_type':
+      return 'Only tenants and untriaged contacts can be extracted.';
+    case 'contact_deleted':
+      return 'This is a deleted contact.';
+    case 'contact_not_found':
+      return 'This contact could not be found.';
+    case 'no_conversations':
+      return 'This contact has no conversations to extract.';
+    case 'no_eligible_conversations':
+      return 'This contact has no eligible conversations to extract.';
+    default:
+      return 'Extraction could not be started - try again.';
   }
 }

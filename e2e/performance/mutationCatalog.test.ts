@@ -364,7 +364,9 @@ describe('dashboard mutation inventory', () => {
   it('matches the complete checked-in catalog in both directions without line fingerprints', () => {
     const discoveredFingerprints = catalogedRaw.map(fingerprint).sort();
     const checkedInFingerprints = DASHBOARD_MUTATION_CATALOG.map((entry) => entry.fingerprint).sort();
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(102);
+    // 103 = the 102 pre-manual-trigger mutations + runExtraction
+    // (manual-extraction-trigger 4.6's POST /api/contacts/:contactId/extraction-run).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(103);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

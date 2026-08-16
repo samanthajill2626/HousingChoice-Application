@@ -111,7 +111,14 @@ export function Inbox(): React.JSX.Element {
 
       {inbox.status === 'loading' ? <Spinner center /> : null}
 
-      {inbox.status === 'error' ? (
+      {/* An empty page that the server TRUNCATED is not "all caught up" - the
+          feed ended early, so we reuse the SHIPPED failure surface verbatim
+          rather than inventing copy (spec 4.5 step 3). Retry refetches the same
+          prefix with a fresh budget; it may fail again, and not lying is the
+          point. The empty-state block below carries the matching `!truncated`
+          so the two can never render together. */}
+      {inbox.status === 'error' ||
+      (inbox.status === 'ready' && inbox.rows.length === 0 && inbox.truncated) ? (
         <div className={styles.error} role="alert">
           <p>We couldn&apos;t load your inbox.</p>
           <button type="button" className={styles.retry} onClick={() => inbox.retry()}>
@@ -127,7 +134,7 @@ export function Inbox(): React.JSX.Element {
         </div>
       ) : null}
 
-      {inbox.status === 'ready' && inbox.rows.length === 0 ? (
+      {inbox.status === 'ready' && inbox.rows.length === 0 && !inbox.truncated ? (
         <div className={styles.empty}>
           <p className={styles.emptyTitle}>{empty.title}</p>
           <p className={styles.emptyBody}>{empty.body}</p>

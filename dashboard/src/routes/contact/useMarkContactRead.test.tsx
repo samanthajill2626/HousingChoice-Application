@@ -2,7 +2,17 @@ import { act, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const markInboxRead = vi.fn(() => Promise.resolve());
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
 let capturedOnMessage: (() => void) | undefined;
+
+// This auto-mark is DELIBERATELY unwired from the nav badge's optimistic layer:
+// it fires BLIND on mount / tab-visibility / new message, with no unread
+// knowledge at all, so an optimistic decrement here would subtract rows the badge
+// may never have counted. It reconciles through the cheap count refetch instead.
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -65,5 +75,13 @@ describe('useMarkContactRead', () => {
     setVisibility('visible');
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+  });
+
+  it('does NOT touch the nav badge context (it fires blind, with no unread knowledge)', async () => {
+    render(<Probe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+    act(() => capturedOnMessage?.());
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 });

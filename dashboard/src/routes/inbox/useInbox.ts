@@ -22,6 +22,8 @@ import {
   type InboxFilter,
   type InboxRow as InboxRowData,
 } from '../../api/index.js';
+import { useUnread } from '../../app/UnreadContext.js';
+import { contactClearKey, conversationClearKey, phoneClearKey } from '../../app/unreadKeys.js';
 
 export type InboxStatus = 'loading' | 'pending' | 'ready' | 'error';
 
@@ -52,6 +54,14 @@ export interface InboxState {
    *  truncation claim. `groupsTruncated` remains the server's separate,
    *  untouched statement that MORE exist than were handed down. */
   groupRowsShown: number;
+  /** The UNREAD feed ended for a NON-NATURAL reason (the server's request budget
+   *  expired before the page filled, or its seen-set depth cap ended paging).
+   *  Only a `filter=unread` response can set it. A page with rows simply ends -
+   *  no affordance; an EMPTY page with this flag is NOT "all caught up", so
+   *  Inbox.tsx renders the existing failure state + Retry instead of lying. It
+   *  is a statement about the LATEST page read, so it is replaced (never OR-ed)
+   *  by each page and reset on every filter change. */
+  truncated: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
@@ -95,9 +105,16 @@ export function useInbox(filter: InboxFilter): InboxState {
   const [base, setBase] = useState<InboxRowData[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [groupsTruncated, setGroupsTruncated] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   // In-flight optimistic patches keyed by rowKey; re-applied over refetches.
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
+  // The nav badge's optimistic layer. Marking a row read here decrements the
+  // badge INSTANTLY instead of waiting for the reconcile fetch; the server stays
+  // the authority and expires the clear on its next read. Both functions are
+  // identity-stable by contract (see UnreadContext) - markRead's dep array below
+  // depends on that.
+  const { noteRowsCleared, rollbackRowsCleared } = useUnread();
 
   const abortRef = useRef<AbortController | null>(null);
   // Bumped on every committed optimistic mutation; a first-page refetch that
@@ -133,6 +150,7 @@ export function useInbox(filter: InboxFilter): InboxState {
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
       setGroupsTruncated(pageData.groupsTruncated === true);
+      setTruncated(pageData.truncated === true);
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -144,6 +162,9 @@ export function useInbox(filter: InboxFilter): InboxState {
         setBase([]);
         setCursor(null);
         setGroupsTruncated(false);
+        // Reset with the rest: a stale `truncated` from a previous unread page
+        // would make this legitimately empty page render the FAILURE state.
+        setTruncated(false);
         setStatus('pending');
         return;
       }
@@ -166,6 +187,11 @@ export function useInbox(filter: InboxFilter): InboxState {
     setBase([]);
     setCursor(null);
     setGroupsTruncated(false);
+    // Same reset for the same reason: `truncated` is a statement about the page
+    // this filter last read. Carried across a tab switch it would still be set
+    // while the new filter's first page is in flight, and the moment that page
+    // lands empty the All tab would render the inbox ERROR state.
+    setTruncated(false);
     setLoadingMore(false);
     setPending(new Map());
     void fetchFirstPage();
@@ -203,6 +229,10 @@ export function useInbox(filter: InboxFilter): InboxState {
         if (filterStale() || reconcileStale()) return;
         setBase((prev) => [...prev, ...pageData.rows]);
         setCursor(pageData.nextCursor);
+        // REPLACE, never OR: the flag describes the page just read, and it sits
+        // inside the staleness guard so a page for a filter (or a list) we no
+        // longer show cannot stamp it.
+        setTruncated(pageData.truncated === true);
       })
       .catch(() => {
         /* keep the cursor so the user can retry "Load more" */
@@ -267,21 +297,38 @@ export function useInbox(filter: InboxFilter): InboxState {
       // its OWN conversation (POST /api/conversations/:id/read), NOT the
       // contact/phone fan-out - the inbox mark-read routes both fan out over a
       // contact's participant-keyed threads, which a group thread has none of.
-      let read: (() => Promise<void>) | undefined;
+      // The badge's clear key is minted IN THE SAME BRANCH that resolved the read
+      // action, bundled with it, rather than derived from `row.kind` separately:
+      // the third branch catches rows BY PHONE across kinds, so a kind-derived
+      // key would mint `c:undefined` for a contact row addressed by phone. It is
+      // also a different vocabulary from `rowKey` above - both group kinds share
+      // `cv:` so the badge dedupes with the tour/placement tabs (unreadKeys.ts).
+      let resolved: { read: () => Promise<void>; clearKey: string } | undefined;
       if (row.kind === 'relay_group' || row.kind === 'group_text') {
         if (row.conversationId !== undefined) {
           const conversationId = row.conversationId;
-          read = () => markConversationRead(conversationId);
+          resolved = {
+            read: () => markConversationRead(conversationId),
+            clearKey: conversationClearKey(conversationId),
+          };
         }
       } else if (row.kind === 'contact' && row.contactId !== undefined) {
         const contactId = row.contactId;
-        read = () => markInboxRead({ contactId });
+        resolved = {
+          read: () => markInboxRead({ contactId }),
+          clearKey: contactClearKey(contactId),
+        };
       } else if (row.phone !== undefined) {
         const phone = row.phone;
-        read = () => markInboxRead({ phone });
+        resolved = { read: () => markInboxRead({ phone }), clearKey: phoneClearKey(phone) };
       }
-      if (read === undefined) return; // unaddressable → don't fake success
+      if (resolved === undefined) return; // unaddressable - don't fake success
+      const { read, clearKey } = resolved;
       setPatch(key, { unreadCount: 0 });
+      // Past the unread>0 and addressability guards, so this row really is one
+      // the badge counts: decrement it now, and let the next reconcile fetch
+      // expire the clear.
+      noteRowsCleared([clearKey]);
       read()
         .then(() => {
           genRef.current += 1; // commit wins over any in-flight pre-commit refetch
@@ -290,10 +337,11 @@ export function useInbox(filter: InboxFilter): InboxState {
         })
         .catch(() => {
           /* rollback: dropping the patch restores base's original count */
+          rollbackRowsCleared([clearKey]);
         })
         .finally(() => clearPatch(key, 'unreadCount'));
     },
-    [setPatch, clearPatch],
+    [setPatch, clearPatch, noteRowsCleared, rollbackRowsCleared],
   );
 
   // --- Assemble the displayed rows ------------------------------------------
@@ -314,6 +362,7 @@ export function useInbox(filter: InboxFilter): InboxState {
     status,
     rows,
     groupsTruncated,
+    truncated,
     // Counted off the RENDERED list (adversarial 30) - see `InboxState`.
     groupRowsShown: countGroupRows(rows),
     hasMore: cursor !== null,

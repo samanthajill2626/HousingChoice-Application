@@ -40,6 +40,8 @@ import {
   type ConversationUpdatedEvent,
   type Tour,
 } from '../../api/index.js';
+import { useUnread } from '../../app/UnreadContext.js';
+import { contactClearKey, conversationClearKey } from '../../app/unreadKeys.js';
 import { involvesContact } from '../contact/useContactTimeline.js';
 
 export interface TourGroupChannel {
@@ -171,6 +173,11 @@ function initialChannels(
 export function useTourChannels(tour: Tour, people: PersonChannelInput[]): TourChannelsState {
   const tourId = tour.tourId;
   const groupThreadId = tour.groupThreadId;
+  // The nav badge's optimistic layer. Both functions are identity-stable by
+  // contract (UnreadContext memoizes them over a ref-held map), which is what
+  // keeps the mark-read callbacks below - and therefore this hook's returned
+  // object - out of a consumer effect's re-fire loop.
+  const { noteRowsCleared, rollbackRowsCleared } = useUnread();
 
   // Callers build `people` INLINE, so a fresh array identity arrives on every
   // render - keying the fetch on that identity would refetch forever. Stabilize
@@ -264,36 +271,56 @@ export function useTourChannels(tour: Tour, people: PersonChannelInput[]): TourC
   // locally makes the immediate re-render a no-op (no fire loop); it fires again
   // only when a real event raises unread. Single conversation only - the group's
   // read must NEVER fan out (that would clear the sibling 1:1 tabs).
-  const markGroupRead = useCallback((conversationId: string | null, unread: number) => {
-    if (conversationId === null || unread <= 0) return;
-    setState((prev) => (prev.group.unread === 0 ? prev : { ...prev, group: { ...prev.group, unread: 0 } }));
-    void markConversationRead(conversationId).catch(() => {
-      /* best-effort - a failed mark-read must not break the view */
-    });
-  }, []);
+  const markGroupRead = useCallback(
+    (conversationId: string | null, unread: number) => {
+      if (conversationId === null || unread <= 0) return;
+      setState((prev) => (prev.group.unread === 0 ? prev : { ...prev, group: { ...prev.group, unread: 0 } }));
+      // Past the guard this group is UNREAD, and by the close-reset ruling an
+      // unread relay group is necessarily open/connecting (closing one zeroes its
+      // unread) - i.e. a row the nav badge counts, so decrementing it is sound.
+      // Pre-ruling this wiring was excluded: a closed-but-unread group would have
+      // decremented a row the badge never counted.
+      const clearKey = conversationClearKey(conversationId);
+      noteRowsCleared([clearKey]);
+      void markConversationRead(conversationId).catch(() => {
+        /* best-effort - a failed mark-read must not break the view */
+        rollbackRowsCleared([clearKey]);
+      });
+    },
+    [noteRowsCleared, rollbackRowsCleared],
+  );
 
   // markPersonRead is the CONTACT fan-out (the contact page's own mark-read):
   // viewing a person's tab clears the unread on every thread they own, which is
   // exactly the set the tab's summed dot counts. Same ordering contract as
   // markGroupRead - guard, zero LOCALLY, then fire - and the guard is what stops
   // the consumer's every-render effect from POSTing in a loop.
-  const markPersonRead = useCallback((contactId: string | undefined, unread: number) => {
-    // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read. The
-    // placement twin really does build a placeholder with tenantId: '' while
-    // its bundle loads, so the guard has to reject '' as well as undefined.
-    if (!contactId || unread <= 0) return;
-    setState((prev) => {
-      const hit = prev.people.find((p) => p.contactId === contactId);
-      if (hit === undefined || hit.unread === 0) return prev;
-      return {
-        ...prev,
-        people: prev.people.map((p) => (p.contactId === contactId ? { ...p, unread: 0 } : p)),
-      };
-    });
-    void markInboxRead({ contactId }).catch(() => {
-      /* best-effort - a failed mark-read must not break the view */
-    });
-  }, []);
+  const markPersonRead = useCallback(
+    (contactId: string | undefined, unread: number) => {
+      // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read. The
+      // placement twin really does build a placeholder with tenantId: '' while
+      // its bundle loads, so the guard has to reject '' as well as undefined.
+      if (!contactId || unread <= 0) return;
+      setState((prev) => {
+        const hit = prev.people.find((p) => p.contactId === contactId);
+        if (hit === undefined || hit.unread === 0) return prev;
+        return {
+          ...prev,
+          people: prev.people.map((p) => (p.contactId === contactId ? { ...p, unread: 0 } : p)),
+        };
+      });
+      // Beside the request, never inside the setState updater (an updater must
+      // stay pure - StrictMode double-invokes it). The badge decrement follows
+      // the REQUEST guard above, which is the caller's fresh unread value.
+      const clearKey = contactClearKey(contactId);
+      noteRowsCleared([clearKey]);
+      void markInboxRead({ contactId }).catch(() => {
+        /* best-effort - a failed mark-read must not break the view */
+        rollbackRowsCleared([clearKey]);
+      });
+    },
+    [noteRowsCleared, rollbackRowsCleared],
+  );
 
   // The people we RETURN are the CURRENT inputs carrying the unread the last
   // resolved inbox page holds for each of them. Returning the committed snapshot

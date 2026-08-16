@@ -41,6 +41,7 @@ import type {
   HistoryRow,
   InboxFilter,
   InboxPage,
+  InboxUnreadCount,
   InspectionOutcome,
   LandlordStatus,
   ListingSendRow,
@@ -1532,6 +1533,17 @@ export function getInbox(
 ): Promise<InboxPage> {
   return request<InboxPage>('/api/inbox', {
     query: { filter: params.filter, cursor: params.cursor, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/inbox/unread-count - the nav badge count. Cheap, index-backed and
+ *  independent of the row-list page shape, so the badge never pays for a page of
+ *  rows it does not render. Path-only, NO query keys (the perf classifier keys
+ *  the badge class on exactly that). Any error -> the caller renders no badge
+ *  (UnreadContext collapses it to null). */
+export function getUnreadCount(signal?: AbortSignal): Promise<InboxUnreadCount> {
+  return request<InboxUnreadCount>('/api/inbox/unread-count', {
     ...(signal !== undefined && { signal }),
   });
 }

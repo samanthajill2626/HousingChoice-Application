@@ -2701,3 +2701,17 @@ export interface InboxPage {
    *  MIRROR of app/src/routes/inbox.ts InboxPage - keep field-for-field. */
   truncated?: true;
 }
+
+/** GET /api/inbox/unread-count - the nav badge's cheap, index-backed count.
+ *  MIRROR of app/src/routes/inbox.ts InboxUnreadCount - keep field-for-field.
+ *
+ *  `capped` and `truncated` are DISTINCT on purpose and the client treats them
+ *  differently (spec 4.7.2): `capped` means BADGE_COUNT_CAP stopped the count, so
+ *  the number is a floor rendered as "99+" and the optimistic layer must NOT
+ *  decrement it; `truncated` means the request's raw-scan budget ran out first,
+ *  which still leaves a small, real-so-far number that SHOULD decrement. */
+export interface InboxUnreadCount {
+  unreadCount: number;
+  capped: boolean;
+  truncated: boolean;
+}

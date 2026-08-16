@@ -47,6 +47,22 @@ function seedConversation(world: World, id: string, type: ConversationItem['type
   });
 }
 
+// An EMAIL thread carries participant_email and NO participant_phone, so the
+// phone leg of the union cannot reach it. Only conversationsForContact's email
+// leg can - which is spec 4.5's stated reason for choosing it over the triage
+// hook's narrower resolver.
+function seedEmailConversation(world: World, id: string, email: string): void {
+  world.conversations.set(id, {
+    conversationId: id,
+    status: 'open',
+    type: 'tenant_1to1',
+    ai_mode: 'auto',
+    participant_email: email,
+    last_activity_at: '2026-08-01T00:00:00.000Z',
+    created_at: '2026-08-01T00:00:00.000Z',
+  });
+}
+
 describe('POST /api/contacts/:contactId/extraction-run', () => {
   it('schedules every eligible 1:1 thread and returns their ids', async () => {
     const { app, world } = makeWebhookHarness();
@@ -58,6 +74,28 @@ describe('POST /api/contacts/:contactId/extraction-run', () => {
     expect(res.body.scheduled.sort()).toEqual(['conv-a', 'conv-b']);
     expect(res.body.failed).toEqual([]);
     expect(typeof res.body.requestId).toBe('string');
+  });
+
+  it('fans out across the EMAIL half of the union as well as the phone half', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant', email: 'tenant@example.test' });
+    seedConversation(world, 'conv-phone', 'tenant_1to1');
+    seedEmailConversation(world, 'conv-email', 'tenant@example.test');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(200);
+    expect(res.body.scheduled.sort()).toEqual(['conv-email', 'conv-phone']);
+    expect(world.manualExtractionRequests.map((c) => c.conversationId).sort())
+      .toEqual(['conv-email', 'conv-phone']);
+  });
+
+  it('schedules an EMAIL-ONLY contact thread (no phone thread exists at all)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant', email: 'tenant@example.test' });
+    seedEmailConversation(world, 'conv-email', 'tenant@example.test');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(200);
+    expect(res.body.scheduled).toEqual(['conv-email']);
+    expect(res.body.failed).toEqual([]);
   });
 
   it('gives one press ONE requestId across threads and no debounce', async () => {

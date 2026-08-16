@@ -9,9 +9,12 @@
 // paraphrase, reorder, or drop any sentence (Message frequency / rates / STOP /
 // HELP / links).
 
-/** The end-user-facing SMS brand (the registered A2P brand). NOT "HousingChoice"
- *  — that is the internal/dashboard name only. */
-export const SMS_BRAND = 'Tenant Place LLC';
+/** The end-user-facing SMS brand. Changed 2026-08-15 from the legal entity name
+ *  "Tenant Place LLC" to the trade name "HousingChoice" (founder decision); the
+ *  app-side twin is SMS_BRAND_NAME and consentDrift.test.ts pins the two equal.
+ *  Still a SEPARATE concept from the internal/dashboard name even though the
+ *  strings now match -- keep them independently spelled. */
+export const SMS_BRAND = 'HousingChoice';
 
 /** The public web-form consent-disclosure version stamped alongside `web_form`
  *  consent (mirrors the app's CONSENT_VERSION). */
@@ -30,7 +33,7 @@ export const TERMS_URL = 'https://tenant.place/terms';
  * do-not-remove — A2P/CTIA consent gate copy (client-side; server also enforces).
  */
 export const WEB_FORM_CONSENT_LABEL =
-  'I agree to receive recurring texts from Tenant Place LLC about new properties ' +
+  'I agree to receive recurring texts from HousingChoice about new properties ' +
   'that accept my voucher, tour reminders, and updates. Message frequency varies. ' +
   'Msg & data rates may apply. Reply STOP to opt out, HELP for help. See our ' +
   'Privacy Policy and Terms.';

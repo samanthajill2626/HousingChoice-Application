@@ -1068,6 +1068,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // conversation-fact-extraction (T9): the ai_suggestions group reads pending
       // suggestions from the SAME store the review API + PATCH clear-hook share.
       extractionRepo: extraction,
+      // inbox-unread-index: Today's unread sections walk the same byUnread index
+      // the badge does, so they take the SAME single budget seam.
+      ...(deps.unreadWalkLimit !== undefined && { unreadWalkLimit: deps.unreadWalkLimit }),
     }),
   );
   // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,

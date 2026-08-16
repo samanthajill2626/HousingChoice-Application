@@ -15,7 +15,7 @@ import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twi
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
   urgencyOf,
@@ -1062,5 +1062,223 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags']);
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
     expect(body.items.length).toBeGreaterThan(0);
+  });
+
+  // --- inbox-unread-index: the unread sections read byUnread, not the open walk --
+  // Today's unread half used to ride the SAME hard-capped 100-row open-partition
+  // Query the relay opt-out scan rides. Any unread thread ranking past that
+  // window was silently missing from Today - a correctness bug, not a cost one.
+  // The unread half now drives the sparse byUnread index (newest-activity-first)
+  // while the relay opt-out scan stays on the open-partition loop, unchanged.
+  describe('unread sections are fed by the byUnread index', () => {
+    /** An open, READ 1:1 - fills the open partition without entering the index. */
+    const seedReadOpen = (n: number): void => {
+      seedConversation({
+        conversationId: `conv-read-${String(n).padStart(4, '0')}`,
+        participant_phone: `+1555020${String(n).padStart(4, '0')}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - n * 1_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 0,
+      });
+    };
+
+    it('surfaces an unread 1:1 that ranks BEYOND the old 100-row open-partition window', async () => {
+      // 130 read threads all sort ahead of the target, so the open-partition
+      // Query's first 100 rows never reach it. Before this change that thread
+      // was invisible on Today no matter how long it sat unanswered.
+      for (let n = 0; n < 130; n += 1) seedReadOpen(n);
+      seedConversation({
+        conversationId: 'conv-deep-unread',
+        participant_phone: '+15550209999',
+        participant_display_name: 'Deep Unread',
+        status: 'open',
+        last_activity_at: iso(-500_000), // oldest of them all -> ~131st
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 2,
+      });
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId)).toEqual(['conv-deep-unread']);
+      expect(unrep[0]).toMatchObject({ who: 'Deep Unread', why: 'Unreplied' });
+    });
+
+    it('still emits the relay opt-out attention item - that scan stays on the open-partition loop', async () => {
+      // The relay thread carries NO unread, so it is structurally absent from
+      // the byUnread index. If the opt-out scan had moved to the index pass with
+      // the unread half, this item would vanish.
+      world.contacts.push({
+        contactId: 'c-loopintact',
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Loop',
+        lastName: 'Intact',
+        phone: '+15550211111',
+        sms_opt_out: true,
+      });
+      seedConversation({
+        conversationId: 'conv-relay-loopintact',
+        participant_phone: '+15550213333', // synthetic pool number
+        status: 'open',
+        last_activity_at: iso(-40_000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-200_000),
+        participants: [{ contactId: 'c-loopintact', phone: '+15550211111', name: 'Loop Intact' }],
+        relay_opted_out_members: {
+          'c-loopintact': {
+            contactId: 'c-loopintact',
+            phone: '+15550211111',
+            name: 'Loop Intact',
+            at: iso(-20_000),
+          },
+        },
+      } as ConversationItem);
+      expect(world.conversations.get('conv-relay-loopintact')?.unread_flag).toBeUndefined();
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+      expect(needs.find((i) => i.refId === 'c-loopintact')).toMatchObject({
+        why: 'Opted out of a relay group - not receiving messages',
+        tag: 'Relay group',
+        attention: true,
+      });
+    });
+
+    it('caps at 100 kept conversations and WARNS with the unread threshold, not the group-fetch one', async () => {
+      for (let n = 0; n < 150; n += 1) {
+        seedConversation({
+          conversationId: `conv-many-${String(n).padStart(4, '0')}`,
+          participant_phone: `+1555022${String(n).padStart(4, '0')}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep).toHaveLength(100);
+      const capWarns = harness.capture
+        .atLevel(40)
+        .filter((l) => l['group'] === 'unread' && String(l['msg'] ?? '').includes('hit the cap'));
+      expect(capWarns).toHaveLength(1);
+      // The LOGGED count is the unread cap, proving warnIfCapped now takes its
+      // threshold as a parameter instead of hardcoding GROUP_FETCH_LIMIT.
+      expect(capWarns[0]).toMatchObject({ group: 'unread', count: 100 });
+    });
+
+    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the 1:1 sections', async () => {
+      // 120 group_text threads all sort NEWER than the three 1:1s. A
+      // cap-then-filter walk would spend all 100 slots on rows Today never
+      // shows and emit nothing; filter-then-cap keeps only 1:1-bucket rows.
+      for (let n = 0; n < 120; n += 1) {
+        seedConversation({
+          conversationId: `conv-group-${String(n).padStart(4, '0')}`,
+          status: GROUP_TEXT_STATUS,
+          last_activity_at: iso(-1_000 - n * 100),
+          type: 'group_text',
+          ai_mode: 'manual',
+          created_at: iso(-900_000),
+          participants: [
+            { contactId: 'c-g1', phone: '+15550230001' },
+            { contactId: 'c-g2', phone: '+15550230002' },
+          ],
+          unread_count: 4,
+        });
+      }
+      for (const n of [1, 2, 3]) {
+        seedConversation({
+          conversationId: `conv-oneone-${n}`,
+          participant_phone: `+1555024000${n}`,
+          participant_display_name: `Solo ${n}`,
+          status: 'open',
+          last_activity_at: iso(-500_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId).sort()).toEqual([
+        'conv-oneone-1',
+        'conv-oneone-2',
+        'conv-oneone-3',
+      ]);
+    });
+
+    it('still writes emittedUnknownPhones, so the contacts-triage pass de-dupes the same person', async () => {
+      // The unknown-triage branch moved into the second pass; the phone it
+      // records is consumed by the LATER contacts-triage pass, so the pass
+      // ORDER has to survive the split.
+      const phone = '+15550250001';
+      seedConversation({
+        conversationId: 'conv-unknown-dedupe',
+        participant_phone: phone,
+        participants: [{ contactId: 'c-unknown-dedupe', phone }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-60_000),
+        unread_count: 1,
+      });
+      world.contacts.push({
+        contactId: 'c-unknown-dedupe',
+        type: 'unknown',
+        status: 'needs_review',
+        phone, // SAME phone - the triage pass must skip it
+      });
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+      const forPerson = needs.filter((i) => i.refId === 'c-unknown-dedupe');
+      expect(forPerson).toHaveLength(1);
+      expect(forPerson[0]).toMatchObject({ refType: 'contact', why: 'New unknown contact' });
+    });
+
+    it('WARNS when the scan budget expires before the pass fills, instead of a silent short block', async () => {
+      // Budget seam (ApiRouterDeps.unreadWalkLimit): the walk stops after 2 raw
+      // rows, so the block is short for a reason the operator cannot otherwise
+      // see - neither capped nor exhausted.
+      for (let n = 0; n < 5; n += 1) {
+        seedConversation({
+          conversationId: `conv-budget-${n}`,
+          participant_phone: `+1555026000${n}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+      const budgeted = makeWebhookHarness({ world, unreadWalkLimit: 2 });
+
+      const res = await request(budgeted.app)
+        .get('/api/today')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+
+      expect(res.status).toBe(200);
+      const unrep = (res.body as TodayResponse).items.filter((i) => i.group === 'unreplied');
+      expect(unrep).toHaveLength(2);
+      const budgetWarns = budgeted.capture
+        .atLevel(40)
+        .filter((l) => l['event'] === 'today_unread_walk_truncated');
+      expect(budgetWarns).toHaveLength(1);
+      expect(budgetWarns[0]).toMatchObject({ scanned: 2, kept: 2, budget: 2 });
+    });
   });
 });

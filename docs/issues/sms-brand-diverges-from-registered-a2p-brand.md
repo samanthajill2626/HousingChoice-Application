@@ -34,10 +34,19 @@ That leaves the code deliberately ahead of the filing in three ways:
 None of this breaks a gate or a send path; it is a compliance-posture gap to
 close deliberately, not a defect in the code.
 
+**Console state (2026-08-16, Cameron).** The RUNBOOK step 3b re-paste is DONE
+and NOT outstanding: dev and prod are consistent and both already carry the
+HousingChoice keyword copy, dev with an `HC DEV: ` prefix. This happened before
+the code shipped, so until each env is deployed its keyword replies say
+"HousingChoice" while its app-SENT copy still says "Tenant Place LLC" -- a
+transient split that closes on deploy, with nothing to redo in the console.
+
+**Still outstanding.** `missedCallAutoText` is a PERSISTED org setting that
+shadows the default, so any org row already saved keeps the old brand string
+regardless of deploy; check it per env.
+
 **Suggested fix.** Before (or alongside) the prod cutover: register
 "HousingChoice" as a DBA on the Tenant Place LLC brand, refresh the sample copy
 in `docs/a2p/campaign-resubmission.md` from the current constants, and decide
 whether the public domain in the copy should follow the name to
-housingchoice.org. Operationally the brand change also requires the RUNBOOK
-step 3b re-paste (Help message + Opt-in confirmation) on every messaging
-service -- see `RUNBOOK.md` "Keyword auto-replies (Advanced Opt-Out)".
+housingchoice.org.

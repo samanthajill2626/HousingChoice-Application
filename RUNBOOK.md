@@ -1557,7 +1557,9 @@ reports a `LastEvaluatedKey`, re-run it until it does not.
    from memory - a trailing slash or a stale host is the whole failure mode.
 3. **Production-service keyword canary.** Requires step 3b ("Keyword
    auto-replies (Advanced Opt-Out)") to have been done on the PROD messaging
-   service first. From a test handset, to the business number:
+   service first. On DEV the same canary applies, except every reply is
+   prefixed `HC DEV: ` (step 3b) - assert the prefix plus the constant, not the
+   constant alone. From a test handset, to the business number:
    - `HELP` -> exactly ONE reply, and it is our `HELP_REPLY` copy. (Expect our
      webhook NOT to be called at all: Twilio consumes HELP.)
    - `STOP` -> exactly ONE reply, and it is our `STOP_CONFIRMATION` copy. Then
@@ -1665,8 +1667,20 @@ keyword copy. The only loss is that the replies are not ours.
    - **Opt-in confirmation** = `OPT_IN_CONFIRMATION` (`keyword.optin`)
    Do not retype them. Copy from the constant so a character never drifts.
    All three are compliance-locked constants; none is operator-editable.
+   **On DEV only, prefix each of the three with `HC DEV: `** so a stray text
+   from the dev service is instantly recognizable as non-production. That
+   prefix is the ONE sanctioned deviation from verbatim; everything after it
+   still matches the constant character for character.
 4. Save, then run the keyword canary in step 2.3 against that service - ONE
    branded reply per keyword, plus the sentence probe.
+
+**Verified state (2026-08-16, Cameron).** Dev and prod are consistent and both
+carry the CURRENT `HousingChoice` copy, dev with the `HC DEV: ` prefix. Note
+the consoles were updated BEFORE the brand change shipped, which inverts the
+usual order below; until the app is deployed, keyword replies say
+"HousingChoice" while app-SENT copy (web-form welcome, missed-call auto-text,
+relay intro) still says "Tenant Place LLC" on the deployed build. The window
+closes on the next deploy of each env - nothing to redo in the console.
 
 **Changing the copy later** - three steps, in this order, always:
 

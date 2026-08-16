@@ -34,8 +34,9 @@ Two defects, one root cause:
 ## 2. Goals
 
 - G1: Unread discovery cost proportional to indexed unread conversations, not
-  open conversations. Empty unread state = O(1) queries. (Indexed unread
-  includes two invisible accrual classes - section 6.)
+  open conversations. Empty unread state = O(1) queries. (Invisible-resident
+  accrual is eliminated by the close/delete resets - section 4.2 - leaving
+  only transient races.)
 - G2: A dedicated cheap badge-count endpoint; the badge never depends on the
   row-list response shape or its page limit.
 - G3: The nav badge reflects the user's own Inbox mark-read actions instantly
@@ -58,9 +59,11 @@ Two defects, one root cause:
   the All page and the bounded Unread page hydrate at most one page of
   latest-messages per request; no duplicated message data).
 - The unmatched-email badge (already server-computed; no optimistic layer now).
-- Optimistic badge decrements from the tour/placement comms tabs and the
-  contact/conversation auto-mark paths (v1 wires the Inbox page only - section
-  4.7; the others reconcile via the now-cheap refetch).
+- Optimistic badge decrements from the contact/conversation AUTO-mark paths
+  (useMarkContactRead and the conversation-detail mount marks fire blind,
+  with no unread knowledge - they stay reconcile-only). The tour/placement
+  comms tabs ARE wired (section 4.7) - the close-reset ruling removed the
+  closed-group hazard that had excluded them.
 - Contacts BatchGet amplification sweep - filed as
   docs/issues/contacts-batchget-amplified-reads.md (the agreed next mission).
 - Voice-inbound unread increments (separate open issues; the index picks them
@@ -143,26 +146,47 @@ Non-runtime writers:
   the new keys are not derived from status/type; NO new obligation. Import
   retract deletes rows (apply.ts:712-719); deletes drop GSI entries.
 - BACKFILL: section 7.
-- Status/lifecycle transitions (touchLastActivity, setRelayStatus,
-  assignPoolNumberAndOpen, convertRelayGroupToGroupText, rebindOwner, roster
-  and close-nag writers): none touch unread or the flag; NO changes.
-- Contact soft-delete/restore: does not touch conversation rows; NO changes.
+- Status/lifecycle transitions: touchLastActivity, assignPoolNumberAndOpen,
+  convertRelayGroupToGroupText, rebindOwner, roster and close-nag writers
+  touch neither unread nor the flag; NO changes. `setRelayStatus` is the
+  EXCEPTION by human ruling - closing zeroes unread + removes the flag in
+  the same write (below).
+- Contact soft-delete now fans out resetUnread over the contact's threads
+  (below); restore does not touch conversation rows.
 
-ACCEPTED ACCRUAL (invisible index residents) - TWO classes, both stated:
+ACCRUAL ELIMINATED BY HUMAN RULING (spec gate, 2026-08-16): the review
+rounds had ACCEPTED two invisible-resident accrual classes (relay groups
+closed while unread; unread threads of soft-deleted contacts) because
+resetting them changed product behavior. The human ruled the OPPOSITE at
+the gate: closing a relay group and soft-deleting a contact now RESET
+unread. Two new reset surfaces, both maintaining the flag invariant:
 
-1. Relay groups closed while unread (invisible: inbox reads open+connecting
-   only, inbox.ts:823). Resetting unread on close is REJECTED: today a
-   reopened relay group resurfaces with its unread intact, and this design
-   does not change product behavior.
-2. Unread threads of soft-deleted contacts that fail the resurfacing rule
-   (inbox.ts:537-576). Resetting unread on contact delete is REJECTED for the
-   same reason (restore currently resurfaces old unread, and a post-deletion
-   inbound re-increments anyway - the reset would not change resurfacing
-   outcomes but WOULD change restore semantics).
+1. RELAY CLOSE resets structurally: `setRelayStatus` to 'closed'
+   (conversationsRepo.ts:1786-1819; sole close caller
+   routes/relayGroups.ts:453) adds `SET unread_count = :zero REMOVE
+   unread_flag` to ITS OWN UpdateExpression when the target status is
+   'closed' - one atomic write, and every future close path inherits it.
+   Reopen (relayGroups.ts:516 -> 'open') does not touch unread. DECLARED
+   PRODUCT CHANGE (human-approved): a reopened relay group returns with
+   unread 0, not its pre-close count. The close route's existing
+   conversation.updated emit (relayGroups.ts:530) reconciles clients.
+2. CONTACT SOFT-DELETE resets via fan-out: the delete handler (the same
+   place that runs the delete/restore presence fan-out over
+   conversationsForContact, contacts.ts:1864 region) calls `resetUnread`
+   for each of the contact's threads with unread > 0 - the exact shape of
+   POST /api/inbox/:contactId/read's fan-out (inbox.ts:997-1015),
+   ConditionalCheckFailedException swallowed, existing emits reconcile.
+   DECLARED PRODUCT CHANGE (human-approved): a restored contact returns
+   with unread 0. RESURFACING IS UNAFFECTED: the resurfacing rule requires
+   a POST-deletion inbound (inbox.ts:537-576), and that inbound itself
+   re-increments unread - so every thread that could resurface still does;
+   only pre-deletion unread (which never resurfaced anyway) stops counting.
 
-Both classes stay indexed until something resets them. Consequences and
-mitigations: sections 4.3 (walk budget + scan-resume), 4.4 (probe
-short-circuit), 6 (cost accounting).
+LEGACY residents (rows closed/deleted BEFORE this ships) are cleaned by the
+backfill (section 7.2) applying the same two rules one-time. Residual
+invisible-resident exposure drops to transient races (a close/delete racing
+an inbound); the walk budget, scanned-items WARN, and deleted-probe WARN
+are KEPT as regression sentinels, not standing mitigations.
 
 Pointer/claim partitions (`phone#`, `email#`, `token#`) never carry
 unread_count and never enter the index (conversationsRepo.ts:1111-1119).
@@ -243,10 +267,11 @@ proportionally to one page.
    documented CLOCK CAVEAT at inbox.ts:558-563, and the append/touch gap
    can leave last_activity_at stale while a fresh post-deletion message
    exists, twilio.ts:2132-2134. The short-circuit is WITHDRAWN: the saved
-   Query is not worth silently suppressing a genuine resurfacing. The
-   stable-no accrual residents therefore cost a contact resolution AND a
-   message probe per request - counted in 4.4's cost model and covered by
-   the accrual tripwire.)
+   Query is not worth silently suppressing a genuine resurfacing. With the
+   human-ruled delete-reset + backfill cleanup (4.2/7.2), the probed
+   population is just the resurface-eligible threads - deleted contacts
+   with post-deletion unread - each costing a contact resolution AND a
+   message probe per request, tripwired by UNREAD_DELETED_PROBE_WARN.)
 3. Emits candidates in index order up to `opts.maxRows`, then STOPS PULLING.
    Returns `{ candidates, scanPosition?, consumedAll, truncated, capped,
    remainingBudget }` (remainingBudget is what 4.5's loop threads into the
@@ -543,16 +568,29 @@ UnreadContext changes (dashboard/src/app/UnreadContext.tsx):
    - Generation guard: a fetch resolving after a newer fetch started is
      discarded (a stale in-flight response cannot clobber newer state).
    - Clamp: displayed count never negative.
-3. CALLERS (v1 scope decision): ONLY `useInbox.markRead` - all four
-   branches, after the `:263` unreadCount guard and the `:283`
-   addressability guard, keyed by the existing rowKey(); rollback in the
-   existing `.catch` (useInbox.ts:291-293). Inbox rows are by construction
-   rows the badge counts (same collector + visibility rules; closed relay
-   rows never render there). The tour/placement channel hooks and the
-   contact/conversation auto-marks are NOT wired (the hooks cannot know row
-   kind or badge visibility; the auto-marks fire blind on mount). Those
-   paths reconcile via the cheap refetch - the pre-existing behavior minus
-   ~1.5s.
+3. CALLERS - every surface that VERIFIED unread > 0 before marking:
+   - `useInbox.markRead`: all four branches, after the `:263` unreadCount
+     guard and the `:283` addressability guard; rollback in the existing
+     `.catch` (useInbox.ts:291-293).
+   - `useTourChannels.markGroupRead`/`markPersonRead` (guards at :268/:288)
+     and `usePlacementChannels` equivalents (:275/:293). SOUND BY THE
+     CLOSE-RESET RULING: with closed relay groups zeroed at close, any
+     unread group these guards pass is open/connecting - i.e. badge-
+     counted; person marks target open 1:1 contacts, always badge-visible.
+     (Pre-ruling this wiring was excluded because a closed-but-unread group
+     would have decremented a row the badge never counted.)
+   - BADGE KEY VOCABULARY (kind-free, resolving the round-1 finding that
+     the hooks cannot know a row's g:/gt: kind): the badge context keys
+     clears as `c:<contactId>` | `u:<phone>` | `cv:<conversationId>`.
+     useInbox derives them from its row fields (contact -> c:, unknown ->
+     u:, both group kinds -> cv:); the hooks have exactly a contactId or a
+     conversationId. One logical row = one key on every surface, so
+     cross-surface duplicate clears (inbox click + tour tab within one TTL
+     window) dedupe instead of double-decrementing.
+   - The contact/conversation AUTO-marks stay unwired (useMarkContactRead
+     and the detail-mount marks fire blind on mount, no unread knowledge);
+     they reconcile via the cheap refetch - pre-existing behavior minus
+     ~1.5s.
 4. RECONNECT RECONCILE: subscribe `onOpen` (EventStreamProvider.tsx:57) ->
    scheduleRefetch, correcting drift after an SSE blackout.
 5. The 300ms SSE debounce and the unmatched-email half are unchanged.
@@ -606,13 +644,15 @@ never present on filter=unread responses (section 4.5).
   cost without commensurate benefit for a typically-ms window); the user's
   own action is masked by the optimistic layer + follow-up reconcile
   (4.7.2); other operators' actions converge on reconcile.
-- ACCRUAL (4.2's two classes) costs: index slots + scanned budget; deleted-
-  contact residents also cost a contact resolution + a message probe per
-  badge request (the probe short-circuit was withdrawn as clock-unsafe -
-  4.3 step 2). The per-request budget ceiling (2000) exists so accrual
-  cannot make a single request unbounded; the rate-limited WARN at 500
-  scanned items is the tripwire to revisit (e.g. an ops sweep resetting
-  ancient invisible unread - a future decision, not this feature).
+- ACCRUAL is eliminated by the close/delete resets + backfill cleanup
+  (4.2/7.2); what remains is transient (a close or delete racing an
+  inbound, and deleted contacts with genuine resurface-eligible unread -
+  which are SUPPOSED to be indexed and each cost a contact resolution + an
+  unconditional message probe per badge request; the round-2 probe
+  short-circuit stays withdrawn as clock-unsafe, 4.3 step 2). The
+  per-request budget ceiling (2000) and both rate-limited WARNs (500
+  scanned items; 25 deleted-probes) remain as regression sentinels for the
+  invariant, not as standing mitigations.
 - The pre-existing emit gap (increment succeeds, touchLastActivity throws,
   no SSE event - twilio.ts:604-618 et al.) leaves the INDEX correct and
   only delays client refresh; unchanged.
@@ -628,8 +668,20 @@ never present on filter=unread responses (section 4.5).
    UpdateCommand; `--dry-run` flag; read-side skip + write-side
    ConditionExpression idempotency; `{scanned, stamped, removed, skipped}`
    counts; isEntrypoint guard; pure planner function unit-tested per
-   backfillConsentMethod.ts). BOTH directions: stamp `unread_flag` where
-   `unread_count > 0` and absent; REMOVE where present with count 0/absent.
+   backfillConsentMethod.ts). FOUR rules, applying the runtime invariant
+   AND the human-ruled resets to legacy rows one-time:
+   - stamp `unread_flag` where `unread_count > 0` and absent;
+   - REMOVE the flag where present with count 0/absent;
+   - CLOSED RELAY GROUPS with unread > 0: zero the count + remove the flag
+     (the close-reset rule, applied retroactively - these rows are
+     invisible to every reader regardless);
+   - DELETED-CONTACT THREADS with unread > 0: apply the SAME resurfacing
+     predicate the runtime uses (one messages.listByConversation(limit 1)
+     probe per such thread; newest message inbound with created_at >
+     deleted_at keeps the unread, anything else zeroes it) - a one-shot
+     probe cost on a bounded population, so resurface-eligible threads
+     survive the cleanup. Requires a pre-pass building the deleted-contact
+     participant set (scan contacts for deleted_at, collect phones/emails).
    Skips pointer partitions (`phone#`/`email#`/`token#` prefixes).
 3. LOCAL SCHEMA UPDATE (no data loss): `ensureTable` is create-only and
    `db-create --reset` would destroy the human's imported local dataset. New
@@ -704,7 +756,14 @@ NEW TESTS:
 Unit (app/test):
 - conversationsRepo: incrementUnread sets flag+count atomically (absent->1
   creates flag; repeats keep it); resetUnread zeroes count and REMOVEs flag;
-  both idempotent; either ordering leaves flag consistent with count.
+  both idempotent; either ordering leaves flag consistent with count;
+  setRelayStatus('closed') zeroes count + removes flag in the same write
+  while 'open'/reopen leaves unread untouched (and a reopened group shows
+  unread 0 - the declared product change).
+- contacts route: soft-delete fans out resetUnread over every thread with
+  unread > 0 (phone + email threads; CCFE swallowed; a thread already at 0
+  is untouched); a post-deletion inbound after the delete still increments
+  and still resurfaces.
 - unreadFeed layer 1: visibility matrix (open/closed/connecting relay,
   group_open, 1:1 bucket incl. a type-less row, pointer-partition skip);
   scanPosition advances across a FULLY-FILTERED run (no dead-end); LAZINESS
@@ -754,8 +813,21 @@ Unit (app/test):
   guard; clamp at 0; capped suppression (and NO suppression on
   truncated-only); no-op defaults (bare render safe); memoized value;
   onOpen refetch.
-- useInbox: noteRowsCleared fires exactly once per guarded mark-read,
-  rollback on failure; useMarkContactRead does NOT touch the badge context.
+- useInbox: noteRowsCleared fires exactly once per guarded mark-read with
+  the kind-free key (contact -> c:, unknown -> u:, relay_group AND
+  group_text -> cv:), rollback on failure; useMarkContactRead does NOT
+  touch the badge context.
+- useTourChannels/usePlacementChannels: markGroupRead/markPersonRead call
+  noteRowsCleared (cv:/c: keys) only past their unread>0 guards, rollback
+  on failure; a same-thread clear from the inbox row and the tour tab
+  dedupes to ONE key (no double-decrement); provider-less renders still
+  safe via the no-op defaults.
+- Backfill rules 3-4: closed-relay unread zeroed; deleted-contact threads
+  probed once with the runtime resurfacing predicate (resurface-eligible
+  kept, stable-no zeroed); dry-run counts all four rule buckets.
+- setRelayStatus('closed') + contact-delete fan-out integration coverage:
+  close-then-reopen shows unread 0 through the index AND the feed;
+  delete-then-inbound resurfaces with exactly the post-deletion count.
 
 Integration (DynamoDB Local, per relayRepos.integration.test.ts precedent):
 - byUnread returns exactly flagged rows newest-first; increment/reset
@@ -817,8 +889,11 @@ WRITERS of unread_count (all through 2 primitives - verified exhaustive):
   inbound), :2125 (1:1 inbound), inboundEmail.ts:707 (email inbound). All
   become flag-writers automatically.
 - resetUnread callers: api.ts:2020 (conversation read), inbox.ts:982 (phone
-  fan-out), inbox.ts:1015 (contact fan-out). All become flag-removers
-  automatically.
+  fan-out), inbox.ts:1015 (contact fan-out), and NEW by human ruling: the
+  contact soft-delete fan-out (contacts.ts delete handler). All become
+  flag-removers automatically. `setRelayStatus('closed')` zeroes
+  count+flag inside its own write (4.2) - the one lifecycle writer that
+  now touches unread.
 - Creation sites (createOrGetByParticipantPhone/Email, createRelayGroup,
   createGroupTextThread, import upsertConversation): omit unread_count ->
   omit flag; NO changes. Every conversation PutCommand is conditional on

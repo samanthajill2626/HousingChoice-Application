@@ -172,17 +172,20 @@ unread_count and never enter the index (conversationsRepo.ts:1111-1119).
 New module `app/src/lib/unreadFeed.ts` with TWO exports, layered so every
 unread consumer shares ONE set of visibility rules.
 
-LAYER 1 - `listUnreadConversations(deps, opts)`: conversation-level.
+LAYER 1 - `iterateUnreadConversations(deps, opts)`: conversation-level,
+PULL-BASED (an async iterator; round-3 finding - a materialized batch made
+every consumer scan the whole index before its own cap applied, breaking the
+cost model and colliding two meanings of "exhausted"):
 
-1. Queries `byUnread` newest-first (ScanIndexForward false), paging
-   internally. RAW WALK BUDGET: UNREAD_WALK_LIMIT = 2000 index items - parity
-   with the group walk this design retires (inbox.ts:181), sized so the
-   accrual classes cannot plausibly exhaust it - with a WARN past
-   UNREAD_WALK_WARN = 500 (the tripwire to revisit accrual). Accepts an
-   optional exclusive-start position (a synthesized ExclusiveStartKey
-   `{ unread_flag: 'unread', last_activity_at, conversationId }` - the GSI's
-   full key shape for this hash-only-base-key table).
-2. Applies VISIBILITY RULES per item, on projected attributes:
+1. Lazily Queries `byUnread` newest-first (ScanIndexForward false) in
+   internal pages (Query Limit ~100), fetching the NEXT page only when the
+   consumer keeps pulling. Options: `startAfter` (a synthesized
+   ExclusiveStartKey `{ unread_flag: 'unread', last_activity_at,
+   conversationId }` - the GSI's full key shape for this hash-only-base-key
+   table) and `budget` (raw items this iteration may scan; the CALLER
+   threads one budget across a whole request).
+2. Applies VISIBILITY RULES per item, on projected attributes, yielding only
+   passers but COUNTING every scanned item against the budget:
    - skip items without a positive `unread_count` (defends WITHIN-IMAGE
      inconsistency only - un-backfilled rows, a hypothetical broken writer -
      NOT GSI replication lag; section 6);
@@ -192,19 +195,29 @@ LAYER 1 - `listUnreadConversations(deps, opts)`: conversation-level.
    - everything else (the 1:1 bucket, matching today's NEGATIVE filter at
      inbox.ts:466 - including any legacy row with no `type`): keep iff status
      `open`.
-3. Returns `{ items, scanPosition?, exhausted, truncated }`:
-   - `scanPosition` = the (last_activity_at, conversationId) tuple of the
-     last RAW item SCANNED (not the last item returned) - defined whenever
-     anything was scanned, so a run of filtered items always advances the
-     resume position and can never dead-end the feed;
-   - `exhausted` = the index stream ended (underlying Query returned no
-     LastEvaluatedKey);
-   - `truncated` = the raw budget stopped the read before exhaustion.
+3. Exposes, at any stop point: `scanPosition` (the tuple of the last RAW
+   item scanned - always advances through filtered runs, so they cannot
+   dead-end the feed), `scanExhausted` (the underlying Query stream ended),
+   and `budgetSpent`. Because the iterator is lazy, a consumer that stops
+   pulling stops the scan - the walk does only the work its consumer needs.
+
+RAW WALK BUDGET: UNREAD_WALK_LIMIT = 2000 scanned items per REQUEST (a
+safety ceiling, not a per-call allowance - callers pass the remaining budget
+through every iteration). With lazy pulling the ceiling is only ever
+approached when invisible accrual dominates the index; the tripwire is
+UNREAD_WALK_WARN = 500 scanned-per-request, logged through
+lib/rateLimitedWarn.ts (this fires on the badge path - the app's
+highest-frequency request - so an unthrottled WARN would flood exactly when
+it matters).
 
 Today (section 4.6) consumes layer 1 directly.
 
 LAYER 2 - `collectUnreadRows(deps, opts)`: row-identity level, used by BOTH
-the badge count and the Unread page so those two cannot diverge.
+the badge count and the Unread page so those two cannot diverge. Drives a
+layer-1 iterator and stops pulling the moment `maxRows` candidates are
+emitted - so the badge (maxRows=100) scans only as many raw items as it
+takes to find 100 visible candidates, and the page (maxRows=limit) scans
+proportionally to one page.
 
 1. Walks layer-1 items newest-first, grouping into ROW CANDIDATES:
    - relay_group / group_text conversation -> its own candidate (keyed by
@@ -221,19 +234,30 @@ the badge count and the Unread page so those two cannot diverge.
      badge needs none).
 2. DELETED CONTACTS: a candidate whose contact isDeleted survives only under
    the resurfacing rule (some unread thread's newest message is an inbound
-   with created_at > contact.deleted_at - inbox.ts:537-576). PROBE
-   SHORT-CIRCUIT: a thread whose `last_activity_at <= deleted_at` cannot have
-   a post-deletion message at all (a message never postdates its
-   conversation's activity), so the messages.listByConversation(limit 1)
-   probe runs ONLY for unread threads with activity NEWER than the deletion.
-   The stable-no accrual class (4.2 class 2) therefore costs its index slot
-   and contact resolution but NO per-request message reads.
-3. Emits candidates in index order up to `opts.maxRows`. Returns
-   `{ candidates, scanPosition?, exhausted, truncated, capped }` where
-   `capped` = maxRows stopped emission (layer-1's `exhausted`/`truncated`
-   pass through; `scanPosition` on a capped run is the position after the
-   last index item CONSUMED, so resumption re-scans nothing and skips
-   nothing).
+   with created_at > contact.deleted_at - inbox.ts:537-576), probed via
+   messages.listByConversation(limit 1) per unread thread of deleted
+   contacts, UNCONDITIONALLY - exactly today's probe. (A round-2 remedy
+   short-circuited the probe on `last_activity_at <= deleted_at`; round 3
+   showed that premise is false in this codebase - last_activity_at is the
+   PROVIDER timestamp while created_at is OUR ingest clock, with a
+   documented CLOCK CAVEAT at inbox.ts:558-563, and the append/touch gap
+   can leave last_activity_at stale while a fresh post-deletion message
+   exists, twilio.ts:2132-2134. The short-circuit is WITHDRAWN: the saved
+   Query is not worth silently suppressing a genuine resurfacing. The
+   stable-no accrual residents therefore cost a contact resolution AND a
+   message probe per request - counted in 4.4's cost model and covered by
+   the accrual tripwire.)
+3. Emits candidates in index order up to `opts.maxRows`, then STOPS PULLING.
+   Returns `{ candidates, scanPosition?, consumedAll, truncated, capped }`:
+   - `capped` = maxRows stopped emission;
+   - `consumedAll` = the item SUPPLY ran out - the iterator's scan
+     exhausted with every yielded item consumed into a candidate or
+     merged/excluded. This is a CONSUMPTION fact, distinct from layer-1's
+     scanExhausted (round-3 blocking finding: conflating them made every
+     under-budget dataset return page one with a null cursor);
+   - `truncated` = the request budget ran out first;
+   - `scanPosition` = position after the last index item CONSUMED, so
+     resumption re-scans nothing and skips nothing.
 
 CURSOR AND SPLIT-PROOF PAGING (round-1 blocking finding, REDESIGNED in round
 2 after its ordering-comparison guard was shown to rest on stale reads and
@@ -254,13 +278,28 @@ undocumented tie order):
 - The `u: 1` tag namespaces the cursor; decodeCursor/decodeGroupCursor gain
   the matching cross-filter rejection (unread cursor under another filter ->
   400, and vice versa - the group-cursor posture today).
-- CURSOR SIZE (accepted): `s` grows by up to `limit` (30) contactIds per
-  page (~45 bytes each), so the cursor is roughly 2KB at page 2 and 6KB by
-  page 5 - inside Node's default 16KB header budget for a GET query param.
-  A cursor whose seen-set exceeds SEEN_SET_MAX = 250 is rejected as invalid
-  (400) rather than silently truncated: paging more than ~8 pages deep into
-  Unread (250+ contact rows) has no product meaning (the badge caps at
-  100), and silently dropping ids would break the dedupe guarantee.
+- CURSOR SIZE (round-3 finding: the transport, not Node, is the binding
+  constraint - CloudFront's URL limit is a fixed 8,192 bytes and fronts
+  every deployed environment, so an oversized cursor fails in dev/prod but
+  not locally, and useInbox's Load-more catch is deliberately silent):
+  `s` grows by up to `limit` (30) contactIds (~47 bytes each as JSON array
+  elements) per page. SEEN_SET_MAX = 100 ids, sized so the worst cursor
+  (~4.7KB JSON -> ~6.3KB base64url) plus the rest of the request line stays
+  inside CloudFront's 8,192-byte quota with margin. THE SERVER NEVER MINTS
+  A CURSOR IT WOULD REJECT: when emitting the next cursor would push the
+  seen-set past SEEN_SET_MAX, the page returns `nextCursor: null` instead -
+  the feed ends at ~4 pages (120+ unread contact rows), which has no
+  product meaning to exceed (the badge caps at 100, and triage is
+  top-down: marking rows read is what reaches deeper unread). The 400 for
+  an over-limit or malformed cursor remains only for tampered input.
+  Hydration-dropped candidates DO stay in the seen-set (they were
+  consumed), so a bulk mark-read race can spend the depth allowance faster;
+  accepted - the next reconcile refetch resets paging from the top.
+- CURSOR CONTENT (stated decision): the seen-set puts opaque contactIds in
+  a GET query param, hence CloudFront access logs and any http.url
+  telemetry attribute. contactIds already appear in request URLs today
+  (e.g. POST /api/inbox/:contactId/read) and carry no PII by themselves;
+  accepted, and noted for the existing telemetry-url-redaction workstream.
 - Non-contact candidates need no seen-set: an unknown row's phone and a
   group/relay row's conversationId each map to exactly ONE index item, so
   they cannot straddle pages.
@@ -271,22 +310,28 @@ undocumented tie order):
 `{ unreadCount: number, capped: boolean, truncated: boolean }`
 
 - `collectUnreadRows` with `maxRows = BADGE_COUNT_CAP = 100` and no cursor.
+  Lazy layer 1 means the badge scans only as many raw index items as it
+  takes to emit 100 candidates (or hit stream end / budget) - never the
+  whole index.
 - `capped` = the cap stopped counting (count is a floor at the cap).
-  `truncated` = the raw walk budget stopped scanning first (count is a
-  floor for a different reason; pathological - see 4.3 budget sizing). The
-  two are DISTINCT wire fields because the client treats them differently
+  `truncated` = the request budget stopped scanning first (count is a floor
+  for a different reason; pathological - see 4.3 budget sizing). The two
+  are DISTINCT wire fields because the client treats them differently
   (4.7): a capped count is "99+" and must not be decremented; a truncated
   count is small and real-so-far and SHOULD still decrement.
 - No hydration: no previews, placement labels, or latest-message reads
-  (the deleted-contact probe is a visibility rule, and runs only for
-  threads with post-deletion activity - 4.3 step 2).
-- COST: empty unread = 1 index query. N unread 1:1s = 1 index query + N
-  contact resolutions. PLUS the accrual classes (4.2): each closed-unread
-  relay group costs an index slot; each deleted-contact unread thread costs
-  an index slot + a contact resolution (probe short-circuited unless
-  activity postdates deletion). This endpoint is the highest-frequency call
-  in the app (every SPA boot + every debounced conversation event per
-  connected dashboard) - the accrual WARN (4.3) is the signal to revisit.
+  (the deleted-contact resurfacing probe is a visibility rule - 4.3 step
+  2 - and is the one message read the badge performs).
+- COST: empty unread = 1 index query. N visible unread 1:1s = 1-2 index
+  Query pages + N contact resolutions. PLUS the accrual classes (4.2),
+  which are scanned through (budget) before/between visible items: each
+  closed-unread relay group costs an index slot; each deleted-contact
+  unread thread costs an index slot + a contact resolution + a message
+  probe per request (the round-2 probe short-circuit is withdrawn - 4.3
+  step 2). This endpoint is the highest-frequency call in the app (every
+  SPA boot + every debounced conversation event per connected dashboard) -
+  the rate-limited accrual WARN (4.3) is the signal to revisit before the
+  accrual classes make this expensive.
 - Registered above the `/:contactId/read` param route; no collision with
   existing inbox routes (GET `/`, POST `/read`, POST `/:contactId/read`).
 - Error posture: normal 500; the client collapses any error to "no badge".
@@ -309,21 +354,34 @@ The `filter=unread` branch of aggregateInbox is rewritten around
 `collectUnreadRows` + hydration in a FILL-OR-EXHAUST loop (the same invariant
 today's pager provides, inbox.ts:755-800):
 
-1. Collect candidates (excludeContactIds from the cursor's seen-set), hydrate
-   them (below), drop the ones hydration disqualifies, and REPEAT - resuming
-   from the returned scanPosition - until `limit` hydrated rows are in hand
-   OR the index stream is exhausted OR the raw budget is spent.
-2. `nextCursor` is non-null IFF the stream is neither exhausted nor
-   budget-truncated with nothing more to serve: concretely, null when the
-   final collect returned `exhausted` (all remaining index items consumed),
-   else the cursor built from the final scanPosition + accumulated seen-set.
-   INVARIANT PRESERVED: an empty `rows` array implies `nextCursor: null`
-   (the loop only stops short of `limit` on exhaustion/budget), so the
-   dashboard's empty-state and Load-more gating
-   (Inbox.tsx:130-158 renders both off `rows.length`) keep working
-   unchanged. A budget-truncated run that produced zero rows returns an
-   empty page with a null cursor and `groupsTruncated` absent - the
-   pathological-accrual case the WARN exists for; accepted.
+1. Collect candidates, hydrate them (below), drop the ones hydration
+   disqualifies, and REPEAT until `limit` hydrated rows are in hand OR
+   `consumedAll` OR the request budget is spent. STATE THREADING (round-3
+   finding - both were underspecified): the loop OWNS (a) the exclude set,
+   seeded from the cursor's seen-set and ACCUMULATED with every candidate
+   emitted by every iteration (without this, iteration 2 could emit a
+   second row for a contact iteration 1 already emitted - duplicate React
+   keys on one page), and (b) the remaining raw budget
+   (UNREAD_WALK_LIMIT per REQUEST), passed into and returned by each
+   collect call.
+2. `nextCursor` keys on CONSUMPTION, never scan state: null when the final
+   collect reported `consumedAll`; null when minting the cursor would
+   exceed SEEN_SET_MAX (the declared depth cap, 4.3); otherwise the cursor
+   from the final scanPosition + accumulated seen-set. INVARIANT: an empty
+   `rows` array implies `nextCursor: null` - the loop only stops empty on
+   consumedAll, budget exhaustion, or the depth cap - so the dashboard's
+   empty-state and Load-more gating (Inbox.tsx:130-158, both keyed on
+   `rows.length`) keep working.
+3. BUDGET-TRUNCATED EMPTY PAGE (round-3 finding: v3 showed "You're all
+   caught up" over unreachable unread - a false all-clear): the InboxPage
+   wire shape gains an optional `truncated?: true`, set ONLY when the
+   request budget expired before the page could fill (any filter's unread
+   branch; never set elsewhere). The dashboard renders the ERROR state
+   (its existing retry affordance) instead of the all-caught-up empty
+   state when `rows.length === 0 && truncated` - a small declared client
+   change. Reachability requires ~2000 consecutive invisible index items
+   (post-lazy-iterator), so this is a tripwire path, but it must not lie
+   to the user when it fires.
 
 DECLARED BEHAVIOR CHANGE - PAGE COMPOSITION: today's `filter=unread` page one
 is up to `limit` CONTACT rows PLUS all unread relay rows PLUS all unread
@@ -403,8 +461,11 @@ the 1:1 bucket - preserving per-conversation type/timestamp semantics.
 
 - ORDERING PRESERVED: the unread pass still runs before the contacts-triage
   pass, which consumes `emittedUnknownPhones` (today.ts:520, :590, :726).
-- CAP: the pass takes at most TODAY_UNREAD_CAP = 100 unread conversations,
-  announcing truncation via the existing warnIfCapped (today.ts:354-356).
+- CAP: FILTER-THEN-CAP, explicitly (round-3 finding: the other order lets a
+  burst of unread group/relay threads starve the 1:1 sections): drive the
+  layer-1 iterator, keep only 1:1-bucket items, and stop after
+  TODAY_UNREAD_CAP = 100 KEPT conversations - announcing truncation via the
+  existing warnIfCapped (today.ts:354-356).
   SELECTION CHANGE: the newest-100-unread by activity, rather than
   unread-within-the-first-100-open. The NUMERIC bound is unchanged but the
   REALIZED payload is larger on unread-heavy data (today only the unread
@@ -445,10 +506,16 @@ UnreadContext changes (dashboard/src/app/UnreadContext.tsx):
      predicate creates stuck states); WHEN a resolve expires one or more
      clears, schedule ONE follow-up reconcile fetch RECHECK_DELAY_MS
      (2000ms) later unless another fetch is already scheduled/in-flight.
-     The follow-up expires nothing (no clears remain from this action) so
-     it cannot cascade; it exists purely to observe the index after
-     propagation. PENDING_CLEAR_TTL_MS = 10_000 stays as backstop when no
-     reconcile happens at all. Residual: if the GSI is STILL stale at
+     BOUND (round-3 correction): the guarantee is "at most one scheduled
+     follow-up at a time" - the schedule guard, NOT a no-cascade property
+     (a clear recorded between scheduling and firing IS expired by the
+     follow-up and may schedule another; continuous clicking sustains a
+     bounded chain, one pending fetch at a time). Under continuous SSE
+     traffic the guard routinely skips the follow-up and the
+     already-pending debounced refetches provide the convergence instead -
+     equivalent outcome, stated so the follow-up is not mistaken for the
+     sole mechanism. PENDING_CLEAR_TTL_MS = 10_000 stays as backstop when
+     no reconcile happens at all. Residual: if the GSI is STILL stale at
      t+2.3s, the badge shows the stale count until the next event/refetch;
      accepted (server remains authority).
    - Generation guard: a fetch resolving after a newer fetch started is
@@ -468,9 +535,11 @@ UnreadContext changes (dashboard/src/app/UnreadContext.tsx):
    scheduleRefetch, correcting drift after an SSE blackout.
 5. The 300ms SSE debounce and the unmatched-email half are unchanged.
 
-The Inbox page keeps its own optimistic row-drop; useInbox changes only by
-the noteRowsCleared/rollback wiring. AppFrame.test's useUnread stub and
-Inbox.test's baseState factory gain the new fields (section 8).
+The Inbox page keeps its own optimistic row-drop; useInbox changes by the
+noteRowsCleared/rollback wiring plus surfacing InboxPage.truncated, and
+Inbox.tsx renders retry on the empty+truncated case (4.5 step 3).
+AppFrame.test's useUnread stub and Inbox.test's baseState factory gain the
+new fields (section 8).
 
 ### 4.8 What the badge means
 
@@ -489,9 +558,10 @@ GET /api/inbox/unread-count
 200 { "unreadCount": number, "capped": boolean, "truncated": boolean }
 ```
 
-No other wire shapes change. InboxRow/InboxPage are untouched
-(`groupsTruncated` is simply never present on filter=unread responses -
-section 4.5).
+InboxPage gains ONE optional field: `truncated?: true` - present only on a
+filter=unread response whose request budget expired before the page filled
+(section 4.5 step 3). InboxRow is untouched; `groupsTruncated` is simply
+never present on filter=unread responses (section 4.5).
 
 ## 6. Consistency model (explicit)
 
@@ -514,12 +584,13 @@ section 4.5).
   cost without commensurate benefit for a typically-ms window); the user's
   own action is masked by the optimistic layer + follow-up reconcile
   (4.7.2); other operators' actions converge on reconcile.
-- ACCRUAL (4.2's two classes) costs: index slots + walk budget; deleted-
-  contact residents also cost a contact resolution per badge request (probe
-  short-circuited per 4.3). The raw budget (2000) is sized so accrual
-  cannot plausibly blind the feed; the WARN at 500 is the tripwire to
-  revisit (e.g. an ops sweep resetting ancient invisible unread - a future
-  decision, not this feature).
+- ACCRUAL (4.2's two classes) costs: index slots + scanned budget; deleted-
+  contact residents also cost a contact resolution + a message probe per
+  badge request (the probe short-circuit was withdrawn as clock-unsafe -
+  4.3 step 2). The per-request budget ceiling (2000) exists so accrual
+  cannot make a single request unbounded; the rate-limited WARN at 500
+  scanned items is the tripwire to revisit (e.g. an ops sweep resetting
+  ancient invisible unread - a future decision, not this feature).
 - The pre-existing emit gap (increment succeeds, touchLastActivity throws,
   no SSE event - twilio.ts:604-618 et al.) leaves the INDEX correct and
   only delays client refresh; unchanged.
@@ -608,25 +679,36 @@ Unit (app/test):
   both idempotent; either ordering leaves flag consistent with count.
 - unreadFeed layer 1: visibility matrix (open/closed/connecting relay,
   group_open, 1:1 bucket incl. a type-less row, pointer-partition skip);
-  scanPosition advances across a FULLY-FILTERED run (no dead-end);
-  exhausted vs truncated; WARN threshold.
+  scanPosition advances across a FULLY-FILTERED run (no dead-end); LAZINESS
+  (a consumer that stops pulling stops the Query paging - assert via a
+  counting fake that maxRows=1 against a 300-item index issues no further
+  Query pages); budget threading across calls; rate-limited WARN.
 - unreadFeed layer 2: contact grouping (multi-phone + phone+email merge to
   one candidate); excludeContactIds suppression; unknown-number candidates;
   contactless email skipped; deleted-contact resurfacing (fresh-inbound yes
-  / pre-deletion no / outbound no) AND the probe short-circuit (a thread
-  with activity <= deleted_at issues NO message read); capped vs truncated
-  vs exhausted; scanPosition on a capped run resumes without re-scan or
-  skip.
+  / pre-deletion no / outbound no) probed unconditionally (a stale
+  last_activity_at older than deleted_at with a fresh post-deletion
+  message still resurfaces - the withdrawn-short-circuit regression case);
+  capped vs truncated vs consumedAll (an under-budget 300-item index with
+  maxRows=30 reports capped, NOT consumedAll - the round-3 blocking case);
+  scanPosition on a capped run resumes without re-scan or skip.
 - inbox route (filter=unread): per-row content parity with pre-change
   fixtures; unified composition (kinds interleaved, limit respected, cursor
-  pages overflow of every kind); FILL-OR-EXHAUST (hydration drops refill
-  the page; empty rows implies null nextCursor - including a bulk-fan-out
-  mark-read race fixture); multi-thread contact split across pages
-  suppressed by the seen-set (incl. equal-timestamp boundary items);
-  cursor namespacing (unread cursor under other filters -> 400, vice
-  versa, oversized seen-set -> 400); groupsTruncated never present;
-  zero-unread dataset -> empty page, 1 index query, NO
-  contact/message/placement calls (call-count assertions).
+  pages overflow of every kind - incl. an under-budget dataset larger than
+  one page, the round-3 blocking case: page 1 MUST carry a non-null
+  cursor); FILL-OR-EXHAUST (hydration drops refill the page; the exclude
+  set accumulates ACROSS loop iterations - a multi-thread contact whose
+  older thread lands in iteration 2 must not emit twice on one page; empty
+  rows implies null nextCursor - including a bulk-fan-out mark-read race
+  fixture); multi-thread contact split across pages suppressed by the
+  seen-set (incl. equal-timestamp boundary items); depth cap (the server
+  returns null instead of minting a cursor past SEEN_SET_MAX; no 400 is
+  reachable from server-minted cursors); cursor namespacing (unread cursor
+  under other filters -> 400, vice versa, tampered oversized seen-set ->
+  400); groupsTruncated never present; InboxPage.truncated set on a
+  budget-expired underfull page and the dashboard renders retry (not
+  all-caught-up) on empty+truncated; zero-unread dataset -> empty page, 1
+  index query, NO contact/message/placement calls (call-count assertions).
 - unread-count endpoint: counts rows not conversations; capped and
   truncated distinguished; deleted-contact parity with the page; zero
   state = 1 call.
@@ -636,11 +718,14 @@ Unit (app/test):
 - Seeds guard: fixture arrays carry unread_flag iff unread_count > 0.
 - backfill planner: stamp / remove / skip / pointer-row cases.
 - UnreadContext: optimistic decrement synchronous (before any debounce);
-  idempotent per key; expiry on first post-clear resolved fetch + the
-  SINGLE follow-up reconcile (scheduled once, no cascade); TTL backstop;
-  rollback; generation guard; clamp at 0; capped suppression (and NO
-  suppression on truncated-only); no-op defaults (bare render safe);
-  memoized value; onOpen refetch.
+  idempotent per key; expiry on first post-clear resolved fetch; follow-up
+  reconcile bounded to ONE SCHEDULED AT A TIME under a multi-click fixture
+  (several clears racing several resolves - not just the single-action
+  case); follow-up skipped when a fetch is already pending (convergence
+  then rides the pending refetch); TTL backstop; rollback; generation
+  guard; clamp at 0; capped suppression (and NO suppression on
+  truncated-only); no-op defaults (bare render safe); memoized value;
+  onOpen refetch.
 - useInbox: noteRowsCleared fires exactly once per guarded mark-read,
   rollback on failure; useMarkContactRead does NOT touch the badge context.
 
@@ -672,11 +757,17 @@ Performance evidence:
 - Badge request on a zero-unread dataset: 1 index query, no hydration calls.
 - Unread page on a zero-unread dataset: 1 index query, empty rows, null
   cursor.
+- The scan is LAZY: badge and page issue index Query pages only until their
+  row caps fill (a 100-row cap against a 1,000-item index does not scan
+  1,000 items).
+- An under-budget multi-page unread list pages completely through the
+  cursor (no silent depth loss except the declared SEEN_SET_MAX cap).
 - Neither badge nor Unread page issues per-OPEN-conversation calls; cost
-  scales with indexed unread (incl. stated accrual) plus per-page hydration
-  bounded by limit.
+  scales with scanned index items (visible unread + stated accrual) plus
+  per-page hydration bounded by limit.
 - A fully-filtered index prefix can never permanently empty the feed
-  (scan-position resume + fill-or-exhaust + 2000 budget).
+  (scan-position resume + fill-or-exhaust); a budget-expired empty page
+  reports InboxPage.truncated and renders retry, never all-caught-up.
 - Badge decrements at click time on Inbox mark-read paths, never negative,
   suppressed only while capped; a failed mark-read restores it; convergence
   via the post-clear reconcile + single follow-up (stale-window residual

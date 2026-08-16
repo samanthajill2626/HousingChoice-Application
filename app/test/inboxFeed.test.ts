@@ -17,6 +17,7 @@ import { aggregateInbox, type InboxRouterDeps } from '../src/routes/inbox.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
+import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 interface Seed {
   conversations: ConversationItem[];
@@ -68,6 +69,18 @@ function makeDeps(seed: Seed, calls?: InboxCallCounts): InboxRouterDeps {
 
   return {
     conversationsRepo: {
+      async getById(conversationId: string) {
+        return seed.conversations.find((c) => c.conversationId === conversationId);
+      },
+      // The sparse byUnread index. NOTE the deliberate difference from
+      // listByLastActivity below: that one models paging as an opaque `{ idx }`
+      // POSITION, which cannot express a resume across rows sharing one
+      // last_activity_at. The unread index keys on the real
+      // (last_activity_at DESC, conversationId DESC) tuple - see
+      // helpers/unreadIndexFake.ts - so equal timestamps page correctly.
+      async queryUnreadPage(opts: { limit: number; exclusiveStartKey?: Record<string, unknown> }) {
+        return queryUnreadPageFromItems(seed.conversations, opts);
+      },
       async listByLastActivity({
         limit,
         exclusiveStartKey,

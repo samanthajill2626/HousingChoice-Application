@@ -58,6 +58,15 @@ export type ConversationType =
  */
 export const GROUP_TEXT_STATUS = 'group_open';
 
+/**
+ * The ONE value the sparse byUnread GSI's HASH attribute ever carries. A
+ * CONSTANT (not a status/type encoding) so that only the unread primitives
+ * maintain the attribute: encoding lifecycle state into the key would oblige
+ * every status writer to keep it in lockstep, the bug class relay_status has
+ * already cost us. Readers filter the projected live status/type instead.
+ */
+export const UNREAD_FLAG_VALUE = 'unread';
+
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';
 
@@ -600,6 +609,19 @@ export interface ConversationsRepo {
    * Throws ConditionalCheckFailedException for unknown conversations.
    */
   resetUnread(conversationId: string): Promise<ConversationItem>;
+  /**
+   * Raw one-page Query on the sparse byUnread GSI, newest-activity-first. NO
+   * filtering happens here - visibility (deleted contacts, thread kinds, the
+   * walk budget) belongs to the unreadFeed layer above, so this stays a
+   * mechanical index read. `exclusiveStartKey` is the SYNTHESIZED full key
+   * { unread_flag, last_activity_at, conversationId }: the trailing table key
+   * is what disambiguates rows sharing one last_activity_at, so a caller can
+   * resume from any item it has seen, not just from a LastEvaluatedKey.
+   */
+  queryUnreadPage(opts: {
+    limit: number;
+    exclusiveStartKey?: Record<string, unknown>;
+  }): Promise<{ items: ConversationItem[]; lastEvaluatedKey?: Record<string, unknown> }>;
   /**
    * THE inbox read (M1.2): ONE DynamoDB Query on the byLastActivity GSI
    * (status partition, last_activity_at descending) — never a Scan.
@@ -1498,13 +1520,17 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async incrementUnread(conversationId) {
+      // Counter and byUnread flag ride ONE UpdateExpression so the row can
+      // never be unread-but-unindexed. Every increment idempotently (re)sets
+      // the flag - detecting the 0 -> 1 crossing would be both unnecessary and
+      // unsafe under concurrent inbound writes.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
-          UpdateExpression: 'ADD unread_count :one',
+          UpdateExpression: 'ADD unread_count :one SET unread_flag = :flag',
           ConditionExpression: 'attribute_exists(conversationId)',
-          ExpressionAttributeValues: { ':one': 1 },
+          ExpressionAttributeValues: { ':one': 1, ':flag': UNREAD_FLAG_VALUE },
           ReturnValues: 'ALL_NEW',
         }),
       );
@@ -1519,7 +1545,12 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
-          UpdateExpression: 'SET unread_count = :zero',
+          // REMOVE (not "set empty") is what retires the row from byUnread:
+          // the flag is the index HASH, so its absence IS the exit. The count
+          // stays SET to 0 - existing readers and the SSE payload keep their
+          // shape. Both clauses are one write, so the race above cannot leave
+          // the flag and the counter disagreeing.
+          UpdateExpression: 'SET unread_count = :zero REMOVE unread_flag',
           ConditionExpression: 'attribute_exists(conversationId)',
           ExpressionAttributeValues: { ':zero': 0 },
           ReturnValues: 'ALL_NEW',
@@ -1527,6 +1558,31 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId }, 'conversation unread reset');
       return Attributes as ConversationItem;
+    },
+
+    async queryUnreadPage({ limit, exclusiveStartKey }) {
+      // ONE Query on the sparse byUnread partition - the whole point of the
+      // index is that unread discovery costs O(actual unread) rather than a
+      // walk of every open thread. No FilterExpression: filtering here would
+      // burn read units before Limit applies AND split the visibility rules
+      // across two layers; unreadFeed owns them.
+      const { Items, LastEvaluatedKey } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byUnread',
+          KeyConditionExpression: 'unread_flag = :u',
+          ExpressionAttributeValues: { ':u': UNREAD_FLAG_VALUE },
+          ScanIndexForward: false, // newest activity first
+          Limit: limit,
+          ...(exclusiveStartKey !== undefined && {
+            ExclusiveStartKey: exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],
+          }),
+        }),
+      );
+      return {
+        items: (Items ?? []) as ConversationItem[],
+        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
+      };
     },
 
     async listByLastActivity({ status, limit, exclusiveStartKey }) {
@@ -1805,20 +1861,29 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // re-announces (the marker is atomically cleared with the reopen flip - a
       // separate write could crash-window into a close that never announces). A
       // close (-> closed) leaves the marker set (the claim just wrote it).
+      // UNREAD (design 2026-08-16): a CLOSE also zeroes unread_count and drops
+      // unread_flag in this same write, so a closed group can never sit unread
+      // and invisible in the byUnread index; every future close path inherits
+      // it. Reopen deliberately does NOT resurrect the count (declared product
+      // change). ':zero' is therefore attached to the CLOSE branch only -
+      // DynamoDB rejects an UpdateExpression carrying a value placeholder it
+      // never references, so a shared literal would make every reopen throw
+      // ValidationException.
+      const isClose = status === 'closed';
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
-          UpdateExpression:
-            status === 'open'
-              ? 'SET #s = :status, relay_status = :rs REMOVE close_announced_at'
-              : 'SET #s = :status, relay_status = :rs',
+          UpdateExpression: isClose
+            ? 'SET #s = :status, relay_status = :rs, unread_count = :zero REMOVE unread_flag'
+            : 'SET #s = :status, relay_status = :rs REMOVE close_announced_at',
           ConditionExpression: 'attribute_exists(conversationId) AND #s = :expected',
           ExpressionAttributeNames: { '#s': 'status' },
           ExpressionAttributeValues: {
             ':status': status,
             ':rs': relayStatusKey(status),
             ':expected': expectedCurrent,
+            ...(isClose && { ':zero': 0 }),
           },
           ReturnValues: 'ALL_NEW',
         }),

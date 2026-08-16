@@ -173,6 +173,7 @@ import {
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import { queryUnreadPageFromItems } from './unreadIndexFake.js';
 import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
@@ -216,6 +217,13 @@ export interface FakeWorld {
   contactCreates: string[];
   /** conversationIds whose unread counter was bumped, in order (M1.2). */
   unreadIncrements: string[];
+  /**
+   * conversationIds whose unread counter was ZEROED, in order. The mirror of
+   * unreadIncrements: mark-read and reset fan-outs assert "called for exactly
+   * these threads, and not the already-read one", which an end-state count of
+   * 0 cannot distinguish from "never called".
+   */
+  unreadResets: string[];
   sent: SendMessageParams[];
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
@@ -357,6 +365,7 @@ export function createFakeWorld(): FakeWorld {
   const touches: FakeWorld['touches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
+  const unreadResets: string[] = [];
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
   // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
@@ -447,6 +456,11 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`incrementUnread: no conversation ${conversationId}`);
       conv.unread_count = (conv.unread_count ?? 0) + 1;
+      // Model the REAL primitive's single write: the sparse byUnread flag rides
+      // the same UpdateExpression as the counter, so the two can never
+      // disagree. A fake that bumped only the counter would leave every route
+      // test reading an index the production code would have populated.
+      conv.unread_flag = 'unread';
       unreadIncrements.push(conversationId);
       return conv.unread_count;
     },
@@ -454,7 +468,19 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`resetUnread: no conversation ${conversationId}`);
       conv.unread_count = 0;
+      // REMOVE, not "set empty" - absence of the HASH attribute is what takes
+      // the row out of byUnread.
+      delete conv.unread_flag;
+      unreadResets.push(conversationId);
       return conv;
+    },
+    async queryUnreadPage({ limit, exclusiveStartKey }) {
+      // Flag-derived, tuple-ordered - see helpers/unreadIndexFake.ts. Items are
+      // stored by reference and mutated in place, so this sees live state.
+      return queryUnreadPageFromItems(conversations.values(), {
+        limit,
+        ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      });
     },
     async listByLastActivity({ status, limit }) {
       const items = [...conversations.values()]
@@ -667,6 +693,13 @@ export function createFakeWorld(): FakeWorld {
       // W3: a reopen (-> open) clears the close-announce marker (folded into the
       // flip in the real repo) so a future close re-announces.
       if (status === 'open') delete conv.close_announced_at;
+      // A CLOSE zeroes unread and drops the byUnread flag in the same write
+      // (design 2026-08-16) so a closed group cannot sit unread and invisible.
+      // Reopen deliberately does NOT resurrect the count.
+      if (status === 'closed') {
+        conv.unread_count = 0;
+        delete conv.unread_flag;
+      }
       return conv;
     },
     async assignPoolNumberAndOpen(conversationId, poolNumber) {
@@ -3288,6 +3321,7 @@ export function createFakeWorld(): FakeWorld {
     touches,
     contactCreates,
     unreadIncrements,
+    unreadResets,
     sent,
     initiatedCalls,
     mediaPuts,

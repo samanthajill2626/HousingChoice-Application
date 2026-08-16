@@ -12,6 +12,7 @@ import {
   RelaySendNotSupportedError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
+import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 describe('suppression predicates', () => {
   it('kill switch: only explicit false suppresses', () => {
@@ -137,6 +138,9 @@ function makeSendFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    // Derived from the one stored conversation, not stubbed to [] - a silent
+    // empty page would be indistinguishable from a broken index.
+    queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async (_id, mode) => {

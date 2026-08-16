@@ -18,6 +18,7 @@ import {
   GROUP_TEXT_STATUS,
   type ConversationItem,
 } from '../src/repos/conversationsRepo.js';
+import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 interface GroupSeed {
   groups?: ConversationItem[];
@@ -43,10 +44,21 @@ function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
   const open = [...(seed.open ?? [])].sort((a, b) =>
     a.last_activity_at < b.last_activity_at ? 1 : -1,
   );
+  /** Every seeded row across the three partitions (the whole fake "table"). */
+  const allSeeded = (): ConversationItem[] => [...groups, ...open, ...(seed.relay ?? [])];
 
   const deps: InboxRouterDeps = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
     conversationsRepo: {
+      async getById(conversationId: string) {
+        return allSeeded().find((c) => c.conversationId === conversationId);
+      },
+      // The sparse byUnread index over EVERY seeded row regardless of which
+      // partition it belongs to - that is the point of the index: one stream,
+      // no per-source walk. Tuple-ordered; see helpers/unreadIndexFake.ts.
+      async queryUnreadPage(opts: { limit: number; exclusiveStartKey?: Record<string, unknown> }) {
+        return queryUnreadPageFromItems(allSeeded(), opts);
+      },
       async listByLastActivity({ limit }: { status: string; limit?: number }) {
         return { items: open.slice(0, limit ?? 50) };
       },

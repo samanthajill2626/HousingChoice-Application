@@ -14,6 +14,7 @@ import type {
 } from '../src/repos/conversationsRepo.js';
 import { createContactCapture } from '../src/services/contactCapture.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 const PHONE = '+15550100001';
 
@@ -172,6 +173,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     touchLastActivity: async () => conversation,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    // Flag-derived over the one stored conversation rather than a bare []: a
+    // silent empty page reads exactly like a broken index.
+    queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async () => {},

@@ -17,7 +17,7 @@ import { aggregateInbox, type InboxRouterDeps } from '../src/routes/inbox.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
-import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
+import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface Seed {
   conversations: ConversationItem[];
@@ -163,6 +163,10 @@ function conv(overrides: Partial<ConversationItem> & { conversationId: string; p
     type: 'tenant_1to1',
     ai_mode: 'auto',
     created_at: overrides.last_activity_at,
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): the
+    // sparse byUnread index keys on `unread_flag`, so a fixture with unread and
+    // no flag is invisible to this file's own queryUnreadPage. Overridable below.
+    ...unreadFlagFor(overrides),
     ...overrides,
   };
 }
@@ -183,6 +187,8 @@ function relayConv(
     participant_phone: poolNumber,
     pool_number: poolNumber,
     created_at: overrides.last_activity_at,
+    // FLAG IFF COUNT>0 - same derivation as conv() above.
+    ...unreadFlagFor(overrides),
     ...overrides,
   };
 }

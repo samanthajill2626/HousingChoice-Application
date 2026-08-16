@@ -20,7 +20,31 @@
 //     from any item it has seen. An index-POSITION key (`{ idx }`, as
 //     listByLastActivity's fakes use) cannot express that and would quietly
 //     repeat or skip a row at a timestamp tie.
-import type { ConversationItem } from '../../src/repos/conversationsRepo.js';
+import { UNREAD_FLAG_VALUE, type ConversationItem } from '../../src/repos/conversationsRepo.js';
+
+/**
+ * The FIXTURE half of the same invariant the page function above models: a
+ * conversation row is in the sparse byUnread index IFF it carries
+ * `unread_flag`, and the real writers only ever stamp that alongside a nonzero
+ * `unread_count`. So every fixture with unread must carry the flag, and no
+ * fixture without unread may.
+ *
+ * Spread this into a fixture factory BEFORE its `...overrides`, so it acts as a
+ * DERIVED DEFAULT rather than a rule the fixture cannot escape: a test that
+ * deliberately needs a STALE index row (flagged but already read, the state a
+ * lagging GSI image produces) can still say so explicitly and win.
+ *
+ * Deriving it centrally rather than writing `unread_flag: 'unread'` next to
+ * every count is what makes the two impossible to drift apart - at the cost
+ * that a reader scanning fixture literals will not SEE the flag anywhere, which
+ * is why each call site carries a one-line comment pointing here.
+ */
+export function unreadFlagFor(source: {
+  unread_count?: unknown;
+}): { unread_flag?: typeof UNREAD_FLAG_VALUE } {
+  const count = source.unread_count;
+  return typeof count === 'number' && count > 0 ? { unread_flag: UNREAD_FLAG_VALUE } : {};
+}
 
 /** The exclusive-start / last-evaluated key shape the real GSI hands back. */
 export interface UnreadIndexKey extends Record<string, unknown> {

@@ -9,6 +9,7 @@ import { conversationIdForGroup } from '../import/ids.js';
 import { TEAM_SENDER_KEY } from '../../jobs/relayFanOut.js';
 import type { BroadcastItem, BroadcastRecipient, BroadcastStats } from '../../repos/broadcastsRepo.js';
 import type { ContactItem } from '../../repos/contactsRepo.js';
+import { UNREAD_FLAG_VALUE } from '../../repos/conversationsRepo.js';
 import type {
   ConversationItem,
   ConversationParticipant,
@@ -811,13 +812,23 @@ function buildConversation(
   const relayOrdinal = Math.floor(index / 5);
   const isRelay = index % 5 === 0 && relayOrdinal < relayGroupCount;
   const lastActivity = at(anchorMs, -index * MINUTE_MS);
+  // The sparse byUnread index keys on `unread_flag`, so a seeded row with a
+  // nonzero count and no flag is simply absent from every unread read. Factored
+  // out of the literal so the count and the flag cannot drift: FLAG IFF COUNT>0.
+  // `common` is spread into BOTH returns below, so this one derivation covers
+  // the 1:1 rows and the relay rows.
+  const unreadValue = index === 1 || index === 2 || index % 2 === 0 ? 2 : 0;
   const common = {
     conversationId: performanceId('conversation', index),
     status: 'open',
     last_activity_at: lastActivity,
     ai_mode: 'manual',
     last_message_preview: `Synthetic message preview ${padded(index)}`,
-    unread_count: index === 1 || index === 2 || index % 2 === 0 ? 2 : 0,
+    unread_count: unreadValue,
+    // `as const` on the INNER object is load-bearing: the outer literal's
+    // `as const` does not reach through a spread, so without it `unread_flag`
+    // widens to `string` and every `satisfies ConversationItem` below fails.
+    ...(unreadValue > 0 && ({ unread_flag: UNREAD_FLAG_VALUE } as const)),
     created_at: at(anchorMs, -(index + 7) * DAY_MS),
   } as const;
 
@@ -878,6 +889,9 @@ function buildNativeConversation(
     phone: contact.phone,
     name: `Synthetic ${contact.type}`,
   }));
+  // Same FLAG IFF COUNT>0 derivation as buildConversation above - a flagless
+  // nonzero row is invisible to the sparse byUnread index.
+  const unreadValue = index % 2 === 0 ? 2 : 0;
   return {
     conversationId: conversationIdForGroup(participants.map((participant) => participant.phone)),
     type: 'group_text',
@@ -886,7 +900,8 @@ function buildNativeConversation(
     participants,
     last_activity_at: at(anchorMs, -(conversationOffset + index) * MINUTE_MS),
     last_message_preview: `Synthetic native group preview ${padded(index)}`,
-    unread_count: index % 2 === 0 ? 2 : 0,
+    unread_count: unreadValue,
+    ...(unreadValue > 0 && { unread_flag: UNREAD_FLAG_VALUE }),
     created_at: at(anchorMs, -(index + 7) * DAY_MS),
   } satisfies ConversationItem;
 }

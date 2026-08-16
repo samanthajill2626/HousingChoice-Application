@@ -16,6 +16,7 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
   urgencyOf,
   type RelayCloseNagItem,
@@ -78,8 +79,14 @@ describe('today action-queue API (BE6/C7)', () => {
     return item;
   };
   const seedConversation = (conv: ConversationItem): ConversationItem => {
-    world.conversations.set(conv.conversationId, conv);
-    return conv;
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): Today's
+    // unread sections become index-fed, and the sparse byUnread index keys on
+    // `unread_flag` - an unread fixture with no flag would make `unreplied` and
+    // the untriaged-inbound `needs_you_now` rows silently EMPTY. An explicit
+    // `unread_flag` on the fixture still wins.
+    const item: ConversationItem = { ...unreadFlagFor(conv), ...conv };
+    world.conversations.set(item.conversationId, item);
+    return item;
   };
 
   const iso = (msFromNow: number): string => new Date(Date.now() + msFromNow).toISOString();

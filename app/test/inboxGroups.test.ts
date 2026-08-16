@@ -18,7 +18,7 @@ import {
   GROUP_TEXT_STATUS,
   type ConversationItem,
 } from '../src/repos/conversationsRepo.js';
-import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
+import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface GroupSeed {
   groups?: ConversationItem[];
@@ -133,6 +133,10 @@ function groupConv(
       { contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' },
       { contactId: 'c-marcus', phone: '+14045550112', name: 'Marcus Landlord' },
     ],
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): the
+    // sparse byUnread index keys on `unread_flag`, so a fixture with unread and
+    // no flag is invisible to this file's own queryUnreadPage. Overridable below.
+    ...unreadFlagFor(over),
     ...over,
   };
 }

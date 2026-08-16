@@ -1033,6 +1033,16 @@ After any model change, watch the AI run log for `truncated` failures and raise 
 the new model writes longer. `voice` runs are the largest output by construction (a `speakerRoles` pair
 per `Speaker N` label on top of the all-required object), so they truncate first.
 
+**Housing authority: why an extracted one sometimes arrives as a suggestion.** The field is free
+text, not a closed vocabulary. `lib/housingAuthority.ts` collapses known variants to one spelling
+("Dekalb Housing" -> "Dekalb County Housing") because broadcast audience resolution is an exact hash
+match on the `byHousingAuthority` GSI, and passes anything else through verbatim. An authority we
+already recognise is WRITTEN; one we have never seen is SUGGESTED, so a human confirms before a
+brand-new string becomes a GSI hash value - a transcript can mishear, and clients name caseworker
+agencies and cities too. If you see the same authority repeatedly arriving as a suggestion, that is
+the signal to add its spelling (and any variants) to `CANONICAL_AUTHORITY` in that file - the only
+remaining code change in this area. A brand-new authority needs no code change to be recorded.
+
 **Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
 row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
 There is no manual un-park step and none is needed: `scheduleExtraction` is an unconditional sliding

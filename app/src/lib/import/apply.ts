@@ -38,6 +38,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import { normalizeToE164 } from '../phone.js';
+import { housingAuthorityFor, KNOWN_AUTHORITIES } from '../housingAuthority.js';
 import {
   LANDLORD_STATUSES,
   NON_TENANT_STATUSES,
@@ -470,67 +471,13 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   return report;
 }
 
-/**
- * The founder's Airtable "voucher program" spellings -> ONE canonical spelling
- * each. FREE FIELD, not a closed vocabulary (Cameron, 2026-08-09): the field is
- * a flexible document attribute and nothing requires membership in the AI
- * extractor's list. What DOES matter is spelling CONSISTENCY - broadcast
- * audience resolution does an exact hash match on the byHousingAuthority GSI, so
- * "Dekalb Housing" and "Dekalb County Housing" would be two audiences invisible
- * to each other. Known variants therefore normalize to one spelling (aligned
- * with `HOUSING_AUTHORITY_VOCAB` where an entry exists, so AI-extracted and
- * imported values agree); UNKNOWN values pass through verbatim rather than being
- * dropped.
- *
- * The full 2026-08-09 tenants table (666 rows) is where most of these spellings
- * come from - e.g. "Atlanta, aha, Atlanta housing" x450. Note the founder's
- * taxonomy (email 2026-08-09): agencies/non-profits (HUD VASH, Hope Atlanta,
- * Claratel, Step Up) are DIFFERENT things from housing authorities (AHA, JHA,
- * DCA, ...) and one person can hold both. The single field cannot represent
- * the pair; that model gap is docs/issues/housing-authority-free-text-drift.md,
- * not this importer's to solve.
- */
-const CANONICAL_AUTHORITY: Readonly<Record<string, string>> = {
-  'atlanta, aha, atlanta housing': 'Atlanta (AHA)',
-  'atlanta housing': 'Atlanta (AHA)',
-  'jonesboro, jha, jonesboro housing': 'Jonesboro (JHA)',
-  'jonesboro housing': 'Jonesboro (JHA)',
-  'dekalb county housing': 'Dekalb County Housing',
-  'dekalb housing': 'Dekalb County Housing',
-  'georgia housing voucher, ghv': 'Georgia Housing Voucher (GHV)',
-  'georgia housing voucher (ghv)': 'Georgia Housing Voucher (GHV)',
-  ghv: 'Georgia Housing Voucher (GHV)',
-  'dca, department of community affairs': 'DCA',
-  dca: 'DCA',
-  'fulton, fulton county': 'Fulton County',
-  'fulton county': 'Fulton County',
-  clayton: 'Clayton County',
-  'clayton county': 'Clayton County',
-  'eastpoint housing authority': 'East Point',
-  'east point': 'East Point',
-  'mcdonough housing authority': 'McDonough',
-  mcdonough: 'McDonough',
-  'hud vash': 'HUD VASH',
-  claratel: 'Claratel',
-  'hope atlanta': 'Hope Atlanta',
-  'step up': 'Step Up',
-};
-
-/** The canonical spellings this importer emits (for the passthrough report). */
-export const KNOWN_AUTHORITIES: ReadonlySet<string> = new Set(
-  Object.values(CANONICAL_AUTHORITY),
-);
-
-/**
- * Normalize an Airtable program value: canonical spelling when known, verbatim
- * (whitespace-collapsed) when not, undefined only when empty.
- */
-export function housingAuthorityFor(rawProgram: string | undefined): string | undefined {
-  if (!rawProgram) return undefined;
-  const cleaned = rawProgram.trim().replace(/\s+/g, ' ');
-  if (!cleaned) return undefined;
-  return CANONICAL_AUTHORITY[cleaned.toLowerCase()] ?? cleaned;
-}
+// The authority vocabulary moved to lib/housingAuthority.ts on 2026-08-16 so the
+// AI extractor could share it (extraction is not downstream of this importer).
+// Re-exported so this module's public surface is unchanged for the callers and
+// tests that already import them from here. Imported at the top of the file as
+// well, because `export ... from` re-exports WITHOUT binding the names locally
+// and three call sites below use them.
+export { housingAuthorityFor, KNOWN_AUTHORITIES };
 
 /** Honorifics that must not become someone's first name (spelt with or without a dot). */
 const HONORIFIC_RE = /^(mr|mrs|ms|miss|dr|rev|pastor|sir|madam)\.?$/i;

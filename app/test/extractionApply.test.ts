@@ -293,22 +293,48 @@ describe('applyExtraction - coercion/validation (item 2)', () => {
     expect(records.updates).toHaveLength(0);
   });
 
-  it('skips an off-vocabulary housingAuthority', async () => {
+  it('SUGGESTS an unrecognised housingAuthority rather than dropping it', async () => {
+    // Was "skips an off-vocabulary housingAuthority". The field is free text
+    // (Cameron, 2026-08-09) - a human types anything into ContactEditForm and
+    // the importer passes unknown values through verbatim, so the extractor
+    // dropping them made the AI the only writer that could not record a real
+    // answer. A client naming an authority we have not seen is data.
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: { housingAuthority: { op: 'write', value: 'Nowhere PHA' } },
     });
+    // Demoted, not written: a transcript can mishear, so a novel authority
+    // waits for one human confirmation before it becomes a GSI hash value.
     expect(outcome.wrote).toEqual([]);
     expect(records.updates).toHaveLength(0);
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority',
+      suggestedValue: 'Nowhere PHA',
+    });
   });
 
-  it('writes an in-vocabulary housingAuthority', async () => {
+  it('writes a RECOGNISED housingAuthority directly', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: { housingAuthority: { op: 'write', value: 'Fulton County' } },
     });
     expect(outcome.wrote).toEqual(['housingAuthority']);
     expect(records.updates[0]!.patch['housingAuthority']).toBe('Fulton County');
+  });
+
+  it('normalizes a known VARIANT to canonical spelling and writes it', async () => {
+    // The case the whole normalizer exists for. Broadcast audience resolution is
+    // an exact hash match on the byHousingAuthority GSI, so had "Dekalb Housing"
+    // been stored verbatim it would have formed a second DeKalb audience
+    // invisible to the imported one. It is also written, not suggested,
+    // BECAUSE it normalizes to something we recognise.
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'Dekalb Housing' } },
+    });
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Dekalb County Housing');
   });
 
   it("coerces porting 'true' to the boolean true", async () => {

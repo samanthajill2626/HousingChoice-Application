@@ -81,8 +81,10 @@ const ANONYMOUS_SENDER_LABEL = 'A member';
  * FIX 2 — neutral team label prefixed on a TEAM-authored relay message (a
  * teammate posting into the thread from the dashboard). There is no member
  * sender, so the prefix must be this team label — NEVER a phone number. A2P
- * (spec §5): the SMS-facing sender label is the registered brand (single source
- * of truth), never the internal "HousingChoice" name.
+ * (spec section 5): the SMS-facing sender label always comes from the single
+ * source of truth in lib/smsCompliance.ts, never from a literal spelled here --
+ * that stays true even now that the SMS brand and the internal name are both
+ * "HousingChoice".
  */
 export const TEAM_SENDER_LABEL = SMS_BRAND_NAME;
 
@@ -188,7 +190,7 @@ export function composeConnectionSentence(memberNames: (string | undefined)[]): 
 }
 
 /**
- * Intro body naming everyone connected (M1.7). E.g. "Tenant Place LLC. You're
+ * Intro body naming everyone connected (M1.7). E.g. "HousingChoice. You're
  * now connected with Alice, Bob, and Carol on this number. Reply here and
  * everyone in the group sees it. Reply STOP to opt out."
  *
@@ -209,7 +211,7 @@ const ANONYMOUS_JOINED_LABEL = 'A new member';
  * Member-added announcement (founder decision 2026-07-14): one body sent to
  * the WHOLE group — the new member's first contact on this number (leading
  * brand + trailing STOP fold in like the intro) doubling as the join notice
- * for everyone else. E.g. "Tenant Place LLC. Carol Brown joined this group
+ * for everyone else. E.g. "HousingChoice. Carol Brown joined this group
  * chat. You're now connected with Alice, Bob, and Carol Brown on this number.
  * Reply here and everyone in the group sees it. Reply STOP to opt out."
  */

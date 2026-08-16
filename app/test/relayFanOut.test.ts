@@ -650,14 +650,14 @@ describe('relay body/intro composition (M1.7)', () => {
     // Founder wording (2026-07-14): content first, "Reply STOP to opt out." last.
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
       const body = composeIntroBody(names);
-      expect(body.startsWith('Tenant Place LLC.')).toBe(true);
+      expect(body.startsWith('HousingChoice.')).toBe(true);
       expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
     }
   });
 
   it('composeMemberAddedBody names the joiner (neutral fallback) with brand-first, STOP-last framing', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
-    expect(body.startsWith('Tenant Place LLC.')).toBe(true);
+    expect(body.startsWith('HousingChoice.')).toBe(true);
     expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
     expect(body).toContain('Carol Brown joined this group chat.');
     expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");

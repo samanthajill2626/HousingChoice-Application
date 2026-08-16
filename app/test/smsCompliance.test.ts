@@ -25,8 +25,8 @@ import {
 } from '../src/lib/smsCompliance.js';
 
 describe('brand + links', () => {
-  it('pins the registered A2P brand name', () => {
-    expect(SMS_BRAND_NAME).toBe('Tenant Place LLC');
+  it('pins the SMS-facing brand name', () => {
+    expect(SMS_BRAND_NAME).toBe('HousingChoice');
   });
   it('pins the policy links', () => {
     expect(PRIVACY_POLICY_URL).toBe('https://tenant.place/privacypolicy');
@@ -80,7 +80,7 @@ describe('consentMethodFromCaptureSource — backfill mapping', () => {
 describe('filed copy — verbatim (spec §3/§5/§6)', () => {
   it('WELCOME_SMS', () => {
     expect(WELCOME_SMS).toBe(
-      "Welcome to Tenant Place LLC! You're signed up for new properties that accept your voucher, plus tour reminders and updates. Msg frequency varies. Msg & data rates may apply. Reply STOP to unsubscribe, HELP for help.",
+      "Welcome to HousingChoice! You're signed up for new properties that accept your voucher, plus tour reminders and updates. Msg frequency varies. Msg & data rates may apply. Reply STOP to unsubscribe, HELP for help.",
     );
   });
   it('STOP_CONFIRMATION', () => {
@@ -90,7 +90,7 @@ describe('filed copy — verbatim (spec §3/§5/§6)', () => {
   });
   it('HELP_REPLY', () => {
     expect(HELP_REPLY).toBe(
-      'Tenant Place LLC: housing listing alerts for voucher holders. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out. More info: tenant.place.',
+      'HousingChoice: housing listing alerts for voucher holders. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out. More info: tenant.place.',
     );
   });
   it('HELP_REPLY contains NO phone number / digit (campaign declares phone-numbers = No)', () => {
@@ -98,18 +98,18 @@ describe('filed copy — verbatim (spec §3/§5/§6)', () => {
   });
   it('WEB_FORM_CONSENT_COPY', () => {
     expect(WEB_FORM_CONSENT_COPY).toBe(
-      'I agree to receive recurring texts from Tenant Place LLC about new properties that accept my voucher, tour reminders, and updates. Message frequency varies. Msg & data rates may apply. Reply STOP to opt out, HELP for help. See our Privacy Policy and Terms.',
+      'I agree to receive recurring texts from HousingChoice about new properties that accept my voucher, tour reminders, and updates. Message frequency varies. Msg & data rates may apply. Reply STOP to opt out, HELP for help. See our Privacy Policy and Terms.',
     );
   });
   it('DEFAULT_MISSED_CALL_AUTOTEXT prepends brand and ends with opt-out', () => {
     expect(DEFAULT_MISSED_CALL_AUTOTEXT).toBe(
-      "Tenant Place LLC: Sorry we missed your call! To get started, please text us your full name, voucher size, and housing authority and we'll be right with you. Reply STOP to opt out.",
+      "HousingChoice: Sorry we missed your call! To get started, please text us your full name, voucher size, and housing authority and we'll be right with you. Reply STOP to opt out.",
     );
-    expect(DEFAULT_MISSED_CALL_AUTOTEXT.startsWith('Tenant Place LLC: ')).toBe(true);
+    expect(DEFAULT_MISSED_CALL_AUTOTEXT.startsWith('HousingChoice: ')).toBe(true);
     expect(DEFAULT_MISSED_CALL_AUTOTEXT.endsWith(' Reply STOP to opt out.')).toBe(true);
   });
   it('RELAY_INTRO_IDENTITY carries brand + opt-out', () => {
-    expect(RELAY_INTRO_IDENTITY).toBe('Tenant Place LLC. Reply STOP to opt out.');
+    expect(RELAY_INTRO_IDENTITY).toBe('HousingChoice. Reply STOP to opt out.');
   });
 });
 
@@ -135,7 +135,7 @@ describe('templateHasOptOutLanguage — A2P/CTIA compliance floor', () => {
   it('rejects a template with the STOP line removed', () => {
     expect(
       templateHasOptOutLanguage(
-        "Welcome to Tenant Place LLC! You're signed up for new properties.",
+        "Welcome to HousingChoice! You're signed up for new properties.",
       ),
     ).toBe(false);
   });

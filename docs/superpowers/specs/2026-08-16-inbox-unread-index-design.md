@@ -1,10 +1,10 @@
 # Inbox Unread Index - Design Spec (2026-08-16)
 
-Status: DRAFT v2 (post design-review round 1) for human review
+Status: DRAFT v3 (post design-review rounds 1-2) for human review
 Branch: feat/inbox-unread-index (worktree W:/tmp/inbox-unread-index, cut from main @41627198)
 Issue: docs/issues/inbox-unread-sse-full-walk.md (this spec is the "separate design" it calls for)
 Related: docs/issues/inbox-filter-tabs-full-walk.md (unread half resolved here; unknown half stays open)
-Design review: round-1 adjudications at .superpowers/design-review/adjudications.md
+Design review: adjudications at .superpowers/design-review/adjudications.md
 
 ## 1. Problem
 
@@ -34,8 +34,8 @@ Two defects, one root cause:
 ## 2. Goals
 
 - G1: Unread discovery cost proportional to indexed unread conversations, not
-  open conversations. Empty unread state = O(1) queries. (Bounded caveat:
-  permanently-invisible unread rows accrue in the index - section 6.)
+  open conversations. Empty unread state = O(1) queries. (Indexed unread
+  includes two invisible accrual classes - section 6.)
 - G2: A dedicated cheap badge-count endpoint; the badge never depends on the
   row-list response shape or its page limit.
 - G3: The nav badge reflects the user's own Inbox mark-read actions instantly
@@ -146,12 +146,23 @@ Non-runtime writers:
 - Status/lifecycle transitions (touchLastActivity, setRelayStatus,
   assignPoolNumberAndOpen, convertRelayGroupToGroupText, rebindOwner, roster
   and close-nag writers): none touch unread or the flag; NO changes.
-  CONSEQUENCE (accepted limitation): a relay group closed while unread keeps
-  its flag - invisible to every reader (visibility rules below) yet indexed -
-  until something resets it. These rows consume walk budget (section 6).
-  Resetting unread on close was considered and REJECTED: today a reopened
-  relay group resurfaces with its unread intact, and this design does not
-  change product behavior.
+- Contact soft-delete/restore: does not touch conversation rows; NO changes.
+
+ACCEPTED ACCRUAL (invisible index residents) - TWO classes, both stated:
+
+1. Relay groups closed while unread (invisible: inbox reads open+connecting
+   only, inbox.ts:823). Resetting unread on close is REJECTED: today a
+   reopened relay group resurfaces with its unread intact, and this design
+   does not change product behavior.
+2. Unread threads of soft-deleted contacts that fail the resurfacing rule
+   (inbox.ts:537-576). Resetting unread on contact delete is REJECTED for the
+   same reason (restore currently resurfaces old unread, and a post-deletion
+   inbound re-increments anyway - the reset would not change resurfacing
+   outcomes but WOULD change restore semantics).
+
+Both classes stay indexed until something resets them. Consequences and
+mitigations: sections 4.3 (walk budget + scan-resume), 4.4 (probe
+short-circuit), 6 (cost accounting).
 
 Pointer/claim partitions (`phone#`, `email#`, `token#`) never carry
 unread_count and never enter the index (conversationsRepo.ts:1111-1119).
@@ -159,93 +170,123 @@ unread_count and never enter the index (conversationsRepo.ts:1111-1119).
 ### 4.3 The server read layers
 
 New module `app/src/lib/unreadFeed.ts` with TWO exports, layered so every
-unread consumer shares ONE set of visibility rules:
+unread consumer shares ONE set of visibility rules.
 
 LAYER 1 - `listUnreadConversations(deps, opts)`: conversation-level.
 
-1. Queries `byUnread` newest-first (ScanIndexForward false), paging internally
-   up to a raw walk budget (UNREAD_WALK_LIMIT = 500 index items; WARN past
-   400). Accepts an optional exclusive-start boundary (below).
-2. Applies VISIBILITY RULES per item, using projected attributes (free -
-   projection ALL):
-   - skip items without a positive `unread_count` or without `type`-agnostic
-     required fields (defensive; also catches un-backfilled or
-     writer-bug rows where flag and count disagree within one item image -
-     NOT a defense against GSI replication lag, see section 6);
-   - `relay_group`: keep iff status is `open` or `connecting` (closed stays
-     invisible, as today - inbox.ts:823);
-   - `group_text`: keep iff status is `group_open`;
+1. Queries `byUnread` newest-first (ScanIndexForward false), paging
+   internally. RAW WALK BUDGET: UNREAD_WALK_LIMIT = 2000 index items - parity
+   with the group walk this design retires (inbox.ts:181), sized so the
+   accrual classes cannot plausibly exhaust it - with a WARN past
+   UNREAD_WALK_WARN = 500 (the tripwire to revisit accrual). Accepts an
+   optional exclusive-start position (a synthesized ExclusiveStartKey
+   `{ unread_flag: 'unread', last_activity_at, conversationId }` - the GSI's
+   full key shape for this hash-only-base-key table).
+2. Applies VISIBILITY RULES per item, on projected attributes:
+   - skip items without a positive `unread_count` (defends WITHIN-IMAGE
+     inconsistency only - un-backfilled rows, a hypothetical broken writer -
+     NOT GSI replication lag; section 6);
+   - `relay_group`: keep iff status `open` or `connecting` (closed invisible,
+     as today - inbox.ts:823);
+   - `group_text`: keep iff status `group_open`;
    - everything else (the 1:1 bucket, matching today's NEGATIVE filter at
-     inbox.ts:466 - including any legacy row with no `type`): keep iff
-     status is `open`.
-3. Returns `{ items, boundary?, truncated }` where `boundary` is the
-   (last_activity_at, conversationId) tuple of the last RETURNED item and
-   `truncated` means the walk budget stopped the read.
+     inbox.ts:466 - including any legacy row with no `type`): keep iff status
+     `open`.
+3. Returns `{ items, scanPosition?, exhausted, truncated }`:
+   - `scanPosition` = the (last_activity_at, conversationId) tuple of the
+     last RAW item SCANNED (not the last item returned) - defined whenever
+     anything was scanned, so a run of filtered items always advances the
+     resume position and can never dead-end the feed;
+   - `exhausted` = the index stream ended (underlying Query returned no
+     LastEvaluatedKey);
+   - `truncated` = the raw budget stopped the read before exhaustion.
 
 Today (section 4.6) consumes layer 1 directly.
 
-LAYER 2 - `enumerateUnreadRows(deps, opts)`: row-identity level, used by BOTH
+LAYER 2 - `collectUnreadRows(deps, opts)`: row-identity level, used by BOTH
 the badge count and the Unread page so those two cannot diverge.
 
 1. Walks layer-1 items newest-first, grouping into ROW CANDIDATES:
    - relay_group / group_text conversation -> its own candidate (keyed by
      conversationId);
-   - 1:1 conversation -> resolve the contact (contacts.findByPhone, then
-     findByEmail - the rowForConversation resolution order, inbox.ts:476-477).
-     Resolved contact -> ONE candidate per contactId (first/newest index item
-     is the candidate's REPRESENTATIVE; later items of the same contact merge
-     silently). No contact + phone -> unknown-number candidate keyed by
-     phone. No contact + no phone (contactless email thread) -> skipped
-     (parity with inbox.ts:489).
-   - The enumerator does NOT compute unread sums (the page hydrates fresh
-     ones; the badge needs none).
+   - 1:1 conversation -> resolve the contact (contacts.findByPhone then
+     findByEmail - the rowForConversation order, inbox.ts:476-477). Resolved
+     contact -> ONE candidate per contactId (first/newest index item is the
+     candidate's representative; later items of the same contact merge
+     silently, and contacts named by `opts.excludeContactIds` - the cursor's
+     seen-set, below - are skipped entirely). No contact + phone ->
+     unknown-number candidate keyed by phone. No contact + no phone
+     (contactless email thread) -> skipped (parity with inbox.ts:489).
+   - No unread sums are computed here (the page hydrates fresh ones; the
+     badge needs none).
 2. DELETED CONTACTS: a candidate whose contact isDeleted survives only under
-   the resurfacing rule - some unread thread's newest message is an inbound
-   with created_at > deleted_at (probe: messages.listByConversation(limit 1)
-   per unread thread of DELETED contacts only, matching inbox.ts:537-576).
-3. Emits candidates in index order up to `opts.maxRows`; returns
-   `{ candidates, boundary?, truncated, saturated }` where `boundary` is now
-   the index tuple of the LAST EMITTED candidate's representative item and
-   `saturated` means maxRows stopped emission.
+   the resurfacing rule (some unread thread's newest message is an inbound
+   with created_at > contact.deleted_at - inbox.ts:537-576). PROBE
+   SHORT-CIRCUIT: a thread whose `last_activity_at <= deleted_at` cannot have
+   a post-deletion message at all (a message never postdates its
+   conversation's activity), so the messages.listByConversation(limit 1)
+   probe runs ONLY for unread threads with activity NEWER than the deletion.
+   The stable-no accrual class (4.2 class 2) therefore costs its index slot
+   and contact resolution but NO per-request message reads.
+3. Emits candidates in index order up to `opts.maxRows`. Returns
+   `{ candidates, scanPosition?, exhausted, truncated, capped }` where
+   `capped` = maxRows stopped emission (layer-1's `exhausted`/`truncated`
+   pass through; `scanPosition` on a capped run is the position after the
+   last index item CONSUMED, so resumption re-scans nothing and skips
+   nothing).
 
-CURSOR AND SPLIT-PROOF RESUME (the round-1 blocking finding, resolved):
+CURSOR AND SPLIT-PROOF PAGING (round-1 blocking finding, REDESIGNED in round
+2 after its ordering-comparison guard was shown to rest on stale reads and
+undocumented tie order):
 
-- The page cursor is the base64url of `{ u: 1, a: <last_activity_at>,
-  c: <conversationId> }` - the boundary tuple of the last emitted candidate's
-  representative index item. It is NOT a raw DynamoDB LastEvaluatedKey: LEKs
-  address fetch boundaries, not consumption boundaries, and one candidate can
-  consume several index items (the existing pager pays a boundary re-query
-  for exactly this reason, inbox.ts:770-788). A synthesized ExclusiveStartKey
-  `{ unread_flag: 'unread', last_activity_at: a, conversationId: c }` resumes
-  the index walk exactly after that item.
+- The page cursor is the base64url of
+  `{ u: 1, a: <last_activity_at>, c: <conversationId>, s: [<contactId>...] }`:
+  the layer-2 `scanPosition` plus the SEEN-SET `s` - every contactId emitted
+  as a candidate on this and prior pages (carried forward cumulatively).
+- Resume: the synthesized ExclusiveStartKey from (a, c) continues the index
+  walk exactly after the last consumed item - an exact-position mechanism
+  that needs NO assumption about DynamoDB's ordering of equal range values.
+  Suppression of already-emitted contacts is pure set membership
+  (`excludeContactIds = s`): no ordering comparison, no re-reading of the
+  contact's threads, no staleness exposure, deterministic under timestamp
+  ties. This restates today's one-row-per-contact guarantee
+  (inbox.ts:522-527) exactly.
 - The `u: 1` tag namespaces the cursor; decodeCursor/decodeGroupCursor gain
-  the matching cross-filter rejection (a tagged unread cursor under any other
-  filter -> 400, and vice versa - same posture as the group cursor today).
-- ORDERING TUPLE: all order comparisons use (last_activity_at DESC,
-  conversationId DESC as tiebreak) - the GSI's own item ordering for equal
-  range values is resumed exactly via the synthesized key, and OUR guard
-  comparisons use the same explicit tuple, so equal timestamps (bulk imports
-  write identical ones) cannot double-serve or drop a row.
-- ONE ROW PER CONTACT ACROSS PAGES: on a resumed enumeration, when a 1:1 item
-  resolves to a contact, compute the contact's newest VISIBLE unread thread:
-  the newest tuple among the contact's open 1:1 conversations (via the
-  contact-thread resolution in step 1's sense) that carry unread_flag. If
-  that tuple sorts STRICTLY NEWER than the cursor boundary tuple, the contact
-  was already emitted on an earlier page -> suppress. Because the contact
-  bucket contains only open 1:1s (always visible), the guard's visibility can
-  never disagree with enumeration's. This restates today's newest-conversation
-  rule (inbox.ts:522-527) against the index stream, tie-safe via the tuple.
+  the matching cross-filter rejection (unread cursor under another filter ->
+  400, and vice versa - the group-cursor posture today).
+- CURSOR SIZE (accepted): `s` grows by up to `limit` (30) contactIds per
+  page (~45 bytes each), so the cursor is roughly 2KB at page 2 and 6KB by
+  page 5 - inside Node's default 16KB header budget for a GET query param.
+  A cursor whose seen-set exceeds SEEN_SET_MAX = 250 is rejected as invalid
+  (400) rather than silently truncated: paging more than ~8 pages deep into
+  Unread (250+ contact rows) has no product meaning (the badge caps at
+  100), and silently dropping ids would break the dedupe guarantee.
+- Non-contact candidates need no seen-set: an unknown row's phone and a
+  group/relay row's conversationId each map to exactly ONE index item, so
+  they cannot straddle pages.
 
 ### 4.4 Badge endpoint
 
-`GET /api/inbox/unread-count` -> `{ unreadCount: number, saturated: boolean }`
+`GET /api/inbox/unread-count` ->
+`{ unreadCount: number, capped: boolean, truncated: boolean }`
 
-- `enumerateUnreadRows` with `maxRows = BADGE_COUNT_CAP = 100`;
-  `saturated: true` when maxRows or the walk budget stopped it.
+- `collectUnreadRows` with `maxRows = BADGE_COUNT_CAP = 100` and no cursor.
+- `capped` = the cap stopped counting (count is a floor at the cap).
+  `truncated` = the raw walk budget stopped scanning first (count is a
+  floor for a different reason; pathological - see 4.3 budget sizing). The
+  two are DISTINCT wire fields because the client treats them differently
+  (4.7): a capped count is "99+" and must not be decremented; a truncated
+  count is small and real-so-far and SHOULD still decrement.
 - No hydration: no previews, placement labels, or latest-message reads
-  (except the deleted-contact resurfacing probe, a visibility rule).
-- Cost: empty unread = 1 index query. N unread 1:1s = 1 index query + N
-  contact resolutions (+ probes for deleted contacts only).
+  (the deleted-contact probe is a visibility rule, and runs only for
+  threads with post-deletion activity - 4.3 step 2).
+- COST: empty unread = 1 index query. N unread 1:1s = 1 index query + N
+  contact resolutions. PLUS the accrual classes (4.2): each closed-unread
+  relay group costs an index slot; each deleted-contact unread thread costs
+  an index slot + a contact resolution (probe short-circuited unless
+  activity postdates deletion). This endpoint is the highest-frequency call
+  in the app (every SPA boot + every debounced conversation event per
+  connected dashboard) - the accrual WARN (4.3) is the signal to revisit.
 - Registered above the `/:contactId/read` param route; no collision with
   existing inbox routes (GET `/`, POST `/read`, POST `/:contactId/read`).
 - Error posture: normal 500; the client collapses any error to "no badge".
@@ -255,67 +296,97 @@ DECLARED BEHAVIOR CHANGES (badge semantics):
 - Today's badge count is NOT capped at 100: `limit=100` bounds only the
   contact pager, then relay rows merge additively uncapped and ALL unread
   group rows merge via the 2000-item walk (inbox.ts:798-887;
-  UnreadContext.tsx:32-38 documents that group unread is deliberately exempt
-  from the limit). The new count caps ALL row kinds at 100 candidates, and
-  group rows now compete for that cap. The visible badge already capped at
-  99+ (NavContents.tsx:67), so the display changes only in that the
+  UnreadContext.tsx:32-38 documents the group exemption). The new count caps
+  ALL row kinds at 100 candidates, and group rows now compete for the cap.
+  The visible badge already capped at 99+ (NavContents.tsx:67); the
   aria-label - previously the uncapped row count, which could exceed 100 -
   now reads at most "100 unread". Accepted: a count above 99 has no display
   fidelity anyway.
 
 ### 4.5 Unread page (`GET /api/inbox?filter=unread`)
 
-The `filter=unread` branch of aggregateInbox is rewritten to consume
-`enumerateUnreadRows` (maxRows = the request `limit`) instead of the contact
-pager + additive relay merge + group walk.
+The `filter=unread` branch of aggregateInbox is rewritten around
+`collectUnreadRows` + hydration in a FILL-OR-EXHAUST loop (the same invariant
+today's pager provides, inbox.ts:755-800):
+
+1. Collect candidates (excludeContactIds from the cursor's seen-set), hydrate
+   them (below), drop the ones hydration disqualifies, and REPEAT - resuming
+   from the returned scanPosition - until `limit` hydrated rows are in hand
+   OR the index stream is exhausted OR the raw budget is spent.
+2. `nextCursor` is non-null IFF the stream is neither exhausted nor
+   budget-truncated with nothing more to serve: concretely, null when the
+   final collect returned `exhausted` (all remaining index items consumed),
+   else the cursor built from the final scanPosition + accumulated seen-set.
+   INVARIANT PRESERVED: an empty `rows` array implies `nextCursor: null`
+   (the loop only stops short of `limit` on exhaustion/budget), so the
+   dashboard's empty-state and Load-more gating
+   (Inbox.tsx:130-158 renders both off `rows.length`) keep working
+   unchanged. A budget-truncated run that produced zero rows returns an
+   empty page with a null cursor and `groupsTruncated` absent - the
+   pathological-accrual case the WARN exists for; accepted.
 
 DECLARED BEHAVIOR CHANGE - PAGE COMPOSITION: today's `filter=unread` page one
 is up to `limit` CONTACT rows PLUS all unread relay rows PLUS all unread
 group rows additively (it can exceed `limit`). The new page is a SINGLE
 unified stream: up to `limit` rows total, all kinds interleaved newest-first,
-with a real cursor over the whole stream (overflow of ANY kind reaches later
-pages via Load more). Row CONTENT is preserved; page composition is not, and
-the fixture-parity tests assert per-row content, not page shape.
+overflow of ANY kind reachable via Load more. Row CONTENT is preserved; page
+composition is not; parity tests assert per-row content.
 
-`groupsTruncated` under filter=unread now means ONLY "the walk budget
-withheld rows" (enumerator `truncated`); group rows withheld by the page
-limit are behind `nextCursor` instead of silently dropped, so the "showing
-the latest" affordance yields to the pager. (Under filter=all nothing
-changes.) The dashboard needs no code change for this (it already renders
-both affordances), but the semantics are declared here because the old
-full-walk contract test pins the opposite (section 8).
+DECLARED BEHAVIOR CHANGE - `groupsTruncated` is NEVER SET under
+filter=unread. Its group-specific meaning ("group-text rows this filter
+would show were withheld"; the dashboard renders group-scoped copy linking
+to ?filter=groups - Inbox.tsx:91-108, useInbox.ts:36-41) no longer has a
+producer: group rows beyond the page limit are behind the cursor (the pager
+affordance covers them), and the raw-budget case withholds rows of EVERY
+kind, which group-scoped copy would mislabel. filter=all and filter=groups
+keep the flag exactly as today. The dashboard needs no code change; the
+Unread tab simply never shows the group notice again (previously it could).
 
-HYDRATION (bounded by the page limit; the page is FRESH even when the index
-is stale - the base-table reads below are authoritative):
+HYDRATION (bounded by the page limit). Hydration reads are the FRESHEST
+available sources but are still eventually consistent (section 6 - the
+round-1 "page is fresh" claim was wrong and is withdrawn):
 
 - contact candidates: `contactConversations` - the aggregateInbox wrapper
-  that filters conversationsForContact to `status === 'open' &&
-  type !== 'relay_group'` (inbox.ts:373-395; NOT the raw
-  conversationsForContact union) - once per contact; newest conversation =
+  filtering conversationsForContact to `status === 'open' && type !==
+  'relay_group'` (inbox.ts:373-395); note these resolve via the
+  byParticipantPhone/byParticipantEmail GSIs (conversationsRepo.ts:1146-1156,
+  :1259-1269), which lag independently of byUnread - once per contact
+  (per-request cache as today, inbox.ts:373-395); newest conversation =
   representative for phone/lastActivityAt/placement exactly as today
-  (inbox.ts:522-533); unreadSum re-summed over the FRESH set; if the fresh
-  sum is 0 the row is DROPPED (today's passesFilter contract,
-  inbox.ts:441-445 - the badge may briefly have counted it; converges on the
-  next reconcile); latestMessageOf(maxConv) once; placement label if present.
+  (inbox.ts:522-533); unreadSum re-summed over that set; fresh sum 0 ->
+  row DROPPED (today's passesFilter contract, inbox.ts:441-445);
+  latestMessageOf(maxConv) once; placement label if present.
 - relay_group / group_text / unknown candidates: ONE point read of the
-  conversation (the getter behind GET /api/conversations/:conversationId)
-  refreshes status + unread_count; drop the row if no longer visible or
-  unread; then hydrate exactly as today (latestMessageOf for unknown rows;
-  relayRowFor / groupRowFor need no further reads).
-- Deleted-contact resurfacing carries over unchanged inside the enumerator +
-  hydration (probe reads as in 4.3; presentation reuses maxConv's latest
-  message as today, inbox.ts:552-561).
+  conversation (conversations.getById - an eventually-consistent base-table
+  GetItem, typically fresher than any GSI; ConsistentRead deliberately not
+  required) refreshes status + unread_count; drop if no longer
+  visible/unread; then hydrate exactly as today (latestMessageOf for unknown
+  rows; relayRowFor / groupRowFor need no further reads).
+- Deleted-contact resurfacing carries over unchanged (probe rules per 4.3
+  step 2; presentation reuses maxConv's latest message as today,
+  inbox.ts:552-561).
+- A row dropped by hydration was already counted into the seen-set /
+  consumed scan range; it simply does not render, and the fill loop replaces
+  it. If its unread was real but a stale participant-GSI read hid it, the
+  row is missed until the next reconcile refetch (section 6; the SSE event
+  that accompanies any unread change triggers exactly that refetch).
 
-Rows within the page sort by displayed lastActivityAt (as today). ACCEPTED
-ORDERING NUANCE: a contact row displays its newest OVERALL thread's activity
-while the index orders by newest UNREAD activity; cross-page ordering can
-wobble for multi-thread contacts whose newest thread is read (today's feed
-has an analogous wobble from its additive merges).
+ORDERING: rows within a page sort by displayed lastActivityAt (as today).
+DECLARED NUANCE, sharper than v2 stated it: the stream orders contact
+candidates by newest UNREAD activity while the row displays newest OVERALL
+activity; these coincide today by construction and diverge here, so (a)
+cross-page ordering can wobble for multi-thread contacts whose newest thread
+is read, and (b) because the dashboard re-sorts the ACCUMULATED list on every
+append (useInbox.ts:87-90, applied to base after loadMore appends at :203),
+a Load more can visibly move an already-rendered row. Accepted: unread lists
+are typically sub-page; the wobble needs a multi-thread contact with a
+read-newer thread AND multi-page unread.
 
 All other filters (`all`, `unknown`, `groups`) are UNTOUCHED, including the
 early-rejection behavior from main @39c1aa41. GROUP_UNREAD_WALK_LIMIT /
-GROUP_UNREAD_GROWTH_THRESHOLD and the unread group walk die with this rewrite
-(the filter=all group source keeps its page-one cap and walk budget as-is).
+GROUP_UNREAD_GROWTH_THRESHOLD and the unread group walk die with this
+rewrite (the filter=all group source keeps its page-one cap and walk budget
+as-is).
 
 Mark-read routes are unchanged (they call resetUnread, which now maintains
 the flag).
@@ -325,72 +396,74 @@ the flag).
 today.ts keeps its single open-partition query (today.ts:529) and loop - the
 relay opt-out attention scan lives INSIDE that loop, ordered before the
 unread gate (today.ts:538-543), and keeps working unchanged. What moves: the
-unread gate (today.ts:581-582) and everything downstream of it (the
-unknown-triage needs_you_now items and the unreplied items, today.ts:584-641)
-leave the loop and become a SECOND pass fed by `listUnreadConversations`
-(layer 1), filtered to the 1:1 bucket - preserving each item's
-per-conversation type/timestamp semantics.
+unread gate (today.ts:581-582) and everything downstream (unknown-triage
+needs_you_now items and unreplied items, today.ts:584-641) leave the loop and
+become a SECOND pass fed by `listUnreadConversations` (layer 1), filtered to
+the 1:1 bucket - preserving per-conversation type/timestamp semantics.
 
 - ORDERING PRESERVED: the unread pass still runs before the contacts-triage
-  pass, which consumes `emittedUnknownPhones` (today.ts:520, written :590,
-  read :726).
-- CAP PRESERVED: the pass takes at most TODAY_UNREAD_CAP = 100 unread
-  conversations (the current effective bound) and announces truncation via
-  the existing warnIfCapped mechanism (today.ts:354-356). The behavior
-  change is the SELECTION: the newest-100-unread by activity, rather than
-  unread-within-the-first-100-open. Payload size stays bounded exactly as
-  today.
-- NET COST: Today gains one index query and loses nothing (the open walk
-  stays for relay opt-out). G5 is a correctness fix, not a cost fix.
+  pass, which consumes `emittedUnknownPhones` (today.ts:520, :590, :726).
+- CAP: the pass takes at most TODAY_UNREAD_CAP = 100 unread conversations,
+  announcing truncation via the existing warnIfCapped (today.ts:354-356).
+  SELECTION CHANGE: the newest-100-unread by activity, rather than
+  unread-within-the-first-100-open. The NUMERIC bound is unchanged but the
+  REALIZED payload is larger on unread-heavy data (today only the unread
+  subset of the first 100 open threads emitted; now up to 100 items all
+  emit). That growth is the point (the silent-miss fix) and is bounded by
+  the same 100.
+- NET COST: Today gains one index query and loses nothing. G5 is a
+  correctness fix, not a cost fix.
 
 ### 4.7 Client: optimistic badge + fast reconcile
 
 UnreadContext changes (dashboard/src/app/UnreadContext.tsx):
 
 1. FETCH SWAP: `fetchCount` calls new `getUnreadCount()`
-   (api/endpoints.ts next to getInbox; type
-   `InboxUnreadCount { unreadCount: number; saturated: boolean }` next to
+   (api/endpoints.ts next to getInbox; type `InboxUnreadCount
+   { unreadCount: number; capped: boolean; truncated: boolean }` next to
    InboxPage in api/types.ts). Error posture unchanged: any error -> null.
 2. OPTIMISTIC LAYER: context value becomes
    `{ unread, unmatchedUnread, noteRowsCleared, rollbackRowsCleared }`, with
    NO-OP function defaults on the createContext value (provider-less renders
-   - existing tests mount hooks bare - must not throw), and the provider
-   value memoized (every nav leaf consumes this context, NavContents.tsx:40).
-   - State: `serverCount`, `saturated`, `pendingClears: Map<rowKey,
+   must not throw - existing tests mount hooks bare), and the provider value
+   memoized (every nav leaf consumes this context, NavContents.tsx:40).
+   - State: `serverCount`, `capped`, `pendingClears: Map<rowKey,
      clearedAtMs>`, and a fetch generation counter.
-   - Displayed `unread = serverCount === null ? null : saturated ?
-     serverCount : max(0, serverCount - pendingClears.size)`. While
-     SATURATED the optimistic subtraction is suppressed entirely - the
-     count is a cap, not a number, and decrementing it would flick
-     99+ -> 99 -> 99+.
-   - `noteRowsCleared(keys)` inserts keys (idempotent by key: the row-click +
-     contact-page double-POST and StrictMode double-invoke cannot
-     double-decrement). `rollbackRowsCleared(keys)` deletes them (wired into
-     the mark-read failure path).
-   - EXPIRY: a pending clear expires when ANY fetch that STARTED after the
-     clear was recorded RESOLVES successfully - full stop, no value
-     comparison (a value predicate creates stuck states: a clear that
-     cleared nothing, or a new inbound during the window, would pin a wrong
-     badge for the whole TTL). PENDING_CLEAR_TTL_MS = 10_000 remains only as
-     a backstop when no reconcile happens. Consequence (accepted): if GSI
-     lag outlives the ~300ms debounce + fetch, the badge can briefly bounce
-     back up until the next event's refetch - the server stays the
-     authority.
-   - Generation guard: a fetch that resolves after a newer fetch started is
-     discarded (prevents a stale in-flight response from clobbering newer
-     state - the abort ref alone does not cover this interleaving).
+   - Displayed `unread = serverCount === null ? null : capped ? serverCount
+     : max(0, serverCount - pendingClears.size)`. While CAPPED the
+     subtraction is suppressed (the count is a cap; decrementing would
+     flick 99+ -> 99 -> 99+). `truncated` does NOT suppress - a truncated
+     count is small and real-so-far, and G3's instant feedback stays on.
+   - `noteRowsCleared(keys)` inserts keys (idempotent by key: the
+     row-click + contact-page double-POST and StrictMode double-invoke
+     cannot double-decrement). `rollbackRowsCleared(keys)` deletes them.
+   - EXPIRY + CONVERGENCE (round-2 finding: the single SSE event this
+     action produces is consumed by the fetch that expires the clear, so a
+     stale read there would otherwise stick until an UNRELATED event): a
+     pending clear expires when ANY fetch that STARTED after the clear was
+     recorded RESOLVES successfully (no value comparison - a value
+     predicate creates stuck states); WHEN a resolve expires one or more
+     clears, schedule ONE follow-up reconcile fetch RECHECK_DELAY_MS
+     (2000ms) later unless another fetch is already scheduled/in-flight.
+     The follow-up expires nothing (no clears remain from this action) so
+     it cannot cascade; it exists purely to observe the index after
+     propagation. PENDING_CLEAR_TTL_MS = 10_000 stays as backstop when no
+     reconcile happens at all. Residual: if the GSI is STILL stale at
+     t+2.3s, the badge shows the stale count until the next event/refetch;
+     accepted (server remains authority).
+   - Generation guard: a fetch resolving after a newer fetch started is
+     discarded (a stale in-flight response cannot clobber newer state).
    - Clamp: displayed count never negative.
-3. CALLERS (v1 scope decision): ONLY `useInbox.markRead` - all four branches,
-   after the `:263` unreadCount guard and the `:283` addressability guard,
-   keyed by the existing rowKey(); rollback in the existing `.catch`
-   (useInbox.ts:291-293). Inbox rows are by construction rows the badge
-   counts (same enumerator; closed relay rows never render there), so the
-   decrement is always sound. The tour/placement channel hooks and the
-   contact/conversation auto-mark paths are NOT wired (the channel hooks
-   cannot know row kind or badge visibility - a closed relay group's
-   mark-read would decrement a row the badge never counted; the auto-marks
-   fire blind on mount). Those paths reconcile via the cheap refetch, which
-   is the pre-existing behavior minus ~1.5s.
+3. CALLERS (v1 scope decision): ONLY `useInbox.markRead` - all four
+   branches, after the `:263` unreadCount guard and the `:283`
+   addressability guard, keyed by the existing rowKey(); rollback in the
+   existing `.catch` (useInbox.ts:291-293). Inbox rows are by construction
+   rows the badge counts (same collector + visibility rules; closed relay
+   rows never render there). The tour/placement channel hooks and the
+   contact/conversation auto-marks are NOT wired (the hooks cannot know row
+   kind or badge visibility; the auto-marks fire blind on mount). Those
+   paths reconcile via the cheap refetch - the pre-existing behavior minus
+   ~1.5s.
 4. RECONNECT RECONCILE: subscribe `onOpen` (EventStreamProvider.tsx:57) ->
    scheduleRefetch, correcting drift after an SSE blackout.
 5. The 300ms SSE debounce and the unmatched-email half are unchanged.
@@ -404,47 +477,52 @@ Inbox.test's baseState factory gain the new fields (section 8).
 The badge counts VISIBLE INBOX ROWS - one per contact (however many unread
 threads), one per unknown number, one per relay group, one per native group
 thread - capped at BADGE_COUNT_CAP (100), rendered as 99+ past 99. Badge and
-page draw from the SAME enumerator and visibility rules; the numbers can
-still diverge transiently (the page hydrates fresh base-table state and drops
-newly-read rows; the badge reads index state and runs in its own request) and
+page draw from the SAME collector and visibility rules; the numbers can
+still diverge transiently (the page hydrates against fresher sources and
+drops newly-read rows; the badge reads index state in its own request) and
 converge on reconcile. No strict badge==page equality is claimed.
 
 ## 5. Wire contract additions
 
 ```
 GET /api/inbox/unread-count
-200 { "unreadCount": number, "saturated": boolean }
+200 { "unreadCount": number, "capped": boolean, "truncated": boolean }
 ```
 
-No other wire shapes change. InboxRow/InboxPage are untouched.
+No other wire shapes change. InboxRow/InboxPage are untouched
+(`groupsTruncated` is simply never present on filter=unread responses -
+section 4.5).
 
 ## 6. Consistency model (explicit)
 
-- The GSI is eventually consistent, and a stale index entry is stale in its
-  PROJECTED attributes too - a projection-side `unread_count > 0` check
-  CANNOT detect replication lag (the lingering entry still carries the old
-  positive count). Therefore:
-  - the BADGE accepts index staleness outright: a just-read conversation may
-    be counted until the index catches up; the user's own action is masked
-    by the optimistic layer; other operators' actions converge on the next
-    reconcile. No per-candidate base reads (that would double the badge's
-    cost for a window that is typically milliseconds).
-  - the PAGE is fresh despite index staleness: every rendered row is
-    re-verified against base-table reads during hydration (contact rows via
-    contactConversations; relay/group/unknown rows via a point read) and
-    dropped if no longer unread/visible.
-  - layer 1's projected-attribute checks defend only against
-    WITHIN-IMAGE inconsistency (un-backfilled rows, a hypothetical broken
-    writer), and the spec claims nothing more for them.
-- A just-arrived unread may be briefly missing from the index; the
-  SSE-triggered refetch lands 300ms+ later; accepted.
-- Permanently-invisible indexed rows (closed-while-unread relay groups)
-  accrue (section 4.2) and consume walk budget; `truncated`/`saturated` can
-  therefore fire early in pathological accumulations. Accepted at current
-  scale; the WARN past 400 raw items is the tripwire.
+- EVERY read path here is eventually consistent, in three tiers:
+  - `byUnread` (the discovery source): a just-read conversation may linger;
+    a just-arrived unread may be briefly missing. A projection-side
+    `unread_count > 0` check CANNOT detect this lag (the stale entry's
+    projected attributes are stale in lockstep); layer-1's check defends
+    within-image inconsistency only.
+  - `byParticipantPhone` / `byParticipantEmail` (contact-row hydration +
+    unreadSum): lag INDEPENDENTLY of byUnread. A contact row can therefore
+    render with a stale sum, be dropped on a stale zero, or (rarely, via
+    cross-GSI skew) be missed across a page boundary. All converge on the
+    next reconcile refetch - the SSE event accompanying any unread change
+    triggers exactly that.
+  - `getById` point reads (non-contact hydration): eventually-consistent
+    base-table reads, typically fresher than any GSI; ConsistentRead is
+    deliberately not used.
+  The BADGE accepts index staleness outright (no per-candidate base reads -
+  cost without commensurate benefit for a typically-ms window); the user's
+  own action is masked by the optimistic layer + follow-up reconcile
+  (4.7.2); other operators' actions converge on reconcile.
+- ACCRUAL (4.2's two classes) costs: index slots + walk budget; deleted-
+  contact residents also cost a contact resolution per badge request (probe
+  short-circuited per 4.3). The raw budget (2000) is sized so accrual
+  cannot plausibly blind the feed; the WARN at 500 is the tripwire to
+  revisit (e.g. an ops sweep resetting ancient invisible unread - a future
+  decision, not this feature).
 - The pre-existing emit gap (increment succeeds, touchLastActivity throws,
-  no SSE event - twilio.ts:604-618 et al.) leaves the INDEX correct and only
-  delays client refresh; unchanged by this design.
+  no SSE event - twilio.ts:604-618 et al.) leaves the INDEX correct and
+  only delays client refresh; unchanged.
 - No transactional projection table; no new event types.
 
 ## 7. Migration and operations
@@ -479,41 +557,46 @@ No other wire shapes change. InboxRow/InboxPage are untouched.
 
 ## 8. Testing and existing-surface migration
 
-EXISTING TEST SURFACES THAT CHANGE (enumerated; this is real builder work):
+EXISTING TEST SURFACES THAT CHANGE (enumerated; real builder work):
 
 - In-memory fakes gain the index, KEYED OFF `unread_flag` (not
-  unread_count>0) so the invariant is actually exercised end-to-end:
-  app/test/helpers/twilioWebhookHarness.ts:403 (its incrementUnread /
-  resetUnread at :447-458 must model the flag), app/test/inboxFeed.test.ts:
-  69-115 (hand-built GSI fake, cast `as unknown as ConversationsRepo` - a
-  missing method is a runtime TypeError), app/test/contactCapture.test.ts:130.
+  unread_count>0) so the invariant is actually exercised:
+  app/test/helpers/twilioWebhookHarness.ts:403 (incrementUnread/resetUnread
+  at :447-458 must model the flag), app/test/inboxFeed.test.ts:69-115
+  (hand-built GSI fake, cast `as unknown as ConversationsRepo` - a missing
+  method is a runtime TypeError), app/test/contactCapture.test.ts:130.
 - Fixtures seeding nonzero unread gain the flag (flag iff count > 0):
   inboxApi.test.ts (:100-101,174,194-196,322-334,418-434,493,532),
   inboxEmail.test.ts (:79-175), contactSoftDelete.test.ts (:96-97,116),
-  inboxFeed.test.ts (:193-240 and the filter='unread' cases),
+  inboxFeed.test.ts (:193-240 + the filter='unread' cases),
   inboxGroups.test.ts (:265-296), contactTriage.test.ts (:91),
   inbox.integration.test.ts (:311), performanceSeed.integration.test.ts
   (:409).
-- inboxGroups.test.ts:265 pins the retired full-partition-walk contract
-  ("returns ALL unread group threads under filter=unread") - REWRITTEN to
-  the unified-stream contract (group rows beyond the page limit reachable
-  via cursor).
-- e2e/performance CONTRACT MIGRATION (required gate - these are unit-tested
-  pins): COLD_SHELL_GETS' badge entry (routes.ts:239) becomes the new
-  path-only endpoint; the classifier keyed on `filter==='unread' &&
-  limit==='100'` (collect.ts:162) becomes a path match for
-  /api/inbox/unread-count (also ensuring an Unread-page request at limit 100
-  is NOT misclassified as the badge); shell-request detection (collect.ts:
-  175-179), classAware (:128), and the warm-mode special case (:362) keep
-  working against the new class shape; line-pinned code-evidence references
-  (routes.ts:666,720,753-755,761) update to the edited files; pinned tests
-  (routes.test.ts:48, collect.test.ts:207-315 badge cases, report.test.ts:
-  561,580) update accordingly.
-- app/scripts/profile-inbox.ts / lib/inboxDiagnostics.ts: the profile plan's
-  `unread-badge` case switches from `aggregateInbox(filter=unread,limit=100)`
-  to driving the unread-count function, so the acceptance criteria below
-  have an evidence path; a new `unread-page` case stays on aggregateInbox at
-  limit 30.
+- inboxGroups.test.ts:265 pins the retired full-partition-walk contract -
+  REWRITTEN to the unified-stream contract (group rows beyond the page limit
+  reachable via cursor; groupsTruncated never set under unread).
+- e2e/performance CONTRACT MIGRATION (required gate; unit-tested pins):
+  ENDPOINT_TEMPLATES gains `/api/inbox/unread-count`
+  (e2e/performance/templates.ts:119-121 region - an unlisted path becomes
+  unmatched_api and fails selfQa.ts:417, though the typed `endpoint()`
+  helper catches omission at typecheck); COLD_SHELL_GETS' badge entry
+  (routes.ts:239) becomes the new path-only endpoint; the classifier keyed
+  on `filter==='unread' && limit==='100'` (collect.ts:162) becomes a path
+  match for /api/inbox/unread-count (also ensuring an Unread-page request
+  at limit 100 is NOT misclassified as the badge); shell-request detection
+  (collect.ts:175-179), classAware (:128), and the warm-mode special case
+  (:362) keep working against the new class; pinned tests (routes.test.ts:
+  48, collect.test.ts:207-315 badge cases, report.test.ts:561,580) update.
+  LINE-PIN re-derivation (checked against v3's actual edit set, not
+  inherited from v1): routes.ts:761 (UnreadContext.tsx:19,52-115) is
+  invalidated by the rewrite and must be re-pinned; routes.ts:666,720 pin
+  useInbox.ts:46-65,139-155 / Inbox.tsx:53-75 - ranges v3 does not edit
+  (the markRead wiring lands ~:260-300) - verify at build, expect no churn;
+  routes.ts:753-755 pin the channel hooks, which v3 does NOT edit - leave
+  alone.
+- app/scripts/profile-inbox.ts / lib/inboxDiagnostics.ts: the plan's
+  `unread-badge` case switches to driving the unread-count function; a
+  `unread-page` case stays on aggregateInbox at limit 30.
 - dashboard: AppFrame.test.tsx's useUnread stub (:6-8) and Inbox.test.tsx's
   baseState factory (:13-25) gain the new fields.
 
@@ -522,49 +605,52 @@ NEW TESTS:
 Unit (app/test):
 - conversationsRepo: incrementUnread sets flag+count atomically (absent->1
   creates flag; repeats keep it); resetUnread zeroes count and REMOVEs flag;
-  both idempotent; either ordering of reset/increment leaves flag consistent
-  with count.
+  both idempotent; either ordering leaves flag consistent with count.
 - unreadFeed layer 1: visibility matrix (open/closed/connecting relay,
-  group_open, 1:1 bucket incl. a type-less row, pointer-partition skip),
-  walk budget + truncated + WARN, boundary resume via synthesized key,
-  within-image inconsistency skip.
-- unreadFeed layer 2: contact grouping (multi-phone and phone+email merge to
-  one candidate), unknown-number candidates, contactless email skipped,
-  deleted-contact resurfacing (fresh-inbound yes / pre-deletion no /
-  outbound no), maxRows + saturated, tie-safe cursor resume: equal
-  last_activity_at across the boundary neither double-serves nor drops;
-  multi-thread contact split across pages suppressed on page 2.
+  group_open, 1:1 bucket incl. a type-less row, pointer-partition skip);
+  scanPosition advances across a FULLY-FILTERED run (no dead-end);
+  exhausted vs truncated; WARN threshold.
+- unreadFeed layer 2: contact grouping (multi-phone + phone+email merge to
+  one candidate); excludeContactIds suppression; unknown-number candidates;
+  contactless email skipped; deleted-contact resurfacing (fresh-inbound yes
+  / pre-deletion no / outbound no) AND the probe short-circuit (a thread
+  with activity <= deleted_at issues NO message read); capped vs truncated
+  vs exhausted; scanPosition on a capped run resumes without re-scan or
+  skip.
 - inbox route (filter=unread): per-row content parity with pre-change
-  fixtures (fields byte-equal for the same seed rows); unified composition
-  (kinds interleaved, limit respected, cursor pages the overflow); cursor
-  namespacing (unread cursor under other filters -> 400 and vice versa);
-  zero-sum-after-hydration row dropped; stale-index row dropped via point
-  read; groupsTruncated only from walk budget; zero-unread dataset -> empty
-  page, 1 index query, NO contact/message/placement calls (call-count
-  assertions per the existing idiom).
-- unread-count endpoint: counts rows not conversations; saturation both ways
-  (maxRows, walk budget); deleted-contact parity with the page; zero state
-  = 1 call.
-- today route: unread sections fed by layer 1; a fixture with an unread
-  thread outside the first-100-open window now surfaces; relay opt-out scan
-  unaffected (still produced with the unread pass moved out);
+  fixtures; unified composition (kinds interleaved, limit respected, cursor
+  pages overflow of every kind); FILL-OR-EXHAUST (hydration drops refill
+  the page; empty rows implies null nextCursor - including a bulk-fan-out
+  mark-read race fixture); multi-thread contact split across pages
+  suppressed by the seen-set (incl. equal-timestamp boundary items);
+  cursor namespacing (unread cursor under other filters -> 400, vice
+  versa, oversized seen-set -> 400); groupsTruncated never present;
+  zero-unread dataset -> empty page, 1 index query, NO
+  contact/message/placement calls (call-count assertions).
+- unread-count endpoint: counts rows not conversations; capped and
+  truncated distinguished; deleted-contact parity with the page; zero
+  state = 1 call.
+- today route: unread sections fed by layer 1; an unread thread outside the
+  first-100-open window surfaces; relay opt-out scan unaffected;
   emittedUnknownPhones ordering preserved; TODAY_UNREAD_CAP + warnIfCapped.
 - Seeds guard: fixture arrays carry unread_flag iff unread_count > 0.
 - backfill planner: stamp / remove / skip / pointer-row cases.
-- UnreadContext: optimistic decrement synchronous (asserted before any
-  debounce); idempotent per key; expiry on first post-clear resolved fetch;
-  TTL backstop; rollback; generation guard discards a stale in-flight fetch;
-  clamp at 0; saturated suppression (no decrement while saturated); no-op
-  defaults (bare render does not throw); memoized value; onOpen refetch.
+- UnreadContext: optimistic decrement synchronous (before any debounce);
+  idempotent per key; expiry on first post-clear resolved fetch + the
+  SINGLE follow-up reconcile (scheduled once, no cascade); TTL backstop;
+  rollback; generation guard; clamp at 0; capped suppression (and NO
+  suppression on truncated-only); no-op defaults (bare render safe);
+  memoized value; onOpen refetch.
 - useInbox: noteRowsCleared fires exactly once per guarded mark-read,
   rollback on failure; useMarkContactRead does NOT touch the badge context.
 
 Integration (DynamoDB Local, per relayRepos.integration.test.ts precedent):
 - byUnread returns exactly flagged rows newest-first; increment/reset
-  round-trip visible through the index; synthesized-ExclusiveStartKey resume
-  matches the GSI's native order across an equal-timestamp tie; backfill
-  script both directions against a mixed-state table (positive / zero /
-  absent / pointer row).
+  round-trip visible through the index; synthesized-ExclusiveStartKey
+  resume is exact after a boundary item that shares last_activity_at with
+  its neighbors (position-exactness, not order-assumption - the seen-set
+  covers dedupe); backfill both directions against a mixed-state table
+  (positive / zero / absent / pointer row).
 
 E2E:
 - NEW spec: nav Inbox badge - seed unread, badge shows count; open the row;
@@ -572,31 +658,34 @@ E2E:
   raced-response idiom per group-text-inbox.spec.ts); a group-text row
   decrements too. First nav-badge e2e coverage.
 - Existing inbox-markread.spec.ts, group-text-inbox.spec.ts,
-  deleted-contact-resurfacing.spec.ts stay green (they pin row-level
-  semantics this design preserves).
+  deleted-contact-resurfacing.spec.ts stay green.
 
 Performance evidence:
 - `npm run perf:inbox` before/after, >= 5 repeats: unread-page (limit 30)
-  and the new badge case drop from ~1,230 calls to O(indexed unread)
-  (target: <= 3 calls on the zero-unread dataset); all-page/groups-page
-  unchanged. Report calls eliminated + remaining; local medians are
+  and the badge case drop from ~1,230 calls to O(indexed unread) (target:
+  <= 3 calls on the zero-unread dataset); all-page/groups-page unchanged.
+  Report calls eliminated + remaining; local medians are
   DynamoDB-Local-bound evidence only.
 
 ## 9. Acceptance criteria
 
 - Badge request on a zero-unread dataset: 1 index query, no hydration calls.
-- Unread page on a zero-unread dataset: 1 index query, empty rows.
+- Unread page on a zero-unread dataset: 1 index query, empty rows, null
+  cursor.
 - Neither badge nor Unread page issues per-OPEN-conversation calls; cost
-  scales with indexed unread candidates (plus per-page hydration bounded by
-  limit).
+  scales with indexed unread (incl. stated accrual) plus per-page hydration
+  bounded by limit.
+- A fully-filtered index prefix can never permanently empty the feed
+  (scan-position resume + fill-or-exhaust + 2000 budget).
 - Badge decrements at click time on Inbox mark-read paths, never negative,
-  suppressed while saturated; a failed mark-read restores it; reconcile
-  converges (bounce under GSI lag is bounded by the next refetch).
-- Unread row CONTENT unchanged for identical data (per-row parity tests +
-  existing e2e); page COMPOSITION per section 4.5's declared change.
+  suppressed only while capped; a failed mark-read restores it; convergence
+  via the post-clear reconcile + single follow-up (stale-window residual
+  bounded by the next event as stated in 4.7).
+- Unread row CONTENT unchanged for identical data; page COMPOSITION and
+  groupsTruncated per section 4.5's declared changes.
 - All/unknown/groups filters and their costs untouched.
-- Sparse-flag invariant across every writer (unit + integration + seed guard
-  + backfill tests); fakes key their index off the flag.
+- Sparse-flag invariant across every writer (unit + integration + seed
+  guard + backfill tests); fakes key their index off the flag.
 - e2e/performance suite green under the migrated badge contract.
 - Gates: `npm run typecheck`, `npm test`, `npm run e2e` green from the
   worktree.
@@ -614,11 +703,9 @@ WRITERS of unread_count (all through 2 primitives - verified exhaustive):
 - Creation sites (createOrGetByParticipantPhone/Email, createRelayGroup,
   createGroupTextThread, import upsertConversation): omit unread_count ->
   omit flag; NO changes. Every conversation PutCommand is conditional on
-  attribute_not_exists(conversationId), so no runtime whole-item write can
-  clobber the flag.
-- Status/lifecycle transitions: no unread writes; no flag writes; reader
-  status filters preserve visibility (closed-while-unread accrual accepted -
-  sections 4.2/6).
+  attribute_not_exists(conversationId) - no runtime whole-item clobber.
+- Status/lifecycle transitions: no unread/flag writes; reader status filters
+  preserve visibility (accrual classes 4.2 accepted).
 - Seeds: performance.ts:820/:889 conditionally per row; others zero/absent.
 - Deletes (import retract, devReset, performanceSeed lean-group delete): GSI
   entries drop with the item.
@@ -626,19 +713,20 @@ WRITERS of unread_count (all through 2 primitives - verified exhaustive):
 READERS of unread state (all accounted for):
 - inbox.ts filter=unread + the badge -> the two unreadFeed layers (this
   design).
-- inbox.ts deleted-resurfacing + unreadSum -> preserved (enumerator +
-  hydration).
+- inbox.ts deleted-resurfacing + unreadSum -> preserved (collector +
+  hydration, with the probe short-circuit).
 - today.ts unread gate -> layer 1 (this design); relay opt-out scan keeps
   the open-partition walk.
 - api.ts:416 summaries + :1697 raw detail -> counter attribute only;
   unchanged (raw detail now also carries unread_flag; accepted).
 - events.ts:100 SSE payload -> unchanged.
-- e2e/performance harness -> badge contract migrated (section 8).
+- e2e/performance harness -> badge contract migrated (section 8, incl.
+  ENDPOINT_TEMPLATES).
 - app/scripts/profile-inbox.ts -> plan updated (section 8).
 - Dashboard: UnreadContext (rewired), useInbox rows (shape unchanged),
   usePlacementChannels/useTourChannels first-page unread dots (unchanged;
   their documented first-page limitation is out of scope), fake-twilio's
-  groupUnreadByPool (different counter entirely; untouched).
+  groupUnreadByPool (different counter; untouched).
 - Test fakes and fixtures -> section 8's migration list.
 
 ## 11. Follow-up issues

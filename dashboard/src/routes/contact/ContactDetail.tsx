@@ -967,7 +967,19 @@ export function ContactDetail(): React.JSX.Element {
  *  itself; `suggested` are the ones parked as review chips. */
 function extractionAppliedCopy(wrote: number, suggested: number): string {
   if (wrote + suggested === 0) return 'Ran - nothing new to extract.';
-  return `Updated ${wrote} field${wrote === 1 ? '' : 's'}, ${suggested} suggestion${suggested === 1 ? '' : 's'}.`;
+  // Only name the halves that actually happened. "Updated 0 fields, 1
+  // suggestion." was the live result of the first self-QA run, and it is not an
+  // edge case: a manual run waives the age floor, so it pulls in older
+  // multi-speaker content, and a single unknown-speaker line demotes EVERY
+  // write in the run to a suggestion (design 8). wrote=0 with suggestions is
+  // therefore the COMMON success shape for this feature's target data, and
+  // "Updated 0 fields" both reads badly and claims something that did not
+  // happen. The both-non-zero string is unchanged from design 4.6.
+  const fields = `Updated ${wrote} field${wrote === 1 ? '' : 's'}`;
+  const chips = `${suggested} suggestion${suggested === 1 ? '' : 's'} to review`;
+  if (wrote === 0) return `${chips.charAt(0).toUpperCase()}${chips.slice(1)}.`;
+  if (suggested === 0) return `${fields}.`;
+  return `${fields}, ${suggested} suggestion${suggested === 1 ? '' : 's'}.`;
 }
 
 /** `truncated` gets its own actionable sentence: it is the one failure an

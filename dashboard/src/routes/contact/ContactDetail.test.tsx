@@ -1278,6 +1278,28 @@ describe('ContactDetail', () => {
       );
     });
 
+    // Found by live self-QA, not by a unit test: this is the COMMON success
+    // shape for this feature's target data, because a manual run waives the age
+    // floor and one unknown-speaker line demotes every write to a suggestion
+    // (design 8). It must not read "Updated 0 fields, 1 suggestion."
+    it('never claims it updated 0 fields when everything was suggested', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 0,
+        suggested: 1,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/1 suggestion to review\./i);
+      expect(resolved).not.toHaveTextContent(/updated 0 fields/i);
+    });
+
     it('says nothing-new for a skipped run', async () => {
       renderAt('k1');
       await pressRun();
@@ -1427,7 +1449,7 @@ describe('ContactDetail', () => {
       });
       const resolved = await screen.findByRole('status', { name: /ai extraction/i });
       // 1 field, not 8: the unqueued thread's counts never joined the total.
-      expect(resolved).toHaveTextContent(/updated 1 field, 0 suggestions/i);
+      expect(resolved).toHaveTextContent(/updated 1 field\./i);
       expect(resolved).toHaveTextContent(/1 thread could not be queued/i);
     });
 

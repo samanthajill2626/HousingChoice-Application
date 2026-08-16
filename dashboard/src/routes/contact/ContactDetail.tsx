@@ -19,7 +19,7 @@
 // (status, opt-out, phone/suggestion changes). Narrow widths lead with comms + a
 // segmented Comms | Profile toggle.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
@@ -98,6 +98,11 @@ type ExtractionState =
        *  what keeps a same-instant unrelated run from resolving this press. */
       requestId: string;
       pending: Set<string>;
+      /** How many threads the press SCHEDULED. Fixed for the life of the run -
+       *  `pending` shrinks as each thread reports, so reading the count off it
+       *  would silently drop "on 3 threads" back to "..." after two reported
+       *  (4.6 state 1 names `scheduled`, not what is left). */
+      scheduledCount: number;
       wrote: number;
       suggested: number;
       /** Threads the server could not queue at all (a partial-failure 200). */
@@ -152,6 +157,13 @@ export function ContactDetail(): React.JSX.Element {
   // a reload shows the current facts instead, which by then are usually the
   // result of the run.
   const [extraction, setExtraction] = useState<ExtractionState>({ phase: 'idle' });
+  // Which press an in-flight POST still belongs to. The POST resolves on its own
+  // clock, so without this its response would write the indicator even after the
+  // operator navigated to another contact (A's outcome rendered on B's page, and
+  // B's kebab item disabled) or after the 180s timeout already resolved it. Every
+  // press, every contact change and the timeout bump it, so a late response is
+  // dropped rather than resurrecting a run nobody is watching.
+  const pressGenerationRef = useRef(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -168,8 +180,11 @@ export function ContactDetail(): React.JSX.Element {
     setSuggestionBusy(null);
     setSuggestionError(null);
     // Same reason: a manual run pressed on contact A must not appear to be
-    // running on contact B (its requestId could never resolve here anyway).
+    // running on contact B. Resetting the state is not enough on its own - A's
+    // POST is still in flight and would write B's indicator when it lands - so
+    // the press generation is bumped too, which invalidates that response.
     setExtraction({ phase: 'idle' });
+    pressGenerationRef.current += 1;
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -185,27 +200,34 @@ export function ContactDetail(): React.JSX.Element {
   // the page renders a different number of hooks per pass and crashes.
 
   const onRunExtraction = useCallback(async (): Promise<void> => {
+    const press = (pressGenerationRef.current += 1);
     // Busy from the PRESS, not from the response: otherwise a double-click fires
     // two POSTs before the first one resolves.
     setExtraction({
       phase: 'running',
       requestId: '',
       pending: new Set(),
+      scheduledCount: 0,
       wrote: 0,
       suggested: 0,
       failedThreads: 0,
     });
     try {
       const res = await runExtraction(contactId);
+      // Dropped when this press is no longer the current one - see
+      // pressGenerationRef.
+      if (pressGenerationRef.current !== press) return;
       setExtraction({
         phase: 'running',
         requestId: res.requestId,
         pending: new Set(res.scheduled),
+        scheduledCount: res.scheduled.length,
         wrote: 0,
         suggested: 0,
         failedThreads: res.failed.length,
       });
     } catch (err) {
+      if (pressGenerationRef.current !== press) return;
       // The server is the only gate (4.6), so every refusal arrives here rather
       // than being predicted client-side.
       setExtraction({ phase: 'done', tone: 'alert', message: extractionRefusalCopy(err) });
@@ -213,15 +235,24 @@ export function ContactDetail(): React.JSX.Element {
   }, [contactId]);
 
   // Resolution waits for EVERY scheduled thread before it decides, so one
-  // failing thread does not hide what the others found. An event carrying some
-  // other requestId is ignored - that is what stops an unrelated inbound run
-  // resolving this operator's indicator.
+  // failing thread does not hide what the others found. Three guards, each
+  // closing a different way the wrong run could speak for this press (spec 7):
+  //
+  //  - requestId: an unrelated inbound run must not resolve this indicator.
+  //  - contactId: nor may a run for a DIFFERENT contact. A `no_contact` run
+  //    carries no contactId at all, so only a MISMATCH is rejected.
+  //  - pending membership: a thread the server could not queue sits in
+  //    `failed[]` and no run is coming for it, so an event naming it must not
+  //    add counts to a banner that simultaneously says it was never queued. It
+  //    also makes a duplicate event for an already-reported thread a no-op.
   useEventStream({
     onAiRunCompleted: (e) => {
       setExtraction((prev) => {
         if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
           return prev;
         }
+        if (e.contactId !== undefined && e.contactId !== contactId) return prev;
+        if (!prev.pending.has(e.conversationId)) return prev;
         const pending = new Set(prev.pending);
         pending.delete(e.conversationId);
         const wrote = prev.wrote + e.wrote;
@@ -259,6 +290,9 @@ export function ContactDetail(): React.JSX.Element {
   useEffect(() => {
     if (extraction.phase !== 'running') return undefined;
     const timer = setTimeout(() => {
+      // A POST slower than the timeout would otherwise land here and put the
+      // page back into `running` with a fresh 180s clock.
+      pressGenerationRef.current += 1;
       setExtraction((prev) => ({
         phase: 'done',
         tone: 'status',
@@ -640,7 +674,7 @@ export function ContactDetail(): React.JSX.Element {
       {extraction.phase === 'running' ? (
         <div className={styles.extractionBanner} role="status" aria-label="AI extraction">
           <span>
-            {`Running AI extraction${extraction.pending.size > 1 ? ` on ${extraction.pending.size} threads` : ''}...`}
+            {`Running AI extraction${extraction.scheduledCount > 1 ? ` on ${extraction.scheduledCount} threads` : ''}...`}
             {failedThreadsCopy(extraction.failedThreads)}
           </span>
         </div>

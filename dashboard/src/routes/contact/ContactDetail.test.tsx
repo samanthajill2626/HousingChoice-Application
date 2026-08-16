@@ -1188,6 +1188,35 @@ describe('ContactDetail', () => {
       );
     });
 
+    it('keeps naming the SCHEDULED count after some threads have reported', async () => {
+      // The count names `scheduled` (4.6 state 1), not what is left: reading it
+      // off the pending set would drop "on 3 threads" back to a bare "Running
+      // AI extraction..." as soon as one thread reported, which reads to the
+      // operator as the run having shrunk.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b', 'conv-c'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction on 3 threads/i,
+      );
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction on 3 threads/i,
+      );
+    });
+
     it('disables the item against a second press', async () => {
       renderAt('k1');
       await pressRun();
@@ -1341,6 +1370,67 @@ describe('ContactDetail', () => {
       );
     });
 
+    it('IGNORES an event naming a DIFFERENT contact', async () => {
+      // requestId alone is not the whole guard (spec 7). A run for another
+      // contact that somehow carried this press's id must not resolve here and
+      // report its counts as if they had landed on this record.
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        contactId: 'someone-else',
+        outcome: 'applied',
+        wrote: 9,
+        suggested: 9,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+    });
+
+    it('IGNORES an event for a thread the server could not queue', async () => {
+      // A thread in `failed[]` has no run coming, so counting its event would
+      // let the resolved banner report results from a thread the same sentence
+      // says was never queued.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-b',
+        runId: 'r-unqueued',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 7,
+        suggested: 7,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      // 1 field, not 8: the unqueued thread's counts never joined the total.
+      expect(resolved).toHaveTextContent(/updated 1 field, 0 suggestions/i);
+      expect(resolved).toHaveTextContent(/1 thread could not be queued/i);
+    });
+
     it('reports threads that could not be queued', async () => {
       runExtraction.mockResolvedValue({
         requestId: 'req-1',
@@ -1402,6 +1492,68 @@ describe('ContactDetail', () => {
       const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
       expect(resolved).toHaveTextContent(/extraction failed/i);
       expect(resolved).toHaveTextContent(/2 threads could not be queued/i);
+    });
+
+    it('a press that RESOLVES after the operator navigated away leaves the next contact alone', async () => {
+      // The /contacts/:contactId route re-renders the SAME instance on a param
+      // change, and the POST resolves on its own clock. Without the press guard
+      // contact A's response writes contact B's page: B's banner reads "Running
+      // AI extraction...", B's kebab item is disabled, and A's outcome later
+      // renders on B - a money-spending action reporting an update to a record
+      // it never touched.
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const { Link } = await import('react-router-dom');
+      const user = userEvent.setup();
+      getContact.mockImplementation((id: unknown) =>
+        id === 'z99' ? Promise.resolve(OTHER) : Promise.resolve(TENANT),
+      );
+      let settle: ((v: { requestId: string; scheduled: string[]; failed: string[] }) => void) | undefined;
+      runExtraction.mockReturnValue(
+        new Promise<{ requestId: string; scheduled: string[]; failed: string[] }>((resolve) => {
+          settle = resolve;
+        }),
+      );
+      render(
+        <MemoryRouter initialEntries={['/contacts/k1']}>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await pressRun();
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toBeInTheDocument();
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      await screen.findByText('Bob Other');
+
+      // A's POST answers now, on B's page.
+      await act(async () => {
+        settle?.({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole('status', { name: /ai extraction/i })).not.toBeInTheDocument();
+
+      // ...and A's completion cannot resolve anything on B either.
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 1,
+        notedLines: 0,
+      });
+      expect(screen.queryByRole('status', { name: /ai extraction/i })).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /more actions/i }));
+      expect(screen.getByRole('menuitem', { name: /run ai extraction/i })).toBeEnabled();
     });
 
     it.each([

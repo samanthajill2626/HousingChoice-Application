@@ -245,7 +245,7 @@ masked relay group. These realities were paid for in build+debug time:
   `FakeThread` type now carries `from`/`to`) — fake pool numbers match `/^\+1555019\d{4}$/`,
   vs the app number `+15550009999`. Member→group = `send-as-party` with `to:` the pool
   number (persona registered first); fan-out arrives as `"Name: body"` (or
-  `"Tenant Place LLC: body"` for staff sends).
+  `"HousingChoice: body"` for staff sends).
 - **Inbound MMS from the fake's own host WORKS** — the fake serves canned raster images
   (e.g. `/canned/room.png`) and the hermetic env pins `FAKE_TWILIO_PUBLIC_URL` into the
   media-origin allowlist, so the self-guided ID gate is a REAL picture message (no

@@ -27,7 +27,7 @@ describe('GET /api/settings', () => {
     expect(res.body.settings.quickReplies).toEqual(['Please text me', "I'll call you back soon"]);
     // A2P/CTIA (spec §5): the default first-contact template carries brand
     // identity + opt-out language (the compliant DEFAULT_MISSED_CALL_AUTOTEXT).
-    expect(res.body.settings.missedCallAutoText).toContain('Tenant Place LLC');
+    expect(res.body.settings.missedCallAutoText).toContain('HousingChoice');
     expect(res.body.settings.missedCallAutoText).toMatch(/Reply STOP to opt out\./);
     // The read-only built-in welcome body rides ALONGSIDE the settings (never
     // inside them — it's not patchable) so the UI can show what "blank" sends.

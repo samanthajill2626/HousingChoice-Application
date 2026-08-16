@@ -213,6 +213,18 @@ const PRE_RING_PAUSE_FALLBACK_SECONDS = 2;
 /** Same sane bound the Settings PUT validates (routes/settings.ts). */
 const MAX_PRE_RING_PAUSE_SECONDS = 10;
 
+/** Voicemail ceiling (spec 4.1: "records up to a 2-minute message"). */
+const VOICEMAIL_MAX_LENGTH_SECONDS = 120;
+/**
+ * Seconds of SILENCE that end a voicemail. Twilio's default is 5, which is too
+ * aggressive for a prompt that says "leave a message after the tone": the clock
+ * starts when <Record> does, so a caller who waits for the tone and pauses to
+ * collect their thoughts gets cut off with nothing captured. 10s tolerates a
+ * normal hesitation while still hanging up promptly on a caller who says
+ * nothing. `maxLength` remains the actual length cap.
+ */
+const VOICEMAIL_SILENCE_TIMEOUT_SECONDS = 10;
+
 /**
  * Clamp the founder-editable pre-ring pause to a sane whole-second range,
  * falling back to the default for anything non-integer / out of range. Defensive
@@ -1362,7 +1374,16 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     if (isMissed && entry?.type === 'call' && entry.masked !== true && entry.direction !== 'outbound') {
       reply.say(resolveMessage('voice.voicemail_prompt'));
       reply.record({
-        maxLength: 120,
+        maxLength: VOICEMAIL_MAX_LENGTH_SECONDS,
+        // SILENCE timeout, NOT a length cap - `maxLength` is the cap. Twilio's
+        // DEFAULT IS 5s, and it starts counting the moment <Record> begins, so a
+        // caller who waits for the tone and then gathers their thoughts is cut
+        // off mid-thought with nothing usable captured. Observed live on prod
+        // 2026-08-15: a voicemail ended at EXACTLY 5s and transcribed to an
+        // empty string, while the answered-bridge recordings either side of it
+        // (98s and 76s) transcribed fine - the tell that this is the record
+        // path's own default and not a VI or audio problem.
+        timeout: VOICEMAIL_SILENCE_TIMEOUT_SECONDS,
         playBeep: true,
         action: `${baseUrl}/webhooks/twilio/voice/voicemail-done`,
         recordingStatusCallback: `${baseUrl}/webhooks/twilio/voice/recording`,

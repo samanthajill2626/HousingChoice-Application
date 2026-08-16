@@ -586,6 +586,11 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
     expect(res.text).toContain('<Record');
     expect(res.text).toContain('maxLength="120"');
+    // An EXPLICIT silence timeout, never Twilio's 5s default. The default ended a
+    // real prod voicemail at exactly 5s with an empty transcript (2026-08-15):
+    // the clock starts when <Record> does, so a caller who waits for the tone the
+    // prompt promises and then pauses is cut off having captured nothing.
+    expect(res.text).toContain('timeout="10"');
     expect(res.text).toContain('playBeep="true"');
     expect(res.text).toContain('/webhooks/twilio/voice/voicemail-done');
     expect(res.text).toContain('/webhooks/twilio/voice/recording');

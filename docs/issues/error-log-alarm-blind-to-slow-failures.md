@@ -3,11 +3,17 @@ id: error-log-alarm-blind-to-slow-failures
 title: The error-log alarm cannot see a slow, steady failure - a full pipeline outage never paged
 type: bug
 severity: high
-status: open
+status: in-progress
 area: observability
 created: 2026-08-16
-refs: infra/
+refs: infra/modules/observability/main.tf
 ---
+
+**Status 2026-08-16.** The companion alarm is written
+(`${name_prefix}error-logs-sustained`, threshold 1, 3 consecutive 300s periods)
+on branch `fix/orphan-logs`. It is NOT yet applied - a `terraform apply` to dev
+and prod closes this. The two follow-on questions below (DLQ companion, missing
+DLQ datapoint) are deliberately still open.
 
 **Problem.** `hc-<env>-error-logs` fires on `Sum(ErrorLogs) >= 5` in a single
 300s period, 1 evaluation period. That shape only detects a BURST. A failure
@@ -58,3 +64,13 @@ does - a sent-rate alarm on a DLQ would never fire.
 
 Both `hc-dev-*` and `hc-prod-*` carry the same alarm definitions, so any change
 applies to both.
+
+**Decided 2026-08-16 (operator).** 3-of-3 over 300s at threshold 1, added as a
+SECOND alarm (`${name_prefix}error-logs-sustained`); the burst alarm keeps its
+own threshold and was not retuned. 3-of-5 was considered and rejected as a
+fuzzier signal for little extra reach.
+
+**DLQ companion: decided NOT to add.** The depth alarm already fires on any
+non-empty DLQ with a single evaluation period and was observed working during
+this incident (above), and the note about `NumberOfMessagesSent` confirms a
+sent-rate alarm on a DLQ would never fire at all. Nothing to add there.

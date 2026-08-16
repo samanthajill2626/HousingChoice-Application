@@ -162,6 +162,45 @@ resource "aws_cloudwatch_metric_alarm" "error_logs" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
 
+# COMPANION to the burst alarm above - deliberately a second alarm, not a retune.
+#
+# The burst alarm needs var.error_logs_alarm_threshold (5) errors inside ONE 300s
+# bucket. That shape can only see a spike. A failure that errors steadily but
+# slowly never fills a single bucket, so it never pages no matter how long it
+# runs or how much it is breaking.
+#
+# Observed, not hypothetical (docs/issues/error-log-alarm-blind-to-slow-failures.md):
+# on 2026-08-16 `voice.reconcileTranscript` failed 5 consecutive times at
+# 17:32:34 / 17:34:34 / 17:36:34 / 17:38:34 / 17:40:34 UTC with 'no
+# OutboundQueueAdapter configured'. Spaced 120s apart by the SQS visibility
+# timeout, each bucket held only 2-3 - under threshold. `hc-prod-error-logs`
+# stayed OK the whole time while EVERY worker-side job continuation in
+# production was disabled. A human found it by noticing a stuck voicemail.
+#
+# The 120s spacing is structural, not bad luck: an SQS-redelivered handler is
+# rate-limited by the queue's visibility timeout, so ANY persistently failing
+# job errors at a cadence the burst threshold cannot see. Hence: threshold 1
+# (a SINGLE error in a bucket counts) but 3 CONSECUTIVE buckets required, so a
+# lone blip stays quiet and ~15 minutes of unbroken errors pages. Both alarms
+# keep their own value - burst catches a sudden storm, this catches a bleed.
+resource "aws_cloudwatch_metric_alarm" "error_logs_sustained" {
+  alarm_name          = "${var.name_prefix}error-logs-sustained"
+  alarm_description   = "App+worker errors (pino level >= 50) recurring in 3 CONSECUTIVE 5-minute periods - a slow, steady failure the burst alarm (${var.name_prefix}error-logs) is structurally unable to see. See RUNBOOK 'Jobs' and the worker log group."
+  namespace           = local.metric_namespace
+  metric_name         = "ErrorLogs"
+  statistic           = "Sum"
+  period              = 300
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  # ErrorLogs has default_value 0, so a healthy stack reports 0 rather than
+  # nothing; notBreaching covers the gap when the log group is entirely silent.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alerts.arn]
+  ok_actions         = [aws_sns_topic.alerts.arn]
+}
+
 # Messaging delivery alarms (doc §9). Each → the same alerts SNS topic, with
 # both ok + alarm actions, period 300, treat_missing_data notBreaching (these
 # metrics stop emitting when nothing is wrong — missing = OK, not breaching).

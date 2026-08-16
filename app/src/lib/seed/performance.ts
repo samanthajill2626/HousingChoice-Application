@@ -1077,6 +1077,20 @@ export function validatePerformanceConversation(conversation: ConversationItem):
     throw new Error('performance conversation has invalid required fields');
   }
 
+  // byUnread invariant (design 2026-08-16 section 4.2): the sparse index is
+  // keyed on `unread_flag`, so a generated row with a nonzero count and no flag
+  // is simply absent from every unread read. THIS CHECK MUST STAY IN THE FIRST
+  // BLOCK: the relay_group and group_text branches below RETURN EARLY, and both
+  // of those row kinds carry flags - an assertion appended at the end would
+  // never run for exactly the rows it exists to protect.
+  const unread = conversation.unread_count ?? 0;
+  if (('unread_flag' in conversation) !== unread > 0) {
+    throw new Error('performance conversation must carry unread_flag iff unread_count > 0');
+  }
+  if ('unread_flag' in conversation && conversation.unread_flag !== UNREAD_FLAG_VALUE) {
+    throw new Error('performance conversation unread_flag must be the byUnread partition value');
+  }
+
   if (conversation.type === 'relay_group') {
     if (
       conversation.participants.length < 2 ||

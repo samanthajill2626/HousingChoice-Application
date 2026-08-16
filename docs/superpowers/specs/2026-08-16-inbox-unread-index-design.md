@@ -1,6 +1,6 @@
 # Inbox Unread Index - Design Spec (2026-08-16)
 
-Status: DRAFT v3 (post design-review rounds 1-2) for human review
+Status: APPROVED v6 (human gate 2026-08-16, with the close/delete reset ruling)
 Branch: feat/inbox-unread-index (worktree W:/tmp/inbox-unread-index, cut from main @41627198)
 Issue: docs/issues/inbox-unread-sse-full-walk.md (this spec is the "separate design" it calls for)
 Related: docs/issues/inbox-filter-tabs-full-walk.md (unread half resolved here; unknown half stays open)
@@ -222,7 +222,7 @@ cost model and colliding two meanings of "exhausted"):
 3. Exposes, at any stop point: `scanPosition` (the tuple of the last RAW
    item scanned - always advances through filtered runs, so they cannot
    dead-end the feed), `scanExhausted` (the underlying Query stream ended),
-   and `budgetSpent`. Because the iterator is lazy, a consumer that stops
+   and `scanned` (raw items consumed from the budget). Because the iterator is lazy, a consumer that stops
    pulling stops the scan - the walk does only the work its consumer needs.
 
 RAW WALK BUDGET: UNREAD_WALK_LIMIT = 2000 scanned items per REQUEST (a
@@ -497,7 +497,7 @@ relay opt-out attention scan lives INSIDE that loop, ordered before the
 unread gate (today.ts:538-543), and keeps working unchanged. What moves: the
 unread gate (today.ts:581-582) and everything downstream (unknown-triage
 needs_you_now items and unreplied items, today.ts:584-641) leave the loop and
-become a SECOND pass fed by `listUnreadConversations` (layer 1), filtered to
+become a SECOND pass fed by `iterateUnreadConversations` (layer 1), filtered to
 the 1:1 bucket - preserving per-conversation type/timestamp semantics.
 
 - ORDERING PRESERVED: the unread pass still runs before the contacts-triage
@@ -737,8 +737,10 @@ EXISTING TEST SURFACES THAT CHANGE (enumerated; real builder work):
   invalidated by the rewrite and must be re-pinned; routes.ts:666,720 pin
   useInbox.ts:46-65,139-155 / Inbox.tsx:53-75 - ranges v3 does not edit
   (the markRead wiring lands ~:260-300) - verify at build, expect no churn;
-  routes.ts:753-755 pin the channel hooks, which v3 does NOT edit - leave
-  alone.
+  routes.ts:753-755 pin the channel hooks, which the v6 ruling DOES now
+  edit (markGroupRead/markPersonRead gain badge wiring) - re-derive those
+  pins; useInbox pins at routes.ts:666,720 ALSO churn (InboxState gains
+  `truncated` inside useInbox.ts:46-65) - re-derive rather than assume.
 - app/scripts/profile-inbox.ts / lib/inboxDiagnostics.ts: the plan's
   `unread-badge` case switches to driving the unread-count function; a
   `unread-page` case stays on aggregateInbox at limit 30.

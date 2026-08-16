@@ -27,7 +27,7 @@ This plan's predecessor invented helper names. These are the real ones, verified
 
 | Layer | Helper | Location |
 | --- | --- | --- |
-| Repo unit tests | `repoWith(doc)`, `makeDoc()`, constants `T1` `T2` `T3` `FUTURE` | `app/test/extractionRepo.test.ts:298` |
+| Repo unit tests | `repoWith(doc)`, `makeFakeDoc()`, constants `T1` `T2` `T3` `FUTURE` | `app/test/extractionRepo.test.ts:298` |
 | Job unit tests | `makeHarness({dueRows, messages?, contact?, conversation?, claimResult?, driver?, aiRuns?})` returning `{deps, repo, seen, runs, aiRuns, applyEvents}`; `dueRow(overrides)`; `msg(seconds, direction, body)`; `tenantContact()`; `convWith(id)`; constants `NOW` `WALL_NOW` `DEBOUNCE` | `app/test/extractionJob.test.ts:182-271` |
 | Route tests | `makeWebhookHarness()` returning `{app, world}`; `createFakeWorld`; `ORIGIN_SECRET`; `TEST_SESSION_COOKIE`; supertest | `app/test/helpers/twilioWebhookHarness.ts` |
 | Dashboard tests | `renderAt(contactId)`; a `vi.mock` factory over `../../api/index.js` | `dashboard/src/routes/contact/ContactDetail.test.tsx:72` |
@@ -75,7 +75,7 @@ Append to `app/test/extractionRepo.test.ts`, using the file's existing `makeDoc(
 ```ts
 describe('extractionRepo.requestManualExtraction', () => {
   it('arms the row with the flag and the request id, and never writes channel', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     const item = await repo.getDue('conv-1');
@@ -87,7 +87,7 @@ describe('extractionRepo.requestManualExtraction', () => {
   });
 
   it('leaves an existing channel untouched when a press lands on a scheduled row', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
@@ -98,7 +98,7 @@ describe('extractionRepo.requestManualExtraction', () => {
   });
 
   it('scheduleExtraction never sets the flag or a request id', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     const item = await repo.getDue('conv-1');
@@ -107,7 +107,7 @@ describe('extractionRepo.requestManualExtraction', () => {
   });
 
   it('claim removes the flag and the request id with the index keys', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     expect(await repo.claim('conv-1', T2, T1)).toBe(true);
@@ -119,7 +119,7 @@ describe('extractionRepo.requestManualExtraction', () => {
 });
 ```
 
-If `makeDoc` is named differently in the file, use whatever the neighbouring `describe` blocks call - do not invent one.
+These names are read from the file, not guessed: `makeFakeDoc` is at `app/test/extractionRepo.test.ts:176` and `repoWith` at `:298`.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -297,7 +297,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
     ({ claimed: true, listedDueAt: T1, manual: false, ...over });
 
   it('claimed, nobody re-armed: backs off normally', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
@@ -309,7 +309,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claimed, a press re-armed: the press survives and the error is still recorded', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
@@ -324,7 +324,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claimed, a press re-armed, and the run PARKS: the press is not deleted', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
@@ -337,7 +337,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claim THREW and nobody re-armed: still backs off, and can still park', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
@@ -349,7 +349,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claim THREW and a press re-armed: the press survives', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
@@ -360,7 +360,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('a manual run re-arms WITH the flag; an automatic one does not', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     await repo.claim('conv-1', T2, T1);
@@ -374,7 +374,7 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('parking REMOVEs BOTH the flag and the request id', async () => {
-    const { doc } = makeDoc();
+    const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     await repo.claim('conv-1', T2, T1);
@@ -521,7 +521,7 @@ In `processRow`:
   }
 ```
 
-In `runDueExtractions`, replace the `repo.fail(...)` call. `row.dueAt` is optional on the item; a due row returned by `listDue` always has it, and the `?? ''` is a total fallback that can only be reached on a malformed row:
+In `runDueExtractions`, replace the `repo.fail(...)` call. `row.dueAt` is optional on the type but `processRow` returns early when it is absent (`app/src/jobs/extraction.ts:363`), so the `?? ''` below is UNREACHABLE today - it exists only to satisfy the optional type. Do not treat it as a real fallback: if that guard ever moves, an empty `listedDueAt` would make the not-claimed condition never match and resurrect the unbounded-retry bug. A comment on the line should say so.
 
 ```ts
       try {
@@ -690,20 +690,20 @@ Expected: FAIL - the aged fixture produces no driver call.
   maxTranscriptAgeDays: number | null;
 ```
 
-and in `buildFullRunWindow`'s `windowParams`, replace the constant with `input.maxTranscriptAgeDays`. Remove `MAX_TRANSCRIPT_AGE_DAYS` from the import list at `runWindow.ts:6` if nothing else in the file uses it - an unused import fails lint.
+and in `buildFullRunWindow`'s `windowParams`, replace the constant with `input.maxTranscriptAgeDays`. Remove `MAX_TRANSCRIPT_AGE_DAYS` from the import list at `runWindow.ts:6` if nothing else in the file uses it - a dangling import of a constant this file no longer applies is misleading to the next reader.
 
 - [ ] **Step 4: Update the window unit tests**
 
-`app/test/extractionRunWindow.test.ts` calls `buildFullRunWindow` in 9 places. Each now needs the new required field. Add `maxTranscriptAgeDays: 30` to every existing call (they are all modelling automatic runs), and add one new case:
+`app/test/extractionRunWindow.test.ts` calls `buildFullRunWindow` in **7** places, each with an inline object literal (there is no shared input builder). Add `maxTranscriptAgeDays: 30` to all 7 - they all model automatic runs - and add one new case that copies the nearest existing literal and overrides the field:
 
 ```ts
   it('records a null age floor when the run waived it', () => {
-    const w = buildFullRunWindow({ ...baseInput(), maxTranscriptAgeDays: null });
-    expect(w.windowParams!.maxTranscriptAgeDays).toBeNull();
+    // Copy the input literal from the 'records the byte-affecting constants'
+    // test above and override the one field.
+    const window = buildFullRunWindow({ /* ...that literal... */ maxTranscriptAgeDays: null });
+    expect(window.windowParams!.maxTranscriptAgeDays).toBeNull();
   });
 ```
-
-using whatever the file's existing input-builder is called.
 
 - [ ] **Step 5: Waive the two gates**
 
@@ -828,6 +828,37 @@ describe('ai_run.completed', () => {
     });
     await runDueExtractions(NOW, h.deps);
     expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'skipped' });
+  });
+
+  it('emits for a NO_OP run (the model proposed nothing)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'just saying hi')], // no EXTRACT marker
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'no_op', wrote: 0, suggested: 0 });
+  });
+
+  it('emits for a FAILED run, carrying the error kind', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      driver: {
+        kind: 'fake',
+        extract: async () => ({
+          ok: false as const,
+          meta: { driver: 'fake' as const },
+          failure: 'driver' as const,
+          message: 'boom',
+        }),
+      },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'failed', errorKind: 'driver' });
   });
 
   it('still emits when the run-log write fails', async () => {
@@ -1138,7 +1169,44 @@ describe('POST /api/contacts/:contactId/extraction-run', () => {
 });
 ```
 
-For the two partial-failure cases, the harness's extraction fake must be made to throw. Add a hook to `twilioWebhookHarness.ts` if one does not exist (the fake already records `scheduleExtraction` calls, so follow that pattern), then:
+Two more cases need harness support that **does not exist yet and must be built
+in this task** - do not assume it:
+
+**(a) A throwing `requestManualExtraction`.** Add to `createFakeWorld` a
+`failManualExtractionFor = new Set<string>()`, and in the fake extraction repo's
+`requestManualExtraction`, throw when the conversationId is in that set. Follow
+the pattern the fake already uses for recording `scheduleExtraction` calls
+(`app/test/helpers/twilioWebhookHarness.ts:2886`).
+
+**(b) The kill switch off.** The contacts router reads `aiExtractionEnabled`
+from its deps (`app/src/routes/contacts.ts:142,889`). Give `makeWebhookHarness`
+an options argument that forwards it, so the refusal is testable at all:
+
+```ts
+  it('refuses when the kill switch is off', async () => {
+    const { app, world } = makeWebhookHarness({ aiExtractionEnabled: false });
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('extraction_disabled');
+  });
+
+  it('appends an audit entry with the counts', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    const entry = world.auditEntries.find((e) => e.action === 'extraction_run_requested');
+    expect(entry).toBeDefined();
+    expect(entry!.payload).toMatchObject({ scheduled: 1, failed: 0 });
+  });
+```
+
+Read how the harness records audit appends before writing that last assertion -
+`world.auditEntries` is the expected shape but confirm the property name.
+
+Then the partial-failure pair:
 
 ```ts
   it('is a 200 with a partial list when one write fails, never a 500', async () => {
@@ -1294,26 +1362,43 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 with `const runExtraction = vi.fn();` hoisted beside the file's other `vi.fn()` declarations. Follow the file's existing hoisting idiom exactly - the factory must not close over anything declared after it.
 
-Add a helper beside `renderAt`:
+Add helpers beside `renderAt`. **Match this file's idioms exactly** - it imports
+`userEvent` per test via a dynamic import and calls `userEvent.setup()`
+(`ContactDetail.test.tsx:195-196`); neither `act` nor a bare `userEvent` is in
+scope at module level:
 
 ```tsx
 function emitRunCompleted(payload: Record<string, unknown>): void {
-  act(() => { capturedHandlers.onAiRunCompleted?.(payload); });
+  capturedHandlers.onAiRunCompleted?.(payload);
 }
 
 async function pressRun(): Promise<void> {
-  await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
-  await userEvent.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
+  const { default: userEvent } = await import('@testing-library/user-event');
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: /more actions/i }));
+  await user.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
 }
 ```
 
-Confirm the kebab button's accessible name against `ContactActionsMenu.tsx` before using `/more actions/i`.
+If `emitRunCompleted` produces an act() warning in practice, wrap it using
+whatever `act` import the file already has - do not add a module-level one that
+conflicts with the dynamic-import idiom.
+
+Confirm the kebab button's accessible name against `ContactActionsMenu.tsx`
+before using `/more actions/i`.
+
+**Every test must seed the contact.** The file's outer `beforeEach` only calls
+`getContact.mockReset()` (`ContactDetail.test.tsx:139-140`) - it does not seed a
+value, so each test does its own `getContact.mockResolvedValue(...)`. Without
+that, `renderAt('k1')` renders no contact and there is no kebab to click.
 
 - [ ] **Step 2: Write the failing tests**
 
 ```tsx
 describe('Run AI extraction', () => {
   beforeEach(() => {
+    // The outer beforeEach only resets these; seeding is per-test in this file.
+    getContact.mockResolvedValue(TENANT);
     runExtraction.mockResolvedValue({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
   });
 
@@ -1321,6 +1406,27 @@ describe('Run AI extraction', () => {
     renderAt('k1');
     await pressRun();
     expect(await screen.findByRole('status')).toHaveTextContent(/running ai extraction/i);
+  });
+
+  it('disables the item against a second press', async () => {
+    renderAt('k1');
+    await pressRun();
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /more actions/i }));
+    expect(screen.getByRole('menuitem', { name: /run ai extraction/i })).toBeDisabled();
+  });
+
+  it('times out to the still-running copy when no event arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      renderAt('k1');
+      await pressRun();
+      vi.advanceTimersByTime(RUN_INDICATOR_TIMEOUT_MS + 1);
+      expect(await screen.findByRole('status')).toHaveTextContent(/still running/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resolves to the applied copy', async () => {
@@ -1376,7 +1482,10 @@ describe('Run AI extraction', () => {
     ['no_eligible_conversations', /no eligible conversations/i],
     ['schedule_failed', /could not be started/i],
   ])('renders its own copy for %s', async (code, copy) => {
-    runExtraction.mockRejectedValue(Object.assign(new Error('refused'), { code }));
+    // A REAL ApiError: the copy helper gates on `instanceof ApiError`
+    // (dashboard/src/api/client.ts:11), so a plain Error carrying a `code`
+    // property falls through to the default and five of these six rows fail.
+    runExtraction.mockRejectedValue(new ApiError(409, code, 'refused'));
     renderAt('k1');
     await pressRun();
     expect(await screen.findByRole('alert')).toHaveTextContent(copy);
@@ -1384,7 +1493,9 @@ describe('Run AI extraction', () => {
 });
 ```
 
-Check how `ApiError` exposes the server's `error` string (the class already carries a `code`); use that property rather than re-parsing `body`.
+`ApiError`'s constructor is `(status, code, message, body?)` and it already
+carries the server's `{ error }` value as `code` - read that, never re-parse
+`body`. Import it in the test file from wherever the other tests import it.
 
 - [ ] **Step 3: Run to verify they fail**
 
@@ -1588,19 +1699,24 @@ Create `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`, modelled on
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { extractionTick } from "../../fixtures/extraction.js";
 import { postInboundSms } from "../../fixtures/fakeTwilio.js";
+import { reseed } from "../../fixtures/reseed.js";
 
 const NEXT = process.env["E2E_DASHBOARD_URL"] ?? "http://127.0.0.1:5174";
 const AGED = "2026-01-05T12:00:00.000Z";
 const MARKER = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"Two cats"}}}';
 
 // devLoginAs / createContact / uniquePhone: copy from ai-run-log.spec.ts.
+// The seeded staff user is founder@example.com (app/src/lib/seed/lean.ts:383);
+// staff@example.com does not exist and dev-login will fail.
 
 test("a manual run reads aged history that an automatic run cannot see", async ({ page, request }) => {
-  await devLoginAs(page, "staff@example.com");
+  await reseed(request); // every sibling spec starts from a known world
+  await devLoginAs(page, "founder@example.com");
   const { contactId, phone } = await createContact(request, { firstName: "Aged", type: "tenant" });
 
   // An ordinary inbound creates the conversation AND an automatic due row.
-  await postInboundSms(request, { from: phone, body: "hello" });
+  // postInboundSms requires a messageSid (e2e/fixtures/fakeTwilio.ts:56).
+  await postInboundSms(request, { from: phone, body: "hello", messageSid: `SM${Date.now()}` });
   const convId = await conversationIdFor(request, contactId);
 
   // Plant the marker on a message far outside the 30-day window.
@@ -1632,7 +1748,13 @@ test("a manual run reads aged history that an automatic run cannot see", async (
 });
 ```
 
-Write `conversationIdFor(request, contactId)` against the contact-threads endpoint the dashboard itself uses; confirm the path in `dashboard/src/api/endpoints.ts` rather than guessing. Confirm the settings route and the kebab's accessible name against the app before finalising.
+**`conversationIdFor` does not exist - write it in this spec file.** Read the
+contact-threads or conversations endpoint the dashboard itself calls
+(`dashboard/src/api/endpoints.ts`) and hit the same path, e.g. GET the contact's
+conversations and take the `tenant_1to1` one's id. Confirm the settings route
+(`/settings/ai-runs`), the run-log heading ("AI run log"), the list's
+accessible name ("AI runs" - `AiRunList.tsx:47`) and the kebab's accessible name
+against the app before finalising.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1672,14 +1794,15 @@ In `app/src/routes/dev.ts`, beside the transcript fixture:
       delivery_status: 'delivered',
       created_at: createdAt,
     };
-    const doc = createDocumentClient();
+    // Reuse the router-scoped client (dev.ts:176) rather than constructing a
+    // second one - that one honours the injectable `deps.doc` the tests use.
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
     log.info({ conversationId, tsMsgId: item.tsMsgId }, 'dev message fixture planted');
     res.json({ tsMsgId: item.tsMsgId });
   });
 ```
 
-Confirm the table base name against `tableName(...)`'s other uses in this file, and import `PutCommand` from `@aws-sdk/lib-dynamodb` and `randomUUID` from `node:crypto` if not already present.
+Confirm the table base name against `tableName(...)`'s other uses in this file (`:304` uses `OUTBOX_TABLE_BASE`), reuse the router-scoped `doc` at `:176`, and import `PutCommand` from `@aws-sdk/lib-dynamodb` and `randomUUID` from `node:crypto` if not already present.
 
 - [ ] **Step 4: Run the e2e**
 
@@ -1763,7 +1886,19 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 | 7 e2e with a real negative | 7 |
 | 9 out of scope, filed | 8 |
 
-**2. Placeholder scan.** No TBD, no "add error handling", no "similar to Task N". Six steps say "confirm X against the file before finalising" - each names the exact file and property, because the previous revision of this plan invented helper names and a builder must not inherit that habit.
+**2. Placeholder scan.** No TBD, no "add error handling", no "similar to Task N".
+
+Several steps say "confirm X against the file" or "this does not exist - build
+it". Those are deliberate and each names the exact file and property. The first
+revision of this plan invented helper names wholesale and asserted they were
+real; naming the uncertainty is the correction, and a builder must not inherit
+the earlier habit.
+
+**Three pieces of test infrastructure are BUILT by this plan, not assumed:**
+`makeHarness`'s `jobEvents` recorder (Task 4 step 1), `createFakeWorld`'s
+`failManualExtractionFor` set and `makeWebhookHarness`'s `aiExtractionEnabled`
+option (Task 5 step 1), and the test file's `capturedHandlers` seam plus
+`conversationIdFor` (Tasks 6 and 7).
 
 **3. Type consistency.** `requestManualExtraction(conversationId, dueAt, requestId)` is identical in Tasks 1, 5. `fail(conversationId, error, nextDueAt, {claimed, listedDueAt, manual})` is defined in Task 2 and called with that shape in Task 2 step 5. `AiRunCompletedEvent` fields match across Task 4 (backend) and Task 6 (dashboard). `RunDraft.requestId` is set in Task 1 and read in Task 4; `.wrote`/`.suggested` set in Task 3, read in Task 4; `.claimed` set and read in Task 2.
 

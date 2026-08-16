@@ -413,8 +413,9 @@ today's pager provides, inbox.ts:755-800):
    before the page could fill, or the SEEN_SET_MAX depth cap ended paging
    (4.3). Never set elsewhere. Client handling (declared, small):
    - `rows.length === 0 && truncated` on the FIRST page: render the
-     honest failure state ("Couldn't load unread conversations") with the
-     existing retry affordance - and NOTE (round-4 precision): retry
+     EXISTING inbox error state verbatim (its shipped copy "We couldn't
+     load your inbox." + retry - no new copy is invented; new automated
+     user-facing copy would need the message catalog) - and NOTE (round-4 precision): retry
      refetches the same prefix with a fresh budget and may fail again
      until the underlying accrual is addressed; the point of this state
      is not lying ("all caught up"), not guaranteed recovery.

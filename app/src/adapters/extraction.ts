@@ -159,12 +159,14 @@ export const EMPTY_EXTRACTION: ExtractionResult = Object.freeze({ fields: {} }) 
  * This budget must cover the WHOLE all-required wire object: eight field ops at
  * op+value+reason each, statusAdvance, typeSuggestion, phoneAddition, the
  * address parts block, noteLines, and one speakerRoles pair per `Speaker N`
- * label. A `voice` run is the largest of those by construction, and 2048 left
- * it no headroom - the model hit the cap mid-object and the run failed.
+ * label. A `voice` run is the largest of those by construction.
  *
- * Raised to 4096 with THINKING_CONFIG below, not instead of it: the cap is only
- * a meaningful "JSON only" budget while thinking is off, because max_tokens
- * bounds thinking plus response text together.
+ * HEADROOM, not the fix. Run 4bf0cf42 measured it: 2048 output tokens billed
+ * against ~500 characters of emitted JSON - order of 150 tokens of text, with
+ * the other ~1900 spent on thinking the request never asked for and never saw.
+ * 2048 was always ample for the JSON alone; THINKING_CONFIG below is what
+ * actually reclaims it. 4096 just means a verbose future model has somewhere to
+ * go before it truncates again.
  */
 const MAX_OUTPUT_TOKENS = 4096;
 

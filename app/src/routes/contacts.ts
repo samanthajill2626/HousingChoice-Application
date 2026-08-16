@@ -1911,6 +1911,37 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       deletedAt,
     });
+    // ZERO the unread on every thread this contact still owns (inbox-unread-index
+    // spec 4.2, human ruling at the spec gate). A deleted contact's unread threads
+    // are invisible to every reader but stay resident in the sparse byUnread
+    // index, permanently inflating the badge's walk. Same fan-out shape as
+    // POST /api/inbox/:contactId/read (inbox.ts).
+    //
+    // DELETE-ONLY, DELIBERATELY: this does NOT live in
+    // propagateContactPresenceChange below, because RESTORE calls that too - and
+    // a reset on restore would zero exactly the post-deletion unread the
+    // deleted-contact RESURFACING rule depends on. Resurfacing is unaffected by
+    // the reset here: it requires a post-deletion INBOUND, and that inbound
+    // re-increments unread (and re-stamps the flag) on its own.
+    //
+    // Runs BEFORE the presence fan-out so the conversation.updated emits that
+    // fan-out re-reads carry unread 0 rather than a stale count. BEST-EFFORT per
+    // thread: the delete has already persisted, so a row that vanished under us
+    // (racing retract/close) must not turn a successful delete into a 500.
+    // DECLARED PRODUCT CHANGE (human-approved): a restored contact returns with
+    // unread 0.
+    await Promise.all(
+      (await conversationsForContact(updated, conversations))
+        .filter((c) => typeof c.unread_count === 'number' && c.unread_count > 0)
+        .map(async (c) => {
+          try {
+            await conversations.resetUnread(c.conversationId);
+          } catch (err) {
+            if (err instanceof ConditionalCheckFailedException) return; // race: already gone
+            throw err;
+          }
+        }),
+    );
     // Refresh the live views so this contact's Today/inbox cards drop without a reload.
     await propagateContactPresenceChange(contactId, updated);
     log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');

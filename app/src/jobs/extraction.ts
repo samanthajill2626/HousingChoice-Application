@@ -290,6 +290,10 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
+  /** Counts for the completion event, sourced from applyOutcome where they
+   *  exist - NOT re-derived from `decisions`, which is best-effort. */
+  wrote?: number;
+  suggested?: number;
   /** The press this run answers, carried from the due row (manual runs only). */
   requestId?: string;
   /** False when repo.claim THREW - the row was never un-armed, which changes
@@ -366,6 +370,9 @@ async function processRow(
   const { repo, conversations, messages, contacts, driver, applyDeps, logger } = deps;
   const conversationId = row.conversationId;
   const cursor = row.cursor ?? '';
+  // The single source of truth for both waivers and the recorded trigger. Read
+  // from the row listDue returned, which is BEFORE claim clears it.
+  const manual = row.manualRequested === true;
   const failed = (kind: RunErrorKind, err: unknown): ProcessRowResult => {
     draft.error = { kind, message: err instanceof Error ? err.message : String(err) };
     return { record: true, outcome: 'failed' };
@@ -453,8 +460,13 @@ async function processRow(
   }
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const chronological = [...newestFirst].reverse();
-  const fresh = chronological.filter((m) => m.created_at >= cutoff);
-  const agedOutTsMsgIds = chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
+  // A manual run waives the age floor: the imported history this feature exists
+  // to reach is historical by definition. Newest-50 and the 60k char budget
+  // still bound the window.
+  const fresh = manual ? chronological : chronological.filter((m) => m.created_at >= cutoff);
+  const agedOutTsMsgIds = manual
+    ? []
+    : chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
   const newestTsMsgId = fresh[fresh.length - 1]?.tsMsgId;
   const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
     cursor,
@@ -467,7 +479,9 @@ async function processRow(
   // entirely rather than storing half of one.
   if (lightWindow !== undefined) draft.window = lightWindow;
 
-  const hasNewClient = row.channel === 'voice' || row.channel === 'triage' || fresh.some(
+  // A manual run joins the existing voice/triage bypasses: the operator asked
+  // for this run, so "nothing new since the cursor" is not a reason to skip it.
+  const hasNewClient = manual || row.channel === 'voice' || row.channel === 'triage' || fresh.some(
     (m) => m.tsMsgId > cursor && (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
   );
   if (!hasNewClient) {
@@ -502,6 +516,7 @@ async function processRow(
   // successfully from the same data, so retaining it degrades nothing.
   const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
     cursor, fetchedCount, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
+    maxTranscriptAgeDays: manual ? null : MAX_TRANSCRIPT_AGE_DAYS,
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
   }));
   if (fullWindow !== undefined) draft.window = fullWindow;
@@ -551,6 +566,10 @@ async function processRow(
   }));
   if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
   draft.notedLines = applyOutcome.notedLines;
+  // `wrote` and `suggested` are string[] of target names on applyOutcome; the
+  // event carries COUNTS only.
+  draft.wrote = applyOutcome.wrote.length;
+  draft.suggested = applyOutcome.suggested.length;
   draft.displaced = applyOutcome.displaced;
   const nextCursor = newestTsMsgId !== undefined && newestTsMsgId > cursor ? newestTsMsgId : cursor;
   const completeFailure = await completeOrFail(nextCursor);

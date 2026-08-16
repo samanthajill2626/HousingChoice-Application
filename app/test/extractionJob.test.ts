@@ -120,6 +120,23 @@ function emailMsg(
   };
 }
 
+/** A message far outside the 30-day window, for the manual-run age waiver. */
+function agedMsg(direction: 'inbound' | 'outbound', body: string): MessageItem {
+  const ts = '2026-01-05T12:00:00.000Z';
+  return {
+    conversationId: 'conv1',
+    tsMsgId: `${ts}#aged`,
+    type: 'sms',
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    body,
+    provider_sid: 'aged',
+    provider_ts: ts,
+    delivery_status: 'delivered',
+    created_at: ts,
+  };
+}
+
 function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
@@ -1316,5 +1333,101 @@ describe('runDueExtractions - group_ambiguous_origin exclusion (T3.7)', () => {
     await runDueExtractions(NOW, h.deps);
 
     expect(h.runs[0]!.window!.windowCappedAtLimit).toBe(true);
+  });
+});
+
+describe('manual runs waive both gates', () => {
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+
+  it('reaches the driver when every message predates the 30-day cutoff', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
+  });
+
+  it('the SAME fixture without the flag skips no_new_client, not empty_window', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(0);
+    expect(h.runs[0]!.outcome).toBe('skipped');
+    expect(h.runs[0]!.skipReason).toBe('no_new_client');
+  });
+
+  it('waives no_new_client when the cursor is already past every message', async () => {
+    const fresh = msg(10, 'inbound', EXTRACT_BODY);
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, cursor: fresh.tsMsgId })],
+      messages: [fresh],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
+  });
+
+  it('records trigger manual from the flag even when channel says sms', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'sms', manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
+  });
+
+  it('records a defined trigger for a row with no channel at all', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: undefined, manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
+  });
+
+  it('records the age floor it actually applied: null when waived, 30 otherwise', async () => {
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(manual.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBeNull();
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(auto.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBe(30);
+  });
+
+  it('a manual run still records the aged-out ids as empty, not as excluded', async () => {
+    // The waiver is not "hide the aged messages" - they are IN the window, so
+    // there is nothing aged OUT to record. A non-empty list here would mean the
+    // record claims the model never saw messages it did in fact see.
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.window!.excluded.filter((e) => e.cause === 'age_30d')).toEqual([]);
   });
 });

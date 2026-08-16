@@ -31,18 +31,30 @@ persistently failing job produces errors at a cadence the current threshold is
 structurally unable to see. The louder the failure is over time, the less
 likely it is to trip this alarm relative to a brief harmless blip.
 
+**What DID work, and why this is still worth fixing.** `hc-prod-jobs-dlq-depth`
+(`Maximum(ApproximateNumberOfMessagesVisible) > 0`, 300s, 1 period) caught it:
+the exhausted envelope landed in the DLQ around 17:42 UTC and the alarm went to
+ALARM at 17:45:23 UTC, where it remains. So the incident WAS observable - just
+~20 minutes after the first error, via the queue rather than via the errors
+themselves, and only because the job happened to exhaust `maxReceiveCount`. A
+failing path that retries forever, swallows its error, or is driven by a poll
+loop instead of SQS produces no DLQ message at all and would still be silent.
+The error-log alarm is the control that is supposed to cover that gap, and it
+did not.
+
 **Suggested fix.** Add a companion alarm for SUSTAINED low-rate errors rather
-than retuning this one - the burst alarm is still useful on its own terms.
+than retuning the burst one - the burst alarm is still useful on its own terms.
 Something like `Sum(ErrorLogs) >= 1` with `EvaluationPeriods` 3 of 3 (or M-of-N
 such as 3-of-5 to tolerate a single stray) over 300s: any error recurring
-across ~15 minutes pages, while a one-off stays quiet. Consider the same shape
-for the jobs DLQ, whose depth alarm has likewise not changed state since
-2026-06-12.
+across ~15 minutes pages, while a one-off stays quiet. That would have fired
+around 17:42 UTC on the log lines themselves, independent of the DLQ.
 
-Worth checking at the same time whether a job that exhausts `maxReceiveCount`
-and lands in the DLQ reliably raises `NumberOfMessagesSent` on
-`hc-prod-jobs-dlq`; during this incident the queue drained to 0 with no DLQ
-datapoint recorded in the window, which was never explained.
+Note for anyone building further SQS alarms: a redrive to the DLQ does NOT
+publish `NumberOfMessagesSent` on the destination queue. That metric reported
+no datapoints across the whole incident window even though the DLQ demonstrably
+received a message and still holds it. Alarm on the DEPTH metric
+(`ApproximateNumberOfMessagesVisible`), as the existing DLQ alarm correctly
+does - a sent-rate alarm on a DLQ would never fire.
 
 Both `hc-dev-*` and `hc-prod-*` carry the same alarm definitions, so any change
 applies to both.

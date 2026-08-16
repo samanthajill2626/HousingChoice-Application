@@ -341,11 +341,19 @@ export interface RunDueTourRemindersDeps {
    * Direct provider sends for the GROUP route (landlord_led / pm_team tours
    * with a usable group thread). Named `adapter` to match the repo idiom
    * (RelayFanOutJobDeps / SendMessageServiceDeps). The group route CANNOT go
-   * through sendMessageService — it throws RelaySendNotSupportedError for
-   * relay_group conversations — and the worker cannot enqueue relay.fanOut
-   * (no OutboundQueueAdapter in the worker process), so reminders go through
-   * sendRelayAnnouncement (the relay.intro chain): persist the rung ONCE in
-   * the thread, then per-member adapter sends FROM the pool number.
+   * through sendMessageService - it throws RelaySendNotSupportedError for
+   * relay_group conversations - so reminders go through sendRelayAnnouncement
+   * (the relay.intro chain): persist the rung ONCE in the thread, then
+   * per-member adapter sends FROM the pool number.
+   *
+   * STALE REASON REMOVED (prod incident 2026-08-16): this used to cite a
+   * second justification - "the worker cannot enqueue relay.fanOut (no
+   * OutboundQueueAdapter in the worker process)". That was a DEFECT being
+   * described as a design constraint, and it is now fixed: the worker wires
+   * the same adapters the app does (jobs/queueWiring.ts). Enqueueing
+   * relay.fanOut from here is therefore possible today. The direct path stays
+   * on its own merits - the in-thread visibility requirement documented on
+   * sendGroupReminder below - NOT because the wiring forbids the alternative.
    */
   adapter: MessagingAdapter;
   /**
@@ -903,10 +911,14 @@ export async function resolveUsableGroup(
  * everything sent into a relay group must be visible in its dashboard thread),
  * then sends per member FROM the pool number with opt-out suppression, A2P
  * pacing, and per-member delivery slots. sendMessageService is unusable here
- * (it throws RelaySendNotSupportedError for relay_group threads) and the
- * worker cannot enqueue relay.fanOut (no OutboundQueueAdapter in the worker
- * process). Per-member failures are the service's accepted post-claim
- * tradeoff: the claim is already stamped, a failed member is not retried.
+ * (it throws RelaySendNotSupportedError for relay_group threads). Per-member
+ * failures are the service's accepted post-claim tradeoff: the claim is
+ * already stamped, a failed member is not retried.
+ *
+ * The in-thread announcement is the REASON for this path, not a workaround: a
+ * relay.fanOut enqueue would not persist the rung as a visible system message.
+ * (It also used to be impossible - the worker had no OutboundQueueAdapter -
+ * but that was a defect, fixed 2026-08-16; see the `adapter` dep note above.)
  */
 async function sendGroupReminder(
   row: TourReminderItem,

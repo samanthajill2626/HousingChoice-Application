@@ -1,7 +1,8 @@
 # Manual Extraction Trigger - Design and Scope
 
 - Date: 2026-08-13
-- Status: Ready for human review (revised after spec review round 1)
+- Status: Ready for human review (8 adversarial review rounds; rebased onto
+  main after the sonnet-5 extraction fixes of 2026-08-15)
 - Owner: Cameron Abt
 - Branch: `feat/manual-extraction-trigger`
 
@@ -16,10 +17,10 @@ and every scheduling site is a reaction to traffic or a triage flip:
 | `app/src/services/inboundEmail.ts:748` | `email` | inbound email |
 | `app/src/services/voiceTranscripts.ts:212` | `voice` | completed call transcript |
 | `app/src/routes/contacts.ts:1605` | `triage` | human flips a contact to tenant |
-| `app/src/routes/dev.ts:758` | `voice` | dev transcript fixture (hermetic only) |
+| `app/src/routes/dev.ts:759` | `voice` | dev transcript fixture (hermetic only) |
 
 There is no way for a human to say "extract this contact's facts now". The only
-existing manual seam, `POST /__dev/extraction/tick` (`app/src/routes/dev.ts:642`),
+existing manual seam, `POST /__dev/extraction/tick` (`app/src/routes/dev.ts:643`),
 drains rows that something else already scheduled, and it is structurally absent
 in deployed environments.
 
@@ -384,7 +385,7 @@ where `staleBefore = now - MANUAL_CLAIM_STALE_MS`.
 
 **The constant must be derived from a bounded run, and today nothing bounds
 one.** `AnthropicExtractionDriver` constructs its client with no `timeout` and
-no `maxRetries` (`app/src/adapters/extraction.ts:181`) and the job awaits
+no `maxRetries` (`app/src/adapters/extraction.ts:218`) and the job awaits
 `driver.extract()` unguarded (`app/src/jobs/extraction.ts:491`), so the call
 inherits the SDK defaults: a 10-minute request timeout with 2 retries, and
 timeouts are themselves retried. Worst-case wall clock is therefore about
@@ -392,20 +393,26 @@ timeouts are themselves retried. Worst-case wall clock is therefore about
 the row as stale while the run is still going, and a press starts the
 concurrent run the guard exists to prevent.
 
-So the driver bounds itself first. The three constants are chosen as a SET, and
-two constraints drive them:
+So the driver bounds itself first. Three constraints drive the constants:
 
-1. **The timeout must exceed a full-length generation.** The SDK's own
-   worst-case estimate for a non-streaming call with `max_tokens: 2048` is
-   about 58 seconds. A 60s timeout leaves ~2s of headroom and would
-   systematically time out the slowest legitimate calls - landing hardest on
-   the long imported transcripts this feature exists to read. The timeout is
-   therefore **120s**, roughly double the SDK's own estimate.
+1. **The timeout must exceed a full-length generation, and that length is a
+   function of `MAX_OUTPUT_TOKENS`.** The SDK models worst-case duration
+   linearly - 60 minutes at 128k output tokens - in
+   `calculateNonstreamingTimeout` (`node_modules/@anthropic-ai/sdk/client.js`,
+   `expectedTime = (3_600_000 * maxTokens) / 128_000`). At the cap of 4096
+   (`app/src/adapters/extraction.ts:171`) that is **115.2s**.
 2. **SDK-level retries are disabled, because their sleeps are unbounded.** The
    SDK honours a `retry-after` header with no cap, so `timeout x (maxRetries +
    1)` is NOT the real worst case and a guard test asserting it would stay
    green while the property it protects is violated. Setting `maxRetries: 0`
    removes the sleeps entirely and makes the bound exact.
+3. **Nothing is hardcoded to a cap that moves.** This exact defect has now
+   happened once: an earlier revision of this spec fixed the timeout at 120s,
+   derived from a 57.6s estimate at `MAX_OUTPUT_TOKENS = 2048`. Main then
+   raised the cap to 4096 for unrelated reasons (`09831370`), which doubled the
+   SDK's estimate to 115.2s and silently cut the headroom to under five
+   seconds. A hardcoded number cannot survive a cap change it never sees, so
+   the constants are **computed from the cap**.
 
 Disabling SDK retries loses nothing, because **the job already owns retry**:
 a failed call routes through `repo.fail()`'s attempt counter, exponential
@@ -416,18 +423,35 @@ waited out. The visible change is that a transient error now surfaces as a
 `failed` run record and a backed-off retry rather than being silently absorbed,
 which is more honest observability, not less.
 
-Resulting set:
+Resulting set, every value computed rather than written down:
 
 ```
-EXTRACTION_REQUEST_TIMEOUT_MS = 120_000   // > SDK's ~58s worst case
-maxRetries                    = 0         // job owns retry; no uncapped sleeps
-MANUAL_CLAIM_STALE_MS         = 300_000   // 2.5x the exact bound
+// The SDK's own worst-case model, restated so the chain is auditable.
+SDK_WORST_CASE_MS             = (3_600_000 * MAX_OUTPUT_TOKENS) / 128_000  // 115_200 at 4096
+EXTRACTION_REQUEST_TIMEOUT_MS = 2 * SDK_WORST_CASE_MS                      // 230_400
+maxRetries                    = 0        // job owns retry; no uncapped sleeps
+MANUAL_CLAIM_STALE_MS         = 2.5 * EXTRACTION_REQUEST_TIMEOUT_MS        // 576_000
 ```
 
-Worst case is now exactly the timeout - 120s - and the five-minute window
-carries 2.5x headroom. The guard test asserts
-`MANUAL_CLAIM_STALE_MS > EXTRACTION_REQUEST_TIMEOUT_MS` with that multiple
-stated, so changing one without the other fails the build.
+Worst case is exactly the timeout, and each constant carries its stated
+multiple over the one below it. **Raising `MAX_OUTPUT_TOKENS` now widens the
+timeout and the staleness window automatically** - the failure that just
+happened cannot happen again.
+
+Two guard tests, because the chain has two links that can break independently:
+
+- `EXTRACTION_REQUEST_TIMEOUT_MS >= 2 * SDK_WORST_CASE_MS`, with
+  `SDK_WORST_CASE_MS` recomputed in the test from `MAX_OUTPUT_TOKENS` and the
+  SDK's constants. This fails if someone replaces the derivation with a literal.
+- `MANUAL_CLAIM_STALE_MS >= 2.5 * EXTRACTION_REQUEST_TIMEOUT_MS`. This holds
+  only because retries are off; if `maxRetries` is ever raised, the premise is
+  gone and the bound must be re-derived, not re-tuned.
+
+The SDK's linear model is deliberately conservative - a structured-output call
+emitting a few hundred tokens of JSON finishes in seconds, nowhere near 115s.
+That conservatism is the point: it is the only non-guessed number available,
+and the cost of being generous is a slower stranded-claim recovery, not a
+wrong result.
 
 **Where the constants live matters.** They do NOT get exported from
 `adapters/extraction.ts`: `app/src/repos/extractionRepo.ts:38` imports that
@@ -439,10 +463,20 @@ test all read.
 
 This bounds automatic runs too, which is a deliberate and separately good
 outcome: an unbounded model call in a poll job can hold a claim for half an
-hour today. A timeout is already handled end to end - `adapters/extraction.ts:196-198`
+hour today. A timeout is already handled end to end - the driver's catch arm
 returns `failure: 'driver'`, which flows through the existing attempts/backoff/
 park path and produces a `failed` run record and an `ai_run.completed`. See
 section 9 for the boundary.
+
+**Interaction with the thinking fix on main.** `09831370` pinned
+`thinking: {type: 'disabled'}` on every call
+(`app/src/adapters/extraction.ts:188`) because an absent parameter means
+different things per model - `claude-opus-4-8` ran without thinking,
+`claude-sonnet-5` ran adaptive thinking against the same shared `max_tokens`
+budget. That fix is what makes the cap mean "JSON only", and therefore what
+makes the SDK's token-derived duration model a sane basis for the timeout at
+all. This spec depends on it: if thinking is ever un-pinned, output tokens stop
+being a proxy for wall-clock duration and the derivation above needs revisiting.
 
 **The guard lives in `requestManualExtraction`'s `ConditionExpression`, not in a
 read before it.** A read-then-act check has a window: two presses can both read
@@ -497,7 +531,7 @@ turning the claim into a real lease, which is out of scope (section 9).
 **A press absorbs a pending inbound countdown; it does not race it.** There is
 exactly one due row per conversation and the debounce is a `dueAt` value on it,
 not a separate timer. An inbound sets `dueAt = now + 30s`
-(`app/src/lib/config.ts:869`); a press slides that same row to `now`. The
+(`app/src/lib/config.ts:897`); a press slides that same row to `now`. The
 pending automatic run is therefore replaced by the manual one rather than
 running alongside it. A consequence to expect: pressing mid-burst pre-empts what
 the debounce is for, so the tenant's next text re-arms the row and produces a
@@ -685,7 +719,14 @@ its states are specified rather than left to the builder:
    The region renders the aggregate outcome in the operator's terms, not the
    job's enum: applied ("Updated 2 fields, 1 suggestion"), no-op or skipped
    ("Ran - nothing new to extract"), failed ("Extraction failed - see Settings >
-   AI runs").
+   AI runs"). A failure whose `errorKind` is **`truncated`** gets its own copy
+   ("Extraction ran out of room - the transcript may be too long"), because it
+   is the one failure an operator can act on and because it is the most likely
+   failure on exactly this feature's target data: a manual run waives the age
+   cutoff, so it sends the widest windows the system ever produces. `truncated`
+   is a real `RunErrorKind` as of `09831370`
+   (`app/src/repos/aiRunsRepo.ts:26`), added when a model swap made the
+   truncation arm necessary - see 4.4a-i.
 3. **Timed out** - if the events do not all arrive within a bounded wait, the
    region stops claiming to know and says so: "Still running - check Settings >
    AI runs". The indicator must never spin forever, because the event can be
@@ -693,7 +734,7 @@ its states are specified rather than left to the builder:
 
 Pending state is **session-local and does not survive a reload**. Recovering it
 would mean querying the run log by contact since the press timestamp - the
-`byEntity` index supports it (`app/src/repos/aiRunsRepo.ts:299-314`) - but for a
+`byEntity` index supports it (`app/src/repos/aiRunsRepo.ts:301-316`) - but for a
 wait measured in seconds that is machinery bought for a rare case. A reloaded
 page simply shows the current facts, which by then are usually the result.
 
@@ -758,12 +799,16 @@ degraded, not broken.
 - `app/src/services/extraction/runWindow.ts` and `runTypes.ts` - the nullable
   age param.
 - `app/src/repos/aiRunsRepo.ts` - `RunTrigger`.
-- `app/src/adapters/extraction.ts:181` - the client gains `timeout` and
+- `app/src/adapters/extraction.ts:218` - the client gains `timeout` and
   `maxRetries: 0` (4.4a-i), read from the new leaf constants module.
-- A new leaf constants module holding `EXTRACTION_REQUEST_TIMEOUT_MS` and
-  `MANUAL_CLAIM_STALE_MS`. It must import nothing: putting them in the adapter
-  would turn `app/src/repos/extractionRepo.ts:38`'s `import type` into a
-  runtime import of `@anthropic-ai/sdk`.
+- A new leaf constants module holding `MAX_OUTPUT_TOKENS` and the values
+  derived from it. It must import nothing: putting them in the adapter would
+  turn `app/src/repos/extractionRepo.ts:38`'s `import type` into a runtime
+  import of `@anthropic-ai/sdk`. **`MAX_OUTPUT_TOKENS` moves here from
+  `app/src/adapters/extraction.ts:171`** so the timeout and staleness values
+  can derive from it without the adapter becoming a runtime dependency of the
+  repo. Its comment block - which records why 4096 is headroom rather than the
+  fix - moves with it intact.
 - `app/src/routes/contacts.ts` - the endpoint, including the post-response call.
 - `app/src/lib/events.ts` - `AppEventMap` + `ALL_APP_EVENTS` (compile-enforced
   pair) and the payload type.
@@ -774,7 +819,7 @@ degraded, not broken.
 - `dashboard/src/api/types.ts` - `AiRunTrigger`, `windowParams`, the new event
   payload.
 - The app-side extraction deps must now be constructible in the APP process, not
-  only the worker and the dev tick. `app/src/routes/dev.ts:602-640` already
+  only the worker and the dev tick. `app/src/routes/dev.ts:603-641` already
   builds exactly these deps lazily, but **the builder cannot live there**: the
   dev router is structurally absent in deployed environments, so importing it
   from a production route would either break the build or drag dev-only code

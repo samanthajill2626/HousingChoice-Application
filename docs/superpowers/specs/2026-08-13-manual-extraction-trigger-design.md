@@ -392,21 +392,57 @@ timeouts are themselves retried. Worst-case wall clock is therefore about
 the row as stale while the run is still going, and a press starts the
 concurrent run the guard exists to prevent.
 
-So the driver bounds itself first:
+So the driver bounds itself first. The three constants are chosen as a SET, and
+two constraints drive them:
 
-- `timeout: EXTRACTION_REQUEST_TIMEOUT_MS` (60s - the call is one
-  `messages.create` with `max_tokens: 2048`, not a long generation)
-- `maxRetries: 2`, stated explicitly rather than inherited
+1. **The timeout must exceed a full-length generation.** The SDK's own
+   worst-case estimate for a non-streaming call with `max_tokens: 2048` is
+   about 58 seconds. A 60s timeout leaves ~2s of headroom and would
+   systematically time out the slowest legitimate calls - landing hardest on
+   the long imported transcripts this feature exists to read. The timeout is
+   therefore **120s**, roughly double the SDK's own estimate.
+2. **SDK-level retries are disabled, because their sleeps are unbounded.** The
+   SDK honours a `retry-after` header with no cap, so `timeout x (maxRetries +
+   1)` is NOT the real worst case and a guard test asserting it would stay
+   green while the property it protects is violated. Setting `maxRetries: 0`
+   removes the sleeps entirely and makes the bound exact.
 
-Worst case becomes `60s x 3 = 180s`, and
-`MANUAL_CLAIM_STALE_MS = 300_000` (five minutes) is then a derived bound with
-comfortable headroom rather than a guessed number. Both constants live together
-with a comment tying one to the other, because changing the timeout without
-changing the window silently re-opens this hole.
+Disabling SDK retries loses nothing, because **the job already owns retry**:
+a failed call routes through `repo.fail()`'s attempt counter, exponential
+backoff, and park-at-five (`app/src/jobs/extraction.ts:654-668`). SDK retries
+were a second, redundant retry layer inside the first, with worse behavior on
+rate limits - a tight SDK retry hammers a 429 that the job's backoff would have
+waited out. The visible change is that a transient error now surfaces as a
+`failed` run record and a backed-off retry rather than being silently absorbed,
+which is more honest observability, not less.
+
+Resulting set:
+
+```
+EXTRACTION_REQUEST_TIMEOUT_MS = 120_000   // > SDK's ~58s worst case
+maxRetries                    = 0         // job owns retry; no uncapped sleeps
+MANUAL_CLAIM_STALE_MS         = 300_000   // 2.5x the exact bound
+```
+
+Worst case is now exactly the timeout - 120s - and the five-minute window
+carries 2.5x headroom. The guard test asserts
+`MANUAL_CLAIM_STALE_MS > EXTRACTION_REQUEST_TIMEOUT_MS` with that multiple
+stated, so changing one without the other fails the build.
+
+**Where the constants live matters.** They do NOT get exported from
+`adapters/extraction.ts`: `app/src/repos/extractionRepo.ts:38` imports that
+module `import type`-only, and adding a runtime import would pull
+`@anthropic-ai/sdk` into every module that imports the repo - the exact shape
+already filed as debt in `extraction-runwindow-module-cycle`. Both constants go
+in a leaf module that imports nothing, which the adapter, the repo, and the
+test all read.
 
 This bounds automatic runs too, which is a deliberate and separately good
 outcome: an unbounded model call in a poll job can hold a claim for half an
-hour today. See section 9 for the boundary.
+hour today. A timeout is already handled end to end - `adapters/extraction.ts:196-198`
+returns `failure: 'driver'`, which flows through the existing attempts/backoff/
+park path and produces a `failed` run record and an `ai_run.completed`. See
+section 9 for the boundary.
 
 **The guard lives in `requestManualExtraction`'s `ConditionExpression`, not in a
 read before it.** A read-then-act check has a window: two presses can both read
@@ -723,8 +759,11 @@ degraded, not broken.
   age param.
 - `app/src/repos/aiRunsRepo.ts` - `RunTrigger`.
 - `app/src/adapters/extraction.ts:181` - the client gains `timeout` and
-  `maxRetries` (4.4a-i), and exports `EXTRACTION_REQUEST_TIMEOUT_MS` so the
-  staleness constant can be derived from it rather than duplicated.
+  `maxRetries: 0` (4.4a-i), read from the new leaf constants module.
+- A new leaf constants module holding `EXTRACTION_REQUEST_TIMEOUT_MS` and
+  `MANUAL_CLAIM_STALE_MS`. It must import nothing: putting them in the adapter
+  would turn `app/src/repos/extractionRepo.ts:38`'s `import type` into a
+  runtime import of `@anthropic-ai/sdk`.
 - `app/src/routes/contacts.ts` - the endpoint, including the post-response call.
 - `app/src/lib/events.ts` - `AppEventMap` + `ALL_APP_EVENTS` (compile-enforced
   pair) and the payload type.
@@ -853,11 +892,16 @@ state that broke some earlier draft of this guard:
   conversation case, and the most common one in practice.
 - A row whose `claimedAt` predates `MANUAL_CLAIM_STALE_MS` is scheduled,
   recovering a run stranded by a dead process.
-- **The driver is constructed with an explicit `timeout` and `maxRetries`**, and
-  a guard test asserts `MANUAL_CLAIM_STALE_MS` exceeds
-  `EXTRACTION_REQUEST_TIMEOUT_MS x (maxRetries + 1)`. This is the test that
-  keeps the two constants from drifting apart later and silently re-opening the
-  concurrent-run hole.
+- **The driver is constructed with an explicit `timeout` and `maxRetries: 0`**,
+  and a guard test asserts `MANUAL_CLAIM_STALE_MS > EXTRACTION_REQUEST_TIMEOUT_MS`
+  by the stated multiple. This is the test that keeps the constants from
+  drifting apart later and silently re-opening the concurrent-run hole. It
+  asserts against the exact bound, which only holds because retries are off -
+  if `maxRetries` is ever raised, the test's premise is gone and it must be
+  re-derived, not just re-tuned.
+- A driver timeout produces `failure: 'driver'`, a `failed` run record, an
+  incremented attempt, and an `ai_run.completed` - the existing path, asserted
+  so disabling SDK retries cannot silently change failure handling.
 - A press covering two threads, one running and one idle, schedules exactly one
   and reports the other as already running.
 - The guard is enforced by the conditional write, not a pre-read: a test drives
@@ -947,10 +991,11 @@ E2E (`e2e/`, accessibility-first selectors):
   starts a third run. This is a property of the accepted residual, not a new
   hazard - the guard cannot fix it without the lease.
 - **Any broader change to the extraction driver.** 4.4a-i sets `timeout` and
-  `maxRetries` on the Anthropic client so the staleness constant is derivable.
-  That is the boundary: two constructor options and the constants they feed.
-  Retry classification, backoff shape, streaming, and model selection are
-  untouched.
+  `maxRetries: 0` on the Anthropic client so the staleness constant is
+  derivable. That is the boundary: two constructor options and the leaf module
+  holding their constants. Retry classification, backoff shape, streaming, and
+  model selection are untouched, and the job's own retry semantics are
+  unchanged - they simply become the only retry layer.
 - **Rendering `windowParams` in the run detail.** Nothing renders it today
   (4.3); making the stored record truthful does not require building a viewer.
 - **Backward pagination of the transcript window.**

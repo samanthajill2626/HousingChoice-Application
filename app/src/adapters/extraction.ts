@@ -135,7 +135,12 @@ export interface ExtractionMeta {
  */
 export type ExtractionCall =
   | { ok: true; meta: ExtractionMeta; result: ExtractionResult }
-  | { ok: false; meta: ExtractionMeta; failure: 'refusal' | 'parse' | 'driver'; message: string };
+  | {
+      ok: false;
+      meta: ExtractionMeta;
+      failure: 'refusal' | 'parse' | 'truncated' | 'driver';
+      message: string;
+    };
 
 export interface ExtractionDriver {
   readonly kind: 'anthropic' | 'console' | 'fake';
@@ -148,7 +153,39 @@ export class ExtractionRefusedError extends Error {}
 /** The canonical "nothing to do" result. */
 export const EMPTY_EXTRACTION: ExtractionResult = Object.freeze({ fields: {} }) as ExtractionResult;
 
-const MAX_OUTPUT_TOKENS = 2048;
+/**
+ * Output-token ceiling for one extraction call.
+ *
+ * This budget must cover the WHOLE all-required wire object: eight field ops at
+ * op+value+reason each, statusAdvance, typeSuggestion, phoneAddition, the
+ * address parts block, noteLines, and one speakerRoles pair per `Speaker N`
+ * label. A `voice` run is the largest of those by construction.
+ *
+ * HEADROOM, not the fix. Run 4bf0cf42 measured it: 2048 output tokens billed
+ * against ~500 characters of emitted JSON - order of 150 tokens of text, with
+ * the other ~1900 spent on thinking the request never asked for and never saw.
+ * 2048 was always ample for the JSON alone; THINKING_CONFIG below is what
+ * actually reclaims it. 4096 just means a verbose future model has somewhere to
+ * go before it truncates again.
+ */
+const MAX_OUTPUT_TOKENS = 4096;
+
+/**
+ * Thinking is pinned OFF, explicitly, on every call.
+ *
+ * NEVER omit this parameter. What omission MEANS is per-model and changed under
+ * us: on claude-opus-4-8 (the model this driver was written and tested against)
+ * an absent `thinking` runs with thinking off, but on claude-sonnet-5 the same
+ * absent parameter runs ADAPTIVE thinking. Because max_tokens caps thinking and
+ * response text together, swapping AI_EXTRACTION_MODEL to sonnet-5 silently
+ * handed the JSON budget to reasoning tokens and truncated every large run -
+ * the model string was the only thing that changed.
+ *
+ * Extraction is mechanical structured output against a fixed schema, so there
+ * is nothing here for thinking to buy. Stating it explicitly makes the budget
+ * mean the same thing on whatever model AI_EXTRACTION_MODEL names next.
+ */
+const THINKING_CONFIG = { type: 'disabled' } as const;
 
 class ConsoleExtractionDriver implements ExtractionDriver {
   readonly kind = 'console' as const;
@@ -196,6 +233,7 @@ class AnthropicExtractionDriver implements ExtractionDriver {
       message = await this.client.messages.create({
         model: this.model,
         max_tokens: MAX_OUTPUT_TOKENS,
+        thinking: THINKING_CONFIG,
         output_config: { format: { type: 'json_schema', schema: EXTRACTION_SCHEMA } },
         system: buildExtractionSystemPrompt(),
         messages: [{ role: 'user', content: buildExtractionUserContent(input) }],
@@ -239,6 +277,32 @@ class AnthropicExtractionDriver implements ExtractionDriver {
       return {
         ok: false, meta, failure: 'refusal',
         message: 'Anthropic declined to extract (stop_reason: refusal)',
+      };
+    }
+    // A max_tokens stop is a TRUNCATION, not a malformed response: the model was
+    // still writing when the budget ran out. It is classified here, beside the
+    // refusal arm and BEFORE the content/parse arms below, or it lands as
+    // whichever of those the wreckage happens to trip - 'driver' ("no text
+    // block") when the cap was spent before any JSON was emitted, 'parse'
+    // (SyntaxError) when it was spent mid-object. Both of those name a symptom
+    // and send the reader looking for a broken response; only the stop reason
+    // names the cause, and only this arm can tell an operator to raise the cap.
+    if (message?.stop_reason === 'max_tokens') {
+      // Best-effort partial text: on a mid-object cut this IS the evidence, and
+      // the arm that normally stamps rawText sits below this early return.
+      const partial = Array.isArray(message.content)
+        ? message.content.find(
+            (block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text',
+          )
+        : undefined;
+      if (partial !== undefined) meta.rawText = partial.text;
+      const spent = meta.usage?.outputTokens;
+      return {
+        ok: false, meta, failure: 'truncated',
+        message:
+          `Anthropic extraction hit the ${MAX_OUTPUT_TOKENS}-token output cap` +
+          (spent === undefined ? '' : ` (${spent} output tokens)`) +
+          ' and returned an incomplete response (stop_reason: max_tokens)',
       };
     }
     if (!usageOk) {

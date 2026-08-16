@@ -503,3 +503,236 @@ describe('createGroupConversationsAdapter', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Conversations SERVICE scoping (cross-env isolation)
+// ---------------------------------------------------------------------------
+//
+// A Conversations service owns its UniqueName namespace, and the account default
+// is one per ACCOUNT. Two envs sharing an account and both on the default derive
+// the SAME UniqueName for the same roster (it is uuidv5 over the roster), so one
+// env ADOPTS the other's live rail. These tests pin that the adapter addresses
+// the configured service and never silently falls back to the shared default.
+
+/** A client exposing BOTH scopes with DISTINCT spies, so a test can prove which
+ *  one the adapter actually addressed. */
+function dualScopeClient() {
+  const mkScope = (tag: string) => {
+    const create = vi
+      .fn()
+      .mockResolvedValue({ sid: `CH${tag}`, uniqueName: 'conv-1', state: 'active' });
+    const bulkCreate = vi
+      .fn()
+      .mockResolvedValue({ sid: `CH${tag}`, uniqueName: 'conv-1', state: 'active' });
+    // ONE shared context, so a test can assert which scope's conversation
+    // resource was addressed AND which operation ran on it.
+    const ctx = {
+      fetch: vi.fn().mockResolvedValue({ sid: `CH${tag}`, uniqueName: 'conv-1', state: 'active' }),
+      remove: vi.fn().mockResolvedValue(true),
+      messages: { create: vi.fn().mockResolvedValue({ sid: 'IM1', index: 0 }) },
+      participants: {
+        create: vi.fn().mockResolvedValue({ sid: 'MB1' }),
+        list: vi.fn().mockResolvedValue([]),
+      },
+    };
+    // `conversations` must itself be a SPY, not a plain arrow. Asserting only
+    // that services(sid) ran proves nothing about any single operation - the
+    // constructor calls it once regardless, so a per-operation regression (a
+    // create on the service scope, a read on the default) would stay green.
+    const conversations = Object.assign(
+      vi.fn(() => ctx),
+      { create },
+    );
+    return {
+      scope: { conversations, conversationWithParticipants: { create: bulkCreate } },
+      conversations,
+      ctx,
+      create,
+      bulkCreate,
+    };
+  };
+
+  const dflt = mkScope('default');
+  const svc = mkScope('service');
+  const services = vi.fn().mockReturnValue(svc.scope);
+  return {
+    client: { conversations: { v1: { ...dflt.scope, services } } },
+    services,
+    dflt,
+    svc,
+  };
+}
+
+/** Every adapter operation that ADDRESSES a conversation, with the assertion for
+ *  the resource call it must make. Table-driven so a newly added operation that
+ *  forgets the scope is a missing row rather than silent coverage loss. */
+const SCOPED_OPERATIONS: {
+  name: string;
+  run: (d: TwilioGroupConversationsDriver) => Promise<unknown>;
+  ran: (scope: ReturnType<typeof dualScopeClient>['svc']) => boolean;
+}[] = [
+  {
+    name: 'fetchByUniqueName (the ADOPT half - reading the wrong scope adopts the other env rail)',
+    run: (d) => d.fetchByUniqueName('conv-1'),
+    ran: (s) => s.ctx.fetch.mock.calls.length > 0,
+  },
+  {
+    name: 'addParticipants',
+    run: (d) => d.addParticipants('CHrail', ['+16175550111']),
+    ran: (s) => s.ctx.participants.create.mock.calls.length > 0,
+  },
+  {
+    name: 'fetchParticipants',
+    run: (d) => d.fetchParticipants('CHrail'),
+    ran: (s) => s.ctx.participants.list.mock.calls.length > 0,
+  },
+  {
+    name: 'removeConversation',
+    run: (d) => d.removeConversation('CHrail'),
+    ran: (s) => s.ctx.remove.mock.calls.length > 0,
+  },
+  {
+    name: 'postGroupMessage',
+    run: (d) => d.postGroupMessage({ conversationSid: 'CHrail', body: 'hi', author: '+14045550000' }),
+    ran: (s) => s.ctx.messages.create.mock.calls.length > 0,
+  },
+];
+
+describe('TwilioGroupConversationsDriver Conversations service scoping', () => {
+  it('addresses the account DEFAULT scope when no service SID is configured', async () => {
+    const f = dualScopeClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await driver.createConversationWithParticipants(CREATE_INPUT);
+
+    expect(f.services).not.toHaveBeenCalled();
+    expect(f.dflt.bulkCreate).toHaveBeenCalledTimes(1);
+    expect(f.svc.bulkCreate).not.toHaveBeenCalled();
+  });
+
+  it('addresses the CONFIGURED service scope and never the default when a service SID is set', async () => {
+    const f = dualScopeClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      conversationsServiceSid: 'ISgrouprails',
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await driver.createConversationWithParticipants(CREATE_INPUT);
+
+    expect(f.services).toHaveBeenCalledWith('ISgrouprails');
+    expect(f.svc.bulkCreate).toHaveBeenCalledTimes(1);
+    // The whole point: the shared default namespace is never touched.
+    expect(f.dflt.bulkCreate).not.toHaveBeenCalled();
+  });
+
+  // Per-OPERATION proof. Asserting services(sid) alone is vacuous: the
+  // constructor calls it once whatever the operations then do, so reverting any
+  // single call site to `this.client.conversations.v1...` would leave such a test
+  // green while creates hit the configured service and reads hit the shared
+  // default - precisely the cross-env bug this change fixes.
+  describe.each(SCOPED_OPERATIONS)('$name', ({ run, ran }) => {
+    it('addresses the CONFIGURED service scope and never the default', async () => {
+      const f = dualScopeClient();
+      const driver = new TwilioGroupConversationsDriver({
+        ...BASE_DEPS,
+        conversationsServiceSid: 'ISgrouprails',
+        client: f.client as never,
+        logger: silentLogger,
+      });
+
+      await run(driver);
+
+      expect(f.svc.conversations).toHaveBeenCalled();
+      expect(ran(f.svc)).toBe(true);
+      // The load-bearing half: the shared default namespace is never addressed.
+      expect(f.dflt.conversations).not.toHaveBeenCalled();
+      expect(ran(f.dflt)).toBe(false);
+    });
+
+    it('addresses the account DEFAULT scope when no service is configured', async () => {
+      const f = dualScopeClient();
+      const driver = new TwilioGroupConversationsDriver({
+        ...BASE_DEPS,
+        client: f.client as never,
+        logger: silentLogger,
+      });
+
+      await run(driver);
+
+      expect(f.services).not.toHaveBeenCalled();
+      expect(f.dflt.conversations).toHaveBeenCalled();
+      expect(ran(f.dflt)).toBe(true);
+    });
+  });
+
+  it('routes the INDIVIDUAL-ADDS FALLBACK create through the configured service too', async () => {
+    // The bulk create and the fallback create are DIFFERENT resources
+    // (conversationWithParticipants vs conversations.create), so covering the
+    // happy path proves nothing about the fallback. If only the fallback
+    // regressed, the rail would be minted in the shared default namespace while
+    // every subsequent participant/message op addressed the configured service -
+    // cross-env contamination PLUS not-found participant failures, and it would
+    // only ever fire on a bulk refusal (a 50407-class member), so no happy-path
+    // test would ever catch it.
+    const f = dualScopeClient();
+    f.svc.bulkCreate.mockRejectedValueOnce(
+      Object.assign(new Error('bad address'), { code: 50407 }),
+    );
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      conversationsServiceSid: 'ISgrouprails',
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await driver.createConversationWithParticipants(CREATE_INPUT);
+
+    // The fallback's own create, on the service scope.
+    expect(f.svc.create).toHaveBeenCalledTimes(1);
+    expect(f.dflt.create).not.toHaveBeenCalled();
+    // ...and the participant adds that follow it, on the same scope.
+    expect(f.svc.ctx.participants.create).toHaveBeenCalled();
+    expect(f.dflt.conversations).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES to construct when a service SID is set but the client cannot scope - never falls back', async () => {
+    const f = fakeConversationsClient(); // no services() accessor
+    expect(
+      () =>
+        new TwilioGroupConversationsDriver({
+          ...BASE_DEPS,
+          conversationsServiceSid: 'ISgrouprails',
+          client: f.client as never,
+          logger: silentLogger,
+        }),
+    ).toThrow(/refusing to fall back to the shared default service/);
+  });
+
+  it('the factory forwards config.twilioConversationsServiceSid', async () => {
+    const f = dualScopeClient();
+    const config = {
+      messagingDriver: 'twilio',
+      twilioAccountSid: 'ACx',
+      twilioApiKeySid: 'SKx',
+      twilioApiKeySecret: 'secret',
+      twilioMessagingServiceSid: 'MGx',
+      twilioConversationsServiceSid: 'ISfromconfig',
+      smsSendingEnabled: true,
+    } as AppConfig;
+
+    const driver = createGroupConversationsAdapter({
+      config,
+      logger: silentLogger,
+      twilioClient: f.client as never,
+    });
+    await (driver as TwilioGroupConversationsDriver).createConversationWithParticipants(CREATE_INPUT);
+
+    expect(f.services).toHaveBeenCalledWith('ISfromconfig');
+  });
+});

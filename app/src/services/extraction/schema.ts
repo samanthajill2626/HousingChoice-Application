@@ -57,6 +57,14 @@ export const HOUSING_AUTHORITY_VOCAB: string[] = [
   'DCA',
   'McDonough',
   'East Point',
+  // Spelled EXACTLY as the importer's CANONICAL_AUTHORITY normalizes it
+  // (lib/import/apply.ts) - "Dekalb County Housing", not "DeKalb County".
+  // Broadcast audience resolution is an exact hash match on the
+  // byHousingAuthority GSI, so a near-miss here does not degrade gracefully: it
+  // creates a SECOND DeKalb audience invisible to the imported one. Its absence
+  // was a live extraction bug (run 4bf0cf42) - the client said DeKalb County,
+  // the vocabulary had no entry, and the fact was dropped on the floor.
+  'Dekalb County Housing',
 ];
 
 const fieldOpSchema = {

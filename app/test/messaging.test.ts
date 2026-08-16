@@ -27,6 +27,9 @@ const TWILIO_ENV = {
   TWILIO_API_KEY_SECRET: 'secret',
   TWILIO_AUTH_TOKEN: 'token',
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
+  // REQUIRED since the account's DEFAULT Conversations service was deleted
+  // (2026-08-15): group rails must be created under an explicit per-env service.
+  TWILIO_CONVERSATIONS_SERVICE_SID: 'IStest',
   // A real (non-mock) twilio config must carry the Event Streams webhook secret
   // (config boot gate) - the promotion webhook fails open without it.
   TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
@@ -90,6 +93,15 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
   it('fail-fasts when MESSAGING_DRIVER=twilio and TWILIO_* values are missing', () => {
     expect(() => loadConfig({ NODE_ENV: 'development', MESSAGING_DRIVER: 'twilio' })).toThrow(
       /TWILIO_ACCOUNT_SID.*TWILIO_MESSAGING_SERVICE_SID/,
+    );
+  });
+
+  it('names TWILIO_CONVERSATIONS_SERVICE_SID among the required twilio keys', () => {
+    // Pins the requirement itself, not just the fixture. The account's DEFAULT
+    // Conversations service was deleted, so an unset value addresses a service
+    // that does not exist - it must fail at boot naming the key, not degrade.
+    expect(() => loadConfig({ NODE_ENV: 'development', MESSAGING_DRIVER: 'twilio' })).toThrow(
+      /TWILIO_CONVERSATIONS_SERVICE_SID/,
     );
   });
 

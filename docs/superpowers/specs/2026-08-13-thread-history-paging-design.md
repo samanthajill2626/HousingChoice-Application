@@ -109,8 +109,21 @@ setServerItems(prev => mergeById(prev, olderPage))   // Load older
 
 `mergeById` unions by id and prefers the FRESHEST copy for ids present in both,
 so delivery-status updates still land. Nothing the client has already seen is
-ever dropped, which closes the gap. Result ordering stays chronological by the
-existing sort.
+ever dropped, which closes the window-shift gap above. Result ordering stays
+chronological by the existing sort.
+
+**What merging does NOT guarantee** (corrected after the final review; the
+original wording here overclaimed): it fills no gap it never fetched. If more
+than ONE PAGE of new entries lands between two refetches, the newest page no
+longer overlaps what is held, and the union is two blocks with an unfetched hole
+between them - and unlike the truncation this feature replaces, that hole is
+invisible, because the transcript reads as continuous. Volume alone does not
+reach it, since every persisted message schedules a refetch; the realistic
+trigger is a gap in the SSE stream (a backgrounded tab, a sleep, a reconnect),
+which has no replay and no resync. Tracked as
+`thread-merge-leaves-a-hole-after-an-sse-gap`. Merging remains the right default
+- it strictly dominates replacing, which dropped paged-in history on every
+refetch - but it is a mitigation, not a proof of continuity.
 
 Accepted consequence: an entry deleted server-side lingers in an open thread
 until the operator navigates away. Messages are not deleted in this product, and
@@ -124,8 +137,10 @@ instead of merging on the first fetch for a new id.
 ### 4.2 API client
 
 `getConversationMessages` gains paging and moves to the `(id, opts, signal)`
-shape already used elsewhere in `endpoints.ts` (`getTourActivity` at :2291,
-`getContacts` at :292):
+shape already used elsewhere in `endpoints.ts` (`getTourActivity` and
+`getPlacementHistory`; located by name, because line numbers drift - an earlier
+revision of this spec cited `getContacts`, which actually takes `(params, signal)`
+with no leading id and is NOT the precedent):
 
 ```ts
 export async function getConversationMessages(
@@ -167,7 +182,8 @@ transcript into a fresh one.
 `useContactTimeline` keeps `page.nextCursor` in state and passes it back with
 the current `kinds` filter. `upcoming` and `timezone` remain first-page-only:
 the server deliberately gathers the scheduled bucket only when `cursor` is
-absent (`app/src/routes/contactTimeline.ts:955-959`), so an older page must not
+absent (`app/src/routes/contactTimeline.ts:964`, a three-part condition - :955-959
+is only the comment above it), so an older page must not
 clobber them. `source` is unchanged by paging.
 
 The 404-assembled fallback path reports `hasOlder: false`.
@@ -184,10 +200,21 @@ change a hot route for a cosmetic signal, the client infers it:
 **Accepted trade-off, to be recorded as a code comment at the computation:** on
 a thread whose length is an exact multiple of the page size, the button shows
 once when nothing older exists. Clicking it fetches an empty page and the button
-disappears. The label can therefore be momentarily wrong; it is never wrong in
-the dangerous direction, because a full page always means more may exist and a
-short page always means the end has been reached. No history is ever unreachable
-as a result.
+disappears. The label can therefore be momentarily wrong; it is not wrong in the
+dangerous direction, because a full page always means more may exist and a short
+page means the end has been reached.
+
+**One caveat on "a short page means the end", carried in the code comments
+beside the computation** (`useRelayThread.ts`, `useGroupThread.ts`): that half is
+a property of `messagesRepo.listByConversation`, which passes `Limit` to a
+DynamoDB Query and DISCARDS `LastEvaluatedKey`. A Query that hits DynamoDB's 1MB
+read cap returns fewer items than `Limit`, so a capped page would also read as
+end-of-history - the control retires and the pages behind it become unreachable
+without a reload. At `limit=50` and a realistic 1-3KB per message row the cap is
+roughly an order of magnitude away, so this is not called live; it is why the
+rule is a heuristic rather than an invariant, and it is a second reason to prefer
+the alternative below. Outside that cap, no history is unreachable as a result of
+the heuristic.
 
 The honest alternative - fetch `limit + 1` server-side, trim, and return
 `hasMore` - is deferred, not rejected. It is roughly six lines plus a route
@@ -197,9 +224,17 @@ The contact timeline is unaffected: it uses its authoritative `nextCursor`.
 
 ### 4.5 Timeline UI and scroll anchoring
 
-`Timeline.tsx` gains three optional props - `hasOlder`, `onLoadOlder`,
-`loadingOlder`. Callers that pass none are behaviorally unchanged, which covers
-every caller not in scope here.
+`Timeline.tsx` gains ONE optional prop, `paging?: TimelinePaging`, carrying
+`hasOlder`, `loadingOlder`, `olderPagesLoaded`, and `onLoadOlder`. Callers that
+pass nothing are behaviorally unchanged, which covers every caller not in scope
+here.
+
+One object rather than four sibling props, because the four are meaningless
+apart: `loadingOlder` disarms a stale anchor and `olderPagesLoaded` consumes it,
+so a caller supplying only `hasOlder` and `onLoadOlder` gets a control whose
+scroll anchoring silently never fires - typecheck-green and invisible in review.
+As four optional props that contract can only be prose; as one object the
+compiler enforces it.
 
 The control renders above the stream with the accessible name
 "Load older messages", per the accessibility-first selector rule in
@@ -211,7 +246,9 @@ history, the control retiring - the transcript deliberately does not move.
 
 It stays visible when the stream renders empty. That is not a cosmetic slip: if
 the "Comms only" filter hides every entry on the current page, the control is
-the only way to reach the pages behind it.
+the only way to reach the pages behind it WITHOUT abandoning the filter. Turning
+the filter off also reveals them, but requiring that would mean the operator has
+to give up the view they chose in order to keep reading.
 
 It sits OUTSIDE the scroll container (in `.streamWrap`, above `.stream`), not
 inside it. Inside, the control would contribute to `el.scrollHeight` and then
@@ -219,6 +256,19 @@ unmount in the same commit as the final prepend - the pass where `hasOlder`
 flips false - so the restored offset would under-shoot by the control's own
 height on the last "Load older" of every thread. Outside, only prepended content
 changes the height, and the delta math is exact.
+
+**Corrected after live measurement.** The delta math IS exact outside the
+container - that half held. What this reasoning missed is that the control's
+unmount still REFLOWS the container it sits above: `.streamWrap` is a flex
+column, so when the row disappears on the final click `.stream` grows into the
+vacated space and its top edge moves up by the control's height. Measured at
+41.78px in Chromium, against 0.69px on every non-final click. Moving the control
+outside converted a scroll-offset error into a layout shift of the same
+magnitude rather than eliminating it. No unit test can see it (jsdom performs no
+layout) and the e2e assertion compares `scrollTop` to `scrollHeight`, both
+internal to `.stream`. Tracked as
+`load-older-control-unmount-jumps-the-reader`, deferred by the human with the
+remedy left open.
 
 The subtle part is scroll. The existing layout effect at
 `Timeline.tsx:1132-1153` reacts to a grown item count by setting `hasNewBelow`,
@@ -253,11 +303,15 @@ changes. Two weaker rules were tried and both are wrong:
 A counter from the hook is immune to all of it: appends, filter toggles, retry
 collapses, and empty older pages leave it untouched.
 
-Accepted residual: if an append and the older page land in the SAME batched
-render, the restore delta includes the append's height and the reader is
-mis-positioned by roughly one message. It cannot lose or duplicate content, and
-closing it would require anchoring to a measured element position, which jsdom
-cannot exercise.
+Accepted residual, stated in full: if an append and the older page land in the
+SAME batched render, the consume branch both counts the append's height into the
+restore delta AND returns before the pill logic, absorbing the new count. So the
+reader is mis-positioned by the height of whatever arrived - a 300ms debounce can
+coalesce a burst, so "one message" is the floor, not the bound - and that
+message's "New messages" pill is skipped. It cannot lose or duplicate content,
+and it requires an inbound to arrive inside the older page's flight window.
+Closing it would mean anchoring to a measured element position, which jsdom
+cannot exercise, so it would ship untested.
 
 A settle effect clears a stale anchor once `loadingOlder` goes false, covering
 an older page that returns nothing at all. Callers therefore pass all four
@@ -268,7 +322,7 @@ behavior for appends are untouched.
 
 ### 4.6 Plumbing
 
-Five files pass the three new props into `<Timeline>`: `ConversationDetail`,
+Five files pass the `paging` object into `<Timeline>`: `ConversationDetail`,
 `GroupTextView`, `ContactCommsPane`, `TourConversation`, and
 `PlacementConversation`.
 
@@ -292,6 +346,9 @@ an unshipped control on the operator's two most-open pages. Only
   onto the older-page request; `upcoming` AND `timezone` both survive an
   older-page load; the fallback path reports `hasOlder: false`; a `kinds` change
   resets rather than merging across filters.
+- All three hooks: `olderPagesLoaded` bumps on a merged older page and NOT on a
+  first load, an SSE refetch, or a failed older read. It is the renderer's only
+  prepend signal, so a phantom bump breaks scroll anchoring everywhere.
 - `Timeline`: the control renders only when `hasOlder`; a prepend holds the
   scroll anchor; a prepend raises no "new below" pill; an append still does; an
   append arriving while an older page is in flight does NOT consume the prepend

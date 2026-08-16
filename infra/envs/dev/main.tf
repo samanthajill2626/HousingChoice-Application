@@ -79,7 +79,7 @@ locals {
   # one env may be true - see the inbound_mail module header + RUNBOOK).
   mail_domain          = "mail.dev.housingchoice.org"
   mail_domain_phase    = 1
-  manage_mail_rule_set = true
+  manage_mail_rule_set = false
 
   # Relay Event Streams sink (T10, relay number buying strategy). false = the
   # twilio-events module is INERT: a normal apply provisions no Twilio sink and

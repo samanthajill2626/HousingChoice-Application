@@ -211,7 +211,13 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // the DISJOINT control subpaths (/control/send-group-as-party,
   // /control/conversations[...]). `/v1` is already a reserved prefix below, so the
   // SPA fallback never swallows the REST half.
-  app.use(createConversationsRestRouter(conversationsEngine));
+  // Mounted TWICE: `/v1/...` is the account's DEFAULT Conversations service and
+  // `/v1/Services/:serviceSid/...` is an explicit one. Which shape the app emits
+  // depends on TWILIO_CONVERSATIONS_SERVICE_SID, and both are real Twilio
+  // surfaces, so the fake answers either rather than pinning the lane to one.
+  const conversationsRest = createConversationsRestRouter(conversationsEngine);
+  app.use('/v1', conversationsRest);
+  app.use('/v1/Services/:serviceSid', conversationsRest);
   app.use(createConversationsControlRouter({ engine, conversations: conversationsEngine }));
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
   // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine

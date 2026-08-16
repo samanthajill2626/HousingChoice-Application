@@ -19,14 +19,16 @@
 //   EXTRACT:{"__fail":"parse"}
 //   EXTRACT:{"__fail":"driver","__failMessage":"connect ECONNREFUSED"}
 //   EXTRACT:{"__fail":"refusal"}
+//   EXTRACT:{"__fail":"truncated"}
 //
-// `__fail` must be one of the three real discriminants ('refusal' | 'parse' |
-// 'driver'); anything else is ignored and the payload extracts normally.
-// `__failMessage` overrides the default message. The returned `meta` mirrors
-// what the REAL driver knows at each stage (adapters/extraction.ts:195-260): a
+// `__fail` must be one of the four real discriminants ('refusal' | 'parse' |
+// 'truncated' | 'driver'); anything else is ignored and the payload extracts
+// normally. `__failMessage` overrides the default message. The returned `meta`
+// mirrors what the REAL driver knows at each stage (adapters/extraction.ts): a
 // 'parse' failure carries rawText (the response text is the whole explanation),
-// while 'driver' and 'refusal' arrive before or without a response body and
-// carry none. The keys are `__`-prefixed so they can never collide with the
+// and so does 'truncated' (the partial JSON is the evidence of where the cap
+// cut it), while 'driver' and 'refusal' arrive before or without a response
+// body and carry none. The keys are `__`-prefixed so they can never collide with the
 // extraction schema, and EXTRACTION_DRIVER=fake is refused under NODE_ENV=production.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { extractionPromptFingerprint } from '../services/extraction/prompt.js';
@@ -34,13 +36,14 @@ import type { ExtractionCall, ExtractionDriver, ExtractionInput, ExtractionMeta,
 
 const MARKER = 'EXTRACT:';
 
-type FakeFailureKind = 'refusal' | 'parse' | 'driver';
+type FakeFailureKind = 'refusal' | 'parse' | 'truncated' | 'driver';
 
-const FAILURE_KINDS: readonly FakeFailureKind[] = ['refusal', 'parse', 'driver'];
+const FAILURE_KINDS: readonly FakeFailureKind[] = ['refusal', 'parse', 'truncated', 'driver'];
 
 const DEFAULT_FAILURE_MESSAGE: Record<FakeFailureKind, string> = {
   refusal: 'fake extraction driver: simulated refusal',
   parse: 'fake extraction driver: simulated parse failure',
+  truncated: 'fake extraction driver: simulated max_tokens truncation',
   driver: 'fake extraction driver: simulated driver failure',
 };
 
@@ -84,9 +87,11 @@ export class FakeExtractionDriver implements ExtractionDriver {
           const message = typeof partial.__failMessage === 'string'
             ? partial.__failMessage
             : DEFAULT_FAILURE_MESSAGE[failure];
-          // Mirror the real driver's meta per stage: only 'parse' has seen a
-          // response body, so only 'parse' keeps rawText.
-          const failureMeta: ExtractionMeta = failure === 'parse'
+          // Mirror the real driver's meta per stage: 'parse' and 'truncated'
+          // have both seen response text (a malformed body, and a body the cap
+          // cut mid-write), so both keep rawText. 'driver' and 'refusal' arrive
+          // before or without one and carry none.
+          const failureMeta: ExtractionMeta = failure === 'parse' || failure === 'truncated'
             ? meta
             : { driver: 'fake', promptFingerprint: fingerprint };
           this.log.warn(

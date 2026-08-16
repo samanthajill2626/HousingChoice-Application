@@ -1017,9 +1017,31 @@ write one (additive `notes` appends are not field writes and are never demoted).
 |---|---|---|
 | `AI_EXTRACTION_ENABLED` | `false` in production, `true` otherwise | Master kill switch. When off, the webhook schedules nothing and the worker starts no poll - the feature is inert. |
 | `EXTRACTION_DRIVER` | `anthropic` in production, `console` otherwise | LLM driver. `anthropic` = real call; `console` = logs a summary and returns nothing (keeps local dev offline); `fake` = deterministic test seam. **`fake` is REFUSED by the prod config validator** (throws at boot). |
-| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. |
+| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. Deployed envs currently set `claude-sonnet-5`. Read "Changing `AI_EXTRACTION_MODEL`" just below before swapping it - the output budget is model-sensitive. |
 | `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
 | `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
+
+**Changing `AI_EXTRACTION_MODEL` (read before you swap it).** The driver sends
+`thinking: {type:'disabled'}` explicitly and budgets `max_tokens` (`MAX_OUTPUT_TOKENS`, currently 4096
+in `app/src/adapters/extraction.ts`) for the JSON alone. **Never drop that parameter.** What an ABSENT
+`thinking` means is decided per model - `claude-opus-4-8` runs without thinking, `claude-sonnet-5` runs
+adaptive thinking - and `max_tokens` caps thinking and response text *together*. Omitting it therefore
+lets a model swap silently hand the JSON budget to reasoning tokens with no other change in the repo.
+That is exactly what broke prod extraction on **2026-08-15**: the model had moved to `claude-sonnet-5`,
+every large run stopped dead on the cap, and the failures surfaced only as `extraction poll: row failed`.
+After any model change, watch the AI run log for `truncated` failures and raise `MAX_OUTPUT_TOKENS` if
+the new model writes longer. `voice` runs are the largest output by construction (a `speakerRoles` pair
+per `Speaker N` label on top of the all-required object), so they truncate first.
+
+**Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
+row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
+There is no manual un-park step and none is needed: `scheduleExtraction` is an unconditional sliding
+upsert, so the **next inbound message on that conversation re-arms the row**, and a successful
+`complete()` REMOVEs `attempts` outright, clearing the counter. The real residue is different and worth
+naming: a conversation that was parked and then **went quiet is never retried**, so the facts in that
+window stay unextracted. After fixing a systemic extraction fault, audit the run log for parked runs and
+decide per conversation whether to re-trigger one manually - it is a data-completeness gap, not a
+pending failure.
 
 **Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
 `POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the
@@ -1235,12 +1257,70 @@ npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --revi
 npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
-For a LOCAL run the two identity vars usually still ride the shell (local `.env`
-files rarely declare them):
+**The current input set** lives in one folder, three subdirectories, one copy of
+each file - `--quo` at `quo-export`, `--airtable` at `airtable-export`,
+`--review` at `workbook-reviewed`:
+
+```
+W:\AI Projects\Housing Choice\Import Review\2026-08-15\
+```
+
+Its README states provenance and lists the superseded workbook folders it
+replaces. The cutover export on 2026-08-17 gets its own dated folder in the same
+shape.
+
+### The LOCAL run
+
+Local resolves far less for itself than dev/prod do, because `.env` is a
+near-empty local-dev file rather than a stack's operator config. Everything the
+run needs rides the shell.
+
+Start the local stack FIRST and leave it running:
 
 ```powershell
-$env:BUSINESS_PHONE_NUMBER = "+15550009999"; $env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "+16782842537"; npm run import:apply:local -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+npm run dev -- --local --mock
 ```
+
+`--mock` is not optional if you want group texts. It starts fake-twilio on
+:8889, which is the only thing on a local box that can hold a group rail;
+without it the driver defaults to `console`, which refuses every rail operation
+and ends the conversion incomplete with all rails failed. `--local` also
+recreates the `hc-local-*` tables on every boot, so local data is transient by
+design: boot first, import second, re-import after any restart.
+
+Then, in a second terminal:
+
+```powershell
+$env:MESSAGING_DRIVER="twilio"; $env:TWILIO_API_BASE_URL="http://localhost:8889"; $env:TWILIO_CONVERSATIONS_SERVICE_SID="ISfake000000000000000000000000000"; $env:TWILIO_ACCOUNT_SID="ACfake000000000000000000000000000"; $env:TWILIO_API_KEY_SID="SKfake000000000000000000000000000"; $env:TWILIO_API_KEY_SECRET="fake-secret"; $env:TWILIO_AUTH_TOKEN="hermetic-shared-twilio-token"; $env:TWILIO_MESSAGING_SERVICE_SID="MGfake000000000000000000000000000"; $env:BUSINESS_PHONE_NUMBER="+15550009999"; $env:GROUP_IDENTITY_EXCLUDED_NUMBERS="+16782842537"; npm run import:apply:local -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+```
+
+Why each block is there:
+
+- `MESSAGING_DRIVER` + `TWILIO_API_BASE_URL` point the REAL driver at
+  fake-twilio, exactly as the e2e harness does. A local NODE_ENV defaults the
+  driver to `console`.
+- `TWILIO_CONVERSATIONS_SERVICE_SID` is REQUIRED as of 2026-08-15, on every
+  stage. The account's DEFAULT Conversations service was deleted in favour of
+  one explicit service per environment, so unset no longer means "use the
+  default" - it means addressing a service that does not exist. `loadConfig()`
+  runs at import time in this script too, so an unset value is a startup
+  refusal naming the key rather than a rail that lands where no webhook points.
+  `ISfake000000000000000000000000000` is the value `--mock` pins, and
+  fake-twilio answers on any service SID, so both sides agree.
+- The remaining `TWILIO_*` fakes are what the twilio driver demands before it
+  will construct at all. Same values as the mock lane.
+- `BUSINESS_PHONE_NUMBER` is the MOCK number, because `--mock` forces that as
+  the app's business number and the import should write for the identity the
+  running stack uses. Do not substitute the real number on local: fake-twilio
+  treats any `from` that is not its own app number as a relay POOL leg, so the
+  mismatch shows up as spurious relay groups on the first dashboard send. The
+  parity gate is indifferent - it subtracts the business number from both sides
+  before comparing.
+- `GROUP_IDENTITY_EXCLUDED_NUMBERS` is the REAL Quo org number even on local.
+  This one is the parity gate, and it has to match the export.
+
+To skip rails entirely on a console-driver local run, add `--skip-convert`: the
+data lands and the group threads stay relay groups.
 
 **Worktree note:** the env files are gitignored, so a feature worktree does not
 have them. Running `import:apply:dev` from a worktree needs `.env.dev` copied in
@@ -1928,20 +2008,45 @@ from the Quick Reference table above. For prod use `/hc/prod/system` as the log 
 (dev uses `/hc/dev/system`).
 
 ```powershell
-# Step 1: install rsyslog + agent, enable rsyslog. $installCmd is plain JSON (single-quoted,
-# real double-quotes preserved). Backtick-escaped quotes build the --parameters JSON safely.
-$installCmd = '["dnf install -y rsyslog amazon-cloudwatch-agent","systemctl enable --now rsyslog"]'
-aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{`"commands`":$installCmd}" --comment "install rsyslog+CWAgent" --no-cli-pager
+# Step 1: install rsyslog + agent, enable rsyslog. --parameters is passed as a FILE, never as an
+# inline string - see "Passing --parameters" below for why the inline form does not survive.
+$p = @{ commands = @("dnf install -y rsyslog amazon-cloudwatch-agent","systemctl enable --now rsyslog") } | ConvertTo-Json -Compress -Depth 3
+[IO.File]::WriteAllText("$env:TEMP\ssm-install.json", $p)
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "file://$env:TEMP\ssm-install.json" --comment "install rsyslog and CWAgent" --no-cli-pager
 
 # Step 2: write the agent config + start the agent. The JSON is base64-encoded locally, then
-# decoded on the instance — base64 has no quotes/backslashes/shell-special chars, so it embeds
+# decoded on the instance - base64 has no quotes/backslashes/shell-special chars, so it embeds
 # cleanly with zero escaping hazard. $json is single-quoted so its real double-quotes and the
 # literal ${aws:InstanceId} placeholder (the agent expands it at runtime) are preserved as-is.
 $json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true},"otlp":{"grpc_endpoint":"127.0.0.1:4319","http_endpoint":"0.0.0.0:4320"}}},"traces":{"traces_collected":{"otlp":{"grpc_endpoint":"127.0.0.1:4317","http_endpoint":"0.0.0.0:4318"}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-$configCmd = "[`"echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`",`"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`"]"
-aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{`"commands`":$configCmd}" --comment "write CWAgent config + start" --no-cli-pager
+$p = @{ commands = @("echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json","/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json") } | ConvertTo-Json -Compress -Depth 3
+[IO.File]::WriteAllText("$env:TEMP\ssm-config.json", $p)
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "file://$env:TEMP\ssm-config.json" --comment "write CWAgent config and start" --no-cli-pager
 ```
+
+> **Passing `--parameters` (two traps, both hit live on 2026-08-15).** Build the JSON in
+> PowerShell, write it to a file with `[IO.File]::WriteAllText`, and pass `file://<path>`.
+> 1. **Never inline it.** The old form here was
+>    ``--parameters "{`"commands`":$cmd}"``. Windows PowerShell 5.1 re-quotes arguments on the
+>    way to a native `.exe`, and the backtick-escaped `"` characters do not survive, so the AWS
+>    CLI receives a malformed value and rejects it.
+> 2. **Never `Set-Content -Encoding utf8`.** On PS 5.1 that writes a UTF-8 **BOM**, and the CLI
+>    fails with `Error parsing parameter '--parameters': Expected: '=', received: <U+FEFF>`
+>    (the console renders that byte as a stray glyph before the opening brace).
+>    `[IO.File]::WriteAllText` writes BOM-free. (Same BOM class as the `terraform console`
+>    stdin foot-gun noted under Custom domain & TLS.)
+>
+> To dry-check the quoting without running anything, send the same command against a bogus
+> instance id (`i-00000000000000000`): parameters are validated first, so `InvalidInstanceId`
+> means the JSON parsed and nothing executed.
+
+> **Reading the result.** `send-command` returns immediately with `"Status": "Pending"` - that
+> is the submission state, NOT the outcome, and it never changes in that response. Poll instead:
+> `aws ssm get-command-invocation --command-id <id> --instance-id <instance-id> --region us-east-1 --profile housingchoice --query "[Status,StandardOutputContent]" --output text`.
+> Prefer `get-command-invocation` over `list-command-invocations --details`: the latter TRUNCATES
+> long output, which silently hides the last commands in the array (observed 2026-08-15 - the
+> container checks were invisible while the agent-log dump filled the buffer).
 
 > **Why two separate SSM commands?** SSM Run Command executes all `commands` array elements in
 > a single shell script, but Step 1 installs packages (longer; can take 30–60 s). Running them
@@ -1955,8 +2060,12 @@ aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <
 > `${aws:InstanceId}` placeholder (expanded by the agent at runtime) are preserved verbatim. The
 > `--parameters` JSON uses PowerShell's backtick quote-escape (`` `" ``), the correct PS escape.
 
-> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$json` before running
-> against the prod instance at M1.11 cutover.
+> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$json` before running against
+> the prod instance. **DONE on prod 2026-08-15** (instance `i-087fd4eda3e2804c1`): agent installed,
+> config written, both OTLP receivers listening, `/var/log/messages` shipping to
+> `/hc/prod/system`. Keep this snippet for a rebuilt instance - `user_data` runs only at FIRST
+> boot, and a stop/start does not re-run it, so any instance that predates the agent config
+> needs this by hand.
 
 ### OTLP wiring — apply and verify
 
@@ -1975,8 +2084,8 @@ npm run plan -- dev
 npm run apply -- dev
 ```
 
-> **Prod:** rides the M1.11 cutover — `npm run plan -- prod` / `npm run apply -- prod` at that
-> milestone, consistent with all prod-infra deferrals in this runbook.
+> **Prod: DONE 2026-08-15.** `npm run plan -- prod` / `npm run apply -- prod` ran as part of the
+> M1.11 catch-up apply, so the X-Ray IAM and the `user_data` change are in place on prod.
 
 #### 2. Update the agent config on the already-running dev instance
 
@@ -1990,12 +2099,20 @@ only (the agent is already installed):
 # double-quotes and the literal ${aws:InstanceId} placeholder are preserved verbatim.
 $json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true},"otlp":{"grpc_endpoint":"127.0.0.1:4319","http_endpoint":"0.0.0.0:4320"}}},"traces":{"traces_collected":{"otlp":{"grpc_endpoint":"127.0.0.1:4317","http_endpoint":"0.0.0.0:4318"}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-$configCmd = "[`"echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`",`"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`"]"
-aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids i-0ad45daa858632001 --document-name "AWS-RunShellScript" --parameters "{`"commands`":$configCmd}" --comment "apply OTLP receiver config" --no-cli-pager
+$p = @{ commands = @("echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json","/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json") } | ConvertTo-Json -Compress -Depth 3
+[IO.File]::WriteAllText("$env:TEMP\ssm-config.json", $p)
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids i-0ad45daa858632001 --document-name "AWS-RunShellScript" --parameters "file://$env:TEMP\ssm-config.json" --comment "apply OTLP receiver config" --no-cli-pager
 ```
 
+> `--parameters` goes through a BOM-free FILE, never an inline string, and `send-command`'s
+> `"Status": "Pending"` is the submission state - both explained under
+> [CloudWatch agent](#cloudwatch-agent) above.
+
 > **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` and use the prod instance ID
-> (`i-087fd4eda3e2804c1`) when running against prod at M1.11 cutover.
+> (`i-087fd4eda3e2804c1`). **DONE on prod 2026-08-15** - verified: both HTTP receivers bound
+> (`0.0.0.0:4318` traces, `0.0.0.0:4320` metrics), agent log clean, and both
+> `OTEL_EXPORTER_OTLP_*` vars present inside the app container with `host.docker.internal`
+> resolving to the gateway.
 
 After sending, confirm the command succeeded and that the agent log shows both receivers started
 cleanly (see Troubleshooting below).
@@ -2153,7 +2270,7 @@ Email channel v1 puts two-way email (send + receive, interleaved in the conversa
 | Mail domain | `mail.dev.housingchoice.org` | `mail.housingchoice.org` |
 | Inbound bucket | `hc-dev-inbound-mail-<account>` | `hc-prod-inbound-mail-<account>` |
 | Inbound queue / DLQ | `hc-dev-inbound-mail` / `hc-dev-inbound-mail-dlq` | `hc-prod-inbound-mail` / `hc-prod-inbound-mail-dlq` |
-| Rule-set owner (`manage_mail_rule_set`) | **true** (owns `hc-inbound-mail`) | false (adds its rule into dev's set) |
+| Rule-set owner (`manage_mail_rule_set`) | false (adds its rule into prod's set) | **true** (owns `hc-inbound-mail`) |
 
 **Raw-MIME retention.** Raw inbound MIME is kept **indefinitely** (Cameron's 2026-07-21 ruling: email history matches the SMS/voice posture; the raw original is the only copy of quoted history + original headers). The inbound bucket's `aws_s3_bucket_lifecycle_configuration` reaps ONLY noncurrent versions **30 days** after an overwrite (same-key re-delivery duplicates; the current version retains the content - nothing unique is lost). Message rows (DynamoDB) and extracted attachments (media bucket) have no expiry either; the only data-expiring TTLs in the email feature are the side-door `unmatched_email` rows (quarantined/linked/dismissed +90d - junk and duplicates, never thread history) and the 7-day internal parked-event bookkeeping.
 
@@ -2178,7 +2295,8 @@ Records are entered in **Netlify DNS** (verified 2026-07-21 at the dev rollout; 
 
 1. **Phase 0 -> create identity + plumbing, emit records.** `mail_domain_phase = 0` (default). **The FIRST plan after this feature lands needs `npm run plan -- <env> --reconfigure`** - the branch added a NEW module (`inbound_mail`), and terraform only installs new modules at init; the wrapper's auto-init keys off the backend cache (already present on an initialized env), so it will not re-init on its own and a bare plan fails with "Module not installed". `--reconfigure` forces the init, once per env. Then `npm run plan -- <env>` -> `npm run apply -- <env>` creates the SES domain identity, DKIM, configuration set, SNS topics, SQS queue+DLQ, and the inbound S3 bucket - and emits the DNS records. Nothing blocks (unlike ACM, classic SES has no verification-wait resource). Enter ALL records above in the Netlify DNS panel, then wait for the domain to verify + DKIM to enable: `aws ses get-identity-verification-attributes --identities mail.dev.housingchoice.org --region us-east-1 --profile housingchoice --query 'VerificationAttributes.*.VerificationStatus'` (expect `Success`).
 2. **Phase 1 -> turn on inbound + activate the shared rule set.** Set `mail_domain_phase = 1`, plan + apply. This creates THIS env's receipt rule (routes the domain's inbound mail to S3 + the mail-inbound topic). On the **managing env (dev)** it ALSO creates the shared receipt rule set `hc-inbound-mail` and ACTIVATES it.
-   - WARNING - **account-singleton active set.** `aws ses set-active-receipt-rule-set` is account-scoped: SES allows exactly ONE active receipt rule set per account+region, and dev+prod SHARE the account (938565869261). dev owns it (`manage_mail_rule_set = true`); the active set carries BOTH envs' rules. **Order: apply DEV at phase 1 FIRST** (creates + activates the set), **THEN apply PROD at phase 1** (prod's rule references the set by name and requires it to already exist). **Never `terraform destroy` the managing env (dev) without first migrating set ownership** - tearing down dev DEACTIVATES the shared set and stops PROD inbound. Coordinate any dev teardown with prod.
+   - WARNING - **account-singleton active set.** `aws ses set-active-receipt-rule-set` is account-scoped: SES allows exactly ONE active receipt rule set per account+region, and dev+prod SHARE the account (938565869261). **PROD owns it** (`manage_mail_rule_set = true`); the active set carries BOTH envs' rules, each matching its own `recipients` domain and routing to its own bucket/topic/queue - so both envs really do get inbound mail, on separate infrastructure. **Order: apply PROD at phase 1 FIRST** (creates + activates the set), **THEN apply DEV at phase 1** (dev's rule references the set by name and requires it to already exist). **Never `terraform destroy` the managing env (prod) without first migrating set ownership** - tearing down prod DEACTIVATES the shared set and stops DEV inbound. Dev is freely destroyable.
+   - **Ownership moved dev -> prod on 2026-08-15** (Cameron: nothing production-related should depend on dev). It was a pure cross-state move, no AWS mutation - `terraform state rm` both resources from dev, flip `manage_mail_rule_set` in each env's `main.tf`, then `terraform import` them into prod, then plan both to confirm clean. Do the code flip FIRST so no plan in between wants to destroy the live set. Resource addresses: `module.inbound_mail.aws_ses_receipt_rule_set.shared[0]` and `module.inbound_mail.aws_ses_active_receipt_rule_set.shared[0]`; the import ID for both is the set name `hc-inbound-mail`.
 3. **SES production-access request.** A new SES account is in the sandbox (send only to verified addresses, low quota). Request production access for the account/region before real outbound - see [`ses-sandbox-exit`](docs/issues/ses-sandbox-exit.md). Until granted, outbound reaches verified addresses only; inbound is unaffected.
 4. **`npm install` on deploy.** Email adds app-workspace runtime deps (`@aws-sdk/client-sesv2`, `nodemailer`, `mailparser`, `sanitize-html`, `email-reply-parser`); the `fake-twilio` workspace gains `@aws-sdk/client-s3` when slice B4 lands. The arm64 `npm ci` rides the deploy build (same pattern as the MMS `sharp` deps).
 5. **Flip `EMAIL_SENDING_ENABLED`.** The kill-switch defaults OFF on deployed stacks (the `SMS_SENDING_ENABLED` pattern) - email is dormant until then. Once 1-4 are done (domain verified, inbound live, production access granted), set `EMAIL_SENDING_ENABLED=true` in `.env.<env>` (template-first: `.env.<env>.example`) and `npm run secrets:push -- <env>`; the next deploy hydrates it. The 5 SES params (`EMAIL_SENDER_DOMAIN`, `EMAIL_FROM_ADDRESS`, `EMAIL_CONFIGURATION_SET`, `INBOUND_MAIL_BUCKET`, `INBOUND_MAIL_QUEUE_URL`) are Terraform-owned (params module) and hydrate automatically - do NOT put them in `.env.<env>`.
@@ -2187,7 +2305,7 @@ Records are entered in **Netlify DNS** (verified 2026-07-21 at the dev rollout; 
 ### Rollback
 
 - **Before phase 1:** nothing routes mail yet - drop `mail_domain_phase` back to 0 and apply. The DNS records can stay in Netlify DNS (harmless, and reused when you re-advance).
-- **After phase 1:** set `mail_domain_phase = 0` and apply to remove this env's receipt rule (stops inbound routing for the env). On the managing env this also deactivates + removes the shared set - which stops PROD inbound too, so coordinate (see the phase-1 warning). `EMAIL_SENDING_ENABLED=false` + `secrets:push` + redeploy is the instant outbound kill-switch, independent of any apply.
+- **After phase 1:** set `mail_domain_phase = 0` and apply to remove this env's receipt rule (stops inbound routing for the env). On the managing env (now PROD) this also deactivates + removes the shared set - which stops DEV inbound too, so coordinate (see the phase-1 warning). `EMAIL_SENDING_ENABLED=false` + `secrets:push` + redeploy is the instant outbound kill-switch, independent of any apply.
 
 ## Security / hardening
 

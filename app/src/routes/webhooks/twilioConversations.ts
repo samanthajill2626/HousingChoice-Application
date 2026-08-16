@@ -124,6 +124,43 @@ export function createTwilioConversationsRouter(
 
   router.post('/', verifySignature, async (req, res) => {
     const eventType = param(req.body, 'EventType');
+
+    // CROSS-ENV FENCE. Signature validation proves the post came from our Twilio
+    // ACCOUNT - not that it came from THIS env's Conversations service. Two envs
+    // sharing an account can each pin their own service, and a mis-pointed
+    // webhook in the console is otherwise silent: the event would file against
+    // whichever conversationSid it names, in the wrong environment.
+    //
+    // Only enforced when this env pins a service. Unset = the account default,
+    // where ChatServiceSid is the default service's sid we do not carry, so the
+    // check would reject everything - hence historical behavior is preserved.
+    //
+    // 200, not 4xx: a foreign event is never going to become ours, so retrying
+    // it cannot help. Same posture as an unrecognized EventType below.
+    //
+    // ERROR, not WARN, and deliberately NOT deduplicated. This condition is
+    // ALWAYS a misconfiguration, and it is otherwise invisible: the far side
+    // sees a healthy 200, and the env that SHOULD have received the event sees
+    // nothing at all - a missing onMessageAdded writes no cross-check deadline
+    // row, so the guardrail cannot detect total silence either. Only level >= 50
+    // reaches `hc-<env>-error-logs` and the Recent Errors query, and that alarm
+    // needs 5 in 5 minutes, so per-event logging is what makes it fire at all;
+    // rate-limiting here would buy quieter logs by never alarming. The volume is
+    // self-limiting - it stops when the webhook URL is corrected.
+    const expectedServiceSid = config.twilioConversationsServiceSid;
+    if (expectedServiceSid !== undefined && expectedServiceSid.length > 0) {
+      const chatServiceSid = param(req.body, 'ChatServiceSid');
+      if (chatServiceSid !== expectedServiceSid) {
+        log.error(
+          { event: 'conversations_event_foreign_service', eventType, chatServiceSid },
+          'Conversations event from another service acknowledged and ignored - a post-webhook URL ' +
+            'points at the wrong environment; check each Conversations service',
+        );
+        res.status(200).json({ ok: true, ignored: true, reason: 'foreign_service' });
+        return;
+      }
+    }
+
     try {
       switch (eventType) {
         case 'onDeliveryUpdated': {

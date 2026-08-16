@@ -25,13 +25,13 @@ function resourceCounts(api = 0, script = 0): Record<ResourceClass, number> {
 }
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
@@ -53,10 +53,23 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
 describe('aggregateSamples', () => {
+  it('keeps shared-path surface samples in separate aggregates', () => {
+    const rows = aggregateSamples([
+      sample('/inbox-all', 'warm', 0, { readyMs: 10 }),
+      sample('/inbox-unread', 'warm', 0, { readyMs: 20 }),
+    ]);
+
+    expect(rows.map((row) => [row.surfaceId, row.metrics.readyMs.median])).toEqual([
+      ['/inbox-all', 10],
+      ['/inbox-unread', 20],
+    ]);
+  });
+
   it('computes odd and even medians with min and max', () => {
     const odd = [9, 1, 5].map((readyMs, repeat) =>
       sample('/odd', 'cold', repeat, { readyMs }),
@@ -67,13 +80,13 @@ describe('aggregateSamples', () => {
 
     const rows = aggregateSamples([...odd, ...even]);
 
-    expect(rows.find((row) => row.routeKey === '/odd')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/odd')?.metrics.readyMs).toEqual({
       median: 5,
       min: 1,
       max: 9,
       p95: null,
     });
-    expect(rows.find((row) => row.routeKey === '/even')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/even')?.metrics.readyMs).toEqual({
       median: 5,
       min: 2,
       max: 8,
@@ -91,8 +104,8 @@ describe('aggregateSamples', () => {
 
     const rows = aggregateSamples([...nineteen, ...twenty]);
 
-    expect(rows.find((row) => row.routeKey === '/nineteen')?.metrics.readyMs.p95).toBeNull();
-    expect(rows.find((row) => row.routeKey === '/twenty')?.metrics.readyMs.p95).toBe(19);
+    expect(rows.find((row) => row.surfaceId === '/nineteen')?.metrics.readyMs.p95).toBeNull();
+    expect(rows.find((row) => row.surfaceId === '/twenty')?.metrics.readyMs.p95).toBe(19);
   });
 
   it('preserves unavailable metrics and excludes failed samples from statistics', () => {
@@ -109,12 +122,12 @@ describe('aggregateSamples', () => {
       sample('/all-null', 'cold', 0, { readyMs: null, domElements: null }),
     ]);
 
-    const nullable = rows.find((row) => row.routeKey === '/nullable');
+    const nullable = rows.find((row) => row.surfaceId === '/nullable');
     expect(nullable?.successCount).toBe(2);
     expect(nullable?.metrics.readyMs).toEqual({ median: 12, min: 12, max: 12, p95: null });
     expect(nullable?.metrics.domElements).toEqual({ median: 120, min: 120, max: 120, p95: null });
     expect(nullable?.metrics.apiRequestCount.max).not.toBe(999);
-    expect(rows.find((row) => row.routeKey === '/all-null')?.metrics.readyMs).toEqual({
+    expect(rows.find((row) => row.surfaceId === '/all-null')?.metrics.readyMs).toEqual({
       median: null,
       min: null,
       max: null,
@@ -130,7 +143,15 @@ describe('aggregateSamples', () => {
 
     expect(row?.lowSampleCount).toBe(true);
     expect(row?.warnings).toEqual(['low_sample_count']);
-    expect(row?.statusCounts).toMatchObject({ ok: 1, timeout: 1, failed: 0 });
+    expect(row?.statusCounts).toMatchObject({ ok: 1, timeout: 1, failed: 0, skipped_required_action_missing: 0 });
+  });
+
+  it('counts a missing required action without treating it as a successful sample', () => {
+    const [row] = aggregateSamples([
+      sample('/inbox', 'warm', 0, { status: 'skipped_required_action_missing', reason: 'required_action_missing' }),
+    ]);
+
+    expect(row).toMatchObject({ successCount: 0, statusCounts: { skipped_required_action_missing: 1 } });
   });
 
   it('keeps resource classes and background noise separate from primary API metrics', () => {
@@ -157,7 +178,7 @@ describe('aggregateSamples', () => {
         backgroundRequestCount: 15,
         backgroundTransferBytes: 1_500,
       }),
-    ], [{ key: '/noise', surfaceScaleBearing: false, sourceLoadScaleBearing: true }]);
+    ], [{ surfaceId: '/noise', surfaceScaleBearing: false, loadScaleBearing: true }]);
 
     expect(row).toMatchObject({
       surfaceScaleBearing: false,
@@ -174,6 +195,19 @@ describe('aggregateSamples', () => {
 });
 
 describe('buildRankings', () => {
+  it('ranks all four same-path Inbox surfaces independently in both modes', () => {
+    const inboxIds = ['inbox-all', 'inbox-unread', 'inbox-unknown', 'inbox-groups'];
+    const rows = aggregateSamples(inboxIds.flatMap((surfaceId, index) => [
+      sample(surfaceId, 'cold', 0, { readyMs: index + 1 }),
+      sample(surfaceId, 'warm', 0, { readyMs: index + 10 }),
+    ]));
+
+    const rankings = buildRankings(rows);
+
+    expect(rankings.cold.readyMs.map((row) => row.surfaceId).sort()).toEqual([...inboxIds].sort());
+    expect(rankings.warm.readyMs.map((row) => row.surfaceId).sort()).toEqual([...inboxIds].sort());
+  });
+
   it('ranks cold and warm independently and preserves stable ties', () => {
     const rows = aggregateSamples([
       sample('/first', 'cold', 0, { readyMs: 10 }),
@@ -192,12 +226,12 @@ describe('buildRankings', () => {
 
     const rankings = buildRankings(rows);
 
-    expect(rankings.cold.readyMs.map((row) => row.routeKey)).toEqual([
+    expect(rankings.cold.readyMs.map((row) => row.surfaceId)).toEqual([
       '/first',
       '/second',
       '/fast',
     ]);
-    expect(rankings.warm.readyMs.map((row) => row.routeKey)).toEqual(['/warm-worst']);
+    expect(rankings.warm.readyMs.map((row) => row.surfaceId)).toEqual(['/warm-worst']);
   });
 
   it('provides every secondary ranking including each resource class', () => {

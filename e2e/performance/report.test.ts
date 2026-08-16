@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolvePerformanceSeedConfig } from '../../app/src/lib/seed/performance.js';
 import type { SafeRunConfig } from './config.js';
 import {
   createPerformanceRunId,
@@ -97,6 +98,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+vi.mock('./routes.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./routes.js')>();
+  const inbox = actual.ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+  return {
+    ...actual,
+    ROUTES: Object.freeze([
+      ...actual.ROUTES,
+      { ...inbox, surfaceId: 'inbox-extra-all' },
+      { ...inbox, surfaceId: 'inbox-extra-unread' },
+    ]),
+  };
+});
+
 const createdRoots: string[] = [];
 
 afterEach(async () => {
@@ -152,29 +166,7 @@ const CONFIG: SafeRunConfig = {
   routeOrderSeed: 42,
   contractCheckpoint: false,
   selfQa: null,
-  seed: {
-    anchor: '2026-08-12T12:00:00.000Z',
-    scale: 1,
-    contacts: 100,
-    units: 25,
-    placements: 50,
-    tours: 50,
-    conversations: 100,
-    messagesPerConversation: 10,
-    broadcasts: 10,
-    recipientsPerBroadcast: 25,
-    messageCount: 1_000,
-    requestedRecipientCount: 250,
-    resolvedRecipientsPerBroadcast: 25,
-    resolvedRecipientCount: 250,
-    requestedRelayGroupCount: 20,
-    relayGroupCount: 20,
-    clippedRelayGroupCount: 0,
-    fixedUnmatchedEmailCount: 4,
-    physicalItemCount: 1_339,
-    totalItemCount: 1_589,
-    fallbacks: { tenant: 'lean_tenant', landlord: 'lean_landlord', unit: 'lean_unit' },
-  },
+  seed: resolvePerformanceSeedConfig({}, '2026-08-12T12:00:00.000Z'),
 };
 
 const TARGET: TargetMetadata = {
@@ -186,17 +178,17 @@ const TARGET: TargetMetadata = {
 };
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
-    readyMs: routeKey === '/contacts' ? 900 : 100,
+    readyMs: surfaceId === '/contacts' ? 900 : 100,
     navigation: { ttfbMs: 20, domContentLoadedMs: 70, loadMs: 80 },
     paint: { fcpMs: 40, lcpMs: 60 },
     longTasks: { totalMs: 12, maxMs: 8, count: 2 },
@@ -218,12 +210,13 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
-function request(routeKey: string, mode: 'cold' | 'warm', repeat: number): RequestEvidence {
+function request(surfaceId: string, mode: 'cold' | 'warm', repeat: number): RequestEvidence {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     method: 'GET',
@@ -243,17 +236,39 @@ function request(routeKey: string, mode: 'cold' | 'warm', repeat: number): Reque
 }
 
 function reportInput(outputRoot: string, runId: string) {
-  const samples = [
+  const repeatZeroSamples = [
     sample('/contacts', 'cold', 0),
-    sample('/inbox', 'cold', 0, { readyMs: 100, clientTruncated: false }),
-    sample('/contacts', 'warm', 0, { readyMs: 400 }),
-    sample('/inbox', 'warm', 0, { readyMs: 50, clientTruncated: false }),
+    sample('inbox-all', 'cold', 0, {
+      readyMs: 100,
+      clientTruncated: false,
+      surfaceEvidence: {
+        kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
+      },
+    }),
+    sample('/contacts', 'warm', 0, {
+      readyMs: 400,
+      surfaceEvidence: { kind: 'conversation_detail', initialRenderedMessageCount: null },
+    }),
+    sample('inbox-all', 'warm', 0, { readyMs: 50, clientTruncated: false }),
     sample('/settings/notifications', 'warm', 0, {
       status: 'skipped_no_fixture',
       reason: 'fixture_absent',
       readyMs: null,
       terminalState: 'unknown',
     }),
+    sample('/settings/notifications', 'cold', 0, {
+      status: 'skipped_no_fixture',
+      reason: 'fixture_absent',
+      readyMs: null,
+      terminalState: 'unknown',
+    }),
+  ];
+  const samples = [
+    ...repeatZeroSamples,
+    ...[1, 2].flatMap((repeat) => repeatZeroSamples.map((row) => ({
+      ...structuredClone(row),
+      repeat,
+    }))),
   ];
   return {
     outputRoot,
@@ -261,13 +276,16 @@ function reportInput(outputRoot: string, runId: string) {
     config: CONFIG,
     target: TARGET,
     samples,
-    requests: [request('/contacts', 'cold', 0), request('/contacts', 'warm', 1)],
-    routeOrders: [
-      { mode: 'cold' as const, repeat: 0, routeKeys: ['/contacts', '/inbox'] },
-      { mode: 'warm' as const, repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
-    ],
+    requests: [0, 1, 2].flatMap((repeat) => [
+      request('/contacts', 'cold', repeat),
+      request('/contacts', 'warm', repeat),
+    ]),
+    routeOrders: [0, 1, 2].flatMap((repeat) => [
+      { mode: 'cold' as const, repeat, surfaceIds: ['/contacts', 'inbox-all'] },
+      { mode: 'warm' as const, repeat, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
+    ]),
     browser: { version: '140.0.7339.12', viewport: { width: 1280, height: 720 } },
-    warmup: { performed: true, routeKey: '/' },
+    warmup: { performed: true, surfaceId: '/' },
     relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
   };
 }
@@ -282,14 +300,167 @@ describe('createPerformanceRunId', () => {
 });
 
 describe('writePerformanceReport', () => {
+  it('writes closed v2 comparison metadata without a seed anchor or requested inputs', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-c0dec0de');
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary).toMatchObject({ schemaVersion: 2, registryVersion: 2, workloadVersion: 2 });
+    expect(summary.environment.comparisonWorkload).toMatchObject({
+      contacts: 100,
+      activeContacts: 85,
+      recipientPoolSize: 81,
+      recipientPoolSource: 'generated_tenants',
+      longConversationFixturePresent: true,
+      largeBroadcastFixturePresent: true,
+    });
+    expect(Object.keys(summary.environment.comparisonWorkload).sort()).toEqual([
+      'activeContacts', 'broadcasts', 'contacts', 'conversations', 'largeBroadcastFixturePresent',
+      'longConversationFixturePresent', 'messagesPerConversation', 'nativeGroupMemberSlotCount',
+      'nativeGroups', 'placements', 'recipientPoolSize', 'recipientPoolSource',
+      'resolvedLargeBroadcastRecipients', 'resolvedLongConversationMessages',
+      'resolvedRecipientsPerBroadcast', 'totalConversations', 'totalMessageCount',
+      'totalRecipientCount', 'tours', 'units', 'workloadModelVersion',
+    ]);
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('anchor');
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('requested');
+  });
+
+  it('sanitizes every closed comparison-workload pool and fixture field before persistence', async () => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, '20260812T123456789Z-01234567');
+    const input = {
+      ...base,
+      config: {
+        ...base.config,
+        seed: {
+          ...base.config.seed!,
+          activeContactCount: 'raw-contact-id',
+          recipientPoolSize: -1,
+          recipientPoolSource: 'private.person@example.com',
+          longConversationFixturePresent: 'yes',
+          largeBroadcastFixturePresent: 'yes',
+        } as never,
+      },
+    };
+
+    await writePerformanceReport(input);
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.environment.comparisonWorkload).toMatchObject({
+      activeContacts: 0,
+      recipientPoolSize: 0,
+      recipientPoolSource: 'lean_tenant',
+      longConversationFixturePresent: false,
+      largeBroadcastFixturePresent: false,
+    });
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('raw-contact-id');
+    expect(JSON.stringify(summary.environment.comparisonWorkload)).not.toContain('private.person@example.com');
+  });
+
+  it.each(['local', 'hosted-dev'] as const)('labels %s artifacts as existing data with no synthetic workload', async (target) => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, target === 'local' ? '20260812T123456789Z-01234568' : '20260812T123456789Z-01234569');
+    const input = {
+      ...base,
+      config: { ...base.config, target, seed: null },
+      target: {
+        target,
+        proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+        profilerCommit: null,
+        targetAppCommit: null,
+        targetVersionStatus: 'unverified',
+      } as TargetMetadata,
+    };
+
+    await writePerformanceReport(input);
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.environment).toMatchObject({ dataSource: 'existing', comparisonWorkload: null });
+  });
+
+  it.each([
+    ['local', 'missing', (baseline: Record<string, any>) => { delete baseline.environment.comparisonWorkload; }],
+    ['local', 'array', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = []; }],
+    ['local', 'object', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = {}; }],
+    ['local', 'scalar', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = 'private.person@example.com'; }],
+    ['hosted-dev', 'missing', (baseline: Record<string, any>) => { delete baseline.environment.comparisonWorkload; }],
+    ['hosted-dev', 'array', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = []; }],
+    ['hosted-dev', 'object', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = {}; }],
+    ['hosted-dev', 'scalar', (baseline: Record<string, any>) => { baseline.environment.comparisonWorkload = 'private.person@example.com'; }],
+  ] as const)('does not control %s existing-data comparisons with a %s workload marker', async (target, _shape, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineBase = reportInput(outputRoot, '20260812T123456789Z-01234570');
+    const targetMetadata: TargetMetadata = {
+      target,
+      proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+      profilerCommit: null,
+      targetAppCommit: null,
+      targetVersionStatus: 'unverified',
+    };
+    const baselineInput = {
+      ...baselineBase,
+      config: { ...baselineBase.config, target, seed: null },
+      target: targetMetadata,
+    };
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...baselineInput,
+      runId: '20260812T123456790Z-01234570',
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    await expect(writePerformanceReport(currentInput)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain('comparison_workload');
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each(['local', 'hosted-dev'] as const)('keeps %s existing-data comparisons compatible with an explicit null workload marker', async (target) => {
+    const outputRoot = await artifactRoot();
+    const baselineBase = reportInput(outputRoot, '20260812T123456789Z-01234571');
+    const targetMetadata: TargetMetadata = {
+      target,
+      proof: target === 'local' ? 'local_stack' : 'hosted_dev',
+      profilerCommit: null,
+      targetAppCommit: null,
+      targetVersionStatus: 'unverified',
+    };
+    const baselineInput = {
+      ...baselineBase,
+      config: { ...baselineBase.config, target, seed: null },
+      target: targetMetadata,
+    };
+    await writePerformanceReport(baselineInput);
+    const baseline = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
+    const currentInput = {
+      ...baselineInput,
+      runId: '20260812T123456790Z-01234571',
+      baselineJson: baseline,
+    };
+
+    await expect(writePerformanceReport(currentInput)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'controlled' });
+  });
+
   it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
-    const route = ROUTES.find((candidate) => candidate.key === '/contacts/tenants')!;
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
     const branch = { kind: 'none' } as const;
     const required = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'required')!;
     const conditional = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'conditional')!;
-    const baseSample = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const baseSample = sample(route.surfaceId, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
     const baseRequest: RequestEvidence = {
-      ...request(route.key, 'warm', 0),
+      ...request(route.surfaceId, 'warm', 0),
       endpointTemplate: required.endpointTemplate,
       queryKeys: [...required.queryKeys],
       requestRole: 'required',
@@ -298,12 +469,12 @@ describe('writePerformanceReport', () => {
     const evaluate = (overrides: {
       sample?: SampleResult;
       requests?: RequestEvidence[];
-      branches?: Array<{ routeKey: string; mode: 'cold' | 'warm'; repeat: number; branch: RouteContractBranch }>;
+      branches?: Array<{ surfaceId: string; mode: 'cold' | 'warm'; repeat: number; branch: RouteContractBranch }>;
     } = {}) => evaluateContractCheckpoint({
       routes: [route],
       samples: [overrides.sample ?? baseSample],
       requests: overrides.requests ?? [baseRequest],
-      branches: overrides.branches ?? [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+      branches: overrides.branches ?? [{ surfaceId: route.surfaceId, mode: 'warm', repeat: 0, branch }],
     });
 
     expect(evaluate().mismatchCodes).toEqual([]);
@@ -338,19 +509,124 @@ describe('writePerformanceReport', () => {
     expect(JSON.stringify(ROUTES)).toBe(before);
   });
 
-  it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
-    const route = ROUTES.find((candidate) => candidate.key === '/conversations/:conversationId')!;
+  it('does not let the unread badge satisfy the unread Inbox page checkpoint', () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
     const branch = { kind: 'none' } as const;
-    const base = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const declared = expectedGets(route, 'cold', branch);
+    const requests = declared.map((contract) => ({
+      ...request(route.surfaceId, 'cold', 0),
+      endpointTemplate: contract.endpointTemplate,
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      requestRole: 'required' as const,
+    }));
+    const pageIndex = requests.findIndex((entry) => entry.inboxRequestClass === 'inbox_page_unread');
+    expect(pageIndex).toBeGreaterThanOrEqual(0);
+    const evaluate = (observed: RequestEvidence[]) => evaluateContractCheckpoint({
+      routes: [route],
+      samples: [sample(route.surfaceId, 'cold', 0, { blockedWrites: [], terminalState: 'populated' })],
+      requests: observed,
+      branches: [{ surfaceId: route.surfaceId, mode: 'cold', repeat: 0, branch }],
+    });
+    expect(evaluate(requests.filter((_, index) => index !== pageIndex)).mismatchCodes).toContain('missing_required_endpoint');
+    expect(evaluate(requests).mismatchCodes).toEqual([]);
+  });
+
+  it('retains distinct closed unread Inbox request classes in report artifacts', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-1a2b3c4d');
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
+    input.config = { ...input.config, contractCheckpoint: true };
+    input.samples = [sample(route.surfaceId, 'cold', 0, {
+      blockedWrites: [], terminalState: 'populated',
+    })];
+    input.requests = expectedGets(route, 'cold', { kind: 'none' }).map((contract) => ({
+      ...request(route.surfaceId, 'cold', 0),
+      endpointTemplate: contract.endpointTemplate,
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      requestRole: 'required' as const,
+    }));
+    Object.assign(input, {
+      checkpointBranches: [{
+        surfaceId: route.surfaceId, mode: 'cold', repeat: 0, branch: { kind: 'none' },
+      }],
+    });
+
+    await writePerformanceReport(input);
+
+    const requestLines = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLines.flatMap((line) => line.inboxRequestClass === undefined ? [] : [line.inboxRequestClass])).toEqual([
+      'inbox_badge', 'inbox_page_unread',
+    ]);
+    const checkpoint = JSON.parse(await readFile(
+      join(outputRoot, input.runId, 'contract-observations.json'),
+      'utf8',
+    )) as {
+      observations: Array<{
+        surfaceId: string;
+        mode: 'cold' | 'warm';
+        endpoints: Array<{ inboxRequestClass?: string }>;
+      }>;
+    };
+    const inboxRequestClasses = checkpoint.observations
+      .filter((observation) => observation.surfaceId === route.surfaceId && observation.mode === 'cold')
+      .flatMap((observation) => observation.endpoints)
+      .flatMap((endpoint) => (
+        endpoint.inboxRequestClass === undefined ? [] : [endpoint.inboxRequestClass]
+      ));
+    expect(inboxRequestClasses).toEqual([
+      'inbox_badge', 'inbox_page_unread',
+    ]);
+  });
+
+  it('omits an unknown Inbox request class at the report artifact boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-4d3c2b1a');
+    input.requests = [{
+      ...request('inbox-unread', 'cold', 0),
+      inboxRequestClass: 'raw-filter=unread' as never,
+    }];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const [requestLine] = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLine.inboxRequestClass).toBeUndefined();
+  });
+
+  it('omits a failure-only Inbox marker at the report artifact boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-5e4d3c2b');
+    input.requests = [{
+      ...request('inbox-unread', 'cold', 0),
+      endpointTemplate: '/api/inbox',
+      queryKeys: ['filter', 'limit'],
+      inboxRequestClass: 'inbox_endpoint_contract_failure' as never,
+      unmatchedApi: true,
+    }];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
+
+    const [requestLine] = (await readFile(join(outputRoot, input.runId, 'requests.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(requestLine.inboxRequestClass).toBeUndefined();
+  });
+
+  it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === '/conversations/:conversationId')!;
+    const branch = { kind: 'none' } as const;
+    const base = sample(route.surfaceId, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
     const declared = expectedGets(route, 'warm', branch).filter((entry) => entry.requirement === 'required');
     const requests = declared.map((entry) => ({
-      ...request(route.key, 'warm', 0),
+      ...request(route.surfaceId, 'warm', 0),
       endpointTemplate: entry.endpointTemplate,
       queryKeys: [...entry.queryKeys],
     }));
     const evaluate = (value: SampleResult) => evaluateContractCheckpoint({
       routes: [route], samples: [value], requests,
-      branches: [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+      branches: [{ surfaceId: route.surfaceId, mode: 'warm', repeat: 0, branch }],
     });
 
     expect(evaluate(base).mismatchCodes).toContain('missing_blocked_write');
@@ -374,7 +650,7 @@ describe('writePerformanceReport', () => {
     }];
     Object.assign(input, {
       checkpointBranches: [{
-        routeKey: '/contacts/tenants', mode: 'warm', repeat: 0, branch: { kind: 'none' },
+        surfaceId: '/contacts/tenants', mode: 'warm', repeat: 0, branch: { kind: 'none' },
       }],
     });
     const secret = 'private.person@example.com';
@@ -399,6 +675,10 @@ describe('writePerformanceReport', () => {
   it('writes only the exact current-run artifacts with allowlisted schema and ranked Markdown', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-abcd1234');
+    const sharedPathSurfaces = [
+      { surfaceId: 'inbox-unread', pathTemplate: '/inbox' },
+      { surfaceId: 'inbox-unknown', pathTemplate: '/inbox' },
+    ] as const;
     const secret = 'private.person@example.com';
     Object.assign(input.config as object, { baseUrl: `https://${secret}`, loginEmail: secret });
     Object.assign(input.target as object, { rawHost: secret });
@@ -408,6 +688,13 @@ describe('writePerformanceReport', () => {
     Object.assign(input.routeOrders[0] as object, { rawRouteIds: [secret] });
     Object.assign(input.warmup as object, { rawUrl: secret });
     Object.assign(input.relayDomCheck as object, { rawRows: [secret] });
+    expect(ROUTES.filter((route) => sharedPathSurfaces.some((surface) => surface.surfaceId === route.surfaceId))
+      .map((route) => ({ surfaceId: route.surfaceId, pathTemplate: route.pathTemplate })))
+      .toEqual(sharedPathSurfaces);
+    input.samples.push(...sharedPathSurfaces.map((surface, index) => (
+      sample(surface.surfaceId, 'cold', 0, { readyMs: 110 + (index * 10), clientTruncated: false })
+    )));
+    input.requests.push(...sharedPathSurfaces.map((surface) => request(surface.surfaceId, 'cold', 0)));
 
     const result = await writePerformanceReport(input);
 
@@ -425,11 +712,12 @@ describe('writePerformanceReport', () => {
     const requestsText = await readFile(join(runDirectory, 'requests.jsonl'), 'utf8');
     const report = await readFile(join(runDirectory, 'report.md'), 'utf8');
 
-    expect(summary.schemaVersion).toBe(1);
+    expect(summary.schemaVersion).toBe(2);
     expect(Object.keys(summary).sort()).toEqual([
       'aggregates', 'artifacts', 'browser', 'comparison', 'config', 'environment',
-      'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'relayDomCheck', 'revisions',
+      'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'registryVersion', 'relayDomCheck', 'revisions',
       'routeOrders', 'run', 'runtime', 'samples', 'schemaVersion', 'target', 'warmup', 'warnings',
+      'workloadVersion',
     ].sort());
     expect(summary.interceptionScopeVersion).toBe(3);
     expect(summary.config.target).toBe('hermetic');
@@ -447,6 +735,14 @@ describe('writePerformanceReport', () => {
     expect(summary.runtime.node).toMatch(/^\d+\.\d+\.\d+/u);
     expect(summary.runtime.os).toMatch(/^(?:aix|darwin|freebsd|linux|openbsd|sunos|win32)\/(?:arm|arm64|ia32|loong64|mips|mipsel|ppc|ppc64|riscv64|s390|s390x|x64)$/u);
     expect(summary.samples[0].rawRequests).toBeUndefined();
+    expect(summary.samples[0].surfaceEvidence).toBeNull();
+    expect(summary.samples[1].surfaceEvidence).toEqual({
+      kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
+    });
+    expect(summary.samples[2].surfaceEvidence).toEqual({ kind: 'conversation_detail', initialRenderedMessageCount: null });
+    expect(summary.samples.filter((sample: { surfaceId: string }) => sharedPathSurfaces.some((surface) => surface.surfaceId === sample.surfaceId))
+      .map((sample: { surfaceId: string }) => sample.surfaceId))
+      .toEqual(sharedPathSurfaces.map((surface) => surface.surfaceId));
     expect(summary.samples[0].blockedWrites).toEqual([{
       method: 'POST',
       endpointTemplate: '/api/inbox/:contactId/read',
@@ -455,25 +751,28 @@ describe('writePerformanceReport', () => {
     expect(summary.requests).toBeUndefined();
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
-    expect(summary.routeOrders).toEqual([
-      { mode: 'cold', repeat: 0, routeKeys: ['/contacts', '/inbox'] },
-      { mode: 'warm', repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
-    ]);
+    expect(summary.routeOrders).toEqual(input.routeOrders.map((row) => ({
+      mode: row.mode,
+      repeat: row.repeat,
+      surfaceIds: row.surfaceIds,
+    })));
     expect(summary.manifest.contacts).toBe(100);
 
     const requestLines = requestsText.trim().split(/\r?\n/u).map((line) => JSON.parse(line));
-    expect(requestLines).toHaveLength(2);
+    expect(requestLines).toHaveLength(input.requests.length);
     expect(Object.keys(requestLines[0]).sort()).toEqual([
       'durationMs', 'endpointTemplate', 'method', 'mode', 'originClass', 'outcome',
-      'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'routeKey', 'startOffsetMs',
+      'queryKeys', 'repeat', 'requestRole', 'resourceClass', 'surfaceId', 'startOffsetMs',
       'status', 'transferBytes', 'ttfbMs', 'unmatchedApi',
     ].sort());
     expect(requestLines[0]).toMatchObject({ outcome: 'finished', requestRole: 'required' });
-    expect(requestLines[1]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
+    expect(requestLines[2]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
+    expect(requestLines.slice(-sharedPathSurfaces.length).map((line: { surfaceId: string }) => line.surfaceId))
+      .toEqual(sharedPathSurfaces.map((surface) => surface.surfaceId));
     expect(requestLines[0].rawUrl).toBeUndefined();
 
     expect(report).toContain('## Cold worst offenders');
-    expect(report.indexOf('| /contacts | 900')).toBeLessThan(report.indexOf('| /inbox | 100'));
+    expect(report.indexOf('| /contacts | 900')).toBeLessThan(report.indexOf('| inbox-all | 100'));
     expect(report).toContain('## Warm worst offenders');
     expect(report).toContain('## Secondary rankings');
     expect(report).toContain('client_truncated');
@@ -487,6 +786,50 @@ describe('writePerformanceReport', () => {
     expect(report).toContain('summary.json');
     expect(report).toContain('requests.jsonl');
     expect((summaryText + requestsText + report).includes(secret)).toBe(false);
+  });
+
+  it('replaces a malformed native group roster with an empty closed value at the report boundary', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-deadbeef');
+    input.config = {
+      ...input.config,
+      seed: { ...input.config.seed!, nativeGroupRosterSizes: null } as never,
+    };
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.manifest.nativeGroupRosterSizes).toEqual([]);
+  });
+
+  it('retains the closed required-action skip status and reason in report aggregates', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-a1a1a1a1');
+    input.samples = [sample('inbox-unread', 'warm', 0, {
+      status: 'skipped_required_action_missing', reason: 'required_action_missing', readyMs: null, terminalState: 'unknown',
+    })];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.aggregates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ statusCounts: expect.objectContaining({ skipped_required_action_missing: 1 }) }),
+    ]));
+  });
+
+  it('retains contradictory terminal as the closed timeout reason in the sanitized artifact', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-c0de0001');
+    input.samples = [sample('inbox-unread', 'warm', 0, {
+      status: 'timeout', reason: 'contradictory_terminal', readyMs: null, terminalState: 'contradictory_terminal',
+    })];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.samples[0]).toMatchObject({
+      status: 'timeout', reason: 'contradictory_terminal', terminalState: 'contradictory_terminal',
+    });
   });
 
   it('preserves out-of-sample evidence at run scope and emits its own checkpoint mismatch', async () => {
@@ -558,7 +901,9 @@ describe('writePerformanceReport', () => {
       ...reportInput(outputRoot, '20260812T123456790Z-eeff0011'),
       baselineJson,
     };
-    currentInput.samples[0] = sample('/contacts', 'cold', 0, { readyMs: 1_000 });
+    currentInput.samples = currentInput.samples.map((row) => (
+      row.surfaceId === '/contacts' && row.mode === 'cold' ? { ...row, readyMs: 1_000 } : row
+    ));
 
     const result = await writePerformanceReport(currentInput);
 
@@ -576,29 +921,256 @@ describe('writePerformanceReport', () => {
       .toContain('Target app revision changed: no');
   });
 
+  it('reports an old 28-surface, pre-projection baseline as explicitly comparison-workload incompatible', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-aabbccde');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet = ROUTES.slice(0, 28).map((route) => route.surfaceId);
+    baseline.environment.comparisonWorkload = { workloadModelVersion: 2, contacts: 100 };
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0012'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('comparison_workload');
+    expect(comparison.mismatches).toContain('route_set');
+  });
+
+  it('keeps a baseline with a duplicate route-set member uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd4');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet.push(baseline.environment.routeSet[0]);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0017'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('route_set');
+  });
+
+  it('keeps a noncanonical baseline route-set order uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd6');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.environment.routeSet.reverse();
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0019'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('route_set');
+  });
+
+  it.each([
+    ['invalid member', (baseline: Record<string, any>) => {
+      baseline.environment.routeSet[0] = 'private.person@example.com';
+    }],
+    ['missing route set', (baseline: Record<string, any>) => {
+      delete baseline.environment.routeSet;
+    }],
+    ['non-array route set', (baseline: Record<string, any>) => {
+      baseline.environment.routeSet = { private: 'person@example.com' };
+    }],
+  ])('keeps a baseline with a %s uncontrolled without persisting malformed route data', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd5');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0018'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain('route_set');
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['invalid data source', 'data_source', (baseline: Record<string, any>) => {
+      baseline.environment.dataSource = 'private.person@example.com';
+    }],
+    ['missing data source', 'data_source', (baseline: Record<string, any>) => {
+      delete baseline.environment.dataSource;
+    }],
+    ['invalid recipient pool source', 'comparison_workload', (baseline: Record<string, any>) => {
+      baseline.environment.comparisonWorkload.recipientPoolSource = 'private.person@example.com';
+    }],
+    ['missing recipient pool source', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.recipientPoolSource;
+    }],
+  ])('keeps a baseline with %s uncontrolled without persisting its raw value', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccdf');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0013'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain(mismatch);
+    const summaryText = await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8');
+    expect(summaryText).not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['invalid target', 'target', (baseline: Record<string, any>) => {
+      baseline.environment.target = 'private.person@example.com';
+    }],
+    ['missing target', 'target', (baseline: Record<string, any>) => {
+      delete baseline.environment.target;
+    }],
+  ])('keeps a baseline with %s uncontrolled without persisting malformed target text', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd1');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0014'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparisonText = await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8');
+    expect(JSON.parse(comparisonText)).toMatchObject({ control: 'uncontrolled' });
+    expect(JSON.parse(comparisonText).mismatches).toContain(mismatch);
+    expect(comparisonText).not.toContain('private.person@example.com');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['missing zero-valued workload count', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.totalMessageCount;
+    }],
+    ['missing false fixture flag', 'comparison_workload', (baseline: Record<string, any>) => {
+      delete baseline.environment.comparisonWorkload.longConversationFixturePresent;
+    }],
+  ])('keeps a baseline with %s uncontrolled instead of normalizing it to a valid workload value', async (_label, mismatch, mutate) => {
+    const outputRoot = await artifactRoot();
+    const base = reportInput(outputRoot, '20260812T123456790Z-aabbccd2');
+    const input = {
+      ...base,
+      config: {
+        ...base.config,
+        seed: {
+          ...base.config.seed!,
+          totalMessageCount: 0,
+          longConversationFixturePresent: false,
+        },
+      },
+    };
+    await writePerformanceReport(input);
+    const baseline = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0015'),
+      config: input.config,
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain(mismatch);
+  });
+
+  it('keeps a baseline with a missing zero-valued viewport field uncontrolled', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-aabbccd3');
+    baselineInput.browser = { version: '140.0.7339.12', viewport: { width: 0, height: 720 } };
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    delete baseline.environment.viewport.width;
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-eeff0016'),
+      browser: baselineInput.browser,
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'uncontrolled' });
+    expect(comparison.mismatches).toContain('viewport');
+  });
+
   it('round-trips every registry route through artifacts and a generated baseline', async () => {
     const outputRoot = await artifactRoot();
-    const routeKeys = ROUTES.map((route) => route.key);
+    const surfaceIds = ROUTES.map((route) => route.surfaceId);
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-11223344');
-    baselineInput.samples = routeKeys.map((key) => sample(key, 'cold', 0));
-    baselineInput.requests = routeKeys.map((key) => request(key, 'cold', 0));
-    baselineInput.routeOrders = [{ mode: 'cold', repeat: 0, routeKeys }];
+    baselineInput.samples = [0, 1, 2].flatMap((repeat) => (
+      surfaceIds.flatMap((key) => [sample(key, 'cold', repeat), sample(key, 'warm', repeat)])
+    ));
+    baselineInput.requests = [0, 1, 2].flatMap((repeat) => (
+      surfaceIds.flatMap((key) => [request(key, 'cold', repeat), request(key, 'warm', repeat)])
+    ));
+    baselineInput.routeOrders = [0, 1, 2].flatMap((repeat) => [
+      { mode: 'cold' as const, repeat, surfaceIds },
+      { mode: 'warm' as const, repeat, surfaceIds },
+    ]);
 
     await expect(writePerformanceReport(baselineInput)).resolves.toMatchObject({ status: 'written' });
     const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
     const baseline = JSON.parse(baselineJson) as Record<string, any>;
 
-    expect(baseline.samples.map((row: SampleResult) => row.routeKey)).toEqual(routeKeys);
-    expect(baseline.routeOrders[0].routeKeys).toEqual(routeKeys);
-    expect(baseline.warmup.routeKey).toBe('/');
-    expect(baseline.aggregates.map((row: { routeKey: string }) => row.routeKey)).toEqual(routeKeys);
-    expect(baseline.rankings.cold.readyMs.some((row: { routeKey: string }) => row.routeKey === '/')).toBe(true);
+    expect([...new Set(baseline.samples.map((row: SampleResult) => row.surfaceId))]).toEqual(surfaceIds);
+    expect(baseline.routeOrders[0].surfaceIds).toEqual(surfaceIds);
+    expect(baseline.warmup.surfaceId).toBe('/');
+    expect([...new Set(baseline.aggregates.map((row: { surfaceId: string }) => row.surfaceId))]).toEqual(surfaceIds);
+    expect(baseline.rankings.cold.readyMs.some((row: { surfaceId: string }) => row.surfaceId === '/')).toBe(true);
 
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-55667788'),
-      samples: routeKeys.map((key) => sample(key, 'cold', 0)),
-      requests: routeKeys.map((key) => request(key, 'cold', 0)),
-      routeOrders: [{ mode: 'cold' as const, repeat: 0, routeKeys }],
+      samples: [0, 1, 2].flatMap((repeat) => (
+        surfaceIds.flatMap((key) => [sample(key, 'cold', repeat), sample(key, 'warm', repeat)])
+      )),
+      requests: [0, 1, 2].flatMap((repeat) => (
+        surfaceIds.flatMap((key) => [request(key, 'cold', repeat), request(key, 'warm', repeat)])
+      )),
+      routeOrders: [0, 1, 2].flatMap((repeat) => [
+        { mode: 'cold' as const, repeat, surfaceIds },
+        { mode: 'warm' as const, repeat, surfaceIds },
+      ]),
       baselineJson,
     };
     const current = await writePerformanceReport(currentInput);
@@ -615,7 +1187,7 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456790Z-a1b2c3d4');
     input.routeOrders = [{
-      mode: 'cold', repeat: 0, routeKeys: ['/a|b', '/contacts/perf-contact-00001'],
+      mode: 'cold', repeat: 0, surfaceIds: ['/a|b', '/contacts/perf-contact-00001'],
     }];
 
     const result = await writePerformanceReport(input);
@@ -624,7 +1196,7 @@ describe('writePerformanceReport', () => {
     const summaryText = await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8');
     expect(summaryText).not.toContain('/a|b');
     expect(summaryText).not.toContain('perf-contact-00001');
-    expect(JSON.parse(summaryText).routeOrders[0].routeKeys).toEqual(['invalid_route', 'invalid_route']);
+    expect(JSON.parse(summaryText).routeOrders[0].surfaceIds).toEqual(['invalid_route', 'invalid_route']);
   });
 
   it('rejects structurally invalid baseline aggregate entries before comparison publication', async () => {
@@ -632,7 +1204,7 @@ describe('writePerformanceReport', () => {
     const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e4');
     await writePerformanceReport(baselineInput);
     const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
-    baseline.aggregates[0].routeKey = '/bad|key';
+    baseline.aggregates[0].surfaceId = '/bad|key';
     baseline.aggregates[0].mode = 'not-a-mode';
     const currentInput = {
       ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f4'),
@@ -643,6 +1215,165 @@ describe('writePerformanceReport', () => {
 
     expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
     expect(result.files).not.toContain('comparison.json');
+  });
+
+  it('rejects duplicate baseline aggregate identities before they can control a comparison', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e5');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    const duplicate = structuredClone(baseline.aggregates[0]);
+    duplicate.metrics.readyMs.median = 9_999;
+    baseline.aggregates.push(duplicate);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f5'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it('rejects malformed aggregate text without persisting it in the current run', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e9');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.aggregates[0].noise.backgroundTransferBytes = 'private.person@example.com';
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f9'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['a missing numeric-summary member', (baseline: Record<string, any>) => {
+      delete baseline.aggregates[0].metrics.readyMs.min;
+    }],
+    ['impossible status and success counts', (baseline: Record<string, any>) => {
+      baseline.aggregates[0].statusCounts.ok += 1;
+    }],
+  ])('rejects a baseline with %s aggregate data before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e8');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f8'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each([
+    ['a non-null p95 with one successful sample', (baseline: Record<string, any>) => {
+      baseline.aggregates[0].metrics.readyMs.p95 = baseline.aggregates[0].metrics.readyMs.median;
+    }],
+    ['a non-null summary with zero successful samples', (baseline: Record<string, any>) => {
+      const aggregate = baseline.aggregates[0];
+      aggregate.successCount = 0;
+      aggregate.statusCounts.ok = 0;
+      aggregate.statusCounts.failed = 1;
+      aggregate.lowSampleCount = true;
+      aggregate.warnings = ['low_sample_count'];
+    }],
+  ])('rejects %s before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3ea');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3fa'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each([
+    ['root', (baseline: Record<string, any>) => { baseline.untrusted = 'private.person@example.com'; }],
+    ['environment', (baseline: Record<string, any>) => { baseline.environment.untrusted = 'private.person@example.com'; }],
+    ['comparison workload', (baseline: Record<string, any>) => {
+      baseline.environment.comparisonWorkload.untrusted = 'private.person@example.com';
+    }],
+    ['revisions', (baseline: Record<string, any>) => { baseline.revisions.untrusted = 'private.person@example.com'; }],
+  ])('rejects an extra %s field before it can publish a controlled comparison', async (_label, mutate) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3eb');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    mutate(baseline);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3fb'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    expect(await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8'))
+      .not.toContain('private.person@example.com');
+  });
+
+  it.each([
+    ['an array', []],
+    ['an invalid revision member', { profilerCommit: 'private.person@example.com', targetAppCommit: '1234567' }],
+  ])('rejects a baseline with revisions as %s without persisting malformed revision text', async (_label, revisions) => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e6');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.revisions = revisions;
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f6'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+    const summaryText = await readFile(join(outputRoot, currentInput.runId, 'summary.json'), 'utf8');
+    expect(summaryText).not.toContain('private.person@example.com');
+  });
+
+  it('keeps a closed null revision pair comparison-compatible for an unverified target', async () => {
+    const outputRoot = await artifactRoot();
+    const target = { ...TARGET, profilerCommit: null, targetAppCommit: null, targetVersionStatus: 'unverified' as const };
+    const baselineInput = { ...reportInput(outputRoot, '20260812T123456790Z-b1c2d3e7'), target };
+    await writePerformanceReport(baselineInput);
+    const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f7'),
+      target,
+      baselineJson,
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'));
+    expect(comparison).toMatchObject({ control: 'controlled', warnings: ['target_version_unverified'] });
+    expect(comparison.revisions.baseline).toEqual({ profilerCommit: null, targetAppCommit: null });
   });
 
   it('keeps the current report and returns a nonzero comparison failure for invalid baseline JSON', async () => {
@@ -667,6 +1398,96 @@ describe('writePerformanceReport', () => {
     expect(await readFile(join(outputRoot, input.runId, 'report.md'), 'utf8'))
       .toContain('comparison_failed');
     expect(JSON.stringify(summary).includes('private.person')).toBe(false);
+  });
+
+  it('rejects a partial baseline before comparison publication', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-02030405');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.run = { status: 'partial', reason: 'browser_failure' };
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456789Z-03040506'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it('rejects a baseline missing one declared route-mode aggregate', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456789Z-04050607');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.aggregates = baseline.aggregates.slice(1);
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456789Z-05060708'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
+  });
+
+  it.each(['cold', 'warm'] as const)(
+    'rejects a baseline whose declared %s repeats exceed its aggregate sample count',
+    async (mode) => {
+      const outputRoot = await artifactRoot();
+      const baselineInput = reportInput(outputRoot, mode === 'cold'
+        ? '20260812T123456789Z-0607080a'
+        : '20260812T123456789Z-0607080b');
+      await writePerformanceReport(baselineInput);
+      const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+      baseline.environment[`${mode}Repeats`] += 1;
+      const currentInput = {
+        ...reportInput(outputRoot, mode === 'cold'
+          ? '20260812T123456789Z-0708090a'
+          : '20260812T123456789Z-0708090b'),
+        baselineJson: JSON.stringify(baseline),
+      };
+
+      const result = await writePerformanceReport(currentInput);
+
+      expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+      expect(result.files).not.toContain('comparison.json');
+      await expect(readFile(join(outputRoot, currentInput.runId, 'comparison.json'), 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it('returns a partial nonzero report for an Inbox endpoint contract mismatch sample', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-06070809');
+    input.samples[0] = sample('/contacts', 'cold', 0, {
+      status: 'failed', reason: 'endpoint_contract_mismatch', readyMs: null, terminalState: 'unknown',
+    });
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.run).toEqual({ status: 'partial', reason: 'endpoint_contract_mismatch' });
+  });
+
+  it('keeps an explicit run partial reason authoritative over a sample mismatch reason', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-08090a0b');
+    input.samples[0] = sample('/contacts', 'cold', 0, {
+      status: 'failed', reason: 'endpoint_contract_mismatch', readyMs: null, terminalState: 'unknown',
+    });
+    Object.assign(input, { partialReason: 'browser_failure' as const });
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.run).toEqual({ status: 'partial', reason: 'browser_failure' });
+    expect(summary.samples[0]).toMatchObject({ status: 'failed', reason: 'endpoint_contract_mismatch' });
   });
 
   it('writes a partial sanitized summary and report with a closed fatal reason', async () => {

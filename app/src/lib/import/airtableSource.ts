@@ -1,17 +1,30 @@
 // Load + normalize the Airtable export (spec §2.2).
 //
 // Airtable is a THIN layer over the Quo corpus, and knowing where it is thin is
-// the point of this module:
+// the point of this module.
 //
-//   Landlord    40 rows -> 18 distinct phones. Carries a `Quo Id` join column
-//               that resolves against Quo contact ObjectIds (21 of 25 resolve).
-//   Properties  10 rows, 38 columns, 26 of them 100% EMPTY. The schema exists;
-//               the data never did.
-//   Tenants     17 rows. Sparse, but the richest structured data in either
-//               system — voucher program, caseworker org, household size,
-//               pets, eviction history. Carries `Quo ID` (10 of 12 resolve).
+// THE SIZES BELOW ARE THE 2026-08-09 EXPORT, which is the one we import. They
+// used to describe the 2026-08-05 pull, which was smaller by two orders of
+// magnitude on the table that matters, and reading the stale numbers is how you
+// conclude Airtable is a rounding error when it is now the founder's master
+// contact list. Re-measure when a later export lands rather than trusting this.
+//
+//   Landlord    40 rows -> 18 distinct phones, every one carrying a parseable
+//               Phone (nothing here needs the `Quo Id` fallback). NOT refreshed
+//               on 08-09; the 08-05 file is still the current one. All 18
+//               phones already appear in the reviewed workbook, so this table
+//               contributes a landlord TYPING signal, not people - and the
+//               Tenants table below types the same 18 anyway.
+//   Properties  70 rows, 37 columns, 4 of them 100% EMPTY. No Quo id column, so
+//               landlords are joined by NAME, best effort.
+//   Tenants     666 rows -> 641 distinct phones. Despite the name this is the
+//               founder's MASTER contact table, not a tenant-only list: its
+//               `tenant type ` column reads Tenant 638, Landlord 18, Casewoker
+//               10. 533 rows carry a voucher program. Still the richest
+//               structured data in either system - program, caseworker org,
+//               household size, pets, eviction history. Carries `Quo ID`.
 //   Tours       13 rows, 10 of them seeded demo data (+1404555xxxx, all created
-//               1/17/2026). NOT LOADED — there is nothing real in it.
+//               1/17/2026). NOT LOADED - there is nothing real in it.
 //
 // Files are matched by a filename PREFIX because Airtable names exports
 // "<Table>-<View>.csv" and the view name is whatever the founder had open

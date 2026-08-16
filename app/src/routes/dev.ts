@@ -348,8 +348,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       res.status(400).json({ error: 'invalid_performance_seed_input' });
       return;
     }
+    const input = body.input as PerformanceSeedInput;
     try {
-      resolvePerformanceSeedConfig(body.input as PerformanceSeedInput, body.anchor);
+      resolvePerformanceSeedConfig(input, body.anchor);
     } catch {
       res.status(400).json({ error: 'invalid_performance_seed_input' });
       return;
@@ -358,7 +359,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     const manifest = await performanceReseed({
       config,
       logger: log,
-      input: body.input as PerformanceSeedInput,
+      input,
       anchor: body.anchor,
     });
     deps.sessionEpochCache?.clear();

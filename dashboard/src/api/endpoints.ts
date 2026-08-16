@@ -477,14 +477,23 @@ export function getConversations(signal?: AbortSignal): Promise<ConversationsPag
 
 /** GET /api/conversations/:id/messages - newest-first page of a conversation's
  *  messages (the contact timeline FALLBACK's source). The server wraps the page
- *  under { messages }; we unwrap it here so callers get a plain Message[]. */
+ *  under { messages }; we unwrap it here so callers get a plain Message[].
+ *
+ *  `before` is an EXCLUSIVE tsMsgId bound and pages BACKWARDS (older), which is
+ *  how the thread hooks reach history beyond the newest page. `limit` is
+ *  1..MAX_PAGE_LIMIT (100); the server REJECTS anything outside that range with
+ *  a 400 rather than clamping it. Omitted = 50. */
 export async function getConversationMessages(
   conversationId: string,
+  opts: { limit?: number; before?: string } = {},
   signal?: AbortSignal,
 ): Promise<Message[]> {
   const res = await request<{ messages: Message[] }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-    { ...(signal !== undefined && { signal }) },
+    {
+      query: { limit: opts.limit, before: opts.before },
+      ...(signal !== undefined && { signal }),
+    },
   );
   return res.messages;
 }
@@ -1173,13 +1182,18 @@ export async function getContact(contactId: string, signal?: AbortSignal): Promi
  *  (e.g. 'message,call' for the "Comms only" toggle). */
 export function getContactTimeline(
   contactId: string,
-  opts: { kinds?: string } = {},
+  opts: { kinds?: string; cursor?: string } = {},
   signal?: AbortSignal,
 ): Promise<ContactTimelinePage> {
   return request<ContactTimelinePage>(
     `/api/contacts/${encodeURIComponent(contactId)}/timeline`,
     {
-      query: { kinds: opts.kinds },
+      // `cursor` is the opaque token from a previous page's nextCursor; sending
+      // it asks for the page OLDER than that boundary. request() drops undefined
+      // query values, so an absent cursor emits no key at all - the newest page.
+      // Server-side the cursor also suppresses the first-page-only `upcoming` /
+      // `timezone` gather, so an older page carries neither.
+      query: { kinds: opts.kinds, cursor: opts.cursor },
       ...(signal !== undefined && { signal }),
     },
   );

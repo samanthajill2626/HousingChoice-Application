@@ -116,6 +116,30 @@
    * In rem (scales with root font) so it isn't a brittle pixel constant. */
   min-height: 8rem;
   overflow: auto;
+  /* Thread history paging: the manual scrollTop correction in Timeline.tsx's
+   * layout effect (`el.scrollTop += el.scrollHeight - anchor`) must be the ONLY
+   * correction applied when an older page is prepended. CSS scroll anchoring is
+   * ON by default and adjusts scrollTop by itself for content inserted above the
+   * viewport; if it fires alongside the layout effect, both compensate for the
+   * same prepend and the reader is scrolled by roughly TWICE the prepended
+   * height - worse than doing nothing.
+   *
+   * MEASURED, not assumed. With this line removed, Chromium 149 did NOT
+   * double-compensate: the e2e assertion below still passed from a mid-thread
+   * offset (scrollTop 1574, stream grown by 417px, reader held to within 2px).
+   * So this is belt-and-braces against an engine or a layout where anchoring
+   * DOES pick a node in this stream - Firefox implements it too and the e2e lane
+   * is Chromium-only - not a fix for an observed live defect. It costs nothing
+   * and makes "exactly one correction" structural instead of dependent on one
+   * engine's anchor-selection heuristics.
+   *
+   * No unit test can see either direction: jsdom performs no layout, and every
+   * jsdom anchor test sits at scroll offset 0, where native anchoring is
+   * suppressed anyway. The real-browser guard is the scrollTop assertion in
+   * e2e/tests/dashboard-next/thread-history-paging.spec.ts, which scrolls
+   * MID-thread first for exactly that reason. Do not remove this line without
+   * removing the manual correction too. */
+  overflow-anchor: none;
   padding: var(--sp-3);
   display: flex;
   flex-direction: column;
@@ -1020,4 +1044,35 @@ a.pill:focus-visible {
   gap: var(--sp-2);
   margin-top: var(--sp-1);
   font-size: var(--fs-xs);
+}
+
+/* --- "Load older messages" control ---------------------------------------- */
+
+/* Sits in .streamWrap ABOVE .stream, i.e. OUTSIDE the scroll container, so the
+ * control never contributes to the stream's scrollHeight and its unmount at the
+ * end of history cannot skew the restored scroll offset. Modeled on the
+ * broadcasts list's .loadMore. */
+.loadOlderRow {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-2) 0;
+}
+
+.loadOlder {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.loadOlder:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.loadOlder:disabled {
+  cursor: default;
+  opacity: 0.6;
 }

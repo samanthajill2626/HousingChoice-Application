@@ -162,7 +162,16 @@ export function buildConversationsMessageAddedParams(
  *  the app correlates on them (the join keys are CH/IM/MB), but the real events
  *  carry them and a shape-faithful fake is the whole point. */
 const FAKE_ACCOUNT_SID = 'ACfake000000000000000000000000000';
-const FAKE_CHAT_SERVICE_SID = 'ISfake000000000000000000000000000';
+
+/** NO LONGER PURELY COSMETIC. When the app pins TWILIO_CONVERSATIONS_SERVICE_SID
+ *  it REJECTS Conversations events whose ChatServiceSid differs (the cross-env
+ *  fence in routes/webhooks/twilioConversations.ts), so the two sides have to
+ *  agree. The fake process inherits the lane's childEnv, so reading the same var
+ *  the app reads keeps them aligned automatically - the TWILIO_VI_SERVICE_SID
+ *  pattern. Falls back to the literal when unset (the app's fence is inactive
+ *  then, so any value passes). */
+const FAKE_CHAT_SERVICE_SID =
+  process.env['TWILIO_CONVERSATIONS_SERVICE_SID']?.trim() || 'ISfake000000000000000000000000000';
 const FAKE_MESSAGING_SERVICE_SID = 'MGfake000000000000000000000000000';
 
 export interface BuildStatusInput {

@@ -225,7 +225,7 @@ export interface AiRunListRowLive {
   trigger: AiRunTrigger;
   outcome: AiRunOutcome;
   skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
-  errorKind?: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo';
+  errorKind?: 'refusal' | 'parse' | 'truncated' | 'driver' | 'complete' | 'repo';
   driver: AiRunDriver;
   model?: string;
   decisionCounts: Record<string, number>;
@@ -281,7 +281,7 @@ export interface AiRunRecordView {
   trigger: AiRunTrigger;
   outcome: AiRunOutcome;
   skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
-  error?: { kind: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo'; message: string; attempts: number; parked: boolean };
+  error?: { kind: 'refusal' | 'parse' | 'truncated' | 'driver' | 'complete' | 'repo'; message: string; attempts: number; parked: boolean };
   driver: AiRunDriver;
   model?: string;
   promptFingerprint?: string;

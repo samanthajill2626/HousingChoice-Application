@@ -333,7 +333,11 @@ describe('PlacementConversation - group tab', () => {
     );
     expect(await screen.findByText('Group message here')).toBeInTheDocument();
     // The relay transcript comes from the conversation, not the person feed.
-    expect(getConversationMessages).toHaveBeenCalledWith('g1', expect.any(AbortSignal));
+    expect(getConversationMessages).toHaveBeenCalledWith(
+      'g1',
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(getContactTimeline).not.toHaveBeenCalled();
   });
 

@@ -22,11 +22,11 @@ const RESOURCE_CLASSES: readonly ResourceClass[] = [
 ];
 
 function aggregateKey(aggregate: RouteModeAggregate): string {
-  return `${aggregate.mode}\u0000${aggregate.routeKey}`;
+  return `${aggregate.mode}\u0000${aggregate.surfaceId}`;
 }
 
 function entryRef(aggregate: RouteModeAggregate): ComparisonEntryRef {
-  return { routeKey: aggregate.routeKey, mode: aggregate.mode };
+  return { surfaceId: aggregate.surfaceId, mode: aggregate.mode };
 }
 
 function normalizeRevision(value: string | null): string | null {
@@ -53,12 +53,6 @@ function normalizedValue(value: unknown): unknown {
   return value;
 }
 
-function normalizedScaleManifest(manifest: object | null): unknown {
-  if (manifest === null) return null;
-  const { anchor: _anchor, ...withoutAnchor } = manifest as Record<string, unknown>;
-  return normalizedValue(withoutAnchor);
-}
-
 function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(normalizedValue(left)) === JSON.stringify(normalizedValue(right));
 }
@@ -73,9 +67,10 @@ function environmentMismatches(
 ): EnvironmentMismatchField[] {
   const mismatches: EnvironmentMismatchField[] = [];
   if (baseline.target !== current.target) mismatches.push('target');
-  if (!sameValue(normalizedScaleManifest(baseline.scaleManifest), normalizedScaleManifest(current.scaleManifest))) {
-    mismatches.push('scale_manifest');
-  }
+  if (baseline.registryVersion !== current.registryVersion) mismatches.push('registry_version');
+  if (baseline.workloadVersion !== current.workloadVersion) mismatches.push('workload_version');
+  if (baseline.dataSource !== current.dataSource) mismatches.push('data_source');
+  if (!sameValue(baseline.comparisonWorkload, current.comparisonWorkload)) mismatches.push('comparison_workload');
   if (!sameValue(normalizedRouteSet(baseline.routeSet), normalizedRouteSet(current.routeSet))) {
     mismatches.push('route_set');
   }
@@ -134,6 +129,7 @@ function metricDeltas(
 function hasSkippedStatus(aggregate: RouteModeAggregate): boolean {
   return aggregate.statusCounts.skipped_no_fixture > 0
     || aggregate.statusCounts.skipped_fixture_not_navigable > 0
+    || aggregate.statusCounts.skipped_required_action_missing > 0
     || aggregate.statusCounts.skipped_source_not_ready > 0
     || aggregate.statusCounts.skipped_unresolved_branch > 0;
 }

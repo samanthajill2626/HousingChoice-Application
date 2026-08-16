@@ -48,6 +48,16 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
     .sort(([a], [b]) => targetRank(a) - targetRank(b));
   return <section className={styles.detailPane} aria-label="AI run detail">
     <header className={styles.detailHeader}><h3>Run {run.runId}</h3><p>{run.trigger} - {run.outcome} - {run.driver}{run.model ? ` / ${run.model}` : ''}</p><p>{new Date(run.startedAt).toLocaleString()} - {run.contactId ?? run.conversationId} - {run.durationMs} ms</p>{run.promptFingerprint ? <p>Prompt fingerprint: {run.promptFingerprint}</p> : null}{run.usage ? <p>{run.usage.inputTokens} input tokens - {run.usage.outputTokens} output tokens</p> : null}</header>
+    {run.error ? <section className={styles.failure} aria-label="Run failure">
+      <h4>Failed: {humanizeEnum(run.error.kind)}</h4>
+      <p>{run.error.message}</p>
+      {/* `attempts` is the count of PRIOR consecutive failures at the moment
+          this run failed (jobs/extraction.ts), so this run is the one after
+          them. Parked means the retry budget is spent and nothing will pick
+          this conversation up again on its own - the single fact an operator
+          reading a failed run most needs, and the one the pane used to drop. */}
+      <p>Attempt {run.error.attempts + 1}{run.error.parked ? <span className={styles.parked}> - parked, no further automatic retries</span> : null}</p>
+    </section> : null}
     {storedWindow ? <section className={styles.block}><h4>{full ? 'Extraction window' : 'Skip window'}</h4>{!full ? <p>This skip window has no byte-level message evidence.</p> : null}<WindowMessages messages={window.messages} full={full} />
       {storedWindow.windowCappedAtLimit ? <p className={styles.note}>Older messages may exist beyond the recorded window.</p> : null}
       {storedWindow.noContent?.length ? <div role="region" aria-label="No content" className={styles.auditList}><h4>No content</h4><ul>{storedWindow.noContent.map((id) => <li key={id}>{id}</li>)}</ul></div> : null}

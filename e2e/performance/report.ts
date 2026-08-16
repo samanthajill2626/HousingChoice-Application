@@ -11,20 +11,25 @@ import { serializeSelfQaResult, type SelfQaResult } from './selfQa.js';
 import { scanArtifactFiles, type PrivacyViolationCode } from './redact.js';
 import {
   ROUTES,
+  INBOX_REQUEST_CLASSES,
   assertObservedGets,
   expectedBlockedWrites,
   expectedGets,
+  type InboxRequestClass,
   type RouteContractBranch,
   type RouteDefinition,
 } from './routes.js';
 import { allEndpointTemplates } from './templates.js';
 import {
   INTERCEPTION_SCOPE_VERSION,
+  PERFORMANCE_REGISTRY_VERSION,
   PERFORMANCE_SCHEMA_VERSION,
+  PERFORMANCE_WORKLOAD_VERSION,
   type AggregateRankings,
   type BlockedWrite,
   type BrowserMetadata,
   type ComparisonEnvironment,
+  type ComparisonWorkload,
   type ComparisonResult,
   type ComparisonRun,
   type FailureReasonCode,
@@ -48,6 +53,7 @@ const SAMPLE_STATUSES: readonly SampleStatus[] = [
   'blocked_write_dependency',
   'skipped_no_fixture',
   'skipped_fixture_not_navigable',
+  'skipped_required_action_missing',
   'skipped_source_not_ready',
   'skipped_unresolved_branch',
 ];
@@ -59,11 +65,14 @@ const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'blocked_write_prevented_ready',
   'fixture_absent',
   'fixture_not_navigable',
+  'required_action_missing',
+  'contradictory_terminal',
   'source_not_ready',
   'unresolved_branch',
   'cleanup_failed',
   'privacy_scan_failed',
   'comparison_failed',
+  'endpoint_contract_mismatch',
   'uncataloged_write_escaped_firewall',
   'unexpected_failure',
 ];
@@ -79,12 +88,11 @@ const ENDPOINT_TEMPLATES: ReadonlySet<string> = new Set([
   'third_party',
   'invalid_url',
 ]);
-const SAFE_ROUTE_KEY = /^\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*$/u;
-const ROUTE_KEYS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.key));
+const SAFE_SURFACE_ID = /^(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*|inbox-[a-z][a-z0-9-]*)$/u;
+const SURFACE_IDS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.surfaceId));
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
 const SAFE_RUN_ID = /^\d{8}T\d{9}Z-[0-9a-f]{8}$/u;
-
 export interface ReportBrowserInput {
   version: string;
   viewport: { width: number; height: number };
@@ -93,12 +101,12 @@ export interface ReportBrowserInput {
 export interface ReportRouteOrder {
   mode: SampleMode;
   repeat: number;
-  routeKeys: string[];
+  surfaceIds: string[];
 }
 
 export interface ReportWarmup {
   performed: boolean;
-  routeKey: string | null;
+  surfaceId: string | null;
 }
 
 export interface ReportRelayDomCheck {
@@ -155,7 +163,7 @@ interface PrivacyFailureResult {
 export type WritePerformanceReportResult = WrittenReportResult | PrivacyFailureResult;
 
 export interface ContractCheckpointBranch {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   repeat: number;
   branch: RouteContractBranch;
@@ -177,13 +185,14 @@ export type ContractCheckpointMismatchCode =
 export interface ContractEndpointObservation {
   endpointTemplate: string;
   queryKeys: string[];
+  inboxRequestClass?: InboxRequestClass;
   multiplicity: number;
   outcome: RequestEvidence['outcome'];
   role: RequestEvidence['requestRole'];
 }
 
 export interface ContractCheckpointObservation {
-  routeKey: string;
+  surfaceId: string;
   mode: SampleMode;
   selectedBranch: string;
   terminal: SampleResult['terminalState'];
@@ -213,8 +222,8 @@ export interface ContractCheckpointEvaluation {
   outOfSampleWrites: BlockedWrite[];
 }
 
-function sampleKey(routeKeyValue: string, mode: SampleMode, repeat: number): string {
-  return `${routeKeyValue}|${mode}|${repeat}`;
+function sampleKey(surfaceIdValue: string, mode: SampleMode, repeat: number): string {
+  return `${surfaceIdValue}|${mode}|${repeat}`;
 }
 
 function symbolicBranch(branch: RouteContractBranch): string {
@@ -241,56 +250,62 @@ function blockedShape(value: BlockedWrite): string {
   return `${value.method}|${value.endpointTemplate}|${value.phase}`;
 }
 
+function inboxRequestClass(value: unknown): InboxRequestClass | undefined {
+  return INBOX_REQUEST_CLASSES.includes(value as InboxRequestClass) ? value as InboxRequestClass : undefined;
+}
+
 function observedEndpoints(requests: readonly RequestEvidence[]): ContractEndpointObservation[] {
   const rows = new Map<string, ContractEndpointObservation>();
   for (const request of requests.filter((row) => row.originClass === 'first_party' && row.resourceClass === 'api')) {
     const queryKeys = [...request.queryKeys].sort();
-    const key = `${request.endpointTemplate}?${queryKeys.join('&')}|${request.outcome}|${request.requestRole}`;
+    const requestClass = inboxRequestClass(request.inboxRequestClass);
+    const key = `${request.endpointTemplate}?${queryKeys.join('&')}|${requestClass ?? 'none'}|${request.outcome}|${request.requestRole}`;
     const prior = rows.get(key);
     rows.set(key, {
       endpointTemplate: endpointTemplate(request.endpointTemplate),
       queryKeys,
+      ...(requestClass !== undefined && { inboxRequestClass: requestClass }),
       multiplicity: (prior?.multiplicity ?? 0) + 1,
       outcome: request.outcome,
       role: request.requestRole,
     });
   }
   return [...rows.values()].sort((left, right) =>
-    `${endpointShape(left)}|${left.role}|${left.outcome}`
-      .localeCompare(`${endpointShape(right)}|${right.role}|${right.outcome}`),
+    `${endpointShape(left)}|${left.inboxRequestClass ?? 'none'}|${left.role}|${left.outcome}`
+      .localeCompare(`${endpointShape(right)}|${right.inboxRequestClass ?? 'none'}|${right.role}|${right.outcome}`),
   );
 }
 
 export function evaluateContractCheckpoint(
   input: EvaluateContractCheckpointInput,
 ): ContractCheckpointEvaluation {
-  const routeByKey = new Map(input.routes.map((route) => [route.key, route]));
+  const routeBySurfaceId = new Map(input.routes.map((route) => [route.surfaceId, route]));
   const branches = new Map(input.branches.map((row) => [
-    sampleKey(row.routeKey, row.mode, row.repeat),
+    sampleKey(row.surfaceId, row.mode, row.repeat),
     row.branch,
   ]));
   const samples = new Map(input.samples.map((sample) => [
-    sampleKey(sample.routeKey, sample.mode, sample.repeat),
+    sampleKey(sample.surfaceId, sample.mode, sample.repeat),
     sample,
   ]));
   const keys = new Set([...samples.keys(), ...branches.keys()]);
   if (input.requireCompleteRegistry === true) {
     for (const route of input.routes) {
-      for (const mode of ['cold', 'warm'] as const) keys.add(sampleKey(route.key, mode, 0));
+      for (const mode of ['cold', 'warm'] as const) keys.add(sampleKey(route.surfaceId, mode, 0));
     }
   }
 
   const observations: ContractCheckpointObservation[] = [];
   for (const key of [...keys].sort()) {
-    const [routeKeyValue, rawMode, rawRepeat] = key.split('|');
+    const [surfaceIdValue, rawMode, rawRepeat] = key.split('|');
     const mode = rawMode === 'warm' ? 'warm' : 'cold';
     const repeat = Number.parseInt(rawRepeat ?? '0', 10);
-    const route = routeByKey.get(routeKeyValue ?? '');
+    const route = routeBySurfaceId.get(surfaceIdValue ?? '');
     if (route === undefined) continue;
     const sample = samples.get(key);
     const branch = branches.get(key);
     const requests = input.requests.filter((request) =>
-      request.routeKey === route.key && request.mode === mode && request.repeat === repeat,
+      request.surfaceId === route.surfaceId && request.mode === mode && request.repeat === repeat,
     );
     const mismatches = new Set<ContractCheckpointMismatchCode>();
     if (sample === undefined) mismatches.add('missing_sample');
@@ -312,6 +327,7 @@ export function evaluateContractCheckpoint(
         .map((request) => ({
           endpointTemplate: endpointTemplate(request.endpointTemplate) as never,
           queryKeys: [...request.queryKeys],
+          ...(request.inboxRequestClass !== undefined && { inboxRequestClass: request.inboxRequestClass }),
           requirement: 'required' as const,
           outcome: request.outcome,
           status: request.status,
@@ -337,7 +353,7 @@ export function evaluateContractCheckpoint(
 
     const endpoints = observedEndpoints(requests);
     observations.push({
-      routeKey: route.key,
+      surfaceId: route.surfaceId,
       mode,
       selectedBranch: branch === undefined ? 'unresolved' : symbolicBranch(branch),
       terminal: sample?.terminalState ?? 'unknown',
@@ -380,9 +396,9 @@ function nullableFinite(value: unknown): number | null {
   return value === null ? null : finite(value);
 }
 
-function routeKey(value: unknown): string {
-  if (value === '/' && ROUTE_KEYS.has('/')) return '/';
-  return typeof value === 'string' && SAFE_ROUTE_KEY.test(value) && ROUTE_KEYS.has(value)
+function surfaceId(value: unknown): string {
+  if (value === '/' && SURFACE_IDS.has('/')) return '/';
+  return typeof value === 'string' && SAFE_SURFACE_ID.test(value) && SURFACE_IDS.has(value)
     ? value
     : 'invalid_route';
 }
@@ -400,6 +416,7 @@ function normalizedRevision(value: unknown): string | null {
 function cloneManifest(manifest: PerformanceSeedManifest | null): PerformanceSeedManifest | null {
   if (manifest === null) return null;
   return {
+    workloadModelVersion: integer(manifest.workloadModelVersion),
     anchor: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(manifest.anchor)
       ? manifest.anchor
       : '1970-01-01T00:00:00.000Z',
@@ -409,13 +426,47 @@ function cloneManifest(manifest: PerformanceSeedManifest | null): PerformanceSee
     placements: integer(manifest.placements),
     tours: integer(manifest.tours),
     conversations: integer(manifest.conversations),
+    requestedNativeGroups: integer(manifest.requestedNativeGroups),
+    nativeGroups: integer(manifest.nativeGroups),
+    nativeGroupCapacity: integer(manifest.nativeGroupCapacity),
+    nativeGroupRosterSizes: Array.isArray(manifest.nativeGroupRosterSizes)
+      ? manifest.nativeGroupRosterSizes.map((size) => integer(size))
+      : [],
+    nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
+    totalConversations: integer(manifest.totalConversations),
+    tenantCount: integer(manifest.tenantCount),
+    landlordCount: integer(manifest.landlordCount),
+    unknownCount: integer(manifest.unknownCount),
+    activeTenantCount: integer(manifest.activeTenantCount),
+    activeLandlordCount: integer(manifest.activeLandlordCount),
+    activeUnknownCount: integer(manifest.activeUnknownCount),
+    activeContactCount: integer(manifest.activeContactCount),
+    deletedContactCount: integer(manifest.deletedContactCount),
     messagesPerConversation: integer(manifest.messagesPerConversation),
+    requestedLongConversationMessages: integer(manifest.requestedLongConversationMessages),
+    resolvedLongConversationMessages: integer(manifest.resolvedLongConversationMessages),
+    longConversationFixturePresent: manifest.longConversationFixturePresent === true,
+    ordinaryMessageCount: integer(manifest.ordinaryMessageCount),
+    tailMessageCount: integer(manifest.tailMessageCount),
+    totalMessageCount: integer(manifest.totalMessageCount),
     broadcasts: integer(manifest.broadcasts),
     recipientsPerBroadcast: integer(manifest.recipientsPerBroadcast),
+    requestedLargeBroadcastRecipients: integer(manifest.requestedLargeBroadcastRecipients),
+    resolvedLargeBroadcastRecipients: integer(manifest.resolvedLargeBroadcastRecipients),
+    clippedLargeBroadcastRecipients: integer(manifest.clippedLargeBroadcastRecipients),
+    largeBroadcastFixturePresent: manifest.largeBroadcastFixturePresent === true,
+    recipientPoolSize: integer(manifest.recipientPoolSize),
+    recipientPoolSource: manifest.recipientPoolSource === 'generated_tenants'
+      ? 'generated_tenants'
+      : 'lean_tenant',
     messageCount: integer(manifest.messageCount),
     requestedRecipientCount: integer(manifest.requestedRecipientCount),
     resolvedRecipientsPerBroadcast: integer(manifest.resolvedRecipientsPerBroadcast),
+    requestedOrdinaryRecipientCount: integer(manifest.requestedOrdinaryRecipientCount),
+    resolvedOrdinaryRecipientCount: integer(manifest.resolvedOrdinaryRecipientCount),
+    clippedOrdinaryRecipientCount: integer(manifest.clippedOrdinaryRecipientCount),
     resolvedRecipientCount: integer(manifest.resolvedRecipientCount),
+    totalRecipientCount: integer(manifest.totalRecipientCount),
     requestedRelayGroupCount: integer(manifest.requestedRelayGroupCount),
     relayGroupCount: integer(manifest.relayGroupCount),
     clippedRelayGroupCount: integer(manifest.clippedRelayGroupCount),
@@ -494,13 +545,29 @@ function cloneResourceCounts(value: Record<ResourceClass, number>): Record<Resou
   ])) as Record<ResourceClass, number>;
 }
 
+function cloneSurfaceEvidence(value: SampleResult['surfaceEvidence']): SampleResult['surfaceEvidence'] {
+  if (value?.kind === 'inbox') {
+    return {
+      kind: 'inbox',
+      filter: ['all', 'unread', 'unknown', 'groups'].includes(value.filter) ? value.filter : 'all',
+      renderedRowCount: integer(value.renderedRowCount),
+      groupsTruncated: value.groupsTruncated === true,
+      initialInboxPageRequestCount: integer(value.initialInboxPageRequestCount),
+    };
+  }
+  if (value?.kind === 'conversation_detail') {
+    return { kind: 'conversation_detail', initialRenderedMessageCount: nullableFinite(value.initialRenderedMessageCount) };
+  }
+  return null;
+}
+
 function cloneSample(sample: SampleResult): SampleResult {
   const status = SAMPLE_STATUSES.includes(sample.status) ? sample.status : 'failed';
   const reason = sample.reason !== null && FAILURE_REASONS.includes(sample.reason)
     ? sample.reason
     : null;
   return {
-    routeKey: routeKey(sample.routeKey),
+    surfaceId: surfaceId(sample.surfaceId),
     mode: sample.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(sample.repeat),
     status,
@@ -540,9 +607,10 @@ function cloneSample(sample: SampleResult): SampleResult {
       }),
     },
     clientTruncated: sample.clientTruncated === true,
-    terminalState: ['populated', 'empty', 'error', 'unknown'].includes(sample.terminalState)
+    terminalState: ['populated', 'empty', 'error', 'contradictory_terminal', 'unknown'].includes(sample.terminalState)
       ? sample.terminalState
       : 'unknown',
+    surfaceEvidence: cloneSurfaceEvidence(sample.surfaceEvidence),
     reason,
   };
 }
@@ -552,8 +620,9 @@ function cloneRequest(request: RequestEvidence): RequestEvidence {
     && ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'OTHER'].includes(request.method)
     ? request.method
     : 'OTHER';
+  const requestClass = inboxRequestClass(request.inboxRequestClass);
   return {
-    routeKey: routeKey(request.routeKey),
+    surfaceId: surfaceId(request.surfaceId),
     mode: request.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(request.repeat),
     method,
@@ -563,6 +632,7 @@ function cloneRequest(request: RequestEvidence): RequestEvidence {
     queryKeys: request.queryKeys
       .filter((key) => typeof key === 'string' && SAFE_QUERY_KEY.test(key))
       .slice(0, 32),
+    ...(requestClass !== undefined && { inboxRequestClass: requestClass }),
     startOffsetMs: finite(request.startOffsetMs),
     durationMs: nullableFinite(request.durationMs),
     ttfbMs: nullableFinite(request.ttfbMs),
@@ -599,7 +669,7 @@ function cloneOrders(orders: readonly ReportRouteOrder[]): ReportRouteOrder[] {
   return orders.map((order) => ({
     mode: order.mode === 'warm' ? 'warm' : 'cold',
     repeat: integer(order.repeat),
-    routeKeys: order.routeKeys.map(routeKey),
+    surfaceIds: order.surfaceIds.map(surfaceId),
   }));
 }
 
@@ -610,8 +680,11 @@ function comparisonEnvironment(
 ): ComparisonEnvironment {
   return {
     target: config.target,
-    scaleManifest: config.seed,
-    routeSet: [...new Set(samples.map((sample) => sample.routeKey))].sort(),
+    registryVersion: PERFORMANCE_REGISTRY_VERSION,
+    workloadVersion: PERFORMANCE_WORKLOAD_VERSION,
+    dataSource: config.target === 'hermetic' ? 'synthetic_hermetic' : 'existing',
+    comparisonWorkload: config.target === 'hermetic' ? comparisonWorkload(config.seed) : null,
+    routeSet: [...new Set(samples.map((sample) => sample.surfaceId))].sort(),
     browserMajor: browser.major,
     browserChannel: browser.channel,
     viewport: browser.viewport,
@@ -624,16 +697,230 @@ function comparisonEnvironment(
   };
 }
 
+function comparisonWorkload(manifest: PerformanceSeedManifest | null): ComparisonWorkload | null {
+  if (manifest === null) return null;
+  return {
+    workloadModelVersion: integer(manifest.workloadModelVersion),
+    contacts: integer(manifest.contacts), activeContacts: integer(manifest.activeContactCount), units: integer(manifest.units),
+    placements: integer(manifest.placements), tours: integer(manifest.tours),
+    conversations: integer(manifest.conversations), nativeGroups: integer(manifest.nativeGroups),
+    totalConversations: integer(manifest.totalConversations),
+    messagesPerConversation: integer(manifest.messagesPerConversation),
+    resolvedLongConversationMessages: integer(manifest.resolvedLongConversationMessages),
+    totalMessageCount: integer(manifest.totalMessageCount),
+    nativeGroupMemberSlotCount: integer(manifest.nativeGroupMemberSlotCount),
+    broadcasts: integer(manifest.broadcasts),
+    resolvedRecipientsPerBroadcast: integer(manifest.resolvedRecipientsPerBroadcast),
+    resolvedLargeBroadcastRecipients: integer(manifest.resolvedLargeBroadcastRecipients),
+    totalRecipientCount: integer(manifest.totalRecipientCount),
+    recipientPoolSize: integer(manifest.recipientPoolSize),
+    recipientPoolSource: manifest.recipientPoolSource === 'generated_tenants' ? 'generated_tenants' : 'lean_tenant',
+    longConversationFixturePresent: manifest.longConversationFixturePresent === true,
+    largeBroadcastFixturePresent: manifest.largeBroadcastFixturePresent === true,
+  };
+}
+
+const INVALID_BASELINE_TARGET = 'invalid_target' as ComparisonEnvironment['target'];
+const INVALID_BASELINE_DATA_SOURCE = 'invalid_data_source' as ComparisonEnvironment['dataSource'];
+const INVALID_BASELINE_RECIPIENT_POOL_SOURCE = 'invalid_recipient_pool_source' as ComparisonWorkload['recipientPoolSource'];
+const INVALID_BASELINE_BROWSER_CHANNEL = 'invalid_browser_channel';
+const INVALID_BASELINE_ROUTE = 'invalid_baseline_route';
+const INVALID_BASELINE_INTEGER = -1;
+const INVALID_BASELINE_BOOLEAN = 'invalid_boolean' as unknown as boolean;
+const BASELINE_ROOT_KEYS = [
+  'schemaVersion', 'registryVersion', 'workloadVersion', 'interceptionScopeVersion', 'run', 'config', 'target',
+  'revisions', 'manifest', 'browser', 'runtime', 'environment', 'samples', 'outOfSampleWrites', 'aggregates',
+  'rankings', 'routeOrders', 'warmup', 'relayDomCheck', 'warnings', 'comparison', 'artifacts',
+] as const;
+const OPTIONAL_BASELINE_ROOT_KEYS = ['safetyFailure', 'selfQa'] as const;
+const BASELINE_ENVIRONMENT_KEYS = [
+  'target', 'registryVersion', 'workloadVersion', 'dataSource', 'comparisonWorkload', 'routeSet', 'browserMajor',
+  'browserChannel', 'viewport', 'coldRepeats', 'warmRepeats', 'routeOrderSeed', 'interceptionScopeVersion',
+  'settleMs', 'pollMs',
+] as const;
+const BASELINE_COMPARISON_WORKLOAD_KEYS = [
+  'workloadModelVersion', 'contacts', 'activeContacts', 'units', 'placements', 'tours', 'conversations',
+  'nativeGroups', 'nativeGroupMemberSlotCount', 'totalConversations', 'messagesPerConversation',
+  'resolvedLongConversationMessages', 'totalMessageCount', 'broadcasts', 'resolvedRecipientsPerBroadcast',
+  'resolvedLargeBroadcastRecipients', 'totalRecipientCount', 'recipientPoolSize', 'recipientPoolSource',
+  'longConversationFixturePresent', 'largeBroadcastFixturePresent',
+] as const;
+const BASELINE_REVISION_KEYS = ['profilerCommit', 'targetAppCommit'] as const;
+const BASELINE_RUN_KEYS = ['status', 'reason'] as const;
+
+function baselineInteger(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : INVALID_BASELINE_INTEGER;
+}
+
+function baselineBoolean(value: unknown): boolean {
+  return typeof value === 'boolean' ? value : INVALID_BASELINE_BOOLEAN;
+}
+
+function baselineSurfaceId(value: unknown): string {
+  return typeof value === 'string' && SURFACE_IDS.has(value) ? value : INVALID_BASELINE_ROUTE;
+}
+
+function baselineRouteSet(value: unknown): string[] {
+  if (!Array.isArray(value)) return [INVALID_BASELINE_ROUTE];
+  const routeSet = value.map(baselineSurfaceId);
+  if (
+    routeSet.includes(INVALID_BASELINE_ROUTE)
+    || new Set(routeSet).size !== routeSet.length
+    || routeSet.some((route, index) => index > 0 && routeSet[index - 1]!.localeCompare(route) >= 0)
+  ) {
+    return [INVALID_BASELINE_ROUTE];
+  }
+  return routeSet;
+}
+
+function invalidBaselineComparisonWorkload(): ComparisonWorkload {
+  return {
+    workloadModelVersion: INVALID_BASELINE_INTEGER,
+    contacts: INVALID_BASELINE_INTEGER,
+    activeContacts: INVALID_BASELINE_INTEGER,
+    units: INVALID_BASELINE_INTEGER,
+    placements: INVALID_BASELINE_INTEGER,
+    tours: INVALID_BASELINE_INTEGER,
+    conversations: INVALID_BASELINE_INTEGER,
+    nativeGroups: INVALID_BASELINE_INTEGER,
+    nativeGroupMemberSlotCount: INVALID_BASELINE_INTEGER,
+    totalConversations: INVALID_BASELINE_INTEGER,
+    messagesPerConversation: INVALID_BASELINE_INTEGER,
+    resolvedLongConversationMessages: INVALID_BASELINE_INTEGER,
+    totalMessageCount: INVALID_BASELINE_INTEGER,
+    broadcasts: INVALID_BASELINE_INTEGER,
+    resolvedRecipientsPerBroadcast: INVALID_BASELINE_INTEGER,
+    resolvedLargeBroadcastRecipients: INVALID_BASELINE_INTEGER,
+    totalRecipientCount: INVALID_BASELINE_INTEGER,
+    recipientPoolSize: INVALID_BASELINE_INTEGER,
+    recipientPoolSource: INVALID_BASELINE_RECIPIENT_POOL_SOURCE,
+    longConversationFixturePresent: INVALID_BASELINE_BOOLEAN,
+    largeBroadcastFixturePresent: INVALID_BASELINE_BOOLEAN,
+  };
+}
+
+function baselineComparisonWorkload(value: unknown): ComparisonWorkload | null {
+  const workload = record(value);
+  if (value === null) return null;
+  if (workload === null) return invalidBaselineComparisonWorkload();
+  if (!hasNoUnknownKeys(workload, BASELINE_COMPARISON_WORKLOAD_KEYS)) {
+    throw new Error('baseline_schema_invalid');
+  }
+  if (!hasClosedKeys(workload, BASELINE_COMPARISON_WORKLOAD_KEYS)) {
+    return invalidBaselineComparisonWorkload();
+  }
+  const recipientPoolSource = workload['recipientPoolSource'];
+  return {
+    workloadModelVersion: baselineInteger(workload['workloadModelVersion']),
+    contacts: baselineInteger(workload['contacts']),
+    activeContacts: baselineInteger(workload['activeContacts']),
+    units: baselineInteger(workload['units']),
+    placements: baselineInteger(workload['placements']),
+    tours: baselineInteger(workload['tours']),
+    conversations: baselineInteger(workload['conversations']),
+    nativeGroups: baselineInteger(workload['nativeGroups']),
+    nativeGroupMemberSlotCount: baselineInteger(workload['nativeGroupMemberSlotCount']),
+    totalConversations: baselineInteger(workload['totalConversations']),
+    messagesPerConversation: baselineInteger(workload['messagesPerConversation']),
+    resolvedLongConversationMessages: baselineInteger(workload['resolvedLongConversationMessages']),
+    totalMessageCount: baselineInteger(workload['totalMessageCount']),
+    broadcasts: baselineInteger(workload['broadcasts']),
+    resolvedRecipientsPerBroadcast: baselineInteger(workload['resolvedRecipientsPerBroadcast']),
+    resolvedLargeBroadcastRecipients: baselineInteger(workload['resolvedLargeBroadcastRecipients']),
+    totalRecipientCount: baselineInteger(workload['totalRecipientCount']),
+    recipientPoolSize: baselineInteger(workload['recipientPoolSize']),
+    recipientPoolSource: recipientPoolSource === 'generated_tenants' || recipientPoolSource === 'lean_tenant'
+      ? recipientPoolSource
+      : INVALID_BASELINE_RECIPIENT_POOL_SOURCE,
+    longConversationFixturePresent: baselineBoolean(workload['longConversationFixturePresent']),
+    largeBroadcastFixturePresent: baselineBoolean(workload['largeBroadcastFixturePresent']),
+  };
+}
+
+function baselineEnvironment(value: unknown): ComparisonEnvironment {
+  const environment = record(value);
+  if (
+    environment === null
+    || !hasNoUnknownKeys(environment, BASELINE_ENVIRONMENT_KEYS)
+    || !hasNoUnknownKeys(record(environment['viewport']) ?? {}, ['width', 'height'])
+  ) {
+    throw new Error('baseline_schema_invalid');
+  }
+  const dataSource = environment['dataSource'];
+  return {
+    target: environment['target'] === 'hermetic' || environment['target'] === 'local' || environment['target'] === 'hosted-dev'
+      ? environment['target']
+      : INVALID_BASELINE_TARGET,
+    registryVersion: baselineInteger(environment['registryVersion']),
+    workloadVersion: baselineInteger(environment['workloadVersion']),
+    dataSource: dataSource === 'synthetic_hermetic' || dataSource === 'existing'
+      ? dataSource
+      : INVALID_BASELINE_DATA_SOURCE,
+    comparisonWorkload: baselineComparisonWorkload(environment['comparisonWorkload']),
+    routeSet: baselineRouteSet(environment['routeSet']),
+    browserMajor: baselineInteger(environment['browserMajor']),
+    browserChannel: environment['browserChannel'] === 'chromium' || environment['browserChannel'] === 'chrome'
+      ? environment['browserChannel']
+      : INVALID_BASELINE_BROWSER_CHANNEL,
+    viewport: {
+      width: baselineInteger(record(environment['viewport'])?.['width']),
+      height: baselineInteger(record(environment['viewport'])?.['height']),
+    },
+    coldRepeats: baselineInteger(environment['coldRepeats']),
+    warmRepeats: baselineInteger(environment['warmRepeats']),
+    routeOrderSeed: baselineInteger(environment['routeOrderSeed']),
+    interceptionScopeVersion: baselineInteger(environment['interceptionScopeVersion']),
+    settleMs: baselineInteger(environment['settleMs']),
+    pollMs: baselineInteger(environment['pollMs']),
+  };
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
 }
 
-function baselineSummary(value: unknown): boolean {
+function hasClosedKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length && actualKeys.every((key) => keys.includes(key));
+}
+
+function hasNoUnknownKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function hasCanonicalBaselineRootKeys(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value);
+  return BASELINE_ROOT_KEYS.every((key) => keys.includes(key))
+    && keys.every((key) => BASELINE_ROOT_KEYS.includes(key as typeof BASELINE_ROOT_KEYS[number])
+      || OPTIONAL_BASELINE_ROOT_KEYS.includes(key as typeof OPTIONAL_BASELINE_ROOT_KEYS[number]));
+}
+
+function baselineFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function baselineNonnegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function baselineSummary(value: unknown, successCount: number): boolean {
   const summary = record(value);
-  return summary !== null && (summary['median'] === null
-    || (typeof summary['median'] === 'number' && Number.isFinite(summary['median'])));
+  if (summary === null || !hasClosedKeys(summary, ['median', 'min', 'max', 'p95'])) return false;
+
+  const median = summary['median'];
+  const min = summary['min'];
+  const max = summary['max'];
+  const p95 = summary['p95'];
+  if (median === null && min === null && max === null) return p95 === null;
+  if (successCount === 0) return false;
+  if (!baselineFiniteNumber(median) || !baselineFiniteNumber(min) || !baselineFiniteNumber(max)) return false;
+  if (min > median || median > max) return false;
+  if (successCount < 20) return p95 === null;
+  return baselineFiniteNumber(p95) && min <= p95 && p95 <= max;
 }
 
 function baselineAggregate(value: unknown): value is RouteModeAggregate {
@@ -641,30 +928,114 @@ function baselineAggregate(value: unknown): value is RouteModeAggregate {
   const metrics = record(aggregate?.['metrics']);
   const resources = record(metrics?.['resourceCountsByClass']);
   const statuses = record(aggregate?.['statusCounts']);
+  const noise = record(aggregate?.['noise']);
+  const sampleCount = aggregate?.['sampleCount'];
+  const successCount = aggregate?.['successCount'];
+  const lowSampleCount = aggregate?.['lowSampleCount'];
+  const warnings = aggregate?.['warnings'];
+  const statusCountTotal = statuses === null
+    ? Number.NaN
+    : SAMPLE_STATUSES.reduce((total, status) => total + Number(statuses[status]), 0);
   return aggregate !== null
-    && routeKey(aggregate['routeKey']) === aggregate['routeKey']
+    && hasClosedKeys(aggregate, [
+      'surfaceId', 'mode', 'sampleCount', 'successCount', 'statusCounts', 'lowSampleCount', 'warnings',
+      'surfaceScaleBearing', 'loadScaleBearing', 'clientTruncated', 'metrics', 'noise',
+    ])
+    && surfaceId(aggregate['surfaceId']) === aggregate['surfaceId']
     && (aggregate['mode'] === 'cold' || aggregate['mode'] === 'warm')
+    && baselineNonnegativeInteger(sampleCount)
+    && baselineNonnegativeInteger(successCount)
     && metrics !== null
-    && baselineSummary(metrics['readyMs'])
-    && baselineSummary(metrics['apiRequestCount'])
-    && baselineSummary(metrics['apiTransferBytes'])
-    && baselineSummary(metrics['longTaskTotalMs'])
-    && baselineSummary(metrics['domElements'])
+    && hasClosedKeys(metrics, [
+      'readyMs', 'apiRequestCount', 'apiTransferBytes', 'longTaskTotalMs', 'domElements', 'resourceCountsByClass',
+    ])
+    && baselineSummary(metrics['readyMs'], successCount)
+    && baselineSummary(metrics['apiRequestCount'], successCount)
+    && baselineSummary(metrics['apiTransferBytes'], successCount)
+    && baselineSummary(metrics['longTaskTotalMs'], successCount)
+    && baselineSummary(metrics['domElements'], successCount)
     && resources !== null
-    && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass]))
+    && hasClosedKeys(resources, RESOURCE_CLASSES)
+    && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass], successCount))
     && statuses !== null
-    && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0);
+    && hasClosedKeys(statuses, SAMPLE_STATUSES)
+    && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0)
+    && Number.isSafeInteger(statusCountTotal)
+    && statusCountTotal === sampleCount
+    && statuses['ok'] === successCount
+    && typeof lowSampleCount === 'boolean'
+    && lowSampleCount === (successCount < 3)
+    && Array.isArray(warnings)
+    && (lowSampleCount ? warnings.length === 1 && warnings[0] === 'low_sample_count' : warnings.length === 0)
+    && typeof aggregate['surfaceScaleBearing'] === 'boolean'
+    && typeof aggregate['loadScaleBearing'] === 'boolean'
+    && typeof aggregate['clientTruncated'] === 'boolean'
+    && noise !== null
+    && hasClosedKeys(noise, ['backgroundRequestCount', 'backgroundTransferBytes'])
+    && baselineSummary(noise['backgroundRequestCount'], successCount)
+    && baselineSummary(noise['backgroundTransferBytes'], successCount);
+}
+
+function baselineRevisions(value: unknown): ComparisonRun['revisions'] {
+  const revisions = record(value);
+  if (revisions === null || !hasClosedKeys(revisions, BASELINE_REVISION_KEYS)) {
+    throw new Error('baseline_schema_invalid');
+  }
+  const revision = (candidate: unknown): string | null => {
+    if (candidate === null) return null;
+    if (typeof candidate !== 'string') throw new Error('baseline_schema_invalid');
+    const normalized = normalizedRevision(candidate);
+    if (normalized === null) throw new Error('baseline_schema_invalid');
+    return normalized;
+  };
+  return {
+    profilerCommit: revision(revisions['profilerCommit']),
+    targetAppCommit: revision(revisions['targetAppCommit']),
+  };
+}
+
+function requireCompleteBaselineRun(value: unknown): void {
+  const run = record(value);
+  if (
+    run === null
+    || !hasClosedKeys(run, BASELINE_RUN_KEYS)
+    || run['status'] !== 'complete'
+    || run['reason'] !== null
+  ) {
+    throw new Error('baseline_schema_invalid');
+  }
+}
+
+function requireCompleteBaselineAggregates(run: ComparisonRun): void {
+  if (run.aggregates.some((aggregate) => aggregate.sampleCount !== (
+    aggregate.mode === 'cold' ? run.environment.coldRepeats : run.environment.warmRepeats
+  ))) {
+    throw new Error('baseline_schema_invalid');
+  }
+  if (run.environment.routeSet.includes(INVALID_BASELINE_ROUTE)) return;
+  const expected = new Set(run.environment.routeSet.flatMap((surface) => [
+    `cold\u0000${surface}`,
+    `warm\u0000${surface}`,
+  ]));
+  const actual = new Set(run.aggregates.map((aggregate) => `${aggregate.mode}\u0000${aggregate.surfaceId}`));
+  if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
+    throw new Error('baseline_schema_invalid');
+  }
 }
 
 function createComparisonRun(summary: Record<string, unknown>): ComparisonRun {
   const aggregates = summary['aggregates'];
-  if (!Array.isArray(aggregates) || !aggregates.every(baselineAggregate)) {
+  if (
+    !Array.isArray(aggregates)
+    || !aggregates.every(baselineAggregate)
+    || new Set(aggregates.map((aggregate) => `${aggregate.mode}\u0000${aggregate.surfaceId}`)).size !== aggregates.length
+  ) {
     throw new Error('baseline_schema_invalid');
   }
   return {
     schemaVersion: summary['schemaVersion'] as number,
-    environment: summary['environment'] as ComparisonEnvironment,
-    revisions: summary['revisions'] as ComparisonRun['revisions'],
+    environment: baselineEnvironment(summary['environment']),
+    revisions: baselineRevisions(summary['revisions']),
     aggregates,
   };
 }
@@ -676,16 +1047,21 @@ function parseBaselineJson(text: string): ComparisonRun {
   }
   const candidate = parsed as Record<string, unknown>;
   if (
+    !hasCanonicalBaselineRootKeys(candidate)
+    ||
     candidate.schemaVersion !== PERFORMANCE_SCHEMA_VERSION
+    || candidate.registryVersion !== PERFORMANCE_REGISTRY_VERSION
+    || candidate.workloadVersion !== PERFORMANCE_WORKLOAD_VERSION
     || typeof candidate.environment !== 'object'
     || candidate.environment === null
-    || typeof candidate.revisions !== 'object'
-    || candidate.revisions === null
     || !Array.isArray(candidate.aggregates)
   ) {
     throw new Error('baseline_schema_invalid');
   }
-  return createComparisonRun(candidate);
+  requireCompleteBaselineRun(candidate['run']);
+  const run = createComparisonRun(candidate);
+  requireCompleteBaselineAggregates(run);
+  return run;
 }
 
 function json(value: unknown): string {
@@ -712,7 +1088,7 @@ function rankingTable(rows: readonly RouteModeAggregate[], field: keyof RouteMod
   return [
     '| Route | Median | Labels |',
     '| --- | ---: | --- |',
-    ...rows.map((row) => `| ${row.routeKey} | ${metric(valueFor(row))} | ${labels(row)} |`),
+    ...rows.map((row) => `| ${row.surfaceId} | ${metric(valueFor(row))} | ${labels(row)} |`),
   ];
 }
 
@@ -778,7 +1154,7 @@ function reportMarkdown(input: {
   const nonOk = input.samples.filter((sample) => sample.status !== 'ok');
   lines.push(...(nonOk.length === 0
     ? ['| none | - | - | - |']
-    : nonOk.map((sample) => `| ${sample.routeKey} | ${sample.mode} | ${sample.status} | ${sample.reason ?? 'none'} |`)));
+    : nonOk.map((sample) => `| ${sample.surfaceId} | ${sample.mode} | ${sample.status} | ${sample.reason ?? 'none'} |`)));
   lines.push('', '## Blocked writes', '', '| Method | Endpoint | Phase | Count |', '| --- | --- | --- | ---: |');
   const blocked = new Map<string, { value: BlockedWrite; count: number }>();
   for (const write of input.samples.flatMap((sample) => sample.blockedWrites)) {
@@ -846,7 +1222,7 @@ function comparisonMarkdown(comparison: ComparisonResult): string {
     '| Route | Mode | Ready absolute | Ready percent |',
     '| --- | --- | ---: | ---: |',
     ...comparison.matched.map((entry) =>
-      `| ${entry.routeKey} | ${entry.mode} | ${metric(entry.metrics.readyMs.absolute)} | ${metric(entry.metrics.readyMs.percent)} |`),
+      `| ${entry.surfaceId} | ${entry.mode} | ${metric(entry.metrics.readyMs.absolute)} | ${metric(entry.metrics.readyMs.percent)} |`),
     '',
   ];
   return lines.join('\n');
@@ -999,9 +1375,9 @@ export async function writePerformanceReport(
   const browser = browserMetadata(config, input.browser);
   const environment = comparisonEnvironment(config, browser, samples);
   const routeMetadata = ROUTES.map((route) => ({
-    key: route.key,
+    surfaceId: route.surfaceId,
     surfaceScaleBearing: route.surfaceScaleBearing,
-    sourceLoadScaleBearing: route.sourceLoadScaleBearing,
+    loadScaleBearing: route.loadScaleBearing,
   }));
   const aggregates = aggregateSamples(samples, routeMetadata);
   const rankings = buildRankings(aggregates);
@@ -1009,11 +1385,15 @@ export async function writePerformanceReport(
   let comparisonStatus: 'not_requested' | 'written' | 'failed' = 'not_requested';
   const partialReason = input.partialReason && FAILURE_REASONS.includes(input.partialReason)
     ? input.partialReason
-    : null;
+    : samples.some((sample) => sample.reason === 'endpoint_contract_mismatch')
+      ? 'endpoint_contract_mismatch'
+      : null;
   const safetyFailure = cloneSafetyFailure(input.safetyFailure);
 
   const summary: Record<string, unknown> = {
     schemaVersion: PERFORMANCE_SCHEMA_VERSION,
+    registryVersion: PERFORMANCE_REGISTRY_VERSION,
+    workloadVersion: PERFORMANCE_WORKLOAD_VERSION,
     interceptionScopeVersion: INTERCEPTION_SCOPE_VERSION,
     run: { status: partialReason === null ? 'complete' : 'partial', reason: partialReason },
     config,
@@ -1033,7 +1413,7 @@ export async function writePerformanceReport(
     routeOrders: cloneOrders(input.routeOrders),
     warmup: {
       performed: input.warmup.performed === true,
-      routeKey: input.warmup.routeKey === null ? null : routeKey(input.warmup.routeKey),
+      surfaceId: input.warmup.surfaceId === null ? null : surfaceId(input.warmup.surfaceId),
     },
     relayDomCheck: input.relayDomCheck === null ? null : {
       expectedCount: integer(input.relayDomCheck.expectedCount),

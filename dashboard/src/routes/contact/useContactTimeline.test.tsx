@@ -142,7 +142,7 @@ describe('useContactTimeline', () => {
     expect(screen.getByTestId('source').textContent).toBe('fallback');
     expect(screen.getByTestId('count').textContent).toBe('1');
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
-    expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+    expect(getConversationMessages).toHaveBeenCalledWith('c1', {}, expect.anything());
   });
 
   it('never pulls a MULTI-PARTY thread into the 1:1 fallback timeline', async () => {
@@ -185,7 +185,7 @@ describe('useContactTimeline', () => {
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
-    expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+    expect(getConversationMessages).toHaveBeenCalledWith('c1', {}, expect.anything());
   });
 
   it('threads the server upcoming[] bucket through to state', async () => {
@@ -413,5 +413,453 @@ describe('normalizeServerItems', () => {
     ]);
     expect(out[0]?.id).toBe('2026-06-01T08:00:00.000Z#m');
     expect(out[1]?.id).toBe('not-an-iso-id');
+  });
+});
+
+// A SECOND probe, alongside Probe: the existing one is depended on by every case
+// above through its test ids, so paging gets its own p-prefixed surface.
+function PagingProbe({
+  contactId,
+  kinds,
+}: {
+  contactId: string;
+  kinds?: string;
+}): React.JSX.Element {
+  const {
+    status,
+    items,
+    upcoming,
+    upcomingTimezone,
+    source,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    olderPagesLoaded,
+  } = useContactTimeline(contactId, kinds);
+  return (
+    <div>
+      <span data-testid="p-status">{status}</span>
+      <span data-testid="p-source">{source}</span>
+      <span data-testid="p-ids">{items.map((i) => i.id).join(',')}</span>
+      <span data-testid="p-upcoming">{upcoming.length}</span>
+      <span data-testid="p-tz">{upcomingTimezone ?? 'none'}</span>
+      <span data-testid="p-hasOlder">{String(hasOlder)}</span>
+      <span data-testid="p-loadingOlder">{String(loadingOlder)}</span>
+      <span data-testid="p-pages">{String(olderPagesLoaded)}</span>
+      <button type="button" onClick={() => void loadOlder()}>
+        load older
+      </button>
+    </div>
+  );
+}
+
+// author is 'tenant', NOT 'contact': MessageAuthor has no 'contact' member, so an
+// `as TimelineItem` cast of a 'contact' literal is a TS2352. Vitest strips types
+// and would never notice; npm run typecheck would.
+function timelineItem(id: string, at: string): TimelineItem {
+  return {
+    kind: 'message',
+    id,
+    at,
+    conversationId: 'c1',
+    tsMsgId: id,
+    direction: 'inbound',
+    author: 'tenant',
+    type: 'sms',
+    body: id,
+    delivery_status: 'delivered',
+  } as TimelineItem;
+}
+
+describe('useContactTimeline paging', () => {
+  it('reports hasOlder from the server cursor', async () => {
+    getContactTimeline.mockResolvedValue({
+      items: [timelineItem('a', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true');
+  });
+
+  it('reports no older history when the cursor is null', async () => {
+    getContactTimeline.mockResolvedValue({
+      items: [timelineItem('a', '2026-08-13T10:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+  });
+
+  it('sends the cursor AND the kinds filter on the older page', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" kinds="message,call" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+
+    expect(getContactTimeline).toHaveBeenLastCalledWith(
+      'p1',
+      { kinds: 'message,call', cursor: 'CURSOR1' },
+      expect.anything(),
+    );
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a,b'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+  });
+
+  it('keeps the first-page upcoming bucket AND its timezone when an older page arrives', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [{ id: 's1' }, { id: 's2' }],
+      timezone: 'America/Chicago',
+    });
+    // The server gathers `upcoming` only when `cursor` is absent, so an older
+    // page legitimately carries none. It must not blank the pinned section.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-upcoming')).toHaveTextContent('2'));
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a,b'));
+    expect(screen.getByTestId('p-upcoming')).toHaveTextContent('2');
+    expect(screen.getByTestId('p-tz')).toHaveTextContent('America/Chicago');
+    // The merged older page is <Timeline>'s prepend signal.
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('1');
+  });
+
+  it('reports no older history on the assembled fallback path', async () => {
+    getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
+    getConversations.mockResolvedValue({ conversations: [], nextCursor: null } as ConversationsPage);
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+  });
+
+  // A5: the fallback check runs on EVERY load, not only the first. A first page
+  // that succeeded with a cursor followed by a refetch that 404s would otherwise
+  // leave a live control on a fallback timeline whose every click 404s.
+  it('retires the control when a LATER refetch falls back to the assembled path', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true'));
+
+    // The endpoint is rolled back (or the contact is soft-deleted and the route
+    // answers 404 contact_not_found), so the SSE refetch assembles the fallback.
+    getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
+    getConversations.mockResolvedValue({ conversations: [], nextCursor: null } as ConversationsPage);
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+
+    await waitFor(() => expect(screen.getByTestId('p-source')).toHaveTextContent('fallback'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+  });
+
+  // [R4] The ref guard, tested here too rather than assumed from the copy.
+  it('fires one older request for a double click', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    let release: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(2); // first page + ONE older
+
+    await act(async () => {
+      release({ items: [], nextCursor: null });
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+  });
+
+  // Spec 5.1 asks for this in ALL THREE hooks, and only the relay suite had it.
+  // The counter is <Timeline>'s prepend signal, so a bump without a merge fires a
+  // scroll restore for a prepend that never happened.
+  it('bumps olderPagesLoaded only when an older page actually merges', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0'); // first load is not a prepend
+
+    // An SSE refetch is not a prepend.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('c', '2026-08-13T11:00:00.000Z')],
+      nextCursor: 'CURSOR9',
+      upcoming: [],
+    });
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('b,c'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0');
+
+    // A merged older page IS.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: 'CURSOR2',
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-pages')).toHaveTextContent('1'));
+
+    // A FAILED older page is not - nothing merged, so nothing may signal one.
+    getContactTimeline.mockRejectedValueOnce(new Error('boom'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('1');
+    expect(screen.getByTestId('p-status')).toHaveTextContent('ready'); // never errors the feed
+  });
+
+  // Spec 4.5: "empty older pages leave it untouched". Rarer here than on the
+  // conversation hooks (the cursor is authoritative) but not impossible - the
+  // server can hand back a cursor whose page filters down to nothing.
+  it('leaves olderPagesLoaded untouched when the older page comes back EMPTY', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+
+    getContactTimeline.mockResolvedValueOnce({ items: [], nextCursor: 'CURSOR2' });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('p-pages')).toHaveTextContent('0');
+    // The cursor still advanced, so the operator can page THROUGH the empty page.
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true');
+    getContactTimeline.mockResolvedValueOnce({ items: [], nextCursor: null });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenLastCalledWith(
+      'p1',
+      { cursor: 'CURSOR2' },
+      expect.anything(),
+    );
+  });
+
+  // The isFirstLoad baseline guard, which here protects the CURSOR as well as
+  // hasOlder. Without it, one inbound message after the operator has paged the
+  // feed back to its beginning both resurrects the control and rewinds the cursor
+  // to the newest page's boundary - so every later click re-reads pages already
+  // merged and nothing on screen changes.
+  it('does not resurrect a retired control (or rewind the cursor) on an SSE refetch', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true'));
+
+    // Page back to the beginning: a null cursor retires the control.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false'));
+
+    // One inbound message; the debounced refetch reads a newest page that still
+    // has history behind IT, so it carries a cursor.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('c', '2026-08-13T11:00:00.000Z')],
+      nextCursor: 'CURSOR9',
+      upcoming: [],
+    });
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a,b,c'));
+    expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
+
+    // ...and the cursor stayed null, so a further load is a no-op rather than a
+    // re-read of pages already merged.
+    const calls = getContactTimeline.mock.calls.length;
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(calls);
+  });
+
+  // A late-settling ABORTED older request must not clear the in-flight guard
+  // belonging to a NEWER one. Unreachable through the button today, which is why
+  // it is asserted here: the deferred scroll-triggered auto-loader calls
+  // loadOlder() programmatically.
+  it('an aborted older request does not release the guard held by a newer one', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    let releaseFirst: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const { rerender } = render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+
+    // A kinds change is a NEW feed: the reset effect aborts the older request.
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('z', '2026-08-13T12:00:00.000Z')],
+      nextCursor: 'CURSOR7',
+      upcoming: [],
+    });
+    let releaseSecond: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseSecond = resolve;
+      }),
+    );
+    rerender(<PagingProbe contactId="p1" kinds="message" />);
+    await waitFor(() => expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('true'));
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(4);
+
+    await act(async () => {
+      releaseFirst({ items: [], nextCursor: null }); // the ABORTED one settles late
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      releaseSecond({ items: [], nextCursor: null });
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+  });
+
+  it('replaces rather than merges when the kinds filter changes', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    const { rerender } = render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a'));
+
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('z', '2026-08-13T11:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    rerender(<PagingProbe contactId="p1" kinds="message" />);
+
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('z'));
+    expect(screen.getByTestId('p-ids')).not.toHaveTextContent('a');
+  });
+
+  // The armed-timer-survives-a-switch case. This hook is the one that does NOT
+  // remount across a contactId change - ContactDetail re-renders the same
+  // instance - so a timer armed for contact A is still live for contact B, and
+  // merge-by-id would make the resulting contamination permanent.
+  it('does not let a refetch armed before a switch write the old contact into the new one', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    const { rerender } = render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('a'));
+
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('z', '2026-08-13T11:00:00.000Z')],
+      nextCursor: null,
+      upcoming: [],
+    });
+    rerender(<PagingProbe contactId="p2" />);
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('z'));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    expect(screen.getByTestId('p-ids')).toHaveTextContent('z');
+    expect(screen.getByTestId('p-ids')).not.toHaveTextContent('a');
+    expect(getContactTimeline).toHaveBeenCalledTimes(2);
+  });
+
+  // A4: the first load REPLACES, but it must still route through
+  // mergeTimelineItems so the ordering contract is identical before and after any
+  // merge. normalizeServerItems returns 0 on an `at` tie and JS sort is stable, so
+  // a raw page keeps its own order within a tie while the merge breaks the tie by
+  // ascending id - assigning the page directly would reshuffle same-instant items
+  // on the first SSE refetch, with no user action.
+  it('orders same-instant items by id on the FIRST load, before any merge', async () => {
+    const SAME = '2026-08-13T10:00:00.000Z';
+    getContactTimeline.mockResolvedValue({
+      // Raw order is the REVERSE of id order.
+      items: [timelineItem('m2', SAME), timelineItem('m1', SAME)],
+      nextCursor: null,
+      upcoming: [],
+    });
+    render(<PagingProbe contactId="p1" />);
+
+    await waitFor(() => expect(screen.getByTestId('p-ids')).toHaveTextContent('m1,m2'));
+
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('p-ids')).toHaveTextContent('m1,m2');
   });
 });

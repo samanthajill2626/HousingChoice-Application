@@ -22,13 +22,13 @@ function resourceCounts(api = 0, script = 0): Record<ResourceClass, number> {
 }
 
 function sample(
-  routeKey: string,
+  surfaceId: string,
   mode: 'cold' | 'warm',
   repeat: number,
   overrides: Partial<SampleResult> = {},
 ): SampleResult {
   return {
-    routeKey,
+    surfaceId,
     mode,
     repeat,
     status: 'ok',
@@ -50,16 +50,16 @@ function sample(
     terminalState: 'populated',
     reason: null,
     ...overrides,
+    surfaceEvidence: overrides.surfaceEvidence ?? null,
   };
 }
 
 const ENVIRONMENT: ComparisonEnvironment = {
   target: 'hermetic',
-  scaleManifest: {
-    anchor: '2026-08-11T00:00:00.000Z',
-    scale: 1,
-    contacts: 100,
-  },
+  registryVersion: 2,
+  workloadVersion: 2,
+  dataSource: 'synthetic_hermetic',
+  comparisonWorkload: null,
   routeSet: ['/shared'],
   browserMajor: 140,
   browserChannel: 'chromium',
@@ -89,6 +89,50 @@ function run(
 }
 
 describe('compareRuns', () => {
+  it('compares only the resolved synthetic workload, not requested syntax or anchor', () => {
+    const baseline = run([sample('/shared', 'cold', 0)], {
+      environment: {
+        ...ENVIRONMENT,
+        comparisonWorkload: { contacts: 100, resolvedRecipientsPerBroadcast: 25 },
+      } as never,
+    });
+    const current = run([sample('/shared', 'cold', 0)], {
+      environment: {
+        ...ENVIRONMENT,
+        comparisonWorkload: { contacts: 100, resolvedRecipientsPerBroadcast: 25 },
+      } as never,
+    });
+
+    expect(compareRuns(baseline, current).mismatches).toEqual([]);
+  });
+
+  it('rejects a changed resolved workload even when requested syntax would look equivalent', () => {
+    const baseline = run([sample('/shared', 'cold', 0)], {
+      environment: { ...ENVIRONMENT, comparisonWorkload: { contacts: 100 } } as never,
+    });
+    const current = run([sample('/shared', 'cold', 0)], {
+      environment: { ...ENVIRONMENT, comparisonWorkload: { contacts: 101 } } as never,
+    });
+
+    expect(compareRuns(baseline, current).mismatches).toContain('comparison_workload');
+  });
+
+  it('matches shared-path surface aggregates by surface identity', () => {
+    const baseline = run([
+      sample('/inbox-all', 'cold', 0, { readyMs: 10 }),
+      sample('/inbox-unread', 'cold', 0, { readyMs: 20 }),
+    ]);
+    const current = run([
+      sample('/inbox-all', 'cold', 0, { readyMs: 30 }),
+      sample('/inbox-unread', 'cold', 0, { readyMs: 50 }),
+    ]);
+
+    expect(compareRuns(baseline, current).matched.map((row) => [row.surfaceId, row.metrics.readyMs.absolute])).toEqual([
+      ['/inbox-all', 20],
+      ['/inbox-unread', 30],
+    ]);
+  });
+
   it('computes matching route and mode deltas for every primary metric', () => {
     const baseline = run([
       sample('/shared', 'cold', 0),
@@ -165,8 +209,8 @@ describe('compareRuns', () => {
 
     const comparison = compareRuns(baseline, current);
 
-    expect(comparison.added).toEqual([{ routeKey: '/added', mode: 'warm' }]);
-    expect(comparison.removed).toEqual([{ routeKey: '/removed', mode: 'warm' }]);
+    expect(comparison.added).toEqual([{ surfaceId: '/added', mode: 'warm' }]);
+    expect(comparison.removed).toEqual([{ surfaceId: '/removed', mode: 'warm' }]);
   });
 
   it('lists skipped, timed-out, and failed current entries separately', () => {
@@ -174,27 +218,34 @@ describe('compareRuns', () => {
     const current = run([
       sample('/shared', 'cold', 0),
       sample('/skip', 'cold', 0, { status: 'skipped_no_fixture', reason: 'fixture_absent' }),
+      sample('/missing-action', 'warm', 0, { status: 'skipped_required_action_missing', reason: 'required_action_missing' }),
       sample('/timeout', 'warm', 0, { status: 'timeout', reason: 'ready_timeout' }),
       sample('/failed', 'cold', 0, { status: 'failed', reason: 'browser_failure' }),
       sample('/blocked', 'warm', 0, {
         status: 'blocked_write_dependency',
         reason: 'blocked_write_prevented_ready',
       }),
-    ], { environment: { ...ENVIRONMENT, routeSet: ['/shared', '/skip', '/timeout', '/failed', '/blocked'] } });
+    ], { environment: { ...ENVIRONMENT, routeSet: ['/shared', '/skip', '/missing-action', '/timeout', '/failed', '/blocked'] } });
 
     const comparison = compareRuns(baseline, current);
 
-    expect(comparison.skipped).toEqual([{ routeKey: '/skip', mode: 'cold' }]);
-    expect(comparison.timedOut).toEqual([{ routeKey: '/timeout', mode: 'warm' }]);
+    expect(comparison.skipped).toEqual([
+      { surfaceId: '/skip', mode: 'cold' },
+      { surfaceId: '/missing-action', mode: 'warm' },
+    ]);
+    expect(comparison.timedOut).toEqual([{ surfaceId: '/timeout', mode: 'warm' }]);
     expect(comparison.failed).toEqual([
-      { routeKey: '/failed', mode: 'cold' },
-      { routeKey: '/blocked', mode: 'warm' },
+      { surfaceId: '/failed', mode: 'cold' },
+      { surfaceId: '/blocked', mode: 'warm' },
     ]);
   });
 
   it.each([
     ['target', { target: 'local' }],
-    ['scale_manifest', { scaleManifest: { ...ENVIRONMENT.scaleManifest, contacts: 101 } }],
+    ['comparison_workload', { comparisonWorkload: { contacts: 101 } }],
+    ['registry_version', { registryVersion: 3 }],
+    ['workload_version', { workloadVersion: 3 }],
+    ['data_source', { dataSource: 'existing' }],
     ['route_set', { routeSet: ['/other'] }],
     ['browser_major', { browserMajor: 141 }],
     ['browser_channel', { browserChannel: 'chrome' }],
@@ -218,19 +269,19 @@ describe('compareRuns', () => {
     expect(comparison.matched).toHaveLength(1);
   });
 
-  it('excludes only the seed anchor and treats route sets as order-independent', () => {
+  it('treats route sets as order-independent', () => {
     const baseline = run([sample('/shared', 'cold', 0)], {
       environment: {
         ...ENVIRONMENT,
         routeSet: ['/b', '/a'],
-        scaleManifest: { anchor: '2026-08-11T00:00:00.000Z', scale: 1, contacts: 100 },
+        comparisonWorkload: { contacts: 100 } as never,
       },
     });
     const current = run([sample('/shared', 'cold', 0)], {
       environment: {
         ...ENVIRONMENT,
         routeSet: ['/a', '/b'],
-        scaleManifest: { anchor: '2027-01-01T00:00:00.000Z', scale: 1, contacts: 100 },
+        comparisonWorkload: { contacts: 100 } as never,
       },
     });
 

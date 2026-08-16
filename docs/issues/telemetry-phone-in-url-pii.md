@@ -3,9 +3,10 @@ id: telemetry-phone-in-url-pii
 title: Phone-bearing URL paths reach telemetry unredacted (OTel spans → X-Ray; request logger)
 type: security
 severity: med
-status: open
+status: deferred
 area: app/observability
 created: 2026-07-02
+deferred: 2026-08-15
 refs: app/src/lib/otel.ts, app/src/middleware/requestLogger.ts:33, app/src/routes/contacts.ts:1348, app/src/routes/relayGroups.ts:250
 ---
 
@@ -24,9 +25,15 @@ unredacted:
 Both conflict with the repo's PII rule (doc §9: IDs/counts/markers only — never
 phones). Inert for spans while the endpoint is unset.
 
-**Gate:** fix (at least the span side) BEFORE setting
-`OTEL_EXPORTER_OTLP_ENDPOINT` in **prod**. Dev exposure is lower-stakes but the
-same fix covers it.
+**Gate LIFTED - accepted 2026-08-15 (Cameron).** Phone numbers reaching spans and
+logs is acceptable at this stage, and the telemetry is wanted in production. Prod
+therefore ships `OTEL_EXPORTER_OTLP_ENDPOINT` /
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` wired exactly like dev at the M1.11 go-live -
+this issue no longer blocks that. The exposure itself is unchanged and the fix below
+is still worth doing; it is now ordinary backlog rather than a release gate.
+
+Prior wording, for the record: "fix (at least the span side) BEFORE setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` in **prod**."
 
 **Suggested fix.** Two layers:
 - **Redact at the telemetry edge:** an `applyCustomAttributesOnSpan` (or

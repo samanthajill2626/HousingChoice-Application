@@ -7,16 +7,22 @@
 // the adapter's `twilioErrorCode`/`twilioStatus` helpers can read.
 //
 // THE PATHS ARE THE SDK'S, NOT OURS. `createRedirectingHttpClient` rewrites only
-// the ORIGIN of each request, so the canonical path arrives verbatim:
-//   POST   /v1/Conversations
-//   POST   /v1/ConversationWithParticipants      (the bulk create)
-//   GET    /v1/Conversations/{SidOrUniqueName}   (adopt-or-create's adopt half)
-//   DELETE /v1/Conversations/{SidOrUniqueName}   (the prod preflight capability check)
-//   POST   /v1/Conversations/{Sid}/Participants
-//   GET    /v1/Conversations/{Sid}/Participants
-//   POST   /v1/Conversations/{Sid}/Messages
-// `/v1` is already in server.ts's reserved-prefix list, so the SPA fallback
-// never swallows these.
+// the ORIGIN of each request, so the canonical path arrives verbatim. The SDK
+// emits ONE OF TWO prefixes depending on whether the app pins an explicit
+// Conversations service (TWILIO_CONVERSATIONS_SERVICE_SID):
+//   <P> = /v1                          -> the account's DEFAULT service
+//   <P> = /v1/Services/{ChatServiceSid} -> an explicit service
+// and the same seven resources hang off either:
+//   POST   <P>/Conversations
+//   POST   <P>/ConversationWithParticipants      (the bulk create)
+//   GET    <P>/Conversations/{SidOrUniqueName}   (adopt-or-create's adopt half)
+//   DELETE <P>/Conversations/{SidOrUniqueName}   (the prod preflight capability check)
+//   POST   <P>/Conversations/{Sid}/Participants
+//   GET    <P>/Conversations/{Sid}/Participants
+//   POST   <P>/Conversations/{Sid}/Messages
+// Routes below are declared RELATIVE and server.ts mounts this router at both
+// prefixes. `/v1` is already in server.ts's reserved-prefix list, so the SPA
+// fallback never swallows either.
 import { Router } from 'express';
 import {
   ConversationsEngine,
@@ -118,11 +124,24 @@ function notFound(res: import('express').Response, resource: string): void {
   });
 }
 
+/**
+ * Routes are RELATIVE (`/Conversations`, not `/v1/Conversations`) because the
+ * caller mounts this router TWICE - once at `/v1` (the account's default
+ * Conversations service) and once at `/v1/Services/:serviceSid` (an explicit
+ * service). Both are real Twilio wire shapes and the app picks one via
+ * `TWILIO_CONVERSATIONS_SERVICE_SID`, so the hermetic lane has to answer either.
+ *
+ * FIDELITY LIMIT: both mounts share ONE engine, so this fake does not model
+ * per-service isolation - a UniqueName created under one mount resolves under
+ * the other. Real Twilio scopes the UniqueName namespace per service. That
+ * isolation is the whole point of the setting, so it is asserted in unit tests
+ * against the adapter's scope resolution rather than here.
+ */
 export function createConversationsRestRouter(engine: ConversationsEngine): Router {
   const router = Router();
 
-  // POST /v1/Conversations
-  router.post('/v1/Conversations', (req, res) => {
+  // POST /Conversations
+  router.post('/Conversations', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     try {
       const record = engine.create({
@@ -142,11 +161,11 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     }
   });
 
-  // POST /v1/ConversationWithParticipants - the bulk create the adapter prefers.
+  // POST /ConversationWithParticipants - the bulk create the adapter prefers.
   // ALL-OR-NOTHING like the real API: one rail-ineligible participant fails the
   // whole request with no per-member detail, which is precisely why the adapter
   // has an individual-add fallback worth exercising.
-  router.post('/v1/ConversationWithParticipants', (req, res) => {
+  router.post('/ConversationWithParticipants', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     let participants: { address?: string; projectedAddress?: string }[];
     try {
@@ -174,8 +193,8 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     }
   });
 
-  // GET /v1/Conversations/:sidOrUniqueName - a UniqueName stands in for the SID.
-  router.get('/v1/Conversations/:sid', (req, res) => {
+  // GET /Conversations/:sidOrUniqueName - a UniqueName stands in for the SID.
+  router.get('/Conversations/:sid', (req, res) => {
     const record = engine.resolve(req.params.sid);
     if (!record) {
       notFound(res, `/Conversations/${req.params.sid}`);
@@ -184,9 +203,9 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     res.status(200).json(conversationResource(record));
   });
 
-  // DELETE /v1/Conversations/:sidOrUniqueName - the production preflight's
+  // DELETE /Conversations/:sidOrUniqueName - the production preflight's
   // capability check creates and then deletes one test conversation.
-  router.delete('/v1/Conversations/:sid', (req, res) => {
+  router.delete('/Conversations/:sid', (req, res) => {
     if (!engine.remove(req.params.sid)) {
       notFound(res, `/Conversations/${req.params.sid}`);
       return;
@@ -194,8 +213,8 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     res.status(204).end();
   });
 
-  // POST /v1/Conversations/:sid/Participants
-  router.post('/v1/Conversations/:sid/Participants', (req, res) => {
+  // POST /Conversations/:sid/Participants
+  router.post('/Conversations/:sid/Participants', (req, res) => {
     const record = engine.resolve(req.params.sid);
     if (!record) {
       notFound(res, `/Conversations/${req.params.sid}`);
@@ -219,9 +238,9 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     }
   });
 
-  // GET /v1/Conversations/:sid/Participants - the read-back the adapter builds
+  // GET /Conversations/:sid/Participants - the read-back the adapter builds
   // its MBxx map from (a create response carries no participant SIDs).
-  router.get('/v1/Conversations/:sid/Participants', (req, res) => {
+  router.get('/Conversations/:sid/Participants', (req, res) => {
     const record = engine.resolve(req.params.sid);
     if (!record) {
       notFound(res, `/Conversations/${req.params.sid}`);
@@ -242,8 +261,8 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     });
   });
 
-  // POST /v1/Conversations/:sid/Messages
-  router.post('/v1/Conversations/:sid/Messages', (req, res) => {
+  // POST /Conversations/:sid/Messages
+  router.post('/Conversations/:sid/Messages', (req, res) => {
     const record = engine.resolve(req.params.sid);
     if (!record) {
       notFound(res, `/Conversations/${req.params.sid}`);

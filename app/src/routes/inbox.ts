@@ -487,6 +487,9 @@ export async function aggregateInbox(
       // ingestion never creates a contactless email conversation, but be
       // defensive: with no phone there is no unknown identity to show, so skip.
       if (phone === undefined) return undefined;
+      // Unread is already carried on the conversation row. A read unknown number
+      // cannot pass this filter, so do not fetch a latest message just to reject it.
+      if (filter === 'unread' && unreadOf(conv) === 0) return undefined;
       // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
       return {
@@ -507,6 +510,12 @@ export async function aggregateInbox(
     // post-deletion inbound exists (deleted-contact resurfacing, 2026-08-03
     // spec): the thread resurfaces with deleted:true until read or restored.
     // findByPhone stays unfiltered for routing, so the decision lives here.
+    // A resolved contact's role is enough to reject it from Unknown. Keep this
+    // ahead of conversation, message, and placement hydration; only type=unknown
+    // contacts can produce a known-contact row for this filter.
+    const role = roleFromContact(contact);
+    if (filter === 'unknown' && role !== 'unknown') return undefined;
+
     const deleted = isDeleted(contact);
 
     if (emittedContacts.has(contact.contactId)) return undefined; // one row per page
@@ -519,6 +528,9 @@ export async function aggregateInbox(
     if (maxConv.conversationId !== conv.conversationId) return undefined;
 
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
+    // This must use the contact-wide sum, not unreadOf(conv): an older phone or
+    // email thread can be unread while the representative newest thread is read.
+    if (filter === 'unread' && unreadSum === 0) return undefined;
     // Deleted fast-path: nothing unread → hidden, no message read needed.
     if (deleted && unreadSum === 0) return undefined;
     const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
@@ -574,7 +586,6 @@ export async function aggregateInbox(
     // record) — so it needs triage and belongs under the "unknown" filter, exactly
     // like a no-contact number. Keying triage off the ROLE (not "no contact
     // record") is what makes both cases surface.
-    const role = roleFromContact(contact);
     // Name fallback when the contact has no resolved name: the formatted phone
     // for a phone thread, else the email address for an email-only thread (never
     // undefined - email-only contacts lack a phone).

@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PerformanceSelfQaFixtures } from '../../app/src/lib/seed/performance.js';
 import type { RequestEvidence, SampleResult } from './types.js';
-import { resolveBoundSelfQaDetail, ROUTES } from './routes.js';
+import { aggregateSamples, buildRankings } from './aggregate.js';
+import { expectedGets, resolveBoundSelfQaDetail, ROUTES } from './routes.js';
 import { writePerformanceReport } from './report.js';
 import {
   compareSelfQaSnapshots,
@@ -74,36 +75,50 @@ function fixtureApi(overrides: Readonly<Record<string, unknown>> = {}): SelfQaAp
   });
 }
 
-function sample(routeKey: string, mode: 'cold' | 'warm', blockedWrites: SampleResult['blockedWrites'] = []): SampleResult {
+function sample(surfaceId: string, mode: 'cold' | 'warm', blockedWrites: SampleResult['blockedWrites'] = []): SampleResult {
+  const inboxFilter = surfaceId === 'inbox-all'
+    ? 'all'
+    : surfaceId === 'inbox-unread'
+      ? 'unread'
+      : surfaceId === 'inbox-unknown'
+        ? 'unknown'
+        : surfaceId === 'inbox-groups'
+          ? 'groups'
+          : null;
   return {
-    routeKey, mode, repeat: 0, status: 'ok', readyMs: 1,
+    surfaceId, mode, repeat: 0, status: 'ok', readyMs: 1,
     navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
     paint: { fcpMs: null, lcpMs: null }, longTasks: { totalMs: 0, maxMs: 0, count: 0 },
     domElements: 1, apiRequestCount: 0, apiTransferBytes: 0, resourceRequestCount: 0,
     resourceTransferBytes: 0,
     resourceCountsByClass: { document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 },
     backgroundRequestCount: 0, backgroundTransferBytes: 0, blockedWrites,
-    consoleCategories: {}, clientTruncated: false, terminalState: 'populated', reason: null,
+    consoleCategories: {}, clientTruncated: false, terminalState: 'populated',
+    surfaceEvidence: inboxFilter === null ? null : {
+      kind: 'inbox', filter: inboxFilter, renderedRowCount: 1,
+      groupsTruncated: false, initialInboxPageRequestCount: 1,
+    },
+    reason: null,
   };
 }
 
-function request(routeKey: string, mode: 'cold' | 'warm', endpointTemplate: string): RequestEvidence {
+function request(surfaceId: string, mode: 'cold' | 'warm', endpointTemplate: string): RequestEvidence {
   return {
-    routeKey, mode, repeat: 0, method: 'GET', resourceClass: 'api', originClass: 'first_party',
+    surfaceId, mode, repeat: 0, method: 'GET', resourceClass: 'api', originClass: 'first_party',
     endpointTemplate, queryKeys: [], startOffsetMs: 0, durationMs: 1, ttfbMs: 1, status: 200,
     transferBytes: 1, outcome: 'finished', requestRole: 'required', unmatchedApi: false,
   };
 }
 
 const branches = ROUTES.flatMap((route) => (['cold', 'warm'] as const).map((mode) => ({
-  routeKey: route.key,
+  surfaceId: route.surfaceId,
   mode,
   repeat: 0,
-  branch: route.key === '/contacts/:contactId'
+  branch: route.surfaceId === '/contacts/:contactId'
     ? ({ kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 } as const)
-    : route.key === '/listings/:unitId'
+    : route.surfaceId === '/listings/:unitId'
       ? ({ kind: 'unit_detail', hasLandlord: true } as const)
-      : route.key === '/tours/:tourId' || route.key === '/placements/:placementId'
+      : route.surfaceId === '/tours/:tourId' || route.surfaceId === '/placements/:placementId'
         ? ({ kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true } as const)
         : ({ kind: 'none' } as const),
 })));
@@ -126,6 +141,39 @@ function expectedAttempts(mode: 'narrow' | 'full'): SelfQaAttempt[] {
     { surface: 'unmatched_email', mode: 'supplemental', method: 'POST', endpointTemplate: '/api/unmatched-email/:unmatchedId/read', phase: 'source_click' },
   );
   return rows;
+}
+
+function reportProof(samples: readonly SampleResult[]) {
+  return {
+    privacyScanRequired: true,
+    countManifest: true,
+    rankings: buildRankings(aggregateSamples(samples)),
+  };
+}
+
+function evaluateFullEndpointRoles(
+  extraRequests: readonly RequestEvidence[],
+  mutateSamples: (samples: SampleResult[]) => void = () => undefined,
+) {
+  const samples = ROUTES.flatMap((route) =>
+    (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
+  mutateSamples(samples);
+  const requiredRequests = branches.flatMap((observation) => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === observation.surfaceId)!;
+    return expectedGets(route, observation.mode, observation.branch).map((contract) => ({
+      ...request(route.surfaceId, observation.mode, contract.endpointTemplate),
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+    }));
+  });
+  return evaluateSelfQa({
+    mode: 'full', routes: ROUTES, samples, requests: [...requiredRequests, ...extraRequests], branches,
+    attempts: expectedAttempts('full'),
+    stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox']
+      .map((surface) => ({ surface, unchanged: true })) as never,
+    relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
+    supplementalSampleCount: 0, reportProof: reportProof(samples),
+  });
 }
 
 describe('self-QA fixture and state guardian', () => {
@@ -185,25 +233,143 @@ describe('self-QA fixture and state guardian', () => {
 });
 
 describe('self-QA closed proof evaluator', () => {
-  it('selects the exact narrow subset and the full 28-route registry', () => {
-    expect(routesForSelfQa('narrow', ROUTES).map((route) => route.key)).toEqual([
-      '/contacts/tenants', '/contacts/:contactId', '/inbox', '/conversations/:conversationId',
+  it('selects the exact narrow subset and the full 31-route registry', () => {
+    expect(routesForSelfQa('narrow', ROUTES).map((route) => route.surfaceId)).toEqual([
+      '/contacts/tenants', '/contacts/:contactId', 'inbox-all', '/conversations/:conversationId',
     ]);
-    expect(routesForSelfQa('full', ROUTES)).toHaveLength(28);
+    expect(routesForSelfQa('full', ROUTES)).toHaveLength(31);
   });
 
   it('accepts exact tuple sets, including both legitimate warm conversation phases and duplicates', () => {
     const attempts = [...expectedAttempts('full'), expectedAttempts('full')[4]!];
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
+    const requests = ROUTES.filter((route) => route.behaviorFamily === 'inbox').flatMap((route) =>
+      (['cold', 'warm'] as const).flatMap((mode) => expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      }))));
     const result = evaluateSelfQa({
-      mode: 'full', routes: ROUTES, samples, requests: [], branches,
+      mode: 'full', routes: ROUTES, samples, requests, branches,
       attempts, stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
-      supplementalSampleCount: 0, reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      supplementalSampleCount: 0, reportProof: reportProof(samples),
     });
     expect(result.status).toBe('pass');
     expect(result.writeTuplesMatch).toBe(true);
-    expect(result.sampleCount).toBe(56);
+    expect(result.sampleCount).toBe(62);
+  });
+
+  it('rejects a missing inbox-unknown pair even when duplicate inbox-all samples preserve 62 total samples', () => {
+    const exact = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
+    const removed = exact.filter((entry) => entry.surfaceId !== 'inbox-unknown');
+    const duplicate = exact.filter((entry) => entry.surfaceId === 'inbox-all');
+    const samples = [...removed, ...duplicate];
+    const requests = ROUTES.filter((route) => route.behaviorFamily === 'inbox').flatMap((route) =>
+      (['cold', 'warm'] as const).flatMap((mode) => expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      }))));
+    const result = evaluateSelfQa({
+      mode: 'full', routes: ROUTES, samples, requests, branches, attempts: expectedAttempts('full'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
+      supplementalSampleCount: 0, reportProof: reportProof(samples),
+    });
+
+    expect(result).toMatchObject({
+      status: 'fail', sampleCount: 62, coldOk: 31, warmOk: 31,
+      sampleCardinalityMatches: false, coldRanking: false, warmRanking: false,
+    });
+  });
+
+  it('keeps shared-path self-QA samples and requests joined by surface identity', () => {
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
+    const routes = ['/inbox-all', '/inbox-unread', '/inbox-recent', '/inbox-assigned'].map((surfaceId) => ({ ...inbox, surfaceId }));
+    const samples = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
+    const branches = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => ({
+      surfaceId: route.surfaceId, mode, repeat: 0, branch: { kind: 'none' as const },
+    })));
+    const requests = routes.flatMap((route) => (['cold', 'warm'] as const).flatMap((mode) =>
+      expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      }))));
+    const result = evaluateSelfQa({
+      mode: 'narrow', routes, samples, requests, branches, attempts: expectedAttempts('narrow'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: null, supplementalSampleCount: 0,
+      reportProof: reportProof(samples),
+    });
+
+    expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, inboxSurfaceSetMatches: false, status: 'fail' });
+    const missingPage = evaluateSelfQa({
+      mode: 'narrow', routes, samples,
+      requests: requests.filter((entry) => entry.inboxRequestClass !== 'inbox_page_all'),
+      branches, attempts: expectedAttempts('narrow'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: null, supplementalSampleCount: 0,
+      reportProof: reportProof(samples),
+    });
+    expect(missingPage.endpointSubset).toBe(false);
+  });
+
+  it('accepts declared background refresh while retaining all required endpoint proof', () => {
+    const backgroundRefresh = {
+      ...request('/contacts/tenants', 'warm', '/api/conversations'),
+      requestRole: 'background_refresh' as const,
+    };
+    expect(evaluateFullEndpointRoles([backgroundRefresh])).toMatchObject({
+      endpointSubset: true,
+      status: 'pass',
+    });
+  });
+
+  it('rejects a duplicate required Inbox page request while keeping badge classification separate', () => {
+    const duplicatePage = evaluateFullEndpointRoles([], (samples) => {
+      const sample = samples.find((row) => row.surfaceId === 'inbox-unread' && row.mode === 'warm')!;
+      sample.surfaceEvidence = {
+        kind: 'inbox', filter: 'unread', renderedRowCount: 1,
+        groupsTruncated: false, initialInboxPageRequestCount: 2,
+      };
+    });
+
+    expect(duplicatePage).toMatchObject({
+      status: 'fail', endpointSubset: true, noUnmatchedApi: true, inboxRequestClassesMatch: false,
+    });
+
+    const abortedOnlyPage = evaluateFullEndpointRoles([], (samples) => {
+      const sample = samples.find((row) => row.surfaceId === 'inbox-unread' && row.mode === 'warm')!;
+      sample.surfaceEvidence = {
+        kind: 'inbox', filter: 'unread', renderedRowCount: 1,
+        groupsTruncated: false, initialInboxPageRequestCount: 0,
+      };
+    });
+
+    expect(abortedOnlyPage).toMatchObject({
+      status: 'fail', endpointSubset: true, noUnmatchedApi: true, inboxRequestClassesMatch: false,
+    });
+  });
+
+  it('rejects an undeclared required endpoint shape', () => {
+    const undeclaredRequired = request('/contacts/tenants', 'warm', '/api/settings');
+    expect(evaluateFullEndpointRoles([undeclaredRequired])).toMatchObject({
+      endpointSubset: false,
+      status: 'fail',
+    });
+  });
+
+  it.each([
+    ['background_refresh', '/api/settings'],
+    ['background_shell', '/api/tours'],
+  ] as const)('fails closed on an undeclared %s endpoint shape', (requestRole, endpointTemplate) => {
+    const undeclaredBackground = {
+      ...request('/contacts/tenants', 'warm', endpointTemplate),
+      requestRole,
+    };
+    expect(evaluateFullEndpointRoles([undeclaredBackground])).toMatchObject({
+      endpointSubset: false,
+      status: 'fail',
+    });
   });
 
   it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {
@@ -224,7 +390,7 @@ describe('self-QA closed proof evaluator', () => {
       phase: 'out_of_sample' as const,
     }];
     expect(attemptsFromSamples([sample('/contacts/:contactId', 'warm', writes)])).toEqual([]);
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches,
       attempts: expectedAttempts('full'),
@@ -232,7 +398,7 @@ describe('self-QA closed proof evaluator', () => {
       stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
       supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.status).toBe('fail');
     expect(result.outOfSampleWritesAbsent).toBe(false);
@@ -258,18 +424,18 @@ describe('self-QA closed proof evaluator', () => {
     ['unexpected', (rows: SelfQaAttempt[]) => [...rows, { surface: 'contact_detail' as const, mode: 'cold' as const, method: 'POST' as const, endpointTemplate: '/api/inbox/read', phase: 'destination_mount' as const }]],
   ])('rejects %s blocked attempt sets', (_name, mutate) => {
     const selected = routesForSelfQa('narrow', ROUTES);
-    const samples = selected.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = selected.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     const result = evaluateSelfQa({
-      mode: 'narrow', routes: selected, samples, requests: [], branches: branches.filter((row) => selected.some((route) => route.key === row.routeKey)),
+      mode: 'narrow', routes: selected, samples, requests: [], branches: branches.filter((row) => selected.some((route) => route.surfaceId === row.surfaceId)),
       attempts: mutate(expectedAttempts('narrow')), stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.status).toBe('fail');
     expect(result.writeTuplesMatch).toBe(false);
   });
 
   it('rejects endpoint mismatch, unmatched API, relay mismatch, outbox delta, non-ok full samples, and supplemental ranking leakage', () => {
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
     samples[0] = { ...samples[0]!, status: 'timeout', reason: 'ready_timeout' };
     const badRequest = request('/', 'cold', '/api/not-declared');
     badRequest.unmatchedApi = true;
@@ -277,27 +443,29 @@ describe('self-QA closed proof evaluator', () => {
       mode: 'full', routes: ROUTES, samples, requests: [badRequest], branches, attempts: expectedAttempts('full'),
       stateChecks: [{ surface: 'outbox', unchanged: false }],
       relayDomCheck: { expectedCount: 20, renderedCount: 19, shortfall: true }, supplementalSampleCount: 1,
-      reportProof: { privacyScanRequired: true, countManifest: false, coldRanking: true, warmRanking: false },
+      reportProof: { ...reportProof(samples), countManifest: false },
     });
     expect(result).toMatchObject({
       status: 'fail', endpointSubset: false, noUnmatchedApi: false, relayCountMatches: false,
       outboxUnchanged: false, sampleCardinalityMatches: false, supplementalExcluded: false,
-      countManifest: false, coldRanking: true, warmRanking: false,
+      countManifest: false, coldRanking: true, warmRanking: true,
     });
   });
 
-  it('requires exact 56 full samples and serializes only allowlisted self-QA status', () => {
-    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm'))).slice(0, 55);
+  it('requires exact 62 full samples and serializes only allowlisted self-QA status', () => {
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm'))).slice(0, 55);
     const result = evaluateSelfQa({
       mode: 'full', routes: ROUTES, samples, requests: [], branches, attempts: expectedAttempts('full'),
       stateChecks: [], relayDomCheck: null, supplementalSampleCount: 0,
-      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+      reportProof: reportProof(samples),
     });
     expect(result.sampleCardinalityMatches).toBe(false);
     const safe = serializeSelfQaResult({ ...result, injectedRaw: 'raw-contact-a' } as never);
     expect(JSON.stringify(safe)).not.toContain('raw-contact-a');
     expect(Object.keys(safe).sort()).toEqual([
-      'coldOk', 'coldRanking', 'countManifest', 'endpointSubset', 'mode', 'noUnmatchedApi',
+      'coldOk', 'coldRanking', 'countManifest', 'endpointSubset',
+      'inboxNoCursor', 'inboxPassiveWritesAbsent', 'inboxRequestClassesMatch', 'inboxSurfaceSetMatches',
+      'mode', 'noUnmatchedApi',
       'outOfSampleWritesAbsent', 'outboxUnchanged', 'privacyScanRequired', 'relayCountMatches', 'routeCount',
       'sampleCardinalityMatches', 'sampleCount', 'stateChecks', 'status', 'supplementalExcluded', 'warmOk', 'warmRanking', 'writeTuplesMatch',
     ]);
@@ -315,7 +483,7 @@ describe('self-QA closed proof evaluator', () => {
         },
         target: { target: 'hermetic', proof: 'hermetic_lane', profilerCommit: 'abcdef1', targetAppCommit: '1234567', targetVersionStatus: 'verified' },
         samples: [], requests: [], routeOrders: [], browser: { version: '1', viewport: { width: 1280, height: 720 } },
-        warmup: { performed: true, routeKey: '/' }, relayDomCheck: null,
+        warmup: { performed: true, surfaceId: '/' }, relayDomCheck: null,
       } as const;
       const proof = serializeSelfQaResult({
         mode: 'narrow', status: 'pass', routeCount: 4, sampleCount: 8, coldOk: 4, warmOk: 4,
@@ -324,6 +492,7 @@ describe('self-QA closed proof evaluator', () => {
         privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true,
         writeTuplesMatch: true,
         outOfSampleWritesAbsent: true,
+        inboxSurfaceSetMatches: true, inboxRequestClassesMatch: true, inboxNoCursor: true, inboxPassiveWritesAbsent: true,
       });
       const written = await writePerformanceReport({ ...base, runId: '20260812T120000000Z-12345678', selfQa: proof } as never);
       expect(written.exitCode).toBe(0);

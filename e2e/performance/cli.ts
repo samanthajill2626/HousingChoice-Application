@@ -1,6 +1,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { exactTargetFromPath } from './routes.js';
 import type {
   Browser,
   BrowserContext,
@@ -10,7 +11,8 @@ import type {
   Page,
 } from '@playwright/test';
 import {
-  parseRunConfig,
+  parseProfilerArgs,
+  toHermeticReseedPayload,
   toSafeRunConfig,
   type ParseRunConfigDeps,
   type RunConfig,
@@ -26,13 +28,16 @@ import type {
 import type { FirewallController, FirewallRecordingToken } from './firewall.js';
 import type {
   LocatorContract,
+  ExactBrowserTarget,
   ResolverApi,
   ResolverDom,
   ResolverResult,
   RouteDefinition,
+  TerminalContract,
 } from './routes.js';
-import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
+import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, SurfaceEvidence, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
+import { aggregateSamples, buildRankings } from './aggregate.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
 import { allEndpointTemplates } from './templates.js';
@@ -201,28 +206,7 @@ function ownerMarkerFailure(value: unknown): string | null {
 function hermeticSeedCountsLine(config: RunConfig): string | null {
   const seed = toSafeRunConfig(config).seed;
   if (seed === null) return null;
-  const counts = {
-    scale: seed.scale,
-    contacts: seed.contacts,
-    units: seed.units,
-    placements: seed.placements,
-    tours: seed.tours,
-    conversations: seed.conversations,
-    messagesPerConversation: seed.messagesPerConversation,
-    broadcasts: seed.broadcasts,
-    recipientsPerBroadcast: seed.recipientsPerBroadcast,
-    messageCount: seed.messageCount,
-    requestedRecipientCount: seed.requestedRecipientCount,
-    resolvedRecipientsPerBroadcast: seed.resolvedRecipientsPerBroadcast,
-    resolvedRecipientCount: seed.resolvedRecipientCount,
-    requestedRelayGroupCount: seed.requestedRelayGroupCount,
-    relayGroupCount: seed.relayGroupCount,
-    clippedRelayGroupCount: seed.clippedRelayGroupCount,
-    fixedUnmatchedEmailCount: seed.fixedUnmatchedEmailCount,
-    physicalItemCount: seed.physicalItemCount,
-    totalItemCount: seed.totalItemCount,
-  };
-  return `performance_seed_counts=${JSON.stringify(counts)}\n`;
+  return `performance_seed_counts=${JSON.stringify(seed)}\n`;
 }
 
 function safeTerminalValues(value: unknown, pattern: RegExp): string[] {
@@ -261,7 +245,12 @@ export async function runProfiler(
   const stderr = deps.stderr ?? ((text: string) => process.stderr.write(text));
   let config: RunConfig;
   try {
-    config = parseRunConfig(argv, deps.configDeps);
+    const parsed = parseProfilerArgs(argv, deps.configDeps);
+    if (parsed.kind === 'help') {
+      stdout(parsed.text);
+      return 0;
+    }
+    config = parsed.config;
   } catch {
     stderr('configuration_invalid\n');
     return 1;
@@ -457,6 +446,7 @@ function locatorFor(page: Page, contract: LocatorContract): Locator {
   return root.getByRole(contract.role as never, {
     ...(matcher !== undefined && { name: matcher }),
     ...(contract.exactness === 'exact' && { exact: true }),
+    ...(contract.selected !== undefined && { selected: contract.selected }),
   });
 }
 
@@ -479,17 +469,37 @@ async function groupVisible(
   return combine === 'all' ? values.every(Boolean) : values.some(Boolean);
 }
 
-async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
-  if (await groupVisible(page, route.terminal.error, 'any')) return 'error';
-  if (await terminalAlternativeVisible(
-    route.terminal.populatedAlternatives,
+export async function terminalStateFor(
+  page: Page,
+  terminal: TerminalContract,
+  selected?: LocatorContract,
+): Promise<SampleResult['terminalState']> {
+  if (await groupVisible(page, terminal.error, 'any')) return 'error';
+  const [structureSatisfied, populated, empty, selectionSatisfied] = await Promise.all([
+    terminal.structure.length === 0 ? Promise.resolve(true) : groupVisible(page, terminal.structure, 'all'),
+    terminalAlternativeVisible(
+    terminal.populatedAlternatives,
     (contract) => visible(page, contract),
-  )) return 'populated';
-  if (await terminalAlternativeVisible(
-    route.terminal.emptyAlternatives,
+    ),
+    terminalAlternativeVisible(
+    terminal.emptyAlternatives,
     (contract) => visible(page, contract),
-  )) return 'empty';
+    ),
+    selected === undefined ? Promise.resolve(true) : visible(page, selected),
+  ]);
+  if (!structureSatisfied) return 'unknown';
+  if (!selectionSatisfied) return 'unknown';
+  if (populated && empty) return 'contradictory_terminal';
+  if (populated) return 'populated';
+  if (empty) return 'empty';
   return 'unknown';
+}
+
+export async function terminalStateForRoute(
+  page: Page,
+  route: RouteDefinition,
+): Promise<SampleResult['terminalState']> {
+  return terminalStateFor(page, route.terminal, route.destinationSelected);
 }
 
 export async function readPageStoreSnapshot(
@@ -513,7 +523,100 @@ function absoluteUrl(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl}/`).href;
 }
 
-function createRealSamplePage(input: {
+export function targetPath(target: ExactBrowserTarget): string {
+  const query = target.query.kind === 'absent'
+    ? ''
+    : `?${new URLSearchParams(Object.entries(target.query.values).sort(([left], [right]) => left.localeCompare(right))).toString()}`;
+  return `${target.path}${query}`;
+}
+
+export function exactTargetMatches(url: string, target: ExactBrowserTarget): boolean {
+  try {
+    const current = new URL(url);
+    const expected = new URL(targetPath(target), 'http://target.invalid');
+    const currentEntries = [...current.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    const expectedEntries = [...expected.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    return current.pathname === expected.pathname
+      && currentEntries.length === expectedEntries.length
+      && currentEntries.every(([key, value], index) => key === expectedEntries[index]?.[0] && value === expectedEntries[index]?.[1]);
+  } catch {
+    return false;
+  }
+}
+
+function inboxFilterForSurface(surfaceId: string): 'all' | 'unread' | 'unknown' | 'groups' | null {
+  switch (surfaceId) {
+    case 'inbox-all': return 'all';
+    case 'inbox-unread': return 'unread';
+    case 'inbox-unknown': return 'unknown';
+    case 'inbox-groups': return 'groups';
+    default: return null;
+  }
+}
+
+async function inboxGroupsTruncated(
+  page: Page,
+  filter: NonNullable<ReturnType<typeof inboxFilterForSurface>>,
+): Promise<boolean> {
+  const visibleFixedText = async (text: string | RegExp, exact = false): Promise<boolean> => {
+    const locator = page.getByText(text, { ...(exact && { exact: true }) });
+    return await locator.count() > 0 && await locator.first().isVisible();
+  };
+  const visibleFixedLink = async (name: string): Promise<boolean> => {
+    const locator = page.getByRole('link', { name, exact: true });
+    return await locator.count() > 0 && await locator.first().isVisible();
+  };
+  if (filter === 'all' || filter === 'unknown') {
+    return await visibleFixedLink('See all group texts');
+  }
+  if (filter === 'unread') {
+    return await visibleFixedLink('Browse all group texts (read and unread)');
+  }
+  return await visibleFixedText('Not all group texts are shown here.', true)
+    || await visibleFixedText(/^Showing the latest [1-9][0-9]* group texts?\.$/u);
+}
+
+async function countRelayConversationRows(page: Page): Promise<number> {
+  const rows = page.getByRole('list', { name: 'Conversations', exact: true }).getByRole('listitem');
+  const rowCount = await rows.count();
+  let relayCount = 0;
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = rows.nth(index);
+    const [relayLabelCount, groupTextLabelCount, detailLinkCount] = await Promise.all([
+      row.getByText('Relay group', { exact: true }).count(),
+      row.getByText('Group text', { exact: true }).count(),
+      row.locator('a[href^="/conversations/"]').count(),
+    ]);
+    if (relayLabelCount > 0 && groupTextLabelCount === 0 && detailLinkCount > 0) relayCount += 1;
+  }
+  return relayCount;
+}
+
+export async function captureSuccessfulSurfaceEvidence(
+  page: SamplePage,
+  route: RouteDefinition,
+  requests: readonly RequestEvidence[],
+): Promise<SurfaceEvidence> {
+  if (route.behaviorFamily === 'inbox') {
+    const pageClass = route.gets.find((contract) => contract.inboxRequestClass?.startsWith('inbox_page_'))?.inboxRequestClass;
+    const initialInboxPageRequestCount = pageClass === undefined
+      ? 0
+      : requests.filter((request) =>
+        request.outcome === 'finished'
+        && request.requestRole === 'required'
+        && request.inboxRequestClass === pageClass,
+      ).length;
+    return await page.captureSurfaceEvidence(route, initialInboxPageRequestCount);
+  }
+  if (route.surfaceId === '/conversations/:conversationId') {
+    return { kind: 'conversation_detail', initialRenderedMessageCount: null };
+  }
+  return null;
+}
+
+export function createRealSamplePage(input: {
   page: Page;
   context: BrowserContext;
   contextState: { token: FirewallRecordingToken | null };
@@ -522,9 +625,7 @@ function createRealSamplePage(input: {
   pageStoreInstaller: typeof import('./readiness.js')['pageStoreInstaller'];
 }): RealPage {
   let firstSource = true;
-  const pathNow = (): string => {
-    try { return new URL(input.page.url()).pathname; } catch { return ''; }
-  };
+  const targetNow = (target: ExactBrowserTarget): boolean => exactTargetMatches(input.page.url(), target);
   return {
     rawPage: input.page,
     contextState: input.contextState,
@@ -539,13 +640,14 @@ function createRealSamplePage(input: {
       await input.page.goto(absoluteUrl(input.baseUrl, path));
     },
     async prepareWarmSource(route): Promise<void> {
-      if (firstSource || pathNow() === '') {
+      const sourcePath = targetPath(route.source.target);
+      if (firstSource || input.page.url() === '') {
         firstSource = false;
-        await input.page.goto(absoluteUrl(input.baseUrl, route.source.path));
+        await input.page.goto(absoluteUrl(input.baseUrl, sourcePath));
         return;
       }
-      if (pathNow() === route.source.path) return;
-      const exactLink = input.page.locator(`a[href="${route.source.path}"]`).first();
+      if (targetNow(route.source.target)) return;
+      const exactLink = input.page.locator(`a[href="${sourcePath}"]`).first();
       if (await exactLink.count() > 0 && await exactLink.isVisible()) {
         await exactLink.click();
         return;
@@ -553,24 +655,52 @@ function createRealSamplePage(input: {
       // Source preparation is outside the measured token. A direct source load
       // is the bounded fallback when the current route exposes no path to the
       // declared source; the destination click remains an in-app exact-href click.
-      await input.page.goto(absoluteUrl(input.baseUrl, route.source.path));
+      await input.page.goto(absoluteUrl(input.baseUrl, sourcePath));
     },
     async waitForSourceReady(route, timeoutMs): Promise<boolean> {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {
-        if (pathNow() === route.source.path && await visible(input.page, route.source.ready)) return true;
+        const sourceTerminal = route.source.sourceTerminal === undefined
+          ? 'populated'
+          : await terminalStateFor(input.page, route.source.sourceTerminal, route.source.sourceSelected);
+        if (targetNow(route.source.target) && await visible(input.page, route.source.ready)
+          && (sourceTerminal === 'populated' || sourceTerminal === 'empty')) return true;
         await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 100));
       }
       return false;
     },
-    async clickExactHref(href): Promise<boolean> {
-      const link = input.page.locator(`a[href="${href}"]`).first();
-      if (await link.count() === 0 || !await link.isVisible()) return false;
-      await link.click();
-      return true;
+    async activateWarmAction(route, destinationTarget): Promise<boolean> {
+      if (route.source.action.kind === 'tab') {
+        const tab = input.page.getByRole('tab', { name: route.source.action.name, exact: true });
+        if (await tab.count() === 0 || !await tab.first().isVisible()) return false;
+        await tab.first().click();
+      } else {
+        const destinationPath = targetPath(destinationTarget);
+        const link = input.page.locator(`a[href="${destinationPath}"]`).first();
+        if (await link.count() === 0 || !await link.isVisible()) return false;
+        await link.click();
+      }
+      const deadline = Date.now() + 3_000;
+      while (Date.now() <= deadline) {
+        if (targetNow(destinationTarget)) return true;
+        await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 25));
+      }
+      return false;
+    },
+    async captureSurfaceEvidence(route, initialInboxPageRequestCount): Promise<SurfaceEvidence> {
+      const filter = route.behaviorFamily === 'inbox' ? inboxFilterForSurface(route.surfaceId) : null;
+      if (filter === null) return null;
+      const rows = input.page.getByRole('list', { name: 'Conversations', exact: true }).getByRole('listitem');
+      return {
+        kind: 'inbox',
+        filter,
+        renderedRowCount: await rows.count(),
+        groupsTruncated: await inboxGroupsTruncated(input.page, filter),
+        initialInboxPageRequestCount,
+      };
     },
     async countRelayConversationLinks(): Promise<number> {
-      return await input.page.locator('a[href^="/conversations/"]').count();
+      return await countRelayConversationRows(input.page);
     },
   };
 }
@@ -666,12 +796,27 @@ export function createRealInstrumentation(input: {
   let token = '';
   let nodeOriginMs = 0;
   let destinationPath = '';
+  let destinationTarget: ExactBrowserTarget | null = null;
   let consoleListener: ((message: ConsoleMessage) => void) | null = null;
+  let recordingToken: FirewallRecordingToken | null = null;
+  let onOutOfSampleWrites: ((writes: readonly BlockedWrite[]) => void) | undefined;
   let adaptersActive = false;
+
+  const deactivateRecordingToken = (): BlockedWrite[] => {
+    const activeToken = recordingToken;
+    recordingToken = null;
+    if (page !== null && page.contextState.token === activeToken) page.contextState.token = null;
+    return activeToken?.evidence() ?? [];
+  };
 
   const finishAdapters = async (): Promise<void> => {
     if (!adaptersActive) return;
     adaptersActive = false;
+    const abandonedWrites = deactivateRecordingToken();
+    if (abandonedWrites.length > 0) {
+      onOutOfSampleWrites?.(abandonedWrites.map((write) => ({ ...write, phase: 'out_of_sample' })));
+    }
+    onOutOfSampleWrites = undefined;
     const activePage = page;
     const activeConsoleListener = consoleListener;
     const activeCdp = cdp;
@@ -680,7 +825,6 @@ export function createRealInstrumentation(input: {
     if (activePage !== null && activeConsoleListener !== null) {
       try { activePage.rawPage.off('console', activeConsoleListener); } catch { /* closed cleanup */ }
     }
-    if (activePage !== null) activePage.contextState.token = null;
     if (activeCdp !== null) await activeCdp.detach().catch(() => undefined);
   };
 
@@ -689,12 +833,15 @@ export function createRealInstrumentation(input: {
       page = begin.page as RealPage;
       await page.firewall.assertHealthy();
       begin.onOutOfSampleWrites?.(page.firewall.drainOutOfSampleEvidence());
+      onOutOfSampleWrites = begin.onOutOfSampleWrites;
       adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
+      destinationTarget = exactTargetFromPath(destinationPath);
       collector = new input.modules.collect.NetworkCollector({
         firstPartyOrigin: input.baseUrl,
-        routeKey: input.route.key,
+        surfaceId: input.route.surfaceId,
+        behaviorFamily: input.route.behaviorFamily,
         mode: input.mode,
         repeat: input.repeat,
         expectedGets: input.modules.routes.expectedGets(input.route, input.mode, begin.branch),
@@ -717,7 +864,7 @@ export function createRealInstrumentation(input: {
         if (level !== null) collector?.noteConsole(token, level, message.text(), performance.now());
       };
       page.rawPage.on('console', consoleListener);
-      const recordingToken = input.modules.firewall.createFirewallRecordingToken(
+      recordingToken = input.modules.firewall.createFirewallRecordingToken(
         input.mode === 'cold'
           ? {
               mode: 'cold',
@@ -763,13 +910,7 @@ export function createRealInstrumentation(input: {
           ui: {
             async urlMatches(): Promise<boolean> {
               await page!.firewall.assertHealthy({ settle: false });
-              try {
-                return new URL(page!.rawPage.url()).pathname === new URL(
-                  absoluteUrl(input.baseUrl, destinationPath),
-                ).pathname;
-              } catch {
-                return false;
-              }
+              return destinationTarget !== null && exactTargetMatches(page!.rawPage.url(), destinationTarget);
             },
             async structureVisible(): Promise<boolean> {
               if (route.terminal.structure.length === 0) return true;
@@ -777,16 +918,12 @@ export function createRealInstrumentation(input: {
               return values.every(Boolean);
             },
             async terminalState(): Promise<SampleResult['terminalState']> {
-              const state = await terminalState(page!.rawPage, route);
+              const state = await terminalStateForRoute(page!.rawPage, route);
               if (state !== 'unknown') collector?.markTerminalVisible(token);
               return state;
             },
           },
         });
-        await page.firewall.assertHealthy();
-        for (const write of page.contextState.token?.evidence() ?? []) collector.noteBlockedWrite(token, write);
-        const ended = collector.endSample(token);
-        input.requests.push(...ended.requests);
         const pageSnapshot = await readPageStoreSnapshot(async () => (
           await page!.rawPage.evaluate(({ sampleToken }) => {
             const host = globalThis as typeof globalThis & {
@@ -795,6 +932,8 @@ export function createRealInstrumentation(input: {
             return host.__hcPerformanceStore?.endSample(sampleToken) ?? null;
           }, { sampleToken: token }) as PageStoreSnapshot | null
         ));
+        const ended = collector.endSample(token);
+        input.requests.push(...ended.requests);
         const metrics = input.modules.collect.summarizePageMetrics({
           mode: input.mode,
           page: pageSnapshot ?? {
@@ -805,11 +944,25 @@ export function createRealInstrumentation(input: {
           },
           consoleCategories: ended.consoleCategories,
         });
+        const endpointContractMismatch = ended.endpointContractMismatch;
+        const status = endpointContractMismatch
+          ? 'failed'
+          : readiness.status === 'ready'
+            ? 'ok'
+            : 'timeout';
+        const surfaceEvidence = status === 'ok'
+          ? await captureSuccessfulSurfaceEvidence(page, route, ended.requests)
+          : null;
+        await page.firewall.assertHealthy();
+        const blockedWrites = [
+          ...ended.blockedWrites,
+          ...deactivateRecordingToken(),
+        ];
         return {
-          routeKey: input.route.key,
+          surfaceId: input.route.surfaceId,
           mode: input.mode,
           repeat: input.repeat,
-          status: readiness.status === 'ready' ? 'ok' : 'timeout',
+          status,
           readyMs: readiness.readyMs,
           navigation: metrics.navigation,
           paint: metrics.paint,
@@ -822,11 +975,18 @@ export function createRealInstrumentation(input: {
           resourceCountsByClass: ended.resourceCountsByClass,
           backgroundRequestCount: ended.backgroundRequestCount,
           backgroundTransferBytes: ended.backgroundTransferBytes,
-          blockedWrites: ended.blockedWrites,
+          blockedWrites,
           consoleCategories: ended.consoleCategories,
           clientTruncated: metrics.clientTruncated,
           terminalState: readiness.terminalState,
-          reason: readiness.status === 'ready' ? null : 'ready_timeout',
+          surfaceEvidence,
+          reason: endpointContractMismatch
+            ? 'endpoint_contract_mismatch'
+            : readiness.status === 'ready'
+              ? null
+              : readiness.terminalState === 'contradictory_terminal'
+                ? 'contradictory_terminal'
+                : 'ready_timeout',
         };
       } finally {
         await finishAdapters();
@@ -843,19 +1003,20 @@ function resolverFor(
   selfQaBindings?: Readonly<SelfQaFixtureBindings>,
 ): Promise<ResolverResult> {
   if (selfQaBindings !== undefined && (
-    route.key === '/contacts/:contactId'
-    || route.key === '/conversations/:conversationId'
-    || route.key === '/tours/:tourId'
-    || route.key === '/placements/:placementId'
+    route.surfaceId === '/contacts/:contactId'
+    || route.surfaceId === '/conversations/:conversationId'
+    || route.surfaceId === '/tours/:tourId'
+    || route.surfaceId === '/placements/:placementId'
   )) {
-    return routes.resolveBoundSelfQaDetail(route.key, selfQaBindings, dom);
+    return routes.resolveBoundSelfQaDetail(route.surfaceId, selfQaBindings, dom);
   }
   switch (route.resolver) {
     case 'static':
+      if (route.coldTarget.kind !== 'static') throw new Error('static_cold_target_required');
       return Promise.resolve({
         kind: 'resolved',
-        coldPath: route.pathTemplate,
-        warmHref: route.source.href,
+        coldPath: route.coldTarget.path,
+        warmTarget: exactTargetFromPath(route.coldTarget.path),
         branch: { kind: 'none' },
       });
     case 'contact': return routes.resolveContactDetail(api, dom);
@@ -1030,22 +1191,12 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
       const lifecycle = owned as DefaultLifecycle;
       lifecycle.assertAlive();
       if (runConfig.seed === null) throw new Error('unexpected_failure');
-      const input = {
-        scale: runConfig.seed.scale,
-        contacts: runConfig.seed.contacts,
-        units: runConfig.seed.units,
-        placements: runConfig.seed.placements,
-        tours: runConfig.seed.tours,
-        conversations: runConfig.seed.conversations,
-        messagesPerConversation: runConfig.seed.messagesPerConversation,
-        broadcasts: runConfig.seed.broadcasts,
-        recipientsPerBroadcast: runConfig.seed.recipientsPerBroadcast,
-      };
+      const payload = toHermeticReseedPayload(runConfig);
       const timeoutMs = Math.max(120_000, Math.min(3_600_000, 120_000 + runConfig.seed.totalItemCount * 20));
       const response = await fetch(`${lifecycle.appBaseUrl}/__dev/performance/reseed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ input, anchor: runConfig.seed.anchor }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (response.status !== 200) {
@@ -1237,8 +1388,8 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           samples: [],
           orders: [],
           warmup: runConfig.target === 'hosted-dev'
-            ? { performed: false, routeKey: null }
-            : { performed: true, routeKey: '/' },
+            ? { performed: false, surfaceId: null }
+            : { performed: true, surfaceId: '/' },
           lowSampleCount: true,
           relayDomCheck: null,
           branches: [],
@@ -1287,8 +1438,11 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           reportProof: {
             privacyScanRequired: true,
             countManifest: runConfig.seed !== null,
-            coldRanking: true,
-            warmRanking: true,
+            rankings: buildRankings(aggregateSamples(result.samples, selectedRoutes.map((route) => ({
+              surfaceId: route.surfaceId,
+              surfaceScaleBearing: route.surfaceScaleBearing,
+              loadScaleBearing: route.loadScaleBearing,
+            })))),
           },
         });
       }
@@ -1326,7 +1480,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           version: value['browserVersion'] as string,
           viewport: value['viewport'] as { width: number; height: number },
         },
-        warmup: value['warmup'] as { performed: boolean; routeKey: string | null },
+        warmup: value['warmup'] as { performed: boolean; surfaceId: string | null },
         relayDomCheck: value['relayDomCheck'] as null,
         checkpointBranches: value['checkpointBranches'] as never[],
         outOfSampleWrites: value['outOfSampleWrites'] as never[],

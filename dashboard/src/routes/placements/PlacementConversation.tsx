@@ -327,6 +327,12 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
       {...(canSend && { onSend })}
       relayRoster={members}
       relayClosed={closed}
+      paging={{
+        hasOlder: thread.hasOlder,
+        loadingOlder: thread.loadingOlder,
+        olderPagesLoaded: thread.olderPagesLoaded,
+        onLoadOlder: thread.loadOlder,
+      }}
       resetScrollKey={conversationId}
     />
   );

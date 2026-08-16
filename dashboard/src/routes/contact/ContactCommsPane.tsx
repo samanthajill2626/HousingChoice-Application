@@ -322,6 +322,12 @@ export function ContactCommsPane(props: ContactCommsPaneProps): React.JSX.Elemen
         upcoming={timeline.upcoming}
         upcomingTimezone={timeline.upcomingTimezone}
         source={timeline.source}
+        paging={{
+          hasOlder: timeline.hasOlder,
+          loadingOlder: timeline.loadingOlder,
+          olderPagesLoaded: timeline.olderPagesLoaded,
+          onLoadOlder: timeline.loadOlder,
+        }}
         {...(replyToPhone !== undefined && { replyToPhone })}
         replyToLabel={defaultPhoneLabel(phones)}
         replyTargets={replyTargets}

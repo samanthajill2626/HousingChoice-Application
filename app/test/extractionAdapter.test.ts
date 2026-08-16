@@ -5,11 +5,16 @@
 // driver's types promise but a runtime response might not carry.
 import { describe, expect, it, vi } from 'vitest';
 
-const sdk = vi.hoisted(() => ({ reply: {} as unknown }));
+const sdk = vi.hoisted(() => ({ reply: {} as unknown, lastRequest: undefined as Record<string, unknown> | undefined }));
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class StubAnthropic {
-    readonly messages = { create: async (): Promise<unknown> => sdk.reply };
+    readonly messages = {
+      create: async (params: Record<string, unknown>): Promise<unknown> => {
+        sdk.lastRequest = params;
+        return sdk.reply;
+      },
+    };
   },
 }));
 
@@ -245,6 +250,18 @@ describe('fake driver', () => {
     expect(call.meta.rawText).toBeUndefined();
   });
 
+  it('drives a truncation that KEEPS rawText, like the real max_tokens arm', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model })
+      .extract(failMarker({ __fail: 'truncated' }));
+    expect(call.ok).toBe(false);
+    if (call.ok) throw new Error('expected a failure');
+    expect(call.failure).toBe('truncated');
+    expect(call.message).toContain('simulated max_tokens truncation');
+    // The real arm stamps the partial response text before returning, because on
+    // a mid-object cut that text is the whole evidence.
+    expect(call.meta.rawText).toBeDefined();
+  });
+
   it('ignores an unknown __fail value and extracts the payload normally', async () => {
     const call = await createExtractionDriver({ driver: 'fake', model })
       .extract(failMarker({ __fail: 'kaboom', fields: { pets: { op: 'write', value: 'cat' } } }));
@@ -307,6 +324,58 @@ describe('anthropic driver - malformed SDK responses (F9)', () => {
     expect(call.ok).toBe(false);
     expect(call.ok === false && call.failure).toBe('refusal');
     expect(call.meta.usage).toEqual({ inputTokens: 7, outputTokens: 0 });
+  });
+
+  it('pins thinking OFF explicitly, so the output cap means the same thing on every model', async () => {
+    // THE REGRESSION GUARD for the sonnet-5 outage. Omitting `thinking` does not
+    // mean one thing: on claude-opus-4-8 an absent parameter runs with thinking
+    // off, on claude-sonnet-5 the same absent parameter runs ADAPTIVE thinking.
+    // max_tokens caps thinking and response text TOGETHER, so swapping
+    // AI_EXTRACTION_MODEL silently handed the JSON budget to reasoning tokens
+    // and truncated every large run. Asserting the parameter is PRESENT is the
+    // point - an assertion on behavior alone would pass again on the next model
+    // whose default flips.
+    sdk.reply = {
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 5 },
+      content: [{ type: 'text', text: '{"fields":{}}' }],
+    };
+    await anthropic().extract(baseInput);
+    expect(sdk.lastRequest?.['thinking']).toEqual({ type: 'disabled' });
+    expect(sdk.lastRequest?.['max_tokens']).toBe(4096);
+  });
+
+  it('reports a max_tokens stop as a TRUNCATION, keeping the partial JSON as evidence', async () => {
+    // The cap was spent mid-object. Without this arm the truncated text reaches
+    // JSON.parse and the run is filed as errorKind 'parse' - a malformed-model
+    // story for what is actually an under-budgeted request.
+    const partial = '{"fields":{"pets":{"op":"write","value":"two cats","reas';
+    sdk.reply = {
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 4977, output_tokens: 4096 },
+      content: [{ type: 'text', text: partial }],
+    };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('truncated');
+    expect(call.ok === false && call.message).toContain('4096');
+    expect(call.meta.rawText).toBe(partial);
+    expect(call.meta.usage).toEqual({ inputTokens: 4977, outputTokens: 4096 });
+  });
+
+  it('a max_tokens stop with NO text block is a truncation, not a "no text block" driver fault', async () => {
+    // The other shape of the same fault: the budget was gone before any JSON was
+    // emitted, so content carries no text block at all. That used to fall
+    // through to the driver arm and read as a broken response.
+    sdk.reply = {
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 4977, output_tokens: 4096 },
+      content: [],
+    };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('truncated');
+    expect(call.meta.rawText).toBeUndefined();
   });
 
   it('rawText SURVIVES a parse failure - the one case where the text is the whole answer', async () => {

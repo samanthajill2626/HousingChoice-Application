@@ -205,6 +205,7 @@ interface Harness {
   runs: AiRunRecordInput[];
   aiRuns: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   applyEvents: { emit: ReturnType<typeof vi.fn> };
+  jobEvents: { emit: ReturnType<typeof vi.fn> };
 }
 
 function makeHarness(opts: {
@@ -251,6 +252,10 @@ function makeHarness(opts: {
   // throw is one of the few paths that actually reaches runDueExtractions'
   // backstop. See Task 20.
   const applyEvents = { emit: vi.fn() };
+  // DISTINCT from applyEvents on purpose: a test makes applyEvents.emit throw to
+  // reach the per-row backstop, and a shared emitter would make the job's own
+  // completion emit throw with it.
+  const jobEvents = { emit: vi.fn() };
   const applyDeps: ApplyDeps = {
     contacts,
     extraction: repo,
@@ -263,6 +268,7 @@ function makeHarness(opts: {
   const deps: ExtractionJobDeps = {
     repo,
     aiRuns,
+    events: jobEvents,
     now: () => WALL_NOW,
     conversations: { getById: vi.fn(async () => opts.conversation) },
     messages: { listByConversation: vi.fn(async () => opts.messages ?? []) },
@@ -273,7 +279,7 @@ function makeHarness(opts: {
     logger: opts.logger ?? silentLogger,
   };
 
-  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents };
+  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents };
 }
 
 function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
@@ -1429,5 +1435,162 @@ describe('manual runs waive both gates', () => {
     });
     await runDueExtractions(NOW, h.deps);
     expect(h.runs[0]!.window!.excluded.filter((e) => e.cause === 'age_30d')).toEqual([]);
+  });
+});
+
+describe('ai_run.completed', () => {
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+  const emitted = (h: ReturnType<typeof makeHarness>) =>
+    h.jobEvents.emit.mock.calls.filter((c) => c[0] === 'ai_run.completed');
+
+  it('emits once for an applied run, carrying the counts', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'applied', wrote: 1, suggested: 0 });
+  });
+
+  it('emits for a SKIPPED run - the case the indicator most needs', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'skipped' });
+  });
+
+  it('emits for a NO_OP run (the model proposed nothing)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'just saying hi')], // no EXTRACT marker
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'no_op', wrote: 0, suggested: 0 });
+  });
+
+  it('emits for a FAILED run, carrying the error kind', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      driver: {
+        kind: 'fake',
+        extract: async () => ({
+          ok: false as const,
+          meta: { driver: 'fake' as const },
+          failure: 'driver' as const,
+          message: 'boom',
+        }),
+      },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'failed', errorKind: 'driver' });
+  });
+
+  it('still emits when the run-log write fails', async () => {
+    const aiRuns = {
+      beginFinalization: vi.fn(async () => true),
+      putRun: vi.fn(async () => { throw new Error('dynamo down'); }),
+      setVerdict: vi.fn(async () => true),
+    };
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      aiRuns,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
+  });
+
+  it('carries the requestId of the press that started it, and none for an automatic run', async () => {
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(emitted(manual)[0]![1].requestId).toBe('req-abc');
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(emitted(auto)[0]![1].requestId).toBeUndefined();
+  });
+
+  it('a no_contact run emits with conversationId and no contactId', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'hi')],
+      contact: undefined,
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const payload = emitted(h)[0]![1];
+    expect(payload.conversationId).toBe('conv1');
+    expect(payload.contactId).toBeUndefined();
+  });
+
+  it('carries ids and counts only - no body, no phone, no field value', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const payload = emitted(h)[0]![1];
+    const serialized = JSON.stringify(payload);
+    // The run really did carry all three - so their ABSENCE here is the assertion.
+    expect(serialized).not.toContain('EXTRACT:');
+    expect(serialized).not.toContain('yes');
+    expect(serialized).not.toContain('+15551230001');
+    // And the payload is exactly the id/count vocabulary, nothing else.
+    expect(Object.keys(payload).sort()).toEqual(
+      ['conversationId', 'contactId', 'notedLines', 'outcome', 'runId', 'suggested', 'wrote'].sort(),
+    );
+  });
+
+  it('a lost claim emits nothing - there is no outcome to report', async () => {
+    // Documented consequence (spec 4.4b): the indicator resolves by its timeout
+    // on this path, because the row was never this run's to report on.
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      claimResult: false,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(0);
+  });
+
+  it('a throwing emitter never fails the run', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    h.jobEvents.emit.mockImplementation(() => { throw new Error('bus down'); });
+    const result = await runDueExtractions(NOW, h.deps);
+    expect(result).toEqual({ processed: 1, failed: 0 });
+    expect(h.repo.complete).toHaveBeenCalledTimes(1);
   });
 });

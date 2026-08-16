@@ -257,6 +257,29 @@ export interface SuggestionUpdatedEvent {
 }
 
 /**
+ * One extraction run finished (manual-extraction-trigger 4.4b). Emitted for
+ * EVERY run - applied, no_op, skipped and failed - because the skip and failure
+ * cases are exactly what the contact page's running indicator has to explain.
+ * `requestId` is present only when a human press started the run, and is what
+ * correlates that press to THIS run: conversationId identifies the thread, not
+ * the run, so it cannot do that job alone.
+ *
+ * PII: ids and counts only. Never a body, a phone number, or a field value.
+ */
+export interface AiRunCompletedEvent {
+  conversationId: string;
+  runId: string;
+  requestId?: string;
+  contactId?: string;
+  outcome: 'applied' | 'no_op' | 'skipped' | 'failed';
+  skipReason?: string;
+  errorKind?: string;
+  wrote: number;
+  suggested: number;
+  notedLines: number;
+}
+
+/**
  * An unmatched-email row changed (email-channel B2/B3): a mail from an unknown
  * sender landed in (or left) the unmatched/quarantine feeds. B2's ingestion
  * emits it when a row is stored; B3's triage routes emit it on status flips;
@@ -277,15 +300,18 @@ export interface AppEventMap {
   'tour.updated': TourUpdatedEvent;
   'suggestion.updated': SuggestionUpdatedEvent;
   'unmatched_email.updated': UnmatchedEmailUpdatedEvent;
+  'ai_run.completed': AiRunCompletedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;
 
 // Every event name, as a VALUE (the bridge + internal route iterate/validate
 // at runtime; AppEventMap is types-only). Record<AppEventName, true> makes this
-// exhaustive BY CONSTRUCTION: adding an eighth event to AppEventMap without
-// listing it here is a compile error - which is what keeps a future event from
-// silently missing the cross-process bridge (lib/eventBridge.ts).
+// exhaustive BY CONSTRUCTION: adding ANY event to AppEventMap without listing
+// it here is a compile error - which is what keeps a future event from
+// silently missing the cross-process bridge (lib/eventBridge.ts). (Stated
+// without a count on purpose: the ordinal this comment used to carry was
+// already stale by one before ai_run.completed was added.)
 const ALL_APP_EVENTS: Record<AppEventName, true> = {
   'conversation.updated': true,
   'message.persisted': true,
@@ -295,6 +321,7 @@ const ALL_APP_EVENTS: Record<AppEventName, true> = {
   'tour.updated': true,
   'suggestion.updated': true,
   'unmatched_email.updated': true,
+  'ai_run.completed': true,
 };
 export const APP_EVENT_NAMES: readonly AppEventName[] = Object.keys(
   ALL_APP_EVENTS,

@@ -613,6 +613,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
         // AI run log: the dev tick records runs too, which is what makes
         // /settings/ai-runs exercisable in e2e and local development.
         aiRuns: createAiRunsRepo({ logger: log }),
+        // ai_run.completed. Same process as the SSE route here, so the emit
+        // reaches connected clients directly, with no bridge hop.
+        events: appEvents,
         // REAL wall clock. This tick deliberately passes runDueExtractions a
         // SIMULATED FUTURE nowIso (see the tick handler below), so the record's
         // timestamps must NOT come from it.

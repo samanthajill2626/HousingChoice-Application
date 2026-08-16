@@ -424,6 +424,11 @@ if (config.aiExtractionEnabled) {
     // AI run log (design 2026-08-06). Best-effort: a failed run-log write must
     // never fail an extraction run, re-arm a due row, or burn a retry attempt.
     aiRuns: createAiRunsRepo({ logger }),
+    // ai_run.completed. This is the WORKER's bus, so the emit reaches the app's
+    // SSE clients only via lib/eventBridge.ts (EVENT_BRIDGE_URL set); with the
+    // URL unset the event is dropped and the page's indicator falls back to its
+    // timeout, exactly as suggestion.updated already does.
+    events: appEvents,
     // REAL wall clock for the record's timestamps (the poll's nowIso is the
     // domain clock and the dev tick simulates it forward).
     now: () => new Date().toISOString(),

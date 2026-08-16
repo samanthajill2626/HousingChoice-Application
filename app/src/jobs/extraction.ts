@@ -18,6 +18,7 @@
 // PII (doc section 9): NEVER log message bodies or phone numbers. Log only
 // conversationId / contactId / counts.
 import type { AppConfig } from '../lib/config.js';
+import type { EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { createExtractionRepo, DueExtractionItem } from '../repos/extractionRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -92,6 +93,12 @@ export interface ExtractionJobDeps {
    * exercised (design 8).
    */
   aiRuns: Pick<AiRunsRepo, 'beginFinalization' | 'putRun' | 'setVerdict'>;
+  /**
+   * The completion emitter. REQUIRED so a missed construction site is a
+   * typecheck failure rather than a silently dead indicator - the same reasoning
+   * as `aiRuns` above.
+   */
+  events: Pick<EventBus, 'emit'>;
   /**
    * REAL WALL-CLOCK now, for the run record's timestamps ONLY (design section 6,
    * as amended). NOT the poll's nowIso: the dev tick runs a SIMULATED FUTURE
@@ -716,6 +723,32 @@ export async function runDueExtractions(
       }
     }
     await recordRun(deps, outcome, draft);
+    // AFTER recordRun but NOT dependent on it: recordRun is best-effort and
+    // swallows its own failures, and the indicator must not hinge on an
+    // observability write.
+    //
+    // Note what this placement deliberately excludes: a draft-allocation throw
+    // (`continue` above) and `!result.record` - a lost claim or a dueAt-less
+    // row - emit NOTHING, because neither produced a run whose outcome this
+    // process can honestly report. A press whose row lost the claim to a
+    // concurrent poll therefore resolves by the indicator's timeout (spec 4.6),
+    // which is exactly what that timeout is for.
+    try {
+      deps.events.emit('ai_run.completed', {
+        conversationId: draft.conversationId,
+        runId: draft.runId,
+        ...(draft.requestId !== undefined && { requestId: draft.requestId }),
+        ...(draft.contactId !== undefined && { contactId: draft.contactId }),
+        outcome,
+        ...(draft.skipReason !== undefined && { skipReason: draft.skipReason }),
+        ...(draft.error !== undefined && { errorKind: draft.error.kind }),
+        wrote: draft.wrote ?? 0,
+        suggested: draft.suggested ?? 0,
+        notedLines: draft.notedLines ?? 0,
+      });
+    } catch (err) {
+      deps.logger.warn({ conversationId: draft.conversationId, err }, 'ai run completed emit failed');
+    }
     await stampSuperseded(deps, draft);
   }
 

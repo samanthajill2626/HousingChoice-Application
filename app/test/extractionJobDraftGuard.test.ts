@@ -166,6 +166,7 @@ function makeHarness(opts: { dueRows: DueExtractionItem[]; messages: MessageItem
       }),
       setVerdict: vi.fn(async () => true),
     },
+    events: { emit: vi.fn() },
     now: () => WALL_NOW,
     conversations: { getById: vi.fn(async () => convWith('c1')) },
     messages: { listByConversation: vi.fn(async () => opts.messages) },

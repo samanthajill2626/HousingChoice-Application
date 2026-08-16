@@ -64,7 +64,7 @@ export type GroupTimestampRecordId =
  * period no matter how many pollers are looking at it.
  *
  * These exist because hermetic e2e lanes spawn a REAL worker process alongside
- * the app (worklist A16): the worker polls every 60s against the same lane data
+ * the app (worklist A16): the worker polls on its shared interval against the same lane data
  * an e2e spec drives through a `__dev` tick, so the period claim is what stops
  * one from stealing the other's work - and the tick's `force` flag is what lets
  * a spec bypass a period the worker just claimed.

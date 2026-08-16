@@ -921,6 +921,26 @@ number purchased via REST is then recognized as a pool number by an inbound mask
 that point at [docs/RCS-integration-contract.md](docs/RCS-integration-contract.md); there is **no
 real RCS behavior** in the fake.
 
+### Worker poll cadence (`WORKER_POLL_INTERVAL_MS`)
+
+One interval drives **five** due-row polls in `worker.ts`: tour reminders, placement
+nudges, roster actions, conversation-fact extraction, and group guardrails. Lowered
+from 60000 to **30000** on 2026-08-16 so a scheduled run starts nearer its due time.
+
+**Owed on the next deploy:** the var was previously absent from every `.env`, so both
+dev and prod were running the in-code default. `.env.dev.example` and
+`.env.prod.example` now carry `WORKER_POLL_INTERVAL_MS=30000` - sync the real `.env`
+files before deploying, or the env keeps whatever the code default is at that commit.
+
+Why halving is safe rather than twice the work: a tick with nothing due is a single
+Query per poll against a **sparse** `byDueAt` index that returns no rows, and every
+poll claims a row before acting, so overlapping ticks cannot double-fire. The cost is
+a handful of empty Queries a minute.
+
+**Floor:** do not set it below `AI_EXTRACTION_DEBOUNCE_MS` (30000). The debounce
+exists to collapse a burst of inbound texts into one extraction run; polling faster
+than the debounce cannot make that run happen sooner, it only spends reads.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule

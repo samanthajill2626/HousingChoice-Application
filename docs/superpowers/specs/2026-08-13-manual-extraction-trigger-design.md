@@ -1,8 +1,9 @@
 # Manual Extraction Trigger - Design and Scope
 
 - Date: 2026-08-13
-- Status: Ready for human review (8 adversarial review rounds; rebased onto
-  main after the sonnet-5 extraction fixes of 2026-08-15)
+- Status: Ready for human review (9 adversarial review rounds; rebased onto main
+  after the sonnet-5 extraction fixes of 2026-08-15; the in-process runner was
+  withdrawn at round 9 - see 4.4a)
 - Owner: Cameron Abt
 - Branch: `feat/manual-extraction-trigger`
 
@@ -82,9 +83,10 @@ Settled in brainstorming; not open in review:
    re-bill ancient history on every inbound text.
 3. **Keep `no_contact`, `ineligible_type`, and `empty_window`.** These mean
    there is genuinely nothing to send or nowhere to write it.
-4. **The endpoint schedules, responds, THEN runs the work in-process.** No model
-   call happens inside an HTTP request - the response is sent first. The worker
-   poll remains the backstop and either process may win the claim.
+4. **The endpoint schedules and returns; the existing worker poll does the
+   work.** No model call happens in the app process at all. An in-process
+   immediate run was specified and then withdrawn - see 4.4a for what it cost
+   and why the wait is the accepted price.
 5. **The operator watches the run.** The action shows a running state until the
    run reports back, then renders its outcome - including outcomes that change
    nothing. This is a change from the original "fire and forget" design and it
@@ -214,11 +216,14 @@ Lifecycle:
 - **The park branch REMOVEs `manualRequested`.** A parked row is inert until
   something re-arms it; leaving the flag set would waive both gates on whatever
   automatic run schedules it next, months later.
-- **Both `fail` branches, and the fallback, also REMOVE `claimedAt`**, which
-  `complete` already does and `fail` never did. See 4.4a-i: this is what makes
-  `claimedAt` mean "a run holds this row" rather than "was claimed at some
-  point", and the in-flight guard depends on it.
+- `claim` also REMOVEs `requestId` alongside the flag, so a press's correlation
+  key belongs to exactly one run (4.4b).
 - `complete` does not touch `manualRequested` - `claim` already cleared it.
+
+`claimedAt` is deliberately NOT touched. An earlier revision had `fail` clear it
+to support an in-flight guard; that guard is withdrawn (4.4a), nothing reads
+`claimedAt` for logic, and narrowing its meaning with no consumer would be
+change for its own sake.
 
 ### 4.2 Two gate changes in the job, both scoped to `manual`
 
@@ -312,250 +317,73 @@ is needed:** `AiRunList.tsx:55` and `AiRunDetail.tsx:50` render `trigger` as
 free text and there is no trigger filter UI to extend. Together with 4.3, the
 dashboard type file is the only run-log-side edit.
 
-### 4.4a The in-process immediate run
+### 4.4a Arming the poll, and why there is no second runner
 
-Waiting for the 60s worker poll (`app/src/worker.ts:398`) would mean a running
-indicator on screen for 5 to 70 seconds. Instead the endpoint kicks the work off
-itself, in the app process, AFTER the response is sent.
+The endpoint schedules and returns. The worker's existing poll does the work.
 
-This is safe in this deployment specifically: app and worker are long-lived
-Docker containers on one EC2 host (`infra/modules/ec2/main.tf:1`), not Lambda,
-so there is no freeze-after-response semantics to lose the work to. The model
-call is I/O-bound - a held socket, not CPU - so a human-frequency press does not
-meaningfully load the shared t4g.small.
+**An earlier revision ran the extraction in the app process straight after
+responding**, to cut the operator's wait from the poll interval to just the
+model call. It was withdrawn. The atomic claim is a debounce collapse, not a
+mutex: it stops two runners taking the SAME scheduled instance, and says nothing
+about two instances overlapping in time. A second press re-armed the row and the
+second endpoint call claimed it while the first run was still in its model call,
+producing two billed runs over one window, two `complete()` writes racing with
+independently computed cursors (so the cursor could move BACKWARDS), and a
+`fail()` from one run re-arming a row the other was still executing.
 
-`app/src/jobs/extraction.ts` grows one export:
+Guarding that took an in-flight predicate, a narrowed `claimedAt`, a staleness
+escape, and a driver timeout derived from the SDK's duration model - and four
+consecutive review rounds each found a defect in the previous round's fix. The
+guard is gone with the runner it existed to protect, and with it: the staleness
+constant, the timeout derivation, the `claimedAt` narrowing, and the
+consistent-read requirement on the runner's own write. That is five of round
+nine's fourteen findings closed by deletion rather than by another fix.
 
-```
-runExtractionForConversations(conversationIds: string[], nowIso: string, deps: ExtractionJobDeps)
-```
+What it costs is wall-clock. See 4.6 for the honest numbers.
 
-`runDueExtractions`'s per-row body is extracted into a shared helper so both
-entry points run the SAME code - the draft allocation, the backstop, the failure
-routing, `recordRun`, and `stampSuperseded`. The only difference is row
-selection: `listDue` for the poll, `repo.getDue(id)` per id here. Reimplementing
-the loop instead of sharing it would fork the machinery that took four review
-rounds to get right.
-
-**The claim is NOT a mutex, and this design must not pretend otherwise.** It is
-a debounce collapse: it stops two runners claiming the SAME scheduled instance
-(`app/src/repos/extractionRepo.ts:250-285`), and says nothing about two
-instances overlapping in time. Without the guard below, pressing twice would
-routinely produce two concurrent runs on one conversation - the second press
-re-arms the row and its own endpoint call claims it while the first run is still
-in its model call. That would mean two billed calls over the same window, two
-`complete()` writes racing with independently computed cursors (so the cursor
-can move BACKWARDS), and a `fail()` from one run re-arming a row the other is
-still executing. It would also invalidate the round-4 soundness argument for the
-conditional `fail`, which enumerated interleavings assuming a single runner.
-
-**The in-flight guard (4.5a) is what makes 4.4a safe**, not the claim.
-
-The call is fire-and-forget with respect to the response, but NOT unobserved: it
-is wrapped so a rejection is logged at `error` with the conversation id and can
-never become an unhandled rejection. The HTTP response has already been sent and
-its status does not depend on the run's outcome.
-
-**Known pre-existing hazard, unchanged and out of scope.** If the process
-running an extraction dies mid-run, the row stays claimed and out of the due
-index with nothing to re-arm it - there is no stale-claim reaper. That is true
-of the worker today; routing some runs through the app does not create it, and
-a container restart during a 10-second window is the exposure. Recorded here so
-the builder does not think this design introduced it. See section 9.
-
-### 4.4a-i The in-flight guard
-
-**First, `claimedAt` is made to mean what its name says.** Today `claim` sets it
-and only `complete` clears it (`app/src/repos/extractionRepo.ts:261,293`);
-neither branch of `fail` does. So a row that failed hours ago still carries a
-`claimedAt`, and the attribute means "was claimed at some point", not "is being
-run". **Both branches of `fail`, and its scheduling-free fallback, now REMOVE
-`claimedAt`** exactly as `complete` does. Verified safe: nothing in the codebase
-reads this attribute for logic - the only readers are repo tests asserting the
-clear behavior - so this narrows its meaning without changing any consumer.
-
-With that, `claimedAt` present means precisely "a run holds this row", and the
-guard is one clause plus a staleness escape:
-
-```
-attribute_not_exists(claimedAt) OR claimedAt < :staleBefore
-```
-
-where `staleBefore = now - MANUAL_CLAIM_STALE_MS`.
-
-**The constant must be derived from a bounded run, and today nothing bounds
-one.** `AnthropicExtractionDriver` constructs its client with no `timeout` and
-no `maxRetries` (`app/src/adapters/extraction.ts:218`) and the job awaits
-`driver.extract()` unguarded (`app/src/jobs/extraction.ts:491`), so the call
-inherits the SDK defaults: a 10-minute request timeout with 2 retries, and
-timeouts are themselves retried. Worst-case wall clock is therefore about
-**30 minutes** - a hung call outlives any five-minute window, the guard reads
-the row as stale while the run is still going, and a press starts the
-concurrent run the guard exists to prevent.
-
-So the driver bounds itself first. Three constraints drive the constants:
-
-1. **The timeout must exceed a full-length generation, and that length is a
-   function of `MAX_OUTPUT_TOKENS`.** The SDK models worst-case duration
-   linearly - 60 minutes at 128k output tokens - in
-   `calculateNonstreamingTimeout` (`node_modules/@anthropic-ai/sdk/client.js`,
-   `expectedTime = (3_600_000 * maxTokens) / 128_000`). At the cap of 4096
-   (`app/src/adapters/extraction.ts:171`) that is **115.2s**.
-2. **SDK-level retries are disabled, because their sleeps are unbounded.** The
-   SDK honours a `retry-after` header with no cap, so `timeout x (maxRetries +
-   1)` is NOT the real worst case and a guard test asserting it would stay
-   green while the property it protects is violated. Setting `maxRetries: 0`
-   removes the sleeps entirely and makes the bound exact.
-3. **Nothing is hardcoded to a cap that moves.** This exact defect has now
-   happened once: an earlier revision of this spec fixed the timeout at 120s,
-   derived from a 57.6s estimate at `MAX_OUTPUT_TOKENS = 2048`. Main then
-   raised the cap to 4096 for unrelated reasons (`09831370`), which doubled the
-   SDK's estimate to 115.2s and silently cut the headroom to under five
-   seconds. A hardcoded number cannot survive a cap change it never sees, so
-   the constants are **computed from the cap**.
-
-Disabling SDK retries loses nothing, because **the job already owns retry**:
-a failed call routes through `repo.fail()`'s attempt counter, exponential
-backoff, and park-at-five (`app/src/jobs/extraction.ts:654-668`). SDK retries
-were a second, redundant retry layer inside the first, with worse behavior on
-rate limits - a tight SDK retry hammers a 429 that the job's backoff would have
-waited out. The visible change is that a transient error now surfaces as a
-`failed` run record and a backed-off retry rather than being silently absorbed,
-which is more honest observability, not less.
-
-Resulting set, every value computed rather than written down:
-
-```
-// The SDK's own worst-case model, restated so the chain is auditable.
-SDK_WORST_CASE_MS             = (3_600_000 * MAX_OUTPUT_TOKENS) / 128_000  // 115_200 at 4096
-EXTRACTION_REQUEST_TIMEOUT_MS = 2 * SDK_WORST_CASE_MS                      // 230_400
-maxRetries                    = 0        // job owns retry; no uncapped sleeps
-MANUAL_CLAIM_STALE_MS         = 2.5 * EXTRACTION_REQUEST_TIMEOUT_MS        // 576_000
-```
-
-Worst case is exactly the timeout, and each constant carries its stated
-multiple over the one below it. **Raising `MAX_OUTPUT_TOKENS` now widens the
-timeout and the staleness window automatically** - the failure that just
-happened cannot happen again.
-
-Two guard tests, because the chain has two links that can break independently:
-
-- `EXTRACTION_REQUEST_TIMEOUT_MS >= 2 * SDK_WORST_CASE_MS`, with
-  `SDK_WORST_CASE_MS` recomputed in the test from `MAX_OUTPUT_TOKENS` and the
-  SDK's constants. This fails if someone replaces the derivation with a literal.
-- `MANUAL_CLAIM_STALE_MS >= 2.5 * EXTRACTION_REQUEST_TIMEOUT_MS`. This holds
-  only because retries are off; if `maxRetries` is ever raised, the premise is
-  gone and the bound must be re-derived, not re-tuned.
-
-The SDK's linear model is deliberately conservative - a structured-output call
-emitting a few hundred tokens of JSON finishes in seconds, nowhere near 115s.
-That conservatism is the point: it is the only non-guessed number available,
-and the cost of being generous is a slower stranded-claim recovery, not a
-wrong result.
-
-**Where the constants live matters.** They do NOT get exported from
-`adapters/extraction.ts`: `app/src/repos/extractionRepo.ts:38` imports that
-module `import type`-only, and adding a runtime import would pull
-`@anthropic-ai/sdk` into every module that imports the repo - the exact shape
-already filed as debt in `extraction-runwindow-module-cycle`. Both constants go
-in a leaf module that imports nothing, which the adapter, the repo, and the
-test all read.
-
-This bounds automatic runs too, which is a deliberate and separately good
-outcome: an unbounded model call in a poll job can hold a claim for half an
-hour today. A timeout is already handled end to end - the driver's catch arm
-returns `failure: 'driver'`, which flows through the existing attempts/backoff/
-park path and produces a `failed` run record and an `ai_run.completed`. See
-section 9 for the boundary.
-
-**Interaction with the thinking fix on main.** `09831370` pinned
-`thinking: {type: 'disabled'}` on every call
-(`app/src/adapters/extraction.ts:188`) because an absent parameter means
-different things per model - `claude-opus-4-8` ran without thinking,
-`claude-sonnet-5` ran adaptive thinking against the same shared `max_tokens`
-budget. That fix is what makes the cap mean "JSON only", and therefore what
-makes the SDK's token-derived duration model a sane basis for the timeout at
-all. This spec depends on it: if thinking is ever un-pinned, output tokens stop
-being a proxy for wall-clock duration and the derivation above needs revisiting.
-
-**The guard lives in `requestManualExtraction`'s `ConditionExpression`, not in a
-read before it.** A read-then-act check has a window: two presses can both read
-"idle", and the second can schedule after the first has already claimed, so both
-run. Putting the predicate in the conditional write closes that window - the
-scheduling upsert itself fails when a run holds the row. A
-`ConditionalCheckFailedException` for a thread means "already running"; anything
-else propagates.
-
-Why each piece is right, in the states that previously broke it:
-
-- **A run in flight with an inbound arriving mid-run.** The inbound re-arms the
-  row, so `_duePartition` comes back while the run continues. An earlier draft
-  of this guard tested `_duePartition` absent as a proxy for "running" and read
-  this state as idle, admitting a second concurrent run - the exact failure the
-  guard exists to prevent. `claimedAt` is unaffected by the re-arm and reads
-  correctly.
-- **A parked row.** Park removes `_duePartition` and now also clears
-  `claimedAt`, so a press proceeds. This is what makes section 8's "a second
-  press is the recovery" true rather than aspirational.
-- **A row that has never been scheduled** - every never-extracted imported
-  conversation, the primary case for this feature. There is no item at all, so
-  `attribute_not_exists(claimedAt)` holds and the upsert creates the row. No
-  special-casing needed.
-- **A process that died mid-run.** `claimedAt` is never cleared, so the
-  staleness clause is the only way back; past the window a press proceeds. This
-  also gives the operator a manual recovery from the stranded-claim hazard
-  (4.4a) that does not exist today.
-
-A skipped thread is reported honestly rather than silently: the response
-distinguishes threads scheduled from threads already running, and 4.6 tells the
-operator a run is already in progress instead of pretending a new one started.
-
-**A refusal can discard the operator's intent, and the copy must say so.** The
-in-flight run may be an AUTOMATIC one, which keeps the 30-day cutoff and will
-skip on exactly the imported population this feature exists for. The press is
-then refused and nothing manual ever happens. The guard cannot tell the two
-apart - `claim` clears `manualRequested` before the guard ever reads the row -
-so rather than guess, the copy covers both cases honestly: a run is already in
-progress on this thread, and if the full history is what is wanted, press again
-once it finishes. A second press after the in-flight run completes always
-schedules.
-
-**What this guard does and does not cover.** It covers presses, which is the
-concurrency 4.4a introduces. It does NOT cover an inbound message arriving
-during a run: that re-arms the row, and if the run outlasts the debounce plus
-the poll interval, the worker can claim and start a second concurrent run. That
-hazard ships today with no manual trigger anywhere near it and needs a run
-exceeding roughly 30-90 seconds to be reachable. Closing it would require
-turning the claim into a real lease, which is out of scope (section 9).
-
-**A press absorbs a pending inbound countdown; it does not race it.** There is
-exactly one due row per conversation and the debounce is a `dueAt` value on it,
-not a separate timer. An inbound sets `dueAt = now + 30s`
-(`app/src/lib/config.ts:897`); a press slides that same row to `now`. The
-pending automatic run is therefore replaced by the manual one rather than
-running alongside it. A consequence to expect: pressing mid-burst pre-empts what
-the debounce is for, so the tenant's next text re-arms the row and produces a
-second run - correct, since that is new content, but it costs a second call.
+Two hazards the withdrawn design would have made worse are real but
+pre-existing, and are filed rather than fixed here (section 9): the driver's
+model call is unbounded (no `timeout`, no `maxRetries` -
+`app/src/adapters/extraction.ts:218`), and `claim` stamps `claimedAt` from the
+poll-wide `nowIso` rather than the moment of claiming, so a later row in a long
+poll records a claim time already minutes stale.
 
 ### 4.4b `ai_run.completed` - the event that resolves the indicator
 
-`AppEventMap` gains an eighth event (`app/src/lib/events.ts:271-298`). The
-`ALL_APP_EVENTS` record is exhaustive by construction, so adding the name there
-is a compile error until it is registered - which is exactly what guarantees it
-crosses the worker-to-app bridge rather than silently missing it.
+`AppEventMap` gains a **ninth** event (`app/src/lib/events.ts:271-280`, which
+already carries eight). `ALL_APP_EVENTS` is exhaustive by construction, so
+registering the name is a compile error until it is done - which is what
+guarantees the event crosses the worker-to-app bridge rather than silently
+missing it.
 
-Payload: `{ conversationId, runId, outcome, skipReason?, errorKind?, wrote,
-suggested, notedLines, contactId? }` - ids and counts only, never field values
-or message content, matching the PII rule the job already follows.
+**That compile-time guarantee does not cover everything.**
+`app/test/eventBridge.test.ts:43` asserts `expect(APP_EVENT_NAMES).toHaveLength(8)`
+- a runtime assertion the typecheck cannot see. Adding the event fails that test,
+and the fix is to update the count, not to route around it.
 
-**`conversationId` is the match key, not `contactId`.** `contactId` is optional
-on the draft and is never set on a `no_contact` run
-(`app/src/jobs/extraction.ts:392-397` returns before the assignment at `:399`),
-so an indicator keyed on it would hang on exactly the runs that resolve fastest.
-`conversationId` is present on every draft from allocation
-(`app/src/jobs/extraction.ts:297-299`), and 4.6 already counts one event per
-returned `conversationId`. `contactId` rides along when known, for consumers
-that want it.
+Payload: `{ conversationId, requestId?, runId, outcome, skipReason?, errorKind?,
+wrote, suggested, notedLines, contactId? }` - ids and counts only, never field
+values or message content, matching the PII rule the job already follows.
+
+**`conversationId` alone cannot correlate a press to its run.** It identifies
+the thread, not the run: an unrelated automatic run on the same conversation -
+an inbound text arriving right after the press - emits the same
+`conversationId` and would resolve the operator's indicator with a different
+run's outcome, possibly before their own run has started. So the press carries
+an identity of its own:
+
+- The endpoint generates a `requestId` (a uuid) per press and passes it to
+  `requestManualExtraction`, which stores it on the due row beside
+  `manualRequested`.
+- `claim` REMOVEs it with the flag, so it belongs to exactly one run.
+- `newRunDraft` reads it from the `listDue` row into the draft, and the emit
+  carries it.
+- The indicator matches on `requestId` and ignores events without it.
+
+`contactId` is deliberately NOT the key: it is optional on the draft and is
+never set on a `no_contact` run (`app/src/jobs/extraction.ts:392-397` returns
+before the assignment at `:400`), so an indicator keyed on it would hang on
+exactly the runs that resolve fastest. It rides along when known.
 
 **The counts must be put somewhere they exist.** `wrote` and `suggested` live on
 `applyOutcome` inside `processRow` and never reach `RunDraft`; `notedLines` does.
@@ -564,6 +392,18 @@ The builder adds the two counts to the draft where `notedLines` is already set
 `draft.decisions`, which is assembled best-effort and can legitimately be
 absent - a degraded observability record must not become a wrong count in a
 live event.
+
+**The emit path is a surface, not a detail.** The job has no event bus today:
+`ExtractionJobDeps` carries repos, a driver, `applyDeps`, config, a logger and a
+clock, and nothing else. It gains a typed emitter, and **all three construction
+sites must supply it** - `app/src/worker.ts` (the poll), `app/src/routes/dev.ts`
+(the deterministic tick), and the unit-test harness - by the same reasoning the
+existing `aiRuns` dep is REQUIRED rather than optional: a missed site should be
+a typecheck failure, not a silently dead indicator in the one environment where
+this feature is first exercised. The app-side SSE writer is a manual
+`events.on` / `events.off` pair (`app/src/routes/api.ts:2098-2141`), so the new
+event needs its own registration and its own cleanup; forgetting the `off` leaks
+a listener per SSE connection.
 
 Emitted once per run from the job, immediately after `recordRun`, for **every**
 run rather than only manual ones: a uniform rule is easier to reason about than
@@ -577,17 +417,11 @@ does not change that.
 does not depend on it: a run whose log write failed still emits, because the
 indicator's correctness must not hinge on an observability write.
 
-Emitting from the job rather than the endpoint is what keeps the indicator
-correct when the app-side attempt LOSES the claim: the worker runs it, emits,
-and the bridge carries it to the waiting page. The page never needs to know
-which process did the work.
-
-That covers a lost claim, **but not every case**. If an inbound message slides
-`dueAt` into the future between the schedule and the app-side attempt, the
-app-side claim fails its `dueAt <= now` condition and nobody runs the row until
-that new `dueAt` comes due and the poll reaches it - up to a debounce plus a
-poll interval later. No event arrives in the meantime. This is what 4.6's
-timeout exists for; the indicator must not claim "resolves either way".
+**The event can be legitimately late or absent**, which is what 4.6's timeout is
+for. An inbound message sliding `dueAt` into the future defers the run by a
+debounce plus a poll interval; `EVENT_BRIDGE_URL` being unset drops the
+worker-to-app hop entirely. The indicator must never claim an outcome it did not
+observe.
 
 ### 4.5 `POST /api/contacts/:contactId/extraction-run`
 
@@ -609,26 +443,27 @@ On success:
    triage hooks do not filter, because they react to an event on one specific
    thread rather than fanning out across a contact's threads; fanning out is
    what makes the filter mandatory here.
-4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
-   with no debounce - `dueAt = now`, as the voice and triage paths do. The
-   in-flight guard (4.4a-i) is inside this call, so the partition into scheduled
-   and already-running threads is the set of calls that succeeded versus the set
-   that raised `ConditionalCheckFailedException`. There is no separate
-   pre-read.
+4. Generate a `requestId` (uuid) for this press - the correlation key of 4.4b.
+5. `requestManualExtraction(conversationId, nowIso, requestId)` for each
+   surviving thread, with no debounce - `dueAt = now`, as the voice and triage
+   paths do.
 6. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor,
-   scheduled: scheduled.length, alreadyRunning: alreadyRunning.length })`. The
-   counts matter: an unconditional entry with no counts cannot distinguish a
-   press that started three runs from one that started none, which is most of
-   the audit value for an action that spends money.
-7. Respond `200 { scheduled: string[], alreadyRunning: string[] }` - both as
+   requestId, scheduled: scheduled.length, failed: failed.length })`. The counts
+   matter: an unconditional entry with no counts cannot distinguish a press that
+   started three runs from one that started none, which is most of the audit
+   value for an action that spends money.
+7. Respond `200 { requestId, scheduled: string[], failed: string[] }` as
    `conversationId` arrays. The client waits for one completion event per entry
-   in `scheduled`, and must NOT wait on `alreadyRunning`: those runs were
-   started by someone else and their events may already have fired. A response
-   with an empty `scheduled` and a non-empty `alreadyRunning` is a success, not
-   a refusal, and 4.6 renders it as "already running".
-8. **After responding**, call `runExtractionForConversations` on the `scheduled`
-   ids (4.4a). Failures here are logged, never surfaced through the already-sent
-   response.
+   in `scheduled`.
+
+**A partial failure must not be reported as a total one.** The fan-out is N
+independent writes; if the second throws after the first succeeded, a run is
+queued and will bill. Returning 500 there tells the operator nothing happened,
+which is false, and leaves an indicator they cannot see resolve. So the endpoint
+**returns 500 only when NOTHING was scheduled**. Once any write succeeds the
+response is a 200 naming both lists, and 4.6 says plainly that some threads
+could not be queued. A thread in `failed` gets no indicator, because no run is
+coming for it.
 
 **This is not the same fan-out as the triage re-extraction hook.** That hook
 (`app/src/routes/contacts.ts:1557,1569-1574`) resolves threads from the contact's
@@ -643,10 +478,12 @@ itself:
 | Condition | Status | Reason |
 | --- | --- | --- |
 | Unknown contact, or a phone-pointer id | 404 | `contact_not_found` |
+| Contact is soft-deleted | 409 | `contact_deleted` |
 | `config.aiExtractionEnabled` is false | 409 | `extraction_disabled` |
 | Contact type is `landlord`, `partner`, or `team_member` | 409 | `ineligible_contact_type` |
 | Contact has no threads at all | 409 | `no_conversations` |
 | Threads exist but none survive the type filter | 409 | `no_eligible_conversations` |
+| Every scheduling write failed | 500 | `schedule_failed` |
 
 The response body is `{ error: '<reason>' }`, the shape every sibling route in
 this file already returns (`res.status(404).json({ error: 'contact_not_found' })`
@@ -663,6 +500,13 @@ The type refusal mirrors the job's eligibility rule
 (`app/src/jobs/extraction.ts:401-406`). Queuing a row guaranteed to skip would
 burn a poll cycle and write a misleading `skipped` record. Eligible types are
 `tenant` and `unknown`.
+
+**The soft-delete refusal is a deliberate divergence from the job**, which has
+no soft-delete check and would happily extract into a deleted contact's record.
+Spending money to write facts onto a record staff have removed from view is not
+something to do on a human's button press, and the parity gap is not this
+spec's to close - a soft-deleted contact still being extractable on the
+automatic path is filed as its own issue (section 9).
 
 The last two rows are deliberately distinct reasons. A contact whose only thread
 is mis-typed - a real, documented state, since triage flips `unknown_1to1` and
@@ -707,42 +551,46 @@ its states are specified rather than left to the builder:
 
 1. **Pressed** - the menu item enters a running state and is disabled against a
    second press. The status region reads "Running AI extraction..." (or
-   "...on 2 threads" when `scheduled` named more than one).
-1a. **Already running** - `scheduled` is empty and `alreadyRunning` is not. This
-   is a SUCCESS response, not a refusal: the region says a run is already in
-   progress and the indicator does NOT start, because the events for those runs
-   belong to whoever started them and may already have fired. Starting an
-   indicator here would hang until the timeout. A mixed response (some
-   scheduled, some already running) starts the indicator for the scheduled
-   threads only and mentions the rest.
-2. **Resolved** - one `ai_run.completed` per `conversationId` in `scheduled`.
-   The region renders the aggregate outcome in the operator's terms, not the
-   job's enum: applied ("Updated 2 fields, 1 suggestion"), no-op or skipped
-   ("Ran - nothing new to extract"), failed ("Extraction failed - see Settings >
-   AI runs"). A failure whose `errorKind` is **`truncated`** gets its own copy
-   ("Extraction ran out of room - the transcript may be too long"), because it
-   is the one failure an operator can act on and because it is the most likely
-   failure on exactly this feature's target data: a manual run waives the age
-   cutoff, so it sends the widest windows the system ever produces. `truncated`
-   is a real `RunErrorKind` as of `09831370`
-   (`app/src/repos/aiRunsRepo.ts:26`), added when a model swap made the
-   truncation arm necessary - see 4.4a-i.
+   "...on 2 threads" when `scheduled` named more than one). If `failed` is
+   non-empty it says so alongside: some threads could not be queued.
+2. **Resolved** - one `ai_run.completed` carrying this press's `requestId` per
+   `conversationId` in `scheduled`. The region renders the aggregate outcome in
+   the operator's terms, not the job's enum: applied ("Updated 2 fields, 1
+   suggestion"), no-op or skipped ("Ran - nothing new to extract"), failed
+   ("Extraction failed - see Settings > AI runs"). A failure whose `errorKind`
+   is **`truncated`** gets its own copy ("Extraction ran out of room - the
+   transcript may be too long"), because it is the one failure an operator can
+   act on and because it is the most likely failure on exactly this feature's
+   target data: a manual run waives the age cutoff, so it sends the widest
+   windows the system ever produces. `truncated` is a real `RunErrorKind` as of
+   `09831370` (`app/src/repos/aiRunsRepo.ts:26`), added when a model swap made
+   the truncation arm necessary.
 3. **Timed out** - if the events do not all arrive within a bounded wait, the
    region stops claiming to know and says so: "Still running - check Settings >
    AI runs". The indicator must never spin forever, because the event can be
-   legitimately lost (see below).
+   legitimately late or lost (see below).
+
+**How long the operator actually waits.** The run happens on the worker poll, so
+the wait is `poll interval` (0-30s, averaging 15s since `WORKER_POLL_INTERVAL_MS`
+became 30000 on 2026-08-16) plus the run itself (a `max_tokens: 4096`
+structured-output call, seconds). Call it **5-40 seconds, averaging around 20**.
+The timeout that ends the indicator sits well above that ceiling, not at it -
+the poll can be delayed by a long-running row ahead of this one in the same
+pass. This is the cost of withdrawing the in-process runner (4.4a), and it is
+the accepted price.
 
 Pending state is **session-local and does not survive a reload**. Recovering it
 would mean querying the run log by contact since the press timestamp - the
 `byEntity` index supports it (`app/src/repos/aiRunsRepo.ts:301-316`) - but for a
-wait measured in seconds that is machinery bought for a rare case. A reloaded
-page simply shows the current facts, which by then are usually the result.
+wait measured in tens of seconds that is machinery bought for a rare case. A
+reloaded page simply shows the current facts, which by then are usually the
+result.
 
-**The event can be lost, and the timeout is the honest answer.** If
-`EVENT_BRIDGE_URL` is unset the worker's emit never reaches app SSE, and if the
-app-side run wins the claim the emit is in-process and arrives normally. So the
-indicator resolves promptly on the expected path and degrades to the timeout
-message otherwise. It never asserts an outcome it did not observe.
+**The event can be late or lost, and the timeout is the honest answer.** An
+inbound message sliding `dueAt` forward defers the run past the debounce; an
+unset `EVENT_BRIDGE_URL` drops the worker-to-app hop entirely. The indicator
+degrades to the timeout message rather than asserting an outcome it did not
+observe.
 
 **What the operator will and will not see.** Suggestions and auto-applied writes
 appear with no reload over the existing SSE path, proven end to end:
@@ -781,7 +629,7 @@ degraded, not broken.
 ### 4.8 Surfaces touched
 
 - `app/src/repos/extractionRepo.ts` - `DueExtractionItem` (`manualRequested`,
-  `channel` optional, and its now-stale channel doc comment), the
+  `requestId`, `channel` optional, and its now-stale channel doc comment), the
   `ExtractionRepo` interface, `requestManualExtraction`, `claim`, `fail`
   (signature gains BOTH the manual flag and `listedDueAt`; both branches gain
   the condition and the scheduling-free fallback).
@@ -794,64 +642,51 @@ degraded, not broken.
   **`npm run typecheck` is the enumerator of record here** - the builder runs it
   before assuming this list is complete, because a missed literal is a compile
   error and a missed `Pick` view is not.
-- `app/src/jobs/extraction.ts` - `manual` derivation, both gates, `newRunDraft`,
-  the effective age value passed to the window builder.
+- `app/src/jobs/extraction.ts` - `manual` derivation, both gates, `newRunDraft`
+  (trigger + `requestId` + the two counts), the effective age value passed to
+  the window builder, and a REQUIRED event emitter on `ExtractionJobDeps`.
+- **All three `ExtractionJobDeps` construction sites** must supply the emitter:
+  `app/src/worker.ts` (the poll), `app/src/routes/dev.ts` (the deterministic
+  tick), and the unit-test harness. Required rather than optional for the same
+  reason the existing `aiRuns` dep is: a missed site should be a typecheck
+  failure, not a dead indicator in the one environment where this is first
+  exercised.
 - `app/src/services/extraction/runWindow.ts` and `runTypes.ts` - the nullable
   age param.
 - `app/src/repos/aiRunsRepo.ts` - `RunTrigger`.
-- `app/src/adapters/extraction.ts:218` - the client gains `timeout` and
-  `maxRetries: 0` (4.4a-i), read from the new leaf constants module.
-- A new leaf constants module holding `MAX_OUTPUT_TOKENS` and the values
-  derived from it. It must import nothing: putting them in the adapter would
-  turn `app/src/repos/extractionRepo.ts:38`'s `import type` into a runtime
-  import of `@anthropic-ai/sdk`. **`MAX_OUTPUT_TOKENS` moves here from
-  `app/src/adapters/extraction.ts:171`** so the timeout and staleness values
-  can derive from it without the adapter becoming a runtime dependency of the
-  repo. Its comment block - which records why 4096 is headroom rather than the
-  fix - moves with it intact.
-- `app/src/routes/contacts.ts` - the endpoint, including the post-response call.
 - `app/src/lib/events.ts` - `AppEventMap` + `ALL_APP_EVENTS` (compile-enforced
   pair) and the payload type.
-- `app/src/routes/api.ts` - the SSE writer for the new event, beside
-  `suggestion.updated` at `:2098`.
-- `dashboard/src/api/EventStreamProvider.tsx` - dispatch the new event beside
-  `:208`.
+- `app/test/eventBridge.test.ts:43` - the hardcoded `toHaveLength(8)` becomes 9.
+  A runtime assertion the typecheck cannot catch (4.4b).
+- `app/src/routes/api.ts:2098-2141` - the SSE writer is a manual `on`/`off`
+  pair; the new event needs both halves or it leaks a listener per connection.
+- `dashboard/src/api/EventStreamProvider.tsx:208` - dispatch the new event.
 - `dashboard/src/api/types.ts` - `AiRunTrigger`, `windowParams`, the new event
   payload.
-- The app-side extraction deps must now be constructible in the APP process, not
-  only the worker and the dev tick. `app/src/routes/dev.ts:603-641` already
-  builds exactly these deps lazily, but **the builder cannot live there**: the
-  dev router is structurally absent in deployed environments, so importing it
-  from a production route would either break the build or drag dev-only code
-  into production. Extract the builder to a normal module (alongside the job or
-  under `services/extraction/`) and have BOTH `routes/dev.ts` and the new
-  endpoint consume it, so a third copy cannot drift from the worker's.
-- `dashboard/src/routes/contact/ContactActionsMenu.tsx` and its API client.
-- `app/test/helpers/twilioWebhookHarness.ts:2886` - the extraction repo fake
-  must implement the new method or the harness stops type-checking.
+- `app/src/routes/contacts.ts` - the endpoint.
+- `dashboard/src/routes/contact/ContactActionsMenu.tsx`, `ContactDetail.tsx`,
+  and the API client.
 
 ## 5. Concurrency and repeat presses
 
 - **Two presses in quick succession** slide the single due row forward; one run
   happens. Existing debounce behavior, correct here.
-- **A press while a run is in flight** is REFUSED for that thread by the
-  in-flight guard (4.4a-i) and reported as `alreadyRunning`. This replaces the
-  earlier design's "a second run follows"; with an indicator on screen, being
-  told a run is already going is more useful than silently starting a rival one,
-  and it is what keeps 4.4a from producing concurrent runs on one conversation.
-  The flag lifecycle in 4.1 still matters for the paths the guard does not
-  cover: an inbound re-arm during a run, and a failed run's retry.
+- **A press while a run is in flight** re-arms the row, and a second run follows
+  once the first completes. This is the original design and it is correct: the
+  operator asked again. It is only safe because there is no second runner - the
+  poll claims one instance at a time, so "a second run follows" means after, not
+  alongside. See 4.4a for the design that made this unsafe and was withdrawn.
 - **An inbound message arriving during a run** re-arms the row while the run
   continues. The conditional `fail` (4.1) is what protects it: the re-armed
   `dueAt` survives, and `fail` records only the error and the attempt count.
   Without that condition the re-arm would be pushed out by the backoff, or - on
-  the fifth failure - deleted with the row's index keys. This is now the
-  scenario that motivates the conditional `fail`, since the guard makes a PRESS
-  during a run impossible.
+  the fifth failure - deleted with the row's index keys. This applies equally to
+  a press landing in that window.
 - **An inbound message between press and claim** slides `dueAt` and may
-  overwrite `channel`, but cannot clear `manualRequested`, so the run stays
-  manual. It can also slide `dueAt` into the future, in which case the app-side
-  claim fails its `dueAt <= now` condition and the poll runs it later (4.4b).
+  overwrite `channel`, but cannot clear `manualRequested` or `requestId`, so the
+  run stays manual and stays correlated to the press. It can also slide `dueAt`
+  into the future, deferring the run past the debounce - which the indicator's
+  timeout covers (4.6).
 - **Sustained inbound traffic** slides `dueAt` forward by a full debounce each
   time, so on an actively texting thread a manual run can be delayed well past
   "shortly". The run stays manual whenever it fires; the delay is the existing
@@ -876,24 +711,29 @@ Unit:
   without the flag skips **`no_new_client`** (not `empty_window` - see 1.2).
 - The job waives `no_new_client` when the flag is set and does not when absent.
 - `windowParams.maxTranscriptAgeDays` is `null` on a manual run, `30` otherwise.
-- `requestManualExtraction` sets the flag and leaves `channel` untouched;
-  `scheduleExtraction` never sets the flag; `claim` removes it.
-- **The two re-arm-survival regression tests, one per write path.** Drive these
-  with an INBOUND re-arm, not a press: the guard (4.4a-i) makes a press during a
-  claimed run impossible, so a press-driven version of this test would be
-  asserting on an unreachable state. A re-arm landing during a claimed run
-  survives that run's `complete`; and it survives that run's `fail` on BOTH
-  branches - re-arm (its `dueAt` is not pushed to `now + backoff`) and park (its
-  `dueAt` and `_duePartition` are not removed). Assert the error and attempt
-  count are still recorded in the re-armed case.
+- `requestManualExtraction` sets the flag and the `requestId`, and leaves
+  `channel` untouched; `scheduleExtraction` never sets either; `claim` removes
+  both.
+- **The two re-arm-survival regression tests, one per write path.** A re-arm
+  landing during a claimed run survives that run's `complete`; and it survives
+  that run's `fail` on BOTH branches - re-arm (its `dueAt` is not pushed to
+  `now + backoff`) and park (its `dueAt` and `_duePartition` are not removed).
+  Assert the error and attempt count are still recorded in the re-armed case.
+  Drive it once with an inbound re-arm and once with a press: both reach this
+  state now that the in-flight guard is withdrawn.
 - `fail` re-arms with the flag for a manual run and without it for an automatic
   one; `fail` parking REMOVEs the flag.
-- `newRunDraft` records `manual` from the flag, and records a defined trigger
-  for a row with no `channel` (the `?? 'manual'` arm).
+- `newRunDraft` records `manual` from the flag, records a defined trigger for a
+  row with no `channel` (the `?? 'manual'` arm), and carries the `requestId`
+  through to the emit.
 - Route: fan-out covers phone and email threads and EXCLUDES `relay_group` and
-  `landlord_1to1`; each of the FIVE refusals in 4.5 returns its status and
-  reason, including `no_conversations` and `no_eligible_conversations` being
-  distinguishable; a repo failure is a 500; the audit entry is appended.
+  `landlord_1to1`; each refusal in 4.5 returns its status and reason, including
+  `no_conversations` and `no_eligible_conversations` being distinguishable, and
+  the soft-delete refusal; the audit entry is appended with its counts.
+- **Partial failure is a 200, not a 500.** With two threads where the second
+  write throws: the response is 200, `scheduled` names the first, `failed` names
+  the second, and the queued run is not orphaned by an error response. A 500
+  happens only when nothing was scheduled.
 - **All four quadrants of the disjunct in 4.1**, since three of them have each
   been wrong in some revision of this spec:
   1. Claim succeeded, nobody re-armed - backs off normally.
@@ -903,82 +743,68 @@ Unit:
   4. Claim THREW, a press re-armed (`dueAt` changed) - press survives, error
      recorded, and the row does NOT park underneath it.
 
-In-process runner and event:
+The event:
 
-- `runExtractionForConversations` runs the SAME per-row path as the poll: assert
-  a shared helper, not two parallel implementations.
-- It processes only the named conversations and leaves other due rows alone.
-- A conversation whose claim is LOST (the poll got there first) does nothing and
-  records no run - the existing `record: false` path.
 - `ai_run.completed` is emitted once per run, after `recordRun`, for applied,
   no_op, skipped AND failed outcomes - the skip and failure cases are the whole
   point of the indicator and are the easiest to forget.
 - The emit still fires when `recordRun` fails (its failure is swallowed).
 - A `no_contact` run emits with `conversationId` present and `contactId` absent.
+- **The `requestId` round-trips**: a run started by a press carries that press's
+  id; an automatic run on the same conversation carries none. This is the test
+  that proves an unrelated inbound run cannot resolve an operator's indicator.
 - The payload carries ids and counts only. A guard test asserts no message body,
   phone number, or field value can reach it.
-
-`claimedAt` narrowing and the in-flight guard (4.4a-i). Each case below is a
-state that broke some earlier draft of this guard:
-
-- **Both `fail` branches and the fallback clear `claimedAt`**, as `complete`
-  does. Assert on all three; a missed branch silently re-creates the
-  "refuses forever after a failure" trap.
-- A thread whose row is claimed (run in flight) is reported `alreadyRunning` and
-  is NOT re-scheduled - the `dueAt` is not slid and `manualRequested` is not
-  re-set.
-- **A claimed row that an INBOUND has re-armed is still reported
-  `alreadyRunning`.** The regression test for the inverted predicate: an earlier
-  draft read `_duePartition` as a proxy for "running" and admitted a second
-  concurrent run here.
-- A row left by an old FAILED run is scheduled normally.
-- A PARKED row is scheduled normally - this is section 8's recovery path.
-- A row that does not exist at all is created and scheduled - the imported
-  conversation case, and the most common one in practice.
-- A row whose `claimedAt` predates `MANUAL_CLAIM_STALE_MS` is scheduled,
-  recovering a run stranded by a dead process.
-- **The driver is constructed with an explicit `timeout` and `maxRetries: 0`**,
-  and a guard test asserts `MANUAL_CLAIM_STALE_MS > EXTRACTION_REQUEST_TIMEOUT_MS`
-  by the stated multiple. This is the test that keeps the constants from
-  drifting apart later and silently re-opening the concurrent-run hole. It
-  asserts against the exact bound, which only holds because retries are off -
-  if `maxRetries` is ever raised, the test's premise is gone and it must be
-  re-derived, not just re-tuned.
-- A driver timeout produces `failure: 'driver'`, a `failed` run record, an
-  incremented attempt, and an `ai_run.completed` - the existing path, asserted
-  so disabling SDK retries cannot silently change failure handling.
-- A press covering two threads, one running and one idle, schedules exactly one
-  and reports the other as already running.
-- The guard is enforced by the conditional write, not a pre-read: a test drives
-  two concurrent `requestManualExtraction` calls against one claimed row and
-  asserts exactly zero succeed.
+- `APP_EVENT_NAMES` has 9 entries and the bridge forwards the new name -
+  `app/test/eventBridge.test.ts:43` updated rather than routed around.
 
 Dashboard:
 
 - The menu item enters its running state on press and is disabled against a
   second press.
-- Each of the three resolutions renders: applied, nothing-new, failed.
+- Each of the three resolutions renders: applied, nothing-new, failed; plus the
+  `truncated` copy.
 - **The multi-thread case resolves only when every `conversationId` in
-  `scheduled` has reported**, not on the first event, and does not wait on
-  `alreadyRunning` entries.
-- An `alreadyRunning`-only response renders "already running" and does not start
-  an indicator that can never resolve.
+  `scheduled` has reported**, not on the first event.
+- **An event carrying a different `requestId` does not resolve the indicator**,
+  nor does one for a different contact.
 - **The timeout renders the "still running" copy** and the indicator stops. A
   test drives this by never delivering an event.
-- An event for a DIFFERENT contact does not resolve this contact's indicator.
+- A response with a non-empty `failed` says so.
 - Each refusal reason from 4.5 renders its own copy in the status region.
 
 E2E (`e2e/`, accessibility-first selectors):
 
-- **Use the existing lean fixture.** `app/src/lib/seed/lean.ts:17-19` seeds the
-  1:1 thread's messages at fixed `2026-06-01` timestamps, more than 30 days old
-  against the current clock - the aged-history case exists without adding seed
-  rows, which also protects lean's byte stability. (The neighbouring constants
-  at `:26-29` belong to the group and relay threads, which the type filter in
-  4.5 excludes; the test must target the `tenant_1to1` thread.)
+**The fixture this needs does not exist, and the spec previously claimed it
+did.** Two independent round-9 reviewers found it, and it partly vindicates a
+round-1 finding this spec REJECTED - see the concession in the adjudications
+file. Both halves are broken:
+
+1. **The lean transcript cannot produce a suggestion.** The hermetic lane runs
+   the fake driver, whose protocol is an `EXTRACT:` marker in a message body
+   (`app/src/adapters/extractionFake.ts`). The lean 1:1 messages carry no
+   marker, so the driver returns an empty result and the asserted chip never
+   appears.
+2. **The lean messages are not "aged" in the field the cutoff reads.** Lean
+   message rows carry `ts` and `tsMsgId` (`app/src/lib/seed/lean.ts:274-300`),
+   not `created_at` - and `created_at` is what
+   `app/src/jobs/extraction.ts:433-436` filters on. The fixed `2026-06-01`
+   timestamps are therefore not exercising the age cutoff at all.
+
+The e2e uses a **dev seam** rather than new lean seed rows, mirroring the
+existing `POST /__dev/voice/transcript-fixture` (`app/src/routes/dev.ts:759`),
+which is hermetic-only and structurally absent in deployed environments: a
+seam that plants a message on a named conversation with a caller-supplied
+`created_at` and body. That gives the test an explicitly aged message carrying
+an `EXTRACT:` marker, without touching lean's byte stability.
+
+- Plant an aged, marker-carrying message on the lean `tenant_1to1` thread.
 - Press the action, drive `POST /__dev/extraction/tick`, and assert a
   `trigger: manual` row in Settings > AI runs whose outcome is not `skipped`.
-- Assert a suggestion chip appears on the contact page without a reload.
+- Assert the suggestion chip appears on the contact page without a reload.
+- **Assert the negative**: the same conversation WITHOUT the manual flag skips,
+  proving the aged message is genuinely outside the automatic window rather
+  than the test passing for an unrelated reason.
 
 ## 8. Risks and consequences
 
@@ -1017,6 +843,25 @@ E2E (`e2e/`, accessibility-first selectors):
   boundary: the condition and its tests, nothing more. The backoff curve, the
   park threshold, the attempts accounting, and the parked-row recovery story are
   all untouched, and a parked row still needs something to re-schedule it.
+- **Four latent hazards found while specifying the withdrawn in-process runner.**
+  All are pre-existing, none is created by this feature, and each is filed in
+  `docs/issues/` rather than fixed here:
+  1. **The driver's model call is unbounded.** The Anthropic client is
+     constructed with no `timeout` and no `maxRetries`
+     (`app/src/adapters/extraction.ts:218`), so it inherits a 10-minute timeout
+     with 2 retries and retries its own timeouts - roughly 30 minutes of wall
+     clock, during which the row stays claimed. Bounding it mattered when a
+     staleness window had to be derived from it; with the guard withdrawn,
+     nothing here depends on the bound.
+  2. **`claim` stamps `claimedAt` from the poll-wide `nowIso`**, not the moment
+     of claiming (`app/src/repos/extractionRepo.ts:270`), so a later row in a
+     long poll records a claim time already minutes stale. Harmless today
+     because nothing reads `claimedAt` for logic - which is exactly why it
+     would bite whoever first does.
+  3. **A process dying mid-run strands its row**: claimed, out of the due index,
+     with nothing to re-arm it and no reaper.
+  4. **A soft-deleted contact is still extractable on the automatic path.** This
+     spec refuses it at the button (4.5) but does not change the job.
 - **Bulk backfill over the imported population.** Deferred by the human: run the
   action on a handful of imported conversations and judge the output before
   firing hundreds of real model calls. Section 8's truncation limit means a
@@ -1024,23 +869,7 @@ E2E (`e2e/`, accessibility-first selectors):
   in `docs/issues/` when this lands.
 - **Persisting the pending indicator across a page reload.** 4.6 keeps it
   session-local; the `byEntity` query that would recover it is real but is
-  machinery for a wait measured in seconds.
-- **A stale-claim reaper, or turning the claim into a real lease.** A process
-  dying mid-run strands its row (4.4a); an inbound landing during a long run can
-  still produce two concurrent runs (4.4a-i). Both are pre-existing, both need
-  a lease to close properly, and the human has accepted them knowingly. The
-  staleness clause in 4.4a-i gives the operator a manual way out of the first
-  without building one. One consequence of accepting the second: `claimedAt` is
-  a single slot, so when two runs do overlap, whichever finishes first clears it
-  and un-guards the row while the other is still running. A press in that window
-  starts a third run. This is a property of the accepted residual, not a new
-  hazard - the guard cannot fix it without the lease.
-- **Any broader change to the extraction driver.** 4.4a-i sets `timeout` and
-  `maxRetries: 0` on the Anthropic client so the staleness constant is
-  derivable. That is the boundary: two constructor options and the leaf module
-  holding their constants. Retry classification, backoff shape, streaming, and
-  model selection are untouched, and the job's own retry semantics are
-  unchanged - they simply become the only retry layer.
+  machinery for a wait measured in tens of seconds.
 - **Rendering `windowParams` in the run detail.** Nothing renders it today
   (4.3); making the stored record truthful does not require building a viewer.
 - **Backward pagination of the transcript window.**

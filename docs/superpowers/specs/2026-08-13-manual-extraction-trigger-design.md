@@ -380,9 +380,33 @@ guard is one clause plus a staleness escape:
 attribute_not_exists(claimedAt) OR claimedAt < :staleBefore
 ```
 
-where `staleBefore = now - MANUAL_CLAIM_STALE_MS` (a named constant; five
-minutes, comfortably longer than any plausible run, which is a model call of
-seconds).
+where `staleBefore = now - MANUAL_CLAIM_STALE_MS`.
+
+**The constant must be derived from a bounded run, and today nothing bounds
+one.** `AnthropicExtractionDriver` constructs its client with no `timeout` and
+no `maxRetries` (`app/src/adapters/extraction.ts:181`) and the job awaits
+`driver.extract()` unguarded (`app/src/jobs/extraction.ts:491`), so the call
+inherits the SDK defaults: a 10-minute request timeout with 2 retries, and
+timeouts are themselves retried. Worst-case wall clock is therefore about
+**30 minutes** - a hung call outlives any five-minute window, the guard reads
+the row as stale while the run is still going, and a press starts the
+concurrent run the guard exists to prevent.
+
+So the driver bounds itself first:
+
+- `timeout: EXTRACTION_REQUEST_TIMEOUT_MS` (60s - the call is one
+  `messages.create` with `max_tokens: 2048`, not a long generation)
+- `maxRetries: 2`, stated explicitly rather than inherited
+
+Worst case becomes `60s x 3 = 180s`, and
+`MANUAL_CLAIM_STALE_MS = 300_000` (five minutes) is then a derived bound with
+comfortable headroom rather than a guessed number. Both constants live together
+with a comment tying one to the other, because changing the timeout without
+changing the window silently re-opens this hole.
+
+This bounds automatic runs too, which is a deliberate and separately good
+outcome: an unbounded model call in a poll job can hold a claim for half an
+hour today. See section 9 for the boundary.
 
 **The guard lives in `requestManualExtraction`'s `ConditionExpression`, not in a
 read before it.** A read-then-act check has a window: two presses can both read
@@ -415,6 +439,16 @@ Why each piece is right, in the states that previously broke it:
 A skipped thread is reported honestly rather than silently: the response
 distinguishes threads scheduled from threads already running, and 4.6 tells the
 operator a run is already in progress instead of pretending a new one started.
+
+**A refusal can discard the operator's intent, and the copy must say so.** The
+in-flight run may be an AUTOMATIC one, which keeps the 30-day cutoff and will
+skip on exactly the imported population this feature exists for. The press is
+then refused and nothing manual ever happens. The guard cannot tell the two
+apart - `claim` clears `manualRequested` before the guard ever reads the row -
+so rather than guess, the copy covers both cases honestly: a run is already in
+progress on this thread, and if the full history is what is wanted, press again
+once it finishes. A second press after the in-flight run completes always
+schedules.
 
 **What this guard does and does not cover.** It covers presses, which is the
 concurrency 4.4a introduces. It does NOT cover an inbound message arriving
@@ -511,7 +545,11 @@ On success:
    and already-running threads is the set of calls that succeeded versus the set
    that raised `ConditionalCheckFailedException`. There is no separate
    pre-read.
-6. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
+6. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor,
+   scheduled: scheduled.length, alreadyRunning: alreadyRunning.length })`. The
+   counts matter: an unconditional entry with no counts cannot distinguish a
+   press that started three runs from one that started none, which is most of
+   the audit value for an action that spends money.
 7. Respond `200 { scheduled: string[], alreadyRunning: string[] }` - both as
    `conversationId` arrays. The client waits for one completion event per entry
    in `scheduled`, and must NOT wait on `alreadyRunning`: those runs were
@@ -684,6 +722,9 @@ degraded, not broken.
 - `app/src/services/extraction/runWindow.ts` and `runTypes.ts` - the nullable
   age param.
 - `app/src/repos/aiRunsRepo.ts` - `RunTrigger`.
+- `app/src/adapters/extraction.ts:181` - the client gains `timeout` and
+  `maxRetries` (4.4a-i), and exports `EXTRACTION_REQUEST_TIMEOUT_MS` so the
+  staleness constant can be derived from it rather than duplicated.
 - `app/src/routes/contacts.ts` - the endpoint, including the post-response call.
 - `app/src/lib/events.ts` - `AppEventMap` + `ALL_APP_EVENTS` (compile-enforced
   pair) and the payload type.
@@ -812,6 +853,11 @@ state that broke some earlier draft of this guard:
   conversation case, and the most common one in practice.
 - A row whose `claimedAt` predates `MANUAL_CLAIM_STALE_MS` is scheduled,
   recovering a run stranded by a dead process.
+- **The driver is constructed with an explicit `timeout` and `maxRetries`**, and
+  a guard test asserts `MANUAL_CLAIM_STALE_MS` exceeds
+  `EXTRACTION_REQUEST_TIMEOUT_MS x (maxRetries + 1)`. This is the test that
+  keeps the two constants from drifting apart later and silently re-opening the
+  concurrent-run hole.
 - A press covering two threads, one running and one idle, schedules exactly one
   and reports the other as already running.
 - The guard is enforced by the conditional write, not a pre-read: a test drives
@@ -895,7 +941,16 @@ E2E (`e2e/`, accessibility-first selectors):
   still produce two concurrent runs (4.4a-i). Both are pre-existing, both need
   a lease to close properly, and the human has accepted them knowingly. The
   staleness clause in 4.4a-i gives the operator a manual way out of the first
-  without building one.
+  without building one. One consequence of accepting the second: `claimedAt` is
+  a single slot, so when two runs do overlap, whichever finishes first clears it
+  and un-guards the row while the other is still running. A press in that window
+  starts a third run. This is a property of the accepted residual, not a new
+  hazard - the guard cannot fix it without the lease.
+- **Any broader change to the extraction driver.** 4.4a-i sets `timeout` and
+  `maxRetries` on the Anthropic client so the staleness constant is derivable.
+  That is the boundary: two constructor options and the constants they feed.
+  Retry classification, backoff shape, streaming, and model selection are
+  untouched.
 - **Rendering `windowParams` in the run detail.** Nothing renders it today
   (4.3); making the stored record truthful does not require building a viewer.
 - **Backward pagination of the transcript window.**

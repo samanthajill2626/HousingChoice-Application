@@ -13,46 +13,44 @@
 ## Global Constraints
 
 - **ASCII only** on every new or touched line in specs, plans, prompts, issues, labels, comments, seed strings, and test names.
-- **Never rewrite source with PowerShell pipelines** (`Get-Content | -replace | Set-Content`) - they mojibake BOM-less UTF-8. Use an edit tool.
+- **Never rewrite source with PowerShell pipelines** - they mojibake BOM-less UTF-8. Use an edit tool.
 - **Read bare `git status` before every commit**; stage explicit paths only, never `git add -A`.
-- **Commit trailer:** every commit ends with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
+- **Commit trailer:** `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 - **PII rule:** extraction code logs and emits ids and counts only - never message bodies, phone numbers, or field values.
-- **Gates before handback:** `npm run typecheck`, `npm test`, `npm run e2e`, each run bare from the feature worktree. Never pipe a gate command.
-- **Vendor SDK imports live in `app/src/adapters`** - services, jobs, and repos depend on interfaces.
-- **All job traffic goes through `jobs.enqueue()` / `defineJobHandler()`** - not applicable to this feature (it uses the existing poll), but do not introduce a new path.
-- **New user-facing automated copy goes through the message catalog.** UI strings rendered in the dashboard are not catalog items; SMS/email copy is. This feature adds no outbound copy.
-- Worktree: `W:\tmp\manual-extraction-trigger`, branch `feat/manual-extraction-trigger`. Run everything from there.
+- **Gates before handback:** `npm run typecheck`, `npm test`, `npm run e2e`, run bare from the feature worktree. Never pipe a gate command.
+- **Vendor SDK imports live in `app/src/adapters`.**
+- Worktree: `W:\tmp\manual-extraction-trigger`, branch `feat/manual-extraction-trigger`.
+
+## Test infrastructure you will use (read this before Task 1)
+
+This plan's predecessor invented helper names. These are the real ones, verified in the repo:
+
+| Layer | Helper | Location |
+| --- | --- | --- |
+| Repo unit tests | `repoWith(doc)`, `makeDoc()`, constants `T1` `T2` `T3` `FUTURE` | `app/test/extractionRepo.test.ts:298` |
+| Job unit tests | `makeHarness({dueRows, messages?, contact?, conversation?, claimResult?, driver?, aiRuns?})` returning `{deps, repo, seen, runs, aiRuns, applyEvents}`; `dueRow(overrides)`; `msg(seconds, direction, body)`; `tenantContact()`; `convWith(id)`; constants `NOW` `WALL_NOW` `DEBOUNCE` | `app/test/extractionJob.test.ts:182-271` |
+| Route tests | `makeWebhookHarness()` returning `{app, world}`; `createFakeWorld`; `ORIGIN_SECRET`; `TEST_SESSION_COOKIE`; supertest | `app/test/helpers/twilioWebhookHarness.ts` |
+| Dashboard tests | `renderAt(contactId)`; a `vi.mock` factory over `../../api/index.js` | `dashboard/src/routes/contact/ContactDetail.test.tsx:72` |
+| E2E | `extractionTick(request)`, `sendExtractSms(...)`, `planTranscribedCall(...)`, `reseed(request)`, `postInboundSms(...)` | `e2e/fixtures/extraction.ts`, `e2e/fixtures/reseed.ts`, `e2e/fixtures/fakeTwilio.ts` |
+
+**Two constraints the fake infrastructure imposes:**
+
+1. **The repo test's fake doc client evaluates `ConditionExpression` by splitting on `AND` only** and THROWS on anything else (`app/test/extractionRepo.test.ts:73-111`). An `OR` condition is not merely unsupported - it errors. Task 2 is designed around this.
+2. **`ContactDetail.test.tsx:66` stubs `useEventStream: () => {}`**, so there is no way to deliver an event today. Task 6 changes that stub to capture the handlers.
+
+**The fake driver's protocol** is a marker in a message body: `EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}` (see `app/test/extractionJob.test.ts` happy-path test). It is JSON, not `key=value`.
 
 ---
 
 ## File Structure
 
-**Backend - repo layer**
-- `app/src/repos/extractionRepo.ts` - `DueExtractionItem` gains `manualRequested` and `requestId`; `channel` becomes optional. New `requestManualExtraction`. `claim` clears both new attributes. `fail` becomes conditional and gains two parameters.
-
-**Backend - job layer**
-- `app/src/jobs/extraction.ts` - derives `manual` from the row, waives two gates, threads `requestId` and two counts into the draft, emits the completion event.
-- `app/src/services/extraction/runWindow.ts`, `runTypes.ts` - `maxTranscriptAgeDays` becomes nullable so the record does not misreport a waived floor.
-
-**Backend - event layer**
-- `app/src/lib/events.ts` - ninth event name, payload type, exhaustive map entry.
-- `app/src/routes/api.ts` - SSE writer registration and cleanup.
-
-**Backend - route layer**
-- `app/src/routes/contacts.ts` - `POST /:contactId/extraction-run`.
-
-**Backend - dev seam (hermetic only)**
-- `app/src/routes/dev.ts` - a seam that plants a message with a caller-supplied `created_at`, so the e2e can exercise the age waiver at all.
-
-**Dashboard**
-- `dashboard/src/api/types.ts` - trigger union, nullable window param, new event payload.
-- `dashboard/src/api/endpoints.ts` - the client call.
-- `dashboard/src/api/EventStreamProvider.tsx` - dispatch the new event.
-- `dashboard/src/routes/contact/ContactActionsMenu.tsx` - the menu item (presentational only).
-- `dashboard/src/routes/contact/ContactDetail.tsx` - owns the request, the indicator state machine, and the status region.
-
-**E2E**
-- `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`
+**Repo:** `app/src/repos/extractionRepo.ts` - two new sparse attributes, one new method, `claim` clears them, `fail` becomes conditional.
+**Job:** `app/src/jobs/extraction.ts` - `manual` derivation, two gate waivers, draft fields, the completion emit. `app/src/services/extraction/{runTypes,runWindow}.ts` - nullable recorded age floor.
+**Events:** `app/src/lib/events.ts`, `app/src/routes/api.ts`.
+**Route:** `app/src/routes/contacts.ts`.
+**Dev seam:** `app/src/routes/dev.ts` - a direct doc-client write, because no repo method accepts a caller-supplied `created_at`.
+**Dashboard:** `dashboard/src/api/{types,endpoints}.ts`, `EventStreamProvider.tsx`, `routes/contact/{ContactActionsMenu,ContactDetail}.tsx` + its CSS module.
+**E2E:** `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`.
 
 ---
 
@@ -60,20 +58,25 @@
 
 **Files:**
 - Modify: `app/src/repos/extractionRepo.ts`
+- Modify: `app/src/jobs/extraction.ts:296-299` (`newRunDraft` - see step 6, this is required IN THIS TASK)
+- Modify: `app/test/helpers/twilioWebhookHarness.ts`, `app/test/extractionJob.test.ts`, `app/test/extractionJobDraftGuard.test.ts`, `app/test/twilioSmsWebhook.test.ts` (repo literals)
 - Test: `app/test/extractionRepo.test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `requestManualExtraction(conversationId: string, dueAt: string, requestId: string): Promise<void>` on `ExtractionRepo`; `DueExtractionItem.manualRequested?: true`; `DueExtractionItem.requestId?: string`; `DueExtractionItem.channel?: 'sms' | 'voice' | 'triage' | 'email'` (now optional).
+- Produces: `requestManualExtraction(conversationId: string, dueAt: string, requestId: string): Promise<void>`; `DueExtractionItem.manualRequested?: true`; `DueExtractionItem.requestId?: string`; `DueExtractionItem.channel?: ...` (now optional).
+
+**Ordering note:** making `channel` optional breaks `newRunDraft`, which assigns `trigger: row.channel` into a required `RunTrigger` (`app/src/jobs/extraction.ts:298`). That fix belongs in THIS task or the task cannot reach its own typecheck gate. Step 6 does it.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `app/test/extractionRepo.test.ts`:
+Append to `app/test/extractionRepo.test.ts`, using the file's existing `makeDoc()` / `repoWith()` / `T1..T3` vocabulary:
 
 ```ts
 describe('extractionRepo.requestManualExtraction', () => {
-  it('arms the row with the manual flag and the request id, and never writes channel', async () => {
-    const repo = createExtractionRepo(deps());
+  it('arms the row with the flag and the request id, and never writes channel', async () => {
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     const item = await repo.getDue('conv-1');
     expect(item!.dueAt).toBe(T1);
@@ -84,7 +87,8 @@ describe('extractionRepo.requestManualExtraction', () => {
   });
 
   it('leaves an existing channel untouched when a press lands on a scheduled row', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
     const item = await repo.getDue('conv-1');
@@ -93,8 +97,9 @@ describe('extractionRepo.requestManualExtraction', () => {
     expect(item!.dueAt).toBe(T2);
   });
 
-  it('scheduleExtraction never sets the manual flag or a request id', async () => {
-    const repo = createExtractionRepo(deps());
+  it('scheduleExtraction never sets the flag or a request id', async () => {
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     const item = await repo.getDue('conv-1');
     expect(item!.manualRequested).toBeUndefined();
@@ -102,7 +107,8 @@ describe('extractionRepo.requestManualExtraction', () => {
   });
 
   it('claim removes the flag and the request id with the index keys', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     expect(await repo.claim('conv-1', T2, T1)).toBe(true);
     const item = await repo.getDue('conv-1');
@@ -113,53 +119,50 @@ describe('extractionRepo.requestManualExtraction', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+If `makeDoc` is named differently in the file, use whatever the neighbouring `describe` blocks call - do not invent one.
+
+- [ ] **Step 2: Run to verify they fail**
 
 Run: `npm test --workspace app -- extractionRepo.test.ts`
 Expected: FAIL - `repo.requestManualExtraction is not a function`.
 
-- [ ] **Step 3: Widen the item type**
+- [ ] **Step 3: Widen `DueExtractionItem`**
 
-In `app/src/repos/extractionRepo.ts`, in `DueExtractionItem`, make `channel` optional and add the two attributes. Replace the existing `channel` declaration and its comment:
+In `app/src/repos/extractionRepo.ts`, replace the `channel` field and its comment:
 
 ```ts
-  /** What scheduled the run through an INBOUND path: an inbound text (sms), an
-   *  inbound email (email), a fresh call transcript (voice), or a human triage
-   *  flip to tenant (triage). voice/triage runs bypass the job's
-   *  client-freshness gate. OPTIONAL because a manual press can create a row
-   *  that has never been scheduled by any inbound path - see
+  /** What scheduled the run through an INBOUND path. OPTIONAL because a manual
+   *  press can create a row that no inbound path ever scheduled - see
    *  requestManualExtraction, which deliberately does not write it. */
   channel?: 'sms' | 'voice' | 'triage' | 'email';
   /** Sticky manual marker (sparse). Set by requestManualExtraction, REMOVEd by
-   *  claim. The single source of truth for the job's gate waivers and the
-   *  recorded trigger - an inbound sliding dueAt forward cannot erase it. */
+   *  claim and by fail's park branch. The single source of truth for the job's
+   *  gate waivers and the recorded trigger - an inbound sliding dueAt forward
+   *  cannot erase it. */
   manualRequested?: true;
-  /** Correlates one press to the one run it produces (sparse). REMOVEd by claim
-   *  alongside manualRequested, so it belongs to exactly one run. */
+  /** Correlates one press to the one run it produces (sparse). Cleared wherever
+   *  manualRequested is, so a dead press's key can never ride a later run. */
   requestId?: string;
 ```
 
-- [ ] **Step 4: Add the interface method**
+- [ ] **Step 4: Declare the method**
 
-In the `ExtractionRepo` interface, directly after `scheduleExtraction`:
+In the `ExtractionRepo` interface, after `scheduleExtraction`:
 
 ```ts
   /**
    * Arm a row for an IMMEDIATE manual run. Same sliding upsert as
-   * scheduleExtraction - SET dueAt / _duePartition / conversationId /
-   * updatedAt, createdAt via if_not_exists - plus manualRequested and the
-   * caller's requestId, and deliberately WITHOUT touching `channel`.
-   *
-   * Not writing `channel` is load-bearing: `channel` has no clearing site, so
-   * a 'manual' value stored there would outlive the flag and could later label
-   * an automatic run as manual in the run log.
+   * scheduleExtraction, plus manualRequested and the caller's requestId, and
+   * deliberately WITHOUT touching `channel` - `channel` has no clearing site,
+   * so a 'manual' value stored there would outlive the flag and could later
+   * label an automatic run as manual in the run log.
    */
   requestManualExtraction(conversationId: string, dueAt: string, requestId: string): Promise<void>;
 ```
 
-- [ ] **Step 5: Implement the method**
+- [ ] **Step 5: Implement it and clear on claim**
 
-In the factory, directly after `scheduleExtraction`:
+In the factory, after `scheduleExtraction`:
 
 ```ts
     async requestManualExtraction(conversationId, dueAt, requestId) {
@@ -194,49 +197,73 @@ In the factory, directly after `scheduleExtraction`:
     },
 ```
 
-- [ ] **Step 6: Clear both attributes on claim**
-
-In `claim`, extend the REMOVE clause and the name map:
+In `claim`, extend the REMOVE clause and the names map:
 
 ```ts
             UpdateExpression: 'SET #claimedAt = :claimedAt REMOVE #dp, #dueAt, #manual, #requestId',
 ```
-
-and add to `ExpressionAttributeNames`:
 
 ```ts
               '#manual': 'manualRequested',
               '#requestId': 'requestId',
 ```
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [ ] **Step 6: Keep `newRunDraft` compiling (REQUIRED in this task)**
 
-Run: `npm test --workspace app -- extractionRepo.test.ts`
-Expected: PASS.
+`app/src/jobs/extraction.ts`, replace `newRunDraft`:
 
-- [ ] **Step 8: Run typecheck to find every full repo literal**
+```ts
+/** Allocate a draft before processing so the outer backstop retains all evidence. */
+export function newRunDraft(row: DueExtractionItem, startedAt: string): RunDraft {
+  const manual = row.manualRequested === true;
+  // The `?? 'manual'` arm is a totality device, not a second labelling rule. A
+  // row with no `channel` can only have been created by
+  // requestManualExtraction, which always sets the flag - and every
+  // flag-clearing site also de-arms the row, so listDue cannot return a
+  // channel-less row without the flag.
+  const trigger: RunTrigger = manual ? 'manual' : (row.channel ?? 'manual');
+  return {
+    runId: randomUUID(),
+    startedAt,
+    conversationId: row.conversationId,
+    trigger,
+    ...(row.requestId !== undefined && { requestId: row.requestId }),
+    displaced: [],
+  };
+}
+```
+
+Add `requestId?: string;` to `RunDraft`. Add `'manual'` to `RunTrigger` in `app/src/repos/aiRunsRepo.ts:23`:
+
+```ts
+export type RunTrigger = 'sms' | 'voice' | 'triage' | 'email' | 'manual';
+```
+
+- [ ] **Step 7: Typecheck to enumerate the repo literals**
 
 Run: `npm run typecheck`
-Expected: FAIL, listing every object literal that implements `ExtractionRepo` in full and now lacks `requestManualExtraction`. Known sites: `app/test/helpers/twilioWebhookHarness.ts:2886`, `app/test/extractionJob.test.ts:164`, `app/test/extractionJobDraftGuard.test.ts:108`, `app/test/twilioSmsWebhook.test.ts:1135`. Treat typecheck as the enumerator of record - the list may be incomplete. Add a stub to each:
+Expected: FAIL, naming every full `ExtractionRepo` literal missing the new method. **Typecheck is the enumerator of record** - the known sites are `app/test/helpers/twilioWebhookHarness.ts:2886`, `app/test/extractionJob.test.ts:164`, `app/test/extractionJobDraftGuard.test.ts:108`, `app/test/twilioSmsWebhook.test.ts:1135`, but do not assume that list is complete.
+
+For the three simple fakes add:
 
 ```ts
     async requestManualExtraction() {},
 ```
 
-except in `twilioWebhookHarness.ts`, where the fake maintains real state - mirror its `scheduleExtraction` implementation, setting `manualRequested: true` and the `requestId` and leaving `channel` alone.
+For `twilioWebhookHarness.ts`, whose fake keeps real state, mirror its own `scheduleExtraction` body and additionally set `manualRequested: true` and the `requestId`, leaving `channel` alone.
 
-- [ ] **Step 9: Run typecheck and tests**
+- [ ] **Step 8: Run typecheck and the full suite**
 
 Run: `npm run typecheck`
 Expected: exit 0.
 Run: `npm test`
 Expected: exit 0.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git status
-git add app/src/repos/extractionRepo.ts app/test/extractionRepo.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts app/test/twilioSmsWebhook.test.ts
+git add app/src/repos/extractionRepo.ts app/src/jobs/extraction.ts app/src/repos/aiRunsRepo.ts app/test/extractionRepo.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts app/test/twilioSmsWebhook.test.ts
 git commit -m "feat(extraction): arm a due row manually with a sticky flag and a press id
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -248,26 +275,33 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `app/src/repos/extractionRepo.ts`
-- Modify: `app/src/jobs/extraction.ts:654-668` (the single production caller)
+- Modify: `app/src/jobs/extraction.ts` (the `claim` result must reach `fail`; the single production call site)
 - Test: `app/test/extractionRepo.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1's `DueExtractionItem` shape.
-- Produces: `fail(conversationId: string, error: string, nextDueAt: string | null, opts: { listedDueAt?: string; manual: boolean }): Promise<void>`.
+- Consumes: Task 1's item shape.
+- Produces: `fail(conversationId, error, nextDueAt, opts: { claimed: boolean; listedDueAt: string; manual: boolean }): Promise<void>`.
 
-**Why:** `fail` writes `dueAt` unconditionally today. The re-arm branch SETs it to `now + backoff`; the park branch REMOVEs it with `_duePartition`. Either destroys a press or an inbound that landed while the run was failing - the park branch permanently, since the row leaves the due index with nothing left to re-arm it.
+**Why no `OR`:** the natural predicate is "nobody re-armed since we listed it", which reads as `attribute_not_exists(_duePartition) OR dueAt = :listedDueAt`. The repo test's fake doc client splits only on `AND` and throws on anything else (`app/test/extractionRepo.test.ts:73-111`). It does not need to: the job knows whether the claim succeeded, and each path justifies exactly one conjunct.
 
-- [ ] **Step 1: Write the failing tests - all four quadrants**
+- **Claim succeeded** -> the claim removed `_duePartition`, so "not re-armed" is precisely `attribute_not_exists(_duePartition)`.
+- **Claim threw** -> the row was never un-armed, so "not re-armed" is precisely `dueAt = :listedDueAt`.
 
-Add to `app/test/extractionRepo.test.ts`:
+Passing `claimed` is strictly more precise than the disjunction and needs no `OR`.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```ts
 describe('extractionRepo.fail - re-arm survival', () => {
+  const opts = (over: Partial<{ claimed: boolean; listedDueAt: string; manual: boolean }> = {}) =>
+    ({ claimed: true, listedDueAt: T1, manual: false, ...over });
+
   it('claimed, nobody re-armed: backs off normally', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
-    await repo.fail('conv-1', 'boom', T3, { listedDueAt: T1, manual: false });
+    await repo.fail('conv-1', 'boom', T3, opts());
     const item = await repo.getDue('conv-1');
     expect(item!.dueAt).toBe(T3);
     expect(item!.attempts).toBe(1);
@@ -275,11 +309,12 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claimed, a press re-armed: the press survives and the error is still recorded', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
-    await repo.fail('conv-1', 'boom', T3, { listedDueAt: T1, manual: false });
+    await repo.fail('conv-1', 'boom', T3, opts());
     const item = await repo.getDue('conv-1');
     expect(item!.dueAt).toBe(T2);
     expect(item!.manualRequested).toBe(true);
@@ -289,114 +324,120 @@ describe('extractionRepo.fail - re-arm survival', () => {
   });
 
   it('claimed, a press re-armed, and the run PARKS: the press is not deleted', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
     await repo.claim('conv-1', T2, T1);
     await repo.requestManualExtraction('conv-1', T2, 'req-abc');
-    await repo.fail('conv-1', 'boom', null, { listedDueAt: T1, manual: false });
+    await repo.fail('conv-1', 'boom', null, opts());
     const item = await repo.getDue('conv-1');
     expect(item!.dueAt).toBe(T2);
     expect(item!._duePartition).toBe('due');
-    expect(item!.attempts).toBe(1);
+    expect(item!.requestId).toBe('req-abc');
   });
 
-  it('claim THREW so the row is still armed at the listed dueAt: backs off and can park', async () => {
-    const repo = createExtractionRepo(deps());
+  it('claim THREW and nobody re-armed: still backs off, and can still park', async () => {
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.scheduleExtraction('conv-1', 'sms', T1);
-    await repo.fail('conv-1', 'boom', T3, { listedDueAt: T1, manual: false });
-    const armed = await repo.getDue('conv-1');
-    expect(armed!.dueAt).toBe(T3);
-    await repo.fail('conv-1', 'boom', null, { listedDueAt: T3, manual: false });
+    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    expect((await repo.getDue('conv-1'))!.dueAt).toBe(T3);
+    await repo.fail('conv-1', 'boom', null, opts({ claimed: false, listedDueAt: T3 }));
     const parked = await repo.getDue('conv-1');
     expect(parked!._duePartition).toBeUndefined();
     expect(parked!.dueAt).toBeUndefined();
   });
 
+  it('claim THREW and a press re-armed: the press survives', async () => {
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
+    await repo.scheduleExtraction('conv-1', 'sms', T1);
+    await repo.requestManualExtraction('conv-1', T2, 'req-abc');
+    await repo.fail('conv-1', 'boom', T3, opts({ claimed: false }));
+    const item = await repo.getDue('conv-1');
+    expect(item!.dueAt).toBe(T2);
+    expect(item!.manualRequested).toBe(true);
+  });
+
   it('a manual run re-arms WITH the flag; an automatic one does not', async () => {
-    const repo = createExtractionRepo(deps());
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     await repo.claim('conv-1', T2, T1);
-    await repo.fail('conv-1', 'boom', T3, { listedDueAt: T1, manual: true });
+    await repo.fail('conv-1', 'boom', T3, opts({ manual: true }));
     expect((await repo.getDue('conv-1'))!.manualRequested).toBe(true);
 
     await repo.scheduleExtraction('conv-2', 'sms', T1);
     await repo.claim('conv-2', T2, T1);
-    await repo.fail('conv-2', 'boom', T3, { listedDueAt: T1, manual: false });
+    await repo.fail('conv-2', 'boom', T3, opts());
     expect((await repo.getDue('conv-2'))!.manualRequested).toBeUndefined();
   });
 
-  it('parking REMOVEs the manual flag so a later automatic run does not inherit it', async () => {
-    const repo = createExtractionRepo(deps());
+  it('parking REMOVEs BOTH the flag and the request id', async () => {
+    const { doc } = makeDoc();
+    const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');
     await repo.claim('conv-1', T2, T1);
-    await repo.fail('conv-1', 'boom', null, { listedDueAt: T1, manual: true });
+    await repo.fail('conv-1', 'boom', null, opts({ manual: true }));
     const item = await repo.getDue('conv-1');
     expect(item!.manualRequested).toBeUndefined();
+    expect(item!.requestId).toBeUndefined();
   });
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+The last case is the one that matters most: leaving `requestId` behind on a park would let a later automatic run inherit a dead press's correlation key and resolve a stale indicator.
+
+- [ ] **Step 2: Run to verify they fail**
 
 Run: `npm test --workspace app -- extractionRepo.test.ts`
-Expected: FAIL - `fail` takes three arguments, and the re-arm-survival cases clobber `dueAt`.
+Expected: FAIL - `fail` takes three arguments; the survival cases clobber `dueAt`.
 
-- [ ] **Step 3: Change the interface signature**
-
-In `ExtractionRepo`, replace the `fail` declaration:
+- [ ] **Step 3: Change the interface**
 
 ```ts
   /**
    * Record a failed run. `nextDueAt` non-null re-arms with backoff; null parks.
    *
-   * BOTH branches are CONDITIONAL on nobody having re-armed the row since the
-   * run was listed. Unconditional writes destroyed a press or an inbound that
+   * Both branches are CONDITIONAL on nobody having re-armed the row since it
+   * was listed. Unconditional writes destroyed a press or an inbound that
    * landed during the failing run - the park branch permanently, since the row
    * then leaves the due index with nothing left to re-arm it.
    *
-   * The condition is `attribute_not_exists(_duePartition) OR dueAt = listedDueAt`.
-   * The first disjunct is the normal post-claim state. The second covers a
-   * THROWN claim, where the row was never un-armed: without it, fail would
-   * always take the fallback branch, never back off, never park, and the poll
-   * would retry the row every interval forever.
+   * The condition depends on how the run reached this point, which is why the
+   * caller passes `claimed`:
+   *   claimed  -> attribute_not_exists(_duePartition)  (the claim un-armed it)
+   *   !claimed -> dueAt = :listedDueAt                 (claim threw; never un-armed)
+   * Each path asserts exactly what it knows, and neither needs an OR.
    *
-   * When the condition fails, a second scheduling-free update records only
-   * lastError and attempts, leaving the fresh dueAt and manual marker alone.
-   *
-   * `opts.manual` re-sets manualRequested on a re-arm so backoff retries of a
-   * manual run stay manual; the park branch REMOVEs it either way.
+   * On a condition failure a second, scheduling-free update records only
+   * lastError and attempts, leaving the fresh dueAt and marker alone.
    */
   fail(
     conversationId: string,
     error: string,
     nextDueAt: string | null,
-    opts: { listedDueAt?: string; manual: boolean },
+    opts: { claimed: boolean; listedDueAt: string; manual: boolean },
   ): Promise<void>;
 ```
 
 - [ ] **Step 4: Implement it**
 
-Replace the whole `async fail(...)` body in the factory:
-
 ```ts
     async fail(conversationId, error, nextDueAt, opts) {
       const common = { TableName: table, Key: { itemId: dueId(conversationId) } };
-      // `listedDueAt` is optional because the job's call site reads it from an
-      // optional field; when it is absent we cannot prove the row was not
-      // re-armed, so we keep today's unconditional behavior rather than
-      // silently skipping the backoff.
-      const condition = opts.listedDueAt === undefined
-        ? undefined
-        : 'attribute_not_exists(#dp) OR #dueAt = :listedDueAt';
+      const condition = opts.claimed
+        ? 'attribute_not_exists(#dp)'
+        : '#dueAt = :listedDueAt';
 
-      const attempt = async (): Promise<void> => {
+      const scheduling = async (): Promise<void> => {
         if (nextDueAt !== null) {
           await doc.send(new UpdateCommand({
             ...common,
             UpdateExpression: opts.manual
               ? 'SET #lastError = :error, #dueAt = :dueAt, #dp = :dp, #manual = :manual ADD #attempts :one'
               : 'SET #lastError = :error, #dueAt = :dueAt, #dp = :dp ADD #attempts :one',
-            ...(condition !== undefined && { ConditionExpression: condition }),
+            ConditionExpression: condition,
             ExpressionAttributeNames: {
               '#lastError': 'lastError',
               '#dueAt': 'dueAt',
@@ -410,38 +451,40 @@ Replace the whole `async fail(...)` body in the factory:
               ':dp': 'due',
               ':one': 1,
               ...(opts.manual && { ':manual': true }),
-              ...(opts.listedDueAt !== undefined && { ':listedDueAt': opts.listedDueAt }),
+              ...(!opts.claimed && { ':listedDueAt': opts.listedDueAt }),
             },
           }));
           log.debug({ conversationId, nextDueAt }, 'extraction failed - re-armed');
           return;
         }
+        // Park. REMOVE the correlation key with the flag: a dead press's
+        // requestId riding a later automatic run would resolve a stale
+        // indicator on someone's screen.
         await doc.send(new UpdateCommand({
           ...common,
-          UpdateExpression: 'SET #lastError = :error REMOVE #dp, #dueAt, #manual ADD #attempts :one',
-          ...(condition !== undefined && { ConditionExpression: condition }),
+          UpdateExpression: 'SET #lastError = :error REMOVE #dp, #dueAt, #manual, #requestId ADD #attempts :one',
+          ConditionExpression: condition,
           ExpressionAttributeNames: {
             '#lastError': 'lastError',
             '#dp': '_duePartition',
             '#dueAt': 'dueAt',
             '#manual': 'manualRequested',
+            '#requestId': 'requestId',
             '#attempts': 'attempts',
           },
           ExpressionAttributeValues: {
             ':error': error,
             ':one': 1,
-            ...(opts.listedDueAt !== undefined && { ':listedDueAt': opts.listedDueAt }),
+            ...(!opts.claimed && { ':listedDueAt': opts.listedDueAt }),
           },
         }));
         log.warn({ conversationId }, 'extraction failed - parked (max attempts)');
       };
 
       try {
-        await attempt();
+        await scheduling();
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
-        // Somebody re-armed the row while this run was failing. Record the
-        // error and the attempt ONLY; their dueAt and manual marker stand.
         await doc.send(new UpdateCommand({
           ...common,
           UpdateExpression: 'SET #lastError = :error ADD #attempts :one',
@@ -453,14 +496,38 @@ Replace the whole `async fail(...)` body in the factory:
     },
 ```
 
-- [ ] **Step 5: Update the one production call site**
+- [ ] **Step 5: Thread the claim outcome to the call site**
 
-In `app/src/jobs/extraction.ts`, in `runDueExtractions`, replace the `repo.fail(...)` call. Note `row.dueAt` is optional on `DueExtractionItem` and `processRow`'s guard does not reach here:
+`processRow` currently swallows whether the claim threw. It must report it. In `processRow`, change the claim block so a throw is distinguishable, and carry the fact on the draft (the simplest channel to the caller, which already reads `draft`):
+
+Add to `RunDraft`:
+
+```ts
+  /** False when repo.claim THREW - the row was never un-armed, which changes
+   *  which condition fail() may assert. */
+  claimed?: boolean;
+```
+
+In `processRow`:
+
+```ts
+  let claimed: boolean;
+  try {
+    claimed = await repo.claim(conversationId, nowIso, listedDueAt);
+    draft.claimed = claimed;
+  } catch (err) {
+    draft.claimed = false;
+    return failed('repo', err);
+  }
+```
+
+In `runDueExtractions`, replace the `repo.fail(...)` call. `row.dueAt` is optional on the item; a due row returned by `listDue` always has it, and the `?? ''` is a total fallback that can only be reached on a malformed row:
 
 ```ts
       try {
         await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt, {
-          ...(row.dueAt !== undefined && { listedDueAt: row.dueAt }),
+          claimed: draft.claimed === true,
+          listedDueAt: row.dueAt ?? '',
           manual: row.manualRequested === true,
         });
       } catch (failErr) {
@@ -470,14 +537,14 @@ In `app/src/jobs/extraction.ts`, in `runDueExtractions`, replace the `repo.fail(
 
 Run: `npm test --workspace app -- extractionRepo.test.ts`
 Expected: PASS.
-Run: `npm run typecheck`
-Expected: exit 0 (fake repos take `fail` via `Pick` or implement it; fix any full literal the compiler names).
+Run: `npm run typecheck && npm test`
+Expected: exit 0 from both. Existing `extractionJob.test.ts` assertions on `repo.fail` call shape will need their expected argument list updated to the four-argument form - update them, do not weaken them.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git status
-git add app/src/repos/extractionRepo.ts app/src/jobs/extraction.ts app/test/extractionRepo.test.ts
+git add app/src/repos/extractionRepo.ts app/src/jobs/extraction.ts app/test/extractionRepo.test.ts app/test/extractionJob.test.ts
 git commit -m "fix(extraction): stop fail() destroying a re-arm that landed during the run
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -489,80 +556,114 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `app/src/jobs/extraction.ts`
-- Modify: `app/src/services/extraction/runTypes.ts`
-- Modify: `app/src/services/extraction/runWindow.ts`
-- Modify: `app/src/repos/aiRunsRepo.ts:23`
-- Test: `app/test/extractionJob.test.ts`
+- Modify: `app/src/services/extraction/runTypes.ts`, `runWindow.ts`
+- Test: `app/test/extractionJob.test.ts`, `app/test/extractionRunWindow.test.ts`
 
 **Interfaces:**
-- Consumes: `DueExtractionItem.manualRequested`, `.requestId` (Task 1).
-- Produces: `RunTrigger` includes `'manual'`; `RunDraft.requestId?: string`; `RunDraft.wrote?: number`; `RunDraft.suggested?: number`; `RunWindowParams.maxTranscriptAgeDays: number | null`.
+- Consumes: `DueExtractionItem.manualRequested` (Task 1).
+- Produces: `RunWindowParams.maxTranscriptAgeDays: number | null`; `BuildFullRunWindowInput.maxTranscriptAgeDays: number | null`; `RunDraft.wrote?: number`, `.suggested?: number`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `app/test/extractionJob.test.ts`:
+Add to `app/test/extractionJob.test.ts`. `msg()` stamps `created_at` at `2026-07-16T12:00:SS.000Z` and `NOW` is `2026-07-17T00:00:00.000Z`, so a helper is needed for a genuinely aged message:
 
 ```ts
+/** A message far outside the 30-day window, for the manual-run age waiver. */
+function agedMsg(direction: 'inbound' | 'outbound', body: string): MessageItem {
+  const ts = '2026-01-05T12:00:00.000Z';
+  return {
+    conversationId: 'conv1',
+    tsMsgId: `${ts}#aged`,
+    type: 'sms',
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    body,
+    provider_sid: 'aged',
+    provider_ts: ts,
+    delivery_status: 'delivered',
+    created_at: ts,
+  };
+}
+
 describe('manual runs waive both gates', () => {
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+
   it('reaches the driver when every message predates the 30-day cutoff', async () => {
-    const world = makeWorld();
-    world.seedConversationWithAgedMessages('conv-1'); // all created_at 90 days old
-    world.seedDueRow('conv-1', { manualRequested: true, requestId: 'req-abc' });
-    await runDueExtractions(NOW, world.deps);
-    expect(world.driver.extract).toHaveBeenCalledTimes(1);
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
   });
 
   it('the SAME fixture without the flag skips no_new_client, not empty_window', async () => {
-    const world = makeWorld();
-    world.seedConversationWithAgedMessages('conv-1');
-    world.seedDueRow('conv-1', { channel: 'sms' });
-    await runDueExtractions(NOW, world.deps);
-    expect(world.driver.extract).not.toHaveBeenCalled();
-    expect(world.aiRuns.putRun).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: 'skipped', skipReason: 'no_new_client' }),
-    );
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(0);
+    expect(h.runs[0]!.outcome).toBe('skipped');
+    expect(h.runs[0]!.skipReason).toBe('no_new_client');
   });
 
   it('waives no_new_client when the cursor is already past every message', async () => {
-    const world = makeWorld();
-    world.seedConversationWithFreshMessages('conv-1');
-    world.seedDueRow('conv-1', { manualRequested: true, cursor: LATEST_TS_MSG_ID });
-    await runDueExtractions(NOW, world.deps);
-    expect(world.driver.extract).toHaveBeenCalledTimes(1);
+    const fresh = msg(10, 'inbound', EXTRACT_BODY);
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, cursor: fresh.tsMsgId })],
+      messages: [fresh],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
   });
 
-  it('records trigger manual from the flag, and the requestId', async () => {
-    const world = makeWorld();
-    world.seedConversationWithFreshMessages('conv-1');
-    world.seedDueRow('conv-1', { channel: 'sms', manualRequested: true, requestId: 'req-abc' });
-    await runDueExtractions(NOW, world.deps);
-    expect(world.aiRuns.putRun).toHaveBeenCalledWith(
-      expect.objectContaining({ trigger: 'manual' }),
-    );
+  it('records trigger manual from the flag even when channel says sms', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'sms', manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
   });
 
   it('records a defined trigger for a row with no channel at all', async () => {
-    const world = makeWorld();
-    world.seedConversationWithFreshMessages('conv-1');
-    world.seedDueRow('conv-1', { manualRequested: true });
-    await runDueExtractions(NOW, world.deps);
-    expect(world.aiRuns.putRun).toHaveBeenCalledWith(
-      expect.objectContaining({ trigger: 'manual' }),
-    );
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: undefined, manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
   });
 
-  it('windowParams.maxTranscriptAgeDays is null on a manual run and 30 otherwise', async () => {
-    const manual = makeWorld();
-    manual.seedConversationWithFreshMessages('conv-1');
-    manual.seedDueRow('conv-1', { manualRequested: true });
+  it('records the age floor it actually applied: null when waived, 30 otherwise', async () => {
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
     await runDueExtractions(NOW, manual.deps);
-    expect(manual.aiRuns.putRun.mock.calls[0][0].window.windowParams.maxTranscriptAgeDays).toBeNull();
+    expect(manual.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBeNull();
 
-    const auto = makeWorld();
-    auto.seedConversationWithFreshMessages('conv-1');
-    auto.seedDueRow('conv-1', { channel: 'sms' });
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
     await runDueExtractions(NOW, auto.deps);
-    expect(auto.aiRuns.putRun.mock.calls[0][0].window.windowParams.maxTranscriptAgeDays).toBe(30);
+    expect(auto.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBe(30);
   });
 });
 ```
@@ -570,47 +671,43 @@ describe('manual runs waive both gates', () => {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npm test --workspace app -- extractionJob.test.ts`
-Expected: FAIL - the driver is not called for aged messages.
+Expected: FAIL - the aged fixture produces no driver call.
 
-- [ ] **Step 3: Widen `RunTrigger`**
-
-`app/src/repos/aiRunsRepo.ts:23`:
-
-```ts
-export type RunTrigger = 'sms' | 'voice' | 'triage' | 'email' | 'manual';
-```
-
-- [ ] **Step 4: Make the recorded age floor nullable**
+- [ ] **Step 3: Make the recorded floor nullable**
 
 `app/src/services/extraction/runTypes.ts`, in `RunWindowParams`:
 
 ```ts
-  /** null when the run waived the age floor (a manual run). A number is the
-   *  floor that was actually applied. Legacy records always carry a number. */
+  /** The floor this run actually applied; null when waived (a manual run).
+   *  Legacy stored records always carry a number. */
   maxTranscriptAgeDays: number | null;
 ```
 
-`app/src/services/extraction/runWindow.ts` - add `maxTranscriptAgeDays` to `BuildFullRunWindowInput` and use it instead of the imported constant:
+`app/src/services/extraction/runWindow.ts` - add to `BuildFullRunWindowInput`:
 
 ```ts
-export interface BuildFullRunWindowInput extends Omit<BuildLightRunWindowInput, 'messages'> {
-  perMessage: WindowMessagePieces[];
-  included: Set<string>;
-  hasInferredRoleContent: boolean;
   /** The floor this run actually applied; null when waived. */
   maxTranscriptAgeDays: number | null;
-}
 ```
 
-and in `buildFullRunWindow`'s `windowParams`:
+and in `buildFullRunWindow`'s `windowParams`, replace the constant with `input.maxTranscriptAgeDays`. Remove `MAX_TRANSCRIPT_AGE_DAYS` from the import list at `runWindow.ts:6` if nothing else in the file uses it - an unused import fails lint.
+
+- [ ] **Step 4: Update the window unit tests**
+
+`app/test/extractionRunWindow.test.ts` calls `buildFullRunWindow` in 9 places. Each now needs the new required field. Add `maxTranscriptAgeDays: 30` to every existing call (they are all modelling automatic runs), and add one new case:
 
 ```ts
-      maxTranscriptAgeDays: input.maxTranscriptAgeDays,
+  it('records a null age floor when the run waived it', () => {
+    const w = buildFullRunWindow({ ...baseInput(), maxTranscriptAgeDays: null });
+    expect(w.windowParams!.maxTranscriptAgeDays).toBeNull();
+  });
 ```
 
-- [ ] **Step 5: Derive `manual` and waive the two gates**
+using whatever the file's existing input-builder is called.
 
-In `app/src/jobs/extraction.ts`, in `processRow`, immediately after `const cursor = row.cursor ?? '';`:
+- [ ] **Step 5: Waive the two gates**
+
+In `processRow`, after `const cursor = row.cursor ?? '';`:
 
 ```ts
   // The single source of truth for both waivers and the recorded trigger. Read
@@ -618,29 +715,27 @@ In `app/src/jobs/extraction.ts`, in `processRow`, immediately after `const curso
   const manual = row.manualRequested === true;
 ```
 
-Replace the cutoff block (currently lines 433-436) so a manual run keeps every fetched message:
+Replace the cutoff block:
 
 ```ts
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const chronological = [...newestFirst].reverse();
   // A manual run waives the age floor: the imported history this feature exists
-  // to reach is historical by definition. The newest-50 page and the 60k char
-  // budget still bound the window.
+  // to reach is historical by definition. Newest-50 and the 60k char budget
+  // still bound the window.
   const fresh = manual ? chronological : chronological.filter((m) => m.created_at >= cutoff);
   const agedOutTsMsgIds = manual
     ? []
     : chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
 ```
 
-Replace the `hasNewClient` expression so manual joins the existing bypasses:
+Replace the freshness gate:
 
 ```ts
   const hasNewClient = manual || row.channel === 'voice' || row.channel === 'triage' || fresh.some(
 ```
 
-- [ ] **Step 6: Pass the effective floor to the window builder**
-
-In the `buildFullRunWindow` call:
+Pass the effective floor:
 
 ```ts
   const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
@@ -650,42 +745,18 @@ In the `buildFullRunWindow` call:
   }));
 ```
 
-- [ ] **Step 7: Carry the trigger, the press id and the counts on the draft**
+- [ ] **Step 6: Carry the counts for the event**
 
-In `RunDraft`, add:
+Add to `RunDraft`:
 
 ```ts
-  /** Correlates this run to the press that asked for it (4.4b). */
-  requestId?: string;
-  /** Counts for the completion event. Sourced from applyOutcome, which is where
-   *  they exist - NOT re-derived from `decisions`, which is best-effort. */
+  /** Counts for the completion event, sourced from applyOutcome where they
+   *  exist - NOT re-derived from `decisions`, which is best-effort. */
   wrote?: number;
   suggested?: number;
 ```
 
-Replace `newRunDraft`:
-
-```ts
-export function newRunDraft(row: DueExtractionItem, startedAt: string): RunDraft {
-  const manual = row.manualRequested === true;
-  // The `?? 'manual'` arm is a totality device, not a second labelling rule.
-  // A row with no `channel` can only have been created by
-  // requestManualExtraction, which always sets the flag - and both flag-clearing
-  // sites (claim, fail's park branch) also de-arm the row, so listDue can never
-  // return a channel-less row without the flag.
-  const trigger: RunTrigger = manual ? 'manual' : (row.channel ?? 'manual');
-  return {
-    runId: randomUUID(),
-    startedAt,
-    conversationId: row.conversationId,
-    trigger,
-    ...(row.requestId !== undefined && { requestId: row.requestId }),
-    displaced: [],
-  };
-}
-```
-
-Where `draft.notedLines` is set after `applyExtraction`, add the two counts:
+Where `draft.notedLines` is assigned after `applyExtraction`:
 
 ```ts
   draft.notedLines = applyOutcome.notedLines;
@@ -693,18 +764,18 @@ Where `draft.notedLines` is set after `applyExtraction`, add the two counts:
   draft.suggested = applyOutcome.suggested.length;
 ```
 
-- [ ] **Step 8: Run the tests**
+- [ ] **Step 7: Run the tests**
 
-Run: `npm test --workspace app -- extractionJob.test.ts`
+Run: `npm test --workspace app -- extractionJob.test.ts extractionRunWindow.test.ts`
 Expected: PASS.
-Run: `npm run typecheck`
+Run: `npm run typecheck && npm test`
 Expected: exit 0.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git status
-git add app/src/jobs/extraction.ts app/src/services/extraction/runTypes.ts app/src/services/extraction/runWindow.ts app/src/repos/aiRunsRepo.ts app/test/extractionJob.test.ts
+git add app/src/jobs/extraction.ts app/src/services/extraction/runTypes.ts app/src/services/extraction/runWindow.ts app/test/extractionJob.test.ts app/test/extractionRunWindow.test.ts
 git commit -m "feat(extraction): waive the age and freshness gates for a manual run
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -716,70 +787,110 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `app/src/lib/events.ts`
-- Modify: `app/test/eventBridge.test.ts:43`
+- Modify: `app/test/eventBridge.test.ts:42-43`
 - Modify: `app/src/jobs/extraction.ts`
-- Modify: `app/src/worker.ts` (extraction deps)
-- Modify: `app/src/routes/dev.ts` (extraction tick deps)
-- Modify: `app/src/routes/api.ts` (SSE on/off)
-- Test: `app/test/extractionJob.test.ts`
+- Modify: `app/src/worker.ts`, `app/src/routes/dev.ts`
+- Modify: `app/src/routes/api.ts`
+- Test: `app/test/extractionJob.test.ts`, `app/test/extractionJobDraftGuard.test.ts`
 
 **Interfaces:**
-- Consumes: `RunDraft.requestId`, `.wrote`, `.suggested` (Task 3).
-- Produces: event name `'ai_run.completed'` with payload `AiRunCompletedEvent`.
+- Consumes: `RunDraft.requestId`, `.wrote`, `.suggested` (Tasks 1, 3).
+- Produces: `'ai_run.completed'` with `AiRunCompletedEvent`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `app/test/extractionJob.test.ts`:
+`makeHarness` needs a recording emitter. Add to the `Harness` interface `jobEvents: { emit: ReturnType<typeof vi.fn> }`, create `const jobEvents = { emit: vi.fn() };` beside the existing `applyEvents`, put `events: jobEvents` in the `deps` object, and return it. Then:
 
 ```ts
 describe('ai_run.completed', () => {
-  it.each(['applied', 'no_op', 'skipped', 'failed'] as const)(
-    'emits once for a %s run', async (outcome) => {
-      const world = makeWorld();
-      world.arrangeOutcome(outcome, 'conv-1');
-      await runDueExtractions(NOW, world.deps);
-      const emits = world.emitted.filter((e) => e.event === 'ai_run.completed');
-      expect(emits).toHaveLength(1);
-      expect(emits[0].payload.outcome).toBe(outcome);
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+  const emitted = (h: ReturnType<typeof makeHarness>) =>
+    h.jobEvents.emit.mock.calls.filter((c) => c[0] === 'ai_run.completed');
+
+  it('emits once for an applied run, carrying the counts', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
     });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'applied', wrote: 1, suggested: 0 });
+  });
+
+  it('emits for a SKIPPED run - the case the indicator most needs', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'skipped' });
+  });
 
   it('still emits when the run-log write fails', async () => {
-    const world = makeWorld();
-    world.aiRuns.putRun.mockRejectedValue(new Error('dynamo down'));
-    world.arrangeOutcome('applied', 'conv-1');
-    await runDueExtractions(NOW, world.deps);
-    expect(world.emitted.filter((e) => e.event === 'ai_run.completed')).toHaveLength(1);
+    const aiRuns = {
+      beginFinalization: vi.fn(async () => true),
+      putRun: vi.fn(async () => { throw new Error('dynamo down'); }),
+      setVerdict: vi.fn(async () => true),
+    };
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      aiRuns,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
   });
 
   it('carries the requestId of the press that started it, and none for an automatic run', async () => {
-    const manual = makeWorld();
-    manual.arrangeOutcome('applied', 'conv-1', { manualRequested: true, requestId: 'req-abc' });
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
     await runDueExtractions(NOW, manual.deps);
-    expect(manual.emitted.find((e) => e.event === 'ai_run.completed')!.payload.requestId).toBe('req-abc');
+    expect(emitted(manual)[0]![1].requestId).toBe('req-abc');
 
-    const auto = makeWorld();
-    auto.arrangeOutcome('applied', 'conv-1', { channel: 'sms' });
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
     await runDueExtractions(NOW, auto.deps);
-    expect(auto.emitted.find((e) => e.event === 'ai_run.completed')!.payload.requestId).toBeUndefined();
+    expect(emitted(auto)[0]![1].requestId).toBeUndefined();
   });
 
   it('a no_contact run emits with conversationId and no contactId', async () => {
-    const world = makeWorld();
-    world.arrangeNoContact('conv-1');
-    await runDueExtractions(NOW, world.deps);
-    const payload = world.emitted.find((e) => e.event === 'ai_run.completed')!.payload;
-    expect(payload.conversationId).toBe('conv-1');
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'hi')],
+      contact: undefined,
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const payload = emitted(h)[0]![1];
+    expect(payload.conversationId).toBe('conv1');
     expect(payload.contactId).toBeUndefined();
   });
 
-  it('carries ids and counts only - never a body, phone or field value', async () => {
-    const world = makeWorld();
-    world.arrangeOutcome('applied', 'conv-1');
-    await runDueExtractions(NOW, world.deps);
-    const serialized = JSON.stringify(world.emitted.find((e) => e.event === 'ai_run.completed')!.payload);
-    expect(serialized).not.toContain(world.secretBody);
-    expect(serialized).not.toContain(world.contactPhone);
-    expect(serialized).not.toContain(world.suggestedValue);
+  it('carries ids and counts only - no body, no phone, no field value', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const serialized = JSON.stringify(emitted(h)[0]![1]);
+    expect(serialized).not.toContain('EXTRACT:');
+    expect(serialized).not.toContain('yes');
   });
 });
 ```
@@ -787,20 +898,20 @@ describe('ai_run.completed', () => {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npm test --workspace app -- extractionJob.test.ts`
-Expected: FAIL - no such event.
+Expected: FAIL - `deps.events` does not exist.
 
-- [ ] **Step 3: Add the event to the bus**
+- [ ] **Step 3: Add the event**
 
 `app/src/lib/events.ts`, beside `SuggestionUpdatedEvent`:
 
 ```ts
 /**
- * One extraction run finished (manual-extraction-trigger 4.4b). Emitted by the
- * job for EVERY run - applied, no_op, skipped and failed - because the skip and
- * failure cases are exactly what the contact page's running indicator has to
- * explain. `requestId` is present only when a human press started this run and
- * is what correlates that press to THIS run; conversationId identifies the
- * thread, not the run, so it cannot do that job on its own.
+ * One extraction run finished (manual-extraction-trigger 4.4b). Emitted for
+ * EVERY run - applied, no_op, skipped and failed - because the skip and failure
+ * cases are exactly what the contact page's running indicator has to explain.
+ * `requestId` is present only when a human press started the run, and is what
+ * correlates that press to THIS run: conversationId identifies the thread, not
+ * the run, so it cannot do that job alone.
  *
  * PII: ids and counts only. Never a body, a phone number, or a field value.
  */
@@ -818,27 +929,19 @@ export interface AiRunCompletedEvent {
 }
 ```
 
-Add to `AppEventMap`:
+Add `'ai_run.completed': AiRunCompletedEvent;` to `AppEventMap` and `'ai_run.completed': true,` to `ALL_APP_EVENTS`. The map comment above `ALL_APP_EVENTS` says "adding an eighth event" - update that wording; it is now nine.
 
-```ts
-  'ai_run.completed': AiRunCompletedEvent;
-```
+- [ ] **Step 4: Fix the runtime count assertion**
 
-Add to `ALL_APP_EVENTS`:
-
-```ts
-  'ai_run.completed': true,
-```
-
-- [ ] **Step 4: Update the hardcoded bridge count**
-
-`app/test/eventBridge.test.ts:43` - the typecheck cannot see this, only the test run can:
+`app/test/eventBridge.test.ts:43` - typecheck cannot see this:
 
 ```ts
     expect(APP_EVENT_NAMES).toHaveLength(9);
 ```
 
-- [ ] **Step 5: Add a REQUIRED emitter to the job deps**
+Update the comment at `:42` if it names eight.
+
+- [ ] **Step 5: Add the REQUIRED dep and emit**
 
 `app/src/jobs/extraction.ts`, in `ExtractionJobDeps`:
 
@@ -846,22 +949,19 @@ Add to `ALL_APP_EVENTS`:
   /**
    * The completion emitter. REQUIRED so a missed construction site is a
    * typecheck failure rather than a silently dead indicator - the same reasoning
-   * as `aiRuns` above. All three sites must supply it: worker.ts (the poll),
-   * routes/dev.ts (the deterministic tick), and the unit-test harness.
+   * as `aiRuns` above.
    */
   events: Pick<EventBus, 'emit'>;
 ```
 
-Import the type at the top: `import type { EventBus } from '../lib/events.js';`
-
-- [ ] **Step 6: Emit after `recordRun`**
+with `import type { EventBus } from '../lib/events.js';`.
 
 In `runDueExtractions`, directly after `await recordRun(deps, outcome, draft);`:
 
 ```ts
     // AFTER recordRun but NOT dependent on it: recordRun is best-effort and
-    // swallows its own failures, and the indicator's correctness must not hinge
-    // on an observability write.
+    // swallows its own failures, and the indicator must not hinge on an
+    // observability write.
     try {
       deps.events.emit('ai_run.completed', {
         conversationId: draft.conversationId,
@@ -880,31 +980,13 @@ In `runDueExtractions`, directly after `await recordRun(deps, outcome, draft);`:
     }
 ```
 
-- [ ] **Step 7: Supply it at all three construction sites**
+- [ ] **Step 6: Supply it at every construction site**
 
-`app/src/worker.ts` - the extraction deps object already has `appEvents` in scope (the placement-nudge deps use it); add:
+Run `npm run typecheck` to enumerate them. Known: `app/src/worker.ts` (add `events: appEvents,` - the module-level import already in scope), `app/src/routes/dev.ts` (add `events: appEvents,`; `DevRouterDeps` has no `events` field, so import the singleton rather than threading a dep), `app/test/extractionJob.test.ts` (step 1), and a fourth at `app/test/extractionJobDraftGuard.test.ts:158` (add `events: { emit: vi.fn() },`).
 
-```ts
-    events: appEvents,
-```
+- [ ] **Step 7: Write and clean up the SSE listener**
 
-`app/src/routes/dev.ts` - in the lazily-built `extractionTickDeps`, add:
-
-```ts
-        events,
-```
-
-using the same `events` the router already receives. If the dev router does not already destructure it, take it from `deps`.
-
-The unit-test harness gains a recording emitter:
-
-```ts
-    events: { emit: (event, payload) => { world.emitted.push({ event, payload }); } },
-```
-
-- [ ] **Step 8: Write and clean up the SSE listener**
-
-`app/src/routes/api.ts` - beside `onSuggestionUpdated`:
+`app/src/routes/api.ts`, beside `onSuggestionUpdated`:
 
 ```ts
     const onAiRunCompleted = (payload: AiRunCompletedEvent): void => {
@@ -912,24 +994,26 @@ The unit-test harness gains a recording emitter:
     };
 ```
 
-Register it with the others:
+Register it with the others, and - this half is easy to forget and leaks a listener per SSE connection - add the matching cleanup beside the other `events.off(...)` calls:
 
 ```ts
     events.on('ai_run.completed', onAiRunCompleted);
 ```
 
-And - this half is easy to forget and leaks a listener per connection - in the disconnect cleanup:
-
 ```ts
       events.off('ai_run.completed', onAiRunCompleted);
 ```
 
-Import `AiRunCompletedEvent` alongside the other event types.
+Import `AiRunCompletedEvent` with the sibling event types.
 
-- [ ] **Step 9: Run the tests**
+- [ ] **Step 8: Assert the cleanup**
+
+`app/test/sse.test.ts` already asserts listener cleanup for the named events. Extend its list to include `ai_run.completed` so a missing `off` fails a test rather than leaking silently in production.
+
+- [ ] **Step 9: Run everything**
 
 Run: `npm test --workspace app`
-Expected: PASS, including `eventBridge.test.ts`.
+Expected: PASS, including `eventBridge.test.ts` and `sse.test.ts`.
 Run: `npm run typecheck`
 Expected: exit 0.
 
@@ -937,7 +1021,7 @@ Expected: exit 0.
 
 ```bash
 git status
-git add app/src/lib/events.ts app/test/eventBridge.test.ts app/src/jobs/extraction.ts app/src/worker.ts app/src/routes/dev.ts app/src/routes/api.ts app/test/extractionJob.test.ts
+git add app/src/lib/events.ts app/test/eventBridge.test.ts app/src/jobs/extraction.ts app/src/worker.ts app/src/routes/dev.ts app/src/routes/api.ts app/test/extractionJob.test.ts app/test/extractionJobDraftGuard.test.ts app/test/sse.test.ts
 git commit -m "feat(extraction): emit ai_run.completed for every run
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -949,141 +1033,150 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `app/src/routes/contacts.ts`
-- Test: `app/test/contactsExtractionRun.test.ts` (create)
+- Test: `app/test/contactExtractionRun.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `requestManualExtraction` (Task 1), `conversationsForContact` (`app/src/lib/contactThreads.ts:38`).
-- Produces: `200 { requestId: string, scheduled: string[], failed: string[] }`, or a refusal `{ error: string }`.
+- Consumes: `requestManualExtraction` (Task 1), `conversationsForContact` (`app/src/lib/contactThreads.ts:38`), `isDeleted` and `PHONE_REF_PREFIX` (`app/src/repos/contactsRepo.ts:297,302`).
+- Produces: `200 { requestId, scheduled: string[], failed: string[] }` or `{ error }`.
+
+**Note on the phone-pointer id:** `PHONE_REF_PREFIX` is `'phoneref#'`, not `'phone#'`. A fixture using the wrong prefix makes that branch untestable.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `app/test/contactsExtractionRun.test.ts`:
+Create `app/test/contactExtractionRun.test.ts`, modelled on `app/test/contactSoftDelete.test.ts`:
 
 ```ts
+import request from 'supertest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+
+type World = ReturnType<typeof createFakeWorld>;
+
+const auth = (req: request.Test) =>
+  req.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+function seedContact(world: World, over: Partial<ContactItem> & { contactId: string; type: ContactItem['type'] }): void {
+  world.contacts.push({ status: 'active', phone: '+15550000001', ...over });
+}
+
+function seedConversation(world: World, id: string, type: ConversationItem['type']): void {
+  world.conversations.set(id, {
+    conversationId: id,
+    status: 'open',
+    type,
+    ai_mode: 'auto',
+    participant_phone: '+15550000001',
+    last_activity_at: '2026-08-01T00:00:00.000Z',
+    created_at: '2026-08-01T00:00:00.000Z',
+  });
+}
+
 describe('POST /api/contacts/:contactId/extraction-run', () => {
   it('schedules every eligible 1:1 thread and returns their ids', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-sms', 'tenant_1to1');
-    world.seedThread('c-1', 'conv-email', 'unknown_1to1');
-    const res = await world.post('/api/contacts/c-1/extraction-run');
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    seedConversation(world, 'conv-b', 'unknown_1to1');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
     expect(res.status).toBe(200);
-    expect(res.body.scheduled.sort()).toEqual(['conv-email', 'conv-sms']);
+    expect(res.body.scheduled.sort()).toEqual(['conv-a', 'conv-b']);
     expect(res.body.failed).toEqual([]);
-    expect(res.body.requestId).toEqual(expect.any(String));
-    expect(world.extraction.requestManualExtraction).toHaveBeenCalledTimes(2);
+    expect(typeof res.body.requestId).toBe('string');
   });
 
-  it('EXCLUDES relay_group and landlord_1to1 threads', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-ok', 'tenant_1to1');
-    world.seedThread('c-1', 'conv-relay', 'relay_group');
-    world.seedThread('c-1', 'conv-ll', 'landlord_1to1');
-    const res = await world.post('/api/contacts/c-1/extraction-run');
+  it('EXCLUDES relay_group and landlord_1to1', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-ok', 'tenant_1to1');
+    seedConversation(world, 'conv-relay', 'relay_group');
+    seedConversation(world, 'conv-ll', 'landlord_1to1');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
     expect(res.body.scheduled).toEqual(['conv-ok']);
   });
 
+  it('404s an unknown contact and a phone-pointer id', async () => {
+    const { app } = makeWebhookHarness();
+    expect((await auth(request(app).post('/api/contacts/nope/extraction-run'))).status).toBe(404);
+    const ref = await auth(request(app).post(`/api/contacts/${encodeURIComponent('phoneref#+15550000001')}/extraction-run`));
+    expect(ref.status).toBe(404);
+    expect(ref.body.error).toBe('contact_not_found');
+  });
+
+  it('refuses a soft-deleted contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant', deleted_at: '2026-08-01T00:00:00.000Z' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_deleted');
+  });
+
+  it.each(['landlord', 'partner', 'team_member'] as const)('refuses a %s contact', async (type) => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('ineligible_contact_type');
+  });
+
+  it('distinguishes no threads from no ELIGIBLE threads', async () => {
+    const a = makeWebhookHarness();
+    seedContact(a.world, { contactId: 'c-1', type: 'tenant' });
+    expect((await auth(request(a.app).post('/api/contacts/c-1/extraction-run'))).body.error)
+      .toBe('no_conversations');
+
+    const b = makeWebhookHarness();
+    seedContact(b.world, { contactId: 'c-2', type: 'tenant' });
+    seedConversation(b.world, 'conv-relay', 'relay_group');
+    expect((await auth(request(b.app).post('/api/contacts/c-2/extraction-run'))).body.error)
+      .toBe('no_eligible_conversations');
+  });
+});
+```
+
+For the two partial-failure cases, the harness's extraction fake must be made to throw. Add a hook to `twilioWebhookHarness.ts` if one does not exist (the fake already records `scheduleExtraction` calls, so follow that pattern), then:
+
+```ts
   it('is a 200 with a partial list when one write fails, never a 500', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    world.seedThread('c-1', 'conv-b', 'tenant_1to1');
-    world.extraction.requestManualExtraction
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('dynamo down'));
-    const res = await world.post('/api/contacts/c-1/extraction-run');
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    seedConversation(world, 'conv-b', 'unknown_1to1');
+    world.failManualExtractionFor.add('conv-b');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
     expect(res.status).toBe(200);
     expect(res.body.scheduled).toEqual(['conv-a']);
     expect(res.body.failed).toEqual(['conv-b']);
   });
 
   it('is a 500 only when NOTHING was scheduled', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    world.extraction.requestManualExtraction.mockRejectedValue(new Error('dynamo down'));
-    const res = await world.post('/api/contacts/c-1/extraction-run');
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant' });
+    seedConversation(world, 'conv-a', 'tenant_1to1');
+    world.failManualExtractionFor.add('conv-a');
+    const res = await auth(request(app).post('/api/contacts/c-1/extraction-run'));
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('schedule_failed');
   });
-
-  it.each([
-    ['unknown contact', 'nope', 404, 'contact_not_found'],
-    ['phone-pointer id', 'phone#+15550100001', 404, 'contact_not_found'],
-  ])('refuses %s', async (_label, id, status, error) => {
-    const world = makeContactsWorld();
-    const res = await world.post(`/api/contacts/${encodeURIComponent(id)}/extraction-run`);
-    expect(res.status).toBe(status);
-    expect(res.body.error).toBe(error);
-  });
-
-  it('refuses a soft-deleted contact', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant', deleted_at: '2026-08-01T00:00:00.000Z' });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    const res = await world.post('/api/contacts/c-1/extraction-run');
-    expect(res.status).toBe(409);
-    expect(res.body.error).toBe('contact_deleted');
-  });
-
-  it('refuses when the kill switch is off', async () => {
-    const world = makeContactsWorld({ aiExtractionEnabled: false });
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    const res = await world.post('/api/contacts/c-1/extraction-run');
-    expect(res.status).toBe(409);
-    expect(res.body.error).toBe('extraction_disabled');
-  });
-
-  it.each(['landlord', 'partner', 'team_member'] as const)('refuses a %s contact', async (type) => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    const res = await world.post('/api/contacts/c-1/extraction-run');
-    expect(res.status).toBe(409);
-    expect(res.body.error).toBe('ineligible_contact_type');
-  });
-
-  it('distinguishes no threads at all from no ELIGIBLE threads', async () => {
-    const none = makeContactsWorld();
-    none.seedContact('c-1', { type: 'tenant' });
-    expect((await none.post('/api/contacts/c-1/extraction-run')).body.error).toBe('no_conversations');
-
-    const filtered = makeContactsWorld();
-    filtered.seedContact('c-2', { type: 'tenant' });
-    filtered.seedThread('c-2', 'conv-relay', 'relay_group');
-    expect((await filtered.post('/api/contacts/c-2/extraction-run')).body.error)
-      .toBe('no_eligible_conversations');
-  });
-
-  it('appends an audit entry with the counts', async () => {
-    const world = makeContactsWorld();
-    world.seedContact('c-1', { type: 'tenant' });
-    world.seedThread('c-1', 'conv-a', 'tenant_1to1');
-    await world.post('/api/contacts/c-1/extraction-run');
-    expect(world.audit.append).toHaveBeenCalledWith(
-      'contacts#c-1',
-      'extraction_run_requested',
-      expect.objectContaining({ scheduled: 1, failed: 0, requestId: expect.any(String) }),
-    );
-  });
-});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npm test --workspace app -- contactsExtractionRun.test.ts`
+Run: `npm test --workspace app -- contactExtractionRun.test.ts`
 Expected: FAIL - 404 on an unregistered route.
 
 - [ ] **Step 3: Implement the route**
 
-In `app/src/routes/contacts.ts`, alongside the other per-contact actions. `randomUUID` is already imported in this file's dependencies; if not, import it from `node:crypto`:
+In `app/src/routes/contacts.ts`. Check the file's existing imports first: it already imports `conversationsForContact` (`:68`) and `PHONE_REF_PREFIX` is available from `contactsRepo`. Add `isDeleted` to that import, and `randomUUID` from `node:crypto` if absent. Use the same `json()` body-parser and `AuthedRequest` typing the neighbouring routes use - copy the shape of an existing `router.post` in this file rather than the sketch below verbatim.
 
 ```ts
-  // Manual extraction trigger. Arms each of the contact's eligible 1:1 threads
-  // for an IMMEDIATE run (dueAt = now, no debounce) and returns; the worker
-  // poll does the work. See the design doc section 4.5.
+  // Manual extraction trigger (design 4.5). Arms each eligible 1:1 thread for an
+  // IMMEDIATE run (dueAt = now, no debounce) and returns; the worker poll does
+  // the work.
   router.post('/:contactId/extraction-run', json(), async (req, res) => {
     const contactId = req.params.contactId;
     if (contactId.startsWith(PHONE_REF_PREFIX)) {
@@ -1095,7 +1188,7 @@ In `app/src/routes/contacts.ts`, alongside the other per-contact actions. `rando
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
-    if (contact.deleted_at !== undefined) {
+    if (isDeleted(contact)) {
       // Deliberate divergence from the job, which has no soft-delete check:
       // spending money to write facts onto a record staff have removed from
       // view is not something to do on a human's button press.
@@ -1118,8 +1211,8 @@ In `app/src/routes/contacts.ts`, alongside the other per-contact actions. `rando
     }
     // The SAME predicate the inbound sites apply (webhooks/twilio.ts:2155-2158,
     // services/inboundEmail.ts:741-746). Mandatory here because this fans out
-    // across a contact's threads: conversationsForContact returns the raw
-    // phone+email union, and a phone query can return relay_group threads.
+    // across a contact's threads, and conversationsForContact returns the raw
+    // phone+email union - a phone query can return relay_group threads.
     const eligible = all.filter((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
     if (eligible.length === 0) {
       res.status(409).json({ error: 'no_eligible_conversations' });
@@ -1135,9 +1228,8 @@ In `app/src/routes/contacts.ts`, alongside the other per-contact actions. `rando
         await extraction.requestManualExtraction(conv.conversationId, nowIso, requestId);
         scheduled.push(conv.conversationId);
       } catch (err) {
-        // Partial failure is NOT a total one: a queued run will bill, so
-        // reporting 500 here would tell the operator nothing happened when
-        // something did.
+        // Partial failure is NOT a total one: a queued run will bill, so a 500
+        // here would tell the operator nothing happened when something did.
         log.error({ err, contactId, conversationId: conv.conversationId }, 'manual extraction schedule failed');
         failed.push(conv.conversationId);
       }
@@ -1159,16 +1251,16 @@ In `app/src/routes/contacts.ts`, alongside the other per-contact actions. `rando
 
 - [ ] **Step 4: Run the tests**
 
-Run: `npm test --workspace app -- contactsExtractionRun.test.ts`
+Run: `npm test --workspace app -- contactExtractionRun.test.ts`
 Expected: PASS.
-Run: `npm run typecheck`
+Run: `npm run typecheck && npm test`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status
-git add app/src/routes/contacts.ts app/test/contactsExtractionRun.test.ts
+git add app/src/routes/contacts.ts app/test/contactExtractionRun.test.ts app/test/helpers/twilioWebhookHarness.ts
 git commit -m "feat(contacts): add the manual extraction-run endpoint
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -1179,204 +1271,191 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 6: The contact page action and its running indicator
 
 **Files:**
-- Modify: `dashboard/src/api/types.ts`
-- Modify: `dashboard/src/api/endpoints.ts`
-- Modify: `dashboard/src/api/EventStreamProvider.tsx:208`
-- Modify: `dashboard/src/routes/contact/ContactActionsMenu.tsx`
-- Modify: `dashboard/src/routes/contact/ContactDetail.tsx`
-- Test: `dashboard/src/routes/contact/ContactDetail.test.tsx`
+- Modify: `dashboard/src/api/types.ts`, `endpoints.ts`, `EventStreamProvider.tsx`
+- Modify: `dashboard/src/routes/contact/ContactActionsMenu.tsx` + `ContactActionsMenu.test.tsx`
+- Modify: `dashboard/src/routes/contact/ContactDetail.tsx` + `ContactDetail.module.css` + `ContactDetail.test.tsx`
 
 **Interfaces:**
 - Consumes: the endpoint (Task 5), `ai_run.completed` (Task 4).
 - Produces: `runExtraction(contactId: string): Promise<{ requestId: string; scheduled: string[]; failed: string[] }>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Give the test file an event seam**
 
-Add to `dashboard/src/routes/contact/ContactDetail.test.tsx`:
+`ContactDetail.test.tsx:66` currently has `useEventStream: () => {}` inside the `vi.mock` factory, so no event can be delivered. Replace it with a capturing stub, and add `runExtraction` to the same factory (a missing mock makes every new test fail on a real fetch):
+
+```ts
+  let capturedHandlers: Record<string, ((e: unknown) => void) | undefined> = {};
+  // ...inside the mock factory object:
+    useEventStream: (handlers: Record<string, ((e: unknown) => void) | undefined>) => {
+      capturedHandlers = handlers;
+    },
+    runExtraction: (...a: unknown[]) => runExtraction(...a),
+```
+
+with `const runExtraction = vi.fn();` hoisted beside the file's other `vi.fn()` declarations. Follow the file's existing hoisting idiom exactly - the factory must not close over anything declared after it.
+
+Add a helper beside `renderAt`:
+
+```tsx
+function emitRunCompleted(payload: Record<string, unknown>): void {
+  act(() => { capturedHandlers.onAiRunCompleted?.(payload); });
+}
+
+async function pressRun(): Promise<void> {
+  await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
+  await userEvent.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
+}
+```
+
+Confirm the kebab button's accessible name against `ContactActionsMenu.tsx` before using `/more actions/i`.
+
+- [ ] **Step 2: Write the failing tests**
 
 ```tsx
 describe('Run AI extraction', () => {
-  it('enters a running state on press and disables a second press', async () => {
-    renderContact({ contactId: 'c-1' });
-    await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
-    expect(await screen.findByRole('status')).toHaveTextContent(/running ai extraction/i);
-    await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
-    expect(screen.getByRole('menuitem', { name: /run ai extraction/i })).toBeDisabled();
+  beforeEach(() => {
+    runExtraction.mockResolvedValue({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
   });
 
-  it('resolves to the applied copy when the run reports back', async () => {
-    const { emit } = renderContact({ contactId: 'c-1' });
-    await pressRunExtraction();
-    emit('ai_run.completed', {
-      conversationId: 'conv-a', runId: 'r1', requestId: lastRequestId(),
-      outcome: 'applied', wrote: 2, suggested: 1, notedLines: 0,
-    });
+  it('enters a running state on press', async () => {
+    renderAt('k1');
+    await pressRun();
+    expect(await screen.findByRole('status')).toHaveTextContent(/running ai extraction/i);
+  });
+
+  it('resolves to the applied copy', async () => {
+    renderAt('k1');
+    await pressRun();
+    emitRunCompleted({ conversationId: 'conv-a', runId: 'r1', requestId: 'req-1', outcome: 'applied', wrote: 2, suggested: 1, notedLines: 0 });
     expect(await screen.findByRole('status')).toHaveTextContent(/updated 2 fields, 1 suggestion/i);
   });
 
   it('says nothing-new for a skipped run', async () => {
-    const { emit } = renderContact({ contactId: 'c-1' });
-    await pressRunExtraction();
-    emit('ai_run.completed', {
-      conversationId: 'conv-a', runId: 'r1', requestId: lastRequestId(),
-      outcome: 'skipped', skipReason: 'no_new_client', wrote: 0, suggested: 0, notedLines: 0,
-    });
+    renderAt('k1');
+    await pressRun();
+    emitRunCompleted({ conversationId: 'conv-a', runId: 'r1', requestId: 'req-1', outcome: 'skipped', skipReason: 'no_new_client', wrote: 0, suggested: 0, notedLines: 0 });
     expect(await screen.findByRole('status')).toHaveTextContent(/nothing new to extract/i);
   });
 
   it('gives a truncated failure its own actionable copy', async () => {
-    const { emit } = renderContact({ contactId: 'c-1' });
-    await pressRunExtraction();
-    emit('ai_run.completed', {
-      conversationId: 'conv-a', runId: 'r1', requestId: lastRequestId(),
-      outcome: 'failed', errorKind: 'truncated', wrote: 0, suggested: 0, notedLines: 0,
-    });
+    renderAt('k1');
+    await pressRun();
+    emitRunCompleted({ conversationId: 'conv-a', runId: 'r1', requestId: 'req-1', outcome: 'failed', errorKind: 'truncated', wrote: 0, suggested: 0, notedLines: 0 });
     expect(await screen.findByRole('alert')).toHaveTextContent(/ran out of room/i);
   });
 
-  it('waits for EVERY scheduled thread before resolving', async () => {
-    const { emit } = renderContact({ contactId: 'c-1', scheduled: ['conv-a', 'conv-b'] });
-    await pressRunExtraction();
-    emit('ai_run.completed', { conversationId: 'conv-a', runId: 'r1', requestId: lastRequestId(), outcome: 'applied', wrote: 1, suggested: 0, notedLines: 0 });
+  it('waits for EVERY scheduled thread, including when one fails', async () => {
+    runExtraction.mockResolvedValue({ requestId: 'req-1', scheduled: ['conv-a', 'conv-b'], failed: [] });
+    renderAt('k1');
+    await pressRun();
+    emitRunCompleted({ conversationId: 'conv-a', runId: 'r1', requestId: 'req-1', outcome: 'failed', errorKind: 'driver', wrote: 0, suggested: 0, notedLines: 0 });
     expect(screen.getByRole('status')).toHaveTextContent(/running ai extraction/i);
-    emit('ai_run.completed', { conversationId: 'conv-b', runId: 'r2', requestId: lastRequestId(), outcome: 'applied', wrote: 1, suggested: 0, notedLines: 0 });
-    expect(await screen.findByRole('status')).toHaveTextContent(/updated 2 fields/i);
+    emitRunCompleted({ conversationId: 'conv-b', runId: 'r2', requestId: 'req-1', outcome: 'applied', wrote: 1, suggested: 0, notedLines: 0 });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/extraction failed/i);
   });
 
   it('IGNORES an event carrying a different requestId', async () => {
-    const { emit } = renderContact({ contactId: 'c-1' });
-    await pressRunExtraction();
-    emit('ai_run.completed', {
-      conversationId: 'conv-a', runId: 'r1', requestId: 'someone-elses-press',
-      outcome: 'applied', wrote: 9, suggested: 9, notedLines: 0,
-    });
+    renderAt('k1');
+    await pressRun();
+    emitRunCompleted({ conversationId: 'conv-a', runId: 'r1', requestId: 'someone-else', outcome: 'applied', wrote: 9, suggested: 9, notedLines: 0 });
     expect(screen.getByRole('status')).toHaveTextContent(/running ai extraction/i);
   });
 
-  it('times out to the still-running copy when no event ever arrives', async () => {
-    vi.useFakeTimers();
-    renderContact({ contactId: 'c-1' });
-    await pressRunExtraction();
-    act(() => { vi.advanceTimersByTime(RUN_INDICATOR_TIMEOUT_MS + 1); });
-    expect(screen.getByRole('status')).toHaveTextContent(/still running/i);
-    vi.useRealTimers();
-  });
-
   it('reports threads that could not be queued', async () => {
-    renderContact({ contactId: 'c-1', scheduled: ['conv-a'], failed: ['conv-b'] });
-    await pressRunExtraction();
-    expect(screen.getByRole('status')).toHaveTextContent(/1 thread could not be queued/i);
+    runExtraction.mockResolvedValue({ requestId: 'req-1', scheduled: ['conv-a'], failed: ['conv-b'] });
+    renderAt('k1');
+    await pressRun();
+    expect(await screen.findByRole('status')).toHaveTextContent(/1 thread could not be queued/i);
   });
 
   it.each([
-    ['extraction_disabled', /ai extraction is turned off/i],
-    ['ineligible_contact_type', /only tenants and untriaged contacts/i],
+    ['extraction_disabled', /turned off/i],
+    ['ineligible_contact_type', /only tenants and untriaged/i],
     ['contact_deleted', /deleted contact/i],
     ['no_conversations', /no conversations/i],
     ['no_eligible_conversations', /no eligible conversations/i],
     ['schedule_failed', /could not be started/i],
-  ])('renders its own copy for %s', async (error, copy) => {
-    renderContact({ contactId: 'c-1', postError: { status: 409, body: { error } } });
-    await pressRunExtraction();
+  ])('renders its own copy for %s', async (code, copy) => {
+    runExtraction.mockRejectedValue(Object.assign(new Error('refused'), { code }));
+    renderAt('k1');
+    await pressRun();
     expect(await screen.findByRole('alert')).toHaveTextContent(copy);
   });
 });
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+Check how `ApiError` exposes the server's `error` string (the class already carries a `code`); use that property rather than re-parsing `body`.
+
+- [ ] **Step 3: Run to verify they fail**
 
 Run: `npm test --workspace dashboard -- ContactDetail.test.tsx`
 Expected: FAIL - no such menu item.
 
-- [ ] **Step 3: Add the types**
+- [ ] **Step 4: Types and client**
 
-`dashboard/src/api/types.ts`:
-- Widen `AiRunTrigger` with `'manual'`.
-- Widen `windowParams.maxTranscriptAgeDays` to `number | null` (line 292).
-- Add the event payload:
+`dashboard/src/api/types.ts`: add `'manual'` to `AiRunTrigger`; widen `windowParams.maxTranscriptAgeDays` to `number | null` (`:292`); add `AiRunCompletedEvent` mirroring the backend interface from Task 4 step 3.
 
-```ts
-export interface AiRunCompletedEvent {
-  conversationId: string;
-  runId: string;
-  requestId?: string;
-  contactId?: string;
-  outcome: 'applied' | 'no_op' | 'skipped' | 'failed';
-  skipReason?: string;
-  errorKind?: string;
-  wrote: number;
-  suggested: number;
-  notedLines: number;
-}
-```
-
-- [ ] **Step 4: Add the client call**
-
-`dashboard/src/api/endpoints.ts`:
+`dashboard/src/api/endpoints.ts`: follow the file's own `request<T>` idiom (there is no `postJson`):
 
 ```ts
 export async function runExtraction(
   contactId: string,
 ): Promise<{ requestId: string; scheduled: string[]; failed: string[] }> {
-  return postJson(`/api/contacts/${encodeURIComponent(contactId)}/extraction-run`, {});
+  return request(`/api/contacts/${encodeURIComponent(contactId)}/extraction-run`, { method: 'POST' });
 }
 ```
 
-Follow the file's existing helper (`postJson` or equivalent) so errors surface as the shared `ApiError` with `status` and `body`.
+Match the generic/options shape of a neighbouring POST in the file exactly.
 
-- [ ] **Step 5: Dispatch the event**
+`dashboard/src/api/EventStreamProvider.tsx`: follow the existing listener idiom at `:208` - it uses a `parse<T>` helper, a `dispatch(...)` call and a mandatory `markActivity()`. Copy that block for `'ai_run.completed'` rather than writing a bare `addEventListener`, and add `onAiRunCompleted?: (e: AiRunCompletedEvent) => void` to the handler map type.
 
-`dashboard/src/api/EventStreamProvider.tsx`, beside the `suggestion.updated` listener at `:208`:
+- [ ] **Step 5: The menu item**
 
-```tsx
-      source.addEventListener('ai_run.completed', (ev) => {
-        handlers.current.onAiRunCompleted?.(JSON.parse((ev as MessageEvent).data) as AiRunCompletedEvent);
-      });
-```
-
-Add `onAiRunCompleted?: (e: AiRunCompletedEvent) => void` to the handler map type.
-
-- [ ] **Step 6: Add the presentational menu item**
-
-`ContactActionsMenu.tsx` - this component stays presentational; the parent owns the request:
+`ContactActionsMenu.tsx` stays presentational. Add to the props interface:
 
 ```tsx
   /** Start a manual AI extraction run; the parent does the request. */
   onRunExtraction: () => void;
-  /** True while a run requested from this page is in flight (disables the item). */
+  /** True from press until the run reports back (disables the item). */
   extractionBusy?: boolean;
 ```
 
-and in the menu body, following the existing item pattern:
+and in the menu body, following the existing item pattern - **including the `setOpen(false)` the other items call**, or the menu stays open and a second query for the item finds a stale node:
 
 ```tsx
-          <button type="button" role="menuitem" disabled={extractionBusy} onClick={onRunExtraction}>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={extractionBusy}
+            onClick={() => { setOpen(false); onRunExtraction(); }}
+          >
             Run AI extraction
           </button>
 ```
 
-- [ ] **Step 7: Own the state machine in `ContactDetail`**
+`ContactActionsMenu.test.tsx` renders the component directly and will fail on the new required prop. Add `onRunExtraction={() => {}}` to its render helper.
 
-Add near the other constants:
+- [ ] **Step 6: The state machine in `ContactDetail`**
 
 ```tsx
 /** How long the indicator waits before it stops claiming to know. Comfortably
  *  above the observed 5-40s (a 30s worker poll plus the run), because the poll
  *  can be delayed by a long-running row ahead of this one in the same pass. */
 export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
+
+type ExtractionState =
+  | { phase: 'idle' }
+  | { phase: 'running'; requestId: string; pending: Set<string>; wrote: number; suggested: number; failedThreads: number; errorKind?: string }
+  | { phase: 'done'; tone: 'status' | 'alert'; message: string };
 ```
 
-State and handler:
-
 ```tsx
-  const [extraction, setExtraction] = useState<
-    | { phase: 'idle' }
-    | { phase: 'running'; requestId: string; pending: Set<string>; wrote: number; suggested: number; failed: number }
-    | { phase: 'done'; tone: 'status' | 'alert'; message: string }
-  >({ phase: 'idle' });
+  const [extraction, setExtraction] = useState<ExtractionState>({ phase: 'idle' });
 
   const onRunExtraction = useCallback(async () => {
+    // Busy from the press, not from the response: otherwise a double-click
+    // fires two POSTs before the first resolves.
+    setExtraction({ phase: 'running', requestId: '', pending: new Set(), wrote: 0, suggested: 0, failedThreads: 0 });
     try {
       const res = await runExtraction(contactId);
       setExtraction({
@@ -1385,7 +1464,7 @@ State and handler:
         pending: new Set(res.scheduled),
         wrote: 0,
         suggested: 0,
-        failed: res.failed.length,
+        failedThreads: res.failed.length,
       });
     } catch (err) {
       setExtraction({ phase: 'done', tone: 'alert', message: extractionRefusalCopy(err) });
@@ -1393,21 +1472,22 @@ State and handler:
   }, [contactId]);
 ```
 
-Resolution, keyed on `requestId` so an unrelated automatic run on the same thread cannot resolve it:
+Resolution collects every scheduled thread before deciding, so one failing thread does not hide the others (spec 4.6):
 
 ```tsx
   useEventStream({
     onAiRunCompleted: (e) => {
       setExtraction((prev) => {
-        if (prev.phase !== 'running' || e.requestId !== prev.requestId) return prev;
+        if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) return prev;
         const pending = new Set(prev.pending);
         pending.delete(e.conversationId);
         const wrote = prev.wrote + e.wrote;
         const suggested = prev.suggested + e.suggested;
-        if (e.outcome === 'failed') {
-          return { phase: 'done', tone: 'alert', message: extractionFailureCopy(e.errorKind) };
+        const errorKind = prev.errorKind ?? (e.outcome === 'failed' ? (e.errorKind ?? 'driver') : undefined);
+        if (pending.size > 0) return { ...prev, pending, wrote, suggested, ...(errorKind !== undefined && { errorKind }) };
+        if (errorKind !== undefined) {
+          return { phase: 'done', tone: 'alert', message: extractionFailureCopy(errorKind) };
         }
-        if (pending.size > 0) return { ...prev, pending, wrote, suggested };
         return {
           phase: 'done',
           tone: 'status',
@@ -1422,47 +1502,40 @@ Resolution, keyed on `requestId` so an unrelated automatic run on the same threa
   useEffect(() => {
     if (extraction.phase !== 'running') return undefined;
     const t = setTimeout(() => {
-      setExtraction({
-        phase: 'done',
-        tone: 'status',
-        message: 'Still running - check Settings > AI runs.',
-      });
+      setExtraction({ phase: 'done', tone: 'status', message: 'Still running - check Settings > AI runs.' });
     }, RUN_INDICATOR_TIMEOUT_MS);
     return () => clearTimeout(t);
   }, [extraction.phase]);
 ```
 
-Copy helpers, beside the component:
-
 ```tsx
-function extractionFailureCopy(errorKind?: string): string {
+function extractionFailureCopy(errorKind: string): string {
   return errorKind === 'truncated'
     ? 'Extraction ran out of room - the transcript may be too long.'
     : 'Extraction failed - see Settings > AI runs.';
 }
 
 function extractionRefusalCopy(err: unknown): string {
-  const reason = err instanceof ApiError ? (err.body as { error?: string } | undefined)?.error : undefined;
-  switch (reason) {
+  const code = err instanceof ApiError ? err.code : undefined;
+  switch (code) {
     case 'extraction_disabled': return 'AI extraction is turned off for this environment.';
     case 'ineligible_contact_type': return 'Only tenants and untriaged contacts can be extracted.';
     case 'contact_deleted': return 'This is a deleted contact.';
     case 'no_conversations': return 'This contact has no conversations to extract.';
     case 'no_eligible_conversations': return 'This contact has no eligible conversations to extract.';
-    case 'schedule_failed': return 'Extraction could not be started - try again.';
     default: return 'Extraction could not be started - try again.';
   }
 }
 ```
 
-Render the region beside the existing `deletedBanner`, following that pattern. Success announces politely, failure announces assertively:
+Render beside the existing `deletedBanner`:
 
 ```tsx
         {extraction.phase === 'running' ? (
           <div className={styles.extractionBanner} role="status">
             {`Running AI extraction${extraction.pending.size > 1 ? ` on ${extraction.pending.size} threads` : ''}...`}
-            {extraction.failed > 0
-              ? ` ${extraction.failed} thread${extraction.failed === 1 ? '' : 's'} could not be queued.`
+            {extraction.failedThreads > 0
+              ? ` ${extraction.failedThreads} thread${extraction.failedThreads === 1 ? '' : 's'} could not be queued.`
               : ''}
           </div>
         ) : null}
@@ -1473,10 +1546,14 @@ Render the region beside the existing `deletedBanner`, following that pattern. S
 
 Pass `onRunExtraction` and `extractionBusy={extraction.phase === 'running'}` to `ContactActionsMenu`.
 
+- [ ] **Step 7: Add the style**
+
+`ContactDetail.module.css` needs an `.extractionBanner` rule - a CSS-module miss typechecks and ships unstyled. Copy `.deletedBanner`'s shape.
+
 - [ ] **Step 8: Run the tests**
 
-Run: `npm test --workspace dashboard -- ContactDetail.test.tsx`
-Expected: PASS.
+Run: `npm test --workspace dashboard`
+Expected: PASS, including `ContactActionsMenu.test.tsx`.
 Run: `npm run typecheck`
 Expected: exit 0.
 
@@ -1484,7 +1561,7 @@ Expected: exit 0.
 
 ```bash
 git status
-git add dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/api/EventStreamProvider.tsx dashboard/src/routes/contact/ContactActionsMenu.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/ContactDetail.test.tsx
+git add dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/api/EventStreamProvider.tsx dashboard/src/routes/contact/ContactActionsMenu.tsx dashboard/src/routes/contact/ContactActionsMenu.test.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/ContactDetail.module.css dashboard/src/routes/contact/ContactDetail.test.tsx
 git commit -m "feat(contact): add the Run AI extraction action and its running indicator
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -1492,83 +1569,87 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 7: A dev seam that can actually age a message, and the e2e
+### Task 7: A dev seam that can age a message, and the e2e that proves the waiver
 
 **Files:**
 - Modify: `app/src/routes/dev.ts`
 - Create: `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`
 
 **Interfaces:**
-- Consumes: everything above.
 - Produces: `POST /__dev/extraction/message-fixture` taking `{ conversationId, body, createdAt, direction? }`.
 
-**Why a seam rather than seed rows:** the lean world cannot exercise this feature as-is. Its message rows carry `ts` and `tsMsgId` but **no `created_at`** (`app/src/lib/seed/lean.ts:274-300`), and `created_at` is the field the cutoff reads (`app/src/jobs/extraction.ts:433-436`) - so the fixed `2026-06-01` timestamps are not aging anything. Separately the hermetic lane runs the fake driver, whose protocol is an `EXTRACT:` marker in a message body, which no lean message carries. Adding rows to lean would risk its byte stability; a hermetic-only seam mirrors `POST /__dev/voice/transcript-fixture` (`app/src/routes/dev.ts:759`) and is structurally absent in deployed environments.
+**Why a direct doc-client write:** `MessagesRepo` has no `put`, and `append` hard-stamps `created_at: now` (`app/src/repos/messagesRepo.ts:1713`) - there is no caller-supplied `created_at` path anywhere in the repo. Rather than widen a production write path for a test-only need, this seam writes the item directly. `app/src/routes/dev.ts` already imports `tableName` (`:9`) and `createDocumentClient` (`:10`), so it is in-idiom for this file, and like every `/__dev` route it is structurally absent in deployed environments.
 
-- [ ] **Step 1: Write the e2e spec**
+- [ ] **Step 1: Write the e2e**
 
-Create `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`:
+Create `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts`, modelled on `e2e/tests/dashboard-next/ai-run-log.spec.ts` (same directory - copy its `NEXT`, `devLoginAs` and `createContact` helpers rather than importing a `steps.js` that does not exist):
 
 ```ts
-import { expect, test } from '@playwright/test';
-import { devLogin, planted, seedLean } from '../../support/steps.js';
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { extractionTick } from "../../fixtures/extraction.js";
+import { postInboundSms } from "../../fixtures/fakeTwilio.js";
 
-const AGED = '2026-01-05T10:00:00.000Z'; // far outside any 30-day window
+const NEXT = process.env["E2E_DASHBOARD_URL"] ?? "http://127.0.0.1:5174";
+const AGED = "2026-01-05T12:00:00.000Z";
+const MARKER = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"Two cats"}}}';
 
-test('a manual run extracts aged history that an automatic run skips', async ({ page, request }) => {
-  await seedLean(request);
-  await devLogin(page);
+// devLoginAs / createContact / uniquePhone: copy from ai-run-log.spec.ts.
 
-  // An aged message the automatic window cannot see, carrying the fake
-  // driver's EXTRACT: marker so the run produces a real suggestion.
-  await request.post('/__dev/extraction/message-fixture', {
-    data: {
-      conversationId: planted.lean.tenantConversationId,
-      body: 'I have two cats. EXTRACT: pets=Two cats',
-      createdAt: AGED,
-      direction: 'inbound',
-    },
+test("a manual run reads aged history that an automatic run cannot see", async ({ page, request }) => {
+  await devLoginAs(page, "staff@example.com");
+  const { contactId, phone } = await createContact(request, { firstName: "Aged", type: "tenant" });
+
+  // An ordinary inbound creates the conversation AND an automatic due row.
+  await postInboundSms(request, { from: phone, body: "hello" });
+  const convId = await conversationIdFor(request, contactId);
+
+  // Plant the marker on a message far outside the 30-day window.
+  const planted = await request.post(`${NEXT}/__dev/extraction/message-fixture`, {
+    data: { conversationId: convId, body: MARKER, createdAt: AGED, direction: "inbound" },
   });
+  expect(planted.ok()).toBeTruthy();
 
-  // NEGATIVE first: without a manual press, the aged message is outside the
-  // window, so a tick produces no run that reaches the driver.
-  await request.post('/__dev/extraction/tick');
-  await page.goto(`/contacts/${planted.lean.tenantContactId}`);
-  await expect(page.getByRole('button', { name: /accept/i })).toHaveCount(0);
+  // NEGATIVE: the automatic run is due and DOES run - it just cannot see the
+  // aged message, so it produces no suggestion. This is the assertion that
+  // proves the age gate, not the absence of a run.
+  await extractionTick(request);
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  await expect(page.getByText(/two cats/i)).toHaveCount(0);
 
-  // Press, tick, and the run reaches the model.
-  await page.getByRole('button', { name: /more actions/i }).click();
-  await page.getByRole('menuitem', { name: /run ai extraction/i }).click();
-  await expect(page.getByRole('status')).toContainText(/running ai extraction/i);
+  // POSITIVE: the manual run waives the floor and sees it.
+  await page.getByRole("button", { name: /more actions/i }).click();
+  await page.getByRole("menuitem", { name: /run ai extraction/i }).click();
+  await expect(page.getByRole("status")).toContainText(/running ai extraction/i);
 
-  await request.post('/__dev/extraction/tick');
-
-  // The chip arrives with no reload.
+  await extractionTick(request);
   await expect(page.getByText(/two cats/i)).toBeVisible({ timeout: 15_000 });
 
   // And the run is recorded as manual.
-  await page.goto('/settings');
-  await page.getByRole('tab', { name: /ai runs/i }).click();
-  const row = page.getByRole('listitem').filter({ hasText: /manual/i }).first();
-  await expect(row).toBeVisible();
-  await expect(row).not.toContainText(/skipped/i);
+  await page.goto(`${NEXT}/settings/ai-runs`);
+  await expect(page.getByRole("heading", { name: "AI run log" })).toBeVisible();
+  const rows = page.getByRole("list", { name: "AI runs" });
+  await expect(rows.getByText(/manual/i).first()).toBeVisible();
 });
 ```
 
+Write `conversationIdFor(request, contactId)` against the contact-threads endpoint the dashboard itself uses; confirm the path in `dashboard/src/api/endpoints.ts` rather than guessing. Confirm the settings route and the kebab's accessible name against the app before finalising.
+
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npm run e2e -- --grep "manual run extracts aged history"`
-Expected: FAIL - 404 on `/__dev/extraction/message-fixture`.
-Note: `npm run e2e -- --flag` does not forward flags through npm. Use the e2e workspace's own runner, or run the full suite.
+Run: `npm run e2e`
+Expected: FAIL - 404 on `/__dev/extraction/message-fixture`. (`npm run e2e -- --grep ...` does not forward flags through npm; run the suite, or invoke Playwright from the e2e workspace.)
 
 - [ ] **Step 3: Implement the seam**
 
 In `app/src/routes/dev.ts`, beside the transcript fixture:
 
 ```ts
-  // POST /__dev/extraction/message-fixture - plant one message with an
-  // ARBITRARY created_at. Hermetic-only, like every /__dev route: the lean seed
-  // writes `ts` but no `created_at`, which is the field the extraction age
-  // cutoff reads, so there is otherwise no way to exercise an aged window.
+  // POST /__dev/extraction/message-fixture - plant ONE message with an
+  // arbitrary created_at. Hermetic-only, like every /__dev route.
+  //
+  // A direct doc-client write on purpose: MessagesRepo has no put(), and
+  // append() hard-stamps created_at (messagesRepo.ts:1713). Widening a
+  // production write path for a test-only need is the worse trade.
   router.post('/__dev/extraction/message-fixture', json(), async (req, res) => {
     const { conversationId, body, createdAt, direction } = req.body as {
       conversationId?: string; body?: string; createdAt?: string; direction?: 'inbound' | 'outbound';
@@ -1577,35 +1658,40 @@ In `app/src/routes/dev.ts`, beside the transcript fixture:
       res.status(400).json({ error: 'conversationId, body and createdAt are required' });
       return;
     }
-    const messages = createMessagesRepo({ logger: log });
-    const tsMsgId = `${createdAt}#dev-${randomUUID()}`;
-    await messages.put({
+    const dir = direction ?? 'inbound';
+    const sid = `dev-${randomUUID()}`;
+    const item = {
       conversationId,
-      tsMsgId,
+      tsMsgId: `${createdAt}#${sid}`,
       type: 'sms',
-      direction: direction ?? 'inbound',
-      author: direction === 'outbound' ? 'teammate' : 'tenant',
+      direction: dir,
+      author: dir === 'inbound' ? 'tenant' : 'teammate',
       body,
+      provider_sid: sid,
+      provider_ts: createdAt,
+      delivery_status: 'delivered',
       created_at: createdAt,
-    });
-    log.info({ conversationId, tsMsgId }, 'dev message fixture planted');
-    res.json({ tsMsgId });
+    };
+    const doc = createDocumentClient();
+    await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
+    log.info({ conversationId, tsMsgId: item.tsMsgId }, 'dev message fixture planted');
+    res.json({ tsMsgId: item.tsMsgId });
   });
 ```
 
-Match the repo's real `put` signature; if `createMessagesRepo` exposes a different write method, use that one and keep `created_at` explicit.
+Confirm the table base name against `tableName(...)`'s other uses in this file, and import `PutCommand` from `@aws-sdk/lib-dynamodb` and `randomUUID` from `node:crypto` if not already present.
 
 - [ ] **Step 4: Run the e2e**
 
 Run: `npm run e2e`
-Expected: exit 0, including the new spec.
+Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status
 git add app/src/routes/dev.ts e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts
-git commit -m "test(extraction): prove a manual run reads aged history an automatic run skips
+git commit -m "test(extraction): prove a manual run reads aged history an automatic run cannot
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1615,26 +1701,22 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 8: File the latent hazards and close out
 
 **Files:**
-- Create: `docs/issues/extraction-driver-call-unbounded.md`
-- Create: `docs/issues/extraction-claimedat-stamped-from-poll-clock.md`
-- Create: `docs/issues/extraction-stranded-claim-no-reaper.md`
-- Create: `docs/issues/soft-deleted-contact-still-extractable.md`
-- Create: `docs/issues/manual-extraction-bulk-backfill.md`
+- Create: five files under `docs/issues/`
 
 - [ ] **Step 1: Write each issue from `docs/issues/_TEMPLATE.md`**
 
-Content for each is in the spec's section 9. Each must state: it is pre-existing, it is not created by this feature, and the evidence line. Specifically:
+Each states that it is pre-existing, not created by this feature, and its evidence line:
 
-1. `extraction-driver-call-unbounded` - the Anthropic client is built with no `timeout` and no `maxRetries` (`app/src/adapters/extraction.ts:218`), inheriting a 10-minute timeout with 2 retries that themselves retry timeouts: roughly 30 minutes of wall clock holding a claim.
+1. `extraction-driver-call-unbounded` - the Anthropic client is built with no `timeout` and no `maxRetries` (`app/src/adapters/extraction.ts:218`), inheriting a 10-minute timeout with 2 retries that themselves retry timeouts: roughly 30 minutes holding a claim.
 2. `extraction-claimedat-stamped-from-poll-clock` - `claim` writes `claimedAt: nowIso` (`app/src/repos/extractionRepo.ts:270`), the poll-wide timestamp, so a later row in a long pass records a claim time already minutes stale. Harmless only because nothing reads it for logic.
 3. `extraction-stranded-claim-no-reaper` - a process dying mid-run leaves the row claimed, out of the due index, with nothing to re-arm it.
-4. `soft-deleted-contact-still-extractable` - this feature refuses the press (4.5) but the job has no soft-delete check, so the automatic path still writes into a deleted contact.
-5. `manual-extraction-bulk-backfill` - the deferred backfill over the imported population, including the constraint that makes it more than a loop: the newest-50 page and 60k budget mean a long imported history is never fully read, so a backfill needs its own windowing design.
+4. `soft-deleted-contact-still-extractable` - this feature refuses the press (4.5); the job has no soft-delete check, so the automatic path still writes into a deleted contact.
+5. `manual-extraction-bulk-backfill` - the deferred backfill, including the constraint that makes it more than a loop: newest-50 and the 60k budget mean a long imported history is never fully read.
 
 - [ ] **Step 2: Regenerate the index**
 
 Run: `npm run issues`
-Expected: `docs/issues/INDEX.md` regenerated (gitignored - do not stage it).
+Expected: `docs/issues/INDEX.md` regenerated. It is gitignored - do not stage it.
 
 - [ ] **Step 3: Sync main once, then run all three gates bare**
 
@@ -1646,7 +1728,7 @@ npm test
 npm run e2e
 ```
 
-Expected: exit 0 from each. Record the exact codes for the handback. Honour the known flakes: re-run once before blaming this branch, and report both runs.
+Record the exact exit codes. Honour the known flakes (`tour-reminders-panel-e2e-flake`, `conversationdetail-members-mock-suite-flake`): re-run once before blaming this branch, and report both runs.
 
 - [ ] **Step 4: Commit**
 
@@ -1666,36 +1748,33 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 | Spec section | Task |
 | --- | --- |
-| 4.1 flag, `requestId`, lifecycle | 1, 2 |
-| 4.1 conditional `fail` | 2 |
+| 4.1 flag, `requestId`, claim clears both | 1 |
+| 4.1 conditional `fail`, park clears both | 2 |
 | 4.2 both gate waivers | 3 |
 | 4.3 nullable recorded age floor | 3 |
-| 4.4 trigger from the flag, totality arm | 3 |
-| 4.4a arm-the-poll (no runner) | design of 1 + 5; nothing to build |
+| 4.4 trigger from the flag, totality arm | 1 (forced early by the type change) |
+| 4.4a arm-the-poll, no second runner | design of 1 + 5; nothing to build |
 | 4.4b event, `requestId`, counts, emit path, ninth-event count | 4 |
 | 4.5 endpoint, filter, refusals, partial commit, audit | 5 |
 | 4.6 indicator states, timeout, copy | 6 |
-| 4.7 what does not change | no task by design |
-| 4.8 surfaces | spread across 1-6; typecheck is the enumerator |
+| 4.8 surfaces | 1-6; typecheck is the enumerator |
 | 7 unit tests | 1, 2, 3, 4, 5 |
 | 7 dashboard tests | 6 |
-| 7 e2e incl. the negative assertion | 7 |
+| 7 e2e with a real negative | 7 |
 | 9 out of scope, filed | 8 |
 
-No gaps.
+**2. Placeholder scan.** No TBD, no "add error handling", no "similar to Task N". Six steps say "confirm X against the file before finalising" - each names the exact file and property, because the previous revision of this plan invented helper names and a builder must not inherit that habit.
 
-**2. Placeholder scan.** No TBD, no "add error handling", no "similar to Task N". Every code step carries real code. Two steps say "match the repo's real signature" (Task 1 step 8 harness fake, Task 7 step 3 `put`) - these name the exact file and the exact property that matters rather than deferring a decision.
+**3. Type consistency.** `requestManualExtraction(conversationId, dueAt, requestId)` is identical in Tasks 1, 5. `fail(conversationId, error, nextDueAt, {claimed, listedDueAt, manual})` is defined in Task 2 and called with that shape in Task 2 step 5. `AiRunCompletedEvent` fields match across Task 4 (backend) and Task 6 (dashboard). `RunDraft.requestId` is set in Task 1 and read in Task 4; `.wrote`/`.suggested` set in Task 3, read in Task 4; `.claimed` set and read in Task 2.
 
-**3. Type consistency.** `requestManualExtraction(conversationId, dueAt, requestId)` is used identically in Tasks 1, 2 and 5. `fail(conversationId, error, nextDueAt, { listedDueAt?, manual })` is defined in Task 2 and called with that shape in Task 2 step 5. `AiRunCompletedEvent` field names match across Task 4 (backend) and Task 6 (dashboard). `RunDraft.wrote`/`.suggested` are added in Task 3 and read in Task 4. `RUN_INDICATOR_TIMEOUT_MS` is defined and used in Task 6.
+**4. Known-good ordering.** Task 1 includes the `newRunDraft` change because making `channel` optional breaks it - without that, Task 1 cannot reach its own typecheck gate. Tasks 2 and 5 both depend only on Task 1 and touch disjoint code, so they can run in parallel. Task 4 needs Task 3's draft counts. Task 6 needs 4 and 5. Task 7 needs everything.
 
 ---
 
-## Execution order and dependencies
+## Execution order
 
 ```
-1 -> 2 -> 3 -> 4 -> 6
-     \-> 5 -----------> 6
-                        \-> 7 -> 8
+1 -> 2 ------------\
+ \-> 3 -> 4 -------> 6 -> 7 -> 8
+  \-> 5 -----------/
 ```
-
-Tasks 2 and 5 can proceed in parallel once 1 lands. Task 6 needs both 4 and 5. Task 7 needs everything.

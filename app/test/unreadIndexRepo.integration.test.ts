@@ -12,12 +12,18 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
+import {
+  CreateTableCommand,
+  DescribeTableCommand,
+  waitUntilTableExists,
+} from '@aws-sdk/client-dynamodb';
 import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { backfillUnreadFlag } from '../scripts/backfill-unread-flag.js';
+import { ensureGsis } from '../scripts/db-update-gsis.js';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
-import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { deleteTableIfExists, ensureTable, toCreateTableInput } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createConversationsRepo, UNREAD_FLAG_VALUE } from '../src/repos/conversationsRepo.js';
@@ -528,5 +534,133 @@ describe.skipIf(!reachable)('backfill:unread-flag against DynamoDB Local (throwa
     ).toBe(counts.scanned);
 
     expect(await allConversations()).toEqual(before);
+  });
+});
+
+// --- db:update-gsis ---------------------------------------------------------
+// The no-data-loss local schema update. `ensureTable` is create-only, so a
+// table that predates a new GSI never gains it; `db:create --reset` would fix
+// that by DROPPING the table, taking the human's imported local data with it.
+// This proves the third path: add the missing index in place, keep the rows.
+describe.skipIf(!reachable)('db:update-gsis against DynamoDB Local (throwaway prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-gsis-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+
+  const spec = getTableSpec('conversations');
+  const physicalName = tableName('conversations', testEnv);
+
+  beforeAll(async () => {
+    // A table built from the REAL spec with ONE index artificially removed -
+    // exactly the shape a local table created before Task 1 landed is in.
+    const input = toCreateTableInput(spec, physicalName);
+    input.GlobalSecondaryIndexes = (input.GlobalSecondaryIndexes ?? []).filter(
+      (gsi) => gsi.IndexName !== 'byUnread',
+    );
+    // DynamoDB REJECTS an AttributeDefinition that no key schema references, so
+    // dropping the index means dropping its now-orphaned key attribute too
+    // (`unread_flag`). `last_activity_at` stays - byLastActivity and
+    // byRelayStatus still range on it. This is the same strictness that makes
+    // UpdateTable want a PER-INDEX definition set rather than the whole-table
+    // one, which is why gsiAttributeDefinitions exists.
+    const referenced = new Set(
+      [
+        ...(input.KeySchema ?? []),
+        ...(input.GlobalSecondaryIndexes ?? []).flatMap((gsi) => gsi.KeySchema ?? []),
+      ]
+        .map((key) => key.AttributeName)
+        .filter((name): name is string => typeof name === 'string'),
+    );
+    input.AttributeDefinitions = (input.AttributeDefinitions ?? []).filter(
+      (attr) => typeof attr.AttributeName === 'string' && referenced.has(attr.AttributeName),
+    );
+    await client.send(new CreateTableCommand(input));
+    await waitUntilTableExists({ client, maxWaitTime: 120 }, { TableName: physicalName });
+
+    // A row that must SURVIVE the update - the entire point of the script.
+    await doc.send(
+      new PutCommand({
+        TableName: physicalName,
+        Item: {
+          conversationId: 'conv-preexisting',
+          type: 'tenant_1to1',
+          status: 'open',
+          participant_phone: '+15550100401',
+          last_activity_at: '2026-08-01T00:00:00.000Z',
+          unread_count: 2,
+          unread_flag: UNREAD_FLAG_VALUE,
+        },
+      }),
+    );
+  }, 180_000);
+
+  afterAll(async () => {
+    await deleteTableIfExists(client, physicalName);
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  it('starts from a table that is genuinely MISSING the index', async () => {
+    // Without this the test could pass by doing nothing at all.
+    const { Table } = await client.send(new DescribeTableCommand({ TableName: physicalName }));
+    const names = (Table?.GlobalSecondaryIndexes ?? []).map((gsi) => gsi.IndexName);
+    expect(names).not.toContain('byUnread');
+    expect(names.length).toBe(spec.gsis.length - 1);
+  });
+
+  it('adds the missing GSI in place, ACTIVE, without dropping the table', async () => {
+    const logged: string[] = [];
+    const result = await ensureGsis(client, [spec], testEnv, (m) => logged.push(m));
+
+    expect(result.added).toEqual([`${physicalName}.byUnread`]);
+    expect(result.unchanged).toEqual([]);
+    expect(result.missingTables).toEqual([]);
+    expect(logged.some((m) => m.includes(`added    ${physicalName}.byUnread`))).toBe(true);
+
+    const { Table } = await client.send(new DescribeTableCommand({ TableName: physicalName }));
+    const added = (Table?.GlobalSecondaryIndexes ?? []).find((gsi) => gsi.IndexName === 'byUnread');
+    expect(added).toBeDefined();
+    expect(added?.IndexStatus).toBe('ACTIVE');
+    expect(added?.KeySchema).toEqual([
+      { AttributeName: 'unread_flag', KeyType: 'HASH' },
+      { AttributeName: 'last_activity_at', KeyType: 'RANGE' },
+    ]);
+    expect(added?.Projection?.ProjectionType).toBe('ALL');
+
+    // THE POINT: the pre-existing row is still there. A --reset would have
+    // taken it with the table.
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: physicalName, Key: { conversationId: 'conv-preexisting' } }),
+    );
+    expect(Item?.['unread_count']).toBe(2);
+
+    // And the row is genuinely queryable through the new index.
+    const repo = createConversationsRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const { items } = await repo.queryUnreadPage({ limit: 10 });
+    expect(items.map((c) => c.conversationId)).toContain('conv-preexisting');
+    // Generous timeout: this is instant on an idle DynamoDB Local (~200ms) but
+    // the index BACKFILL is a background task that starves when the shared
+    // container is saturated by other worktrees' suites.
+  }, 300_000);
+
+  it('a SECOND run reports nothing to do (idempotent)', async () => {
+    const logged: string[] = [];
+    const result = await ensureGsis(client, [spec], testEnv, (m) => logged.push(m));
+
+    expect(result.added).toEqual([]);
+    expect(result.unchanged).toEqual([physicalName]);
+    expect(logged).toEqual([`  ok       ${physicalName}`]);
+  });
+
+  it('reports an ABSENT table rather than trying to alter it', async () => {
+    const absentEnv = { TABLE_PREFIX: `hc-test-gsis-absent-${randomUUID().slice(0, 8)}-` };
+    const result = await ensureGsis(client, [spec], absentEnv, () => {});
+    expect(result.added).toEqual([]);
+    expect(result.unchanged).toEqual([]);
+    expect(result.missingTables).toEqual([tableName('conversations', absentEnv)]);
   });
 });

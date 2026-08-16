@@ -22,6 +22,7 @@
     "db:start": "node scripts/db.mjs start",
     "db:stop": "node scripts/db.mjs stop",
     "db:create": "tsx app/scripts/db-create.ts",
+    "db:update-gsis": "tsx app/scripts/db-update-gsis.ts",
     "db:seed": "tsx app/scripts/db-seed.ts",
     "s3:start": "node scripts/s3.mjs start",
     "s3:stop": "node scripts/s3.mjs stop",

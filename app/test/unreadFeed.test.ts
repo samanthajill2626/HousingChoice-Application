@@ -15,12 +15,16 @@
 // timestamp tie behaves the way DynamoDB does.
 import { describe, expect, it, vi } from 'vitest';
 import {
+  collectUnreadRows,
   isOneToOneBucket,
   isUnreadVisible,
   iterateUnreadConversations,
   toExclusiveStartKey,
+  warnDeletedProbes,
+  UNREAD_DELETED_PROBE_WARN,
   UNREAD_WALK_LIMIT,
   UNREAD_WALK_WARN,
+  type UnreadCandidate,
   type UnreadWalkState,
 } from '../src/lib/unreadFeed.js';
 import {
@@ -29,6 +33,13 @@ import {
   type ConversationItem,
   type ConversationsRepo,
 } from '../src/repos/conversationsRepo.js';
+import {
+  contactEmails,
+  contactPhones,
+  type ContactItem,
+  type ContactsRepo,
+} from '../src/repos/contactsRepo.js';
+import type { MessageItem, MessagesRepo } from '../src/repos/messagesRepo.js';
 import type { Logger } from '../src/lib/logger.js';
 import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
@@ -114,6 +125,131 @@ async function drain(
   const out: ConversationItem[] = [];
   for await (const item of iterator) out.push(item);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2 fixtures: contacts + messages
+// ---------------------------------------------------------------------------
+
+interface CollectCalls extends QueryCalls {
+  findByPhone: number;
+  findByEmail: number;
+  listByConversation: number;
+}
+
+function emptyCollectCalls(): CollectCalls {
+  return { queryUnreadPage: 0, findByPhone: 0, findByEmail: 0, listByConversation: 0 };
+}
+
+function contact(overrides: Partial<ContactItem> & { contactId: string }): ContactItem {
+  return {
+    type: 'tenant',
+    status: 'searching',
+    ...overrides,
+  };
+}
+
+/**
+ * Contact resolution derived exactly the way the repo derives it (the shared
+ * contactPhones/contactEmails serializers), so a fixture that sets `phone`
+ * instead of `phones[]` resolves here too.
+ */
+function makeContacts(
+  contacts: ContactItem[],
+  calls: CollectCalls,
+  errors?: { findByPhone?: Error },
+): Pick<ContactsRepo, 'findByPhone' | 'findByEmail'> {
+  return {
+    async findByPhone(phone) {
+      calls.findByPhone += 1;
+      if (errors?.findByPhone !== undefined) throw errors.findByPhone;
+      return contacts.find((c) => contactPhones(c).some((p) => p.phone === phone));
+    },
+    async findByEmail(email) {
+      calls.findByEmail += 1;
+      return contacts.find((c) => contactEmails(c).some((e) => e.email === email));
+    },
+  };
+}
+
+function msg(overrides: Partial<MessageItem> & { created_at: string }): MessageItem {
+  return {
+    conversationId: 'conv-x',
+    tsMsgId: `${overrides.created_at}#m1`,
+    type: 'sms',
+    direction: 'inbound',
+    author: 'tenant',
+    provider_sid: 'SM-test',
+    provider_ts: overrides.created_at,
+    delivery_status: 'delivered',
+    ...overrides,
+  };
+}
+
+/** Newest message per conversationId; an absent entry models "no readable row". */
+function makeMessages(
+  latest: Record<string, MessageItem>,
+  calls: CollectCalls,
+  throwFor?: string,
+): Pick<MessagesRepo, 'listByConversation'> {
+  return {
+    async listByConversation(conversationId) {
+      calls.listByConversation += 1;
+      if (throwFor === conversationId) throw new Error('probe boom');
+      const found = latest[conversationId];
+      return found === undefined ? [] : [found];
+    },
+  };
+}
+
+/**
+ * `count` rows in strict index order: BOTH the timestamp and the conversationId
+ * descend with the array, so the tuple sort keeps array order even where a
+ * deliberate `tie` makes two rows share one `last_activity_at`. Every row
+ * resolves to its own contact.
+ */
+function contactSeries(
+  count: number,
+  tie?: number,
+): { items: ConversationItem[]; contacts: ContactItem[] } {
+  const items: ConversationItem[] = [];
+  const contacts: ContactItem[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const phone = `+1555${String(2_000_000 + i)}`;
+    items.push(
+      conv({
+        conversationId: `row-${String(count - i).padStart(4, '0')}`,
+        last_activity_at: tsAt(tie !== undefined && i === tie + 1 ? tie : i),
+        participant_phone: phone,
+      }),
+    );
+    contacts.push(
+      contact({
+        contactId: `contact-${String(i).padStart(4, '0')}`,
+        phones: [{ phone, primary: true }],
+      }),
+    );
+  }
+  return { items, contacts };
+}
+
+function contactCandidate(candidate: UnreadCandidate | undefined): Extract<
+  UnreadCandidate,
+  { kind: 'contact' }
+> {
+  if (candidate === undefined || candidate.kind !== 'contact') {
+    throw new Error(`expected a contact candidate, got ${String(candidate?.kind)}`);
+  }
+  return candidate;
+}
+
+/** Row IDENTITY per kind: contactId / phone / conversationId. */
+function candidateIds(candidates: UnreadCandidate[]): string[] {
+  return candidates.map((c) => {
+    if (c.kind === 'contact') return c.contactId;
+    if (c.kind === 'unknown') return c.phone;
+    return c.conversation.conversationId;
+  });
 }
 
 describe('isUnreadVisible / isOneToOneBucket', () => {
@@ -366,5 +502,447 @@ describe('iterateUnreadConversations', () => {
     // is tested in lib/rateLimitedWarn.ts - never assert exactly-once here.
     expect(loud.warn.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(loud.warn.mock.calls[0]?.[0]).toMatchObject({ event: 'unread_walk_scan_tripwire' });
+  });
+});
+
+describe('collectUnreadRows - grouping', () => {
+  it('groups index items into ONE candidate per row identity', async () => {
+    const alice = contact({
+      contactId: 'contact-alice',
+      phones: [
+        { phone: '+15550000001', primary: true },
+        { phone: '+15550000002', primary: false },
+      ],
+    });
+    const bob = contact({
+      contactId: 'contact-bob',
+      phones: [{ phone: '+15550000003', primary: true }],
+      emails: [{ email: 'bob@test.example', primary: true }],
+    });
+    const items = [
+      conv({ conversationId: 'a-newer', last_activity_at: tsAt(0), participant_phone: '+15550000001' }),
+      conv({ conversationId: 'a-older', last_activity_at: tsAt(1), participant_phone: '+15550000002' }),
+      conv({ conversationId: 'b-phone', last_activity_at: tsAt(2), participant_phone: '+15550000003' }),
+      conv({
+        conversationId: 'b-email',
+        last_activity_at: tsAt(3),
+        participant_email: 'bob@test.example',
+      }),
+      conv({ conversationId: 'u-unknown', last_activity_at: tsAt(4), participant_phone: '+15550000099' }),
+      // Contactless email thread: no identity to render, so it is SKIPPED
+      // (parity with the inbox reader) - email unknowns live in the
+      // unmatched-email surface only.
+      conv({
+        conversationId: 'e-orphan',
+        last_activity_at: tsAt(5),
+        participant_email: 'nobody@test.example',
+      }),
+      conv({ conversationId: 'g-relay', last_activity_at: tsAt(6), type: 'relay_group' }),
+      conv({
+        conversationId: 'g-group',
+        last_activity_at: tsAt(7),
+        type: 'group_text',
+        status: GROUP_TEXT_STATUS,
+      }),
+    ];
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts([alice, bob], calls),
+        messages: makeMessages({}, calls),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(candidateIds(result.candidates)).toEqual([
+      'contact-alice',
+      'contact-bob',
+      '+15550000099',
+      'g-relay',
+      'g-group',
+    ]);
+    // Representative is the FIRST (newest) thread encountered; the older ones
+    // merge behind it. No unread SUMS are computed at this layer.
+    const aliceRow = contactCandidate(result.candidates[0]);
+    expect(aliceRow.unreadConversations.map((c) => c.conversationId)).toEqual(['a-newer', 'a-older']);
+    const bobRow = contactCandidate(result.candidates[1]);
+    expect(bobRow.unreadConversations.map((c) => c.conversationId)).toEqual(['b-phone', 'b-email']);
+    expect(result.consumedAll).toBe(true);
+    expect(result.capped).toBe(false);
+    expect(result.truncated).toBe(false);
+    expect(result.deletedProbes).toBe(0);
+    // No hydration: nothing read a message for a live (non-deleted) contact.
+    expect(calls.listByConversation).toBe(0);
+    expect(result.remainingBudget).toBe(UNREAD_WALK_LIMIT - items.length);
+  });
+
+  it('skips excluded contacts entirely while their items still consume scan range', async () => {
+    const { items, contacts } = contactSeries(4);
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages({}, calls),
+      },
+      {
+        maxRows: 100,
+        budget: UNREAD_WALK_LIMIT,
+        excludeContactIds: new Set(['contact-0000', 'contact-0001']),
+      },
+    );
+
+    expect(candidateIds(result.candidates)).toEqual(['contact-0002', 'contact-0003']);
+    // Scan range was consumed by the excluded rows too: the position is past
+    // the LAST item, and the walk drained.
+    expect(result.scanPosition).toEqual({ lastActivityAt: tsAt(3), conversationId: 'row-0001' });
+    expect(result.consumedAll).toBe(true);
+    expect(result.remainingBudget).toBe(UNREAD_WALK_LIMIT - 4);
+  });
+
+  it('degrades to no-contact when the lookup throws, and to not-resurfaced when the probe throws', async () => {
+    const calls = emptyCollectCalls();
+    const items = [
+      conv({ conversationId: 'x-1', last_activity_at: tsAt(0), participant_phone: '+15550000501' }),
+    ];
+
+    // Injected loggers keep the best-effort WARNs out of the suite's stdout
+    // AND prove each degrade path is actually logged rather than swallowed.
+    const lookupLog = makeLoggerSpy();
+    const degraded = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts([], calls, { findByPhone: new Error('lookup boom') }),
+        messages: makeMessages({}, calls),
+        logger: lookupLog.logger,
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+    // A failed lookup must not drop the row silently: it falls back to the
+    // unknown-number identity, exactly as the inbox reader does.
+    expect(candidateIds(degraded.candidates)).toEqual(['+15550000501']);
+    expect(lookupLog.warn).toHaveBeenCalled();
+
+    const deleted = contact({
+      contactId: 'contact-probe-error',
+      phones: [{ phone: '+15550000502', primary: true }],
+      deleted_at: '2026-08-12T00:00:00.000Z',
+    });
+    const probeCalls = emptyCollectCalls();
+    const probeItems = [
+      conv({ conversationId: 'x-2', last_activity_at: tsAt(0), participant_phone: '+15550000502' }),
+    ];
+    const probeLog = makeLoggerSpy();
+    const probeFailed = await collectUnreadRows(
+      {
+        conversations: makeConversations(probeItems, probeCalls),
+        contacts: makeContacts([deleted], probeCalls),
+        messages: makeMessages({}, probeCalls, 'x-2'),
+        logger: probeLog.logger,
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+    expect(probeFailed.candidates).toEqual([]);
+    expect(probeFailed.deletedProbes).toBe(1);
+    expect(probeLog.warn).toHaveBeenCalled();
+  });
+});
+
+describe('collectUnreadRows - capped / consumedAll / truncated', () => {
+  it('distinguishes the CAP from the SUPPLY running out on identical data', async () => {
+    const { items, contacts } = contactSeries(300);
+
+    const cappedCalls = emptyCollectCalls();
+    const capped = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, cappedCalls),
+        contacts: makeContacts(contacts, cappedCalls),
+        messages: makeMessages({}, cappedCalls),
+      },
+      { maxRows: 30, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(capped.candidates).toHaveLength(30);
+    expect(capped.capped).toBe(true);
+    // THE round-3 blocking case: `consumedAll` is a CONSUMPTION fact and must
+    // NOT be inferred from the scan. Conflating it with layer 1's
+    // scanExhausted made every under-budget dataset return page one with a
+    // null cursor.
+    expect(capped.consumedAll).toBe(false);
+    expect(capped.truncated).toBe(false);
+    expect(capped.scanPosition).toEqual({ lastActivityAt: tsAt(29), conversationId: 'row-0271' });
+
+    const wholeCalls = emptyCollectCalls();
+    const whole = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, wholeCalls),
+        contacts: makeContacts(contacts, wholeCalls),
+        messages: makeMessages({}, wholeCalls),
+      },
+      { maxRows: 500, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(whole.candidates).toHaveLength(300);
+    expect(whole.consumedAll).toBe(true);
+    expect(whole.capped).toBe(false);
+    expect(whole.truncated).toBe(false);
+  });
+
+  it('reports truncated when the request budget runs out first', async () => {
+    const { items, contacts } = contactSeries(300);
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages({}, calls),
+      },
+      { maxRows: 100, budget: 10 },
+    );
+
+    expect(result.candidates).toHaveLength(10);
+    expect(result.truncated).toBe(true);
+    expect(result.capped).toBe(false);
+    expect(result.consumedAll).toBe(false);
+    expect(result.remainingBudget).toBe(0);
+  });
+
+  it('carries laziness through: maxRows 1 against 300 visible rows is ONE query', async () => {
+    const { items, contacts } = contactSeries(300);
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages({}, calls),
+      },
+      { maxRows: 1, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.capped).toBe(true);
+    expect(calls.queryUnreadPage).toBe(1);
+    // Only the ONE row it emitted was resolved - the collector stopped pulling.
+    expect(calls.findByPhone).toBe(1);
+    expect(result.remainingBudget).toBe(UNREAD_WALK_LIMIT - 1);
+  });
+
+  it('resumes from scanPosition + the seen-set without duplicating or skipping a row', async () => {
+    // Rows 29 and 30 share a `last_activity_at`, so the resume crosses a
+    // TIMESTAMP TIE - the case an index-position cursor cannot express.
+    const { items, contacts } = contactSeries(300, 29);
+    const firstCalls = emptyCollectCalls();
+
+    const first = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, firstCalls),
+        contacts: makeContacts(contacts, firstCalls),
+        messages: makeMessages({}, firstCalls),
+      },
+      { maxRows: 30, budget: UNREAD_WALK_LIMIT },
+    );
+    expect(first.scanPosition).toBeDefined();
+    const seen = new Set(candidateIds(first.candidates));
+    expect(seen.size).toBe(30);
+
+    const secondCalls = emptyCollectCalls();
+    const second = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, secondCalls),
+        contacts: makeContacts(contacts, secondCalls),
+        messages: makeMessages({}, secondCalls),
+      },
+      {
+        maxRows: 30,
+        budget: UNREAD_WALK_LIMIT,
+        ...(first.scanPosition !== undefined && { startAfter: first.scanPosition }),
+        excludeContactIds: seen,
+      },
+    );
+
+    const secondIds = candidateIds(second.candidates);
+    expect(secondIds).toEqual(
+      Array.from({ length: 30 }, (_, i) => `contact-${String(30 + i).padStart(4, '0')}`),
+    );
+    expect(new Set([...seen, ...secondIds]).size).toBe(60);
+  });
+});
+
+describe('collectUnreadRows - deleted-contact resurfacing', () => {
+  const DELETED_AT = '2026-08-12T00:00:00.000Z';
+  const BEFORE_DELETE = '2026-08-11T00:00:00.000Z';
+  const AFTER_DELETE = '2026-08-14T00:00:00.000Z';
+
+  function deletedContact(id: string, phone: string): ContactItem {
+    return contact({ contactId: id, phones: [{ phone, primary: true }], deleted_at: DELETED_AT });
+  }
+
+  it('surfaces only the deleted contact whose newest message is a post-deletion INBOUND', async () => {
+    const items = [
+      conv({ conversationId: 'thr-fresh', last_activity_at: tsAt(0), participant_phone: '+15550000101' }),
+      conv({ conversationId: 'thr-stale', last_activity_at: tsAt(1), participant_phone: '+15550000102' }),
+      conv({ conversationId: 'thr-out', last_activity_at: tsAt(2), participant_phone: '+15550000103' }),
+    ];
+    const contacts = [
+      deletedContact('contact-fresh', '+15550000101'),
+      deletedContact('contact-stale', '+15550000102'),
+      deletedContact('contact-out', '+15550000103'),
+    ];
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages(
+          {
+            'thr-fresh': msg({ created_at: AFTER_DELETE, direction: 'inbound' }),
+            // Pre-deletion unread stays hidden - deleting draws a line.
+            'thr-stale': msg({ created_at: BEFORE_DELETE, direction: 'inbound' }),
+            // A straggler scheduled send does not resurface anyone.
+            'thr-out': msg({ created_at: AFTER_DELETE, direction: 'outbound' }),
+          },
+          calls,
+        ),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(candidateIds(result.candidates)).toEqual(['contact-fresh']);
+    expect(result.deletedProbes).toBe(3);
+  });
+
+  it('probes UNCONDITIONALLY: a thread whose last_activity_at predates deleted_at still resurfaces', async () => {
+    // THE withdrawn-short-circuit regression. A round-2 remedy skipped the
+    // probe when last_activity_at <= deleted_at; that premise is false here -
+    // last_activity_at is the PROVIDER clock while created_at is OUR ingest
+    // clock, and the append/touch gap can leave last_activity_at stale while
+    // a fresh post-deletion inbound exists.
+    const items = [
+      conv({
+        conversationId: 'thr-clock-skew',
+        last_activity_at: '2026-08-10T00:00:00.000Z',
+        participant_phone: '+15550000201',
+      }),
+    ];
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts([deletedContact('contact-skew', '+15550000201')], calls),
+        messages: makeMessages(
+          { 'thr-clock-skew': msg({ created_at: AFTER_DELETE, direction: 'inbound' }) },
+          calls,
+        ),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(candidateIds(result.candidates)).toEqual(['contact-skew']);
+    expect(result.deletedProbes).toBe(1);
+  });
+
+  it('evaluates PER THREAD: a qualifying OLDER thread emits the row at its own stream position', async () => {
+    // plan-review A6: a one-shot candidate evaluation would drop this contact
+    // entirely, because the FIRST thread it meets does not qualify.
+    const items = [
+      conv({ conversationId: 'multi-newest', last_activity_at: tsAt(0), participant_phone: '+15550000301' }),
+      conv({ conversationId: 'live-between', last_activity_at: tsAt(1), participant_phone: '+15550000399' }),
+      conv({ conversationId: 'multi-older', last_activity_at: tsAt(2), participant_phone: '+15550000302' }),
+      conv({ conversationId: 'multi-oldest', last_activity_at: tsAt(3), participant_phone: '+15550000303' }),
+    ];
+    const multi = contact({
+      contactId: 'contact-multi',
+      phones: [
+        { phone: '+15550000301', primary: true },
+        { phone: '+15550000302', primary: false },
+        { phone: '+15550000303', primary: false },
+      ],
+      deleted_at: DELETED_AT,
+    });
+    const live = contact({
+      contactId: 'contact-live',
+      phones: [{ phone: '+15550000399', primary: true }],
+    });
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts([multi, live], calls),
+        messages: makeMessages(
+          {
+            'multi-newest': msg({ created_at: AFTER_DELETE, direction: 'outbound' }),
+            'multi-older': msg({ created_at: AFTER_DELETE, direction: 'inbound' }),
+            'multi-oldest': msg({ created_at: AFTER_DELETE, direction: 'inbound' }),
+          },
+          calls,
+        ),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    // EXACTLY ONE candidate for the contact, emitted AFTER the live row - i.e.
+    // at the position of the first thread whose probe passed, not at the
+    // position of the newer thread that failed.
+    expect(candidateIds(result.candidates)).toEqual(['contact-live', 'contact-multi']);
+    const row = contactCandidate(result.candidates[1]);
+    expect(row.unreadConversations.map((c) => c.conversationId)).toEqual([
+      'multi-newest',
+      'multi-older',
+      'multi-oldest',
+    ]);
+    // Two probes: the failing newest and the qualifying older. Once EMITTED,
+    // later threads of the same contact merge WITHOUT probing.
+    expect(result.deletedProbes).toBe(2);
+  });
+
+  it('counts probes and fires the shared rate-limited warn only past the threshold', async () => {
+    const probeCount = UNREAD_DELETED_PROBE_WARN + 1;
+    const items: ConversationItem[] = [];
+    const contacts: ContactItem[] = [];
+    const latest: Record<string, MessageItem> = {};
+    for (let i = 0; i < probeCount; i += 1) {
+      const phone = `+1555${String(3_000_000 + i)}`;
+      const id = `probe-${String(probeCount - i).padStart(4, '0')}`;
+      items.push(conv({ conversationId: id, last_activity_at: tsAt(i), participant_phone: phone }));
+      contacts.push(deletedContact(`contact-probe-${String(i).padStart(4, '0')}`, phone));
+      // None qualifies: every one costs a probe and emits nothing.
+      latest[id] = msg({ created_at: BEFORE_DELETE, direction: 'inbound' });
+    }
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages(latest, calls),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(result.candidates).toEqual([]);
+    expect(result.deletedProbes).toBe(probeCount);
+    // A contact that never emits never enters the seen-set, but its items DID
+    // consume scan range and count toward consumedAll.
+    expect(result.consumedAll).toBe(true);
+
+    // The WARN belongs to the CALLER (it accumulates across the page loop's
+    // many collects), so it is fired explicitly from the shared module-scope
+    // limiter. ORDER MATTERS: at-threshold first (emits nothing, leaving the
+    // limiter window untouched), over-threshold second.
+    const spy = makeLoggerSpy();
+    warnDeletedProbes(spy.logger, UNREAD_DELETED_PROBE_WARN);
+    expect(spy.warn).not.toHaveBeenCalled();
+
+    warnDeletedProbes(spy.logger, result.deletedProbes);
+    expect(spy.warn.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(spy.warn.mock.calls[0]?.[0]).toMatchObject({ event: 'unread_deleted_probe_tripwire' });
   });
 });

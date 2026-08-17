@@ -28,7 +28,10 @@ other.
 
 Note the fix wave narrowed the blast radius: the depth cap no longer fires on a
 page that also exhausted the supply, so `limit=100` over a <=100-contact unread
-feed is a clean natural end. The interaction above still holds past 100.
+feed is a clean natural end. The interaction above still holds past 100 - and
+the narrowing is not complete, because a page that FILLS at the same moment the
+supply runs out still misses the natural-end arm:
+[`unread-load-more-empty-on-exact-multiple`](./unread-load-more-empty-on-exact-multiple.md).
 
 **Suggested fix.** Cheapest: a comment at each constant naming the interaction.
 Better: raise `SEEN_SET_MAX` above `MAX_INBOX_LIMIT` (the cursor is base64url

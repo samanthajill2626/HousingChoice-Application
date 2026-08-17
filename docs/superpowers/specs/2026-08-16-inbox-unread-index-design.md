@@ -196,6 +196,14 @@ unread. Two new reset surfaces, both maintaining the flag invariant:
    re-increments unread - so every thread that could resurface still does;
    only pre-deletion unread (which never resurfaced anyway) stops counting.
 
+   AMENDED ON-BRANCH (2026-08-16, review fix wave): the fan-out resets EVERY
+   thread `conversationsForContact` returns, not only those the read reports as
+   unread. The thread list comes from `byParticipantPhone`/`byParticipantEmail`,
+   which section 6 declares lag INDEPENDENTLY of `byUnread`, so a stale image
+   reporting 0 made the reset skip a genuinely-unread thread permanently -
+   nothing re-runs this fan-out for an already-deleted contact. `resetUnread` is
+   idempotent, so the cost is one extra write per already-read thread.
+
 LEGACY residents (rows closed/deleted BEFORE this ships) are cleaned by the
 backfill (section 7.2) applying the same two rules one-time. Residual
 invisible-resident exposure drops to transient races (a close/delete racing
@@ -438,6 +446,17 @@ today's pager provides, inbox.ts:755-800):
      only fetchFirstPage): the list simply ends; no new affordance.
      Declared and accepted - the signal exists on the wire for a future
      affordance without another schema change.
+
+AMBIGUITY RECORDED ON-BRANCH (2026-08-16, review fix wave; NOT resolved here):
+steps 2 and 3 pull opposite ways on the BUDGET-truncated case. Step 2 enumerates
+only TWO null-cursor conditions (`consumedAll`, and exceeding SEEN_SET_MAX), so
+on a literal reading a budget-expired page - which has a known `scanPosition`
+and a seen-set inside the cap - OWES a cursor; step 3 says the list simply ends.
+The SHIPPED CODE follows the plan's reading (`nextCursor: null` plus
+`truncated: true`), and this branch does not change that. Which reading wins is
+a product call for the human and is already filed, with the reproduction and
+both remedies, as
+`docs/issues/unread-budget-truncation-has-no-forward-path.md`.
 
 DECLARED BEHAVIOR CHANGE - PAGE COMPOSITION: today's `filter=unread` page one
 is up to `limit` CONTACT rows PLUS all unread relay rows PLUS all unread

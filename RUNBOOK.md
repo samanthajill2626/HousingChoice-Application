@@ -223,7 +223,7 @@ All FOUR changes are already in both `tables.auto.tfvars.json` files (GSIs regen
 
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
-| Unread read model (2026-08) - **committed, NOT YET APPLIED anywhere** | `conversations` (existing) | **GSI add** - `byUnread` (sparse, hash `unread_flag` = the constant `'unread'`, range `last_activity_at`) | `GET /api/inbox/unread-count` (the nav badge), `GET /api/inbox?filter=unread`, and Today's unread sections read ONLY unread rows instead of walking every open conversation |
+| Unread read model (2026-08) - **APPLIED dev + prod, backfill dry-run ALL ZEROS both envs (2026-08-17: dev 771/771 skipped, prod 786/786 skipped) - no live backfill was needed; DONE** | `conversations` (existing) | **GSI add** - `byUnread` (sparse, hash `unread_flag` = the constant `'unread'`, range `last_activity_at`) | `GET /api/inbox/unread-count` (the nav badge), `GET /api/inbox?filter=unread`, and Today's unread sections read ONLY unread rows instead of walking every open conversation |
 
 In the regenerated `tables.auto.tfvars.json` files. **Online** operation - no recreate - but it DOES need a one-time **backfill**: the two unread primitives maintain `unread_flag` from now on, so a row that was ALREADY unread when the index landed carries no flag and is invisible to every reader above until it is stamped. On **dev**, in this order (schema, then code, then data):
 
@@ -232,6 +232,8 @@ In the regenerated `tables.auto.tfvars.json` files. **Online** operation - no re
 3. Backfill LAST, dry run FIRST: `npx tsx app/scripts/backfill-unread-flag.ts --dry-run`, then the same command without the flag, with the dev environment active. It resolves the table from the ambient `TABLE_PREFIX` and has NO endpoint guard by design (same as the broadcast backfill above), so set the environment deliberately. Idempotent, and it applies the two retroactive resets the runtime now makes as well as the stamping: a relay group closed while unread is zeroed, and a soft-deleted contact's thread keeps its unread only when the newest message would resurface it (that costs one message read per such thread, on every run).
 
 **Prod** rides M1.11: `npm run plan -- prod` / `npm run apply -- prod` + the promote, then the same dry-run-first backfill against prod - again with the backfill AFTER the promote.
+
+**OUTCOME (2026-08-17):** dev and prod both applied and deployed; the dry run reported zero rows to stamp/remove/reset in BOTH environments (no unread existed at deploy time), so the live backfill was never run and is not owed. Only the founder's LOCAL imported dataset below still needs `db:update-gsis` + backfill if/when it is used with the new code.
 
 **The founder's imported LOCAL dataset** (DynamoDB Local, `TABLE_PREFIX=hc-local-`) needs the same two operations in the same order - and **never `db:create --reset` there**, which would destroy the imported data:
 

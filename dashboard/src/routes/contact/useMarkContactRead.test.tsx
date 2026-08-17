@@ -57,6 +57,75 @@ describe('useMarkContactRead', () => {
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(2));
   });
 
+  it('coalesces triggers that land while a mark-read is in flight into ONE trailing re-mark', async () => {
+    // Hold the first request open so the trailing logic is observable.
+    let release: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<Probe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+
+    // Two events inside the same round trip (e.g. a call's ring then its miss).
+    act(() => capturedOnMessage?.());
+    act(() => capturedOnMessage?.());
+    // Still exactly one request outstanding - nothing fired concurrently.
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release?.();
+    });
+    // Exactly one trailing re-mark, not one per dropped event.
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('switching contacts while A\'s mark-read is in flight marks B on arrival and never re-marks A', async () => {
+    let releaseA: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        releaseA = resolve;
+      }),
+    );
+    const view = render(<Probe id="A" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' }));
+
+    // Same hook instance, new contact (unkeyed route + useParams).
+    view.rerender(<Probe id="B" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
+
+    // A's request settles later: it must not spend a trailing re-mark on A.
+    await act(async () => {
+      releaseA?.();
+    });
+    await act(async () => {});
+    const contacts = (markInboxRead.mock.calls as unknown as Array<[{ contactId: string }]>).map(
+      (c) => c[0].contactId,
+    );
+    expect(contacts).toEqual(['A', 'B']);
+  });
+
+  it('a trailing re-mark never fires after unmount (an unread the operator never saw stays unread)', async () => {
+    let release: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const view = render(<Probe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    act(() => capturedOnMessage?.()); // arms the trailing re-mark
+    view.unmount();
+    await act(async () => {
+      release?.();
+    });
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT mark read when the tab is hidden (background tab)', () => {
     setVisibility('hidden');
     render(<Probe id="k1" />);

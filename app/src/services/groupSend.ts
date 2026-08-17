@@ -49,6 +49,7 @@ import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { sharedA2pBucket, TokenBucketBusyError, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createGroupConversationsAdapter,
+  GroupConversationsAuthorRejectedError,
   GroupConversationsUnavailableError,
   type GroupConversationsPort,
 } from '../adapters/groupConversations.js';
@@ -76,7 +77,12 @@ import {
 import { deriveGroupDeliveryStatus, suppressedSlot } from './groupDelivery.js';
 import { groupMemberKey } from './groupMembers.js';
 import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
-import { createGroupRailService, hasActiveGroupRail, type GroupRailEnsurer } from './groupRail.js';
+import {
+  createGroupRailService,
+  hasActiveGroupRail,
+  railAuthorVerified,
+  type GroupRailEnsurer,
+} from './groupRail.js';
 import { readNumberSuppression } from './numberSuppression.js';
 import { ConversationNotFoundError, SendRefusedError, SmsSendingDisabledError } from './sendMessage.js';
 
@@ -339,24 +345,6 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       }
     }
 
-    // (5) The rail. Send-time creation is the BACKSTOP (spec 6.1): eager
-    // creation at detection/migration is the normal path, and this covers the
-    // thread that slipped through.
-    let conversationSid = conversation.twilio_conversation_sid;
-    let participantMap = conversation.twilio_participant_map ?? {};
-    if (!hasActiveGroupRail(conversation)) {
-      const ensured = await rail.ensureGroupRail({ conversationId, members });
-      if (ensured.twilioConversationSid === undefined) {
-        log.warn(
-          { conversationId, railStatus: ensured.status },
-          'group send refused: no Conversations rail could be established',
-        );
-        throw new GroupRailUnavailableError(conversationId, ensured.reason ?? ensured.status);
-      }
-      conversationSid = ensured.twilioConversationSid;
-      participantMap = ensured.participantMap ?? {};
-    }
-
     // The rail was built with the business number as its PROJECTED address, and
     // that same number is the only valid Author. Unset, there is nothing to post
     // as - refuse rather than let Twilio attribute the message to `system`.
@@ -369,17 +357,52 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       throw new GroupRailUnavailableError(conversationId, 'BUSINESS_PHONE_NUMBER is not configured');
     }
 
+    // (5) The rail. Send-time creation is the BACKSTOP (spec 6.1): eager
+    // creation at detection/migration is the normal path, and this covers the
+    // thread that slipped through.
+    //
+    // AND THE AUTHOR CHECK (prod incident 2026-08-17). A stamped sid whose map
+    // covers the roster used to be posted to blind - and 135 of 136 prod rails
+    // did not carry the current business number as a participant, so every
+    // staff reply was refused with 50513 while inbound kept arriving through
+    // the SMS webhook. A rail verified for another (or no) author goes through
+    // the ONE ensure path first, which re-reads Twilio, attaches the current
+    // number, and re-stamps the row - so the post below is made into a rail
+    // that can take it, and the next send skips the check entirely.
+    let conversationSid = conversation.twilio_conversation_sid;
+    let participantMap = conversation.twilio_participant_map ?? {};
+    if (!hasActiveGroupRail(conversation) || !railAuthorVerified(conversation, businessNumber)) {
+      if (hasActiveGroupRail(conversation)) {
+        log.info(
+          { conversationId, event: 'group_rail_author_unverified' },
+          'group send: the rail is not verified for the current business number - verifying before the post',
+        );
+      }
+      const ensured = await rail.ensureGroupRail({ conversationId, members });
+      if (ensured.twilioConversationSid === undefined) {
+        log.warn(
+          { conversationId, railStatus: ensured.status },
+          'group send refused: no Conversations rail could be established',
+        );
+        throw new GroupRailUnavailableError(conversationId, ensured.reason ?? ensured.status);
+      }
+      conversationSid = ensured.twilioConversationSid;
+      participantMap = ensured.participantMap ?? {};
+    }
+
     /** One post attempt at a given rail. */
     async function postOnce(sid: string) {
       return port.postGroupMessage({ conversationSid: sid, author: businessNumber as string, body });
     }
 
     /**
-     * Drop a rail Twilio has told us is closed or gone and build a new one
-     * through the ONE authoritative ensure path. `undefined` means the thread
-     * genuinely has no rail right now - which the caller reports as such, and
-     * which is now a STORED fact (the sid is cleared and `rail_failed` stamped),
-     * so the re-enqueue path and the thread view can both see it.
+     * Drop a rail Twilio has refused a post into (closed/gone, or the business
+     * number is not among its participants) and re-establish one through the ONE
+     * authoritative ensure path - which rebuilds a dead rail and REPAIRS a live
+     * one it re-adopts by UniqueName. `undefined` means the thread genuinely has
+     * no rail right now - which the caller reports as such, and which is now a
+     * STORED fact (the sid is cleared and `rail_failed` stamped), so the
+     * re-enqueue path and the thread view can both see it.
      */
     // WORST-CASE WALL CLOCK: a healed send performs TWO metered A2P draws (N
     // tokens before the first post, N again before the post-heal retry), so an
@@ -492,23 +515,35 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
     // creation failed EVERY send to that thread, forever, with a 409 no operator
     // action could clear. Dropping the dead sid (conditionally, so a concurrent
     // healer is never clobbered) is what makes the ensure path re-detect it.
+    //
+    // AN AUTHOR REFUSAL (50513) IS HEALED THE SAME WAY (prod incident
+    // 2026-08-17). The verified-author check above is the row's word; this is
+    // Twilio's, and Twilio wins - a participant removed in the console, or a row
+    // stamped by an older build, lands here. Dropping the stored rail forces the
+    // ensure path off its fast path: it re-adopts the SAME conversation by
+    // UniqueName (the rail is alive, so nothing is deleted), attaches the
+    // business number, re-stamps, and the retry posts into a rail that can
+    // take it.
     let posted;
     try {
       posted = await postOnce(conversationSid as string);
     } catch (err) {
       if (err instanceof AdapterSmsSendingDisabledError) throw new SmsSendingDisabledError();
-      if (err instanceof GroupConversationsUnavailableError) {
+      if (err instanceof GroupConversationsUnavailableError || err instanceof GroupConversationsAuthorRejectedError) {
         // ERROR, not the adapter's WARN: this is the alarmed channel, and a rail
         // dying under a live thread is exactly what the alarm is for (wave 1
         // dropped it to a WARN and the 409 path logged nothing at all).
+        const authorRejected = err instanceof GroupConversationsAuthorRejectedError;
         log.error(
           {
             conversationId,
             conversationSid,
-            event: 'group_rail_closed_detected',
+            event: authorRejected ? 'group_rail_author_rejected' : 'group_rail_closed_detected',
             err: summarizeError(err),
           },
-          'the Conversations rail refused a post because it is closed or gone - dropping it and rebuilding',
+          authorRejected
+            ? 'the Conversations rail refused a post because the business number is not among its participants - re-verifying and repairing it'
+            : 'the Conversations rail refused a post because it is closed or gone - dropping it and rebuilding',
         );
         const healed = await healRail(conversationSid as string);
         if (healed === undefined) {
@@ -527,6 +562,12 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
           if (retryErr instanceof AdapterSmsSendingDisabledError) throw new SmsSendingDisabledError();
           if (retryErr instanceof GroupConversationsUnavailableError) {
             throw new GroupRailUnavailableError(conversationId, 'the rebuilt rail refused this post too');
+          }
+          if (retryErr instanceof GroupConversationsAuthorRejectedError) {
+            throw new GroupRailUnavailableError(
+              conversationId,
+              'the rail still refuses the business number as author after a repair',
+            );
           }
           throw translatePostFailure(retryErr);
         }

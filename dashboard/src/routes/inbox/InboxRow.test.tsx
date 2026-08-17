@@ -75,14 +75,49 @@ describe('InboxRow', () => {
     expect(onMarkRead).toHaveBeenCalledTimes(1);
   });
 
-  it('omits the Mark read action for already-read rows', () => {
+  it('omits the Mark read action for already-read rows (and no toggle when no onMarkUnread is wired)', () => {
     renderRow(mkRow({ unreadCount: 0 }));
-    expect(screen.queryByRole('button', { name: /mark .* read/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /mark .* read$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /mark .* unread/i })).not.toBeInTheDocument();
+  });
+
+  it('a READ row shows Mark unread INSTEAD of Mark read, and it calls onMarkUnread', () => {
+    const onMarkUnread = vi.fn();
+    render(
+      <MemoryRouter>
+        <ul>
+          <InboxRow row={mkRow({ unreadCount: 0 })} onOpen={onOpen} onMarkRead={onMarkRead} onMarkUnread={onMarkUnread} />
+        </ul>
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('button', { name: 'Mark Tasha Williams read' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Tasha Williams as unread' }));
+    expect(onMarkUnread).toHaveBeenCalledTimes(1);
+    expect(onMarkRead).not.toHaveBeenCalled();
+  });
+
+  it('an UNREAD row shows Mark read only, never Mark unread, even with onMarkUnread wired', () => {
+    const onMarkUnread = vi.fn();
+    render(
+      <MemoryRouter>
+        <ul>
+          <InboxRow row={mkRow({ unreadCount: 2 })} onOpen={onOpen} onMarkRead={onMarkRead} onMarkUnread={onMarkUnread} />
+        </ul>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark Tasha Williams as unread' })).not.toBeInTheDocument();
   });
 
   it('shows a call channel label for call rows', () => {
     renderRow(mkRow({ channel: 'call', preview: 'Missed call' }));
     expect(screen.getByText('Call')).toBeInTheDocument();
+  });
+
+  it('does NOT prefix an outbound CALL preview with "You:" (the preview already names its direction)', () => {
+    renderRow(mkRow({ channel: 'call', direction: 'outbound', preview: 'Outgoing call - 42s' }));
+    expect(screen.getByText('Outgoing call - 42s')).toBeInTheDocument();
+    expect(screen.queryByText(/^You:/)).not.toBeInTheDocument();
   });
 
   it('renders a relay_group row with a Relay group chip, linking to the conversation view', () => {

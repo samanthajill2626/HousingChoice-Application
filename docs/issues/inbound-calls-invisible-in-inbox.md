@@ -3,10 +3,11 @@ id: inbound-calls-invisible-in-inbox
 title: Calls never surface in the inbox - no activity bump, no unread, no re-sort
 type: improvement
 severity: med
-status: open
+status: resolved
+resolved: 2026-08-17
 area: app
 created: 2026-08-03
-refs: app/src/routes/webhooks/voice.ts, app/src/routes/inbox.ts:228, app/src/repos/conversationsRepo.ts:447
+refs: app/src/routes/webhooks/voice.ts, app/src/services/originateCall.ts, app/src/lib/callPreview.ts, app/src/routes/inbox.ts:228, app/src/repos/conversationsRepo.ts:447
 ---
 
 **Problem.** The voice webhook records call history as `type:'call'` message items
@@ -49,3 +50,135 @@ still do not stamp `last_activity_at`, do not re-sort or re-preview the thread,
 and never bump `unread_count`, so an inbound call still cannot surface a row an
 operator is not already looking at (and still cannot resurface a deleted
 contact's thread). Status: open.
+
+**Resolution (2026-08-17, branch `feat/call-inbox-unread`, small-fix lane with an
+end-of-branch adversarial review, two rounds).** SCOPE: resolved for every call
+that produces a `<Dial action>` summary (answered, missed, voicemail, outbound
+that reached a dial). A caller who abandons during the ring may produce no
+summary at all - that path shows "Incoming call" on the Call channel (derived
+at read time, no re-sort, no unread) and is tracked separately in
+`docs/issues/voice-caller-abandon-no-dial-summary.md`. Design record, since
+this change has no separate spec:
+
+- Write-side wiring into the EXISTING primitives (`touchLastActivity` +
+  `incrementUnread`), no schema/index/infra/deps change; the whole read stack
+  (byUnread index, Unread tab, nav badge, Today, `conversation.updated` SSE,
+  the deleted-contact resurfacing rule) picks calls up unchanged. Rejected:
+  read-side derivation (defeats the index) and a separate call log surface.
+- Founder-bridge inbound call, two stamp points on the caller's 1:1 thread,
+  BOTH driven by callbacks that carry a real outcome: the terminal `<Dial
+  action>` summary -> the outcome preview ("Missed call" / "Call - 12m 3s") and
+  `incrementUnread` ONLY when `isMissed && direction inbound && !masked`, gated
+  on the forward-only `transitioned` so a redelivered summary never
+  double-counts; the voicemail upgrade -> "Voicemail" and `incrementUnread`
+  AGAIN (deliberate: a read miss must re-flag when the voicemail lands; the
+  badge counts rows). NO stamp at ring time and NO stamp at outbound placement
+  (adversarial r1 HIGH 1 + Q1): a caller-abandon or a never-accepted originate
+  produces no Dial summary, so a stamp made then could never be closed out and
+  would pin the thread at the top of the inbox forever - see
+  `docs/issues/voice-caller-abandon-no-dial-summary.md`.
+- Outbound originate: the Dial summary stamps "Outgoing call - 42s" /
+  "Outgoing call - no answer", never unread. The outbound PREVIEW reads the
+  Dial summary's own status (completed/in-progress = the target answered, else
+  no answer) because the outbound whisper gate stamps `answered_at` before the
+  target rings and the stored `call_outcome` therefore says "answered" for a
+  rung-out call (pre-existing, r2 HIGH 1 -
+  `docs/issues/outbound-call-outcome-answered-before-target-rings.md`).
+  InboxRow drops its "You:" prefix for call previews (they already name their
+  direction).
+- Read side, one deliberate and BOUNDED addition (r2 MED 4, bounded at r3
+  HIGH 1 / MED 2): `deriveLatest` builds a call-latest row's preview from the
+  loaded call row (`callPreview` over `call_status`/`call_outcome`/
+  `call_duration`, zero extra reads) ONLY when the row carries a known
+  `call_status` and either the call is still non-terminal (ringing /
+  in-progress: during a ring, or forever after an abandon) or no preview was
+  ever stored (a call that finished before this shipped). A stored terminal
+  preview is authoritative (it is what carries the outbound "no answer" that
+  the persisted `call_outcome` gets wrong), and a row with no known
+  `call_status` (the Quo importer writes none, with out-of-union outcomes)
+  keeps the stored preview or blank - never a synthetic live ring. Where the
+  newest message is a TEXT (the missed-call auto-text, by default), the row
+  previews that text's body regardless of what the voicemail stamped - so with
+  the auto-text ON the inbox row reads the auto-text, not "Voicemail"; the
+  stored "Voicemail" still feeds `conversation.updated` and Today.
+- Ordering: the unread write lands BEFORE `message.persisted` (a staff member
+  viewing the contact re-marks read on that event), `conversation.updated`
+  follows - the SMS webhook's order - on BOTH the status and the recording
+  (voicemail) paths (r1 HIGH 2 fixed the latter: one emit, after the counter).
+  `useMarkContactRead` now coalesces triggers that land mid-flight into ONE
+  trailing re-mark, so a second event inside one round trip (a miss right
+  behind its ring, two rapid texts) is no longer dropped.
+- Preview strings live in `app/src/lib/callPreview.ts` (stored, like message
+  bodies; staff dashboard copy, not catalog copy).
+- Non-goals: masked/pool-number relay calls (touching a relay thread would
+  blind-write `status='open'` over `connecting`; roster semantics); the
+  no-holder guard path; historical backfill; dashboard changes (the existing
+  `Call` chip + preview + bold/badge rendering carry it).
+- Accepted v1 wart (operator decision 2026-08-17): the missed-call auto-text
+  re-previews the thread with the auto-text body (`sendMessage` touches), so an
+  unread missed-call row can read as the auto-text; the row stays unread and the
+  timeline shows both. Follow-up if it grates: a call-aware preview.
+- Also accepted at the r1 adjudication (planner's call, code-level): the STORED
+  preview of a miss-with-voicemail is whichever writer lands last (auto-text
+  body vs "Voicemail") - same last-activity semantic as texts (the inbox ROW
+  shows the auto-text body whenever that text is the newest message, see the
+  read-side bullet); the voicemail re-flag rides the recording
+  callback and so requires the S3 mirror to have succeeded (the outcome upgrade
+  always did); Today labels an auto-replied missed call "Unreplied" (a bot
+  courtesy is not a staff reply - same as an auto-replied text); one call that
+  becomes a voicemail shows 2 on its row count (OPERATOR-APPROVED at the design
+  gate; a "re-flag only if read" variant is possible with the existing
+  primitives - `incrementUnread` returns the new count - and was not chosen);
+  the Dial-summary stamp is two awaited DynamoDB writes ahead of the TwiML
+  (needed for the ordering rule); the recording callback's single
+  `message.persisted` now sits behind the voicemail upgrade + stamp (a hang
+  there would delay the timeline's "recording landed" refetch; a redelivery
+  200s without emitting - narrow, and the one post-upgrade emit means the
+  timeline sees `voicemail` on its first read); `bridgeAccepted` still derives
+  from an eventually-consistent read of `answered_at` (pre-existing
+  classification, now also feeding the durable preview/unread).
+- `useMarkContactRead`'s trailing re-mark is generation-scoped and
+  mount-guarded (r2 MED 2/3): switching contacts mid-flight marks the NEW
+  contact and never re-marks the old one; unmount cancels a pending trailing
+  re-mark (an unread the operator never looked at stays unread).
+
+- Mark-UNREAD toggle (operator decision 2026-08-17, added on this branch): the
+  inbox row's action is ONE toggle - "Mark read" while unread, "Mark unread"
+  while read - never both, so there is no "click Mark read on a read row"
+  case. `POST /api/inbox/:contactId/unread` flags the contact's NEWEST 1:1
+  thread (the one the row shows; never a fan-out), `POST /api/inbox/unread
+  { phone }` the unknown-number twin, `POST /api/conversations/:id/unread` for
+  relay/group rows (409 on a closed relay / non-group_open group thread, so a
+  manual flag never plants an invisible byUnread resident). All idempotent
+  (an unread thread is left alone), built on `incrementUnread` (counter + flag
+  in one write), 409 `contact_deleted` for a soft-deleted contact (a manual
+  flag must not fake the fresh inbound the resurfacing rule means). The row
+  flips optimistically; the nav badge follows the server's
+  `conversation.updated` (its optimistic layer models clears only). The three
+  routes share one guard (`isUnreadVisible` on the would-be flagged image; the
+  contact route also restricts to the row's own candidate set - open, never
+  relay_group - and the conversation route refuses 1:1s), the emitted image is
+  built from the increment's own return (a re-read is eventually consistent),
+  and the toggle is not offered on a `deleted` or `closed` row.
+  ADVISORY, NOT STICKY (r4 MED 3, planner's call pending the operator): Mark
+  unread raises the counter like an inbound would, so any surface that
+  auto-marks-read on view - a tour/placement comms tab open on that contact
+  (`ContactCommsTab` re-marks when the count rises), the contact page on its
+  next `message.persisted` / tab focus - will clear it again. A "keep this for
+  later" that survives open reader panes needs a sticky bit those surfaces
+  respect; not built here.
+- Left as-is at the terminal review round (r5, all LOW): the conversation
+  route emits `conversation.updated` on an idempotent no-op where the inbox
+  routes do not; the contact route's `thread_closed` arm is belt-and-braces
+  (its candidate set is already open 1:1s); the phone route can flag an OPEN
+  relay through its pool number (a legal, visible state - not UI-reachable);
+  "Outgoing call - 0s" can still appear where nothing was ever stored (a
+  pre-deploy or stamp-failed outbound row) via the read-side derivation.
+  Review reports: `.superpowers/review/adversarial-r1..r5.md` (worktree,
+  gitignored) - 5 rounds, 2 high + 6 medium fixed after r1, 1 high + 3 medium
+  after r2, 1 high + 2 medium after r3, 1 high + 3 medium after r4.
+
+Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
+`app/test/inboxApi.test.ts` (mark-unread routes),
+`dashboard/src/routes/contact/useMarkContactRead.test.tsx`, `dashboard/src/routes/inbox/InboxRow.test.tsx`,
+`e2e/tests/dashboard-next/call-inbox-unread.spec.ts`.

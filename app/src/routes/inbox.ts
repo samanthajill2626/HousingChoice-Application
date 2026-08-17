@@ -67,6 +67,7 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
+  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createContactsRepo,
@@ -74,7 +75,14 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
-import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  type CallOutcome,
+  type CallStatus,
+  type MessageItem,
+  type MessagesRepo,
+} from '../repos/messagesRepo.js';
+import { callPreview } from '../lib/callPreview.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   BADGE_COUNT_CAP,
@@ -426,8 +434,40 @@ interface DerivedLatest {
  * record; else sms. Falls back to the conversation's denormalized preview (and
  * sms/inbound) when no message is available — never throws.
  */
+// Exhaustive by construction: adding a member to either union in messagesRepo
+// fails typecheck here (`satisfies Record<Union, true>`), so an unknown call
+// state can never silently fall through to the wrong preview.
+const CALL_STATUS_MAP = {
+  ringing: true,
+  'in-progress': true,
+  completed: true,
+  'no-answer': true,
+  busy: true,
+  failed: true,
+  canceled: true,
+} satisfies Record<CallStatus, true>;
+const CALL_OUTCOME_MAP = { answered: true, missed: true, voicemail: true } satisfies Record<CallOutcome, true>;
+function isCallStatus(v: unknown): v is CallStatus {
+  return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
+}
+function isCallOutcome(v: unknown): v is CallOutcome {
+  return typeof v === 'string' && Object.hasOwn(CALL_OUTCOME_MAP, v);
+}
+
 function deriveLatest(
-  latest: { type?: unknown; direction?: unknown; body?: unknown; mediaUrls?: unknown; media_attachments?: unknown; created_at?: unknown } | undefined,
+  latest:
+    | {
+        type?: unknown;
+        direction?: unknown;
+        body?: unknown;
+        mediaUrls?: unknown;
+        media_attachments?: unknown;
+        created_at?: unknown;
+        call_status?: unknown;
+        call_outcome?: unknown;
+        call_duration?: unknown;
+      }
+    | undefined,
   conv: ConversationItem,
 ): DerivedLatest {
   const fallbackPreview =
@@ -452,7 +492,39 @@ function deriveLatest(
     channel = 'sms';
   }
   const direction: 'inbound' | 'outbound' = latest.direction === 'outbound' ? 'outbound' : 'inbound';
-  const preview = typeof latest.body === 'string' && latest.body.length > 0 ? latest.body : fallbackPreview;
+  // A call row has no body. The STORED preview (written by the voice paths from
+  // the Dial summary / voicemail callback - call-inbox-unread) is authoritative
+  // once it exists for a finished call. Derive from the row itself ONLY when
+  // the row carries a KNOWN call_status and either (a) the call is still
+  // non-terminal - during the ring, or forever when the caller abandons before
+  // any summary (docs/issues/voice-caller-abandon-no-dial-summary.md), where
+  // the stored preview is empty or the previous TEXT's body under a "Call"
+  // chip - or (b) no preview was ever stored (a call that finished before this
+  // shipped). Never for a row without a known call_status (the Quo importer
+  // writes none, and its call_outcome values are outside the union): a stored
+  // preview or blank is the honest answer there, not a synthetic live ring.
+  // Never overrides a stored terminal preview - the outbound preview is
+  // deliberately derived from the Dial status, not from the persisted
+  // call_outcome (outbound-call-outcome-answered-before-target-rings), and
+  // re-deriving from the row here would undo that. Never derives "in progress"
+  // either: `in-progress` is written by the whisper gate the moment the bridge
+  // is accepted and nothing but a Dial summary moves a call off it, so a call
+  // that ends without one would assert a LIVE call forever; an in-progress row
+  // keeps the stored preview, or derives as a plain "Incoming call" /
+  // "Outgoing call" when nothing was stored (true, and never stale-false).
+  // Zero extra reads either way.
+  const callStatus: CallStatus | undefined = isCallStatus(latest.call_status) ? latest.call_status : undefined;
+  const preview =
+    typeof latest.body === 'string' && latest.body.length > 0
+      ? latest.body
+      : channel === 'call' && callStatus !== undefined && (callStatus === 'ringing' || fallbackPreview === '')
+        ? callPreview({
+            direction,
+            callStatus: callStatus === 'in-progress' ? 'ringing' : callStatus,
+            ...(isCallOutcome(latest.call_outcome) && { callOutcome: latest.call_outcome }),
+            ...(typeof latest.call_duration === 'number' && { callDuration: latest.call_duration }),
+          })
+        : fallbackPreview;
   const createdAt = typeof latest.created_at === 'string' ? latest.created_at : undefined;
   return { channel, direction, preview, ...(createdAt !== undefined && { createdAt }) };
 }
@@ -1675,6 +1747,102 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
     );
 
     log.info({ contactId, count: all.length }, 'inbox: contact mark-read fan-out');
+    res.json({ ok: true });
+  });
+
+  // --- Mark UNREAD (the inbox row's toggle counterpart to Mark read) ---------
+  // The row is per CONTACT (newest-conversation rule), so "mark this row
+  // unread" flags the contact's NEWEST 1:1 thread - the one the row shows -
+  // never a fan-out. Idempotent: an already-unread thread is left alone (no
+  // second increment), and the reply is the same 200 either way. Built on the
+  // existing primitive (incrementUnread writes the counter + byUnread flag in
+  // one expression), so the sparse-index invariant holds. Read-then-write, not
+  // conditional: the "already unread?" test reads a GSI-fed image (the
+  // participant lookups lag), so a stale 0 for an already-unread thread - or a
+  // concurrent inbound landing between the read and the increment - can leave
+  // the row at 2: the same shape as two inbounds, and the next Mark read
+  // zeroes it. Only the row-visible candidate set is flaggable: the same
+  // `status open, not relay_group` filter contactConversations applies, so a
+  // manual flag can never plant an invisible byUnread resident (a closed relay
+  // reachable through a pool number, say) - the residue class
+  // scripts/backfill-unread-flag.ts exists to repair.
+  const newestOf = (convs: ConversationItem[]): ConversationItem | undefined =>
+    convs.reduce<ConversationItem | undefined>(
+      (best, c) => (best === undefined || c.last_activity_at > best.last_activity_at ? c : best),
+      undefined,
+    );
+  /** Flag `conv` unread. false = refused (the unread feed would never show it). */
+  const flagUnread = async (conv: ConversationItem): Promise<boolean> => {
+    if (!isUnreadVisible({ ...conv, unread_count: 1 })) return false;
+    if (unreadOf(conv) > 0) return true; // already unread - idempotent no-op
+    const count = await conversations.incrementUnread(conv.conversationId);
+    // The event carries the post-increment image built from the write's own
+    // return (a re-read is eventually consistent and could hand back the
+    // pre-increment count); consumers refetch on it regardless.
+    events.emit(
+      'conversation.updated',
+      toConversationUpdatedEvent({ ...conv, unread_count: count, unread_flag: UNREAD_FLAG_VALUE }),
+    );
+    return true;
+  };
+
+  // POST /api/inbox/unread { phone } - unknown-number rows.
+  router.post('/unread', async (req, res) => {
+    const payload = (req.body ?? {}) as { phone?: unknown };
+    const phone = payload.phone;
+    if (typeof phone !== 'string' || phone.length === 0) {
+      res.status(400).json({ error: 'phone must be a non-empty string' });
+      return;
+    }
+    if (!/^\+\d+$/.test(phone)) {
+      res.status(400).json({ error: 'phone must be E.164 (e.g. +15550001234)' });
+      return;
+    }
+    const newest = newestOf(await conversations.findByParticipantPhone(phone));
+    if (newest === undefined) {
+      res.status(404).json({ error: 'no_conversation_for_phone' });
+      return;
+    }
+    if (!(await flagUnread(newest))) {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
+    log.info({ phone, conversationId: newest.conversationId }, 'inbox: unknown-number mark-unread');
+    res.json({ ok: true });
+  });
+
+  // POST /api/inbox/:contactId/unread - contact rows. A soft-deleted contact
+  // is refused: their row is only ever visible while unread (resurfacing), and
+  // a manual flag must not fake the "fresh inbound" the resurfacing rule means.
+  router.post('/:contactId/unread', async (req, res) => {
+    const { contactId } = req.params;
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    if (isDeleted(contact)) {
+      res.status(409).json({ error: 'contact_deleted' });
+      return;
+    }
+    // The row's own candidate set (the aggregator's contactConversations rule:
+    // status open, never a relay_group), NOT the raw phone/email union - a
+    // contact who owns a pool number must not be able to flag a relay thread
+    // through here.
+    const newest = newestOf(
+      (await conversationsForContact(contact, conversations)).filter(
+        (c) => c.status === 'open' && c.type !== 'relay_group',
+      ),
+    );
+    if (newest === undefined) {
+      res.status(404).json({ error: 'no_conversation_for_contact' });
+      return;
+    }
+    if (!(await flagUnread(newest))) {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
+    log.info({ contactId, conversationId: newest.conversationId }, 'inbox: contact mark-unread');
     res.json({ ok: true });
   });
 

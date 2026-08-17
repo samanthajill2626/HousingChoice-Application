@@ -17,7 +17,9 @@ import {
   ApiError,
   getInbox,
   markConversationRead,
+  markConversationUnread,
   markInboxRead,
+  markInboxUnread,
   useEventStream,
   type InboxFilter,
   type InboxRow as InboxRowData,
@@ -84,6 +86,9 @@ export interface InboxState {
   /** Optimistically mark a row's comms read (also called on row open). No-op if
    *  already read or the row can't be addressed. */
   markRead: (row: InboxRowData) => void;
+  /** Optimistically mark a READ row unread (the row's toggle counterpart). No-op
+   *  if already unread or unaddressable. */
+  markUnread: (row: InboxRowData) => void;
 }
 
 const PAGE_LIMIT = 30;
@@ -359,6 +364,43 @@ export function useInbox(filter: InboxFilter): InboxState {
     [setPatch, clearPatch, noteRowsCleared, rollbackRowsCleared],
   );
 
+  const markUnread = useCallback(
+    (row: InboxRowData) => {
+      if (row.unreadCount > 0) return;
+      const key = rowKey(row);
+      // Same per-kind addressing as markRead. The nav badge is NOT touched
+      // optimistically here: its optimistic layer models CLEARS only (pending
+      // clear keys with a TTL); a manual flag rides the server's
+      // conversation.updated, which the badge already reconciles on. The row
+      // itself flips immediately.
+      let flag: (() => Promise<void>) | undefined;
+      if (row.kind === 'relay_group' || row.kind === 'group_text') {
+        if (row.conversationId !== undefined) {
+          const conversationId = row.conversationId;
+          flag = () => markConversationUnread(conversationId);
+        }
+      } else if (row.kind === 'contact' && row.contactId !== undefined) {
+        const contactId = row.contactId;
+        flag = () => markInboxUnread({ contactId });
+      } else if (row.phone !== undefined) {
+        const phone = row.phone;
+        flag = () => markInboxUnread({ phone });
+      }
+      if (flag === undefined) return; // unaddressable - don't fake success
+      setPatch(key, { unreadCount: 1 });
+      flag()
+        .then(() => {
+          genRef.current += 1;
+          setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 1 } : r)));
+        })
+        .catch(() => {
+          /* rollback: dropping the patch restores base's original (read) count */
+        })
+        .finally(() => clearPatch(key, 'unreadCount'));
+    },
+    [setPatch, clearPatch],
+  );
+
   // --- Assemble the displayed rows ------------------------------------------
   const patched = base.map((row) => {
     const p = pending.get(rowKey(row));
@@ -388,5 +430,6 @@ export function useInbox(filter: InboxFilter): InboxState {
     loadMore,
     retry,
     markRead,
+    markUnread,
   };
 }

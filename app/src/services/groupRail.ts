@@ -84,6 +84,26 @@ export function hasActiveGroupRail(item: Pick<ConversationItem, 'twilio_conversa
   );
 }
 
+/**
+ * Was this rail VERIFIED to carry `businessNumber` as its projected-address
+ * participant - i.e. can a post authored as that number succeed? False for a
+ * rail finalized before the author was recorded (every rail before 2026-08-17)
+ * and for a rail verified under a previous BUSINESS_PHONE_NUMBER. Either way
+ * the rail is not trusted: `ensureGroupRail` re-reads Twilio and repairs, and
+ * `groupSend` routes through it before posting (prod incident 2026-08-17: 135
+ * stamped rails could not be posted to, and every staff reply failed 50513).
+ */
+export function railAuthorVerified(
+  item: Pick<ConversationItem, 'twilio_projected_address'>,
+  businessNumber: string | undefined,
+): boolean {
+  return (
+    businessNumber !== undefined &&
+    businessNumber.length > 0 &&
+    item.twilio_projected_address === businessNumber
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The SYNCHRONOUS ensure seam (S5/T5.2 send-time backstop + S7 migration)
 // ---------------------------------------------------------------------------
@@ -294,25 +314,37 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
         return { status: 'failed', reason };
       }
 
+      // The ONE author every post uses. Resolved before the fast path because a
+      // rail is only "existing" for the number it was verified to carry.
+      const author = businessNumber();
+
       // Already railed AND verifiable: no claim, no Twilio call. This is the
       // overwhelmingly common case on a migration re-run.
       if (hasActiveGroupRail(thread)) {
         const stored = thread.twilio_participant_map ?? {};
         const missing = missingFromMap(members, stored);
-        if (missing.length === 0) {
+        if (missing.length === 0 && railAuthorVerified(thread, author)) {
           return {
             status: 'existing',
             twilioConversationSid: thread.twilio_conversation_sid as string,
             participantMap: stored,
           };
         }
-        // A rail whose stored map does not cover the roster: fall through to the
-        // claimed path, which re-reads participants from Twilio and re-finalizes
-        // the SAME conversation (adopt-by-UniqueName finds it).
-        log.warn(
-          { event: 'group_rail_map_incomplete', conversationId, missing: missing.length },
-          'group rail participant map does not cover the roster - refreshing from Twilio',
-        );
+        // A rail whose stored map does not cover the roster, OR whose author was
+        // never verified for the CURRENT business number: fall through to the
+        // claimed path, which re-reads participants from Twilio, repairs, and
+        // re-finalizes the SAME conversation (adopt-by-UniqueName finds it).
+        if (missing.length > 0) {
+          log.warn(
+            { event: 'group_rail_map_incomplete', conversationId, missing: missing.length },
+            'group rail participant map does not cover the roster - refreshing from Twilio',
+          );
+        } else {
+          log.info(
+            { event: 'group_rail_author_unverified', conversationId },
+            'group rail is not verified for the current business number - verifying against Twilio',
+          );
+        }
       }
 
       if (members.length > MAX_RAIL_MEMBERS) {
@@ -322,7 +354,6 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
         return { status: 'failed', reason };
       }
 
-      const author = businessNumber();
       if (author === undefined || author.length === 0) {
         return {
           status: 'failed',
@@ -355,6 +386,17 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
 
       let ref: GroupConversationRef;
       let participants: GroupParticipantRef[] | undefined;
+      /**
+       * Did the create path attach the business number? The bulk create is
+       * all-or-nothing, so a bulk success carries it; the individual-add
+       * fallback reports a refused business add in `failures` under the business
+       * address - which was never read (prod incident 2026-08-17: 132 rails
+       * shipped without their author). An adoptee is checked against Twilio's
+       * participant list below instead.
+       */
+      let authorRefusedOnCreate = false;
+      /** Adopted rails are verified against Twilio's participant list, not trusted. */
+      let wasAdopted = false;
       try {
         // ADOPT-OR-CREATE. The adopt half runs FIRST: a 404 here is `undefined`
         // while an auth failure or a 5xx re-throws (adapter contract), so an
@@ -409,6 +451,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
 
         if (adopted !== undefined) {
           ref = adopted;
+          wasAdopted = true;
         } else {
           const created = await port.createConversationWithParticipants({
             uniqueName: conversationId,
@@ -417,6 +460,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
           });
           ref = created.conversation;
           participants = created.participants;
+          authorRefusedOnCreate = created.failures.some((f) => f.address === author);
         }
       } catch (err) {
         const reason = railFailureReason(err);
@@ -515,11 +559,69 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
         return { status: 'failed', reason };
       }
 
+      // VERIFY THE AUTHOR BEFORE FINALIZE (prod incident 2026-08-17). Roster
+      // coverage says the rail can REACH everyone; it says nothing about whether
+      // WE can post into it. A post is authored as the business number, and
+      // Twilio accepts it only if that exact number is a projected-address
+      // participant of the rail (else 50513). Two live failure shapes:
+      //   - the participant is ABSENT (the individual-add fallback's business
+      //     add was refused; or a read-back that never included it) - attach it;
+      //   - it names a PREVIOUS business number (BUSINESS_PHONE_NUMBER changed
+      //     under the rail) - drop the stale one, attach the current one.
+      // A refused attach is a recorded rail failure, exactly like a refused
+      // member: the next ensure re-adopts and retries, and nothing is stamped
+      // that cannot be posted to. The bulk-create path is trusted for the
+      // participant it was asked to create (all-or-nothing) and only checked
+      // against the read-back when that read-back happens to include it - the
+      // async binding propagation that makes fresh reads roster-incomplete
+      // (rail-binding-propagation-retry) applies to the projected one too.
+      const projectedParticipants = participants.filter(
+        (p) => p.projectedAddress !== undefined && p.projectedAddress.length > 0,
+      );
+      const staleAuthors = projectedParticipants.filter((p) => p.projectedAddress !== author);
+      const authorPresent =
+        !authorRefusedOnCreate &&
+        (!wasAdopted || projectedParticipants.some((p) => p.projectedAddress === author));
+      if (staleAuthors.length > 0 || !authorPresent) {
+        log.warn(
+          {
+            event: 'group_rail_author_repair',
+            conversationId,
+            conversationSid: ref.conversationSid,
+            stale: staleAuthors.length,
+            missing: !authorPresent,
+          },
+          'group rail does not carry the current business number as its projected-address participant - repairing',
+        );
+        try {
+          for (const stale of staleAuthors) {
+            await port.removeParticipant(ref.conversationSid, stale.participantSid);
+          }
+          if (!authorPresent) {
+            const attached = await port.addProjectedParticipant(ref.conversationSid, author);
+            if (attached.projectedAddress !== author) {
+              throw new Error(
+                `rail author attach returned participant ${attached.participantSid} without the projected address`,
+              );
+            }
+          }
+        } catch (err) {
+          const reason = `rail has no participant for the business number: ${railFailureReason(err)}`;
+          log.warn(
+            { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
+            'group rail author repair failed - the thread stays inbound-only',
+          );
+          await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
+          return { status: 'failed', reason };
+        }
+      }
+
       const finalized = await conversations.setTwilioConversation(
         conversationId,
         ref.conversationSid,
         participantMap,
         token,
+        author,
       );
       if (finalized === undefined) {
         // We lost the fence. Because UniqueName is deterministic, the winner's

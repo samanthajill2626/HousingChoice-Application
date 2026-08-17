@@ -7,6 +7,7 @@ import type { InboxState } from './useInbox.js';
 let state: InboxState;
 let seenFilter: string | undefined;
 const markRead = vi.fn();
+const markUnread = vi.fn();
 const loadMore = vi.fn();
 const retry = vi.fn();
 
@@ -23,6 +24,7 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     loadMore,
     retry,
     markRead,
+    markUnread,
     ...over,
   };
 }

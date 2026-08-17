@@ -167,6 +167,16 @@ this change has no separate spec:
   next `message.persisted` / tab focus - will clear it again. A "keep this for
   later" that survives open reader panes needs a sticky bit those surfaces
   respect; not built here.
+- Left as-is at the terminal review round (r5, all LOW): the conversation
+  route emits `conversation.updated` on an idempotent no-op where the inbox
+  routes do not; the contact route's `thread_closed` arm is belt-and-braces
+  (its candidate set is already open 1:1s); the phone route can flag an OPEN
+  relay through its pool number (a legal, visible state - not UI-reachable);
+  "Outgoing call - 0s" can still appear where nothing was ever stored (a
+  pre-deploy or stamp-failed outbound row) via the read-side derivation.
+  Review reports: `.superpowers/review/adversarial-r1..r5.md` (worktree,
+  gitignored) - 5 rounds, 2 high + 6 medium fixed after r1, 1 high + 3 medium
+  after r2, 1 high + 2 medium after r3, 1 high + 3 medium after r4.
 
 Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
 `app/test/inboxApi.test.ts` (mark-unread routes),

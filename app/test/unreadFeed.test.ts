@@ -934,6 +934,26 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     expect(result.deletedProbes).toBe(2);
   });
 
+  // DECLARED FIRST ON PURPOSE: warnDeletedProbes is rate limited on ONE
+  // module-scope 5-minute window, so only the FIRST firing attempt in this file
+  // can be observed. A test asserting "this does NOT fire" has to run before any
+  // test that legitimately fires it, or the limiter would make it pass for the
+  // wrong reason.
+  it('does NOT trip the tripwire on PRODUCTIVE probes: 50 resurfaced contacts are not an alarm', async () => {
+    // CONFORMANCE r3 FINDING 1. Fix wave 2 made the BOUND ignore productive
+    // probes - resurfacing is the product rule, not accrual - but left the WARN
+    // keyed on probes ATTEMPTED. So the exact world the same wave pinned as
+    // healthy (50 genuinely resurfaced deleted contacts, counted in full) raised
+    // "revisit index accrual" on the badge path every five minutes, forever,
+    // diluting the signal that says the residue really is growing. The threshold
+    // now keys on the same quantity the bound does: WASTED + SKIPPED.
+    // Nothing here may FIRE, for the same reason: firing would open the shared
+    // window and the sibling test below could no longer observe its own line.
+    const spy = makeLoggerSpy();
+    warnDeletedProbes(spy.logger, { probes: 50, wasted: 0, skipped: 0 });
+    expect(spy.warn).not.toHaveBeenCalled();
+  });
+
   it('counts probes and fires the shared rate-limited warn only past the threshold', async () => {
     const probeCount = UNREAD_DELETED_PROBE_WARN + 1;
     const items: ConversationItem[] = [];
@@ -969,12 +989,28 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     // limiter. ORDER MATTERS: at-threshold first (emits nothing, leaving the
     // limiter window untouched), over-threshold second.
     const spy = makeLoggerSpy();
-    warnDeletedProbes(spy.logger, { probes: UNREAD_DELETED_PROBE_WARN, skipped: 0 });
+    warnDeletedProbes(spy.logger, {
+      probes: UNREAD_DELETED_PROBE_WARN,
+      wasted: UNREAD_DELETED_PROBE_WARN,
+      skipped: 0,
+    });
     expect(spy.warn).not.toHaveBeenCalled();
 
-    warnDeletedProbes(spy.logger, { probes: result.deletedProbes, skipped: 0 });
+    // Every probe here was WASTED (none of them qualified), which is exactly
+    // the state the threshold exists for.
+    expect(result.wastedProbes).toBe(probeCount);
+    warnDeletedProbes(spy.logger, {
+      probes: result.deletedProbes,
+      wasted: result.wastedProbes,
+      skipped: 0,
+    });
     expect(spy.warn.mock.calls.length).toBeGreaterThanOrEqual(1);
-    expect(spy.warn.mock.calls[0]?.[0]).toMatchObject({ event: 'unread_deleted_probe_tripwire' });
+    expect(spy.warn.mock.calls[0]?.[0]).toMatchObject({
+      event: 'unread_deleted_probe_tripwire',
+      probes: probeCount,
+      wasted: probeCount,
+      skipped: 0,
+    });
   });
 
   it('BOUNDS the WASTED probe work: a wall of hidden deleted threads is SKIPPED unprobed, and the walk continues', async () => {

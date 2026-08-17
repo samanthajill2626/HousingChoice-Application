@@ -1191,7 +1191,11 @@ export async function aggregateInbox(
     // exactly `startingBudget - remainingBudget` because ONE budget is threaded
     // through every collect; the in-collector WARN is per-walk and would miss a
     // request that scanned 200 in each of three collects.
-    warnDeletedProbes(log, { probes: deletedProbes, skipped: deletedSkipped });
+    warnDeletedProbes(log, {
+      probes: deletedProbes,
+      wasted: wastedProbes,
+      skipped: deletedSkipped,
+    });
     warnUnreadScanned(log, startingBudget - remainingBudget);
 
     // Rows sort by DISPLAYED lastActivityAt, as every other filter does. The
@@ -1489,6 +1493,7 @@ export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnrea
   // instance the unread PAGE fires) owns the threshold - do not re-test it here.
   warnDeletedProbes(log, {
     probes: result.deletedProbes,
+    wasted: result.wastedProbes,
     skipped: result.skippedDeletedThreads,
   });
   // THE SILENT ZERO (conformance C1): an early-stopped walk that found nothing
@@ -1500,6 +1505,9 @@ export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnrea
     warnTruncatedZeroCount(log, {
       scanned: (deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT) - result.remainingBudget,
       probes: result.deletedProbes,
+      // How DEEP the wall behind the zero is - the field `probes` cannot supply
+      // once the bound pins it to a constant (adversarial r3 finding 6).
+      skipped: result.skippedDeletedThreads,
     });
   }
 

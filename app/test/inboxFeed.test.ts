@@ -1382,38 +1382,6 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(page2.truncated).toBeUndefined();
   });
 
-  it('BADGE: a TRUNCATED ZERO count logs a rate-limited WARN (the silent zero is observable)', async () => {
-    const warn = vi.fn();
-    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
-    const seed = unreadWorld(3);
-    // The newest index entry is stale (flagged, stored count 0), so the single
-    // raw item the budget buys yields no candidate: the badge answers 0 while
-    // three unread rows sit behind it.
-    seed.conversations.unshift({
-      ...conv({
-        conversationId: 'conv-stale-head-badge',
-        participant_phone: '+14045554002',
-        last_activity_at: T(23),
-        unread_count: 0,
-      }),
-      unread_flag: 'unread',
-    });
-
-    const count = await countUnreadRows(
-      makeDeps(seed, undefined, logger, { unreadWalkLimit: 1 }),
-    );
-
-    expect(count).toEqual({ unreadCount: 0, capped: false, truncated: true });
-    // The client renders a truncated zero as NO BADGE, indistinguishable from
-    // genuinely caught up. The UI affordance is out of scope for v1 (the issue
-    // stays open), so the SERVER has to be the one that says it happened.
-    const zeroWarns = warn.mock.calls.filter(
-      (c) => (c[0] as { event?: string })?.event === 'unread_badge_truncated_zero',
-    );
-    expect(zeroWarns).toHaveLength(1);
-    expect(zeroWarns[0]![0]).toMatchObject({ scanned: 1 });
-  });
-
   it('BUDGET: an empty page still says truncated when the budget dies before any row', async () => {
     const seed = unreadWorld(3);
     // The NEWEST index entry is stale (flagged, stored count 0), so the single
@@ -1631,6 +1599,38 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     // re-asserted here - that WARN is rate limited on ONE module-scope 5-minute
     // window shared by every caller in the process, so the first firing in this
     // file suppresses the rest.
+  });
+
+  it('BADGE: a TRUNCATED ZERO count logs a rate-limited WARN carrying the WALL DEPTH', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
+    // A wall of 30 hidden deleted threads with the live rows behind it and a
+    // budget that dies inside the wall: the badge answers 0, its walk stopped
+    // early, and three unread rows sit behind the answer.
+    const seed = wallOfHiddenDeleted(30, 3);
+
+    const count = await countUnreadRows(
+      makeDeps(seed, undefined, logger, { unreadWalkLimit: 30 }),
+    );
+
+    expect(count).toEqual({ unreadCount: 0, capped: false, truncated: true });
+    // The client renders a truncated zero as NO BADGE, indistinguishable from
+    // genuinely caught up. The UI affordance is out of scope for v1 (the issue
+    // stays open), so the SERVER has to be the one that says it happened.
+    const zeroWarns = warn.mock.calls.filter(
+      (c) => (c[0] as { event?: string })?.event === 'unread_badge_truncated_zero',
+    );
+    expect(zeroWarns).toHaveLength(1);
+    // ADVERSARIAL r3 FINDING 6 / CONFORMANCE r3 FINDING 8: `probes` is pinned at
+    // the bound whenever the bound engaged, so on its own it can only say "this
+    // is happening". `skipped` is free to count and is the one number that says
+    // the wall is 2,000 deep rather than 26 - and this is the ONE log line that
+    // names the zero-count state, so it is the line that most needs it.
+    expect(zeroWarns[0]![0]).toMatchObject({
+      scanned: 30,
+      probes: UNREAD_DELETED_PROBE_LIMIT,
+      skipped: 30 - UNREAD_DELETED_PROBE_LIMIT,
+    });
   });
 
   it('PROBE BOUND: a page behind the wall still gets a FORWARD PATH while supply remains', async () => {

@@ -166,10 +166,16 @@ const warnBadgeZero = moduleRateLimitedWarn(UNREAD_WARN_INTERVAL_MS);
  * stays open for the UI affordance). Until then the SERVER is the only place
  * this state can be observed at all, so it says so here - rate limited, because
  * the badge is the app's highest-frequency request and the signal is the RATE.
+ *
+ * IT CARRIES `skipped` TOO (adversarial r3 finding 6 / conformance r3 finding
+ * 8). `probes` is pinned at UNREAD_DELETED_PROBE_LIMIT whenever the bound
+ * engaged, so alone it can only say "this is happening", never "how bad": the
+ * skipped count is what distinguishes a 26-deep wall from a 2,600-deep one, and
+ * this is the ONE line that names the zero-count state.
  */
 export function warnTruncatedZeroCount(
   logger: Logger | undefined,
-  fields: { scanned: number; probes: number },
+  fields: { scanned: number; probes: number; skipped: number },
 ): void {
   warnBadgeZero(
     logger,
@@ -188,22 +194,31 @@ export function warnTruncatedZeroCount(
  * `CollectResult.skippedDeletedThreads` across their collects and call this
  * once, with the request totals. No-ops when neither is interesting.
  *
- * ATTEMPTED AND SKIPPED ARE SEPARATE FIELDS (adversarial r2 finding 7). Once
- * the bound caps the reads, `probes` alone is a CONSTANT on the badge path, so
- * on its own it can only ever say "this is happening" - never "how bad". The
- * skipped count is free (it needs no read) and is what distinguishes 26
- * deleted residents from 2,600, i.e. how urgent the cleanup is.
+ * ATTEMPTED, WASTED AND SKIPPED ARE SEPARATE FIELDS (adversarial r2 finding 7).
+ * Once the bound caps the reads, `probes` alone is a CONSTANT on the badge path,
+ * so on its own it can only ever say "this is happening" - never "how bad". The
+ * skipped count is free (it needs no read) and is what distinguishes 26 deleted
+ * residents from 2,600, i.e. how urgent the cleanup is.
+ *
+ * THE THRESHOLD KEYS ON WASTED + SKIPPED, NEVER ON ATTEMPTED (conformance r3
+ * finding 1). Fix wave 2 exempted PRODUCTIVE probes from the BOUND - resurfacing
+ * a deleted contact is the product rule, and those rows are bounded by `maxRows`
+ * - but left this tripwire keyed on probes attempted, so the very world that
+ * wave declared healthy (50 resurfaced contacts, counted in full) raised
+ * "revisit index accrual" on every badge request. Productive probes are still
+ * REPORTED, on the `probes` field; they simply cannot trip the alarm.
  */
 export function warnDeletedProbes(
   logger: Logger | undefined,
-  totals: { probes: number; skipped: number },
+  totals: { probes: number; wasted: number; skipped: number },
 ): void {
-  if (totals.probes <= UNREAD_DELETED_PROBE_WARN && totals.skipped === 0) return;
+  if (totals.wasted + totals.skipped <= UNREAD_DELETED_PROBE_WARN) return;
   warnProbeBurst(
     logger,
     {
       event: 'unread_deleted_probe_tripwire',
       probes: totals.probes,
+      wasted: totals.wasted,
       skipped: totals.skipped,
       threshold: UNREAD_DELETED_PROBE_WARN,
     },

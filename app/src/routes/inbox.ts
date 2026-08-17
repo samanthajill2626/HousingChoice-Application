@@ -433,21 +433,24 @@ interface DerivedLatest {
  * record; else sms. Falls back to the conversation's denormalized preview (and
  * sms/inbound) when no message is available — never throws.
  */
-const CALL_STATUSES: ReadonlySet<string> = new Set<CallStatus>([
-  'ringing',
-  'in-progress',
-  'completed',
-  'no-answer',
-  'busy',
-  'failed',
-  'canceled',
-]);
-const CALL_OUTCOMES: ReadonlySet<string> = new Set<CallOutcome>(['answered', 'missed', 'voicemail']);
+// Exhaustive by construction: adding a member to either union in messagesRepo
+// fails typecheck here (`satisfies Record<Union, true>`), so an unknown call
+// state can never silently fall through to the wrong preview.
+const CALL_STATUS_MAP = {
+  ringing: true,
+  'in-progress': true,
+  completed: true,
+  'no-answer': true,
+  busy: true,
+  failed: true,
+  canceled: true,
+} satisfies Record<CallStatus, true>;
+const CALL_OUTCOME_MAP = { answered: true, missed: true, voicemail: true } satisfies Record<CallOutcome, true>;
 function isCallStatus(v: unknown): v is CallStatus {
-  return typeof v === 'string' && CALL_STATUSES.has(v);
+  return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
 }
 function isCallOutcome(v: unknown): v is CallOutcome {
-  return typeof v === 'string' && CALL_OUTCOMES.has(v);
+  return typeof v === 'string' && Object.hasOwn(CALL_OUTCOME_MAP, v);
 }
 
 function deriveLatest(
@@ -488,21 +491,30 @@ function deriveLatest(
     channel = 'sms';
   }
   const direction: 'inbound' | 'outbound' = latest.direction === 'outbound' ? 'outbound' : 'inbound';
-  // A call row has no body. Derive its preview from the row itself (the SAME
-  // strings the voice paths stamp into last_message_preview - call-inbox-unread)
-  // rather than falling back to the stored preview: the stored one is written
-  // only from the Dial summary / voicemail callback, so during the ring - or
-  // forever, when the caller abandons before any summary
-  // (docs/issues/voice-caller-abandon-no-dial-summary.md) - the stored preview
-  // is either empty (a brand-new caller) or the previous TEXT's body sitting
-  // under a "Call" chip. Zero extra reads: the row is already loaded.
+  // A call row has no body. The STORED preview (written by the voice paths from
+  // the Dial summary / voicemail callback - call-inbox-unread) is authoritative
+  // once it exists for a finished call. Derive from the row itself ONLY when
+  // the row carries a KNOWN call_status and either (a) the call is still
+  // non-terminal - during the ring, or forever when the caller abandons before
+  // any summary (docs/issues/voice-caller-abandon-no-dial-summary.md), where
+  // the stored preview is empty or the previous TEXT's body under a "Call"
+  // chip - or (b) no preview was ever stored (a call that finished before this
+  // shipped). Never for a row without a known call_status (the Quo importer
+  // writes none, and its call_outcome values are outside the union): a stored
+  // preview or blank is the honest answer there, not a synthetic live ring.
+  // Never overrides a stored terminal preview - the outbound preview is
+  // deliberately derived from the Dial status, not from the persisted
+  // call_outcome (outbound-call-outcome-answered-before-target-rings), and
+  // re-deriving from the row here would undo that. Zero extra reads either way.
   const preview =
     typeof latest.body === 'string' && latest.body.length > 0
       ? latest.body
-      : channel === 'call'
+      : channel === 'call' &&
+          isCallStatus(latest.call_status) &&
+          (latest.call_status === 'ringing' || latest.call_status === 'in-progress' || fallbackPreview === '')
         ? callPreview({
             direction,
-            callStatus: isCallStatus(latest.call_status) ? latest.call_status : 'ringing',
+            callStatus: latest.call_status,
             ...(isCallOutcome(latest.call_outcome) && { callOutcome: latest.call_outcome }),
             ...(typeof latest.call_duration === 'number' && { callDuration: latest.call_duration }),
           })

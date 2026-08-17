@@ -2690,7 +2690,7 @@ export interface InboxRow {
   role?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
-  preview: string; // latest item's text as a preview (relay: last_message_preview)
+  preview: string; // latest item's text as a preview (relay: last_message_preview; a call-latest row: the stored call preview, or one derived from the call row while it is live)
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' -> render "You: ..." (except channel 'call', whose preview names its direction) - OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)

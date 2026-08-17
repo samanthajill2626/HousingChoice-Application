@@ -1422,23 +1422,15 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // (pre-existing) classification - see
         // docs/issues/outbound-call-outcome-answered-before-target-rings.md -
         // but the PREVIEW reads the Dial summary's own status, which on an
-        // outbound leg describes the target: completed/in-progress = the
-        // target answered, anything else = no answer.
+        // outbound leg describes the target: completed = the target answered,
+        // anything else = no answer. (An outbound Dial in-progress summary
+        // never transitions here - the gate already wrote in-progress - and
+        // callPreview renders "in progress" from callStatus regardless.)
         let touched: ConversationItem | undefined;
         if (isDialSummary && fresh.type === 'call' && fresh.masked !== true) {
           const outbound = fresh.direction === 'outbound';
-          const previewOutcome = outbound
-            ? mapped === 'completed' || mapped === 'in-progress'
-              ? 'answered'
-              : 'missed'
-            : outcome;
-          const previewDuration = outbound
-            ? mapped === 'completed'
-              ? callDuration
-              : undefined
-            : bridgeAccepted
-              ? callDuration
-              : undefined;
+          const previewOutcome = outbound ? (mapped === 'completed' ? 'answered' : 'missed') : outcome;
+          const previewDuration = (outbound ? mapped === 'completed' : bridgeAccepted) ? callDuration : undefined;
           touched = await stampCallActivity(
             fresh.conversationId,
             callPreview({

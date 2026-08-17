@@ -33,6 +33,7 @@ export function useMarkContactRead(contactId: string): void {
   // is no mark-unread).
   const generation = useRef(0);
   const mounted = useRef(true);
+  const ownerContactId = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     mounted.current = true;
@@ -42,8 +43,13 @@ export function useMarkContactRead(contactId: string): void {
   }, []);
 
   // Declared BEFORE the mount-read effect below so a contact switch resets the
-  // flags before the new contact's first read is attempted.
+  // flags before the new contact's first read is attempted. Keyed on an ACTUAL
+  // change of contact (not on effect re-runs): React StrictMode replays effects
+  // for the same contact in dev, and a blind reset there would clear the
+  // in-flight guard and issue the mount read twice.
   useEffect(() => {
+    if (ownerContactId.current === contactId) return;
+    ownerContactId.current = contactId;
     generation.current += 1;
     inFlight.current = false;
     trailing.current = false;

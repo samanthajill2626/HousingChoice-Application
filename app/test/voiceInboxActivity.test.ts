@@ -154,6 +154,60 @@ describe('inbound founder-bridge call -> inbox activity + unread', () => {
     expect(world.conversations.get(conv.conversationId)!.last_message_preview).toBeUndefined();
   });
 
+  it('read-side derivation is bounded: a stored terminal preview wins; an imported call row (no call_status) never previews as a live ring; a pre-deploy finished call derives its outcome', async () => {
+    const world = createFakeWorld();
+    const authed = (r: request.Test) => r.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    const harness = makeWebhookHarness({ world });
+    const inboxRow = async (contactId: string) => {
+      const rows = (await authed(request(harness.app).get('/api/inbox'))).body.rows as Array<Record<string, unknown>>;
+      return rows.find((r) => r['contactId'] === contactId);
+    };
+    const seed = (n: string, phone: string, conv: Record<string, unknown>, msg: Record<string, unknown>) => {
+      world.contacts.push({ contactId: `c-${n}`, type: 'tenant', phone, firstName: n, lastName: 'X' });
+      world.conversations.set(`conv-${n}`, {
+        conversationId: `conv-${n}`,
+        participant_phone: phone,
+        status: 'open',
+        type: 'tenant_1to1',
+        ai_mode: 'manual',
+        participants: [{ contactId: `c-${n}`, phone }],
+        created_at: '2024-01-01T00:00:00.000Z',
+        last_activity_at: '2024-01-02T00:00:00.000Z',
+        ...conv,
+      } as ConversationItem);
+      world.messages.push({
+        conversationId: `conv-${n}`,
+        tsMsgId: '2024-01-02T00:00:00.000Z#m1',
+        provider_sid: `CA-${n}`,
+        type: 'call',
+        direction: 'inbound',
+        author: 'tenant',
+        delivery_status: 'delivered',
+        created_at: '2024-01-02T00:00:00.000Z',
+        ...msg,
+      } as never);
+    };
+    // (1) Stored terminal preview wins over the row (the row says answered/0s -
+    // the outbound classification bug shape).
+    seed('stored', '+15550199201', { last_message_preview: 'Outgoing call - no answer' }, {
+      direction: 'outbound',
+      call_status: 'no-answer',
+      call_outcome: 'answered',
+      call_duration: 0,
+    });
+    // (2) Imported history: no call_status, out-of-union outcome, no stored preview.
+    seed('imported', '+15550199202', {}, { call_outcome: 'no_answer', call_duration_seconds: 0 });
+    // (3) A call that finished before this shipped: known status, no stored preview.
+    seed('predeploy', '+15550199203', {}, { call_status: 'no-answer', call_outcome: 'missed' });
+    // (4) A live ring on a thread whose stored preview is the previous text.
+    seed('ringing', '+15550199204', { last_message_preview: 'can we tour saturday?' }, { call_status: 'ringing' });
+
+    expect(await inboxRow('c-stored')).toMatchObject({ channel: 'call', preview: 'Outgoing call - no answer' });
+    expect(await inboxRow('c-imported')).toMatchObject({ channel: 'call', preview: '' });
+    expect(await inboxRow('c-predeploy')).toMatchObject({ channel: 'call', preview: 'Missed call', unreadCount: 0 });
+    expect(await inboxRow('c-ringing')).toMatchObject({ channel: 'call', preview: 'Incoming call' });
+  });
+
   it('a redelivered inbound webhook (dedupe) does not re-emit', async () => {
     const world = createFakeWorld();
     const { app } = await ringBridge(world);
@@ -492,6 +546,15 @@ describe('outbound originate -> "Outgoing call" lifecycle, never unread', () => 
     expect(fresh.last_message_preview).toBe('Outgoing call - no answer');
     expect(fresh.unread_count ?? 0).toBe(0);
     expect(world.unreadIncrements).toHaveLength(0);
+    // And the INBOX ROW says the same (r3 HIGH 1: the read-side derivation must
+    // not rebuild "Outgoing call - 0s" from the persisted call_outcome).
+    const authed = (r: request.Test) => r.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    const rows = (await authed(request(app).get('/api/inbox'))).body.rows as Array<Record<string, unknown>>;
+    expect(rows.find((r) => r['contactId'] === 'c-target')).toMatchObject({
+      channel: 'call',
+      direction: 'outbound',
+      preview: 'Outgoing call - no answer',
+    });
     // Also busy: the target's line was busy - not an answered call either.
     const world2 = createFakeWorld();
     const o2 = await originate(world2);

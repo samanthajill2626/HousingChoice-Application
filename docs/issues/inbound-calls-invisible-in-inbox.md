@@ -86,14 +86,21 @@ this change has no separate spec:
   `docs/issues/outbound-call-outcome-answered-before-target-rings.md`).
   InboxRow drops its "You:" prefix for call previews (they already name their
   direction).
-- Read side, one deliberate addition (r2 MED 4): `deriveLatest` builds a
-  call-latest row's preview from the loaded call row (`callPreview` over
-  `call_status`/`call_outcome`/`call_duration`, zero extra reads) instead of
-  falling back to the stored preview - so during a ring, or forever after an
-  abandon, the row reads "Incoming call" on the Call channel rather than a
-  blank line or the previous text's body. The stored preview still feeds
-  `conversation.updated`, Today and the relay rows; the two agree by
-  construction (same function).
+- Read side, one deliberate and BOUNDED addition (r2 MED 4, bounded at r3
+  HIGH 1 / MED 2): `deriveLatest` builds a call-latest row's preview from the
+  loaded call row (`callPreview` over `call_status`/`call_outcome`/
+  `call_duration`, zero extra reads) ONLY when the row carries a known
+  `call_status` and either the call is still non-terminal (ringing /
+  in-progress: during a ring, or forever after an abandon) or no preview was
+  ever stored (a call that finished before this shipped). A stored terminal
+  preview is authoritative (it is what carries the outbound "no answer" that
+  the persisted `call_outcome` gets wrong), and a row with no known
+  `call_status` (the Quo importer writes none, with out-of-union outcomes)
+  keeps the stored preview or blank - never a synthetic live ring. Where the
+  newest message is a TEXT (the missed-call auto-text, by default), the row
+  previews that text's body regardless of what the voicemail stamped - so with
+  the auto-text ON the inbox row reads the auto-text, not "Voicemail"; the
+  stored "Voicemail" still feeds `conversation.updated` and Today.
 - Ordering: the unread write lands BEFORE `message.persisted` (a staff member
   viewing the contact re-marks read on that event), `conversation.updated`
   follows - the SMS webhook's order - on BOTH the status and the recording
@@ -111,10 +118,11 @@ this change has no separate spec:
   re-previews the thread with the auto-text body (`sendMessage` touches), so an
   unread missed-call row can read as the auto-text; the row stays unread and the
   timeline shows both. Follow-up if it grates: a call-aware preview.
-- Also accepted at the r1 adjudication (planner's call, code-level): the final
+- Also accepted at the r1 adjudication (planner's call, code-level): the STORED
   preview of a miss-with-voicemail is whichever writer lands last (auto-text
-  body vs "Voicemail") - same last-activity semantic as texts, and "Voicemail"
-  winning is the better outcome; the voicemail re-flag rides the recording
+  body vs "Voicemail") - same last-activity semantic as texts (the inbox ROW
+  shows the auto-text body whenever that text is the newest message, see the
+  read-side bullet); the voicemail re-flag rides the recording
   callback and so requires the S3 mirror to have succeeded (the outcome upgrade
   always did); Today labels an auto-replied missed call "Unreplied" (a bot
   courtesy is not a staff reply - same as an auto-replied text); one call that

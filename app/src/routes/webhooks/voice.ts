@@ -44,7 +44,8 @@ import {
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import { formatPhoneForDisplay } from '../../lib/phone.js';
-import { appEvents, type EventBus } from '../../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
+import { callPreview } from '../../lib/callPreview.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { resolveMessage } from '../../messages/index.js';
 import {
@@ -369,6 +370,41 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     return vr;
   }
 
+  /**
+   * INBOX ACTIVITY for a call row (inbound-calls-invisible-in-inbox): stamp
+   * `last_activity_at` + the call preview on the conversation - the SAME
+   * touchLastActivity the text/email writers use, so the thread re-sorts and
+   * re-previews in the inbox - and, when `unread`, bump `unread_count` (+ the
+   * sparse byUnread flag) FIRST so the touch's ALL_NEW snapshot carries the
+   * count into `conversation.updated`. Only an inbound MISS and a voicemail are
+   * unread (operator decision 2026-08-03); ring/answered/outbound re-sort as
+   * already-read. Best-effort: a failure logs and never 5xxs a webhook (the
+   * call row is already persisted; the inbox is merely stale). Callers emit
+   * `conversation.updated` from the returned item AFTER their
+   * `message.persisted`, matching the SMS webhook's order - and the unread
+   * write lands BEFORE `message.persisted` on purpose: a staff member viewing
+   * the contact re-marks read on that event, so the increment must already be
+   * visible or the miss would stay unread behind their back.
+   */
+  async function stampCallActivity(
+    conversationId: string,
+    preview: string,
+    ts: string,
+    unread: boolean,
+    callSid: string,
+  ): Promise<ConversationItem | undefined> {
+    try {
+      if (unread) await conversations.incrementUnread(conversationId);
+      return await conversations.touchLastActivity(conversationId, preview, ts);
+    } catch (err) {
+      log.error(
+        { err, callSid, conversationId, unread },
+        'voice: touchLastActivity/unread failed - call row persisted, inbox stale',
+      );
+      return undefined;
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Inbound voice — POST /voice. Mirrors the SMS inbound handler's shape:
   // missing-fields guard → echo guard → route by To.
@@ -590,12 +626,23 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         transcriptChannelRoles: { '1': 'client', '2': 'staff' },
       });
       if (!appended.deduped) {
+        // Inbox: the ringing call surfaces/re-sorts the caller's thread NOW
+        // ("Incoming call", already-read); the terminal summary re-stamps the
+        // outcome and decides unread. Fresh-append-only, like the emits.
+        const touched = await stampCallActivity(
+          conversation.conversationId,
+          callPreview({ direction: 'inbound', callStatus: 'ringing' }),
+          startedAt,
+          false,
+          CallSid,
+        );
         events.emit('message.persisted', {
           conversationId: conversation.conversationId,
           tsMsgId: appended.tsMsgId,
           direction: 'inbound',
           deliveryStatus: 'delivered',
         });
+        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
       }
     } catch (err) {
       // Never 5xx a webhook on a persist failure — bridge regardless (a
@@ -1361,12 +1408,38 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       const fresh = entry ?? (await messages.getByProviderSid(entryCallSid));
       if (fresh) {
         mergeContext({ conversationId: fresh.conversationId });
+        // INBOX (inbound-calls-invisible-in-inbox): a Dial-summary transition
+        // on a founder-bridge / outbound call re-stamps the thread with the
+        // outcome preview ("Missed call", "Call - 12m 3s", "Outgoing call - no
+        // answer", ...) and, for an INBOUND terminal MISS only, marks it
+        // unread. Gated on `transitioned` (forward-only machine) so a
+        // redelivered summary never double-counts, and on the Dial summary so
+        // a per-leg child callback never writes. Masked relay legs are a
+        // non-goal (their thread carries roster semantics, not staff unread).
+        // Uses the LOCAL outcome/duration - `fresh` may be the pre-transition
+        // snapshot fetched for classification.
+        let touched: ConversationItem | undefined;
+        if (isDialSummary && fresh.type === 'call' && fresh.masked !== true) {
+          touched = await stampCallActivity(
+            fresh.conversationId,
+            callPreview({
+              direction: fresh.direction,
+              callStatus: mapped,
+              ...(outcome !== undefined && { callOutcome: outcome }),
+              ...(bridgeAccepted && callDuration !== undefined && { callDuration }),
+            }),
+            now,
+            isMissed && fresh.direction === 'inbound',
+            entryCallSid,
+          );
+        }
         events.emit('message.persisted', {
           conversationId: fresh.conversationId,
           tsMsgId: fresh.tsMsgId,
           direction: fresh.direction,
           deliveryStatus: fresh.delivery_status,
         });
+        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
 
         // MISSED FOUNDER-BRIDGE (M1.9b): a founder-bridge call (masked:false)
         // whose <Dial action> summary just transitioned it into a terminal MISS
@@ -1599,12 +1672,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     if (isVoicemail) {
       const upgraded = await messages.upgradeCallOutcomeToVoicemail(entryCallSid);
       if (upgraded) {
+        // INBOX: a voicemail is NEW information on a call already counted as a
+        // miss - re-stamp "Voicemail" and bump unread AGAIN, deliberately: if
+        // staff read the miss and navigated away, the voicemail must re-flag
+        // the row (the badge counts rows, so the double only shows on the
+        // row's own count). Idempotent via the conditional upgrade above.
+        const touched = await stampCallActivity(
+          entry.conversationId,
+          callPreview({
+            direction: entry.direction,
+            callStatus: entry.call_status ?? 'completed',
+            callOutcome: 'voicemail',
+          }),
+          new Date().toISOString(),
+          true,
+          entryCallSid,
+        );
         events.emit('message.persisted', {
           conversationId: entry.conversationId,
           tsMsgId: entry.tsMsgId,
           direction: entry.direction,
           deliveryStatus: entry.delivery_status,
         });
+        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
         try {
           await sendVoicemailPush(entry.conversationId, entryCallSid);
         } catch (err) {

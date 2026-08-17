@@ -20,7 +20,16 @@ const getConversationScheduled = vi.fn();
 const markConversationRead = vi.fn();
 const sendMessageMock = vi.fn();
 const getContacts = vi.fn();
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
 let sse: EventStreamHandlers = {};
+
+// The nav badge's optimistic layer, spied so the mount-mark below can assert it
+// stays UNWIRED (adversarial A10). If a future edit wires noteRowsCleared into
+// that effect, this spy is what catches it.
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -121,6 +130,16 @@ describe('ConversationDetail dispatch - group_text', () => {
     expect(screen.queryByText('CONTACT PAGE')).toBeNull();
     expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument();
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('gt-1'));
+    // ...and DELIBERATELY does not touch the nav badge's optimistic layer
+    // (adversarial A10). This mount-mark fires BLIND, with no unread knowledge,
+    // exactly like useMarkContactRead - so an optimistic decrement here could
+    // subtract a row the badge never counted. It reconciles through the cheap
+    // count refetch the mark-read's own SSE event triggers. The asymmetry is
+    // real and intended: opening this thread from an Inbox ROW decrements
+    // instantly (useInbox knows that row's unread), opening it from Today or a
+    // deep link does not.
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 
   it('reads the roster from the GROUP members route, never the relay members route', async () => {

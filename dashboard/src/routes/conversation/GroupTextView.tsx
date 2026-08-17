@@ -245,6 +245,16 @@ export function GroupTextView({
   // than no safety net: the next reader trusts it.
 
   // Viewing the thread marks it read - the inbox unread badge clears once seen.
+  // DELIBERATELY UNWIRED from the badge's optimistic layer (the same ruling
+  // useMarkContactRead carries, and its regression test): this fires BLIND on
+  // mount, with no unread knowledge, so an optimistic decrement here could
+  // subtract a row the badge never counted. It reconciles through the cheap
+  // count refetch this mark-read's own SSE event triggers. The visible
+  // asymmetry is intended - opening a thread from an Inbox ROW decrements
+  // instantly (useInbox knows that row's unread), opening it from Today or a
+  // deep link does not. Wiring it later is safe (the clear key would be
+  // `cv:<conversationId>`, the vocabulary useInbox already mints, so the two
+  // would dedupe rather than double-decrement) but it needs the unread count.
   useEffect(() => {
     void markConversationRead(conversationId).catch(() => {
       /* best-effort - a failed mark-read must not break the view */

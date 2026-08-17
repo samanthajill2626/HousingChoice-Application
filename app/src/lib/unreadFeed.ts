@@ -115,6 +115,13 @@ const POINTER_PARTITION_PREFIXES = ['phone#', 'email#', 'token#'] as const;
  * ACCEPTED: a TRAILING FLUSH fired by the limiter's own timer lands on the
  * last caller's logger rather than the one that was suppressed. These lines
  * are process-level tripwires whose content does not depend on the request.
+ *
+ * ALSO ACCEPTED, and NOT a leak (adversarial A12): `destination` holds the last
+ * caller's request-scoped child logger until the NEXT call replaces it, so
+ * between bursts the module pins one request's logger and its correlation
+ * context indefinitely. That is one small object, never a growing set, and the
+ * alternative - clearing it after each call - would cost the trailing flush its
+ * destination entirely.
  */
 function moduleRateLimitedWarn(
   intervalMs: number,

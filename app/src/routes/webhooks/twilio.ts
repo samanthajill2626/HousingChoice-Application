@@ -87,8 +87,12 @@ import { convertConnectingRelayGroupToGroupText } from '../../services/groupConv
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNumbersRepo.js';
 import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../../repos/settingsRepo.js';
 import { createRateLimitedWarn } from '../../lib/rateLimitedWarn.js';
-import { normalizeToE164 } from '../../lib/phone.js';
+import { formatPhoneForDisplay, normalizeToE164 } from '../../lib/phone.js';
 import { conversationIdForGroup } from '../../lib/import/ids.js';
+import { capPushText, PUSH_BODY_MAX, PUSH_TITLE_MAX } from '../../lib/pushText.js';
+import { contactDisplayName } from '../../lib/contactName.js';
+import { groupThreadLabel, relayThreadLabel } from '../../lib/groupTitle.js';
+import { createPushService, type PushService } from '../../services/pushService.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -264,6 +268,13 @@ export interface TwilioWebhookDeps {
    * keeps a healthy channel from alarming. Defaults to the real service.
    */
   groupCrossCheck?: Pick<GroupCrossCheck, 'recordClassicInbound'>;
+  /**
+   * Inbound-message push broadcast (spec: inbound-message-push). Every FRESH
+   * inbound message row fans a `message` push out to every subscribed staff
+   * device. The real service by default (it no-ops when VAPID is unset); the
+   * test harness injects a recorder.
+   */
+  pushService?: PushService;
 }
 
 /** Default wait before the one unknown-SID retry in /status (see above). */
@@ -291,6 +302,41 @@ export function isTerminalDeliveryFailure(errorCode: string | undefined): boolea
   return true;
 }
 
+/**
+ * The sender label for group/relay push bodies: roster name -> contact display
+ * name -> formatted phone -> the raw From (spec 3.4 fallback chain). All three
+ * inputs are already in scope at every persist point, so a push adds NO repo
+ * lookup to the hot path. Pure, no I/O, no logging.
+ */
+function pushSenderLabel(
+  rosterName: string | undefined,
+  senderContact: ContactItem | undefined,
+  from: string,
+): string {
+  const roster = typeof rosterName === 'string' ? rosterName.trim() : '';
+  if (roster.length > 0) return roster;
+  return contactDisplayName(senderContact) ?? formatPhoneForDisplay(from) ?? from;
+}
+
+/**
+ * The push body for an inbound SMS/MMS (spec 3.4): the text when present, the
+ * attachment line for a media-only message, and - when there is NEITHER text
+ * nor media - empty on a 1:1 (the SW renders title-only) or the sender label
+ * alone on a group/relay row, so the alert still says who acted. `sender`
+ * prefixes group/relay bodies and is undefined for 1:1. Pure, no I/O.
+ */
+function pushMessageBody(body: string | undefined, mediaCount: number, sender?: string): string {
+  const text = body !== undefined && body.length > 0 ? body : undefined;
+  if (sender !== undefined) {
+    if (text !== undefined) return capPushText(`${sender}: ${text}`, PUSH_BODY_MAX);
+    if (mediaCount > 0) return capPushText(`${sender} sent an attachment.`, PUSH_BODY_MAX);
+    return capPushText(sender, PUSH_BODY_MAX);
+  }
+  if (text !== undefined) return capPushText(text, PUSH_BODY_MAX);
+  if (mediaCount > 0) return 'Sent an attachment.';
+  return '';
+}
+
 export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
@@ -310,6 +356,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
   const groupRail = deps.groupRailEnqueuer ?? createGroupRailEnqueuer({ logger: log });
   const groupCrossCheck = deps.groupCrossCheck ?? createGroupCrossCheck({ logger: log });
+  const pushService = deps.pushService ?? createPushService({ config, logger: deps.logger });
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -351,6 +398,33 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   });
   const ourNumberKind = createOurNumberKind({ config, conversations });
   const statusRetryDelayMs = deps.statusUnknownSidRetryDelayMs ?? STATUS_UNKNOWN_SID_RETRY_DELAY_MS;
+
+  /**
+   * Fire-and-forget inbound-message push broadcast (spec D11): the promise is
+   * deliberately NOT awaited, so a slow or failing push can never delay or fail
+   * the webhook ack (the same pattern as the pre-ring voice push). The payload
+   * is FLAT - the service worker reads kind/conversationId at the JSON root.
+   */
+  function emitMessagePush(title: string, body: string, conversationId: string): void {
+    void pushService
+      .sendToAll({
+        kind: 'message',
+        payload: {
+          title: capPushText(title, PUSH_TITLE_MAX),
+          // Capped here too even though every caller already caps via
+          // pushMessageBody: this helper is the choke point, capping an
+          // already-capped string is idempotent, and an oversize payload is
+          // REJECTED by the push service, so the notification would be lost
+          // silently and on every retry.
+          body: capPushText(body, PUSH_BODY_MAX),
+          kind: 'message',
+          conversationId,
+        },
+      })
+      .catch((err: unknown) => {
+        log.warn({ err, conversationId }, 'inbound message push failed (fire-and-forget)');
+      });
+  }
 
   const router = Router();
   const verifySignature = twilioSignatureMiddleware({
@@ -615,6 +689,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         deliveryStatus: 'delivered',
       });
       if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+      // Inbound-message push. A SIBLING of the braceless `if (touched)` above -
+      // NEVER nested under it: a touchLastActivity failure must not suppress the
+      // alert. Every relay arm (closed / removed-member / keyword / fresh) falls
+      // through to this one block, so one emit covers every persisted relay row.
+      emitMessagePush(
+        relayThreadLabel(relay),
+        pushMessageBody(Body, mediaUrls.length, pushSenderLabel(sender?.name, senderContact, From)),
+        relay.conversationId,
+      );
     }
 
     // Keyword processing (spec 3.2): the SHARED seam runs against the sender's
@@ -922,6 +1005,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         deliveryStatus: 'delivered',
       });
       if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+      // Inbound-message push, 1:1 semantics (the row filed into the SENDER's own
+      // 1:1, not the dead group): no sender prefix, and the deep link goes to
+      // that 1:1. A SIBLING of the braceless `if (touched)` above, never nested.
+      emitMessagePush(
+        contactDisplayName(contact) ??
+          (typeof conversation.participant_display_name === 'string' &&
+          conversation.participant_display_name.length > 0
+            ? conversation.participant_display_name
+            : undefined) ??
+          formatPhoneForDisplay(From) ??
+          From,
+        pushMessageBody(Body, mediaUrls.length),
+        conversation.conversationId,
+      );
     }
     // PII (doc sec 9): IDs only - never the sender phone. viaGroup = the closed
     // group's id; conversationId = the 1:1 the text was intercepted into.
@@ -1677,6 +1774,21 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         deliveryStatus: 'delivered',
       });
       if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+      // Inbound-message push on the GROUP thread. A SIBLING of the braceless
+      // `if (touched)` above, never nested under it.
+      emitMessagePush(
+        groupThreadLabel(thread.participants),
+        pushMessageBody(
+          Body,
+          mediaUrls.length,
+          pushSenderLabel(
+            (thread.participants ?? []).find((p) => p.phone === senderE164)?.name,
+            senderContact,
+            From,
+          ),
+        ),
+        thread.conversationId,
+      );
     }
 
     // Keywords (spec 4.4): the SHARED seam runs on EVERY group inbound, because
@@ -2144,6 +2256,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (touched) {
         events.emit('conversation.updated', toConversationUpdatedEvent(touched));
       }
+      // Inbound-message push. Uses `contact` (the pre-capture findByPhone at the
+      // top of the handler), NOT `effectiveContact`: an auto-captured stub never
+      // carries a name, so both resolve identically and this one is free.
+      emitMessagePush(
+        contactDisplayName(contact) ??
+          (typeof conversation.participant_display_name === 'string' &&
+          conversation.participant_display_name.length > 0
+            ? conversation.participant_display_name
+            : undefined) ??
+          formatPhoneForDisplay(From) ??
+          From,
+        pushMessageBody(Body, mediaUrls.length),
+        persistedConversationId,
+      );
       // Conversation fact extraction (AI): a fresh inbound on a tenant/unknown 1:1
       // thread schedules a debounced extraction run. The sliding upsert collapses
       // a burst of inbounds into ONE run at the latest dueAt (now + debounce).

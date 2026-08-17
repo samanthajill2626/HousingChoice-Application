@@ -200,6 +200,7 @@ if (config.inboundMailQueueUrl) {
     const { ingestInboundEmail } = await import('./services/inboundEmail.js');
     const { createInboundMailDispatch } = await import('./services/inboundMailConsumer.js');
     const { createApplyEmailEvent } = await import('./services/emailEvents.js');
+    const { createPushService } = await import('./services/pushService.js');
     const { SQSClient } = await import('@aws-sdk/client-sqs');
     const { SqsJobConsumer } = await import('./adapters/sqsJobConsumer.js');
 
@@ -217,6 +218,10 @@ if (config.inboundMailQueueUrl) {
       contacts,
       extraction: createExtractionRepo({ logger }),
       events: appEvents,
+      // Inbound-message push: this is the PROD email path, so this instance is
+      // the one that actually broadcasts. It no-ops when VAPID is unset, and it
+      // defaults its own usersRepo internally.
+      pushService: createPushService({ config, logger }),
       ...(mediaStore !== undefined && { mediaStore }),
     };
     // B5: bounce/complaint/delivery events -> delivery status + suppression (+ the

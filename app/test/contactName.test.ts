@@ -1,7 +1,12 @@
 // M1.2 — exhaustive unit tests for the "First Last - N Bed" convention
 // parser (lib/contactName.ts). Pure function: table-driven, no fakes.
 import { describe, expect, it } from 'vitest';
-import { parseContactName, type ParsedContactName } from '../src/lib/contactName.js';
+import {
+  contactDisplayName,
+  parseContactName,
+  type ParsedContactName,
+} from '../src/lib/contactName.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 
 describe('parseContactName — conforming strings', () => {
   const cases: [string, ParsedContactName][] = [
@@ -76,5 +81,32 @@ describe('parseContactName — purity', () => {
     const b = parseContactName('John Smith - 2 Bed');
     expect(a).toEqual(b);
     expect(a).not.toBe(b);
+  });
+});
+
+// contactDisplayName - the push-copy name join. firstName/lastName are NOT
+// declared fields on ContactItem: they ride its index signature, so the
+// helper must read them defensively and a non-string must not reach trim().
+function contact(fields: Record<string, unknown>): ContactItem {
+  return { contactId: 'c1', type: 'tenant', created_at: 'x', ...fields } as ContactItem;
+}
+
+describe('contactDisplayName', () => {
+  it('joins trimmed first and last', () => {
+    expect(contactDisplayName(contact({ firstName: ' Keisha ', lastName: 'Jones' }))).toBe(
+      'Keisha Jones',
+    );
+  });
+  it('returns a single present part alone', () => {
+    expect(contactDisplayName(contact({ firstName: 'Keisha' }))).toBe('Keisha');
+    expect(contactDisplayName(contact({ lastName: ' Jones ' }))).toBe('Jones');
+  });
+  it('returns undefined for no name parts, blank parts, or non-strings', () => {
+    expect(contactDisplayName(contact({}))).toBeUndefined();
+    expect(contactDisplayName(contact({ firstName: '  ', lastName: '' }))).toBeUndefined();
+    expect(contactDisplayName(contact({ firstName: 42 }))).toBeUndefined();
+  });
+  it('returns undefined for an undefined contact', () => {
+    expect(contactDisplayName(undefined)).toBeUndefined();
   });
 });

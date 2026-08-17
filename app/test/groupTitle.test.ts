@@ -7,8 +7,12 @@
 // The two are output-equal by contract, and these cases are deliberately the
 // same cases the mirror's suite pins.
 import { describe, expect, it } from 'vitest';
-import { groupThreadLabel } from '../src/lib/groupTitle.js';
-import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
+import { groupThreadLabel, relayThreadLabel } from '../src/lib/groupTitle.js';
+import { formatPhoneForDisplay } from '../src/lib/phone.js';
+import type {
+  ConversationItem,
+  ConversationParticipant,
+} from '../src/repos/conversationsRepo.js';
 
 function member(over: Partial<ConversationParticipant> = {}): ConversationParticipant {
   return { contactId: 'c1', phone: '+14045550111', ...over } as ConversationParticipant;
@@ -62,5 +66,42 @@ describe('groupThreadLabel (app - the canonical derivation)', () => {
     const odd = { contactId: 'c9', phone: '+16174707727', name: 42 } as unknown as ConversationParticipant;
     expect(() => groupThreadLabel([odd])).not.toThrow();
     expect(groupThreadLabel([odd])).toBe('With (617) 470-7727');
+  });
+});
+
+// relayThreadLabel is the OTHER derivation: a relay group carries a pool number
+// and an operator tag that a native group text does not, so its chain has four
+// rungs where groupThreadLabel has one rule. These cases are the same four rungs
+// app/test/inboxFeed.test.ts pins through the inbox row - that test staying
+// green UNCHANGED is the parity gate for the routes/inbox.ts re-point.
+function relayConv(fields: Record<string, unknown>): ConversationItem {
+  return { conversationId: 'r1', status: 'open', type: 'relay_group', ...fields } as ConversationItem;
+}
+
+describe('relayThreadLabel', () => {
+  it('prefers member names: "With A & B"', () => {
+    const conv = relayConv({
+      participants: [
+        member({ contactId: 'c1', phone: '+15550100001', name: 'Ana Diaz' }),
+        member({ contactId: 'c2', phone: '+15550100002', name: ' Jose ' }),
+        member({ contactId: 'c3', phone: '+15550100003', name: '' }),
+      ],
+    });
+    expect(relayThreadLabel(conv)).toBe('With Ana Diaz & Jose');
+  });
+  it('falls back to the operator placement_tag', () => {
+    expect(relayThreadLabel(relayConv({ placement_tag: ' 12 Oak St ' }))).toBe('12 Oak St');
+  });
+  it('falls back to the formatted pool number', () => {
+    // Assert the FORMATTED output, derived from the same formatter the rung
+    // uses: a `toContain('555')` would pass just as well against the raw
+    // E.164, so it could not tell this rung from a bare-number fallback.
+    const poolNumber = '+15550100009';
+    const label = relayThreadLabel(relayConv({ pool_number: poolNumber }));
+    expect(label).toBe(formatPhoneForDisplay(poolNumber));
+    expect(label).toBe('(555) 010-0009');
+  });
+  it('falls back to "Relay group" when nothing else exists', () => {
+    expect(relayThreadLabel(relayConv({}))).toBe('Relay group');
   });
 });

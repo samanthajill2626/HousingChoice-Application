@@ -53,7 +53,7 @@ import {
   type EventBus,
 } from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
-import { groupThreadLabel } from '../lib/groupTitle.js';
+import { groupThreadLabel, relayThreadLabel } from '../lib/groupTitle.js';
 import { STAGE_LABELS } from '../lib/statusModel.js';
 import {
   createPlacementsRepo,
@@ -805,22 +805,7 @@ export async function aggregateInbox(
    * contact rows); log lines stay counts/IDs only.
    */
   const relayRowFor = async (conv: ConversationItem): Promise<InboxRow> => {
-    const memberNames = (conv.participants ?? [])
-      .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
-      .filter((n) => n.length > 0);
-    // GOTCHA: the operator tag rides ConversationItem's index signature under
-    // the key `placement_tag` (NOT `tag`) and is untyped — read it defensively.
-    const tag = typeof conv.placement_tag === 'string' ? conv.placement_tag.trim() : '';
-    let label: string;
-    if (memberNames.length > 0) {
-      label = `With ${memberNames.join(' & ')}`;
-    } else if (tag.length > 0) {
-      label = tag;
-    } else if (typeof conv.pool_number === 'string' && conv.pool_number.length > 0) {
-      label = formatPhoneForDisplay(conv.pool_number) ?? conv.pool_number;
-    } else {
-      label = 'Relay group';
-    }
+    const label = relayThreadLabel(conv);
 
     const preview =
       typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '';

@@ -8,8 +8,8 @@
 // target ONLY from known fields (kind + callId/conversationId + action) into a
 // fixed same-origin allow-list of paths:
 //     '/'                         (fallback)
-//     '/quick-reply/<callId>'     (missed_call; optional #action=<id>)
-//     '/conversations/<id>'       (message)
+//     '/email'                    (unmatched_email; EXACT match, not a prefix)
+//     '/conversations/<id>'       (message, missed_call, voicemail)
 // ids are validated as plausible (no slashes, no scheme/control chars) and
 // URL-encoded; anything off-list or unparseable falls back to '/'.
 //
@@ -82,6 +82,13 @@ export function resolveSafePath(
     return `/conversations/${encodeURIComponent(d.conversationId)}`;
   }
 
+  // An unmatched email has NO conversation to open - the tap lands on the
+  // triage queue page. Checked AFTER conversationId so a payload that does
+  // carry a thread still wins.
+  if (d.kind === 'unmatched_email') {
+    return '/email';
+  }
+
   return '/';
 }
 
@@ -95,10 +102,16 @@ export function assertSameOriginPath(path: string, origin: string): string {
   try {
     const url = new URL(path, origin);
     if (url.origin !== origin) return '/';
-    // Allow-list mirrors routes that ACTUALLY EXIST in App.tsx. `/quick-reply/`
-    // was removed with the branch above - leaving it here would let a path with
-    // no route pass the last gate.
-    if (url.pathname === '/' || /^\/conversations\/[^/]+$/.test(url.pathname)) {
+    // Allow-list mirrors routes that ACTUALLY EXIST in App.tsx: '/', '/email',
+    // '/conversations/<id>'. `/quick-reply/` was removed with the branch above -
+    // leaving it here would let a path with no route pass the last gate.
+    // '/email' is an EXACT match on purpose: '/email/quarantine' is a separate
+    // tab and never a push target.
+    if (
+      url.pathname === '/' ||
+      url.pathname === '/email' ||
+      /^\/conversations\/[^/]+$/.test(url.pathname)
+    ) {
       // Re-serialise as a leading-'/' path (drop any host the candidate carried).
       return `${url.pathname}${url.search}${url.hash}`;
     }

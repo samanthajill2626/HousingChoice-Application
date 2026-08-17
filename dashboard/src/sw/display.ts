@@ -9,7 +9,9 @@
 // collapsed a whole call into one shade entry. Tags are now "<kind>:<id>", so
 // one call's alerts coexist the way a native phone app shows incoming-call,
 // missed-call and voicemail as separate entries. A `message` push coalesces
-// per conversation ("message:<conversationId>") like a native SMS thread.
+// per conversation ("message:<conversationId>") like a native SMS thread, and
+// an `unmatched_email` push carries the bare QUEUE-level tag "unmatched_email"
+// so the whole triage queue owns one shade entry.
 //
 // The one deliberate replacement left: a missed_call/voicemail push CLOSES the
 // call's pre_ring notification (staleTagsFor). "Incoming call" is transient -
@@ -54,26 +56,41 @@ export interface BuiltNotification {
  * the same call/conversation get their OWN shade entries, while repeats of the
  * SAME kind (e.g. more texts in one thread) coalesce in place. Bare id when
  * the payload has no kind; undefined (no coalescing) when it has no id.
+ *
+ * `unmatched_email` is the one QUEUE-level exception, checked first: every
+ * unmatched-email push shares the bare tag, so the triage queue owns ONE shade
+ * entry that each new arrival replaces in place. No unmatched id travels in
+ * the payload (the C1 data allow-list is kind/callId/conversationId), and the
+ * entry represents the queue rather than any single item.
  */
 export function notificationTag(data: PushDisplayData | null | undefined): string | undefined {
   const d = data ?? {};
+  if (d.kind === 'unmatched_email') return 'unmatched_email';
   const id = d.callId || d.conversationId || undefined;
   if (!id) return undefined;
   return d.kind ? `${d.kind}:${id}` : id;
 }
 
 /**
- * Build the Notification title + options for a pushed payload. Pre-ring and
- * missed-call alerts are time-sensitive (the founder must see them BEFORE or
- * around a live call), so they get the strongest on-screen treatment we can
- * ask for: renotify (peek again on a same-tag repeat) and requireInteraction
- * (stay on screen until acted on). Every push vibrates - the vibration
- * pattern is the key nudge that makes Android surface a heads-up banner
- * instead of filing the notification silently into the shade.
+ * Build the Notification title + options for a pushed payload. Two distinct
+ * sets, deliberately split:
+ *
+ * - ALERTING kinds re-alert on a same-tag replacement (renotify). A same-tag
+ *   replacement is otherwise SILENT, so the second message in a thread would
+ *   land without a peep - the opposite of native messaging. `message` and
+ *   `unmatched_email` join the time-sensitive kinds here.
+ * - TIME-SENSITIVE kinds (missed_call, pre_ring) additionally pin themselves
+ *   to the screen (requireInteraction): the founder must see them BEFORE or
+ *   around a live call. A message must NOT pin itself.
+ *
+ * Every push vibrates - the vibration pattern is the key nudge that makes
+ * Android surface a heads-up banner instead of filing the notification
+ * silently into the shade.
  */
 export function buildNotificationOptions(data: PushDisplayData | null | undefined): BuiltNotification {
   const d = data ?? {};
   const timeSensitive = d.kind === 'missed_call' || d.kind === 'pre_ring';
+  const alerting = timeSensitive || d.kind === 'message' || d.kind === 'unmatched_email';
   const tag = notificationTag(d);
   return {
     title: d.title || 'HousingChoice',
@@ -93,7 +110,7 @@ export function buildNotificationOptions(data: PushDisplayData | null | undefine
       actions: Array.isArray(d.actions) ? d.actions.slice(0, 2) : undefined,
       vibrate: [200, 100, 200],
       // `renotify` REQUIRES a tag - setting it tagless throws - so gate it.
-      renotify: timeSensitive && Boolean(tag),
+      renotify: alerting && Boolean(tag),
       requireInteraction: timeSensitive,
       tag,
     },

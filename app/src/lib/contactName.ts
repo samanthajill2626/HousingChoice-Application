@@ -4,6 +4,7 @@
 // it rather than re-implementing the split.
 //
 // Pure function, no I/O, no logging.
+import type { ContactItem } from '../repos/contactsRepo.js';
 
 /** Parsed components of a conforming "First Last - N Bed" string. */
 export interface ParsedContactName {
@@ -44,4 +45,27 @@ export function parseContactName(raw: string): ParsedContactName | undefined {
     lastName: tokens.slice(1).join(' '),
     voucherSize: bedrooms === undefined ? 0 : Number(bedrooms),
   };
+}
+
+// contactDisplayName - the trimmed "First Last" join for push copy.
+//
+// SCOPE GUARD: five PRIVATE copies of this derivation already exist
+// (routes/contacts.ts, routes/units.ts, lib/rosterResolution.ts,
+// services/groupMembers.ts, services/inboundEmail.ts). This export is
+// consumed by the inbound-message PUSH sites only; consolidating the
+// older copies is tracked in
+// docs/issues/consolidate-contact-display-name-helpers.md - do not
+// re-point them here as a drive-by.
+//
+// `firstName`/`lastName` are NOT declared fields on ContactItem - they ride
+// its index signature, so both reads are defensive: a non-string value must
+// never reach `.trim()`.
+
+/** Trimmed first/last join, or undefined when the contact has no name. */
+export function contactDisplayName(contact: ContactItem | undefined): string | undefined {
+  if (contact === undefined) return undefined;
+  const first = typeof contact['firstName'] === 'string' ? contact['firstName'].trim() : '';
+  const last = typeof contact['lastName'] === 'string' ? contact['lastName'].trim() : '';
+  const joined = [first, last].filter((p) => p.length > 0).join(' ');
+  return joined.length > 0 ? joined : undefined;
 }

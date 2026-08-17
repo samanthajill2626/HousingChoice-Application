@@ -22,6 +22,7 @@
 
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
+import { dropKeyedLocalTables } from './globalTeardown.js';
 
 /**
  * Core logic, exported so tests can call it directly (e.g. with a fresh
@@ -110,7 +111,18 @@ export async function ensureKeyedLocalTables(opts: {
   }
 }
 
-/** Vitest globalSetup entry point. */
-export default async function setup(): Promise<void> {
+/**
+ * Vitest globalSetup entry point.
+ *
+ * Returns the TEARDOWN function. Vitest has no `globalTeardown` config option -
+ * it takes the teardown from whatever globalSetup returns (a `globalTeardown`
+ * key in vitest.config.ts is accepted silently and never runs; verified
+ * 2026-08-16 when the tables survived a run). See globalTeardown.ts for why the
+ * drop exists and what it deliberately does not reclaim.
+ */
+export default async function setup(): Promise<() => Promise<void>> {
   await ensureKeyedLocalTables();
+  return async () => {
+    await dropKeyedLocalTables();
+  };
 }

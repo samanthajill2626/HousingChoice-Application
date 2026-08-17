@@ -55,6 +55,7 @@ import {
   type UnmatchedEmailRepo,
   type UnmatchedListFilter,
 } from '../repos/unmatchedEmailRepo.js';
+import { createPushService, type PushService } from '../services/pushService.js';
 import {
   ingestInboundEmail,
   type IngestOptions,
@@ -96,6 +97,13 @@ export interface UnmatchedEmailRouterDeps {
   messagesRepo?: MessagesRepo;
   extractionRepo?: ExtractionRepo;
   mediaStore?: MediaStore;
+  /**
+   * Inbound-message push broadcast for the default reingest deps. The route
+   * always passes { reingest: true }, so this instance never actually emits
+   * (D7) - it exists so the ingest deps stay uniform and the suppression guard
+   * lives in ONE place (the service).
+   */
+  pushService?: PushService;
 }
 
 // --- Opaque cursor (the api.ts inbox convention) -----------------------------
@@ -194,6 +202,7 @@ export function createUnmatchedEmailRouter(deps: UnmatchedEmailRouterDeps = {}):
       const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
       const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
       const mediaStore = deps.mediaStore ?? createMediaStore({ config });
+      const pushService = deps.pushService ?? createPushService({ config, logger: deps.logger });
       reingest = (notice, opts) =>
         ingestInboundEmail(
           notice,
@@ -207,6 +216,7 @@ export function createUnmatchedEmailRouter(deps: UnmatchedEmailRouterDeps = {}):
             contacts,
             extraction,
             events,
+            pushService,
             ...(mediaStore !== undefined && { mediaStore }),
           },
           opts,

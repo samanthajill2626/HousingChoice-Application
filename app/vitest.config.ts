@@ -32,6 +32,11 @@ export default defineConfig({
     // Auto-bootstrap the hc-local- tables under the active test key before
     // any test runs. Fail-soft: if Docker is down the setup warns and returns;
     // pure-unit runs are unaffected. See app/test/globalSetup.ts.
+    // The tables are dropped again after the run - but NOT via a
+    // `globalTeardown` option: Vitest has none, and setting one here is
+    // silently ignored (verified 2026-08-16 - the tables survived the run).
+    // Vitest takes its teardown from the FUNCTION globalSetup RETURNS, so the
+    // cleanup is wired inside globalSetup.ts itself.
     globalSetup: './test/globalSetup.ts',
   },
 });

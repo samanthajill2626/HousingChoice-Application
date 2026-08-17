@@ -61,12 +61,14 @@ import {
 import { normalizeEmailAddress } from '../lib/email.js';
 import { toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { EMAIL_MAX_TOTAL_BYTES, normalizeStoredMediaType } from '../lib/mediaTypes.js';
+import { capPushText, PUSH_BODY_MAX, PUSH_TITLE_MAX } from '../lib/pushText.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { contactEmails, contactPhones, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo, ConversationType } from '../repos/conversationsRepo.js';
 import type { MediaAttachment, MessageAuthor, MessagesRepo, NewMessage } from '../repos/messagesRepo.js';
 import type { ExtractionRepo } from '../repos/extractionRepo.js';
 import type { ContactCaptureService } from './contactCapture.js';
+import type { PushService } from './pushService.js';
 
 /** Raw objects over this are quarantined UNFETCHED (plan F17 DoS point 1). */
 export const INBOUND_EMAIL_MAX_RAW_BYTES = 30 * 1024 * 1024;
@@ -210,6 +212,14 @@ export interface InboundEmailDeps {
   contacts: Pick<ContactsRepo, 'findByEmail' | 'getById' | 'touchEmailLastSeen'>;
   extraction: Pick<ExtractionRepo, 'scheduleExtraction'>;
   events: EventBus;
+  /**
+   * Inbound-message push broadcast (spec: inbound-message-push). REQUIRED so an
+   * unwired construction site is a compile error, not a silent prod gap - an
+   * optional dep let an omitted wiring pass typecheck, unit, and e2e while the
+   * prod email push path was dead. Wired by the worker, the dev SES route, and
+   * the reingest route; unit suites inject a recorder.
+   */
+  pushService: Pick<PushService, 'sendToAll'>;
   /** The MEDIA bucket store - threaded attachments only. Absent -> attachments
    *  are skipped (marked attachments_truncated); the raw ref keeps fidelity. */
   mediaStore?: MediaStore;
@@ -438,6 +448,30 @@ export async function ingestInboundEmail(
     // emitted on its first delivery.
     if (created && row.status !== 'dismissed') {
       deps.events.emit('unmatched_email.updated', { unmatchedId });
+    }
+    // Unmatched-email push (spec 3.3), on the LITERAL condition below -
+    // deliberately NARROWER than the SSE above: a quarantined row (oversize /
+    // parse-fail / virus / spam-unknown) and a dismissed one (blocklist) never
+    // push, a re-put of an existing row (created false) never re-pushes, and a
+    // reingest is old mail being filed (D7). NO conversationId and NO row id in
+    // the payload - the notification is a QUEUE entry deep-linking to /email.
+    // Fire-and-forget (D11): a push must never fail the ingest.
+    if (created === true && row.status === 'unmatched' && !opts.reingest) {
+      void deps.pushService
+        .sendToAll({
+          kind: 'unmatched_email',
+          payload: {
+            title: capPushText(row.from.name ?? row.from.address, PUSH_TITLE_MAX),
+            body: capPushText(row.subject.length > 0 ? row.subject : row.snippet, PUSH_BODY_MAX),
+            kind: 'unmatched_email',
+          },
+        })
+        .catch((err: unknown) => {
+          log.warn(
+            { bucket, key, ...errFields(err) },
+            'unmatched email push failed (fire-and-forget)',
+          );
+        });
     }
     // THEN the fast-path marker (a crash before this simply re-runs; the
     // deterministic id makes the re-put a no-op, so no double row / SSE).
@@ -724,6 +758,36 @@ export async function ingestInboundEmail(
     });
     if (touched) {
       deps.events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+
+    // Inbound-message push (spec 3.3): FRESH threaded mail only - all three
+    // dedupe gates returned above, so no extra freshness guard is needed here.
+    // A reingest is old mail being filed by a staffer who is looking at it
+    // (D7). The payload is FLAT - the service worker reads kind/conversationId
+    // at the JSON root. Fire-and-forget (D11): a push must never fail the
+    // ingest, so the promise is deliberately NOT awaited.
+    if (!opts.reingest) {
+      const title =
+        (threadContact !== undefined ? displayNameOf(threadContact) : undefined) ??
+        parsed.from.name ??
+        fromNorm;
+      const body = subjectCapped.length > 0 ? subjectCapped : bodyText;
+      void deps.pushService
+        .sendToAll({
+          kind: 'message',
+          payload: {
+            title: capPushText(title, PUSH_TITLE_MAX),
+            body: capPushText(body, PUSH_BODY_MAX),
+            kind: 'message',
+            conversationId,
+          },
+        })
+        .catch((err: unknown) => {
+          log.warn(
+            { bucket, key, conversationId, ...errFields(err) },
+            'inbound email message push failed (fire-and-forget)',
+          );
+        });
     }
 
     // Address freshness - only for a VERIFIED sender address (on the contact).

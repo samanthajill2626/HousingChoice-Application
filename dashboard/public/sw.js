@@ -22,12 +22,15 @@
  *     provided action buttons; iOS ignores actions and the tap deep-links.
  *   - notificationclick: focus/open the PWA and route to
  *     /conversations/<conversationId> - for message AND missed-call pushes
- *     alike. The original /quick-reply/<callId> deep link was dropped on
+ *     alike, or to /email for an unmatched-email push (no conversation
+ *     exists). The original /quick-reply/<callId> deep link was dropped on
  *     restore because that surface was never rebuilt (see src/sw/route.ts).
  *     See PHASE1_CHANGE_ORDER_2.md for the original triage intent.
  *
  * Pushed payload shape (server sends JSON):
- *   { title, body, kind: 'missed_call' | 'message' | 'test' | string,
+ *   { title, body,
+ *     kind: 'missed_call' | 'pre_ring' | 'voicemail' | 'message'
+ *         | 'unmatched_email' | 'test' | string,
  *     callId?, conversationId?, actions?: [{ action, title }] }
  *
  * SECURITY (C1): we NEVER navigate to a payload-supplied URL — that would be an
@@ -104,27 +107,35 @@ self.addEventListener('notificationclick', (event) => {
 /* The notification tag: "<kind>:<id>" so different kinds about the same
  * call/conversation get their own shade entries, while repeats of the SAME
  * kind (e.g. more texts in one thread) coalesce in place. Bare id when the
- * payload has no kind; undefined (no coalescing) when it has no id. */
+ * payload has no kind; undefined (no coalescing) when it has no id.
+ * `unmatched_email` is the one QUEUE-level exception, checked first: every
+ * unmatched-email push shares the bare tag, so the triage queue owns ONE
+ * shade entry that each new arrival replaces in place. */
 function notificationTag(data) {
   const d = data || {};
+  if (d.kind === 'unmatched_email') return 'unmatched_email';
   const id = d.callId || d.conversationId || undefined;
   if (!id) return undefined;
   return d.kind ? `${d.kind}:${id}` : id;
 }
 
-/* Build the Notification title + options. Pre-ring and missed-call alerts are
- * time-sensitive (the founder must see them BEFORE/around a live call), so
- * they get the strongest on-screen treatment we can ask for: renotify (peek
- * again on a same-tag repeat; REQUIRES a tag - setting it tagless throws) and
- * requireInteraction (stay on screen until acted on). Every push vibrates -
- * the vibration pattern is the key nudge that makes Android surface a
- * heads-up banner instead of filing the notification silently into the shade.
- * (iOS ignores `vibrate` but honors the banner per the user's per-PWA
- * notification settings - no code lever for heads-up on iOS; see
- * PHASE1_CHANGE_ORDER_3 notes.) */
+/* Build the Notification title + options. Two distinct sets, deliberately
+ * split. ALERTING kinds re-alert on a same-tag replacement (renotify; REQUIRES
+ * a tag - setting it tagless throws): a same-tag replacement is otherwise
+ * SILENT, so the second message in a thread would land without a peep, the
+ * opposite of native messaging - `message` and `unmatched_email` join the
+ * time-sensitive kinds here. TIME-SENSITIVE kinds (missed_call, pre_ring)
+ * additionally pin themselves to the screen (requireInteraction) because the
+ * founder must see them BEFORE/around a live call; a message must NOT pin.
+ * Every push vibrates - the vibration pattern is the key nudge that makes
+ * Android surface a heads-up banner instead of filing the notification
+ * silently into the shade. (iOS ignores `vibrate` but honors the banner per
+ * the user's per-PWA notification settings - no code lever for heads-up on
+ * iOS; see PHASE1_CHANGE_ORDER_3 notes.) */
 function buildNotificationOptions(data) {
   const d = data || {};
   const timeSensitive = d.kind === 'missed_call' || d.kind === 'pre_ring';
+  const alerting = timeSensitive || d.kind === 'message' || d.kind === 'unmatched_email';
   const tag = notificationTag(d);
   return {
     title: d.title || 'HousingChoice',
@@ -143,7 +154,7 @@ function buildNotificationOptions(data) {
       // Android shows action buttons; iOS ignores them (tap deep-links instead).
       actions: Array.isArray(d.actions) ? d.actions.slice(0, 2) : undefined,
       vibrate: [200, 100, 200],
-      renotify: timeSensitive && Boolean(tag),
+      renotify: alerting && Boolean(tag),
       requireInteraction: timeSensitive,
       tag,
     },
@@ -192,17 +203,26 @@ function resolveSafePath(data, action) {
   if (isPlausibleId(d.conversationId)) {
     return `/conversations/${encodeURIComponent(d.conversationId)}`;
   }
+  // An unmatched email has NO conversation to open - the tap lands on the
+  // triage queue page. Checked AFTER conversationId so a payload that does
+  // carry a thread still wins.
+  if (d.kind === 'unmatched_email') {
+    return '/email';
+  }
   return '/';
 }
 
 /* Last gate before navigate/openWindow: assert same-origin + allow-listed path,
- * else fall back to '/'. */
+ * else fall back to '/'. The allow-list mirrors routes that ACTUALLY EXIST in
+ * App.tsx: '/', '/email', '/conversations/<id>'. '/email' is an EXACT match on
+ * purpose - '/email/quarantine' is a separate tab and never a push target. */
 function assertSameOriginPath(path, origin) {
   try {
     const url = new URL(path, origin);
     if (url.origin !== origin) return '/';
     if (
       url.pathname === '/' ||
+      url.pathname === '/email' ||
       /^\/conversations\/[^/]+$/.test(url.pathname)
     ) {
       return `${url.pathname}${url.search}${url.hash}`;

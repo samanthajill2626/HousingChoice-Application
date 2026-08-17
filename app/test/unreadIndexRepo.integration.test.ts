@@ -13,6 +13,7 @@
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import {
+  ConditionalCheckFailedException,
   CreateTableCommand,
   DescribeTableCommand,
   waitUntilTableExists,
@@ -26,7 +27,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable, toCreateTableInput } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createConversationsRepo, UNREAD_FLAG_VALUE } from '../src/repos/conversationsRepo.js';
+import {
+  createConversationsRepo,
+  GROUP_TEXT_STATUS,
+  UNREAD_FLAG_VALUE,
+} from '../src/repos/conversationsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -74,6 +79,27 @@ describe.skipIf(!reachable)('byUnread index + unread_flag against DynamoDB Local
 
   let phoneSeq = 0;
   const nextPhone = (): string => `+1555${String(2_000_000 + ++phoneSeq).slice(0, 7)}`;
+
+  /**
+   * Raw whole-item seed. The describe otherwise creates rows only THROUGH the
+   * repo, which cannot produce the shapes setUnread must refuse: a closed
+   * relay, a group_text sitting at plain `open`, a legacy row with no `type`,
+   * a row already sitting at 5.
+   */
+  async function seedRaw(item: Record<string, unknown>): Promise<string> {
+    const conversationId = `conv-${randomUUID()}`;
+    await doc.send(
+      new PutCommand({
+        TableName: table,
+        // last_activity_at is the byUnread RANGE key (tables.ts:182-186). A row
+        // seeded without it writes fine and setUnread SUCCEEDS, but never enters
+        // the index - so the round-trip assertions fail against CORRECT code,
+        // with a symptom reading as "setUnread does not index".
+        Item: { conversationId, last_activity_at: new Date().toISOString(), ...item },
+      }),
+    );
+    return conversationId;
+  }
 
   beforeAll(async () => {
     for (const base of bases) {
@@ -271,6 +297,115 @@ describe.skipIf(!reachable)('byUnread index + unread_flag against DynamoDB Local
     const ids = await unreadIds(100);
     expect(ids).toContain(conv.conversationId);
     expect(ids.some((id) => id.startsWith('phone#') || id.startsWith('email#'))).toBe(false);
+  });
+
+  // --- setUnread: MU-1 + already-read carried by the ConditionExpression -----
+
+  it('setUnread stamps count 1 + unread_flag on a READ 1:1 and round-trips through byUnread', async () => {
+    const id = await seedRaw({ status: 'open', type: 'tenant_1to1', unread_count: 0 });
+    expect(await unreadIds(100)).not.toContain(id);
+
+    const updated = await conversations.setUnread(id, { bucket: 'one_to_one' });
+    expect(updated.unread_count).toBe(1);
+    expect(updated.unread_flag).toBe(UNREAD_FLAG_VALUE);
+
+    const raw = await rawItem(id);
+    expect(raw['unread_count']).toBe(1);
+    expect(raw['unread_flag']).toBe(UNREAD_FLAG_VALUE);
+    expect(await unreadIds(100)).toContain(id);
+
+    await conversations.resetUnread(id);
+    expect(await unreadIds(100)).not.toContain(id);
+  });
+
+  it('setUnread ACCEPTS a row carrying NO unread_count attribute at all (the sparse class)', async () => {
+    const id = await seedRaw({ status: 'open', type: 'tenant_1to1' });
+    expect('unread_count' in (await rawItem(id))).toBe(false);
+
+    const updated = await conversations.setUnread(id, { bucket: 'one_to_one' });
+    expect(updated.unread_count).toBe(1);
+    expect(updated.unread_flag).toBe(UNREAD_FLAG_VALUE);
+    expect(await unreadIds(100)).toContain(id);
+  });
+
+  it('setUnread refuses an ALREADY-unread row (5 stays 5) and an unknown conversationId', async () => {
+    const id = await seedRaw({
+      status: 'open',
+      type: 'tenant_1to1',
+      unread_count: 5,
+      unread_flag: UNREAD_FLAG_VALUE,
+    });
+    await expect(conversations.setUnread(id, { bucket: 'one_to_one' })).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+    // SET over a thread at 5 would be data loss - the count is untouched.
+    expect((await rawItem(id))['unread_count']).toBe(5);
+
+    await expect(
+      conversations.setUnread('conv-ghost-set-unread', { bucket: 'one_to_one' }),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+  });
+
+  it('the one_to_one bucket refuses a CLOSED 1:1 and a relay_group row, and ACCEPTS a legacy row with no type', async () => {
+    const closed = await seedRaw({ status: 'closed', type: 'tenant_1to1', unread_count: 0 });
+    await expect(conversations.setUnread(closed, { bucket: 'one_to_one' })).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+
+    const relay = await seedRaw({ status: 'open', type: 'relay_group', unread_count: 0 });
+    await expect(conversations.setUnread(relay, { bucket: 'one_to_one' })).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+
+    // isOneToOneBucket deliberately admits a type-less legacy row; the negative
+    // type clause has to admit it too, or the whole class becomes unflaggable.
+    const legacy = await seedRaw({ status: 'open', unread_count: 0 });
+    expect((await conversations.setUnread(legacy, { bucket: 'one_to_one' })).unread_count).toBe(1);
+    expect(await unreadIds(100)).toContain(legacy);
+  });
+
+  it('the relay_group bucket accepts open and connecting, refuses closed, and refuses an OPEN 1:1', async () => {
+    const open = await seedRaw({ status: 'open', type: 'relay_group', unread_count: 0 });
+    expect((await conversations.setUnread(open, { bucket: 'relay_group' })).unread_count).toBe(1);
+
+    const connecting = await seedRaw({
+      status: 'connecting',
+      type: 'relay_group',
+      unread_count: 0,
+    });
+    expect((await conversations.setUnread(connecting, { bucket: 'relay_group' })).unread_count).toBe(
+      1,
+    );
+
+    const closed = await seedRaw({ status: 'closed', type: 'relay_group', unread_count: 0 });
+    await expect(conversations.setUnread(closed, { bucket: 'relay_group' })).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+    expect('unread_flag' in (await rawItem(closed))).toBe(false);
+
+    // The TYPE clause earns its place here: an OPEN 1:1 satisfies the relay
+    // bucket's STATUS predicate on its own.
+    const oneToOne = await seedRaw({ status: 'open', type: 'tenant_1to1', unread_count: 0 });
+    await expect(
+      conversations.setUnread(oneToOne, { bucket: 'relay_group' }),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+  });
+
+  it('the group_text bucket accepts group_open and refuses a group_text sitting at plain open', async () => {
+    const groupOpen = await seedRaw({
+      status: GROUP_TEXT_STATUS,
+      type: 'group_text',
+      unread_count: 0,
+    });
+    expect((await conversations.setUnread(groupOpen, { bucket: 'group_text' })).unread_count).toBe(
+      1,
+    );
+    expect(await unreadIds(100)).toContain(groupOpen);
+
+    const plainOpen = await seedRaw({ status: 'open', type: 'group_text', unread_count: 0 });
+    await expect(
+      conversations.setUnread(plainOpen, { bucket: 'group_text' }),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 });
 

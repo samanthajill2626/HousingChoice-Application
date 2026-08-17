@@ -138,6 +138,7 @@ function makeSendFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    setUnread: async () => conversation,
     // Derived from the one stored conversation, not stubbed to [] - a silent
     // empty page would be indistinguishable from a broken index.
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),

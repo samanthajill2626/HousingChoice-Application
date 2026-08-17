@@ -67,6 +67,17 @@ export const GROUP_TEXT_STATUS = 'group_open';
  */
 export const UNREAD_FLAG_VALUE = 'unread';
 
+/**
+ * The three kinds `setUnread` conditions on - MU-1 ("unread the human should
+ * see", lib/unreadFeed.ts isUnreadVisible) expressed as a WRITE precondition
+ * rather than a prior read. The caller names the bucket from the item it read;
+ * the ConditionExpression re-checks that reading against the LIVE row, so a
+ * concurrent status/type transition loses instead of planting an invisible
+ * byUnread resident. `one_to_one` is the NEGATIVE bucket, mirroring
+ * isOneToOneBucket: a legacy row with no `type` belongs to it.
+ */
+export type UnreadBucket = 'relay_group' | 'group_text' | 'one_to_one';
+
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';
 
@@ -171,11 +182,11 @@ export interface ConversationItem {
   unread_count?: number;
   /**
    * Sparse byUnread GSI HASH - present IFF unread_count > 0 (the constant
-   * string 'unread'). Maintained ONLY by incrementUnread / resetUnread and the
-   * relay-close / contact-delete resets; status and type transitions leave it
-   * alone. Never exposed on a constructed wire shape (it does ride the raw
-   * item returned by GET /api/conversations/:conversationId - accepted:
-   * internal client, ignores unknown fields).
+   * string 'unread'). Maintained ONLY by incrementUnread / resetUnread /
+   * setUnread and the relay-close / contact-delete resets; status and type
+   * transitions leave it alone. Never exposed on a constructed wire shape (it
+   * does ride the raw item returned by GET /api/conversations/:conversationId
+   * - accepted: internal client, ignores unknown fields).
    */
   unread_flag?: 'unread';
   /**
@@ -620,6 +631,22 @@ export interface ConversationsRepo {
    * Throws ConditionalCheckFailedException for unknown conversations.
    */
   resetUnread(conversationId: string): Promise<ConversationItem>;
+  /**
+   * Mark a thread unread (the operator's Mark-unread toggle): SETs the counter
+   * to exactly 1 and stamps the byUnread flag, CONDITIONAL on the live row
+   * still being eligible (`eligibility.bucket`, see UnreadBucket) AND still
+   * read. Returns the updated item.
+   *
+   * Throws ConditionalCheckFailedException when the row is absent, ineligible,
+   * or already unread. DynamoDB does not say WHICH clause failed, so the caller
+   * re-reads once and classifies - eligibility BEFORE count, because an
+   * ineligible-AND-unread thread is a real state (an inbound re-flagging a
+   * closed relay group) and count-first would report success for that residue.
+   */
+  setUnread(
+    conversationId: string,
+    eligibility: { bucket: UnreadBucket },
+  ): Promise<ConversationItem>;
   /**
    * Raw one-page Query on the sparse byUnread GSI, newest-activity-first. NO
    * filtering happens here - visibility (deleted contacts, thread kinds, the
@@ -1575,6 +1602,70 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         }),
       );
       log.info({ conversationId }, 'conversation unread reset');
+      return Attributes as ConversationItem;
+    },
+
+    async setUnread(conversationId, { bucket }) {
+      // EVERY bucket carries a TYPE clause, not only one_to_one. Without it the
+      // relay_group predicate is satisfied by any open 1:1 thread, and the only
+      // separator would be the route's own type read - the exact value this
+      // condition exists to distrust. It is safe today only because the sole
+      // type-changing writer (convertRelayGroupToGroupText) also moves status
+      // out of the admitted set; do not depend on that coincidence.
+      const buckets: Record<UnreadBucket, { predicate: string; values: Record<string, unknown> }> = {
+        relay_group: {
+          predicate: '#type = :type AND #s IN (:open, :connecting)',
+          values: { ':type': 'relay_group', ':open': 'open', ':connecting': 'connecting' },
+        },
+        group_text: {
+          predicate: '#type = :type AND #s = :groupOpen',
+          values: { ':type': 'group_text', ':groupOpen': GROUP_TEXT_STATUS },
+        },
+        one_to_one: {
+          // The NEGATIVE type test, mirroring isOneToOneBucket: a legacy row
+          // with no `type` - and any future 1:1 type - stays flaggable instead
+          // of silently dropping out of the bucket.
+          predicate: '(attribute_not_exists(#type) OR NOT #type IN (:relay, :groupText)) AND #s = :open',
+          values: { ':relay': 'relay_group', ':groupText': 'group_text', ':open': 'open' },
+        },
+      };
+      const { predicate, values } = buckets[bucket];
+      // Accepted risk, the same class documented for resetUnread above: SET is
+      // last-write-wins against an in-flight inbound ADD, so a setUnread racing
+      // a fresh inbound writes 1 where the truth is 2. The flag is correct
+      // either way and the row stays visible.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          // SET, not ADD: the count is deterministically 1, and the counter and
+          // the index hash ride ONE write so the row can never be
+          // unread-but-unindexed.
+          UpdateExpression: 'SET unread_count = :one, unread_flag = :flag',
+          // Clause 3's attribute_not_exists half is LOAD-BEARING: unread_count
+          // is genuinely sparse, so a thread that has never received an inbound
+          // has never had it written, and a bare `= :zero` would refuse that
+          // whole class forever.
+          //
+          // Pointer-partition rows (MU-1's first clause) are deliberately NOT
+          // in the condition: conversationId is the table key and cannot
+          // change, so the route's pre-check for them cannot be raced.
+          ConditionExpression:
+            `attribute_exists(conversationId) AND (${predicate}) ` +
+            'AND (attribute_not_exists(unread_count) OR unread_count = :zero)',
+          ExpressionAttributeNames: { '#s': 'status', '#type': 'type' },
+          // Bucket values are spread in per bucket: DynamoDB rejects an
+          // expression carrying a value placeholder it never references.
+          ExpressionAttributeValues: {
+            ':one': 1,
+            ':flag': UNREAD_FLAG_VALUE,
+            ':zero': 0,
+            ...values,
+          },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ conversationId }, 'conversation unread set');
       return Attributes as ConversationItem;
     },
 

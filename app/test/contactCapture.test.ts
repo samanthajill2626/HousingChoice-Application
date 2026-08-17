@@ -173,6 +173,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     touchLastActivity: async () => conversation,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    setUnread: async () => conversation,
     // Flag-derived over the one stored conversation rather than a bare []: a
     // silent empty page reads exactly like a broken index.
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),

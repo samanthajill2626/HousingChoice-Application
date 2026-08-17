@@ -20,7 +20,8 @@ renotify for message kinds, a queue-level unmatched_email tag, and the
 dashboard service worker is plain JS mirrored from tested TS modules.
 
 **Spec:** docs/superpowers/specs/2026-08-16-inbound-message-push-design.md
-(rev 4, commit da3460be). The plan argues from the spec; read it first.
+(rev 5 - the header states its revision). The plan argues from the
+spec; read it first.
 
 ## Global Constraints (copied from the spec - verbatim hard values)
 
@@ -68,8 +69,9 @@ dashboard service worker is plain JS mirrored from tested TS modules.
 
 - Create: `app/src/lib/pushText.ts` (+ `app/test/pushText.test.ts`) -
   capPushText.
-- Create: `app/src/lib/contactName.ts` (+ `app/test/contactName.test.ts`)
-  - contactDisplayName.
+- Modify: `app/src/lib/contactName.ts` (+ its EXISTING test file) -
+  the file ALREADY EXISTS holding the live parseContactName parser;
+  contactDisplayName is APPENDED to it, never a new file.
 - Modify: `app/src/lib/groupTitle.ts` (+ `app/test/groupTitle.test.ts`
   extend or create) - add relayThreadLabel.
 - Modify: `app/src/routes/inbox.ts` (relayRowFor re-points to
@@ -143,6 +145,11 @@ describe('capPushText', () => {
     expect(Array.from(out).length).toBe(5);
   });
 
+  it('never exceeds a cap too small for the suffix', () => {
+    expect(capPushText('abcdef', 2)).toBe('ab');
+    expect(Array.from(capPushText('abcdef', 3)).length).toBe(3);
+  });
+
   it('exports the spec caps', () => {
     expect(PUSH_TITLE_MAX).toBe(100);
     expect(PUSH_BODY_MAX).toBe(300);
@@ -182,7 +189,10 @@ export const PUSH_BODY_MAX = 300;
 export function capPushText(text: string, maxCodePoints: number): string {
   const points = Array.from(text);
   if (points.length <= maxCodePoints) return text;
-  return points.slice(0, Math.max(0, maxCodePoints - 3)).join('') + '...';
+  // A cap too small to hold the suffix degrades to a hard slice - the
+  // result NEVER exceeds the cap (spec D12).
+  if (maxCodePoints <= 3) return points.slice(0, maxCodePoints).join('');
+  return points.slice(0, maxCodePoints - 3).join('') + '...';
 }
 ```
 
@@ -201,11 +211,18 @@ git commit -m "feat(push): capPushText - code-point caps for push copy" -m "Co-A
 
 ---
 
-### Task 2: contactDisplayName (app/src/lib/contactName.ts)
+### Task 2: contactDisplayName (extend the EXISTING app/src/lib/contactName.ts)
+
+WARNING: `app/src/lib/contactName.ts` and `app/test/contactName.test.ts`
+ALREADY EXIST - the module holds the live parseContactName parser
+(M1.2) imported by routes/contacts.ts. This task APPENDS a new export
+and APPENDS tests. Do not create files, do not touch parseContactName,
+do not re-declare imports the test file already has.
 
 **Files:**
-- Create: `app/src/lib/contactName.ts`
-- Test: `app/test/contactName.test.ts`
+- Modify: `app/src/lib/contactName.ts` (append one export)
+- Test: `app/test/contactName.test.ts` (append one describe; extend the
+  existing import line from ../src/lib/contactName.js)
 
 **Interfaces:**
 - Consumes: `ContactItem` from `app/src/repos/contactsRepo.ts`
@@ -216,13 +233,11 @@ git commit -m "feat(push): capPushText - code-point caps for push copy" -m "Co-A
 
 - [ ] **Step 1: Write the failing test**
 
-`app/test/contactName.test.ts`:
+Append to `app/test/contactName.test.ts` (add `contactDisplayName` to
+the file's EXISTING import from `../src/lib/contactName.js`; add a
+`ContactItem` type import only if the file lacks one):
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import { contactDisplayName } from '../src/lib/contactName.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
-
 function contact(fields: Record<string, unknown>): ContactItem {
   return { contactId: 'c1', type: 'tenant', created_at: 'x', ...fields } as ContactItem;
 }
@@ -256,23 +271,24 @@ required field with dummy values. Do not weaken the assertions.
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npm run test -w app -- contactName`
-Expected: FAIL (cannot resolve ../src/lib/contactName.js)
+Expected: the NEW describe FAILS (contactDisplayName is not exported);
+every pre-existing parseContactName test still PASSES.
 
 - [ ] **Step 3: Write the implementation**
 
-`app/src/lib/contactName.ts`:
+Append to `app/src/lib/contactName.ts` (add the ContactItem type import
+only if the module lacks one):
 
 ```ts
 // contactDisplayName - the trimmed "First Last" join for push copy.
 //
 // SCOPE GUARD: five PRIVATE copies of this derivation already exist
 // (routes/contacts.ts, routes/units.ts, lib/rosterResolution.ts,
-// services/groupMembers.ts, services/inboundEmail.ts). This module is
+// services/groupMembers.ts, services/inboundEmail.ts). This export is
 // consumed by the inbound-message PUSH sites only; consolidating the
 // older copies is tracked in
 // docs/issues/consolidate-contact-display-name-helpers.md - do not
 // re-point them here as a drive-by.
-import type { ContactItem } from '../repos/contactsRepo.js';
 
 /** Trimmed first/last join, or undefined when the contact has no name. */
 export function contactDisplayName(contact: ContactItem | undefined): string | undefined {
@@ -287,14 +303,14 @@ export function contactDisplayName(contact: ContactItem | undefined): string | u
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm run test -w app -- contactName`
-Expected: PASS
+Expected: PASS (new describe + every pre-existing test)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status
 git add app/src/lib/contactName.ts app/test/contactName.test.ts
-git commit -m "feat(push): contactDisplayName helper for push titles" -m "Co-Authored-By: <authoring model>"
+git commit -m "feat(push): contactDisplayName export beside parseContactName" -m "Co-Authored-By: <authoring model>"
 ```
 
 ---
@@ -313,14 +329,12 @@ git commit -m "feat(push): contactDisplayName helper for push titles" -m "Co-Aut
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `app/test/groupTitle.test.ts` (create the file with the
-imports below if it does not exist):
+`app/test/groupTitle.test.ts` ALREADY EXISTS with its own vitest
+imports. EXTEND its existing import from ../src/lib/groupTitle.js with
+`relayThreadLabel`, add a ConversationItem type import only if absent,
+and APPEND a new describe - never re-declare imports it already has:
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import { relayThreadLabel } from '../src/lib/groupTitle.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-
 function relayConv(fields: Record<string, unknown>): ConversationItem {
   return { conversationId: 'r1', status: 'open', type: 'relay_group', ...fields } as ConversationItem;
 }
@@ -350,9 +364,10 @@ describe('relayThreadLabel', () => {
 });
 ```
 
-(If the base-object cast fails typecheck for missing required
-ConversationItem fields, add dummy values for the required fields; do
-not weaken assertions.)
+(If a cast fails typecheck for missing required fields - on
+ConversationItem OR on the participant literals, whose
+ConversationParticipant type requires `contactId` - add dummy values
+for the required fields; do not weaken assertions.)
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -374,11 +389,12 @@ Append to `app/src/lib/groupTitle.ts`:
  * Other relay-label chains (notably routes/poolNumbersAdmin.ts
  * serverLabel) are DELIBERATELY different precedences pinned by their
  * own tests - do not re-point them here.
+ *
+ * CLIENT MIRROR: dashboard/src/routes/contact/GroupTextsCard.tsx
+ * carries the same four-step chain client-side (it cannot import from
+ * app/src) - the groupThreadLabel precedent; they change together.
  */
-export function relayThreadLabel(conv: {
-  participants?: readonly ConversationParticipant[];
-  [key: string]: unknown;
-}): string {
+export function relayThreadLabel(conv: ConversationItem): string {
   const memberNames = (conv.participants ?? [])
     .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
     .filter((n) => n.length > 0);
@@ -387,11 +403,15 @@ export function relayThreadLabel(conv: {
   // under the key `placement_tag` (NOT `tag`) and is untyped.
   const tag = typeof conv['placement_tag'] === 'string' ? conv['placement_tag'].trim() : '';
   if (tag.length > 0) return tag;
-  const pool = typeof conv['pool_number'] === 'string' ? conv['pool_number'] : '';
+  const pool = typeof conv.pool_number === 'string' && conv.pool_number.length > 0 ? conv.pool_number : '';
   if (pool.length > 0) return formatPhoneForDisplay(pool) ?? pool;
   return 'Relay group';
 }
 ```
+
+(`ConversationItem` needs a type import in groupTitle.ts from
+`../repos/conversationsRepo.js` - the file already imports
+ConversationParticipant from there; extend that import.)
 
 Then in `app/src/routes/inbox.ts` relayRowFor (lines 620-636), replace
 the inline chain:
@@ -453,15 +473,60 @@ file's existing helpers (fake adapter factory, makeFakeUsersRepo,
 createLogCapture, the VAPID config fixture) - read the top of the file
 and follow its established construction pattern exactly. The new tests:
 
+Construction: do NOT use makeFakeUsersRepo (it is a single-identity
+session helper with the wrong shape). Build a purpose-made multi-user
+fake at the top of the describe - it implements only the UsersRepo
+members pushService touches, cast once:
+
+```ts
+function makeBroadcastWorld(userSpecs: Array<{ userId: string; endpoints: string[] }>) {
+  const state = new Map(
+    userSpecs.map((u) => [
+      u.userId,
+      u.endpoints.map((endpoint) => ({
+        endpoint,
+        keys: { p256dh: 'k', auth: 'a' },
+        created_at: '2026-08-16T00:00:00.000Z',
+      })),
+    ]),
+  );
+  let listAllCalls = 0;
+  let findByIdCalls = 0;
+  const usersRepo = {
+    async listAll() {
+      listAllCalls += 1;
+      return userSpecs.map((u) => ({
+        userId: u.userId,
+        email: `${u.userId}@example.com`,
+        role: 'admin',
+        status: 'active',
+        created_at: '2026-08-16T00:00:00.000Z',
+        ...(state.get(u.userId)!.length > 0 && { push_subscriptions: [...state.get(u.userId)!] }),
+      }));
+    },
+    async findById(userId: string) {
+      findByIdCalls += 1;
+      const subs = state.get(userId);
+      if (subs === undefined) return undefined;
+      return { userId, email: `${userId}@example.com`, role: 'admin', status: 'active', created_at: 'x', push_subscriptions: [...subs] };
+    },
+    async removePushSubscription(userId: string, endpoint: string) {
+      state.set(userId, (state.get(userId) ?? []).filter((s) => s.endpoint !== endpoint));
+    },
+  } as unknown as UsersRepo;
+  return { usersRepo, calls: { get listAll() { return listAllCalls; }, get findById() { return findByIdCalls; } }, state };
+}
+```
+
+(If UserItem requires more fields at typecheck, add dummy values - the
+cast is at the repo boundary, the item literals must still satisfy the
+fields pushService reads. Use the file's existing VAPID-configured
+`config` fixture, its fake-adapter factory for scripted outcomes, and
+createLogCapture, exactly as the existing describes do. Endpoints must
+be on an allowlisted host, e.g. `https://fcm.googleapis.com/send/<n>`.)
+
 ```ts
 describe('sendToAll', () => {
-  // Construction sketch - adapt to the file's existing helpers:
-  //   const users = makeFakeUsersRepo(); // then add users with/without subscriptions
-  //   const svc = createPushService({ config, usersRepo: users, adapter, logger, now });
-  // The fake usersRepo must expose call counts for listAll and findById;
-  // if makeFakeUsersRepo does not track calls, wrap it:
-  //   let listAllCalls = 0;
-  //   const counting = { ...users, listAll: async () => { listAllCalls += 1; return users.listAll(); } };
 
   it('fans out to every user with subscriptions and aggregates the tally', async () => {
     // user A: 2 subscriptions, user B: 1, user C: none
@@ -606,6 +671,7 @@ export interface SendToAllResult {
     subscriptions: PushSubscriptionRecord[],
     body: string,
     kind: string,
+    options: { ttlSeconds: number } | undefined,
   ): Promise<{ sent: number; pruned: number; failed: number; prunedEndpoints: string[] }> {
     let sent = 0;
     let pruned = 0;
@@ -628,7 +694,7 @@ export interface SendToAllResult {
         const outcome = await adapter!.sendToSubscription(
           toBrowserSubscription(record),
           body,
-          undefined,
+          options,
         );
         if (outcome.result === 'gone') {
           await users.removePushSubscription(userId, record.endpoint);
@@ -651,27 +717,20 @@ export interface SendToAllResult {
   }
 ```
 
-   IMPORTANT: the existing per-device loop passes ttl options through -
-   keep that. Give sendToDevices a fifth parameter
-   `options: { ttlSeconds: number } | undefined` and pass it to
-   `adapter.sendToSubscription` (sendToUser passes
+   Both methods compute
    `notification.ttlSeconds === undefined ? undefined : { ttlSeconds:
-   notification.ttlSeconds }` exactly as today; sendToAll passes the
-   same expression). The `undefined` literal in the sketch above is the
-   sendToAll case - implement via the parameter, not a literal.
-   Refactor sendToUser to call sendToDevices and keep its surrounding
-   behavior BYTE-IDENTICAL: same unconfigured warn, same
-   'user has no subscriptions' info, same final
+   notification.ttlSeconds }` and pass it as the options argument
+   (exactly what sendToUser does today). Refactor sendToUser to call
+   sendToDevices and keep its surrounding behavior BYTE-IDENTICAL: same
+   unconfigured warn, same 'user has no subscriptions' info, same final
    'push: sendToUser complete' info with the same fields. The existing
    pushService.test.ts suite is the regression gate - it must pass
    UNCHANGED (do not edit existing assertions).
 
-   NOTE the non-ASCII em dashes in the two quoted log lines are
-   PRE-EXISTING strings being MOVED verbatim - moving them keeps the
-   log contract; do not retype them by hand, cut and paste the existing
-   lines. (The ASCII-only rule applies to NEW lines; these move.)
-   If your tooling flags them, keep the strings byte-identical anyway -
-   the pushService PII test greps them.
+   NOTE the two per-device log strings being MOVED into sendToDevices
+   contain PRE-EXISTING em dashes: cut and paste the existing lines
+   byte-identical, never retype them (the ASCII-only rule applies to
+   NEW lines; these move).
 
 3. Add the cache + sendToAll to the returned object:
 
@@ -784,11 +843,22 @@ git commit -m "feat(push): sendToAll broadcast with 60s user-list TTL cache" -m 
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/test/inboundMessagePush.test.ts` - one describe per path. Use the
-harness's real signed-webhook entry (the same way existing inbound
-suites POST /webhooks/twilio/sms) and seed contacts/conversations with
-the world's fixtures. The assertions (fill in setup per the harness's
-conventions):
+`app/test/inboundMessagePush.test.ts` - one describe per path. The
+harness surface is REAL and named (app/test/helpers/
+twilioWebhookHarness.ts): `makeWebhookHarness(opts)` returns the app +
+`world` (with `world.pushBroadcasts` from Task 4); `signedTwilioPost`
+posts a correctly-signed webhook; `inboundSmsParams(overrides)` builds
+the form params; constants OUR_NUMBER / TENANT_PHONE. Copy the setup
+shape from the existing per-path suites - do NOT invent harness APIs:
+
+- 1:1 + echo + dedupe cases: copy `app/test/twilioSmsWebhook.test.ts`
+- MMS cases: copy `app/test/mmsMedia.test.ts`
+- relay cases (incl. closed thread / removed member / unknown-sender
+  open-group fallback worlds): copy `app/test/relayWebhook.test.ts`
+- native group cases: copy `app/test/groupTextWebhook.test.ts`
+
+Every test is REAL code with real setup and real assertions - no
+`it.todo`, no comment-only bodies. The behaviors to pin:
 
 ```ts
 // 1:1 with a named contact
@@ -814,6 +884,9 @@ expect(b.notification.payload).toEqual({
 //   of the seeded relay conv; body === 'Ana: <text>'
 // relay media-only: body === 'Ana sent an attachment.'
 // relay REMOVED-member sender: body starts with the formatted phone + ': '
+// relay UNKNOWN-sender open-group fallback (stranger routed onto the
+//   newest open group): pushes with the phone-fallback sender label
+// relay/group with NEITHER text NOR media: body === the sender label alone
 // closed-group intercept: kind message, conversationId === the sender 1:1,
 //   title from the contact/phone chain (1:1 semantics)
 // native group inbound: title === groupThreadLabel(thread participants);
@@ -823,15 +896,15 @@ expect(b.notification.payload).toEqual({
 ```
 
 Every sketched line above becomes a real assertion in a real test with
-real harness setup. Where the harness lacks a seeding helper for a
-path (e.g. a relay conv with a removed member), follow how the
-existing relay/group suites construct those worlds - do not invent new
-harness APIs.
+real harness setup copied from the named suites.
 
-- [ ] **Step 2: Run to verify the suite fails**
+- [ ] **Step 2: Run to verify the suite fails FOR THE RIGHT REASON**
 
 Run: `npm run test -w app -- inboundMessagePush`
-Expected: FAIL (pushBroadcasts stays empty - no emit sites yet)
+Expected: every test FAILS ON ITS ASSERTION (world.pushBroadcasts is
+empty - no emit sites exist yet). A compile/import error or a harness
+setup throw is NOT a valid red - fix the setup until the failures are
+the assertions themselves.
 
 - [ ] **Step 3: Implement the emit sites**
 
@@ -895,12 +968,15 @@ function pushMessageBody(
 }
 ```
 
-   Imports to add: `capPushText, PUSH_BODY_MAX, PUSH_TITLE_MAX` from
-   `../../lib/pushText.js`; `contactDisplayName` from
-   `../../lib/contactName.js`; `relayThreadLabel` (extend the existing
-   groupTitle import if twilio.ts has one, else add it);
-   `formatPhoneForDisplay` from `../../lib/phone.js` (check whether
-   twilio.ts already imports it - extend, do not duplicate).
+   Imports to ADD (twilio.ts currently imports NONE of these - all
+   four lines are new):
+
+```ts
+import { capPushText, PUSH_BODY_MAX, PUSH_TITLE_MAX } from '../../lib/pushText.js';
+import { contactDisplayName } from '../../lib/contactName.js';
+import { groupThreadLabel, relayThreadLabel } from '../../lib/groupTitle.js';
+import { formatPhoneForDisplay } from '../../lib/phone.js';
+```
 
 3. One in-router fire-and-forget emitter (inside
    createTwilioWebhookRouter, after the pushService construction):
@@ -1069,11 +1145,17 @@ reset `broadcasts.length = 0` in beforeEach). New cases:
 //   kind: 'unmatched_email' } - assert with toEqual so NO conversationId
 //   and NO unmatchedId sneak in
 // unmatched REDELIVERY (same object key re-put, created false): 1 total
+// unmatched via REINGEST (opts { reingest: true } reaching quarantineRow):
+//   0 broadcasts even when created would be true
 // oversize/parse-fail/virus/spam-unknown quarantine: 0 broadcasts
 // blocklisted (dismissed): 0 broadcasts
 // spam verdict from a KNOWN contact: threads AND broadcasts kind 'message'
-// deps WITHOUT pushService: every path still works, 0 broadcasts, no throw
 ```
+
+pushService is a REQUIRED member of InboundEmailDeps (spec 3.3) - every
+existing deps-builder in the suite gains the recorder; there is no
+"absent pushService" case to test (an omission is a compile error, by
+design).
 
 Each sketched case becomes a real test using the suite's existing
 notice/fixture builders.
@@ -1087,15 +1169,18 @@ still PASS.
 - [ ] **Step 3: Implement**
 
 1. `app/src/services/inboundEmail.ts`:
-   - Add to `InboundEmailDeps`:
+   - Add to `InboundEmailDeps` (REQUIRED - spec 3.3: an optional dep
+     let an omitted wiring silently kill the prod email push path;
+     required makes omission a compile error):
 
 ```ts
   /**
    * Inbound-message push broadcast (spec: inbound-message-push).
-   * OPTIONAL: absent means no pushes (unit tests that do not care).
-   * Wired by the worker, the dev SES route, and the reingest route.
+   * REQUIRED so an unwired construction site is a compile error, not a
+   * silent prod gap. Wired by the worker, the dev SES route, and the
+   * reingest route; unit suites inject a recorder.
    */
-  pushService?: Pick<PushService, 'sendToAll'>;
+  pushService: Pick<PushService, 'sendToAll'>;
 ```
 
      with a type-only import of PushService from './pushService.js'
@@ -1108,7 +1193,7 @@ still PASS.
     // Inbound-message push (spec 3.3): fresh threaded mail only -
     // dedupe returned above, and a reingest is old mail being filed
     // (D7). Fire-and-forget: a push must never fail the ingest.
-    if (deps.pushService !== undefined && !opts.reingest) {
+    if (!opts.reingest) {
       const push = deps.pushService;
       const title =
         (threadContact !== undefined ? displayNameOf(threadContact) : undefined) ??
@@ -1142,12 +1227,7 @@ still PASS.
     // NARROWER than the SSE above: quarantined rows SSE but never
     // push, a re-put (created false) never re-pushes, and a reingest
     // never pushes).
-    if (
-      created === true &&
-      row.status === 'unmatched' &&
-      !opts.reingest &&
-      deps.pushService !== undefined
-    ) {
+    if (created === true && row.status === 'unmatched' && !opts.reingest) {
       const push = deps.pushService;
       void push
         .sendToAll({
@@ -1174,18 +1254,24 @@ still PASS.
    ingestDeps object literal.
 
 3. `app/src/routes/webhooks/ses.ts`: where the route builds its
-   InboundEmailDeps (read the file; it mirrors the worker's deps
-   shape), add a `pushService` member: injected dep if the route's
-   deps interface carries one (add `pushService?: PushService;` to
-   SesWebhookDeps for test injection), else
-   `createPushService({ config, logger })`.
+   InboundEmailDeps (read the file's construction block and USE ITS
+   ACTUAL LOCAL NAMES for config/logger - do not copy identifiers from
+   this plan), add `pushService?: PushService;` to SesWebhookDeps for
+   test injection and construct the member as
+   `deps.pushService ?? createPushService({ <the file's config local>, <the file's logger form> })`.
 
 4. `app/src/routes/unmatchedEmail.ts`: same pattern at the default
-   ingest deps (~189-198): add
-   `pushService: deps.pushService ?? createPushService({ config, logger })`
-   (with the matching optional dep on its router deps interface). The
+   ingest deps (~189-198), again using THAT file's actual local names:
+   optional `pushService?: PushService;` on its router deps interface,
+   `deps.pushService ?? createPushService(...)` in the ingest deps. The
    reingest call passes `{ reingest: true }` already, which suppresses
    emission - the wiring stays uniform.
+
+NOTE (spec 3.3 instance-multiplicity): the app process may now hold
+more than one pushService instance (twilio, ses, reingest), each with
+its own 60s cache. Accepted: in prod only the twilio instance
+broadcasts from the app process (ses.ts is dev/e2e-only; reingest
+always suppresses). Do not refactor to a composition root.
 
 - [ ] **Step 4: Run the email suite + worker typecheck**
 
@@ -1281,32 +1367,41 @@ Create `dashboard/src/sw/mirror.test.ts`:
 // The classic worker (public/sw.js) cannot import the tested modules -
 // it carries verbatim mirrors. Nothing else verifies the mirror, and
 // sw.js has been lost wholesale before (its own header says so). This
-// smoke test pins the NEW tokens of the inbound-message-push feature
-// into the artifact that actually runs. It is NOT a full equality
-// check (out of scope by spec).
+// smoke test pins the NEW code lines of the inbound-message-push
+// feature into the artifact that actually runs, as EXACT fragments a
+// comment cannot satisfy. It is NOT a full equality check (out of
+// scope by spec).
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const swSource = readFileSync(resolve(__dirname, '../../public/sw.js'), 'utf8');
+const swSource = readFileSync(join(process.cwd(), 'public/sw.js'), 'utf8');
 
 describe('public/sw.js mirror carries the inbound-message-push changes', () => {
   it('has the queue-level unmatched_email tag branch', () => {
-    expect(swSource).toContain("'unmatched_email'");
-  });
-  it('routes unmatched_email to /email and allowlists it', () => {
-    expect(swSource).toContain("'/email'");
+    expect(swSource).toContain("if (d.kind === 'unmatched_email') return 'unmatched_email';");
   });
   it('has the alerting renotify set', () => {
-    expect(swSource).toContain('alerting');
+    expect(swSource).toContain(
+      "const alerting = timeSensitive || d.kind === 'message' || d.kind === 'unmatched_email';",
+    );
+    expect(swSource).toContain('renotify: alerting && Boolean(tag)');
+  });
+  it('routes unmatched_email to /email', () => {
+    expect(swSource).toContain("return '/email';");
+  });
+  it('allowlists exact /email', () => {
+    expect(swSource).toContain("url.pathname === '/email'");
   });
 });
 ```
 
-(If `__dirname` is unavailable under the dashboard's vitest ESM config,
-use `new URL('../../public/sw.js', import.meta.url)` with
-`fileURLToPath` - match whatever the dashboard's other node-side tests
-do; if none exist, the URL form is the safe default.)
+(These exact fragments must match the code written into sw.js in Step
+5 - if your mirrored lines differ in spacing/quotes, make the TEST
+match the REAL mirrored line, keeping each assertion a code fragment,
+never a bare word a comment could satisfy. process.cwd() is the
+dashboard workspace root under `npm run test -w dashboard` - the
+repo's existing node-side tests use the same pattern.)
 
 - [ ] **Step 2: Run to verify failures**
 
@@ -1439,20 +1534,32 @@ file). Contents, one paragraph each plus a suggested-fix paragraph:
   private copies onto lib/contactName.ts in a dedicated sweep with
   their tests.
 
-- [ ] **Step 3: e2e-push-seam-missing.md** (type: gap, severity: low,
-  area: e2e): pushes have no e2e seam (no dev outbox / fake push
-  service / control API); voice pushes and inbound-message pushes are
-  unit-harness-tested only. A future seam could record adapter sends
-  behind a dev flag like the SMS outbox did, or a fake web-push
-  receiver in the hermetic lane.
+- [ ] **Step 3: e2e-push-seam-missing.md** (type: improvement,
+  severity: low, area: e2e): pushes have no e2e seam (no dev outbox /
+  fake push service / control API); voice pushes and inbound-message
+  pushes are unit-harness-tested only. A future seam could record
+  adapter sends behind a dev flag like the SMS outbox did, or a fake
+  web-push receiver in the hermetic lane.
 
-  (If the template's `type:` vocabulary differs (e.g. no 'debt'/'gap'),
-  use the nearest existing value seen in current issue files.)
+  (The template's `type:` vocabulary is
+  bug|security|debt|improvement|decision - stay inside it: Step 1 is
+  `bug`, Step 2 is `debt`, Step 3 is `improvement`.)
 
-- [ ] **Step 4: usersRepo comment amendment** - at the "Device-count
-  contention on one user is not a real concern (a person adds devices
-  serially), so a plain RMW is fine" comment (~585-587), append one
-  ASCII line to the comment block:
+- [ ] **Step 3b: Close the origin issue.** Update
+  `docs/issues/no-push-on-inbound-message.md` frontmatter to the
+  registry's closed convention (match how other resolved issues in
+  docs/issues/ mark it - e.g. `status: closed`) and append a short
+  resolution section: implemented by feat/inbound-message-push per
+  docs/superpowers/specs/2026-08-16-inbound-message-push-design.md;
+  all four kinds of inbound (SMS 1:1/group/relay, matched + unmatched
+  email) now push. ASCII only; added lines only (the file has
+  pre-existing non-ASCII).
+
+- [ ] **Step 4: usersRepo comment amendment** - on the
+  `removePushSubscription` doc comment (~612 - the method whose
+  contention profile this feature changed; the "a person adds devices
+  serially, so a plain RMW is fine" premise near ~585-587 belongs to
+  add), append to the remove method's comment block:
 
 ```
   // (Since inbound-message push, prunes also run on the message path
@@ -1469,8 +1576,8 @@ Expected: exits 0 (INDEX.md is gitignored - do not stage it).
 
 ```bash
 git status
-git add docs/issues/push-subscription-prune-rmw-lost-update.md docs/issues/consolidate-contact-display-name-helpers.md docs/issues/e2e-push-seam-missing.md app/src/repos/usersRepo.ts
-git commit -m "docs(issues): file push RMW race, display-name consolidation, e2e push seam" -m "Co-Authored-By: <authoring model>"
+git add docs/issues/push-subscription-prune-rmw-lost-update.md docs/issues/consolidate-contact-display-name-helpers.md docs/issues/e2e-push-seam-missing.md docs/issues/no-push-on-inbound-message.md app/src/repos/usersRepo.ts
+git commit -m "docs(issues): close inbound-push origin issue; file RMW race, name consolidation, e2e seam" -m "Co-Authored-By: <authoring model>"
 ```
 
 ---
@@ -1482,8 +1589,8 @@ git commit -m "docs(issues): file push RMW race, display-name consolidation, e2e
 Run (Git Bash): `git diff main...HEAD | grep '^+' | grep -v '^+++' | tr -d '\11\12\15\40-\176' | wc -c`
 Expected: 0. EXCEPTION: Task 4's two MOVED log-line strings carry
 pre-existing em dashes - if the count is nonzero, verify every
-non-ASCII byte sits on one of those two moved lines (and the
-pushService PII test still passes); anything else must be fixed.
+non-ASCII byte sits on one of those two moved lines; anything else
+must be fixed.
 
 - [ ] **Step 2: Typecheck**
 

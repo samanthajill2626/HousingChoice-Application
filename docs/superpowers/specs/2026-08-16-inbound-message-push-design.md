@@ -1,6 +1,7 @@
 # Inbound-Message Push Notifications - Design Spec
 
-Date: 2026-08-16 (rev 2, post adversarial review round 1)
+Date: 2026-08-16 (rev 5: r2-r3 = adversarial spec review rounds 1-2;
+r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments)
 Branch: feat/inbound-message-push (worktree W:\tmp\inbound-message-push, cut
 from main @d0c28678)
 Origin issue: docs/issues/no-push-on-inbound-message.md
@@ -191,8 +192,12 @@ Two sites:
   fires on created && status !== 'dismissed', i.e. including
   quarantined rows) - do not copy the SSE condition.
 
-Wiring: InboundEmailDeps gains an optional pushService. Construction
-points that must supply it (or accept the default):
+Wiring: InboundEmailDeps gains a REQUIRED
+`pushService: Pick<PushService, 'sendToAll'>` (plan review r1: an
+OPTIONAL dep made an omitted wiring pass typecheck, unit, and e2e while
+silently killing the prod email push path - required means an omission
+is a compile error). Unit suites inject a recorder. Construction
+points that must supply it:
 
 - app/src/worker.ts (PROD email path): the worker constructs NO push
   machinery today. It gains createUsersRepo + createPushService and
@@ -203,6 +208,13 @@ points that must supply it (or accept the default):
 - routes/unmatchedEmail.ts (reingest): supplies pushService too, but the
   reingest flag suppresses emission (D7). This keeps the deps uniform
   and the guard in ONE place (the service), not in each caller.
+
+Instance multiplicity note (plan review r1): the app process may hold
+more than one pushService instance (twilio router, dev SES route,
+reingest route), each with its own 60s cache. In PROD only the twilio
+instance ever broadcasts from the app process - ses.ts is dev/e2e-only
+and the reingest path always suppresses emission - so the multiplicity
+is a dev-only triviality, accepted; no composition-root refactor.
 
 ### 3.4 Payload shapes (flat, matching the voice sends)
 
@@ -246,8 +258,10 @@ Body rules for SMS/MMS (1:1 and closed-group rows):
   rides along - native SMS behavior).
 - Media-only (no body text): "Sent an attachment."
 - Neither body nor media (rare but possible - the append only sets body
-  when Body.length > 0): the push still fires with an empty body; the
-  SW renders title-only (display.ts d.body || '').
+  when Body.length > 0): the push still fires. On the 1:1/closed-group
+  rows the body is empty (the SW renders title-only, display.ts
+  d.body || ''); on the group/relay rows the body is the SENDER LABEL
+  alone, so the alert still says who acted.
 
 Rules:
 

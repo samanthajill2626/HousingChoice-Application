@@ -123,6 +123,29 @@ rather than engineered around; a distributed transaction here is not warranted.
 
 Client-side hiding of the action is a usability measure, never the guarantee.
 
+## 4b. Delivered state (2026-08-17)
+
+The inbox-ROW half of this spec was built on `feat/call-inbox-unread` and merged
+into this branch at @e4890b98; that branch is now FROZEN. What shipped matches
+D1/D3/D5 and D6's row half. Two implementation facts differ from what sections
+6-7 originally described, and the sections below are written as the TARGET
+state, not as a description of untouched ground:
+
+- The three routes were built on `incrementUnread` with a route-level
+  read-then-check-then-write. Section 6.1's `setUnread` conditional write is
+  therefore a HARDENING step (plan H1, human-ruled), not new construction. It
+  closes the TOCTOU; it does not change observable behavior, and the delivered
+  route matrix must stay green through it.
+- `POST /api/inbox/unread { phone }` shipped WITHOUT the MU-2 contact check.
+  Plan H2 closes it (human-ruled). Until then MU-2 is enforced on two of three
+  routes, which is exactly what section 4 forbids.
+- No route returns a top-level `unreadCount`, and none needs to: every live
+  count this spec relies on - including D6's toggle - comes from the
+  `conversation.updated` SSE event, which carries `unread_count`.
+- The row's unread action is labelled `Mark <name> as unread`. The "as" is
+  deliberate so the two labels are not substrings of each other; new surfaces
+  keep that shape.
+
 ## 5. Data model
 
 No schema change. No new attribute. No migration. No backfill.

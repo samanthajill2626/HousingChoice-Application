@@ -29,6 +29,11 @@ function renderAuthedApp(): void {
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
+      // Sign-out succeeds (204) so a clicked Sign out never leaves an
+      // unhandled rejection behind - the sign-out tests assert on the call.
+      if (url.includes('/auth/logout')) {
+        return new Response(null, { status: 204 });
+      }
       return new Response(JSON.stringify({ error: 'not_found' }), {
         status: 404,
         headers: { 'content-type': 'application/json' },

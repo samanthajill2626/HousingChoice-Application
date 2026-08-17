@@ -4,6 +4,8 @@ Spec: `docs/superpowers/specs/2026-08-17-inbox-mark-unread-design.md` (approved
 at the human's gate, tip `2dbdea0f`).
 Worktree: `W:\tmp\inbox-mark-unread`   Branch: `feat/inbox-mark-unread`
 Base: `main` @aa62b493
+Plan review: R1 complete (2 reviewers, 32 findings); adjudications at
+`.superpowers/design-review/adjudications.md`.
 
 Assume ZERO context. Every path is repo-relative from the worktree root. Every
 task is TDD: write the failing test, watch it fail for the RIGHT reason, then
@@ -16,17 +18,16 @@ implement.
 - `unread_count = 1` is the written value. `SET`, never `ADD`.
 - The sparse GSI hash constant is `UNREAD_FLAG_VALUE` (`'unread'`), already
   exported from `app/src/repos/conversationsRepo.ts`.
-- **MU-1**: a mark-unread write is permitted only where
-  `isUnreadVisible({ ...c, unread_count: 1 })` is true. Enforced as a WRITE
-  CONDITION, not a prior read.
+- **MU-1**: permitted only where `isUnreadVisible({ ...c, unread_count: 1 })` is
+  true. Enforced as a WRITE CONDITION, not a prior read.
 - **MU-2**: refused when the target thread's contact is soft-deleted. Enforced
   in the route (it cannot ride the condition - different item).
 - Condition clause 3: `(attribute_not_exists(unread_count) OR unread_count = :zero)`.
   `unread_count` is genuinely sparse - the `attribute_not_exists` half is load-bearing.
-- Condition-failure classification order, ALL routes: absent -> 404;
-  ineligible -> 409; eligible-and-already-unread -> 200 no write. **Eligibility
-  is checked BEFORE the count.**
-- Every route returns the authoritative resulting count.
+- Classification order, ALL routes: absent -> 404; ineligible -> 409;
+  eligible-and-already-unread -> 200 no write. **Eligibility BEFORE count.**
+- Every route returns the authoritative resulting count as a TOP-LEVEL
+  `unreadCount` number.
 - `last_activity_at` is NEVER written by this feature.
 - Fan-in selection: `status === 'open'` AND `isOneToOneBucket`, newest by
   `last_activity_at`, strict `>` so ties keep first-encountered.
@@ -34,141 +35,88 @@ implement.
 - Commit explicit paths only. A bare `git status` is a SEPARATE read before
   every commit. `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 
-## Verification commands
+## Repo facts the builder MUST know before starting
 
-Per-slice (fast): `npm test -- <path>` for the touched test file.
-Slice gates: `npm run typecheck`.
+These were wrong in the first draft of this plan and each one cost a blocking
+review finding. Do not re-derive them; they are verified.
+
+1. **App tests live in `app/test/`**, not beside sources. They import from
+   `../src/...`. There is NO `app/src/repos/conversationsRepo.integration.test.ts`
+   and no `seedConversation` helper anywhere.
+2. **The unread integration suite is `app/test/unreadIndexRepo.integration.test.ts`.**
+   It seeds rows with raw `PutCommand` (so it CAN express any shape: closed,
+   `group_text`, legacy-no-`type`, `unread_count: 5`), and asserts BOTH the item
+   shape via `getById` AND index membership via `queryUnreadPage`.
+3. **That suite SELF-SKIPS when DynamoDB Local is unreachable** (it probes
+   `DYNAMODB_ENDPOINT`, default `http://localhost:8000`). A "green" run without
+   Docker means SKIPPED, not passing - so the TDD red state is unobservable.
+   **Run `npm run db:start` before S1 and confirm the suite actually executes.**
+4. **Per-slice test commands must target a workspace.** Root `npm test` is
+   `npm run test --workspaces --if-present`, so `npm test -- <path>` forwards the
+   path to every workspace and fails. Use:
+   - `npm test -w app -- test/<file>`
+   - `npm test -w dashboard -- src/routes/<path>`
+5. **`isDeleted` already exists** (`app/src/repos/contactsRepo.ts:297`) and is
+   already imported into `app/src/routes/api.ts:64`. Do NOT write a new
+   deleted-contact helper.
+6. **`ConversationsRepo` has full-literal fakes** that will fail typecheck the
+   moment a required method is added. See S1.5 for the enumerated list.
+
+## Verification
+
+Per-slice: the workspace-scoped commands above.
+Slice gate: `npm run typecheck`.
 Final gates, BARE, from the worktree root, never piped:
 `npm run typecheck`, then `npm test`, then `npm run e2e`.
 
-## Slice order and why
+## Slice order
 
-S1 -> S2 -> S3 are server, bottom-up: the primitive, then the conversation
-route, then the two fan-in routes. S4 is the client bridge. S5 -> S8 are client
-surfaces. S9 is e2e. **S6 must land before S7**: S7's header actions call the
-handle S6 creates, so building S7 first leaves the drain unimplementable and
-invites the builder to ship the round-2 bug the spec exists to prevent.
+S1 -> S2 -> S3 server bottom-up; S4 client bridge; S5 -> S8 client surfaces;
+S9 e2e; S10 close-out.
 
-Each slice is independently green. Stopping between any two leaves the tree
-passing and no user-visible half-feature (the client surfaces are the only
-user-visible parts, and each lands complete).
+**S6 must land before S7** - S7's header actions call the handle S6 creates.
+Built the other way round the drain is unimplementable and the builder ships
+the exact ordering bug the spec exists to prevent.
+
+**S1.5 is part of S1, not a follow-up.** Adding a required interface method
+breaks every full-literal fake in the same commit; splitting them leaves the
+tree red and falsifies "each slice independently green".
 
 ---
 
 # S1 - Repo primitive `setUnread`
 
 Files: `app/src/repos/conversationsRepo.ts`,
-`app/src/repos/conversationsRepo.integration.test.ts`
+`app/test/unreadIndexRepo.integration.test.ts`, plus the fakes in S1.5.
 
-## S1.1 RED - the tests
+**Precondition: `npm run db:start`.** Confirm the suite runs rather than skips
+before trusting any red or green.
 
-Add to `app/src/repos/conversationsRepo.integration.test.ts`, following the
-existing `resetUnread` describe block's setup idioms (reuse whatever helper the
-neighbouring unread tests use to seed a conversation; do NOT invent a new one).
+## S1.1 RED - tests
 
-```ts
-describe('setUnread', () => {
-  it('sets unread_count to 1 and stamps unread_flag on a read thread', async () => {
-    const conv = await seedConversation({ status: 'open', unread_count: 0 });
-    const updated = await repo.setUnread(conv.conversationId, { bucket: 'one_to_one' });
-    expect(updated.unread_count).toBe(1);
-    expect(updated.unread_flag).toBe('unread');
-  });
+Add a `describe('setUnread', ...)` block to
+`app/test/unreadIndexRepo.integration.test.ts`, using that file's existing raw
+`PutCommand` seeding idiom and its both-sides assertion style (item shape AND
+index membership). Cases:
 
-  it('ACCEPTS a thread that has no unread_count attribute at all', async () => {
-    // unread_count is sparse: a thread that never received an inbound has never
-    // had it written. A bare `unread_count = :zero` condition would 409 this
-    // class of thread forever and nothing else in the suite would catch it.
-    const conv = await seedConversation({ status: 'open' }); // no unread_count
-    const updated = await repo.setUnread(conv.conversationId, { bucket: 'one_to_one' });
-    expect(updated.unread_count).toBe(1);
-  });
+- read 1:1 -> `unread_count` 1, `unread_flag` stamped, row present in
+  `queryUnreadPage`.
+- **thread with NO `unread_count` attribute at all -> ACCEPTED.** `unread_count`
+  is sparse; a thread that never received an inbound has never had it written. A
+  bare `unread_count = :zero` condition would refuse that whole class forever and
+  nothing else in the suite would catch it.
+- already-unread thread at 5 -> rejects `ConditionalCheckFailedException`, and a
+  follow-up `getById` still reads 5.
+- unknown id -> rejects `ConditionalCheckFailedException`.
+- `one_to_one` refuses `closed`; refuses a row whose `type` is `relay_group`;
+  ACCEPTS a legacy row with no `type`.
+- `relay_group` accepts `open` and `connecting`, refuses `closed`, and
+  **refuses an OPEN 1:1 thread** (the type clause - without it this passes
+  silently, since a 1:1 also carries status `open`).
+- `group_text` accepts `group_open`, refuses plain `open`.
+- round trip: `setUnread` puts the row in the index, `resetUnread` removes it.
 
-  it('REFUSES an already-unread thread, leaving the real count intact', async () => {
-    const conv = await seedConversation({ status: 'open', unread_count: 5 });
-    await expect(
-      repo.setUnread(conv.conversationId, { bucket: 'one_to_one' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-    const after = await repo.getById(conv.conversationId);
-    expect(after?.unread_count).toBe(5);
-  });
-
-  it('throws ConditionalCheckFailedException for an unknown conversation', async () => {
-    await expect(
-      repo.setUnread('conv-does-not-exist', { bucket: 'one_to_one' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  // --- the condition bites, per bucket -------------------------------------
-  it('one_to_one refuses a closed thread', async () => {
-    const conv = await seedConversation({ status: 'closed', unread_count: 0 });
-    await expect(
-      repo.setUnread(conv.conversationId, { bucket: 'one_to_one' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  it('one_to_one refuses a row whose type is relay_group', async () => {
-    const conv = await seedConversation({ status: 'open', type: 'relay_group', unread_count: 0 });
-    await expect(
-      repo.setUnread(conv.conversationId, { bucket: 'one_to_one' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  it('one_to_one ACCEPTS a legacy row with no type', async () => {
-    const conv = await seedConversation({ status: 'open', unread_count: 0 }); // no type
-    const updated = await repo.setUnread(conv.conversationId, { bucket: 'one_to_one' });
-    expect(updated.unread_count).toBe(1);
-  });
-
-  it('relay_group accepts open and connecting, refuses closed', async () => {
-    for (const status of ['open', 'connecting'] as const) {
-      const ok = await seedConversation({ status, type: 'relay_group', unread_count: 0 });
-      const updated = await repo.setUnread(ok.conversationId, { bucket: 'relay_group' });
-      expect(updated.unread_count).toBe(1);
-    }
-    const closed = await seedConversation({ status: 'closed', type: 'relay_group', unread_count: 0 });
-    await expect(
-      repo.setUnread(closed.conversationId, { bucket: 'relay_group' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  it('relay_group REFUSES an open 1:1 thread (the type clause, not the status)', async () => {
-    // Without the type clause this passes silently: a 1:1 thread also carries
-    // status 'open', so only the route's own type read would separate them -
-    // the exact value the conditional write exists to distrust.
-    const conv = await seedConversation({ status: 'open', unread_count: 0 }); // 1:1
-    await expect(
-      repo.setUnread(conv.conversationId, { bucket: 'relay_group' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  it('group_text accepts group_open and refuses plain open', async () => {
-    const ok = await seedConversation({ status: 'group_open', type: 'group_text', unread_count: 0 });
-    const updated = await repo.setUnread(ok.conversationId, { bucket: 'group_text' });
-    expect(updated.unread_count).toBe(1);
-
-    const wrong = await seedConversation({ status: 'open', type: 'group_text', unread_count: 0 });
-    await expect(
-      repo.setUnread(wrong.conversationId, { bucket: 'group_text' }),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
-  });
-
-  it('round trip: setUnread lands the row in the byUnread index', async () => {
-    const conv = await seedConversation({ status: 'open', unread_count: 0 });
-    await repo.setUnread(conv.conversationId, { bucket: 'one_to_one' });
-    const page = await repo.queryUnreadPage({ limit: 50 });
-    expect(page.items.map((i) => i.conversationId)).toContain(conv.conversationId);
-
-    await repo.resetUnread(conv.conversationId);
-    const after = await repo.queryUnreadPage({ limit: 50 });
-    expect(after.items.map((i) => i.conversationId)).not.toContain(conv.conversationId);
-  });
-});
-```
-
-Run `npm test -- app/src/repos/conversationsRepo.integration.test.ts`. Every
-test must fail with "setUnread is not a function" - NOT a condition error. If
-any fails differently, the seed helper is wrong; fix that before implementing.
+Red state must be "setUnread is not a function", not a condition error.
 
 ## S1.2 GREEN - the type
 
@@ -184,325 +132,242 @@ interface:
 export type UnreadBucket = 'relay_group' | 'group_text' | 'one_to_one';
 ```
 
-Add to the interface, immediately after `resetUnread`'s declaration:
+Declare on the interface immediately after `resetUnread`:
 
 ```ts
   /**
    * Make a thread unread (`unread_count = 1` + the sparse `unread_flag`), the
-   * mirror of resetUnread. Carries its whole precondition in the
-   * ConditionExpression: the row must exist, match the bucket's type/status
-   * predicate (MU-1), and be currently READ. A read-then-write would be TOCTOU
-   * - a relay close committing in the window leaves permanent index residue.
-   * Throws ConditionalCheckFailedException when ANY clause fails; the caller
-   * classifies by re-reading (routes: 404 absent / 409 ineligible / 200
-   * already-unread, in that order).
+   * mirror of resetUnread. Carries its WHOLE precondition in the
+   * ConditionExpression: the row exists, matches the bucket's type/status
+   * predicate (MU-1), and is currently READ. A read-then-write would be TOCTOU -
+   * a relay close committing in the window leaves permanent index residue.
+   * Throws ConditionalCheckFailedException when ANY clause fails; callers
+   * classify by re-reading (see app/src/lib/markUnread.ts).
    */
   setUnread(conversationId: string, eligibility: { bucket: UnreadBucket }): Promise<ConversationItem>;
 ```
 
 ## S1.3 GREEN - the implementation
 
-Insert immediately after the `resetUnread` implementation (around
-`conversationsRepo.ts:1561`):
+Insert after the `resetUnread` implementation (~`conversationsRepo.ts:1561`).
+Build `ExpressionAttributeNames`/`Values` per bucket and AND three clauses:
+`attribute_exists(conversationId)`, the bucket predicate, and
+`(attribute_not_exists(unread_count) OR unread_count = :zero)`.
 
-```ts
-    async setUnread(conversationId, eligibility) {
-      // MU-1 AS A WRITE CONDITION. Every bucket carries a TYPE clause, not only
-      // one_to_one: a 1:1 thread also carries status 'open', so without it the
-      // relay_group predicate would be satisfied by any open 1:1 and the only
-      // separator would be the route's own type read - the value this condition
-      // exists to distrust. It is safe today only because the sole type-changing
-      // writer (convertRelayGroupToGroupText) also moves status out of the
-      // admitted set; do not depend on that coincidence.
-      const names: Record<string, string> = { '#s': 'status' };
-      const values: Record<string, unknown> = {
-        ':one': 1,
-        ':flag': UNREAD_FLAG_VALUE,
-        ':zero': 0,
-      };
-      let predicate: string;
-      if (eligibility.bucket === 'relay_group') {
-        names['#type'] = 'type';
-        values[':type'] = 'relay_group';
-        values[':open'] = 'open';
-        values[':connecting'] = 'connecting';
-        predicate = '#type = :type AND #s IN (:open, :connecting)';
-      } else if (eligibility.bucket === 'group_text') {
-        names['#type'] = 'type';
-        values[':type'] = 'group_text';
-        values[':groupOpen'] = GROUP_TEXT_STATUS;
-        predicate = '#type = :type AND #s = :groupOpen';
-      } else {
-        // The 1:1 bucket mirrors isOneToOneBucket's NEGATIVE test, so a legacy
-        // row with no `type` - and any future 1:1 type - stays admitted rather
-        // than vanishing.
-        names['#type'] = 'type';
-        values[':relay'] = 'relay_group';
-        values[':groupText'] = 'group_text';
-        values[':open'] = 'open';
-        predicate =
-          '(attribute_not_exists(#type) OR NOT #type IN (:relay, :groupText)) AND #s = :open';
-      }
+Bucket predicates:
+- `relay_group`: `#type = :type AND #s IN (:open, :connecting)`
+- `group_text`: `#type = :type AND #s = :groupOpen` (`GROUP_TEXT_STATUS`)
+- `one_to_one`: `(attribute_not_exists(#type) OR NOT #type IN (:relay, :groupText)) AND #s = :open`
 
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { conversationId },
-          // Counter and flag ride ONE write, so the row can never be
-          // unread-but-unindexed - the property incrementUnread was built for.
-          UpdateExpression: 'SET unread_count = :one, unread_flag = :flag',
-          // Clause 3 is the ALREADY-READ precondition. `attribute_not_exists`
-          // is load-bearing: unread_count is SPARSE, so a thread that never
-          // received an inbound has never had it written, and a bare
-          // `= :zero` would refuse that whole class forever.
-          ConditionExpression:
-            `attribute_exists(conversationId) AND ${predicate}` +
-            ' AND (attribute_not_exists(unread_count) OR unread_count = :zero)',
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info({ conversationId, bucket: eligibility.bucket }, 'conversation unread set');
-      return Attributes as ConversationItem;
-    },
-```
+`UpdateExpression: 'SET unread_count = :one, unread_flag = :flag'`,
+`ReturnValues: 'ALL_NEW'`, log `conversation unread set` at info.
 
-Accepted risk to note in the comment block (same class the repo already
-documents for `resetUnread` at `conversationsRepo.ts:1541-1543`): `SET` is
-last-write-wins against an in-flight inbound `ADD`, so a `setUnread` racing a
-fresh inbound writes 1 where the truth is 2. The flag is correct either way and
-the row stays visible.
+Comments to carry:
+- Every bucket has a TYPE clause, not only `one_to_one`: a 1:1 also carries
+  status `open`, so without it the `relay_group` predicate is satisfied by any
+  open 1:1 and the only separator would be the route's own type read - the value
+  this condition exists to distrust. Safe today only because
+  `convertRelayGroupToGroupText` also moves status out of the admitted set; do
+  not depend on that.
+- The 1:1 bucket mirrors `isOneToOneBucket`'s NEGATIVE test so legacy and future
+  1:1 types stay admitted.
+- Accepted risk, same class documented at `conversationsRepo.ts:1541-1543`:
+  `SET` is last-write-wins against an in-flight inbound `ADD`, so a `setUnread`
+  racing a fresh inbound writes 1 where truth is 2. Flag correct either way.
+- **Pointer-partition rows** (MU-1's first clause) are NOT in the condition, on
+  purpose: `conversationId` is the table key and cannot change, so the route's
+  pre-check cannot be raced. Say so, or a future reader will read the omission
+  as a gap.
 
-## S1.4 Verify
+## S1.4 Update the attribute's contract comment
 
-`npm test -- app/src/repos/conversationsRepo.integration.test.ts` green, then
-`npm run typecheck`. Commit `app/src/repos/conversationsRepo.ts` and the test.
+`conversationsRepo.ts:172-178` currently says `unread_flag` is
+"Maintained ONLY by incrementUnread / resetUnread and the relay-close /
+contact-delete resets". `setUnread` is now a THIRD writer. Update that comment
+in the same commit - it is the doc every future reader trusts.
+
+## S1.5 Update every full-literal `ConversationsRepo` fake (same commit)
+
+Adding a required interface method breaks typecheck in each of these. Add a
+`setUnread` implementation to all of them:
+
+- `app/test/helpers/twilioWebhookHarness.ts` (the one S2/S3 route tests use)
+- `app/test/contactCapture.test.ts`
+- `app/test/conversationHub.integration.test.ts`
+- `app/test/scheduledSendSuppression.test.ts`
+- `app/test/sendMessage.test.ts`
+- `app/test/unreadIndexRepo.integration.test.ts` (if it holds a literal)
+
+Confirm the list with:
+`grep -rln "resetUnread" app --include=*.ts | grep -v node_modules`
+and check each hit for a full object literal rather than a `Pick<>`.
+
+**The harness fake's `setUnread` MUST actually implement the condition** -
+refuse when the row is absent, when the bucket predicate fails, or when
+`unread_count > 0`, throwing `ConditionalCheckFailedException`. If it
+unconditionally succeeds, every classification test in S2/S3 is vacuous: they
+would assert route branches that the fake can never trigger. Fakes elsewhere may
+throw "not implemented" if their suites never reach it.
+
+## S1.6 Verify
+
+`npm test -w app -- test/unreadIndexRepo.integration.test.ts` (with Docker up),
+then `npm run typecheck`. Commit.
 
 ---
 
-# S2 - `POST /api/conversations/:conversationId/unread`
+# S2 - Shared helpers + `POST /api/conversations/:conversationId/unread`
 
-Files: `app/src/routes/api.ts`, `app/src/lib/markUnread.ts` (new),
-`app/src/routes/api.test.ts` (or the existing conversations-route test file -
-put the tests beside the existing `/read` route tests).
+Files: `app/src/lib/markUnread.ts` (new), `app/test/markUnread.test.ts` (new),
+`app/src/routes/api.ts`, and the existing route-test file that covers
+`POST /api/conversations/:id/read` (find it: `grep -rln "conversations/.*read" app/test`).
 
-## S2.1 The shared classification helper (new file)
+## S2.1 `app/src/lib/markUnread.ts`
 
-`app/src/lib/markUnread.ts`:
+Three pure helpers plus one classifier. Extracted because THREE routes make
+these decisions and a fork between them is how the invariant drifts.
 
-```ts
-// The mark-unread route layer's two shared decisions, extracted because THREE
-// routes make them and a fork between them is how the invariant drifts.
-import { isOneToOneBucket, isUnreadVisible } from './unreadFeed.js';
-import type { ConversationItem, UnreadBucket } from '../repos/conversationsRepo.js';
-
-/** The bucket whose ConditionExpression predicate matches this item's type. */
-export function bucketFor(conv: ConversationItem): UnreadBucket {
-  if (conv.type === 'relay_group') return 'relay_group';
-  if (conv.type === 'group_text') return 'group_text';
-  return 'one_to_one';
-}
-
-/** MU-1 as a route-level PRE-check (fail fast with a clear error). The
- *  authoritative enforcement is setUnread's condition; this only avoids a
- *  pointless write and gives a specific 409. */
-export function isMarkableUnread(conv: ConversationItem): boolean {
-  return isUnreadVisible({ ...conv, unread_count: 1 });
-}
-
-/** The fan-in selection rule (spec 6.2), shared by both inbox routes.
- *
- *  STRICTER than the inbox reader's literal `type !== 'relay_group'`:
- *  isOneToOneBucket excludes group_text too. The sets are identical today, but
- *  contactThreads.ts warns that giving a group thread a participant key would
- *  break every caller relying on the enumerated form. A negative bucket test
- *  survives that change.
- *
- *  Strict `>` mirrors newestOf, so ties keep the FIRST encountered - the same
- *  thread the inbox row itself previews. */
-export function newestMarkable(convs: ConversationItem[]): ConversationItem | undefined {
-  let best: ConversationItem | undefined;
-  for (const c of convs) {
-    if (c.status !== 'open') continue;
-    if (!isOneToOneBucket(c)) continue;
-    if (best === undefined || c.last_activity_at > best.last_activity_at) best = c;
-  }
-  return best;
-}
-```
-
-Unit-test this file directly (`app/src/lib/markUnread.test.ts`): `newestMarkable`
-skips closed, skips relay_group, skips group_text, keeps first on a tie, returns
-undefined on an empty/all-ineligible list.
-
-## S2.2 The classification, used by all three routes
-
-Also in `app/src/lib/markUnread.ts`:
+- `bucketFor(conv): UnreadBucket` - `relay_group` / `group_text` / else
+  `one_to_one`.
+- `isMarkableUnread(conv): boolean` - `isUnreadVisible({ ...conv, unread_count: 1 })`.
+  A route-level PRE-check for a fast, specific 409; the authoritative
+  enforcement is the write condition.
+- `newestMarkable(convs): ConversationItem | undefined` - filter
+  `status === 'open'` AND `isOneToOneBucket`, take newest by `last_activity_at`
+  with strict `>` so ties keep first-encountered.
+  Comment: deliberately STRICTER than the inbox reader's literal
+  `type !== 'relay_group'` (`isOneToOneBucket` excludes `group_text` too). The
+  sets are identical today, but `contactThreads.ts:22-23` warns that giving a
+  group thread a participant key breaks every caller relying on the enumerated
+  form; a negative bucket test survives that change.
+- `classifyConditionFailure(conversationId, getById)`:
 
 ```ts
 export type MarkUnreadOutcome =
   | { kind: 'not_found' }
   | { kind: 'ineligible' }
-  | { kind: 'already_unread'; conversation: ConversationItem };
+  | { kind: 'already_unread'; conversation: ConversationItem }
+  | { kind: 'raced' };
 
-/**
- * Classify a ConditionalCheckFailedException from setUnread by re-reading ONCE.
- * The condition has three clauses and DynamoDB does not say which failed.
- *
- * ORDER IS LOAD-BEARING: eligibility BEFORE count. An ineligible-AND-unread
- * thread is a real state, not a hypothetical - a closed relay group re-flagged
- * by an inbound (docs/issues/inbound-reflags-closed-relay-group.md). Classifying
- * on the count first answers 200 for exactly that residue row.
- */
 export async function classifyConditionFailure(
   conversationId: string,
   getById: (id: string) => Promise<ConversationItem | undefined>,
 ): Promise<MarkUnreadOutcome> {
   const conv = await getById(conversationId);
   if (!conv) return { kind: 'not_found' };
+  // ORDER IS LOAD-BEARING: eligibility BEFORE count. An ineligible-AND-unread
+  // thread is a real state - a closed relay group re-flagged by an inbound
+  // (docs/issues/inbound-reflags-closed-relay-group.md). Count-first would
+  // answer 200 for exactly that residue row.
   if (!isMarkableUnread(conv)) return { kind: 'ineligible' };
-  return { kind: 'already_unread', conversation: conv };
+  // Eligible AND already unread: the goal state holds.
+  if ((conv.unread_count ?? 0) > 0) return { kind: 'already_unread', conversation: conv };
+  // Eligible AND read, yet the write was refused: the row was concurrently
+  // RESET between our write and this re-read. Reporting 200 here would tell the
+  // client "unread" about a row reading 0. The caller retries the write ONCE.
+  return { kind: 'raced' };
 }
 ```
 
-Tests: all three arms, and explicitly the ineligible-AND-unread row -> 
-`ineligible`, never `already_unread`.
+Unit-test all four arms in `app/test/markUnread.test.ts`, plus `newestMarkable`
+(skips closed, skips relay_group, skips group_text, keeps first on a tie,
+undefined on empty/all-ineligible) and `bucketFor`.
 
-## S2.3 RED - the route tests
+## S2.2 The shared route body
 
-Beside the existing `POST /api/conversations/:id/read` tests:
+All three routes share this shape. Write it ONCE as a helper in
+`app/src/lib/markUnread.ts` taking the resolved conversation and the repo, and
+returning a discriminated result the route maps to status codes:
 
-- 200 on a read 1:1: body carries the updated conversation with
-  `unread_count: 1`; `conversation.updated` emitted once.
+1. `setUnread(conversationId, { bucket: bucketFor(conv) })`.
+2. On `ConditionalCheckFailedException` -> `classifyConditionFailure`.
+   - `not_found` -> caller's not-found code (see S3.3: the contact route uses
+     `contact_not_found`, the others `conversation_not_found`).
+   - `ineligible` -> 409 `thread_not_markable_unread`.
+   - `already_unread` -> 200, no write, **no `conversation.updated` emit**
+     (nothing changed), carrying the real count.
+   - `raced` -> retry `setUnread` ONCE; if it fails again, classify once more
+     and map without a second retry (a `raced` on the retry becomes 409).
+3. On success emit `conversation.updated` with
+   `toConversationUpdatedEvent(conversation)`.
+4. Respond with a top-level `unreadCount` number in every 200 (see S4 - the
+   client has no other typed source for it).
+
+## S2.3 RED + GREEN - the conversation route
+
+Response shape: `{ conversation, unreadCount }`.
+
+Tests (beside the existing `/read` tests, in `app/test/`):
+- 200 on a read 1:1: `unreadCount` 1, one `conversation.updated` emitted.
 - 404 unknown id.
-- 409 for a CLOSED relay group.
-- 409 for a 1:1 thread whose contact is soft-deleted (MU-2).
+- 409 CLOSED relay group.
+- 409 for a 1:1 whose contact is soft-deleted (MU-2, via `isDeleted`).
 - 200 for a `connecting` relay group; 200 for a `group_open` group text.
-- 200 no-write for an already-unread ELIGIBLE thread: response carries the REAL
-  count (e.g. 5), the stored row is still 5, and NO `conversation.updated` is
-  emitted.
-- 409 for a thread that is BOTH ineligible and unread (the ORDER test).
-- 404 when the conversation is deleted between the route's read and its write
-  (drive by stubbing the repo so `setUnread` rejects with
-  `ConditionalCheckFailedException` and `getById` then returns undefined).
+- 200 no-write for an already-unread eligible thread: `unreadCount` is the REAL
+  count (5), the stored row is still 5, and NO event is emitted.
+- 409 for a thread BOTH ineligible and unread (the ORDER test).
+- 404 when the row disappears between read and write (drive via the harness fake).
+- **MU-1 property**: a 200 that WROTE implies the stored row passes
+  `isUnreadVisible`. Assert it explicitly - spec 9.1 requires it and the first
+  draft of this plan omitted the task.
 
-## S2.4 GREEN - the route
+MU-2 uses the already-imported `isDeleted` (`api.ts:64`): resolve the contact via
+`participant_phone` -> `contacts.findByPhone`, else `participant_email` ->
+`contacts.findByEmail`. A thread with NO contact record is NOT deleted (an
+untriaged unknown number is markable). Group threads skip MU-2 entirely.
 
-In `app/src/routes/api.ts`, immediately after the existing `/read` handler
-(around line 2047):
+## S2.4 Verify
 
-```ts
-  // POST /api/conversations/:conversationId/unread - make the thread unread so
-  // it resurfaces as a to-do. The mirror of /read, with three differences that
-  // are all deliberate: it writes 1 rather than 0, it refuses ineligible and
-  // deleted-contact targets (MU-1/MU-2), and an ALREADY-unread thread is a
-  // SUCCESS with no write rather than a clobber to 1.
-  router.post('/conversations/:conversationId/unread', async (req, res) => {
-    const { conversationId } = req.params;
-    mergeContext({ conversationId });
-
-    const conv = await conversations.getById(conversationId);
-    if (!conv) {
-      res.status(404).json({ error: 'conversation_not_found' });
-      return;
-    }
-    if (!isMarkableUnread(conv)) {
-      res.status(409).json({ error: 'thread_not_markable_unread' });
-      return;
-    }
-    // MU-2. A group thread has no single owning contact and skips this.
-    if (isOneToOneBucket(conv) && (await ownerContactIsDeleted(conv, contacts))) {
-      res.status(409).json({ error: 'thread_not_markable_unread' });
-      return;
-    }
-
-    try {
-      const conversation = await conversations.setUnread(conversationId, {
-        bucket: bucketFor(conv),
-      });
-      events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
-      res.json({ conversation });
-    } catch (err) {
-      if (!(err instanceof ConditionalCheckFailedException)) throw err;
-      const outcome = await classifyConditionFailure(conversationId, (id) =>
-        conversations.getById(id),
-      );
-      if (outcome.kind === 'not_found') {
-        res.status(404).json({ error: 'conversation_not_found' });
-        return;
-      }
-      if (outcome.kind === 'ineligible') {
-        res.status(409).json({ error: 'thread_not_markable_unread' });
-        return;
-      }
-      // Already unread: the goal state holds. Success, no write, NO event -
-      // nothing changed. The real count goes back so the client stops assuming 1.
-      res.json({ conversation: outcome.conversation });
-    }
-  });
-```
-
-`ownerContactIsDeleted` is a small helper in `app/src/lib/markUnread.ts`:
-resolve the thread's contact via `participant_phone` -> `contacts.findByPhone`
-else `participant_email` -> `contacts.findByEmail`, and return true only when a
-contact was found AND carries `deleted_at`. A thread with no contact record is
-NOT deleted (an untriaged unknown number is markable).
-
-## S2.5 Verify
-
-Route tests green; `npm run typecheck`. Commit.
+`npm test -w app -- test/markUnread.test.ts` and the route test file;
+`npm run typecheck`. Commit.
 
 ---
 
 # S3 - The two fan-in inbox routes
 
-File: `app/src/routes/inbox.ts` + its route test file.
+Files: `app/src/routes/inbox.ts` + its route test file in `app/test/`.
 
-## S3.1 RED - tests
+## S3.1 `POST /api/inbox/unread` `{ phone }`
 
-`POST /api/inbox/unread` `{ phone }`:
-- 400 missing/non-string phone; 400 non-E.164.
+Response `{ ok: true, unreadCount }`. Tests:
+- 400 missing/non-string phone; 400 non-E.164 (mirror `/read`'s shapes).
 - 404 `no_conversation_for_phone`.
-- **409 `contact_deleted` when the phone belongs to a soft-deleted contact**
-  (the MU-2 gap review found - this route's `/read` sibling deliberately has no
-  such check, so it will not be copied in by accident).
+- **409 `contact_deleted` when the phone belongs to a soft-deleted contact.**
+  This route's `/read` sibling deliberately has NO such check, so it will not be
+  copied in by accident - zeroing unread on a deleted contact is harmless,
+  SETTING it is what MU-2 forbids.
 - 409 `no_markable_thread` when every candidate is ineligible.
-- 200 flipping ONLY the newest eligible thread when the number owns several;
-  assert the others are untouched; response carries `{ ok: true, unreadCount }`.
+- 200 flips ONLY the newest eligible thread when the number owns several;
+  assert the others are untouched.
 
-`POST /api/inbox/:contactId/unread`:
+## S3.2 `POST /api/inbox/:contactId/unread`
+
+Response `{ ok: true, unreadCount }`. Tests:
 - 404 `contact_not_found`; 409 `contact_deleted`.
-- 200 flipping ONLY the newest eligible thread across a phone+email union, with
-  the other threads asserted still at 0.
+- 200 flips ONLY the newest eligible thread across a phone+email union, others
+  asserted still 0.
 - **200 does NOT select an open relay group** even when the contact's record
-  carries the pool number (the 6.2 filter - this is the finding that made the
-  filter shared).
-- The same condition-failure classification arms as S2.
+  carries the pool number (the `newestMarkable` filter).
+- The same classification arms as S2.
 
-## S3.2 GREEN - the routes
+## S3.3 Not-found vocabulary
 
-Register both immediately after the existing `/read` handlers, keeping
-`POST /unread` above `POST /:contactId/unread`. Note in the comment that the
-ordering is house-style belt-and-braces, NOT a live hazard: the paths are one
-and two segments, exactly as `inbox.ts:1607-1610` already records for the read
-pair.
+The shared body's `not_found` outcome must map to **`contact_not_found`** on the
+contact route and `no_conversation_for_phone` / `conversation_not_found` on the
+others. Reusing one literal across all three leaks the wrong noun to the client.
 
-Both routes: select with `newestMarkable(...)`, call `setUnread` with
-`bucketFor(selected)`, wrap in the same try/catch classification as S2, emit
-`conversation.updated` on a real write only, and respond
-`{ ok: true, unreadCount: conversation.unread_count }`.
+## S3.4 Registration and comments
 
-The by-phone route's MU-2 step: `contacts.findByPhone(phone)`; if found and
-`deleted_at` is set -> `409 contact_deleted`.
+Keep `POST /unread` above `POST /:contactId/unread`. Comment that this is
+house-style belt-and-braces, NOT a live hazard - the paths are one and two
+segments, exactly as `inbox.ts:1607-1610` records for the read pair.
 
-Add a comment on both routes recording the GSI-lag dependency
+Comment the GSI-lag dependency on both
 (`docs/issues/markread-fanout-depends-on-stale-participant-gsi.md`): a fan-OUT
 degrades gracefully under participant-GSI lag, a fan-IN "pick exactly one" does
-not, so `409 no_markable_thread` is EXPECTED and RETRYABLE rather than an error
-state.
+not, so `409 no_markable_thread` is EXPECTED and RETRYABLE, not an error state.
 
-## S3.3 Verify
+## S3.5 Verify
 
 Route tests green; `npm run typecheck`. Commit.
 
@@ -510,28 +375,30 @@ Route tests green; `npm run typecheck`. Commit.
 
 # S4 - API client
 
-File: `dashboard/src/api/endpoints.ts`.
+File: `dashboard/src/api/endpoints.ts` (+ the `index.ts` barrel if it
+enumerates names).
 
-Beside `markConversationRead` (line ~860) and `markInboxRead` (line ~1578):
+Both functions return `number` - the authoritative count. `ConversationHeader`
+has NO typed `unread_count` (it rides an index signature), so it cannot be the
+source; that is why every route carries a top-level `unreadCount`.
 
 ```ts
 /** POST /api/conversations/:id/unread - make the thread unread again so it
- *  resurfaces as a to-do. Returns the AUTHORITATIVE conversation: an
- *  already-unread thread answers 200 with its real count, NOT 1. */
+ *  resurfaces as a to-do. Returns the AUTHORITATIVE count: an already-unread
+ *  thread answers 200 with its real count, NOT 1. */
 export async function markConversationUnread(
   conversationId: string,
   signal?: AbortSignal,
-): Promise<ConversationHeader> {
-  const res = await request<{ conversation: ConversationHeader }>(
+): Promise<number> {
+  const res = await request<{ conversation: unknown; unreadCount: number }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/unread`,
     { method: 'POST', ...(signal !== undefined && { signal }) },
   );
-  return res.conversation;
+  return res.unreadCount;
 }
 
 /** POST /api/inbox/:contactId/unread (contact rows + the contact page) - or
- *  POST /api/inbox/unread { phone } (unknown rows). Returns the resulting
- *  unread count so callers never assume 1. */
+ *  POST /api/inbox/unread { phone } (unknown rows). */
 export async function markInboxUnread(
   target: { contactId: string } | { phone: string },
   signal?: AbortSignal,
@@ -551,100 +418,107 @@ export async function markInboxUnread(
 }
 ```
 
-Export both from `dashboard/src/api/index.ts` if that barrel enumerates names.
 `npm run typecheck`. Commit.
 
 ---
 
 # S5 - Inbox row action
 
-Files: `dashboard/src/routes/inbox/InboxRow.tsx`,
-`dashboard/src/routes/inbox/useInbox.ts`, plus both test files.
+Files: `dashboard/src/routes/inbox/InboxRow.tsx`, `useInbox.ts`, `Inbox.tsx`,
+plus `InboxRow.test.tsx`, `useInbox.test.tsx`, `Inbox.test.tsx`.
 
-## S5.1 RED
+## S5.1 REQUIRED FIRST: fix the colliding selector idiom
 
-`InboxRow.test.tsx`:
-- renders "Mark unread" when `unreadCount === 0`, and NOT "Mark read";
-- renders "Mark read" when `unreadCount > 0`, and NOT "Mark unread";
-- clicking calls `onMarkUnread` with the row.
+`InboxRow.test.tsx:78-81` (and the same idiom elsewhere) matches the Mark-read
+button with `/mark .* read/i`. **That regex also matches "Mark Ada unread"** -
+`.*` absorbs "Ada un" and "read" matches the tail of "unread". So the existing
+"omits the Mark read action for already-read rows" assertion goes RED the moment
+this feature ships, and it is not a real failure.
 
-`useInbox.test.tsx`:
-- per-kind dispatch: relay_group / group_text -> `markConversationUnread`;
-  contact -> `markInboxUnread({ contactId })`; phone-bearing fallback ->
-  `markInboxUnread({ phone })`;
-- optimistic patch to 1, then **commits the SERVER's returned count** - an
-  already-unread thread answering 5 leaves the row at 5, not 1;
-- rejection drops the patch (row returns to 0);
-- calls `rollbackRowsCleared` with the same key `markRead` would have minted.
-  Drive the pending-clear assertion through the FETCH-GENERATION seam (resolve
-  a `getUnreadCount`), NOT a clock - a clock-driven test passes with or without
-  the call.
+Before writing any new row test, update the existing selectors to disambiguate.
+Use a word boundary: `/mark .*\bread\b/i` does NOT match inside "unread"
+(the `r` follows the word character `n`). Apply to:
+- `dashboard/src/routes/inbox/InboxRow.test.tsx`
+- every other dashboard test using the idiom
+  (`grep -rn "mark .\* read" dashboard/src`)
+- the e2e specs sharing it (`grep -rn "mark .\* read" e2e/`)
 
-## S5.2 GREEN - `InboxRow.tsx`
+Run those suites and confirm still-green BEFORE adding the feature. A red here
+after the feature lands is ambiguous; a green here first makes it diagnostic.
 
-Add `onMarkUnread: (row: InboxRowData) => void` to `InboxRowProps`. Replace the
-actions block:
+## S5.2 `InboxRow.tsx`
 
-```tsx
-        <div className={styles.actions}>
-          {unread ? (
-            <button
-              type="button"
-              className={styles.action}
-              onClick={() => onMarkRead(row)}
-              aria-label={`Mark ${row.name} read`}
-            >
-              Mark read
-            </button>
-          ) : (
-            <button
-              type="button"
-              className={styles.action}
-              onClick={() => onMarkUnread(row)}
-              aria-label={`Mark ${row.name} unread`}
-            >
-              Mark unread
-            </button>
-          )}
-        </div>
-```
+Add `onMarkUnread: (row: InboxRowData) => void` to `InboxRowProps`. Render
+"Mark unread" when `unreadCount === 0`, "Mark read" when `> 0` - exactly one at
+a time. `aria-label={`Mark ${row.name} unread`}`.
 
-**Deliberately NO client-side D5 guards here.** Add this comment so nobody
-restores them:
+**Guard on `row.deleted`.** Do NOT ship the "this guard is dead code" comment the
+first draft carried: review showed it is false. A deleted row normally implies
+`unreadCount > 0`, but `useInbox.markRead` sets `unreadCount: 0` optimistically
+and commits it, so on the `all` filter a deleted row CAN sit at 0 with the action
+showing - and clicking it gets a silent 409. Guard, and comment why.
 
-```tsx
-        {/* No `deleted` / closed-relay guard on this action, deliberately: a
-            deleted row is emitted ONLY when some thread is unread
-            (inbox.ts:786), and a closed relay group is never an inbox row at
-            all (the relay source reads only the open and connecting
-            partitions, inbox.ts:1396). Both states are mutually exclusive with
-            unreadCount === 0, so a guard would be dead code and a test for it
-            would prove nothing. D5 is enforced server-side. */}
-```
+The closed-relay guard IS unreachable on a row (the relay source reads only the
+`open` and `connecting` partitions, `inbox.ts:1396`); omit it and say so.
 
-## S5.3 GREEN - `useInbox.markUnread`
+**Naming the render sites that must change** (`onMarkUnread` is required, so
+these break typecheck in the same commit): `dashboard/src/routes/inbox/Inbox.tsx`
+and any test-local render helper in `InboxRow.test.tsx`. Confirm with
+`grep -rn "<InboxRow" dashboard/src`.
 
-Mirror `markRead` (line ~306). Differences, all load-bearing:
+## S5.3 `useInbox.markUnread`
 
-- guard is `if (row.unreadCount > 0) return;`
-- resolves `markConversationUnread` / `markInboxUnread` per kind, minting the
-  clear key in the SAME branch (the third branch catches rows BY PHONE across
-  kinds, so a kind-derived key would mint `c:undefined`);
-- `setPatch(key, { unreadCount: 1 })` for the optimistic paint;
+Add `markUnread: (row: InboxRowData) => void` to the `InboxState` interface AND
+to the returned object - the first draft wired the call site without declaring
+it. Mirror `markRead` (line ~306) with these differences:
+
+- guard `if (row.unreadCount > 0) return;` plus `if (row.deleted === true) return;`
+- resolve endpoint AND clear key in ONE branch per kind (the third branch
+  catches rows BY PHONE across kinds, so a kind-derived key would mint
+  `c:undefined`)
+- `setPatch(key, { unreadCount: 1 })` for the optimistic paint
 - `rollbackRowsCleared([clearKey])` - purges a stale pending CLEAR from a
-  mark-read the operator just performed. Do NOT call `noteRowsCleared`; there
-  is no optimistic-increment layer and none is being added.
-- on success, commit **the returned count**:
-  `setBase(prev => prev.map(r => rowKey(r) === key ? { ...r, unreadCount: served } : r))`
-- on failure, drop the patch. Note in a comment that `rollbackRowsCleared` has
-  no re-add, so the badge sits one ABOVE truth until the next reconcile
-  (~300ms); accepted and self-healing.
+  mark-read just performed. Do NOT call `noteRowsCleared`; no
+  optimistic-increment layer is being added (non-goal 4)
+- on success commit the RETURNED count:
 
-Wire `onMarkUnread={inbox.markUnread}` in `Inbox.tsx`'s `InboxRow` render.
+```ts
+      unread()
+        .then((servedCount) => {
+          genRef.current += 1;
+          setBase((prev) =>
+            prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: servedCount } : r)),
+          );
+        })
+        .catch(() => {
+          /* rollback: dropping the patch restores base's original count */
+        })
+        .finally(() => clearPatch(key, 'unreadCount'));
+```
 
-## S5.4 Verify
+Comment that `rollbackRowsCleared` has no re-add, so on a rejected POST the
+badge sits one ABOVE truth until the next reconcile (~300ms); accepted and
+self-healing.
 
-Both test files green; `npm run typecheck`. Commit.
+## S5.4 Tests
+
+`useInbox.test.tsx` stubs `UnreadContext` wholesale, so the assertion available
+there is **that `rollbackRowsCleared` was called with the right key** - not a
+fetch-generation experiment. Do not attempt the generation seam in this file;
+the first draft named a test that file cannot deliver.
+
+- per-kind dispatch (relay_group / group_text -> `markConversationUnread`;
+  contact -> `markInboxUnread({ contactId })`; phone fallback ->
+  `markInboxUnread({ phone })`)
+- optimistic patch to 1, then commits the SERVER's count: a stub resolving 5
+  leaves the row at 5, not 1
+- rejection drops the patch (row returns to 0)
+- `rollbackRowsCleared` called with the key `markRead` would have minted
+- a `deleted` row at `unreadCount 0` renders no action and `markUnread` no-ops
+
+## S5.5 Verify
+
+`npm test -w dashboard -- src/routes/inbox`; `npm run typecheck`. Commit.
 
 ---
 
@@ -652,12 +526,10 @@ Both test files green; `npm run typecheck`. Commit.
 
 Files: `dashboard/src/routes/contact/useMarkContactRead.ts`,
 `dashboard/src/routes/conversation/useMarkThreadRead.ts` (new),
-`dashboard/src/routes/conversation/ConversationDetail.tsx`,
-`dashboard/src/routes/conversation/GroupTextView.tsx`, plus tests.
+`RelayGroupView.tsx` / `GroupTextView.tsx` (the components that own the mount
+read), plus tests.
 
-## S6.1 The contract
-
-Both hooks return the same handle:
+## S6.1 Contract
 
 ```ts
 export interface AutoReadHandle {
@@ -667,121 +539,130 @@ export interface AutoReadHandle {
 }
 ```
 
-## S6.2 `useMarkContactRead` changes
+**Memoize the returned object** (`useMemo` on `[suppressAndDrain]`, itself a
+`useCallback`). An unstable identity flows into consumer effect deps and
+POST-loops - the exact hazard `UnreadContext.tsx:82-88` documents.
 
-Currently returns `void`. Change to return `AutoReadHandle`, and add:
+## S6.2 `useMarkContactRead`
 
-- `suppressedForRef: useRef<string | null>(null)` - the latch, holding the
-  IDENTITY it suppresses, not a boolean. `markRead` returns early when
+Currently returns `void`; return `AutoReadHandle`.
+
+- `suppressedForRef: useRef<string | null>(null)` holds the IDENTITY suppressed,
+  not a boolean. `markRead` returns early when
   `suppressedForRef.current === contactId`.
-  **Keyed, not per-mount.** `/contacts/a` -> `/contacts/b` is a React Router
+  **Keyed, not per-mount**: `/contacts/a` -> `/contacts/b` is a React Router
   param change, NOT a remount (`ContactDetail.tsx:214`), and `markRead`'s
-  `[contactId]` dependency refires for the new contact. A boolean ref would
-  leave the NEXT contact never marked read for the rest of the visit.
-- `inFlightPromiseRef: useRef<{ id: string; promise: Promise<unknown> } | null>(null)` -
-  set when `markRead` issues its POST, cleared in `finally`. Keyed the same way
-  so the drain can never await a request belonging to a previous contact.
-- `suppressAndDrain`:
+  `[contactId]` dep refires for the new contact. A boolean ref would leave the
+  NEXT contact never marked read for the rest of the visit.
+- **RESET on identity change.** In the `[contactId]` effect, clear the ref when
+  it holds a different id before running `markRead`. Without this, returning to
+  a previously-suppressed contact later in the same session never marks it read -
+  which contradicts spec 7.3 ("a fresh arrival IS reading it") and 10.3.
+- `inFlightRef: useRef<{ id: string; promise: Promise<unknown> } | null>` - set
+  when `markRead` issues its POST, cleared in `finally`, keyed so the drain can
+  never await a previous contact's request.
+- `suppressAndDrain`: set the latch, then await the in-flight promise for THIS
+  id, **bounded** by `Promise.race` against
+  `AUTO_READ_DRAIN_TIMEOUT_MS = 2000` (module scope).
 
-```ts
-  const suppressAndDrain = useCallback(async () => {
-    suppressedForRef.current = contactId;
-    const pending = inFlightPromiseRef.current;
-    if (pending === null || pending.id !== contactId) return;
-    // BOUNDED. `request` has no timeout of its own and the auto-read passes no
-    // signal, so an unbounded await would make the button look dead - a worse
-    // and likelier failure than the narrow tail race. On timeout we proceed;
-    // the latch still suppresses the late RESPONSE client-side, and only the
-    // server-side ordering is unprotected in that tail.
-    await Promise.race([
-      pending.promise.catch(() => undefined),
-      new Promise((resolve) => setTimeout(resolve, AUTO_READ_DRAIN_TIMEOUT_MS)),
-    ]);
-  }, [contactId]);
-```
+Why await rather than abort: a client abort does not stop the server committing
+the `resetUnread`, so aborting would HIDE the race. Why bounded: `request` has
+no timeout of its own and the auto-read passes no signal, so an unbounded await
+makes the button look dead - a worse and likelier failure than the narrow tail
+race. On timeout proceed; the latch still suppresses the late response
+client-side.
 
-with `const AUTO_READ_DRAIN_TIMEOUT_MS = 2000;` at module scope.
-
-Why await rather than abort: a client-side abort does not stop the server from
-committing the `resetUnread`, so aborting would HIDE the race instead of
-closing it. The fan-out is the heavier write (`inbox.ts:1661-1675` does a
-lookup plus a `resetUnread` per thread), so last-writer-wins would frequently
-be the fan-out.
-
-## S6.3 `useMarkThreadRead` (new, extracted)
+## S6.3 `useMarkThreadRead` (new)
 
 `ConversationDetail.tsx:238-242` and `GroupTextView.tsx:259-263` hold the SAME
-inline mount effect. Extract it verbatim into
-`dashboard/src/routes/conversation/useMarkThreadRead.ts` with the identical
-latch/drain shape keyed on `conversationId`, and have both components call it
-instead of their inline effect.
+inline mount effect. Extract it into
+`dashboard/src/routes/conversation/useMarkThreadRead.ts` with the same
+latch/drain keyed on `conversationId`.
 
-**Preserve the existing comment block** in the extracted hook - it records the
-deliberate ruling that this read is UNWIRED from the badge's optimistic layer,
-and that ruling is pinned by regression spies.
+**Move the MOUNT EFFECT ONLY.** Do NOT copy `useMarkContactRead`'s other
+triggers - no `visibilitychange`, no `onMessagePersisted`. Those belong to the
+contact page's model; adding them here would change shipped behavior and break
+the pinned ruling that this read fires blind on mount. "Identical shape" means
+the same handle and drain, not the same trigger set.
 
-## S6.4 RED - tests
+**Preserve the existing comment block verbatim** - it records the deliberate
+ruling that this read is UNWIRED from the badge's optimistic layer, pinned by
+regression spies in `GroupTextView.test.tsx:27-31` and
+`ConversationDetail.test.tsx:149-151`.
 
-- TRIGGER path: after `suppressAndDrain()`, firing a `message.persisted` event
-  does NOT issue `markInboxRead`. Same shape for the thread hook's mount read.
-- **DRAIN path (the one that matters): assert ORDER.** With a mount fan-out
-  still in flight (a deferred promise), `suppressAndDrain()` does not resolve
-  until that request settles. A trigger-only test stays green while the
-  in-flight ordering bug ships.
+## S6.4 Tests
+
+- TRIGGER: after `suppressAndDrain()`, a `message.persisted` event does NOT
+  issue `markInboxRead`.
+- **DRAIN - assert ORDER.** With a deferred in-flight fan-out,
+  `suppressAndDrain()` does not resolve until it settles. A trigger-only test
+  stays green while the ordering bug ships; this is the test that matters.
 - BOUNDED: with an auto-read that never settles, `suppressAndDrain()` still
-  resolves after the timeout (use fake timers).
-- KEYED: after suppressing on contact `a`, a param change to contact `b` DOES
-  mark `b` read.
-- The existing `noteRowsCleared` regression spies in `GroupTextView.test.tsx`
-  and `ConversationDetail.test.tsx` must still pass unchanged - the extraction
-  must not wire the badge layer in.
+  resolves after the timeout (fake timers).
+- KEYED: after suppressing on `a`, a param change to `b` DOES mark `b` read.
+- RESET: returning to `a` after visiting `b` marks `a` read again.
+- The existing `noteRowsCleared` spies must still pass unchanged.
+
+Note for the builder: `useMarkContactRead`'s test probe currently exposes no
+handle, and `markInboxRead` may need a hoisted mock. Update the probe rather
+than working around it.
 
 ## S6.5 Verify
 
-`npm test -- dashboard/src/routes/contact dashboard/src/routes/conversation`;
+`npm test -w dashboard -- src/routes/contact src/routes/conversation`;
 `npm run typecheck`. Commit.
 
 ---
 
 # S7 - Thread header actions
 
-Files: `dashboard/src/routes/conversation/ConversationDetail.tsx` (and/or
-`RelayGroupView` / `GroupTextView` header), `dashboard/src/routes/contact/ContactDetail.tsx`,
+Files: `dashboard/src/routes/conversation/RelayGroupView.tsx` AND
+`GroupTextView.tsx`, `dashboard/src/routes/contact/ContactDetail.tsx`,
 `dashboard/src/routes/contact/ContactActionsMenu.tsx`, plus tests.
 
-Both surfaces: `await handle.suppressAndDrain()`, then `await` the POST, then
-`navigate('/inbox')`. On failure stay put and use the surface's existing inline
-error treatment. Render a pending state while the drain/POST is outstanding.
+**Both group views, explicitly.** `/conversations/:id` redirects a plain 1:1 to
+the contact page, so that route renders `RelayGroupView` or `GroupTextView` -
+and those components own the header and the mount read, not `ConversationDetail`.
+The first draft named only `ConversationDetail`, which would have shipped no
+action at all for group texts while every named test still passed.
 
-**No client-side "already unread" guard on either surface.** The count guard is
-condition clause 3 (S1). Neither surface can evaluate it: the conversation
-page's header is fetched once per mount and is deterministically PRE-auto-read
+Flow on both surfaces: `await handle.suppressAndDrain()`, then `await` the POST,
+then `navigate('/inbox')`. Render a **pending state** while outstanding (assert
+it - spec 9.1 requires it). On failure stay put.
+
+**Error copy is new UI, not a reuse.** Neither surface has an existing inline
+treatment for these codes. Add one: `409 no_markable_thread` renders
+"Could not mark unread - try again" and LEAVES THE ACTION AVAILABLE (it is the
+expected, retryable GSI-lag path, not an error the operator must reason about).
+Any other failure uses the same inline treatment.
+
+**No client-side already-unread guard on either surface.** The count guard is
+condition clause 3. Neither surface can evaluate it: the conversation page's
+header is fetched once per mount and is deterministically PRE-auto-read
 (`ConversationDetail.tsx:81-87`, `:118-152`, `:148-151` - nothing re-reads it),
-and the contact page has no unread datum at all (`useContact.ts:23-45`). A
-client rule would hide the action for the whole visit on the feature's primary
-flow. Put that reasoning in a comment on both.
+and the contact page has no unread datum at all (`useContact.ts:23-45`). Comment
+the reasoning on both so nobody "improves" it back.
 
-- **Conversation page**: "Mark unread" header action calling
+- **Group views**: "Mark unread" header action ->
   `markConversationUnread(conversationId)`. HIDDEN for a closed relay group -
-  unlike the inbox row, this guard IS live, because a closed relay group is
-  reachable here by deep link and from the contact's relay-groups card.
-- **Contact page**: a "Mark unread" item in `ContactActionsMenu` (the existing
-  kebab at `ContactDetail.tsx:658`), calling `markInboxUnread({ contactId })`.
-  Hidden when the contact is soft-deleted. It goes in the MENU, not a bare
-  header button, and specifically NOT in `ContactCommsPane` - that pane is
-  shared with the tour and placement 1:1 tabs
+  unlike the row, this guard IS live (reachable by deep link and from the
+  contact's relay-groups card).
+- **Contact page**: a "Mark unread" item in `ContactActionsMenu` (the kebab
+  at `ContactDetail.tsx:658`) -> `markInboxUnread({ contactId })`. Hidden when
+  the contact is soft-deleted. In the MENU, and specifically NOT in
+  `ContactCommsPane` - that pane is shared with the tour and placement 1:1 tabs
   (`TourConversation.tsx:263`, `PlacementConversation.tsx:260`), so putting it
-  there would leak the action onto the surfaces non-goal 5 excludes.
+  there leaks the action onto surfaces non-goal 5 excludes.
+  `ContactActionsMenu` gains required props; update every render site
+  (`grep -rn "<ContactActionsMenu" dashboard/src`) in the same commit.
 
-**Neither header action touches `UnreadContext`** - no `noteRowsCleared`, no
-`rollbackRowsCleared`. Neither auto-read records a clear (that is pinned by the
-regression spies), so there is nothing to roll back.
+**Neither header action touches `UnreadContext`.** Neither auto-read records a
+clear, so there is nothing to roll back. `ContactDetail.test.tsx` has NO
+`UnreadContext` mock today, so for that surface ADD a spy rather than
+"extending an existing" one.
 
-Tests: navigates to `/inbox` on success; does NOT navigate on rejection; absent
-for a closed relay group; absent for a soft-deleted contact; calls
-`suppressAndDrain` BEFORE the POST; a `409 no_markable_thread` renders the
-retryable inline message and leaves the action available; neither surface calls
-into `UnreadContext` (extend the existing spies rather than adding new ones).
+Spec 9.2 step 4 drives the CONTACT page action; keep the e2e and this slice
+consistent about it living in the kebab.
 
 ---
 
@@ -789,33 +670,25 @@ into `UnreadContext` (extend the existing spies rather than adding new ones).
 
 Files: `dashboard/src/routes/inbox/Inbox.tsx`, `Inbox.test.tsx`.
 
-Render when `inbox.truncated && inbox.serverRowCount > 0`, reusing
-`styles.notice` (the treatment the group-text truncation already uses at
-`Inbox.tsx:88-116`):
+Render when `inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0`,
+reusing `styles.notice` (the group-text truncation treatment at
+`Inbox.tsx:88-116`). Copy, with NO count:
+"Showing the most recent unread. There are older unread threads not shown here."
 
-```tsx
-      {/* A truncated NON-EMPTY unread page ends silently today: hasMore is
-          false so no "Load more" renders, and the truncation banner below is
-          gated on the page having come back EMPTY. So a capped list looks
-          exactly like the end of the feed. Gate on serverRowCount, NOT
-          rows.length - both `truncated` and that count describe the SERVER
-          page, while `rows` is the client-filtered list the Unread tab empties
-          as the operator marks rows read, so a rows-keyed notice would vanish
-          mid-triage. This condition is the exact complement of
-          serverEndedEarlyEmpty, so the two can never render together.
-          NO COUNT in the copy: the operator clears rows while the server's flag
-          stands, so any number reaches zero with the notice still up. */}
-      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 ? (
-        <p className={styles.notice}>
-          Showing the most recent unread. There are older unread threads not shown here.
-        </p>
-      ) : null}
-```
+Comment to carry: a truncated NON-EMPTY unread page ends silently today
+(`hasMore` false, and the truncation banner is gated on the page having come
+back EMPTY), so a capped list looks exactly like the end of the feed. Gate on
+`serverRowCount`, NOT `rows.length` - both `truncated` and that count describe
+the SERVER page while `rows` is the client-filtered list the Unread tab empties
+as rows are marked read, so a rows-keyed notice would vanish mid-triage. The
+condition is the exact complement of `serverEndedEarlyEmpty`, so the two can
+never render together. No count in the copy because the operator clears rows
+while the flag stands, so any number reaches zero with the notice still up.
 
-Tests: renders on a non-empty truncated page; does NOT render on an untruncated
-page; does NOT render alongside the empty/error surface; and **STAYS rendered
-after every visible row is marked read** (the `serverRowCount`-not-`rows.length`
-gate - a test keyed on `rows` would pass while the regression ships).
+Tests: renders on a non-empty truncated page; not on an untruncated page; not
+alongside the empty/error surface; and **stays rendered after every visible row
+is marked read** (the `serverRowCount` gate - a `rows`-keyed test would pass
+while the regression ships).
 
 ---
 
@@ -826,40 +699,36 @@ File: `e2e/tests/dashboard-next/inbox-mark-unread.spec.ts` (new).
 **Starting state:** lean seeds every conversation `unread_count: 0` on purpose
 (`app/src/lib/seed/lean.ts:23-25`), so the spec MUST manufacture unread with the
 fake-Twilio inbound fixture (`sendAsParty`, as `inbox-nav-badge.spec.ts` does).
-Do not assume a seeded unread thread.
 
-**Anchoring:** an inbox row's count carries `aria-label="<n> unread"`
+**Anchoring:** a row's count carries `aria-label="<n> unread"`
 (`InboxRow.tsx:107-111`), the SAME accessible name as the nav badge
-(`NavContents.tsx:66`). A bare `getByLabel('1 unread')` matches both and fails
-strict mode - the trap `inbox-nav-badge.spec.ts:15-21` documents. Address rows
-by href.
+(`NavContents.tsx:66`); a bare `getByLabel('1 unread')` matches both and fails
+strict mode (`inbox-nav-badge.spec.ts:15-21`). Address rows by href. Mind S5.1 -
+the `/mark .* read/i` idiom appears in e2e too.
 
-Steps:
-1. Drive an inbound to a seeded contact; open the row (which marks it read);
-   return to the inbox; confirm no unread treatment on that row.
+1. Drive an inbound; open the row (marks it read); return to the inbox; confirm
+   no unread treatment.
 2. Reveal the row's actions, click "Mark unread"; assert the row (by href) shows
    the unread treatment and a count of 1.
 3. Switch to the Unread filter; assert the row is present.
-4. From the contact page, click the kebab's "Mark unread"; assert the browser
-   lands on the inbox with that row unread.
+4. From the contact page kebab, click "Mark unread"; assert the browser lands on
+   the inbox with that row unread.
 
 ---
 
 # S10 - Close out
 
-1. Sync `main` into the branch ONCE, at this final step. If `main` has advanced
-   in a way that conflicts, ASK before resolving. Expect a conflict window in
+1. Sync `main` into the branch ONCE, at this final step. If it conflicts with
+   active work, ASK before resolving. Expect a conflict window in
    `app/src/routes/inbox.ts` and `app/src/repos/conversationsRepo.ts` from
    `feat/call-inbox-unread` if it has landed - report drift, do not chase it.
-2. Run the three gates BARE, never piped, from `W:\tmp\inbox-mark-unread`:
-   `npm run typecheck`, `npm test`, `npm run e2e`. Re-run either known flake
-   once before blaming this change, and report BOTH runs:
-   `tour-reminders-panel-e2e-flake`,
+2. Gates BARE from `W:\tmp\inbox-mark-unread`, never piped: `npm run typecheck`,
+   `npm test`, `npm run e2e`. Re-run either known flake once before blaming this
+   change and report BOTH runs: `tour-reminders-panel-e2e-flake`,
    `conversationdetail-members-mock-suite-flake`.
 3. `npm run issues` if any `docs/issues/` file was added.
-4. Write the handback to `.superpowers/sdd/handback.md`: per-spec-item status,
-   quoted exit codes on the final commit, drift, and owed post-merge ops
-   (expected: NONE - no dependency, schema, GSI, infra, config, or backfill).
+4. Handback to `.superpowers/sdd/handback.md`: per-spec-item status, quoted exit
+   codes on the final commit, drift, owed post-merge ops (expected: NONE).
 
 ## Watch items for the builder
 
@@ -869,5 +738,7 @@ Steps:
 - **Do not add an optimistic-increment layer to `UnreadContext`.** Non-goal 4.
 - **Do not touch `last_activity_at`.** D4.
 - **Do not put the contact action in `ContactCommsPane`.** Non-goal 5.
+- **Do not add visibility/SSE triggers to the conversation-page read.** S6.3.
 - **`unread_count` is sparse.** The `attribute_not_exists` half of clause 3 is
   not defensive padding.
+- **Docker must be up for S1's red state to mean anything.**

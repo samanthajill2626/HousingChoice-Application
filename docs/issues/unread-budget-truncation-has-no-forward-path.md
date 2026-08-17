@@ -1,8 +1,8 @@
 ---
 id: unread-budget-truncation-has-no-forward-path
-title: A budget-truncated unread badge renders nothing (half fixed - the page now pages)
+title: A truncated unread badge renders nothing (half fixed - the page now pages)
 type: bug
-severity: low
+severity: med
 status: open
 area: app/inbox
 created: 2026-08-16
@@ -21,9 +21,26 @@ Rendering an indeterminate badge is out of v1's scope, so the interim measure is
 server-side only: `countUnreadRows` logs a rate-limited WARN
 (`unread_badge_truncated_zero`) when it answers 0 with the walk stopped early,
 which makes the state observable but still leaves the OPERATOR looking at a
-blank nav item. Note the walk can now also stop early on the deleted-probe bound
-(`UNREAD_DELETED_PROBE_LIMIT`), not only on the raw-scan budget, which makes
-this state cheaper to reach than the 2000-resident estimate below.
+blank nav item.
+
+**SEVERITY RESTORED to `med` 2026-08-16** (review fix wave 2, adversarial r2
+finding 2). Fix wave 1 dropped it to `low` while simultaneously making the state
+FAR cheaper to reach - the deleted-probe bound stopped the whole walk after 26
+probes, so 27 hidden deleted threads (not ~2000 invisible residents) produced a
+zero badge AND a page of zero rows with a null cursor. The direction was wrong,
+so the severity is back.
+
+**The corrected mechanism (fix wave 2).** The probe bound now counts only WASTED
+probes and stops the PROBING, never the WALK: past the bound a deleted-contact
+thread is treated as hidden without a read, and live contacts, unknowns, groups
+and relay threads behind the wall are still counted and still emitted. So the
+27-hidden world answers 5 (its true visible count) and the page returns those 5
+rows, with `truncated` marking the answer as a floor. What remains, and what this
+issue still tracks: when the visible count is genuinely ZERO behind such a wall,
+the badge renders nothing and the page renders the inbox error state with a Retry
+that reproduces itself - unchanged in shape from the raw-scan-budget case below,
+but now reachable via residue as well as via budget. The UI affordance is the
+fix; the residue cleanup (delete-time reset + backfill rule 3) is the prevention.
 
 **Problem.** Filed from the plan-blind adversarial review of
 `feat/inbox-unread-index` (finding 1, CONFIRMED - reproduced against the real

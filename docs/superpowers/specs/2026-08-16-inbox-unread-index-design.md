@@ -282,8 +282,8 @@ proportionally to one page.
    the resurfacing rule (some unread thread's newest message is an inbound
    with created_at > contact.deleted_at - inbox.ts:537-576), probed via
    messages.listByConversation(limit 1) per unread thread of deleted
-   contacts, UNCONDITIONALLY - exactly today's probe. (A round-2 remedy
-   short-circuited the probe on `last_activity_at <= deleted_at`; round 3
+   contacts, with NO `last_activity_at <= deleted_at` short-circuit. (A
+   round-2 remedy added such a short-circuit; round 3
    showed that premise is false in this codebase - last_activity_at is the
    PROVIDER timestamp while created_at is OUR ingest clock, with a
    documented CLOCK CAVEAT at inbox.ts:558-563, and the append/touch gap
@@ -294,6 +294,16 @@ proportionally to one page.
    population is just the resurface-eligible threads - deleted contacts
    with post-deletion unread - each costing a contact resolution AND a
    message probe per request, tripwired by UNREAD_DELETED_PROBE_WARN.)
+   AMENDED, fix wave 2 (post-gate change, conformance r2 finding 5): the
+   probe is no longer UNCONDITIONAL, as this step said until now. It is
+   bounded per REQUEST - see 4.4 PROBE BOUND - and the bound counts only
+   WASTED probes, i.e. reads that found the thread still hidden. The round-3
+   ruling it appears to touch is intact in the case that ruling was about: a
+   probe is never skipped to save a Query on an ordinary walk, and a
+   resurfacing is never suppressed by a heuristic short-circuit. What the
+   bound does is refuse to keep PAYING once a request has proved, 26 reads
+   running, that it is walking a wall of hidden residue - and it says so on
+   the wire (`truncated`) instead of silently.
 3. Emits candidates in index order up to `opts.maxRows`, then STOPS PULLING.
    Returns `{ candidates, scanPosition?, consumedAll, truncated, capped,
    remainingBudget }` (remainingBudget is what 4.5's loop threads into the
@@ -345,11 +355,12 @@ undocumented tie order):
   ~4 pages (120+ unread contact rows), which has no product meaning to
   exceed (the badge caps at 100, and triage is top-down: marking rows read
   is what reaches deeper unread). The 400 for an over-limit or malformed
-  cursor remains only for tampered input. Hydration-dropped candidates DO
-  stay in the seen-set (they were consumed), so a bulk mark-read race can
-  spend the depth allowance faster - possibly within page one's fill loop;
-  the truncated flag covers that case too, and the race's own SSE events
-  trigger the reconcile refetch that resets paging from the top.
+  cursor remains only for tampered input. Hydration-dropped candidates do
+  NOT stay in the seen-set (CORRECTED, review fix wave 1 - A3; the amended
+  rule is stated at 4.5 step 1 and in section 12). The set records EMITTED
+  contacts only, so a bulk mark-read race spends NO depth allowance on the
+  rows it dropped, and the race's own SSE events trigger the reconcile
+  refetch that resets paging from the top.
 - CURSOR CONTENT (stated decision): the seen-set puts opaque contactIds in
   a GET query param, hence CloudFront access logs and any http.url
   telemetry attribute. contactIds already appear in request URLs today
@@ -383,7 +394,10 @@ undocumented tie order):
   closed-unread relay group costs an index slot; each deleted-contact
   unread thread costs an index slot + a contact resolution + a message
   probe per request (the round-2 probe short-circuit is withdrawn - 4.3
-  step 2). This endpoint is the highest-frequency call in the app (every
+  step 2), with the MESSAGE half bounded per request by the PROBE BOUND
+  below and the CONTACT half unbounded by design (one resolution per 1:1
+  item walked; the BatchGet follow-up owns it). This endpoint is the
+  highest-frequency call in the app (every
   SPA boot + every debounced conversation event per connected dashboard).
   TWO rate-limited tripwires, because the two costs grow independently
   (round-4 finding: the scanned-items WARN alone misses the probe cost -
@@ -392,18 +406,38 @@ undocumented tie order):
   DELETED-RESIDENT PROBE WARN when a single request issues more than
   UNREAD_DELETED_PROBE_WARN = 25 resurfacing probes. Both through
   lib/rateLimitedWarn.ts; both are the signal to revisit accrual.
-- PROBE BOUND (AMENDED, A2): the probe WARN is backed by a HARD BOUND,
-  UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1 probes per
-  collect, past which the collect STOPS WALKING and reports `truncated`. A
-  hidden deleted candidate never counts toward `maxRows`, so before this the
-  row cap could not stop the walk either and a wall of them cost a contact
-  Query plus a message probe per row - thousands of serial round trips on the
-  app's highest-frequency request, answering zero. Contact resolution is
-  additionally MEMOIZED per collect on the participant key. Consequence,
-  declared: rows behind such a wall are withheld with `truncated` rather than
-  paid for, and the residue itself is what has to go (the delete-time reset and
-  backfill rule 3). The +1 keeps the bound above the tripwire so tripping it
-  always warns.
+- PROBE BOUND (AMENDED, A2; REWRITTEN in fix wave 2, adversarial r2 findings
+  1-3 and conformance r2 finding 1.1): the probe WARN is backed by a HARD
+  BOUND of UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1
+  WASTED probes per REQUEST. Three parts, each load-bearing:
+  - WASTED ONLY. A wasted probe is one that found the thread still hidden. A
+    probe that RESURFACES a contact emits a row, and rows are already bounded
+    by `maxRows`, so productive probes never spend the bound. (Fix wave 1
+    counted every probe, which floored the badge at 26 in the ordinary world
+    of 27+ resurfaced deleted contacts - not at BADGE_COUNT_CAP, and through
+    `truncated`, which v1's client does not render.)
+  - PER REQUEST, not per collect: the page's fill loop threads the running
+    wasted total into each collect the way it threads `remainingBudget`.
+  - IT BOUNDS THE PROBES, NEVER THE WALK. Past the bound a deleted-contact
+    thread is treated as hidden WITHOUT a read; live contacts, unknowns,
+    groups and relay threads keep being counted and emitted. (Fix wave 1
+    stopped the walk, which turned 27 hidden threads ahead of live unread
+    into a page of ZERO rows with a NULL cursor - the inbox error state, with
+    a Retry that reproduces itself.)
+  Consequence, declared: a result carrying skipped threads reports
+  `truncated`, i.e. the count is a FLOOR, even when the stream drained - the
+  answer for those threads was assumed, not read. Threads skipped at the
+  bound are re-evaluated by the NEXT request from the top, not deferred
+  within this one. The residue itself is what has to go (the delete-time
+  reset and backfill rule 3). The +1 keeps the bound above the tripwire so
+  tripping it always warns, and the WARN reports probes ATTEMPTED and
+  SKIPPED separately so it can distinguish 26 residents from 2,600.
+  NO MEMO: fix wave 1's per-collect memo keyed on the participant key is
+  REMOVED. The claim arbiters (`phone#<E164>`, `claimEmail`) guarantee at
+  most one OPEN conversation per key, so it could never hit. Contact
+  resolution stays one lookup per visible unread row, which is this section's
+  stated cost model, and batching it belongs to
+  docs/issues/contacts-batchget-amplified-reads.md.
 - SILENT ZERO (AMENDED, C1): when the badge answers 0 with `truncated` set, the
   server logs a rate-limited WARN. A zero renders as NO badge, which is
   indistinguishable from caught up, and v1 deliberately gives the client no
@@ -441,7 +475,10 @@ today's pager provides, inbox.ts:755-800):
    cross-page suppression of emitted contacts, and `scanPosition` already
    makes within-page re-offering impossible) - and (b) the remaining raw budget
    (UNREAD_WALK_LIMIT per REQUEST), passed into and returned by each
-   collect call.
+   collect call, (c) the request's WASTED-probe total, threaded the same way
+   (AMENDED, fix wave 2: 4.4 PROBE BOUND), and (d) the LAG-SHAPED hydration
+   drops, retried once at the end of the request and reported as `truncated`
+   if still unresolved (AMENDED, fix wave 2: see 12b, A3 COMPLETED).
 2. `nextCursor` keys on CONSUMPTION, never scan state: null when the final
    collect reported `consumedAll`; null when minting the cursor would
    exceed SEEN_SET_MAX (the declared depth cap, 4.3); otherwise - INCLUDING a
@@ -595,6 +632,14 @@ the 1:1 bucket - preserving per-conversation type/timestamp semantics.
   in the collect loop beside isOneToOneBucket, for the same reason the spec
   already gives for filtering group threads first. DECLARED PRODUCT CHANGE: a
   contact with unread on both channels is ONE Unreplied row.
+  BOUNDED (AMENDED, fix wave 2 - adversarial r2 finding 6): ahead of the cap
+  the deleted test runs on every 1:1 item WALKED, and each distinct contact is
+  a real `contacts.getById` (the request cache is per contact ID, so the move
+  is NOT free as this bullet first implied). The skip work is therefore bounded
+  at TODAY_UNREAD_CAP DISTINCT skipped contacts; past that the pass stops and
+  warnIfCapped announces it under the label `unread:deleted_skips`. Unbounded,
+  a deleted-residue head could cost up to UNREAD_WALK_LIMIT contact Gets on a
+  route every connected dashboard SSE-refetches.
 - NET COST: Today gains one index query and loses nothing. G5 is a
   correctness fix, not a cost fix.
 
@@ -766,14 +811,22 @@ never present on filter=unread responses (section 4.5).
    UpdateTable CreateGlobalSecondaryIndex for missing ones, wait ACTIVE.
    Disposable e2e lanes are wiped instead (hc-local-<L>-* under the lane's
    own access key, per docs/issues/e2e-lane-tables-stale-schema.md).
-4. ORDER OF OPERATIONS (human-run, recorded in RUNBOOK): dev:
+4. ORDER OF OPERATIONS (human-run, recorded in RUNBOOK). CORRECTED, review
+   fix wave 1 (adversarial A1) - this item previously prescribed
+   apply -> backfill -> deploy, which is HAZARDOUS: run under the OLD
+   `resetUnread`, every mark-read between the backfill and the deploy zeroes
+   `unread_count` without REMOVEing `unread_flag`, manufacturing a permanent
+   invisible index resident. The order is SCHEMA -> CODE -> DATA. Dev:
    `npm run plan -- dev` -> `npm run apply -- dev` (NOTE: the plan carries
    the entire owed backlog - byJurisdiction delete, several new tables and
    GSI adds/drops, per RUNBOOK.md:117-220; expected, not an error) ->
-   `tsx app/scripts/backfill-unread-flag.ts --dry-run` then live ->
-   `npm run deploy:dev`. Schema BEFORE code (RUNBOOK.md:85-92). Prod rides
-   the M1.11 gate. Local: `tsx app/scripts/db-update-gsis.ts` -> backfill ->
-   restart dev stack.
+   `npm run deploy:dev` -> `tsx app/scripts/backfill-unread-flag.ts
+   --dry-run` then live. Deploying against a not-yet-backfilled GSI is safe
+   (the new code simply does not see legacy unread yet). Prod rides the M1.11
+   gate. Local: `tsx app/scripts/db-update-gsis.ts` -> restart the dev stack
+   -> backfill. Anyone who already ran the old order must re-run the
+   backfill. RUNBOOK.md is the operational copy of this and is authoritative
+   for the run itself.
 5. RUNBOOK gains the owed-op row in the schema-changes table.
 
 ## 8. Testing and existing-surface migration
@@ -1066,9 +1119,61 @@ Ratified amendments, by review finding id:
   product-visible: a contact with unread on two channels is now ONE Unreplied
   row, and a wall of deleted-contact threads no longer empties the block.
 
+- A1 (section 7 item 4). THE ROLLOUT ORDER IS A SPEC CHANGE, not a
+  RUNBOOK-only correction as this section first recorded it (conformance r2
+  finding 3): section 7 spelled the hazardous sequence out verbatim. Both
+  recipes are now schema -> code -> data, with the reason inline. See item 4.
+
 Corrections made in the same wave that need NO spec change, recorded so the
-diff is fully accounted for: the RUNBOOK's rollout order (apply -> DEPLOY ->
-backfill, A1); cursor emptiness validation (A4); the backfill's contact-key
-pre-pass and its outcome-based counters (A5, A8); the contact-delete fan-out
-emitting from its own reset returns (A6); the shared index fake's
-LEK-at-the-Limit rule (A7); and comment-only rulings (A10, A12, C8).
+diff is fully accounted for: cursor emptiness validation (A4); the backfill's
+contact-key pre-pass and its outcome-based counters (A5, A8); the
+contact-delete fan-out emitting from its own reset returns (A6); the shared
+index fake's LEK-at-the-Limit rule (A7); and comment-only rulings (A10, A12,
+C8).
+
+## 12b. Post-review amendments, fix wave 2 (2026-08-16, planner-ratified)
+
+A SECOND independent review round (conformance r2, plan-blind adversarial r2)
+found that fix wave 1's A2 remedy was itself a correctness regression, and the
+planner adjudicated the corrected design. Everything here is post-gate, and
+none of it reverses a human decision made at the spec gate.
+
+- A2 CORRECTED (4.3 step 2, 4.4). The deleted-probe bound counts WASTED probes
+  only, is a REQUEST budget, and stops the PROBING rather than the WALK; a
+  result carrying skipped threads reports `truncated` as a floor. Full
+  statement at 4.4 PROBE BOUND. Two BLOCKING regressions drove it: 27+
+  genuinely resurfaced deleted contacts floored the badge at 26 (a product
+  state, not an error state), and 27 hidden deleted threads ahead of live
+  unread dead-ended the page at zero rows with no cursor. The
+  participant-key MEMO is REMOVED as unreachable (the claim arbiters allow one
+  open conversation per key); the unread collector is added to the surface
+  list in docs/issues/contacts-batchget-amplified-reads.md.
+- A2 accepted consequence: a deleted-contact thread refused AT the bound is
+  SKIPPED, not deferred - the scan range advances past it, and the next
+  request re-evaluates from the top with a fresh budget. This is the
+  pathological wall only.
+- Probe tripwire: the WARN payload reports probes ATTEMPTED and threads
+  SKIPPED separately, so the badge path can still say how DEEP the wall is
+  once the reads are capped.
+- A3 COMPLETED (4.5 step 1). Fix wave 1 stopped a hydration-dropped candidate
+  being suppressed; it did not make it reachable. The fill loop now retries
+  LAG-SHAPED drops ONCE at the end of the request (after every other read, so
+  a lagging participant GSI has had time to settle), and a drop the retry
+  cannot fix sets `truncated` on the page - it must never report a natural end
+  while the badge counts a row it could not deliver. LAG-SHAPED is the
+  discriminator: a fresh read that CONTAINS the offered thread and reports it
+  read is authoritative (the ordinary mark-read race) and neither retried nor
+  truncating - marking those would render the inbox ERROR state at the end of
+  a successful triage session, the regression C2 fixed.
+- A6 CORRECTED (no spec claim). The contact-delete reset's authoritative emits
+  move AFTER propagateContactPresenceChange so they are genuinely last on the
+  wire, and the comment's premise is corrected: no dashboard consumer reads
+  `unread_count` off that event today.
+- A9 BOUNDED (4.6). Today's pre-cap deleted-contact test is bounded at
+  TODAY_UNREAD_CAP DISTINCT skipped contacts; past that the pass stops and
+  warns under its own label. Unbounded it could issue up to UNREAD_WALK_LIMIT
+  contact Gets per /api/today.
+- Conformance r2 3/4/5: section 7's rollout order, 4.3's CURSOR SIZE
+  paragraph and 4.3 step 2's "UNCONDITIONALLY" are corrected in place, each
+  labeled. The step-2 edit is the one that touches a carried-through gate
+  ruling and is surfaced to the human in the merge verdict.

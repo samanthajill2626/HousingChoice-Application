@@ -1,8 +1,8 @@
 # Create a relay group from the contact file
 
 Date: 2026-08-17
-Status: revised after design review round 1 (adjudications at
-`.superpowers/design-review/adjudications.md`)
+Status: revised through design review round 4 (the process cap); adjudications
+at `.superpowers/design-review/adjudications.md`. Awaiting the human spec gate.
 Branch: `feat/contact-create-relay-group`
 
 ## 1. Problem
@@ -103,7 +103,7 @@ them.
   helpers (a new optional prop, a new mapped error string) are permitted; the
   behavior those two surfaces exhibit today is not.
 - Correcting the shared dialog's recipient wording for the tier-3 case. Filed
-  (section 10); the standalone path handles it locally per 6.6.
+  (section 9); the standalone path handles it locally per 6.6.
 - Creating NATIVE group texts (the sibling "Group threads" card).
 - Reusing an existing group when the same member set already has one. Each
   confirm creates a NEW group. COST, stated because it is not obvious: pool
@@ -141,11 +141,9 @@ export interface OpenPreviewParts {
   /** Members provisioning will put on the thread: phone-bearing, de-duped by
    *  phone (FIRST WINS), in roster order. Names as the BODY composer sees them. */
   bodyMembers: { name?: string; memberKey: string }[];
-  /** Everyone who will be ON the thread, in display order, with display names
-   *  and reachability. The owner path passes its full roster view (phone-less
-   *  rows included - they are still participants); the standalone path passes
-   *  its phone-de-duplicated list, because create drops the duplicates before
-   *  they ever become participants. See 6.2 step 4. */
+  /** The rows the confirm dialog lists, in display order, with display names
+   *  and reachability. Callers decide what goes in; see 6.2 step 4 for why the
+   *  two paths pass different lists. */
   recipients: { name?: string; memberKey: string; reachability: RosterReachability }[];
 }
 
@@ -205,18 +203,25 @@ not affect the intro body.
      the create route applies (`routes/relayGroups.ts:267`), in the order sent.
    - `bodyMembers` = that same de-duplicated list.
 
-   PARITY IS OF MEANING, NOT OF LIST CONSTRUCTION. `recipients` means "everyone
-   who will be on the thread". On the owner path every resolved member becomes a
-   participant, so nothing is dropped. On the standalone path CREATE ITSELF
-   de-dupes by phone, so a second member sharing a number never becomes a
-   participant at all - listing them would name a person in the confirm dialog
-   who will not be in the group and will not be texted, with no annotation
-   saying so (`toRecipient` carries only name and reachability; the roster
-   view's `sharesPhoneWithName` never reaches the dialog). De-duplicating here
-   is what makes the two paths agree.
+   WHY THE TWO PATHS PASS DIFFERENT LISTS. Both paths drop the same members at
+   provisioning time: `provisionMembersOf` (`services/rosterProvision.ts:106-121`)
+   excludes phone-less members and keeps ONE slot per number, which is exactly
+   what create's own de-dupe does (`routes/relayGroups.ts:267`). There is NO
+   asymmetry in who ends up on the thread.
 
-   The picker prevents this case from arising through the UI anyway (6.5), but
-   the route must be deterministic for any direct API caller.
+   The asymmetry is in the PREVIEW. `buildOpenPreview` builds `recipients` from
+   `describeRoster`'s view - every roster row - NOT from `provisionMembersOf`,
+   so the owner path's dialog already lists people provisioning will drop, with
+   no annotation saying so (`toRecipient` carries only name and reachability;
+   the view's `sharesPhoneWithName` never reaches the dialog). That is a
+   PRE-EXISTING imprecision on the two shipped surfaces, filed at 9.5.
+
+   The standalone path declines to reproduce it: it lists what create will
+   actually put on the thread. So a shared-phone roster INTENTIONALLY yields a
+   different `recipients` list on the two paths, and the tests assert exactly
+   that difference (section 7). The picker prevents the case from arising
+   through the UI anyway (6.5); the route must still be deterministic for a
+   direct API caller.
 5. `buildOpenPreviewFromParts(parts, await quietHoursState())`, returned AS THE
    BODY (not wrapped), matching the two owner-scoped preview routes.
 
@@ -314,6 +319,14 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
   back to a FORMATTED PHONE NUMBER (`routes/contact/format.ts:101-110`), which
   would both print a phone in the preview and embed one in the outbound intro.
 
+  BANNING THE HELPER IS NOT ENOUGH. `ContactSearchField` sets its own
+  `value.name` BY CALLING `contactDisplayName` on the picked candidate
+  (`ContactSearchField.tsx:81`), so `value.name` already IS the phone-fallback
+  string for a nameless contact. The member name must be recomputed from the
+  resolved `Contact`'s `firstName`/`lastName`; the search field's `value.name`
+  must NEVER be forwarded as the member `name`. It is a display value for the
+  input box only.
+
   SCOPE LIMIT, stated so the builder does not chase it: the rule CANNOT extend
   to the intro body. `composeConnectionSentence` OMITS a nameless member from
   the sentence entirely rather than rendering a placeholder, so a nameless
@@ -340,11 +353,18 @@ NO new copy is authored for this dialog. It shows the server-composed
 where it applies, and the server's recipient count. It prints no phone numbers
 and says nothing about provisioning a number.
 
-ONE MODAL AT A TIME. The picker UNMOUNTS when the confirm dialog mounts.
+ONE MODAL AT A TIME. The flow is a three-state machine owned by the PARENT, and
+exactly one state is mounted at any moment:
+
+- `picking` - the picker modal.
+- `confirming` - the picker UNMOUNTS, `RosterConfirmDialog` mounts.
+- `connecting` - the confirm dialog unmounts, the picker modal re-mounts showing
+  the result panel from 6.6 instead of the member list.
+
 `Modal` registers a document-level Escape handler with no propagation guard, so
 two stacked modals would both close on one keypress and silently discard the
-assembled member list. Member state lives in the PARENT, so returning from the
-confirm dialog restores the picker with its selection intact.
+assembled member list - hence never two at once. Member state lives in the
+PARENT, so `confirming` -> `picking` (Cancel) restores the selection intact.
 
 A failed preview surfaces its error in the PICKER and never opens the confirm
 dialog: an operator must never confirm a send whose content could not be shown.
@@ -352,8 +372,9 @@ dialog: an operator must never confirm a send whose content could not be shown.
 Outcomes after a successful create:
 
 - `conversation.status === 'connecting'` -> the group exists but has NO number
-  and NO intro was sent (section 2.2). DO NOT navigate. The confirm dialog
-  closes and the picker modal REMAINS OPEN, replaced by a short result panel
+  and NO intro was sent (section 2.2). DO NOT navigate. The flow moves to the
+  `connecting` state (6.6 state machine): the confirm dialog unmounts and the
+  picker modal re-mounts showing a short result panel
   that names the unsent intro specifically - for example "This group is still
   getting its number. The intro text has not been sent yet; it goes out once the
   number is ready." - with a single `Go to the group` button that navigates to
@@ -460,7 +481,11 @@ Unit (Vitest):
   `onConfirm(false)`; the default is unchanged.
 
 E2E (Playwright, accessibility-first selectors): one spec driving contact file
--> `+ Create group` -> add a member -> confirm -> lands on the conversation. It
+-> `+ Create group` -> add a member -> confirm -> THE CONNECTING RESULT PANEL.
+In the hermetic lane every fresh pair lands connecting (section 2.9) and
+connecting does NOT navigate (6.6), so the spec must assert the modal's
+unsent-intro panel, NOT a conversation page. Then drive the group open and
+follow `Go to the group`. It
 MUST use `e2e/fixtures/relayConnect.ts`: a fresh pair lands CONNECTING in the
 hermetic lane (section 2.9), so assert the connecting landing, then use
 `driveConnectingGroupToOpen` before asserting any intro. Do not assert an intro
@@ -482,12 +507,13 @@ Gates, bare, from the worktree: `npm run typecheck`, `npm test`, `npm run e2e`.
 - This change authors NO new outbound copy; it reuses `relay.intro`. The
   connecting notice (6.6) is in-dashboard UI text, not an outbound message, so
   it does not go through the message catalog.
-- PER-MEMBER COST: the name resolution does one `contacts.getById`, and
-  `isMemberSuppressed` independently does its own contact read (by id, or
-  `findByPhone`) PLUS a `findByParticipantPhone` GSI query. That is two contact
-  reads and one GSI query per member, and the two reads use different resolution
-  rules. Acceptable for a picked roster of single digits; never use this shape
-  over an unbounded list.
+- PER-MEMBER COST: `resolveMemberName` reads the contact ONLY when no `name` was
+  supplied (it short-circuits - section 2.12), so a named member costs zero name
+  reads. `isMemberSuppressed` always does its own contact read (by id, or
+  `findByPhone`) PLUS a `findByParticipantPhone` GSI query. So the floor is one
+  read and one GSI query per member, rising to two reads for a nameless one, and
+  the two reads use different resolution rules. Acceptable for a picked roster
+  of single digits; never use this shape over an unbounded list.
 - ACCEPTED TRADE (human decision, 2026-08-17): on tier 3 the confirm dialog
   still says "N recipients will receive this" at the only moment the operator
   can cancel, and the correction arrives only AFTER the irreversible create. The
@@ -518,7 +544,15 @@ Copy `docs/issues/_TEMPLATE.md` for each:
    `ConversationHeader.status` docblock omits `'connecting'`, which the server
    really sends. All three mislead a reader of otherwise-correct code.
 
-Items 2-4 are pre-existing defects this review surfaced, NOT regressions from
+5. `relay-preview-lists-members-provisioning-drops.md` - on the tour and
+   placement paths, `buildOpenPreview` builds `recipients` from
+   `describeRoster`'s full roster view while `provisionMembersOf`
+   (`services/rosterProvision.ts:106-121`) drops phone-less members and
+   same-phone duplicates. The confirm dialog therefore names people who will not
+   be on the thread and will not be texted, unannotated. The standalone path
+   declines to reproduce this (6.2 step 4); the two shipped surfaces still do.
+
+Items 2-5 are pre-existing defects this review surfaced, NOT regressions from
 this change.
 
 ## 10. Post-merge obligations

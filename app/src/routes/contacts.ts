@@ -1927,8 +1927,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // the reset here: it requires a post-deletion INBOUND, and that inbound
     // re-increments unread (and re-stamps the flag) on its own.
     //
-    // Runs BEFORE the presence fan-out so the conversation.updated emits that
-    // fan-out re-reads carry unread 0 rather than a stale count.
+    // IT EMITS ITS OWN conversation.updated, from the resetUnread ALL_NEW
+    // returns (adversarial A6). Sequencing this ahead of the presence fan-out
+    // buys nothing on its own: that fan-out re-reads through the
+    // byParticipantPhone/byParticipantEmail GSIs, which lag, so the image it
+    // broadcasts normally still carries the PRE-reset count - and
+    // toConversationUpdatedEvent puts unread_count on the wire, where the
+    // tour/placement channel hooks patch their per-tab unread from it, so a
+    // delete could RAISE an unread dot on an open pane. The reset's own
+    // post-update items are authoritative and already in hand. The presence
+    // fan-out still runs and may still emit a count that is stale by one GSI
+    // hop; these emits are the correcting ones, and the nav badge is unaffected
+    // either way (it refetches the authoritative count).
     // DECLARED PRODUCT CHANGE (human-approved): a restored contact returns with
     // unread 0.
     //
@@ -1952,24 +1962,28 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // may turn a successful delete into a 500 - and a throw here would also skip
     // the presence fan-out, leaving every dashboard showing the deleted contact.
     //
-    // WHAT BEST-EFFORT COSTS (conformance N7): Promise.all rejects on the FIRST
-    // rejection, so the remaining resets' outcomes are UNOBSERVED - some may
-    // have landed, some not, and nothing re-runs this fan-out for an
-    // already-deleted contact. That is the same "skipped FOREVER" shape dropping
-    // the pre-filter was introduced to close, reintroduced on the failure path.
+    // WHAT BEST-EFFORT COSTS (conformance N7 / C8): every reset is ISSUED - the
+    // promises are created eagerly, so none is skipped - but Promise.all
+    // observes only the FIRST rejection, so the outcomes of the rest are
+    // UNREPORTED. The practical exposure is a lost log line rather than a
+    // skipped write; a write that genuinely failed is unrecoverable here all the
+    // same, because nothing re-runs this fan-out for an already-deleted contact.
     // The WARN below is therefore the ONLY signal that it happened, and
     // app/scripts/backfill-unread-flag.ts (rule 3) is the only recovery.
     try {
-      await Promise.all(
+      const reset = await Promise.all(
         (await conversationsForContact(updated, conversations)).map(async (c) => {
           try {
-            await conversations.resetUnread(c.conversationId);
+            return await conversations.resetUnread(c.conversationId);
           } catch (err) {
-            if (err instanceof ConditionalCheckFailedException) return; // race: already gone
+            if (err instanceof ConditionalCheckFailedException) return undefined; // race: already gone
             throw err;
           }
         }),
       );
+      for (const conv of reset) {
+        if (conv !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(conv));
+      }
     } catch (err) {
       log.warn({ err, contactId }, 'contact delete: unread reset fan-out failed (best-effort)');
     }

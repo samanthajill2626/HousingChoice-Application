@@ -319,6 +319,54 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
     ).toHaveLength(1);
   });
 
+  it('emits conversation.updated carrying unread 0 from the RESET ITSELF, not a lagging GSI read', async () => {
+    // ADVERSARIAL A6. The handler's comment claimed that running the reset
+    // before propagateContactPresenceChange made that fan-out's emits carry
+    // unread 0. It cannot: the fan-out re-reads through the participant GSIs,
+    // which lag, so the image it broadcasts still carries the pre-reset count -
+    // and toConversationUpdatedEvent puts unread_count on the wire, where the
+    // tour/placement channel hooks patch their per-tab unread from it. Deleting
+    // a contact could therefore RAISE an unread dot on an open pane. The reset's
+    // own ALL_NEW return values are authoritative and were being discarded.
+    const world = createFakeWorld();
+    const real = world.conversationsRepo;
+    world.conversationsRepo = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== 'findByParticipantPhone' || typeof value !== 'function') return value;
+        // The GSI image, frozen one beat behind: it keeps reporting the
+        // pre-reset count no matter what the base table now says.
+        return async (phone: string) => {
+          const items = (await (value as (p: string) => Promise<ConversationItem[]>).call(
+            target,
+            phone,
+          )) as ConversationItem[];
+          return items.map((c) => ({ ...c, unread_count: 7, unread_flag: 'unread' as const }));
+        };
+      },
+    });
+    const { app } = makeWebhookHarness({ world });
+    seedContact(world, { contactId: 'c-emit', type: 'tenant', phone: '+15550000055' });
+    seedConversation(world, 'conv-emit', {
+      participant_phone: '+15550000055',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 7,
+    });
+
+    const del = await auth(request(app).delete('/api/contacts/c-emit'));
+
+    expect(del.status).toBe(200);
+    const counts = world.emitted
+      .filter(
+        (e) =>
+          e.event === 'conversation.updated' &&
+          (e.payload as { conversationId?: string }).conversationId === 'conv-emit',
+      )
+      .map((e) => (e.payload as { unread_count?: number }).unread_count);
+    // At least one emit states the truth the reset just wrote.
+    expect(counts).toContain(0);
+  });
+
   it('a ConditionalCheckFailedException from one reset does not fail the delete', async () => {
     // The row can vanish between the thread read and the reset (a racing retract
     // or a concurrent close). The delete has ALREADY persisted at that point, so

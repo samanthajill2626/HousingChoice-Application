@@ -66,13 +66,30 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
   const today = await api.get(`${NEXT}/api/today`);
   expect(today.status(), await today.text()).toBe(200);
   const { items } = (await today.json()) as {
-    items: Array<{ group: string; refType: string; refId: string; why: string }>;
+    items: Array<{ group: string; refType: string; refId: string; who: string; why: string }>;
   };
   const row = items.find((i) => i.refId === stub!.contactId);
   expect(row, `no Today item for ${stub!.contactId}: ${JSON.stringify(items)}`).toBeDefined();
   expect(row!.group).toBe('needs_you_now');
   expect(row!.refType).toBe('contact');
   expect(row!.why).toBe('New unknown contact');
+
+  // Today is a staff-facing display surface: the contact keeps E.164 storage,
+  // but its phone-only identity is rendered in the existing NANP display form.
+  expect(caller).toMatch(/^\+1\d{10}$/);
+  const local = caller.slice(2);
+  const callerDisplay = `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`;
+  expect(row!.who).toBe(callerDisplay);
+
+  await page.goto(`${NEXT}/`);
+  const todayRow = page
+    .getByRole('list', { name: 'Needs you now' })
+    .getByRole('link')
+    .filter({ hasText: callerDisplay })
+    .filter({ hasText: 'New unknown contact' });
+  await expect(todayRow).toBeVisible();
+  await expect(todayRow).not.toContainText(caller);
+  await expect(todayRow).toHaveAttribute('href', `/contacts/${stub!.contactId}`);
 
   // (3) The Inbox row for the caller links to the CONTACT page (never the
   // phone-fallback list URL) and carries the Needs-triage chip.

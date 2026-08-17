@@ -732,7 +732,7 @@ async function processReminderRow(
     // skipped, nothing on the panel to say why. Past the grace window the state
     // is treated as permanent and the rung is retired with a VISIBLE skip.
     if (rosterWaitExpired(row.dueAt, now)) {
-      log.warn(
+      log.error(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
         'tour reminder: roster STILL unreadable past the grace window - retiring (claim-skipped)',
       );
@@ -777,7 +777,7 @@ async function processReminderRow(
     body = await composeBodyForRow(row, tour, window, deps, log);
   } catch (err) {
     if (err instanceof UncomposableReminderError) {
-      log.warn(
+      log.error(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder body uncomposable - retiring (claim-skipped)',
       );
@@ -937,7 +937,7 @@ async function sendGroupReminder(
     body = await composeBodyForRow(row, tour, window, deps, log);
   } catch (err) {
     if (err instanceof UncomposableReminderError) {
-      log.warn(
+      log.error(
         { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
         'tour reminder body uncomposable - retiring (claim-skipped)',
       );

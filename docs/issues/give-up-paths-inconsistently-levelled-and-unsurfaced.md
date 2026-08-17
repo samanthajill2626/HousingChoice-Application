@@ -3,9 +3,10 @@ id: give-up-paths-inconsistently-levelled-and-unsurfaced
 title: Capped give-up paths are inconsistently levelled, so most of them reach no alarm at all
 type: bug
 severity: med
-status: open
+status: resolved
 area: observability
 created: 2026-08-16
+resolved: 2026-08-16
 refs: app/src/jobs/voiceTranscript.ts:225, app/src/jobs/voiceTranscript.ts:303, app/src/jobs/tourReminders.ts:737, app/src/jobs/tourReminders.ts:782, app/src/jobs/tourReminders.ts:942, app/src/jobs/placementNudges.ts:571, app/src/jobs/broadcastFanOut.ts:479, app/src/jobs/relayFanOut.ts:559
 ---
 
@@ -73,3 +74,43 @@ sustained alarm for the failure it was added to catch.
 **Not doing:** a dedicated `$.event`-tagged metric filter per give-up type was
 considered and dropped as more machinery for the same signal, once it was clear
 the level fix reuses the existing filter and alarm.
+
+**Resolution (2026-08-16).** Twelve sites promoted to ERROR, not the six above.
+The operator widened the rule from "terminal give-up" to "anything that is
+actually not what should have happened", which pulled in five sites originally
+held as judgment calls plus the unmapped-status drop:
+
+- `voiceTranscript.ts` create + reconcile exhausted (transcript abandoned)
+- `tourReminders.ts` roster unreadable past grace, and BOTH uncomposable-body
+  sites (reminder never sent)
+- `placementNudges.ts` roster unreadable past grace (nudge never sent)
+- `groupReceipts.ts` unmapped provider status dropped - the SAME class as the
+  Twilio VI `error` value that caused the 2026-08-16 incident
+- `groupReceipts.ts` receipt dropped on the park bound
+- `relayFanOut.ts` media silently dropped from a relayed message
+- `api.ts` SSE connection cap reached
+- `poolNumbersRepo.ts` retirement clock not stamped
+- `extraction.ts` unexplained dropped decision
+
+Kept at WARN deliberately, with reasons, so nobody "finishes the job" later:
+
+- `twilio.ts:2479` carrier filtering - the `delivery_failed` marker directly
+  above ALREADY logs this event at ERROR and carries the alarm; this WARN is
+  only the no-retry context note. Promoting it double-counts one event.
+- `missedCallAutoText.ts:142` opt-out/manual refusal - compliance working.
+- `placementNudges.ts:820`, `tourReminders.ts:1218` post-claim races - another
+  actor legitimately won.
+- `groupConvert.ts:442/453/514`, `conversationsRepo.ts:2157/2177/2232` -
+  self-healing; the next run or the ensure path redoes the work.
+- `routes/units.ts` (7 sites) - user-input validation on uploaded keys.
+- the moot-retirement cluster listed above.
+
+Note on the SSE cap: at this scale (default 50 streams, ~10 devices, though it
+counts STREAMS not devices - each browser tab is its own EventSource) it should
+never fire. If it does, the likely cause is a LEAKED slot whose `close` never
+decremented the counter, not genuine load - which is exactly why it earns an
+ERROR rather than being treated as routine backpressure.
+
+Three test assertions pinned the old levels and were updated with them
+(`groupReceipts.test.ts` x2 via a new `ERROR` constant, `sse.test.ts` x1).
+Gates: typecheck 0, affected suites 204/204, full unit suite green.

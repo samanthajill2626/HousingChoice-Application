@@ -495,7 +495,7 @@ async function processRow(
   if (call.meta.usage !== undefined) draft.usage = call.meta.usage;
   if (call.meta.rawText !== undefined) draft.rawText = call.meta.rawText;
   const warnUnexplained = (target: DecisionTarget): void => {
-    logger.warn({ conversationId, target }, 'ai run log: unexplained dropped decision');
+    logger.error({ conversationId, target }, 'ai run log: unexplained dropped decision');
   };
   if (!call.ok) {
     const failureDecisions = draftPiece(logger, draft, () => buildDecisions({

@@ -220,7 +220,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
         // NOTHING downstream will ever stamp it - fall through to the stamp now.
       }
       const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
-      log.warn(
+      log.error(
         { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempts: payload.attempt, stamped },
         'createVoiceTranscript: exhausted attempts - stamped transcript_status failed',
       );
@@ -298,7 +298,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     // late webhook can still upgrade failed -> completed (setCallTranscript
     // condition is on transcript, not status).
     const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
-    log.warn(
+    log.error(
       { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempts: payload.attempt, stamped },
       'reconcileVoiceTranscript: exhausted attempts - stamped transcript_status failed',
     );

@@ -136,9 +136,11 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * its cached user items honest. The log lines here are the EXACT lines
    * sendToUser has always emitted per device (moved, not rewritten).
    *
-   * It swallows per-DEVICE failures but can still reject: the allowlist prune
-   * write sits outside the inner try, so a repo failure there propagates to
-   * the caller, which is why sendToAll keeps a per-user catch.
+   * EVERY per-device fault is isolated - the send, the Gone prune write and
+   * the allowlist prune write alike. One bad device is tallied and the loop
+   * moves on, so this helper does not reject under any per-device fault: a
+   * caller can never lose the devices already delivered or skip the ones
+   * after the bad one.
    */
   async function sendToDevices(
     userId: string,
@@ -161,7 +163,22 @@ export function createPushService(deps: PushServiceDeps): PushService {
       // subscribe-time guard existed is pruned here, BEFORE any POST — so the
       // server is never aimed at an internal/attacker address.
       if (!isAllowedPushEndpoint(record.endpoint)) {
-        await users.removePushSubscription(userId, record.endpoint);
+        try {
+          await users.removePushSubscription(userId, record.endpoint);
+        } catch (err) {
+          // The prune WRITE failed (the user row is gone, or DynamoDB
+          // throttled). Book it as THIS device's failure and continue: a bad
+          // repo write must never abort the rest of the user's devices,
+          // discard the ones already delivered, or drop the endpoints already
+          // pruned. Nothing was sent here, so the subscription stays and the
+          // next send retries the prune.
+          failed += 1;
+          log.warn(
+            { userId, kind, err: (err as Error).message },
+            'push: pruning a non-allowlisted endpoint failed - kept, not sent',
+          );
+          continue;
+        }
         pruned += 1;
         prunedEndpoints.push(record.endpoint);
         log.warn(
@@ -252,13 +269,28 @@ export function createPushService(deps: PushServiceDeps): PushService {
           usersCache = { items: await users.listAll(), fetchedAt: now() };
         } catch (err) {
           // A lookup failure must never break the caller (the send is
-          // fire-and-forget off a webhook/ingest path): log and push to
-          // nobody, exactly as the voice founder lookup does.
-          log.error(
+          // fire-and-forget off a webhook/ingest path): it is logged, never
+          // thrown, exactly as the voice founder lookup does.
+          if (usersCache === undefined) {
+            // No list has ever been fetched, so there is nobody to send to:
+            // log ERROR and drop the broadcast (spec 3.1).
+            log.error(
+              { err, kind: notification.kind },
+              'push: listing users failed - broadcast not sent',
+            );
+            return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+          }
+          // A cached list EXISTS, so fan out to it instead of dropping the
+          // notification. Deliberate deviation from 3.1's literal wording: the
+          // spec already accepts a 60s staleness bound, and D1 ("everyone with
+          // a subscription is notified") plus the late-better-than-never
+          // posture make a slightly stale fan-out strictly better than a
+          // silent drop on a transient Dynamo blip. `fetchedAt` is left
+          // UNCHANGED so the very next send retries the refresh.
+          log.warn(
             { err, kind: notification.kind },
-            'push: listing users failed - broadcast not sent',
+            'push: refreshing the user list failed - fanning out to the cached list (stale)',
           );
-          return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
         }
       }
 
@@ -292,8 +324,11 @@ export function createPushService(deps: PushServiceDeps): PushService {
           }
         } catch (err) {
           // Per-user isolation (the voice founder-loop shape): one failing
-          // user never aborts the fan-out. Reachable because the shared
-          // loop's allowlist prune write is outside its per-device try.
+          // user never aborts the fan-out. DEFENSE IN DEPTH ONLY - the shared
+          // loop isolates every per-device fault, prune writes included, so
+          // nothing in it is expected to reject; this catch exists for a
+          // genuinely unexpected throw. It cannot know how far the loop got,
+          // so its tally is deliberately pessimistic.
           failed += subs.length;
           log.warn(
             { userId: user.userId, kind: notification.kind, err: (err as Error).message },

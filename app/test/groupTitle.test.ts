@@ -8,6 +8,7 @@
 // same cases the mirror's suite pins.
 import { describe, expect, it } from 'vitest';
 import { groupThreadLabel, relayThreadLabel } from '../src/lib/groupTitle.js';
+import { formatPhoneForDisplay } from '../src/lib/phone.js';
 import type {
   ConversationItem,
   ConversationParticipant,
@@ -92,9 +93,13 @@ describe('relayThreadLabel', () => {
     expect(relayThreadLabel(relayConv({ placement_tag: ' 12 Oak St ' }))).toBe('12 Oak St');
   });
   it('falls back to the formatted pool number', () => {
-    const label = relayThreadLabel(relayConv({ pool_number: '+15550100009' }));
-    expect(label).toContain('555');
-    expect(label).not.toBe('Relay group');
+    // Assert the FORMATTED output, derived from the same formatter the rung
+    // uses: a `toContain('555')` would pass just as well against the raw
+    // E.164, so it could not tell this rung from a bare-number fallback.
+    const poolNumber = '+15550100009';
+    const label = relayThreadLabel(relayConv({ pool_number: poolNumber }));
+    expect(label).toBe(formatPhoneForDisplay(poolNumber));
+    expect(label).toBe('(555) 010-0009');
   });
   it('falls back to "Relay group" when nothing else exists', () => {
     expect(relayThreadLabel(relayConv({}))).toBe('Relay group');

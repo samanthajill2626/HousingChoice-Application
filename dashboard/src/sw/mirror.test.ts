@@ -12,16 +12,21 @@
 // deliberately differs from the TS source in small ways (no `export`, no
 // types, `data || {}` instead of `data ?? {}`).
 //
-// Read from disk with process.cwd(): vitest's root is the dashboard workspace
-// (vite.config.ts lives there and `npm run test -w dashboard` sets the child
-// cwd), and both `import ... ?raw` and `new URL(..., import.meta.url)` would be
-// rewritten by Vite's asset pipeline. Same pattern as
-// src/routes/shared/PeopleCard.test.tsx.
+// Read from disk relative to THIS FILE, not to process.cwd(): the sanctioned
+// gate is `npm run test -w dashboard` (whose child cwd is the workspace), but
+// anyone driving vitest straight from the repo root would otherwise hard-fail
+// this file at collection time on a missing path. `fileURLToPath` +
+// `import.meta.url` is a plain Node path computation, so - unlike
+// `import ... ?raw` or `new URL(..., import.meta.url)` - Vite's asset pipeline
+// does not rewrite it.
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const swSource = readFileSync(join(process.cwd(), 'public/sw.js'), 'utf8');
+// src/sw/ -> ../../public/sw.js
+const swPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'public', 'sw.js');
+const swSource = readFileSync(swPath, 'utf8');
 
 describe('public/sw.js mirror carries the inbound-message-push changes', () => {
   it('has the queue-level unmatched_email tag branch', () => {

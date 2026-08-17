@@ -411,7 +411,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         kind: 'message',
         payload: {
           title: capPushText(title, PUSH_TITLE_MAX),
-          body,
+          // Capped here too even though every caller already caps via
+          // pushMessageBody: this helper is the choke point, capping an
+          // already-capped string is idempotent, and an oversize payload is
+          // REJECTED by the push service, so the notification would be lost
+          // silently and on every retry.
+          body: capPushText(body, PUSH_BODY_MAX),
           kind: 'message',
           conversationId,
         },

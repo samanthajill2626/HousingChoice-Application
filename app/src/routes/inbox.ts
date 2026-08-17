@@ -1806,6 +1806,25 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       res.status(400).json({ error: 'phone must be E.164 (e.g. +15550001234)' });
       return;
     }
+    // MU-2 (H2): this route never resolved the contact, so a soft-deleted
+    // contact's number could be flagged unread through it - the one way around
+    // the rule /:contactId/unread enforces (a 1:1 cannot reach the conversation
+    // route at all). Their row is only ever visible while unread, so a manual
+    // flag would fake the fresh inbound the resurfacing rule means.
+    //
+    // A phone with NO contact record is NOT deleted: an untriaged unknown
+    // number is exactly what this route is for and stays markable. findByPhone
+    // deliberately ignores deleted_at (contactsRepo), which is what lets this
+    // see the deleted contact at all.
+    //
+    // Its /read twin deliberately carries NO such check - zeroing a deleted
+    // contact's unread is harmless; SETTING it is what MU-2 forbids. Do not
+    // "make them consistent".
+    const owner = await contacts.findByPhone(phone);
+    if (owner !== undefined && isDeleted(owner)) {
+      res.status(409).json({ error: 'contact_deleted' });
+      return;
+    }
     const newest = newestOf(await conversations.findByParticipantPhone(phone));
     if (newest === undefined) {
       res.status(404).json({ error: 'no_conversation_for_phone' });

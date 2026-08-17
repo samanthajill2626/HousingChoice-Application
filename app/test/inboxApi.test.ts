@@ -946,6 +946,79 @@ describe('Mark UNREAD - the conditional write, its one retry, and its classifica
   });
 });
 
+// H2 - MU-2 on the by-phone route. The other two routes already refuse a
+// soft-deleted contact (/:contactId/unread via isDeleted; a 1:1 cannot reach
+// the conversation route at all), so this was the one way in.
+describe('POST /api/inbox/unread { phone } - MU-2, a soft-deleted contact (H2)', () => {
+  it('409 contact_deleted for a deleted contact\'s number, 200 for a live one, 200 for a number with no contact at all', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-h2-del',
+      type: 'tenant',
+      phone: '+14049820901',
+      deleted_at: '2026-06-01T00:00:00.000Z',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-del', {
+      participant_phone: '+14049820901',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+    const del = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820901' }));
+    expect(del.status).toBe(409);
+    expect(del.body).toEqual({ error: 'contact_deleted' });
+    // The refusal is a REFUSAL: their row is only ever visible while unread
+    // (the resurfacing rule), and a manual flag must not fake a fresh inbound.
+    expect(world.conversations.get('conv-h2-del')!.unread_count ?? 0).toBe(0);
+    expect(world.conversations.get('conv-h2-del')!.unread_flag).toBeUndefined();
+
+    // A live contact's number is untouched by the new check.
+    seedContact(world, {
+      contactId: 'c-h2-live',
+      type: 'tenant',
+      phone: '+14049820902',
+      firstName: 'Liv',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-live', {
+      participant_phone: '+14049820902',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+    const live = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820902' }));
+    expect(live.status).toBe(200);
+    expect(world.conversations.get('conv-h2-live')!.unread_count).toBe(1);
+
+    // A phone with NO contact record is NOT deleted - an untriaged unknown
+    // number is exactly what this route exists for and stays markable.
+    seedConversation(world, 'conv-h2-unknown', {
+      participant_phone: '+14049820903',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    const unknown = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820903' }));
+    expect(unknown.status).toBe(200);
+    expect(world.conversations.get('conv-h2-unknown')!.unread_count).toBe(1);
+  });
+
+  it('the /read twin deliberately keeps NO such check - zeroing a deleted contact\'s unread is harmless', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-h2-read',
+      type: 'tenant',
+      phone: '+14049820904',
+      deleted_at: '2026-06-01T00:00:00.000Z',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-read', {
+      participant_phone: '+14049820904',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+      unread_count: 2,
+    });
+    const res = await auth(request(app).post('/api/inbox/read').send({ phone: '+14049820904' }));
+    expect(res.status).toBe(200);
+    expect(world.conversations.get('conv-h2-read')!.unread_count).toBe(0);
+  });
+});
+
 describe('POST /api/inbox/read { phone } — unknown number (C8)', () => {
   it('resets unread on the unknown number\'s conversation and emits conversation.updated', async () => {
     const { app, world } = makeWebhookHarness();

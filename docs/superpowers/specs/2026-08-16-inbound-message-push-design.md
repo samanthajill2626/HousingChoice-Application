@@ -59,7 +59,13 @@ Planner-settled technical decisions:
   tiny-table scan pattern; listByRole is listAll + filter already).
   Everyone means admin AND va roles - all users. No status filtering:
   subscription PRESENCE is the filter (an invited-never-signed-in user
-  has no subscriptions and costs nothing - see 3.1).
+  has no subscriptions and costs nothing - see 3.1). CACHED (operator,
+  spec gate): sendToAll caches the listAll result in-process with a
+  60-second TTL so notification sends do not scan on every message -
+  users are added/removed rarely, and this is a non-mission-critical
+  consumer. Accepted staleness bound: a just-subscribed device can lag
+  up to 60s behind; each process (app, worker) holds its own cache.
+  The voice paths and admin routes are NOT moved onto the cache.
 - D11 Emission is fire-and-forget (void promise + .catch log) at every
   site: a push must never delay or fail a webhook ack or the email
   ingest. This copies the pre_ring pattern (voice.ts:623-633).
@@ -87,12 +93,16 @@ Behavior:
 
 - If push is unconfigured (VAPID unset): ONE log line (warn) and a
   zeroed result. Never one line per user.
-- Otherwise: usersRepo.listAll() ONCE, then fan out over the returned
-  items directly - listAll already returns full items including
-  push_subscriptions; the SEND path must NOT re-read each user via
-  findById. (The PRUNE path is the exception: a Gone endpoint triggers
+- Otherwise: fan out over the user list from a per-instance TTL cache
+  (D10): on a miss or expiry (60s), call usersRepo.listAll() ONCE and
+  cache the items; within the TTL, reuse them with no repo call at
+  all. listAll already returns full items including push_subscriptions;
+  the SEND path must NOT re-read each user via findById. (The PRUNE
+  path is the exception: a Gone endpoint triggers
   removePushSubscription, which internally re-reads the user - that is
-  the existing exceptional path, unchanged.) Users with zero
+  the existing exceptional path, unchanged.) A Gone-pruned endpoint is
+  ALSO removed from the cached item in memory, so repeat sends within
+  the TTL do not re-attempt a known-dead endpoint. Users with zero
   subscriptions are skipped silently (no I/O, no log line).
 - The per-device loop (allowlist prune, Gone prune, transient keep) is
   shared with sendToUser via an internal helper so the two methods
@@ -400,6 +410,10 @@ Unit (app):
   (NO per-user findById on the SEND path - pinned by asserting the fake
   repo's findById is never called in a fan-out with NO Gone endpoints;
   a Gone-prune case may legitimately read via removePushSubscription),
+  TTL cache behavior (second send within the TTL does not call listAll
+  again - pinned by call count on the fake repo; a send after the TTL
+  re-scans, driven by a fake/injected clock; a Gone-pruned endpoint is
+  not re-attempted by a second send within the TTL),
   zero-subscription users skipped silently, per-user
   failure isolation, listAll-throw safety, unconfigured single-log
   no-op, ONE aggregate log line, aggregate tally, TTL absence (adapter

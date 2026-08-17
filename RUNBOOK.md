@@ -1326,18 +1326,22 @@ do **not** apply to it.
   pre-ring push also carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather
   than delivered minutes late; missed-call and voicemail keep the late-is-better-than-never
   default deliberately.
-- **Signing out DROPS every push subscription for that user (all devices); each device re-arms
-  itself the next time the app opens.** Since inbound-message push (2026-08-17) a subscribed device
-  receives contact names and message bodies on every inbound text/email, so sign-out (which is
-  global revocation by design) clears the user's push subscriptions in the same write - INCLUDING
-  the voice pre-ring on the phone if you sign out on the laptop. The browser that signed out
-  forgets its own subscription; every OTHER device re-POSTs the subscription it still holds the
-  next time the app opens SIGNED IN (boot reconcile) - and since the sign-out revoked that device's
-  session too, that means: open the PWA, sign back in, and push is re-armed with no Settings visit.
-  On the device that signed out, after signing back in:
-  **Settings -> Notifications -> enable**, then prove it with **Send test notification**. Normal
-  session expiry and an admin role change do NOT drop subscriptions; only an explicit sign-out
-  does.
+- **Signing out removes push for THAT device only; other devices keep working.** Since
+  inbound-message push (2026-08-17) a subscribed device receives contact names and message bodies on
+  every inbound text/email, so the browser that signs out first removes its own subscription on the
+  server (while its session is still valid), then unsubscribes itself, then signs out - your phone
+  keeps its subscription (and its voice pre-ring) when you sign out on the tablet. Sign-out is still
+  a GLOBAL session revocation (the other devices will show Login next time), but their push
+  subscriptions are untouched and every device also re-POSTs the subscription it holds on each
+  signed-in open (boot reconcile), so drift heals itself. On the device that signed out, after
+  signing back in: **Settings -> Notifications -> enable**, then prove it with **Send test
+  notification**. Normal session expiry and an admin role change touch no subscription.
+- **Offboarding = remove the user (Settings -> Users), not sign-out.** Removing a user hard-deletes
+  the whole user row, and the push subscriptions live ON that row - so every device that user ever
+  subscribed stops receiving immediately, and their sessions die with the row. **A LOST device is the
+  one case sign-out cannot reach:** its subscription stays live until you remove and re-invite the
+  user (userId is deterministic from the email, so a re-invite is clean; they re-enable push on the
+  devices they still have) or the endpoint is pruned as Gone.
 
 ### iPhone (installed PWA, iOS 16.4+)
 

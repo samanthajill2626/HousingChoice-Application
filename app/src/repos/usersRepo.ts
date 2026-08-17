@@ -76,17 +76,15 @@ export const MAX_PUSH_SUBSCRIPTIONS = 10;
  * in two days and only a literal in each test file kept them in step.
  * if_not_exists(..., 1) + 1 (NOT ADD): a legacy item lacking the attribute
  * reads as epoch 1 (sessionEpochOf), so its first bump must land on 2.
- * push_subscriptions are deliberately KEPT here - only the LOGOUT bump
- * (SESSION_REVOKE_UPDATE_EXPRESSION) drops them.
+ * Neither revocation write touches push_subscriptions (see bumpSessionEpoch).
  */
 export const ROLE_REVOKE_UPDATE_EXPRESSION =
   'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one';
 
-/** The LOGOUT revocation UpdateExpression: bump the epoch AND drop the push
- *  subscriptions in one write (see bumpSessionEpoch). REMOVE of an absent
- *  attribute is a no-op. */
+/** The LOGOUT revocation UpdateExpression: bump the epoch only (see
+ *  bumpSessionEpoch for why push subscriptions are deliberately untouched). */
 export const SESSION_REVOKE_UPDATE_EXPRESSION =
-  'SET session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions';
+  'SET session_epoch = if_not_exists(session_epoch, :base) + :one';
 
 export interface UserItem {
   userId: string;
@@ -261,11 +259,9 @@ export interface UsersRepo {
    * script's combined update (scripts/lib/userRoleCore.mjs buildRoleUpdate)
    * byte-for-byte. Returns the NEW session epoch. Throws if the user does not
    * exist. Use this from the in-app PATCH role route instead of a separate
-   * setRole + bumpSessionEpoch pair. Unlike bumpSessionEpoch (logout), this
-   * write KEEPS push_subscriptions: a role change is not a distrust of the
-   * user's devices (a promotion, or the C2 verify-after-write rollback that
-   * leaves the role unchanged), and message pushes are not role-gated - so
-   * dropping them would buy nothing and silence the devices for no reason.
+   * setRole + bumpSessionEpoch pair. Like bumpSessionEpoch, this write KEEPS
+   * push_subscriptions (a role change is not a distrust of the user's
+   * devices, and message pushes are not role-gated).
    */
   setRoleAndRevoke(userId: string, role: UserRole): Promise<number>;
   /**
@@ -273,17 +269,17 @@ export interface UsersRepo {
    * sealed with the old epoch (effective within the middleware's 60s epoch
    * cache). Throws if the user does not exist.
    *
-   * The SAME write also REMOVES push_subscriptions. A push subscription is a
-   * device-scoped credential: since inbound-message push, a subscribed device
-   * receives contact names and message bodies on every inbound, so a
-   * revocation that killed the cookies but left the subscriptions would keep
-   * feeding a signed-out (or stolen, or offboarded) device indefinitely.
-   * Revocation is global by design (all devices), so the drop is global too.
-   * The dashboard re-POSTs whatever subscription each device still holds on
-   * its next boot (reconcileBrowserPushSubscription), so a device that was
-   * NOT the one signing out re-arms itself the next time the app opens; the
-   * signing-out browser also unsubscribes its own copy. This is the LOGOUT
-   * write only - setRoleAndRevoke keeps subscriptions (see there).
+   * push_subscriptions are deliberately UNTOUCHED (operator ruling
+   * 2026-08-17, inbound-message-push D13 option 2). Session revocation is
+   * global by design, but a push subscription is a DEVICE credential and
+   * sign-out is per-device for push: signing out on the tablet must not
+   * silence the phone. The signing-out browser removes ITS OWN subscription
+   * (DELETE /api/push/subscriptions, then browser unsubscribe - dashboard
+   * pushSignOut.ts) before calling /auth/logout. Offboarding is remove():
+   * the whole row goes, and every subscription on it. The accepted residual:
+   * a lost device that cannot be signed out from itself keeps its
+   * subscription until the user is removed and re-invited (or the device is
+   * Gone-pruned).
    */
   bumpSessionEpoch(userId: string): Promise<number>;
   /**
@@ -562,8 +558,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
           Key: { userId },
           // if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking the
           // attribute read as epoch 1 (sessionEpochOf), so their first bump
-          // must land on 2 - ADD would mint 1 and revoke nothing. REMOVE of an
-          // absent push_subscriptions attribute is a no-op (never a failure).
+          // must land on 2 - ADD would mint 1 and revoke nothing.
           UpdateExpression: SESSION_REVOKE_UPDATE_EXPRESSION,
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeValues: { ':base': 1, ':one': 1 },
@@ -574,10 +569,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       if (typeof epoch !== 'number') {
         throw new Error(`bumpSessionEpoch(${userId}): UPDATED_NEW returned no session_epoch`);
       }
-      log.info(
-        { userId, sessionEpoch: epoch },
-        'session epoch bumped - all prior sessions revoked, push subscriptions dropped',
-      );
+      log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped - all prior sessions revoked');
       return epoch;
     },
 

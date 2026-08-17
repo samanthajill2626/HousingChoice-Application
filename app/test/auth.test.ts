@@ -611,11 +611,13 @@ describe('session epoch — the server-side kill switch', () => {
     expect(res.status).toBe(401);
   });
 
-  it('logout DROPS the push subscriptions in the same revocation - a signed-out device stops receiving pushes', async () => {
-    // Push subscriptions are device-scoped credentials. Global logout ("log
-    // me out everywhere" / "this phone was stolen") must stop message pushes
-    // - which now carry contact names + message bodies to every subscribed
-    // device - not just kill the cookies.
+  it('logout revokes the sessions but KEEPS the push subscriptions (the signing-out DEVICE removes only its own; other devices keep working)', async () => {
+    // Operator ruling 2026-08-17 (inbound-message-push D13, option 2): a
+    // sign-out on the tablet must not silence the phone. The signing-out
+    // browser DELETEs its own subscription before logging out (dashboard
+    // pushSignOut.ts); the server-side epoch bump touches nothing else.
+    // Offboarding is DELETE /api/users/:id, which removes the whole row and
+    // every subscription on it.
     const { app, fakeUsers } = makeAuthApp({
       seedUsers: [
         testUserItem({
@@ -639,7 +641,7 @@ describe('session epoch — the server-side kill switch', () => {
 
     const after = fakeUsers.users.get(TEST_SESSION_USER.userId);
     expect(after?.session_epoch).toBe(2);
-    expect(after?.push_subscriptions).toBeUndefined();
+    expect(after?.push_subscriptions).toHaveLength(1);
   });
 
   it('a role change + epoch bump (the user:role script) revokes within the window; the next login carries the new role', async () => {

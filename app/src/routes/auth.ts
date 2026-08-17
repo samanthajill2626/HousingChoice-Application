@@ -271,12 +271,13 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
   // user's session_epoch invalidates every cookie sealed with the old epoch
   // — all browsers, all devices — within the 60s epoch-cache TTL ("log me
   // out everywhere" and "this laptop was stolen" are the same button).
-  // The same write DROPS the user's push subscriptions (usersRepo
-  // .bumpSessionEpoch): since inbound-message push, a subscribed device
-  // receives contact names + message bodies on every inbound, so revocation
-  // must silence the devices, not only the cookies. Each device re-arms push
-  // in Settings after signing back in; the dashboard also best-effort
-  // unsubscribes the signing-out browser so its toggle stays honest.
+  // Push subscriptions are NOT dropped here (operator ruling 2026-08-17): a
+  // subscription is a DEVICE credential and sign-out is per-device for push -
+  // signing out on the tablet must not silence the phone. The signing-out
+  // browser removes its own subscription (DELETE /api/push/subscriptions,
+  // then a browser unsubscribe - dashboard pushSignOut.ts) BEFORE calling
+  // this route, while its cookie is still valid. Offboarding is the user
+  // DELETE, which removes the whole row and every subscription on it.
   router.post('/logout', sessionMw, async (req: AuthedRequest, res) => {
     if (req.user) {
       await usersRepo.bumpSessionEpoch(req.user.userId);

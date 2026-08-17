@@ -25,48 +25,76 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('forgetBrowserPushSubscription (sign-out best-effort unsubscribe)', () => {
-  it('unsubscribes the browser subscription when one exists and reports true', async () => {
+describe('forgetBrowserPushSubscription (sign-out: drop THIS device on the server, then in the browser)', () => {
+  const sub = (unsubscribe: () => Promise<boolean>) => ({
+    endpoint: 'https://fcm.googleapis.com/send/this-device',
+    unsubscribe,
+  });
+
+  it('DELETEs this device endpoint on the server FIRST (session still valid), then unsubscribes the browser', async () => {
+    const order: string[] = [];
+    const del = vi.fn(async (endpoint: string) => {
+      order.push('server:' + endpoint);
+    });
+    const unsubscribe = vi.fn(async () => {
+      order.push('browser');
+      return true;
+    });
+    stubServiceWorker(async () => registrationWith(sub(unsubscribe)));
+    await expect(forgetBrowserPushSubscription(del)).resolves.toBe(true);
+    expect(order).toEqual(['server:https://fcm.googleapis.com/send/this-device', 'browser']);
+  });
+
+  it('still unsubscribes the browser when the server DELETE fails, and resolves false', async () => {
+    const del = vi.fn(async () => {
+      throw new Error('network');
+    });
     const unsubscribe = vi.fn(async () => true);
-    stubServiceWorker(async () => registrationWith({ unsubscribe }));
-    await expect(forgetBrowserPushSubscription()).resolves.toBe(true);
+    stubServiceWorker(async () => registrationWith(sub(unsubscribe)));
+    await expect(forgetBrowserPushSubscription(del)).resolves.toBe(false);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
-  it('reports false and does not throw when there is no subscription', async () => {
+  it('reports false, calls nothing, and does not throw when there is no subscription', async () => {
+    const del = vi.fn(async () => {});
     stubServiceWorker(async () => registrationWith(null));
-    await expect(forgetBrowserPushSubscription()).resolves.toBe(false);
+    await expect(forgetBrowserPushSubscription(del)).resolves.toBe(false);
+    expect(del).not.toHaveBeenCalled();
   });
 
   it('reports false when NO service worker is registered (getRegistration resolves undefined) - never touches .ready', async () => {
     stubServiceWorker(async () => undefined);
-    await expect(forgetBrowserPushSubscription()).resolves.toBe(false);
+    await expect(forgetBrowserPushSubscription(async () => {})).resolves.toBe(false);
   });
 
   it('never hangs: a registration lookup that never settles is bounded by the timeout', async () => {
     stubServiceWorker(() => new Promise(() => {}));
-    await expect(forgetBrowserPushSubscription({ timeoutMs: 20 })).resolves.toBe(false);
+    await expect(forgetBrowserPushSubscription(async () => {}, { timeoutMs: 20 })).resolves.toBe(false);
   });
 
-  it('never hangs: an unsubscribe that never settles is bounded by the timeout too', async () => {
-    stubServiceWorker(async () => registrationWith({ unsubscribe: () => new Promise(() => {}) }));
-    await expect(forgetBrowserPushSubscription({ timeoutMs: 20 })).resolves.toBe(false);
+  it('never hangs: a server DELETE or browser unsubscribe that never settles is bounded by the timeout too', async () => {
+    stubServiceWorker(async () => registrationWith(sub(() => new Promise(() => {}))));
+    await expect(forgetBrowserPushSubscription(async () => {}, { timeoutMs: 20 })).resolves.toBe(false);
+    stubServiceWorker(async () => registrationWith(sub(async () => true)));
+    await expect(
+      forgetBrowserPushSubscription(() => new Promise(() => {}), { timeoutMs: 20 }),
+    ).resolves.toBe(false);
   });
 
-  it('never throws: an unsubscribe failure resolves false', async () => {
+  it('never throws: a browser unsubscribe failure resolves false', async () => {
     stubServiceWorker(async () =>
-      registrationWith({
-        unsubscribe: async () => {
+      registrationWith(
+        sub(async () => {
           throw new Error('push service down');
-        },
-      }),
+        }),
+      ),
     );
-    await expect(forgetBrowserPushSubscription()).resolves.toBe(false);
+    await expect(forgetBrowserPushSubscription(async () => {})).resolves.toBe(false);
   });
 
   it('never throws when the platform has no service worker API at all', async () => {
     vi.stubGlobal('navigator', { ...navigator, serviceWorker: undefined });
-    await expect(forgetBrowserPushSubscription()).resolves.toBe(false);
+    await expect(forgetBrowserPushSubscription(async () => {})).resolves.toBe(false);
   });
 });
 

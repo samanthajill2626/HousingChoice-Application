@@ -215,9 +215,8 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       const user = users.get(userId);
       if (!user) throw new Error(`bumpSessionEpoch: no user ${userId}`);
       user.session_epoch = sessionEpochOf(user) + 1;
-      // Mirrors the real write's REMOVE push_subscriptions (revocation drops
-      // the device push credentials with the sessions).
-      delete user.push_subscriptions;
+      // push_subscriptions are UNTOUCHED, like the real write (sign-out is
+      // per-device for push - the browser DELETEs its own endpoint).
       return user.session_epoch;
     },
     async listAll() {

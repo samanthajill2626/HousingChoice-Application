@@ -1,18 +1,21 @@
 // pushSignOut - keep the browser's push subscription and the server's record
 // of it in agreement across sign-out and boot.
 //
-// WHY: sign-out is global revocation on the server, and that write also DROPS
-// the user's push subscriptions - ALL devices (a subscription is a device
-// credential; message pushes carry contact names + bodies). The browser that
-// signed out unsubscribes its own copy so its Settings toggle does not keep
-// reading On (forgetBrowserPushSubscription). Every OTHER device still holds
-// a live browser subscription the server no longer knows about - and the
-// Settings toggle derives its state from the BROWSER, so it would read On
-// while nothing arrives, silently, including the voice pre-ring. So on boot
-// every device re-POSTs the subscription it holds
-// (reconcileBrowserPushSubscription): idempotent on the server (dedupe by
-// endpoint, replace), it converges browser and server after any revocation
-// or subscription rotation without a Settings visit.
+// WHY: a push subscription is a device credential (message pushes carry
+// contact names + bodies), and sign-out is PER-DEVICE for push by operator
+// ruling (2026-08-17): signing out on the tablet must not silence the phone.
+// So the signing-out browser removes ITS OWN subscription - on the server
+// (DELETE, while the session cookie is still valid) and then in the browser
+// (forgetBrowserPushSubscription); the server-side session revocation touches
+// no other device's subscription. Offboarding is DELETE /api/users/:id, which
+// removes the whole user row and every subscription on it.
+//
+// The Settings toggle derives its state from the BROWSER, so any drift where
+// the server lost a subscription the browser still holds (a Gone-prune, a
+// subscription rotation) would read On while nothing arrives. So on boot every
+// device re-POSTs the subscription it holds (reconcileBrowserPushSubscription):
+// idempotent on the server (dedupe by endpoint, replace), it converges browser
+// and server without a Settings visit.
 //
 // BOTH are best-effort and NEVER throw or hang: sign-out and boot must never
 // be blocked by the push service, a missing service worker, or a denied
@@ -68,13 +71,32 @@ async function bounded(work: () => Promise<boolean>, opts?: PushSyncOptions): Pr
   return result === true;
 }
 
-/** Unsubscribe the current browser push subscription, if any. Never throws
- *  or hangs. Resolves true when a subscription was unsubscribed. */
-export function forgetBrowserPushSubscription(opts?: PushSyncOptions): Promise<boolean> {
+/**
+ * Sign-out: remove THIS device's push subscription - on the SERVER first
+ * (`unsubscribeServer`, the API's unsubscribePush(endpoint), while the session
+ * cookie is still valid), then in the browser. Per-device by operator ruling
+ * (2026-08-17): signing out on the tablet must not silence the phone; the
+ * server-side epoch bump touches no other device's subscription. Offboarding
+ * is DELETE /api/users/:id, which removes the whole row and every
+ * subscription on it. Never throws or hangs. Resolves true only when both
+ * halves succeeded (the browser half still runs when the server half fails,
+ * so the toggle never lies On for a subscription that is being abandoned).
+ */
+export function forgetBrowserPushSubscription(
+  unsubscribeServer: (endpoint: string) => Promise<unknown>,
+  opts?: PushSyncOptions,
+): Promise<boolean> {
   return bounded(async () => {
     const subscription = await currentSubscription();
     if (subscription === null) return false;
-    return await subscription.unsubscribe();
+    let serverOk = true;
+    try {
+      await unsubscribeServer(subscription.endpoint);
+    } catch {
+      serverOk = false;
+    }
+    const browserOk = await subscription.unsubscribe();
+    return serverOk && browserOk;
   }, opts);
 }
 

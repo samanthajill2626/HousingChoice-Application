@@ -1,12 +1,13 @@
 # Inbound-Message Push Notifications - Design Spec
 
-Date: 2026-08-16 (rev 7: r2-r3 = adversarial spec review rounds 1-2;
+Date: 2026-08-16 (rev 8: r2-r3 = adversarial spec review rounds 1-2;
 r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments;
 r6 = BUILD-TIME amendments from review round 2 - the bounded stale-user-list
 fallback in 3.1/D10/section 5, and the honest restatement of the sendToUser
 promise in 3.1 - ACCEPTED by the planner's post-merge review 2026-08-17 on
 the operator's go; r7 = post-merge review fix: revocation drops push
-subscriptions, D13 below)
+subscriptions; r8 = operator option-2 ruling: sign-out is PER-DEVICE for
+push, D13 below)
 Branch: feat/inbound-message-push (worktree W:\tmp\inbound-message-push, cut
 from main @d0c28678)
 Origin issue: docs/issues/no-push-on-inbound-message.md
@@ -92,35 +93,38 @@ Planner-settled technical decisions:
   fails silently and would fail again forever. The cap must be
   server-side at the send site.
 
-- D13 (rev 7, post-merge adversarial review MUST-FIX, operator-approved
-  2026-08-17) Revocation drops push subscriptions. A push subscription is
-  a device-scoped credential, and message pushes carry contact names +
-  bodies to every subscribed device; before this fix, sign-out (global
-  session revocation by design) and an admin role change killed the
-  cookies but left the subscriptions, so a signed-out, stolen, or
-  offboarded device kept receiving every inbound until a Gone-prune or a
-  full account delete. Now usersRepo.bumpSessionEpoch (the LOGOUT write
-  only) REMOVEs push_subscriptions in the SAME atomic write. Re-review
-  round 2 corrections, both accepted: (a) setRoleAndRevoke and the
-  ops-script buildRoleUpdate mirror KEEP push subscriptions - a
-  promotion, or the C2 verify-after-write rollback, is not a distrust of
-  the user's devices, and message pushes are not role-gated, so dropping
-  them there bought nothing and would silently outage the devices; (b)
-  the drop is attribute-wide (it silences the VOICE pre-ring on the
-  phone when the founder signs out on the laptop) and the Settings
-  toggle reads the BROWSER, so the dashboard now RECONCILES on boot:
-  every device re-POSTs the browser subscription it still holds
-  (idempotent on the server - dedupe by endpoint, replace) when the
-  authenticated shell mounts, which re-arms push on the next SIGNED-IN
-  app open (after the sign-out revoked its session, that means after
-  signing back in) with no Settings visit, and makes the toggle truthful
-  by construction. Both client operations are bounded end to end (the
-  registration lookup, getSubscription, AND the unsubscribe / re-POST -
-  1.5s default) so nothing can hang in front of logout(). The signing-out browser also
-  best-effort unsubscribes its own copy. Both client helpers use
-  serviceWorker.getRegistration() (never .ready, which hangs forever with
-  no registration) under a bounded timeout, and never throw or block
-  sign-out. Normal session expiry does NOT drop subscriptions.
+- D13 (rev 8; raised as a post-merge adversarial MUST-FIX 2026-08-17,
+  final shape = OPTION 2 by operator ruling the same day) Sign-out is
+  PER-DEVICE for push. A push subscription is a device-scoped credential
+  and message pushes carry contact names + bodies to every subscribed
+  device; before this, a device that had signed out (or been lost) kept
+  receiving every inbound until a Gone-prune or a full account delete.
+  Three designs were weighed: (1) drop ALL subscriptions in the global
+  logout write - secure, but signing out on the tablet silences the phone
+  (including the VOICE pre-ring) until it is next opened signed in;
+  (2) the signing-out DEVICE removes only its own subscription; (3) real
+  per-device sessions (an auth change, out of scope). The operator chose
+  (2), on the verified fact that offboarding is DELETE /api/users/:id,
+  which hard-deletes the whole user row and therefore every subscription
+  on it. Mechanism: the dashboard sign-out first DELETEs this device's
+  endpoint on the server (/api/push/subscriptions, while the session
+  cookie is still valid), then unsubscribes the browser, then calls
+  /auth/logout; usersRepo.bumpSessionEpoch and setRoleAndRevoke (and the
+  ops-script buildRoleUpdate mirror) touch NO subscription. Accepted
+  residual: a LOST device that cannot be signed out from itself keeps its
+  subscription until the user is removed and re-invited (deterministic
+  userId makes that clean) or the endpoint is Gone-pruned; the RUNBOOK
+  says so. Companion, kept: the dashboard RECONCILES on boot - every
+  device re-POSTs the browser subscription it still holds when the
+  authenticated shell mounts (idempotent on the server - dedupe by
+  endpoint, replace) - so any server/browser drift (a Gone-prune, a
+  subscription rotation) heals on the next signed-in open and the
+  Settings toggle, which reads the BROWSER, stays truthful. Both client
+  helpers use serviceWorker.getRegistration() (never .ready, which hangs
+  forever with no registration), are bounded end to end (registration
+  lookup, getSubscription, and the DELETE/unsubscribe or re-POST - 1.5s
+  default), never throw, and never block sign-out. Normal session expiry
+  and an admin role change touch no subscription.
 
 ## 3. What gets built
 

@@ -192,20 +192,22 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     );
   });
 
-  it('bumpSessionEpoch DROPS push_subscriptions in the same write (REMOVE of an absent attribute is a no-op); setRoleAndRevoke KEEPS them', async () => {
+  it('bumpSessionEpoch and setRoleAndRevoke both KEEP push_subscriptions; remove() takes the whole row (offboarding drops every subscription)', async () => {
     const sub = {
       endpoint: 'https://fcm.googleapis.com/send/revoke-1',
       keys: { p256dh: 'k', auth: 'a' },
       created_at: '2026-08-16T00:00:00.000Z',
     };
-    // Logout path: subscription present -> bump -> gone; bump again with the
-    // attribute absent -> still fine (REMOVE of a missing attribute is legal).
+    // Logout path: the epoch bump touches nothing but the epoch (option 2 -
+    // the signing-out DEVICE removes only its own subscription, client-side).
     const a = await users.invite({ email: 'revoke-a@housingchoice.org', role: 'va' });
     await users.addPushSubscription(a.user.userId, sub);
     expect((await users.findById(a.user.userId))!.push_subscriptions).toHaveLength(1);
     expect(await users.bumpSessionEpoch(a.user.userId)).toBe(2);
-    expect((await users.findById(a.user.userId))!.push_subscriptions).toBeUndefined();
-    expect(await users.bumpSessionEpoch(a.user.userId)).toBe(3);
+    expect((await users.findById(a.user.userId))!.push_subscriptions).toHaveLength(1);
+    // Offboarding: the row goes, and every subscription with it.
+    await users.remove(a.user.userId);
+    expect(await users.findById(a.user.userId)).toBeUndefined();
 
     // Role-change path: role flip + bump, push subscriptions KEPT (a role
     // change is not a distrust; message pushes are not role-gated).

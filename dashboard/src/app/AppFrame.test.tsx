@@ -34,6 +34,13 @@ function renderAuthedApp(): void {
       if (url.includes('/auth/logout')) {
         return new Response(null, { status: 204 });
       }
+      // Push subscription POST (boot reconcile) / DELETE (sign-out) succeed.
+      if (url.includes('/api/push/subscriptions')) {
+        return new Response(JSON.stringify({ subscriptionCount: 1 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify({ error: 'not_found' }), {
         status: 404,
         headers: { 'content-type': 'application/json' },
@@ -128,12 +135,16 @@ describe('AppFrame', () => {
     return fetchMock.mock.calls.map((c) => String(c[0]));
   }
 
-  it('Sign out forgets the browser push subscription (best-effort) and still logs out', async () => {
-    // Server-side revocation drops the user's push subscriptions; the
-    // signing-out browser also unsubscribes itself so its Settings toggle
-    // does not keep reading On for a subscription the server no longer has.
+  it('Sign out removes THIS device push subscription (server DELETE, then browser) BEFORE logging out; other devices are untouched', async () => {
+    // Option 2 (operator, 2026-08-17): sign-out is per-device for push. The
+    // DELETE must go out while the session is still valid, so it precedes
+    // /auth/logout; the browser copy is dropped too so the toggle stays honest.
     const unsubscribe = vi.fn(async () => true);
-    stubServiceWorker({ unsubscribe, toJSON: () => ({ endpoint: 'e', keys: {} }) });
+    stubServiceWorker({
+      endpoint: 'https://fcm.googleapis.com/send/this-device',
+      unsubscribe,
+      toJSON: () => ({ endpoint: 'https://fcm.googleapis.com/send/this-device', keys: {} }),
+    });
     renderAuthedApp();
     const trigger = await screen.findByRole('button', { name: 'Account menu' });
     fireEvent.click(trigger);
@@ -141,6 +152,17 @@ describe('AppFrame', () => {
 
     await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(fetchCalls().some((u) => u.includes('/auth/logout'))).toBe(true));
+    // The boot reconcile also POSTs to the same path; find the DELETE itself
+    // and check it went out before the logout.
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const del = fetchMock.mock.calls.findIndex(
+      (c) =>
+        String(c[0]).includes('/api/push/subscriptions') &&
+        (c[1] as RequestInit | undefined)?.method === 'DELETE',
+    );
+    const out = fetchMock.mock.calls.findIndex((c) => String(c[0]).includes('/auth/logout'));
+    expect(del).toBeGreaterThanOrEqual(0);
+    expect(del).toBeLessThan(out);
   });
 
   it('Sign out still logs out when the browser unsubscribe throws', async () => {

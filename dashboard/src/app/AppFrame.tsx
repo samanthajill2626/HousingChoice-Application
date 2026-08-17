@@ -8,7 +8,7 @@
 // focus to the hamburger.
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { logout, subscribePush } from '../api/index.js';
+import { logout, subscribePush, unsubscribePush } from '../api/index.js';
 import {
   forgetBrowserPushSubscription,
   reconcileBrowserPushSubscription,
@@ -27,22 +27,23 @@ export function AppFrame(): React.JSX.Element {
   const drawerRef = useRef<HTMLElement>(null);
   const hamburgerRef = useRef<HTMLButtonElement>(null);
 
-  // Boot-time push reconcile: a server-side revocation (sign-out on another
-  // device, role change) drops this user's push subscriptions while this
-  // browser still holds its own, and the Settings toggle reads the BROWSER -
-  // so without this the toggle would say On while nothing (including the
-  // voice pre-ring) arrives. Re-POST what the browser holds; idempotent on
-  // the server, best-effort, never throws or hangs.
+  // Boot-time push reconcile: if the server ever lost this device's
+  // subscription (a Gone-prune, a subscription rotation) while the browser
+  // still holds it, the Settings toggle - which reads the BROWSER - would say
+  // On while nothing (including the voice pre-ring) arrives. Re-POST what the
+  // browser holds; idempotent on the server, best-effort, never throws or
+  // hangs.
   useEffect(() => {
     void reconcileBrowserPushSubscription(subscribePush);
   }, []);
 
   async function handleSignOut(): Promise<void> {
     try {
-      // The server drops every push subscription with the revocation; forget
-      // this browser's own copy too so its Settings toggle stays honest.
-      // Best-effort, bounded, never throws - it must not block sign-out.
-      await forgetBrowserPushSubscription();
+      // Sign-out is per-device for push: remove THIS device's subscription on
+      // the server (while the session is still valid) and in the browser, so
+      // a signed-out device stops receiving and its toggle stays honest -
+      // other devices are untouched. Best-effort, bounded, never throws.
+      await forgetBrowserPushSubscription(unsubscribePush);
       await logout();
     } finally {
       // Re-probe → AuthContext flips to anonymous → the shell shows Login.

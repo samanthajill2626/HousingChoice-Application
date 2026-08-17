@@ -41,6 +41,7 @@ import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import { ingestInboundEmail, type InboundEmailNotice, type IngestResult } from '../../services/inboundEmail.js';
 import { parseSnsSesNotification } from '../../services/sesNotifications.js';
 import { createApplyEmailEvent } from '../../services/emailEvents.js';
+import { createPushService, type PushService } from '../../services/pushService.js';
 import {
   createSemaphore,
 } from '../../lib/semaphore.js';
@@ -74,6 +75,13 @@ export interface SesWebhookDeps {
   auditRepo?: AuditRepo;
   mediaStore?: MediaStore;
   events?: EventBus;
+  /**
+   * Inbound-message push broadcast for the default ingest. Typed as the FULL
+   * PushService (never a Pick) because WebhooksRouterDeps is an intersection
+   * and TwilioVoiceWebhookDeps/TwilioWebhookDeps already carry that exact
+   * member - a narrower type here would intersect into an unsatisfiable shape.
+   */
+  pushService?: PushService;
 }
 
 /** Build the default (real) ingestion call, or undefined when no raw store. */
@@ -87,6 +95,10 @@ function buildDefaultIngest(deps: SesWebhookDeps, config: AppConfig): IngestInbo
   const unmatchedStore = deps.unmatchedEmailRepo ?? createUnmatchedEmailRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const events = deps.events ?? appEvents;
+  // Built only AFTER the no-raw-store early return above: the factory eagerly
+  // builds a users repo (and its Dynamo client), which has no business running
+  // on a path designed to bail.
+  const pushService = deps.pushService ?? createPushService({ config, logger: deps.logger });
   return (notice: InboundEmailNotice): Promise<IngestResult> =>
     ingestInboundEmail(notice, {
       config,
@@ -98,6 +110,7 @@ function buildDefaultIngest(deps: SesWebhookDeps, config: AppConfig): IngestInbo
       contacts,
       extraction,
       events,
+      pushService,
       ...(mediaStore !== undefined && { mediaStore }),
     });
 }

@@ -22,6 +22,7 @@ import {
   type InboundEmailNotice,
   type NewUnmatchedEmail,
 } from '../src/services/inboundEmail.js';
+import { capPushText, PUSH_BODY_MAX } from '../src/lib/pushText.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const NOW = '2026-07-21T12:00:00.000Z';
@@ -262,6 +263,20 @@ function makeWorld(over: WorldOver = {}) {
   const emit = vi.fn();
   const contactCapture = vi.fn(async () => undefined);
 
+  // Inbound-message push recorder (spec 3.3). Per-world like every other spy
+  // here - each test builds a fresh world, so no cross-test reset is needed.
+  // Threaded in DELIBERATELY: the deps literal's `as unknown as
+  // InboundEmailDeps` cast erases the REQUIRED-member check, so a missing
+  // recorder would not be a compile error here (it is at the three production
+  // construction sites, which pass plain typed object literals).
+  const broadcasts: { kind: string; payload: Record<string, unknown> }[] = [];
+  const pushService = {
+    sendToAll: vi.fn(async (n: { kind: string; payload: Record<string, unknown> }) => {
+      broadcasts.push({ kind: n.kind, payload: n.payload });
+      return { configured: true, users: 1, attempted: 1, sent: 1, pruned: 0, failed: 0 };
+    }),
+  };
+
   const put = vi.fn(async (_key: string, _body: unknown, _ct?: string) => {
     if (over.putThrowsOnFirst && put.mock.calls.length === 1) throw new Error('put boom');
   });
@@ -291,6 +306,7 @@ function makeWorld(over: WorldOver = {}) {
     contacts: { findByEmail, getById, touchEmailLastSeen },
     extraction: { scheduleExtraction },
     events: { emit } as unknown as EventBus,
+    pushService,
     ...(mediaStore !== undefined ? { mediaStore } : {}),
     contactCapture,
     now: () => new Date(NOW),
@@ -320,6 +336,8 @@ function makeWorld(over: WorldOver = {}) {
     scheduleExtraction,
     emit,
     contactCapture,
+    broadcasts,
+    pushService,
     put,
     setContact: (c: Partial<ContactItem> | undefined) => {
       contactRef.current = c === undefined ? undefined : ({ contactId: 'c1', type: 'tenant', ...c } as ContactItem);
@@ -1126,5 +1144,180 @@ describe('PII posture', () => {
       expect(all).not.toContain('Hush');
       expect(all).not.toContain('Hidden text');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound-message push (spec 3.3/3.4): the MATCHED emit in thread() and the
+// UNMATCHED emit in quarantineRow. Payloads are FLAT (the service worker reads
+// kind/conversationId at the JSON root) and every title/body is capped (D12).
+// ---------------------------------------------------------------------------
+
+describe('inbound-message push: matched (threaded) email', () => {
+  it('broadcasts ONE message push carrying the contact display name and the subject', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.broadcasts).toEqual([
+      {
+        kind: 'message',
+        payload: {
+          title: 'Alice Sender',
+          body: 'Hello there',
+          kind: 'message',
+          conversationId: 'conv-new',
+        },
+      },
+    ]);
+  });
+
+  it('falls back to the stored body text when the subject is EMPTY', async () => {
+    const w = makeWorld({ raw: mime({ subject: '' }) });
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.broadcasts[0]!.payload['body']).toBe('A plain text body');
+  });
+
+  it('caps the body-text fallback at the push body limit (D12)', async () => {
+    const long = 'x'.repeat(400);
+    const w = makeWorld({ raw: mime({ subject: '', body: long }) });
+    await ingestInboundEmail(notice(), w.deps);
+    const body = w.broadcasts[0]!.payload['body'];
+    expect(body).toBe(capPushText(long, PUSH_BODY_MAX));
+    expect(Array.from(String(body))).toHaveLength(PUSH_BODY_MAX);
+  });
+
+  it('an rfc-id redelivery under a DIFFERENT key pushes exactly once', async () => {
+    const w = makeWorld({});
+    await ingestInboundEmail(notice({ key: 'obj/key-1' }), w.deps);
+    const again = await ingestInboundEmail(notice({ key: 'obj/key-2' }), w.deps);
+    expect(again.outcome).toBe('duplicate');
+    expect(w.broadcasts).toHaveLength(1);
+  });
+
+  it('a same-key redelivery (object-marker fast path) pushes exactly once', async () => {
+    const w = makeWorld({});
+    await ingestInboundEmail(notice(), w.deps);
+    const again = await ingestInboundEmail(notice(), w.deps);
+    expect(again.outcome).toBe('duplicate');
+    expect(w.broadcasts).toHaveLength(1);
+  });
+
+  it('a REINGEST of a matched email pushes nothing (D7 - old mail being filed)', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps, { reingest: true });
+    expect(out.outcome).toBe('threaded');
+    expect(w.broadcasts).toEqual([]);
+  });
+
+  it('a spam-verdict mail from a KNOWN contact threads AND pushes kind message (D6)', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice({ spamVerdict: 'GRAY' }), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.putUnmatched).not.toHaveBeenCalled();
+    expect(w.broadcasts).toHaveLength(1);
+    expect(w.broadcasts[0]!.kind).toBe('message');
+  });
+});
+
+describe('inbound-message push: unmatched email', () => {
+  it('broadcasts kind unmatched_email with NO conversationId and NO unmatchedId', async () => {
+    const w = makeWorld({
+      contact: null,
+      raw: mime({ from: 'Newbie <newbie@somewhere.test>', subject: 'Looking for a 2 bed' }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('unmatched');
+    // toEqual on the WHOLE payload: no id may sneak into the queue-level push.
+    expect(w.broadcasts).toEqual([
+      {
+        kind: 'unmatched_email',
+        payload: {
+          title: 'Newbie',
+          body: 'Looking for a 2 bed',
+          kind: 'unmatched_email',
+        },
+      },
+    ]);
+  });
+
+  it('falls back to the from ADDRESS and the stored snippet', async () => {
+    const w = makeWorld({
+      contact: null,
+      raw: mime({ from: 'newbie@somewhere.test', subject: '', body: 'Do you have a 2 bed?' }),
+    });
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.broadcasts).toEqual([
+      {
+        kind: 'unmatched_email',
+        payload: {
+          title: 'newbie@somewhere.test',
+          body: 'Do you have a 2 bed?',
+          kind: 'unmatched_email',
+        },
+      },
+    ]);
+  });
+
+  it('a RE-PUT of the same row (created false) never re-pushes', async () => {
+    const w = makeWorld({ contact: null });
+    const first = await ingestInboundEmail(notice(), w.deps);
+    expect(first.outcome).toBe('unmatched');
+    // A plain redelivery short-circuits at the object marker and never reaches
+    // quarantineRow - model the crash-before-marker window so the row is really
+    // re-put (created false) with the push condition evaluated.
+    w.clearMarkers();
+    const again = await ingestInboundEmail(notice(), w.deps);
+    expect(again.outcome).toBe('duplicate');
+    expect(w.putUnmatched).toHaveBeenCalledTimes(2);
+    expect(w.broadcasts).toHaveLength(1);
+  });
+
+  it('a REINGEST that lands unmatched pushes nothing even though the row is fresh', async () => {
+    const w = makeWorld({ contact: null });
+    const out = await ingestInboundEmail(notice(), w.deps, { reingest: true });
+    expect(out.outcome).toBe('unmatched');
+    expect(w.putUnmatched).toHaveBeenCalledTimes(1);
+    expect(w.broadcasts).toEqual([]);
+  });
+});
+
+describe('inbound-message push: never fires for a quarantined or dismissed row', () => {
+  it('oversize quarantine pushes nothing', async () => {
+    const w = makeWorld({ rawSize: 30 * 1024 * 1024 + 1 });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('quarantined');
+    expect(w.broadcasts).toEqual([]);
+  });
+
+  it('a parse failure pushes nothing', async () => {
+    const w = makeWorld({
+      parseMime: async () => {
+        throw new Error('hostile input');
+      },
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('quarantined');
+    expect(w.broadcasts).toEqual([]);
+  });
+
+  it('a virus FAIL pushes nothing', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice({ virusVerdict: 'FAIL' }), w.deps);
+    expect(out.outcome).toBe('quarantined');
+    expect(w.broadcasts).toEqual([]);
+  });
+
+  it('spam FAIL from an UNKNOWN sender pushes nothing', async () => {
+    const w = makeWorld({ contact: null });
+    const out = await ingestInboundEmail(notice({ spamVerdict: 'FAIL' }), w.deps);
+    expect(out.outcome).toBe('quarantined');
+    expect(w.broadcasts).toEqual([]);
+  });
+
+  it('a blocklisted sender (row stored dismissed) pushes nothing', async () => {
+    const w = makeWorld({ raw: mime({ from: 'Spammy <SPAM@Evil.Test>' }), isBlocked: true });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('blocked');
+    expect(w.broadcasts).toEqual([]);
   });
 });

@@ -443,6 +443,10 @@ describe.skipIf(!reachable)('backfill:unread-flag against DynamoDB Local (throwa
     closedReset: 1, // conv-closed-relay
     deletedReset: 1, // conv-deleted-stale
     probed: 2, // both deleted-contact threads
+    // Nothing races here: on a first live run every condition holds, and a dry
+    // run attempts no write at all (adversarial A8 - these counters are the
+    // OUTCOME, so they are what distinguishes the two runs from a raced one).
+    skippedOnCondition: { stamp: 0, remove: 0, closedReset: 0, deletedReset: 0 },
   };
 
   it('--dry-run reports the full plan and writes NOTHING', async () => {
@@ -515,22 +519,34 @@ describe.skipIf(!reachable)('backfill:unread-flag against DynamoDB Local (throwa
 
     const counts = await backfillUnreadFlag({ doc, env: testEnv });
     // Everything already sits in its target state. conv-deleted-fresh is still
-    // unread with a deleted owner, so it is probed and re-stamped every run -
-    // the conditional write makes that a no-op, which is exactly why the write
-    // guards the state it transitions FROM.
+    // unread with a deleted owner, so it is probed and RE-ATTEMPTED every run -
+    // and its condition (`attribute_not_exists(unread_flag)`) now correctly
+    // LOSES, which the report says out loud instead of claiming a stamp that
+    // did not happen (adversarial A8).
     expect(counts).toEqual({
       scanned: 7,
-      stamped: 1,
+      stamped: 0,
       removed: 0,
       // The other six: the pointer row, and five rows already in target state.
       skipped: 6,
       closedReset: 0,
       deletedReset: 0,
       probed: 1,
+      skippedOnCondition: { stamp: 1, remove: 0, closedReset: 0, deletedReset: 0 },
     });
     // Every row is accounted for exactly once - no row silently unvisited.
+    const skippedOnCondition =
+      counts.skippedOnCondition.stamp +
+      counts.skippedOnCondition.remove +
+      counts.skippedOnCondition.closedReset +
+      counts.skippedOnCondition.deletedReset;
     expect(
-      counts.stamped + counts.removed + counts.skipped + counts.closedReset + counts.deletedReset,
+      counts.stamped +
+        counts.removed +
+        counts.skipped +
+        counts.closedReset +
+        counts.deletedReset +
+        skippedOnCondition,
     ).toBe(counts.scanned);
 
     expect(await allConversations()).toEqual(before);

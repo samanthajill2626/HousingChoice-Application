@@ -13,7 +13,9 @@
 //     out resetUnread now; legacy deleted-contact threads are cleaned here) -
 //     EXCEPT where the thread genuinely RESURFACED, which is decided by the
 //     SAME predicate the runtime uses (routes/inbox.ts): the newest message is
-//     inbound AND its created_at is after the contact's deleted_at.
+//     inbound AND its created_at is after the contact's deleted_at. WHICH
+//     THREADS ARE A DELETED CONTACT'S is decided by the runtime's resolution
+//     ORDER too, phone-decides-alone included - see `deletedAtForItem`.
 //
 // That last rule costs one messages read per deleted-contact thread with
 // unread. It is deliberately NOT short-circuited on last_activity_at: that
@@ -72,18 +74,27 @@ export type BackfillAction =
   | { kind: 'probe' }; // deleted-contact thread - needs the message read first
 
 /**
- * The soft-deleted-contact participant keys, built by the contacts pre-pass.
- * `deletedAtByKey` maps each phone/email back to its contact's `deleted_at`,
- * which the resurfacing probe compares the newest message against.
+ * EVERY contact participant key in the table, built by the contacts pre-pass -
+ * live contacts included (adversarial A5).
+ *
+ * The sets answer "does this key resolve to SOME contact", which is the
+ * question the runtime's findByPhone/findByEmail actually answer;
+ * `deletedAtByKey` then carries a `deleted_at` for the subset owned by a
+ * SOFT-DELETED contact, and its absence for a known key means "live". Knowing
+ * only the deleted keys was the bug: it made a live contact's thread fall
+ * through to an email owned by someone else.
  */
-export interface DeletedContactKeys {
+export interface ContactKeyIndex {
+  /** Phones owned by ANY contact (live or soft-deleted). */
   phones: ReadonlySet<string>;
+  /** Emails owned by ANY contact (live or soft-deleted). */
   emails: ReadonlySet<string>;
+  /** deleted_at, present ONLY for keys owned by a soft-deleted contact. */
   deletedAtByKey: ReadonlyMap<string, string>;
 }
 
-/** An empty deleted-contact set (no soft-deleted contacts in the table). */
-export const NO_DELETED_CONTACTS: DeletedContactKeys = {
+/** An empty key index (no contacts in the table). */
+export const NO_CONTACT_KEYS: ContactKeyIndex = {
   phones: new Set(),
   emails: new Set(),
   deletedAtByKey: new Map(),
@@ -103,21 +114,35 @@ function unreadCountOf(item: Record<string, unknown>): number {
 
 /**
  * The `deleted_at` of the soft-deleted contact owning this thread, or undefined
- * when no participant of it is deleted.
+ * when the thread's owner is LIVE (or unknown).
  *
- * PHONE FIRST, then email - the same resolution order the runtime hydration
- * uses (contactThreads.conversationsForContact, routes/inbox.ts). Exported so
- * the planner and the runner's probe agree by construction rather than by two
- * copies of the same rule.
+ * PHONE FIRST, AND THE PHONE DECIDES ALONE - the runtime's own short-circuit
+ * (unreadFeed.resolveContact / routes/inbox.ts): findByPhone runs first and,
+ * when it returns a contact, findByEmail is NEVER consulted. So a phone this
+ * index knows ENDS the decision whether or not that contact is deleted;
+ * undefined here means "a live contact owns it", not "keep looking".
+ *
+ * That distinction is load-bearing (adversarial A5). participant_email is a
+ * LAST-WRITER hint (conversationsRepo's note on attachEmailToConversation), so
+ * a thread can carry a live contact's phone and a deleted contact's email. The
+ * old fall-through resolved that thread as "deleted" and RESET it - a silent,
+ * irreversible zero on a live person's unread, which the reset's
+ * ConditionExpression cannot catch because it guards the observed COUNT, not
+ * the contact identity.
+ *
+ * Exported so the planner and the runner's probe agree by construction rather
+ * than by two copies of the same rule.
  */
 export function deletedAtForItem(
   item: Record<string, unknown>,
-  keys: DeletedContactKeys,
+  keys: ContactKeyIndex,
 ): string | undefined {
   const phone = item['participant_phone'];
   if (typeof phone === 'string' && keys.phones.has(phone)) {
     return keys.deletedAtByKey.get(phone);
   }
+  // Only when the phone resolves to NO contact at all (including a thread with
+  // no phone) does the email get a say - again mirroring the runtime.
   const email = item['participant_email'];
   if (typeof email === 'string' && keys.emails.has(email)) {
     return keys.deletedAtByKey.get(email);
@@ -144,7 +169,7 @@ export function deletedAtForItem(
  */
 export function planUnreadBackfill(
   item: Record<string, unknown>,
-  deletedContactKeys: DeletedContactKeys,
+  contactKeys: ContactKeyIndex,
 ): BackfillAction {
   // 1. Pointer/claim rows carry ONLY the key + ref_conversationId, so they can
   // never enter the index. Counted as scanned+skipped rather than filtered out
@@ -162,7 +187,7 @@ export function planUnreadBackfill(
     }
     // 3. A soft-deleted contact's thread. Whether it stays unread depends on
     // the newest MESSAGE, which the planner cannot read - hand it to the runner.
-    if (deletedAtForItem(item, deletedContactKeys) !== undefined) {
+    if (deletedAtForItem(item, contactKeys) !== undefined) {
       return { kind: 'probe' };
     }
     // 4. The migration proper: genuinely unread, simply not in the index yet.
@@ -201,8 +226,24 @@ export function resolveProbe(
   return { kind: 'reset' };
 }
 
+/**
+ * Writes whose ConditionExpression LOST, per bucket - i.e. the row moved under
+ * the runner and was deliberately left for a re-run (adversarial A8).
+ *
+ * Always zero on a dry run, which writes nothing and therefore reports the
+ * PLAN. Comparing a dry run's plan against a live run's applied counters is how
+ * the operator sees a race-heavy run at all.
+ */
+export interface BackfillSkippedOnCondition {
+  stamp: number;
+  remove: number;
+  closedReset: number;
+  deletedReset: number;
+}
+
 export interface BackfillResult {
   scanned: number;
+  /** Rows the flag was actually STAMPED on (or planned, on a dry run). */
   stamped: number;
   removed: number;
   skipped: number;
@@ -212,21 +253,34 @@ export interface BackfillResult {
   deletedReset: number;
   /** Deleted-contact threads that needed a message read (stamped + deletedReset). */
   probed: number;
+  /**
+   * OUTCOME, not attempt. The four counters above once incremented whether or
+   * not the write landed, so a one-shot prod run in which most conditions lost
+   * was indistinguishable from a clean one - on the report that is the
+   * operator's only feedback.
+   */
+  skippedOnCondition: BackfillSkippedOnCondition;
 }
 
 /**
- * Scan the contacts table and collect the phones/emails of every SOFT-DELETED
- * contact, with the `deleted_at` the resurfacing probe compares against.
- * Pointer rows (phone_ref / email_ref) carry no contact identity and are
- * skipped.
+ * Scan the contacts table and collect the phones/emails of EVERY contact, plus
+ * the `deleted_at` of the soft-deleted ones (the value the resurfacing probe
+ * compares against). Pointer rows (phone_ref / email_ref) carry no contact
+ * identity and are skipped.
+ *
+ * LIVE CONTACTS ARE COLLECTED TOO, deliberately (adversarial A5): the index has
+ * to be able to say "this phone belongs to SOMEBODY", because that is what ends
+ * the runtime's resolution order. See `deletedAtForItem`.
  */
-export async function collectDeletedContactKeys(
+export async function collectContactKeys(
   doc: DynamoDBDocumentClient,
   table: string,
-): Promise<DeletedContactKeys> {
+): Promise<ContactKeyIndex> {
   const phones = new Set<string>();
   const emails = new Set<string>();
   const deletedAtByKey = new Map<string, string>();
+  /** Keys claimed by at least one LIVE contact (see the sweep at the end). */
+  const liveKeys = new Set<string>();
 
   /** Keep the EARLIEST deleted_at when a key somehow maps to two deleted
    *  contacts: the earlier the delete, the more likely a later inbound counts
@@ -248,20 +302,31 @@ export async function collectDeletedContactKeys(
       // Skip phone/email-pointer items (no contact identity, no deleted_at).
       if (item['phone_ref'] === true || item['email_ref'] === true) continue;
       const contact = item as unknown as ContactItem;
-      if (!isDeleted(contact)) continue;
       const deletedAt = contact.deleted_at;
-      if (typeof deletedAt !== 'string' || deletedAt.length === 0) continue;
+      // A contact counts as SOFT-DELETED only with a usable timestamp - the
+      // probe has nothing to compare against otherwise, so such a row is
+      // recorded as a live owner rather than as an undecidable deleted one.
+      const softDeleted =
+        isDeleted(contact) && typeof deletedAt === 'string' && deletedAt.length > 0;
       for (const entry of contactPhones(contact)) {
         phones.add(entry.phone);
-        note(entry.phone, deletedAt);
+        if (softDeleted) note(entry.phone, deletedAt!);
+        else liveKeys.add(entry.phone);
       }
       for (const entry of contactEmails(contact)) {
         emails.add(entry.email);
-        note(entry.email, deletedAt);
+        if (softDeleted) note(entry.email, deletedAt!);
+        else liveKeys.add(entry.email);
       }
     }
     exclusiveStartKey = LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (exclusiveStartKey !== undefined);
+
+  // A key claimed by BOTH a live and a deleted contact resolves to the LIVE one
+  // for this backfill's purposes. Order-independent (a Scan's order is not a
+  // contract) and conservative in the same direction as `note` above: KEEPING
+  // unread costs another run, zeroing a live contact's thread is irreversible.
+  for (const key of liveKeys) deletedAtByKey.delete(key);
 
   return { phones, emails, deletedAtByKey };
 }
@@ -289,8 +354,8 @@ export async function backfillUnreadFlag(
   const messages = opts.messagesRepo ?? createMessagesRepo({ doc, env });
   const dryRun = opts.dryRun === true;
 
-  // PRE-PASS: which participants belong to soft-deleted contacts.
-  const deletedContactKeys = await collectDeletedContactKeys(doc, contactsTable);
+  // PRE-PASS: every contact participant key, and which of them are deleted.
+  const contactKeys = await collectContactKeys(doc, contactsTable);
 
   const result: BackfillResult = {
     scanned: 0,
@@ -300,6 +365,7 @@ export async function backfillUnreadFlag(
     closedReset: 0,
     deletedReset: 0,
     probed: 0,
+    skippedOnCondition: { stamp: 0, remove: 0, closedReset: 0, deletedReset: 0 },
   };
 
   /** SET the flag; conditional on it still being absent AND the row still
@@ -408,14 +474,21 @@ export async function backfillUnreadFlag(
     );
   };
 
-  /** A losing conditional write means another actor already reached the target
-   *  state - the whole point of an idempotent backfill, never an error. */
-  const write = async (fn: () => Promise<void>): Promise<void> => {
-    if (dryRun) return;
+  /**
+   * A losing conditional write means the row moved under the runner - the whole
+   * point of an idempotent backfill, never an error.
+   *
+   * RETURNS WHETHER IT LANDED (adversarial A8) so the caller can count the
+   * OUTCOME. On a dry run nothing is attempted and `true` reports the PLAN,
+   * which is what the RUNBOOK tells the operator to compare against.
+   */
+  const write = async (fn: () => Promise<void>): Promise<boolean> => {
+    if (dryRun) return true;
     try {
       await fn();
+      return true;
     } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) return;
+      if (err instanceof ConditionalCheckFailedException) return false;
       throw err;
     }
   };
@@ -431,7 +504,7 @@ export async function backfillUnreadFlag(
     for (const item of (Items ?? []) as Array<Record<string, unknown>>) {
       result.scanned += 1;
       const conversationId = item['conversationId'];
-      const planned = planUnreadBackfill(item, deletedContactKeys);
+      const planned = planUnreadBackfill(item, contactKeys);
 
       // Resolve a `probe` into a terminal action FIRST, so the switch below
       // only ever sees the four write-or-skip kinds. A probe resolving to
@@ -442,7 +515,7 @@ export async function backfillUnreadFlag(
 
       if (planned.kind === 'probe') {
         result.probed += 1;
-        const deletedAt = deletedAtForItem(item, deletedContactKeys);
+        const deletedAt = deletedAtForItem(item, contactKeys);
         if (deletedAt === undefined) {
           // Unreachable: the same helper is what decided 'probe'. Narrow rather
           // than assert, and leave the row untouched if it ever happens.
@@ -457,27 +530,33 @@ export async function backfillUnreadFlag(
       }
 
       switch (action.kind) {
-        case 'stamp':
-          await write(() => stamp(conversationId));
-          result.stamped += 1;
+        case 'stamp': {
+          const applied = await write(() => stamp(conversationId));
+          if (applied) result.stamped += 1;
+          else result.skippedOnCondition.stamp += 1;
           break;
-        case 'remove':
-          await write(() => remove(conversationId));
-          result.removed += 1;
+        }
+        case 'remove': {
+          const applied = await write(() => remove(conversationId));
+          if (applied) result.removed += 1;
+          else result.skippedOnCondition.remove += 1;
           break;
-        case 'reset':
+        }
+        case 'reset': {
           // `planned.kind === 'reset'` is EXACTLY rule 2 (a closed relay group);
           // every other reset arrived through the probe. Derived from the plan
           // rather than from `resetBucket` so the extra type/status guard cannot
           // drift away from the rule that asked for it.
-          await write(() =>
+          const applied = await write(() =>
             reset(conversationId, {
               count: unreadCountOf(item),
               closedRelay: planned.kind === 'reset',
             }),
           );
-          result[resetBucket] += 1;
+          if (applied) result[resetBucket] += 1;
+          else result.skippedOnCondition[resetBucket] += 1;
           break;
+        }
         case 'skip':
           result.skipped += 1;
           break;
@@ -508,6 +587,10 @@ if (isEntrypoint) {
           closedReset: r.closedReset,
           deletedReset: r.deletedReset,
           probed: r.probed,
+          // The four counters above are what LANDED; this is what the runner
+          // decided to do and then found already moved. Both are needed to read
+          // a live run against its dry run.
+          skippedOnCondition: r.skippedOnCondition,
           dryRun,
         },
         `backfill:unread-flag - done${dryRun ? ' (DRY RUN - nothing written)' : ''}`,

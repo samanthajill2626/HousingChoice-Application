@@ -19,20 +19,21 @@ import { describe, it, expect } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
-  NO_DELETED_CONTACTS,
+  NO_CONTACT_KEYS,
   backfillUnreadFlag,
   deletedAtForItem,
   planUnreadBackfill,
   resolveProbe,
-  type DeletedContactKeys,
+  type ContactKeyIndex,
 } from '../scripts/backfill-unread-flag.js';
 import { UNREAD_FLAG_VALUE } from '../src/repos/conversationsRepo.js';
 
 const DELETED_PHONE = '+15550100999';
 const DELETED_EMAIL = 'gone@example.test';
+const LIVE_PHONE = '+15550100888';
 const DELETED_AT = '2026-08-10T00:00:00.000Z';
 
-const DELETED: DeletedContactKeys = {
+const DELETED: ContactKeyIndex = {
   phones: new Set([DELETED_PHONE]),
   emails: new Set([DELETED_EMAIL]),
   deletedAtByKey: new Map([
@@ -75,7 +76,7 @@ describe('planUnreadBackfill', () => {
       expect(
         planUnreadBackfill(
           row({ type: 'relay_group', status: 'closed', unread_count: 3 }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'reset' });
     });
@@ -89,7 +90,7 @@ describe('planUnreadBackfill', () => {
             unread_count: 3,
             unread_flag: UNREAD_FLAG_VALUE,
           }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'reset' });
     });
@@ -97,14 +98,14 @@ describe('planUnreadBackfill', () => {
     it('OUTRANKS the stamp rule - a closed unread relay is never surfaced', () => {
       // Precedence proof: this row satisfies rule 4 too (unread > 0, no flag).
       const closedUnread = row({ type: 'relay_group', status: 'closed', unread_count: 3 });
-      expect(planUnreadBackfill(closedUnread, NO_DELETED_CONTACTS).kind).not.toBe('stamp');
+      expect(planUnreadBackfill(closedUnread, NO_CONTACT_KEYS).kind).not.toBe('stamp');
     });
 
     it('leaves an OPEN relay group alone - it stamps like any unread thread', () => {
       expect(
         planUnreadBackfill(
           row({ type: 'relay_group', status: 'open', unread_count: 3 }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'stamp' });
     });
@@ -118,7 +119,7 @@ describe('planUnreadBackfill', () => {
             unread_count: 0,
             unread_flag: UNREAD_FLAG_VALUE,
           }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'remove' });
     });
@@ -145,7 +146,7 @@ describe('planUnreadBackfill', () => {
       expect(planUnreadBackfill(deletedUnread, DELETED).kind).not.toBe('stamp');
       // ...and the SAME row against a live contact stamps, which is what makes
       // this a precedence test rather than a restatement of rule 4.
-      expect(planUnreadBackfill(deletedUnread, NO_DELETED_CONTACTS)).toEqual({ kind: 'stamp' });
+      expect(planUnreadBackfill(deletedUnread, NO_CONTACT_KEYS)).toEqual({ kind: 'stamp' });
     });
 
     it('a closed relay whose participant is deleted still takes the CLOSE rule (2 before 3)', () => {
@@ -178,7 +179,7 @@ describe('planUnreadBackfill', () => {
 
   describe('rule 4 - stamp', () => {
     it('stamps an unread row with no flag (the migration proper)', () => {
-      expect(planUnreadBackfill(row({ unread_count: 1 }), NO_DELETED_CONTACTS)).toEqual({
+      expect(planUnreadBackfill(row({ unread_count: 1 }), NO_CONTACT_KEYS)).toEqual({
         kind: 'stamp',
       });
     });
@@ -187,7 +188,7 @@ describe('planUnreadBackfill', () => {
       expect(
         planUnreadBackfill(
           row({ unread_count: 1, unread_flag: UNREAD_FLAG_VALUE }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'skip' });
     });
@@ -202,7 +203,7 @@ describe('planUnreadBackfill', () => {
         participant_phone: '+15550100002',
         unread_count: 4,
       };
-      expect(planUnreadBackfill(legacy, NO_DELETED_CONTACTS)).toEqual({ kind: 'stamp' });
+      expect(planUnreadBackfill(legacy, NO_CONTACT_KEYS)).toEqual({ kind: 'stamp' });
     });
   });
 
@@ -211,32 +212,32 @@ describe('planUnreadBackfill', () => {
       expect(
         planUnreadBackfill(
           row({ unread_count: 0, unread_flag: UNREAD_FLAG_VALUE }),
-          NO_DELETED_CONTACTS,
+          NO_CONTACT_KEYS,
         ),
       ).toEqual({ kind: 'remove' });
     });
 
     it('removes the flag when the count attribute is ABSENT entirely', () => {
       expect(
-        planUnreadBackfill(row({ unread_flag: UNREAD_FLAG_VALUE }), NO_DELETED_CONTACTS),
+        planUnreadBackfill(row({ unread_flag: UNREAD_FLAG_VALUE }), NO_CONTACT_KEYS),
       ).toEqual({ kind: 'remove' });
     });
   });
 
   describe('rule 6 - already correct', () => {
     it('skips a read row with no flag', () => {
-      expect(planUnreadBackfill(row({ unread_count: 0 }), NO_DELETED_CONTACTS)).toEqual({
+      expect(planUnreadBackfill(row({ unread_count: 0 }), NO_CONTACT_KEYS)).toEqual({
         kind: 'skip',
       });
     });
 
     it('skips a freshly imported row that carries no unread attributes at all', () => {
-      expect(planUnreadBackfill(row(), NO_DELETED_CONTACTS)).toEqual({ kind: 'skip' });
+      expect(planUnreadBackfill(row(), NO_CONTACT_KEYS)).toEqual({ kind: 'skip' });
     });
 
     it('treats a non-numeric unread_count as zero rather than throwing', () => {
       expect(
-        planUnreadBackfill(row({ unread_count: 'two' }), NO_DELETED_CONTACTS),
+        planUnreadBackfill(row({ unread_count: 'two' }), NO_CONTACT_KEYS),
       ).toEqual({ kind: 'skip' });
     });
   });
@@ -244,7 +245,7 @@ describe('planUnreadBackfill', () => {
 
 describe('deletedAtForItem', () => {
   it('resolves by phone FIRST, matching the runtime hydration order', () => {
-    const keys: DeletedContactKeys = {
+    const keys: ContactKeyIndex = {
       phones: new Set([DELETED_PHONE]),
       emails: new Set([DELETED_EMAIL]),
       deletedAtByKey: new Map([
@@ -268,6 +269,26 @@ describe('deletedAtForItem', () => {
 
   it('is undefined for a live contact', () => {
     expect(deletedAtForItem(row(), DELETED)).toBeUndefined();
+  });
+
+  it('DECIDES FROM THE PHONE ALONE when it belongs to ANY contact, live or deleted', () => {
+    // Adversarial A5. The runtime resolves findByPhone FIRST and, if it returns
+    // a contact - live or deleted - never consults findByEmail. So a key index
+    // that only knows DELETED phones makes the backfill fall through to an
+    // email owned by someone else entirely, and decide "deleted thread" about a
+    // LIVE contact's unread. The index therefore carries EVERY contact's keys;
+    // `deletedAtByKey` is what distinguishes them.
+    const keys: ContactKeyIndex = {
+      phones: new Set([LIVE_PHONE, DELETED_PHONE]),
+      emails: new Set([DELETED_EMAIL]),
+      deletedAtByKey: new Map([
+        [DELETED_PHONE, DELETED_AT],
+        [DELETED_EMAIL, DELETED_AT],
+      ]),
+    };
+    const mixed = row({ participant_phone: LIVE_PHONE, participant_email: DELETED_EMAIL });
+    expect(deletedAtForItem(mixed, keys)).toBeUndefined();
+    expect(planUnreadBackfill({ ...mixed, unread_count: 3 }, keys)).toEqual({ kind: 'stamp' });
   });
 });
 
@@ -486,10 +507,10 @@ describe('backfillUnreadFlag runner - conditional writes under concurrency', () 
       expect(fake.writes).toEqual([{ conversationId: 'conv-legacy', applied: false }]);
       expect('unread_flag' in legacy).toBe(false);
       expect(flagMatchesCount(legacy)).toBe(true);
-      // The counter reports ATTEMPTS, not landed writes - which is exactly why
-      // the run report cannot be trusted to notice this and the row state is
-      // what the test pins.
-      expect(result.stamped).toBe(1);
+      // ...and the run report SAYS so (adversarial A8): the applied counter does
+      // not claim a write that lost its condition.
+      expect(result.stamped).toBe(0);
+      expect(result.skippedOnCondition.stamp).toBe(1);
     });
 
     it('still stamps when nothing races (the migration proper)', async () => {
@@ -558,7 +579,9 @@ describe('backfillUnreadFlag runner - conditional writes under concurrency', () 
       expect(thread['unread_count']).toBe(2);
       expect(thread['unread_flag']).toBe(UNREAD_FLAG_VALUE);
       expect(flagMatchesCount(thread)).toBe(true);
-      expect(result.deletedReset).toBe(1);
+      expect(result.deletedReset).toBe(0);
+      expect(result.skippedOnCondition.deletedReset).toBe(1);
+      // The probe happened either way - it is a READ, not a write.
       expect(result.probed).toBe(1);
     });
 
@@ -630,7 +653,8 @@ describe('backfillUnreadFlag runner - conditional writes under concurrency', () 
       expect(group['unread_count']).toBe(4);
       expect(group['status']).toBe('open');
       expect(flagMatchesCount(group)).toBe(true);
-      expect(result.closedReset).toBe(1);
+      expect(result.closedReset).toBe(0);
+      expect(result.skippedOnCondition.closedReset).toBe(1);
     });
 
     it('still zeroes a relay group still closed and still at the observed count', async () => {
@@ -655,6 +679,165 @@ describe('backfillUnreadFlag runner - conditional writes under concurrency', () 
       expect('unread_flag' in group).toBe(false);
       expect(flagMatchesCount(group)).toBe(true);
       expect(result.closedReset).toBe(1);
+    });
+  });
+
+  describe('the contact-key pre-pass (adversarial A5)', () => {
+    it('does NOT reset a LIVE contact thread whose participant_email belongs to a deleted one', async () => {
+      // participant_email is a LAST-WRITER HINT (conversationsRepo's own note on
+      // attachEmailToConversation), so a thread can carry a phone owned by a
+      // live contact and an email owned by a soft-deleted one. The runtime stops
+      // at findByPhone and says "live contact, keep the unread"; a pre-pass that
+      // only knew DELETED phones fell through to the email and reset - a silent,
+      // irreversible zero on a live person's thread, and the `reset` condition
+      // guards the observed COUNT, not the contact identity, so nothing caught
+      // it.
+      const thread: Row = {
+        conversationId: 'conv-live-with-stale-email',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: LIVE_PHONE,
+        participant_email: DELETED_EMAIL,
+        unread_count: 3,
+      };
+      const fake = fakeDoc({
+        [CONVERSATIONS_TABLE]: [thread],
+        [CONTACTS_TABLE]: [
+          { contactId: 'c-live', type: 'tenant', status: 'searching', phone: LIVE_PHONE },
+          {
+            contactId: 'c-gone-mail',
+            type: 'tenant',
+            status: 'active',
+            email: DELETED_EMAIL,
+            deleted_at: DELETED_AT,
+          },
+        ],
+      });
+
+      const result = await backfillUnreadFlag({
+        doc: fake.doc,
+        env: TEST_ENV,
+        messagesRepo: fakeMessages(undefined),
+      });
+
+      // STAMPED, not probed and not reset.
+      expect(result.probed).toBe(0);
+      expect(result.deletedReset).toBe(0);
+      expect(result.stamped).toBe(1);
+      expect(thread['unread_count']).toBe(3);
+      expect(thread['unread_flag']).toBe(UNREAD_FLAG_VALUE);
+      expect(flagMatchesCount(thread)).toBe(true);
+    });
+
+    it('still probes when the phone belongs to nobody and the EMAIL is the deleted contact', async () => {
+      // The fall-through is not removed, only demoted: it applies exactly when
+      // the phone resolves to no contact at all, which is the runtime's order.
+      const thread: Row = {
+        conversationId: 'conv-email-only',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_email: DELETED_EMAIL,
+        unread_count: 1,
+        unread_flag: UNREAD_FLAG_VALUE,
+      };
+      const fake = fakeDoc({
+        [CONVERSATIONS_TABLE]: [thread],
+        [CONTACTS_TABLE]: [
+          {
+            contactId: 'c-gone-mail',
+            type: 'tenant',
+            status: 'active',
+            email: DELETED_EMAIL,
+            deleted_at: DELETED_AT,
+          },
+        ],
+      });
+
+      const result = await backfillUnreadFlag({
+        doc: fake.doc,
+        env: TEST_ENV,
+        messagesRepo: fakeMessages({ direction: 'outbound', created_at: '2026-08-20T00:00:00.000Z' }),
+      });
+
+      expect(result.probed).toBe(1);
+      expect(result.deletedReset).toBe(1);
+      expect(thread['unread_count']).toBe(0);
+      expect('unread_flag' in thread).toBe(false);
+    });
+  });
+
+  describe('the run report counts OUTCOMES, not attempts (adversarial A8)', () => {
+    it('splits a lost conditional write out of the applied counter', async () => {
+      // The run report is the operator's only feedback on a ONE-SHOT prod
+      // migration, and the RUNBOOK tells them to dry-run first and compare.
+      // Counting attempts made a live run in which most conditions LOST look
+      // exactly like a clean one - and a lost `stamp` is precisely the case the
+      // guard exists for.
+      const legacy: Row = {
+        conversationId: 'conv-legacy',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: '+15550100002',
+        unread_count: 4,
+      };
+      let raced = false;
+      const fake = fakeDoc(
+        { [CONVERSATIONS_TABLE]: [legacy], [CONTACTS_TABLE]: [] },
+        {
+          beforeWrite: () => {
+            if (raced) return;
+            raced = true;
+            legacy['unread_count'] = 0;
+          },
+        },
+      );
+
+      const result = await backfillUnreadFlag({
+        doc: fake.doc,
+        env: TEST_ENV,
+        messagesRepo: fakeMessages(undefined),
+      });
+
+      expect(raced).toBe(true);
+      expect(fake.writes).toEqual([{ conversationId: 'conv-legacy', applied: false }]);
+      expect(result.stamped).toBe(0);
+      expect(result.skippedOnCondition).toEqual({
+        stamp: 1,
+        remove: 0,
+        closedReset: 0,
+        deletedReset: 0,
+      });
+    });
+
+    it('a DRY RUN still reports the PLAN, with nothing skipped', async () => {
+      // Nothing is written, so nothing can lose a condition: the dry run's job
+      // is to say what WOULD happen, and comparing it against the live run's
+      // applied counts is how the operator sees a race-heavy run.
+      const legacy: Row = {
+        conversationId: 'conv-legacy',
+        type: 'tenant_1to1',
+        status: 'open',
+        participant_phone: '+15550100002',
+        unread_count: 4,
+      };
+      const fake = fakeDoc({ [CONVERSATIONS_TABLE]: [legacy], [CONTACTS_TABLE]: [] });
+
+      const result = await backfillUnreadFlag({
+        dryRun: true,
+        doc: fake.doc,
+        env: TEST_ENV,
+        messagesRepo: fakeMessages(undefined),
+      });
+
+      expect(fake.writes).toEqual([]);
+      expect(result.stamped).toBe(1);
+      expect(result.skippedOnCondition).toEqual({
+        stamp: 0,
+        remove: 0,
+        closedReset: 0,
+        deletedReset: 0,
+      });
+      expect('unread_flag' in legacy).toBe(false);
     });
   });
 });

@@ -35,8 +35,12 @@ export interface AutoReadHandle {
 export const AUTO_READ_DRAIN_TIMEOUT_MS = 2000;
 
 /** Await `promise`, giving up after AUTO_READ_DRAIN_TIMEOUT_MS. Never rejects -
- *  a failed auto-read is a settled auto-read as far as the drain is concerned. */
-function drainWithBound(promise: Promise<unknown>): Promise<void> {
+ *  a failed auto-read is a settled auto-read as far as the drain is concerned.
+ *
+ *  Exported for `routes/conversation/useMarkThreadRead`: the two auto-read hooks
+ *  implement ONE contract and this file is its home (it is the older, canonical
+ *  auto-read). Two copies of a timeout bound would drift. */
+export function drainWithBound(promise: Promise<unknown>): Promise<void> {
   return new Promise<void>((resolve) => {
     let settled = false;
     const finish = (): void => {

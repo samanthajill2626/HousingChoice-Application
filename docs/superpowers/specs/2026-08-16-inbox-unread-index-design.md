@@ -395,17 +395,29 @@ undocumented tie order):
   unread thread costs an index slot + a contact resolution + a message
   probe per request (the round-2 probe short-circuit is withdrawn - 4.3
   step 2), with the MESSAGE half bounded per request by the PROBE BOUND
-  below and the CONTACT half unbounded by design (one resolution per 1:1
-  item walked; the BatchGet follow-up owns it). This endpoint is the
+  below and the CONTACT half unbounded by design. CORRECTED (fix wave 3,
+  adversarial r3 finding 3): that contact half is O(SCANNED INDEX ITEMS),
+  NOT O(visible unread) and not O(rows returned). A hidden deleted-contact
+  thread PASSES `isUnreadVisible` - the contact lookup is how the collector
+  discovers the contact is deleted at all - so a 2,000-thread wall of hidden
+  residue costs ~2,000 serial contact resolutions to answer ZERO, on every
+  badge request. Nothing bounds it in v1 (bounding it would re-create the
+  walk-stop class round 2 blocked: a bound past which live rows go
+  uncounted); the scanned-items WARN fires at 500, long before that, and
+  docs/issues/contacts-batchget-amplified-reads.md is the remedy. This endpoint is the
   highest-frequency call in the app (every
   SPA boot + every debounced conversation event per connected dashboard).
   TWO rate-limited tripwires, because the two costs grow independently
   (round-4 finding: the scanned-items WARN alone misses the probe cost -
   tens of deleted residents degrade this endpoint long before 500 scanned
   items): the scanned-items WARN (4.3, threshold 500) and a
-  DELETED-RESIDENT PROBE WARN when a single request issues more than
-  UNREAD_DELETED_PROBE_WARN = 25 resurfacing probes. Both through
-  lib/rateLimitedWarn.ts; both are the signal to revisit accrual.
+  DELETED-RESIDENT PROBE WARN when a single request WASTES more than
+  UNREAD_DELETED_PROBE_WARN = 25 probes-plus-skips. AMENDED (fix wave 3,
+  conformance r3 finding 1): the threshold counts WASTED + SKIPPED, the same
+  quantity the PROBE BOUND below counts, never probes ATTEMPTED - otherwise
+  it fires on the resurfacing world that bullet declares legitimate.
+  Productive probes stay on the payload; they cannot trip the alarm. Both
+  through lib/rateLimitedWarn.ts; both are the signal to revisit accrual.
 - PROBE BOUND (AMENDED, A2; REWRITTEN in fix wave 2, adversarial r2 findings
   1-3 and conformance r2 finding 1.1): the probe WARN is backed by a HARD
   BOUND of UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1
@@ -424,19 +436,29 @@ undocumented tie order):
     stopped the walk, which turned 27 hidden threads ahead of live unread
     into a page of ZERO rows with a NULL cursor - the inbox error state, with
     a Retry that reproduces itself.)
-  Consequence, declared: a result carrying skipped threads reports
-  `truncated`, i.e. the count is a FLOOR, even when the stream drained - the
-  answer for those threads was assumed, not read. Threads skipped at the
-  bound are re-evaluated by the NEXT request from the top, not deferred
-  within this one. The residue itself is what has to go (the delete-time
-  reset and backfill rule 3). The +1 keeps the bound above the tripwire so
-  tripping it always warns, and the WARN reports probes ATTEMPTED and
-  SKIPPED separately so it can distinguish 26 residents from 2,600.
+  Consequence, declared - AMENDED (fix wave 3, adversarial r3 finding 2):
+  skipped threads do NOT by themselves make the result `truncated`. A DRAINED
+  stream is a NATURAL end regardless of how many deleted-contact threads the
+  bound called hidden without reading them: the assumption past the bound is
+  "hidden", which is the overwhelmingly likely truth inside a wall of
+  confirmed-hidden threads and is exactly what an empty page already means.
+  Fix wave 2's rule (skips force a floor) put a residue-only, GENUINELY
+  caught-up org into the client's inbox FAILURE state permanently -
+  `serverRowCount === 0 && truncated` - over a deterministic prefix whose
+  Retry reproduces itself. `truncated` keeps its 4.5 step 3 meaning: the scan
+  ended EARLY (budget, depth cap, or an undeliverable lag drop). The skip
+  total and the probe WARN remain the operator-facing signal that the wall is
+  there. Threads skipped at the bound are re-evaluated by the NEXT request
+  from the top, not deferred within this one. The residue itself is what has
+  to go (the delete-time reset and backfill rule 3). The +1 keeps the bound
+  above the tripwire so tripping it always warns, and the WARN reports probes
+  ATTEMPTED, WASTED and SKIPPED separately so it can distinguish 26 residents
+  from 2,600.
   NO MEMO: fix wave 1's per-collect memo keyed on the participant key is
   REMOVED. The claim arbiters (`phone#<E164>`, `claimEmail`) guarantee at
   most one OPEN conversation per key, so it could never hit. Contact
-  resolution stays one lookup per visible unread row, which is this section's
-  stated cost model, and batching it belongs to
+  resolution stays one lookup per 1:1 index item WALKED - see the corrected
+  cost sentence above - and batching it belongs to
   docs/issues/contacts-batchget-amplified-reads.md.
 - SILENT ZERO (AMENDED, C1): when the badge answers 0 with `truncated` set, the
   server logs a rate-limited WARN. A zero renders as NO badge, which is
@@ -478,7 +500,8 @@ today's pager provides, inbox.ts:755-800):
    collect call, (c) the request's WASTED-probe total, threaded the same way
    (AMENDED, fix wave 2: 4.4 PROBE BOUND), and (d) the LAG-SHAPED hydration
    drops, retried once at the end of the request and reported as `truncated`
-   if still unresolved (AMENDED, fix wave 2: see 12b, A3 COMPLETED).
+   if still unresolved (AMENDED, fix wave 2: see 12b, A3 COMPLETED;
+   DISCRIMINATOR CORRECTED and the retry BOUNDED in fix wave 3: see 12c).
 2. `nextCursor` keys on CONSUMPTION, never scan state: null when the final
    collect reported `consumedAll`; null when minting the cursor would
    exceed SEEN_SET_MAX (the declared depth cap, 4.3); otherwise - INCLUDING a
@@ -546,6 +569,24 @@ Unread tab simply never shows the group notice again (previously it could).
 HYDRATION (bounded by the page limit). Hydration reads are the FRESHEST
 available sources but are still eventually consistent (section 6 - the
 round-1 "page is fresh" claim was wrong and is withdrawn):
+
+THE LAG DISCRIMINATOR (AMENDED, fix wave 3 - adversarial r3 finding 1,
+conformance r3 findings 6 and 7). A contact candidate whose fresh sum is 0 is
+classified by ONE authoritative base-table `getById` of the thread the index
+offered (`unreadConversations[0]` - the collector emits a candidate AT its
+first offered thread, so [0] IS that thread). Base still unread -> LAG: the
+participant image is behind, retry once. Base read, closed or absent -> an
+ordinary mark-read race (or a closed thread the index has not caught up with):
+drop it, do not retry, do not truncate. Fix wave 2 asked instead whether the
+offered thread was ABSENT from the fresh participant set, which is not the
+shape a lagging GSI produces - a GSI replicates the whole projected item, so
+the lag window shows the thread PRESENT carrying its pre-increment
+`unread_count: 0` - so the dominant lag shape was classified authoritative and
+neither retried nor flagged. THE RETRY IS BOUNDED at the page `limit`
+(adversarial r3 finding 4 / conformance r3 finding 2): a lagging or degraded
+participant GSI makes every candidate a lag-shaped drop, and an unbounded
+retry doubles the reads of a page that returns nothing. Retry and unresolved
+counts ride the request-level `inbox feed assembled` line.
 
 - contact candidates: `contactConversations` - the aggregateInbox wrapper
   filtering conversationsForContact to `status === 'open' && type !==
@@ -636,10 +677,19 @@ the 1:1 bucket - preserving per-conversation type/timestamp semantics.
   the deleted test runs on every 1:1 item WALKED, and each distinct contact is
   a real `contacts.getById` (the request cache is per contact ID, so the move
   is NOT free as this bullet first implied). The skip work is therefore bounded
-  at TODAY_UNREAD_CAP DISTINCT skipped contacts; past that the pass stops and
-  warnIfCapped announces it under the label `unread:deleted_skips`. Unbounded,
-  a deleted-residue head could cost up to UNREAD_WALK_LIMIT contact Gets on a
-  route every connected dashboard SSE-refetches.
+  at TODAY_UNREAD_CAP DISTINCT skipped contacts, and warnIfCapped announces the
+  state under the label `unread:deleted_skips`. Unbounded, a deleted-residue
+  head could cost up to UNREAD_WALK_LIMIT contact Gets on a route every
+  connected dashboard SSE-refetches.
+  THE BOUND STOPS THE LOOKUPS, NEVER THE WALK (AMENDED, fix wave 3 -
+  adversarial r3 finding 5). Fix wave 2 BROKE the pass past the bound, which is
+  the walk-stop both reviewers blocked for the inbox in round 2, on the one
+  surface with no cursor, no `truncated` and no Load more: every live unread
+  thread behind the wall disappeared permanently. Past the bound a 1:1 item is
+  treated as NON-deleted and the existing TODAY_UNREAD_CAP ends the pass; a
+  contact already known deleted stays filtered for free. DECLARED COST: a
+  deleted contact met past the bound CAN render an Unreplied row - bounded by
+  the same 100-row cap, and the lesser harm against hiding live work.
 - NET COST: Today gains one index query and loses nothing. G5 is a
   correctness fix, not a cost fix.
 
@@ -1155,16 +1205,21 @@ none of it reverses a human decision made at the spec gate.
 - Probe tripwire: the WARN payload reports probes ATTEMPTED and threads
   SKIPPED separately, so the badge path can still say how DEEP the wall is
   once the reads are capped.
-- A3 COMPLETED (4.5 step 1). Fix wave 1 stopped a hydration-dropped candidate
-  being suppressed; it did not make it reachable. The fill loop now retries
-  LAG-SHAPED drops ONCE at the end of the request (after every other read, so
-  a lagging participant GSI has had time to settle), and a drop the retry
-  cannot fix sets `truncated` on the page - it must never report a natural end
-  while the badge counts a row it could not deliver. LAG-SHAPED is the
-  discriminator: a fresh read that CONTAINS the offered thread and reports it
-  read is authoritative (the ordinary mark-read race) and neither retried nor
-  truncating - marking those would render the inbox ERROR state at the end of
-  a successful triage session, the regression C2 fixed.
+- A3 COMPLETED (4.5 step 1) - IMPLEMENTER-PROPOSED, PLANNER-RATIFIED r3
+  (conformance r3 finding 4: the adjudication stated a BLANKET rule, the
+  implementer narrowed it to lag-shaped drops and wrote the narrowing into this
+  authority document before the planner had ruled; the narrowing is right on
+  the merits and is ratified in `planner-adjudications-r3.md`). Fix wave 1
+  stopped a hydration-dropped candidate being suppressed; it did not make it
+  reachable. The fill loop now retries LAG-SHAPED drops ONCE at the end of the
+  request (after every other read, so a lagging participant GSI has had time to
+  settle), and a drop the retry cannot fix sets `truncated` on the page - it
+  must never report a natural end while the badge counts a row it could not
+  deliver. Only lag-shaped drops qualify: marking an ordinary mark-read race
+  would render the inbox ERROR state at the end of a successful triage session,
+  the regression C2 fixed. HOW lag is recognized was WRONG here (fix wave 2
+  keyed on GSI membership) and is CORRECTED in fix wave 3 - see 12c and the
+  hydration section of 4.5.
 - A6 CORRECTED (no spec claim). The contact-delete reset's authoritative emits
   move AFTER propagateContactPresenceChange so they are genuinely last on the
   wire, and the comment's premise is corrected: no dashboard consumer reads
@@ -1177,3 +1232,67 @@ none of it reverses a human decision made at the spec gate.
   paragraph and 4.3 step 2's "UNCONDITIONALLY" are corrected in place, each
   labeled. The step-2 edit is the one that touches a carried-through gate
   ruling and is surfaced to the human in the merge verdict.
+
+## 12c. Post-review amendments, fix wave 3 (2026-08-16, planner-ratified)
+
+A THIRD independent review round (conformance r3, plan-blind adversarial r3)
+verified both round-2 BLOCKERs fixed and found that two of wave 2's remedies
+still LIE to the operator - one about what lag looks like, one about what an
+empty page means. Everything here is post-gate; none of it reverses a human
+decision made at the spec gate. Adjudications: `planner-adjudications-r3.md`.
+
+- LAG DISCRIMINATOR CORRECTED (4.5 hydration; adversarial r3 finding 1,
+  conformance r3 findings 6 and 7). Wave 2 asked whether the offered thread was
+  ABSENT from the fresh participant set. A GSI replicates the whole projected
+  ITEM, so the lag window shows the thread PRESENT carrying its pre-increment
+  `unread_count: 0` - the dominant production shape was therefore called
+  authoritative: never retried, and not even reported through `truncated`, so
+  the page claimed a clean natural end while the badge went on counting the row.
+  The contact arm now discriminates with ONE authoritative base-table `getById`
+  of the offered thread, exactly as the non-contact arm already does. Base
+  unread -> lag; base read, closed or gone -> a real mark-read, dropped without
+  a retry. `unreadConversations[0]` IS the offered thread and the code says why.
+- LAG RETRY BOUNDED (4.5 step 1(d); adversarial r3 finding 4, conformance r3
+  finding 2). At most `limit` retries per request. Correcting the predicate
+  makes the retry live, and a lagging or DEGRADED participant GSI (a thrown
+  lookup degrades to an empty set) turns every candidate into a lag-shaped drop,
+  so an unbounded retry doubles the reads of a page that returns nothing.
+  DEVIATION, declared: the adjudication asked for the retry count on "the
+  request-level WARN payload"; it rides the request-level `inbox feed assembled`
+  INFO line instead, with `unresolvedDrops`. Reason: once capped at `limit` the
+  retry is a per-request STATISTIC rather than a tripwire, no WARN in this route
+  fires on the shape that produces it (the reviewer's own 200-lagged
+  reproduction trips neither existing tripwire), and that line already carries
+  scanned / seen / truncated.
+- DRAINED IS NATURAL (4.4 PROBE BOUND consequence; adversarial r3 finding 2).
+  Skipped-but-unprobed deleted threads no longer force `truncated` on a walk
+  that drained. Wave 2's rule made a residue-only, genuinely caught-up org
+  render the inbox FAILURE banner permanently. Full statement at 4.4.
+- TODAY BOUNDS THE LOOKUPS (4.6; adversarial r3 finding 5). The unread pass
+  keeps walking past the deleted-skip bound and stops LOOKING UP instead, with
+  the declared cost that a deleted contact met past the bound can render.
+- PROBE TRIPWIRE THRESHOLD (4.4 COST; conformance r3 finding 1). Fires on
+  WASTED + SKIPPED, never on probes ATTEMPTED, so the resurfacing world wave 2
+  declared legitimate stops raising "revisit index accrual" on every request.
+  The payload reports attempted, wasted and skipped.
+- ZERO-COUNT WARN DEPTH (4.4 SILENT ZERO; adversarial r3 finding 6 /
+  conformance r3 finding 8). `warnTruncatedZeroCount` gains `skipped`.
+- COST CLAIM CORRECTED (4.4 COST; adversarial r3 finding 3, conformance r3
+  finding 3). The contact half is O(scanned index items), not O(visible
+  unread): hidden deleted-contact threads pass `isUnreadVisible`, and the
+  contact lookup is what discovers they are hidden. NO further bound in v1 -
+  bounding contact resolution would re-create the walk-stop class round 2
+  blocked - so the scanned-items WARN (500) is the trigger and
+  docs/issues/contacts-batchget-amplified-reads.md (raised to HIGH, unread
+  collector named the priority surface) is the remedy. Surfaced to the human.
+- A6 CALL SITE GUARDED (no spec claim; conformance r3 finding 9). The contact
+  delete wraps `propagateContactPresenceChange` so a throw there cannot 500 an
+  already-persisted delete or swallow the authoritative reset emits behind it.
+- 12b RELABELED (conformance r3 finding 4): its A3 bullet records an
+  implementer narrowing as ratified design; it now says so, and the planner's
+  ratification is on the record in the r3 adjudications.
+- ACCEPTED, unchanged: an `unresolvedDrops`-only truncation on a FULL page has
+  no client reader (adversarial r3 finding 7) - the flag is on the wire for the
+  future affordance 4.5 step 3 already declares; and the two surfaces derive
+  `truncated` by different routes (conformance r3 finding 5) - they converge on
+  the same wire value, and the code now cross-references instead of forking.

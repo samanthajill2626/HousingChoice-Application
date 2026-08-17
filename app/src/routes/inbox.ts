@@ -1514,6 +1514,15 @@ export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnrea
   // Deliberately no per-request INFO line: this is the highest-frequency call in
   // the app (every SPA boot plus every debounced conversation event, per
   // connected dashboard). The rate-limited WARN tripwires are the signal.
+  //
+  // TWO SURFACES, ONE FACT (conformance r3 finding 5). The badge returns the
+  // collector's `truncated` verbatim while the unread PAGE re-derives its own
+  // from the cursor branch chain (the page can end early for reasons the
+  // collector cannot see: the seen-set depth cap, an undeliverable lag drop).
+  // The two converge on the same wire meaning - "the scan ended EARLY, so this
+  // answer is a floor" - and the collector's derivation, with the fix-wave-3
+  // rule that a drained stream is a natural end, is at
+  // lib/unreadFeed.ts `collectUnreadRows`' return.
   return {
     unreadCount: result.candidates.length,
     capped: result.capped,

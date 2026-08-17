@@ -35,12 +35,30 @@ probes and stops the PROBING, never the WALK: past the bound a deleted-contact
 thread is treated as hidden without a read, and live contacts, unknowns, groups
 and relay threads behind the wall are still counted and still emitted. So the
 27-hidden world answers 5 (its true visible count) and the page returns those 5
-rows, with `truncated` marking the answer as a floor. What remains, and what this
-issue still tracks: when the visible count is genuinely ZERO behind such a wall,
-the badge renders nothing and the page renders the inbox error state with a Retry
-that reproduces itself - unchanged in shape from the raw-scan-budget case below,
-but now reachable via residue as well as via budget. The UI affordance is the
-fix; the residue cleanup (delete-time reset + backfill rule 3) is the prevention.
+rows.
+
+**A DRAINED STREAM IS A NATURAL END (fix wave 3, adversarial r3 finding 2).**
+Wave 2 additionally made those skipped threads force `truncated` even when the
+walk then drained its supply, and wave 2's own note called what remained "the
+genuinely-zero case". That understated it: an org whose index holds nothing but
+hidden residue and is otherwise CAUGHT UP got a zero badge marked as a floor and
+an empty page marked truncated, which is the client's inbox FAILURE state
+(`serverRowCount === 0 && truncated`) - permanently, over a deterministic prefix
+whose Retry reproduces it. That is the steady state of any org past ~26 hidden
+residents, and residue accrues by design. The rule now: skipped-but-unprobed
+threads do NOT make a drained walk an early end. The assumption past the bound is
+"hidden", which is exactly what an empty page means, and a hidden row is one no
+reader would have shown. `truncated` is back to naming an EARLY end only - the
+raw-scan budget, the depth cap, or a lag-drop the request could not deliver.
+
+WHAT THIS ISSUE STILL TRACKS, therefore, is the ORIGINAL silent zero: a badge
+that answers 0 because its WALK STOPPED EARLY (the budget case reproduced below)
+renders as no badge at all, indistinguishable from caught up. The server-side
+`unread_badge_truncated_zero` WARN - which now also carries the skipped depth -
+is the only place that state is observable; the UI affordance is the fix. The
+residue cleanup (delete-time reset + backfill rule 3) remains the prevention for
+the wall itself, and the deleted-probe tripwire (wasted + skipped) is what
+reports it.
 
 **Problem.** Filed from the plan-blind adversarial review of
 `feat/inbox-unread-index` (finding 1, CONFIRMED - reproduced against the real

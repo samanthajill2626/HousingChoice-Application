@@ -33,6 +33,13 @@ export function Inbox(): React.JSX.Element {
   // it made the notice tick 4, 3, 2 while the truncation claim stood.
   const groupRowCount = inbox.groupRowsShown;
   const groupNoun = groupRowCount === 1 ? 'group text' : 'group texts';
+  // THE early-end condition, named once so the failure surface and the
+  // empty-state below stay exact complements: the SERVER handed down no rows AND
+  // said the unread feed ended early. Both halves are server statements - see
+  // `InboxState.serverRowCount`. When it is false and the list is nonetheless
+  // empty (every row marked read on a truncated page), "all caught up" is the
+  // truth and the block below says so.
+  const serverEndedEarlyEmpty = inbox.serverRowCount === 0 && inbox.truncated;
 
   const selectFilter = useCallback(
     (next: InboxFilter) => {
@@ -111,7 +118,19 @@ export function Inbox(): React.JSX.Element {
 
       {inbox.status === 'loading' ? <Spinner center /> : null}
 
-      {inbox.status === 'error' ? (
+      {/* An empty page that the server TRUNCATED is not "all caught up" - the
+          feed ended early, so we reuse the SHIPPED failure surface verbatim
+          rather than inventing copy (spec 4.5 step 3). Retry refetches the same
+          prefix with a fresh budget; it may fail again, and not lying is the
+          point. The empty-state block below carries the matching `!truncated`
+          so the two can never render together.
+
+          Gated on `serverRowCount`, NOT `rows.length` (adversarial 4): both
+          `truncated` and this count describe the SERVER page, while `rows` is
+          the client-filtered list that the Unread tab empties as the operator
+          marks rows read. Keyed on `rows` this banner appeared at the END of a
+          successful triage session on any truncated page. */}
+      {inbox.status === 'error' || (inbox.status === 'ready' && serverEndedEarlyEmpty) ? (
         <div className={styles.error} role="alert">
           <p>We couldn&apos;t load your inbox.</p>
           <button type="button" className={styles.retry} onClick={() => inbox.retry()}>
@@ -127,7 +146,7 @@ export function Inbox(): React.JSX.Element {
         </div>
       ) : null}
 
-      {inbox.status === 'ready' && inbox.rows.length === 0 ? (
+      {inbox.status === 'ready' && inbox.rows.length === 0 && !serverEndedEarlyEmpty ? (
         <div className={styles.empty}>
           <p className={styles.emptyTitle}>{empty.title}</p>
           <p className={styles.emptyBody}>{empty.body}</p>

@@ -10,13 +10,14 @@ import {
   createInboxProfilePlan,
   createTimedRepository,
   summarizeInboxTrace,
+  type InboxProfilePlanEntry,
   type InboxTraceEvent,
 } from '../src/lib/inboxDiagnostics.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createMessagesRepo } from '../src/repos/messagesRepo.js';
 import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
-import { aggregateInbox, type InboxFilter } from '../src/routes/inbox.js';
+import { aggregateInbox, countUnreadRows, type InboxFilter } from '../src/routes/inbox.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 const tablePrefix = process.env.TABLE_PREFIX ?? 'hc-local-';
@@ -37,15 +38,23 @@ const env = { ...process.env, TABLE_PREFIX: tablePrefix };
 const logger = pino({ level: 'silent' });
 
 const trace: InboxTraceEvent[] = [];
+// One row per executed case. The page fields and the badge fields are BOTH
+// optional because the two kinds measure different calls: a page case has a
+// filter/limit and reports cursor + group truncation, the badge case has
+// neither and reports the count endpoint's capped/truncated posture instead.
+// `rowCount` is the one field both carry (rows on the page / rows counted).
 const samples: Array<{
   caseId: string;
-  filter: InboxFilter;
-  limit: number;
+  kind: InboxProfilePlanEntry['kind'];
+  filter?: InboxFilter;
+  limit?: number;
   repeat: number;
   durationMs: number;
   rowCount: number;
-  hasNextCursor: boolean;
-  groupsTruncated: boolean;
+  hasNextCursor?: boolean;
+  groupsTruncated?: boolean;
+  capped?: boolean;
+  truncated?: boolean;
 }> = [];
 try {
   for (const profileCase of createInboxProfilePlan()) {
@@ -59,6 +68,52 @@ try {
       wallNow: () => new Date().toISOString(),
     };
     const repoDeps = { doc, env, logger };
+    const timedCalls = (): number =>
+      trace.filter((event) => event.caseId === profileCase.caseId && event.repeat === repeat).length;
+    if (profileCase.kind === 'unread-badge-endpoint') {
+      // The badge drives its OWN endpoint helper - no filter, no limit, no
+      // hydration - through the same timing proxies, so its per-operation trace
+      // is directly comparable with a page case's. countUnreadRows resolves
+      // exactly three repos (conversations, contacts, messages); a placements
+      // proxy would never be called, so it is not built here.
+      const count = await countUnreadRows({
+        logger,
+        conversationsRepo: createTimedRepository(
+          'conversations',
+          createConversationsRepo(repoDeps),
+          trace,
+          context,
+        ),
+        contactsRepo: createTimedRepository(
+          'contacts',
+          createContactsRepo(repoDeps),
+          trace,
+          context,
+        ),
+        messagesRepo: createTimedRepository(
+          'messages',
+          createMessagesRepo(repoDeps),
+          trace,
+          context,
+        ),
+      });
+      const durationMs = performance.now() - originMs;
+      samples.push({
+        caseId: profileCase.caseId,
+        kind: profileCase.kind,
+        repeat,
+        durationMs,
+        rowCount: count.unreadCount,
+        capped: count.capped,
+        truncated: count.truncated,
+      });
+      console.log(
+        `${profileCase.caseId}: ${durationMs.toFixed(1)} ms, ` +
+        `${count.unreadCount} unread rows counted, ` +
+        `${timedCalls()} timed calls`,
+      );
+      continue;
+    }
     const page = await aggregateInbox(
       { filter: profileCase.filter, limit: profileCase.limit },
       {
@@ -92,6 +147,7 @@ try {
     const durationMs = performance.now() - originMs;
     samples.push({
       caseId: profileCase.caseId,
+      kind: profileCase.kind,
       filter: profileCase.filter,
       limit: profileCase.limit,
       repeat,
@@ -103,7 +159,7 @@ try {
     console.log(
       `${profileCase.caseId}: ${durationMs.toFixed(1)} ms, ` +
       `${page.rows.length} rows, ` +
-      `${trace.filter((event) => event.caseId === profileCase.caseId && event.repeat === repeat).length} timed calls`,
+      `${timedCalls()} timed calls`,
     );
   }
 

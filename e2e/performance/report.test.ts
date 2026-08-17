@@ -576,8 +576,14 @@ describe('writePerformanceReport', () => {
       .flatMap((endpoint) => (
         endpoint.inboxRequestClass === undefined ? [] : [endpoint.inboxRequestClass]
       ));
+    // REVERSED vs requests.jsonl above, and deliberately so: that file keeps the
+    // declaration order (shell first), while contract observations are sorted by
+    // ENDPOINT SHAPE. The badge and the page were the same shape until the badge
+    // moved to /api/inbox/unread-count, which sorts after /api/inbox?filter&limit
+    // - so this pair flipping is the migration's own evidence that the two are no
+    // longer one shape distinguished only by a request class.
     expect(inboxRequestClasses).toEqual([
-      'inbox_badge', 'inbox_page_unread',
+      'inbox_page_unread', 'inbox_badge',
     ]);
   });
 

@@ -15,7 +15,8 @@ import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twi
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import {
   urgencyOf,
   type RelayCloseNagItem,
@@ -78,8 +79,14 @@ describe('today action-queue API (BE6/C7)', () => {
     return item;
   };
   const seedConversation = (conv: ConversationItem): ConversationItem => {
-    world.conversations.set(conv.conversationId, conv);
-    return conv;
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): Today's
+    // unread sections become index-fed, and the sparse byUnread index keys on
+    // `unread_flag` - an unread fixture with no flag would make `unreplied` and
+    // the untriaged-inbound `needs_you_now` rows silently EMPTY. An explicit
+    // `unread_flag` on the fixture still wins.
+    const item: ConversationItem = { ...unreadFlagFor(conv), ...conv };
+    world.conversations.set(item.conversationId, item);
+    return item;
   };
 
   const iso = (msFromNow: number): string => new Date(Date.now() + msFromNow).toISOString();
@@ -659,6 +666,297 @@ describe('today action-queue API (BE6/C7)', () => {
     });
   });
 
+  // --- ADVERSARIAL NEW-3: one contact, several unread threads, ONE row ---------
+  // contactThreads.ts models exactly one conversation PER PARTICIPANT KEY, so a
+  // person with a phone thread and an email thread reaches the unread pass
+  // TWICE. Both emitted an `unreplied` row with the same refType/refId.
+  it('a contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE unreplied row', async () => {
+    seedTenant('c-dupe', 'Dee', 'Dupe');
+    seedConversation({
+      conversationId: 'conv-dupe-phone',
+      participant_phone: '+15550108888',
+      participant_display_name: 'Dee Dupe',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+    seedConversation({
+      conversationId: 'conv-dupe-email',
+      participant_email: 'dee@example.test',
+      status: 'open',
+      last_activity_at: iso(-60_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+
+    expect(unrep.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
+    // The actual breakage: Today.tsx renders key={`${refType}:${refId}`} inside
+    // ONE <ul> per group, so two rows for one contact are duplicate React keys.
+    const keys = unrep.map((i) => `${i.refType}:${i.refId}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Newest-activity-first, so the PHONE thread is the representative - which
+    // is also why the surviving row carries a name rather than the email
+    // thread's blank `who`.
+    expect(unrep.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
+  });
+
+  it('a duplicate thread does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
+    // The cap is 100. Seed 99 single-thread contacts plus ONE contact owning two
+    // unread threads: 101 index rows, 100 distinct people. Deduping only at emit
+    // time would collect the duplicate into the cap and starve the oldest real
+    // contact, leaving 99 rows - so this pins that the dedupe runs BEFORE the
+    // cap is counted.
+    for (let i = 0; i < 99; i += 1) {
+      const id = `c-bulk-${String(i).padStart(3, '0')}`;
+      const phone = `+1555020${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Bulk', id);
+      seedConversation({
+        conversationId: `conv-bulk-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Bulk ${id}`,
+        status: 'open',
+        // Older than the duplicate pair below, so the pair is scanned first and
+        // the starved contact is one of these.
+        last_activity_at: iso(-200_000 - i * 1_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-twin', 'Twin', 'Threads');
+    for (const [suffix, offset] of [
+      ['phone', -10_000],
+      ['email', -20_000],
+    ] as const) {
+      seedConversation({
+        conversationId: `conv-twin-${suffix}`,
+        participant_phone: '+15550209999',
+        participant_display_name: 'Twin Threads',
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: 'c-twin', phone: '+15550209999' }],
+      } as ConversationItem);
+    }
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+
+    expect(new Set(ids).size).toBe(ids.length); // no duplicate React keys
+    expect(ids).toHaveLength(100); // every distinct person fits
+    expect(ids).toContain('c-twin');
+    // The OLDEST real contact is the one a wasted slot would have pushed off.
+    expect(ids).toContain('c-bulk-098');
+  });
+
+  it('a DELETED contact does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
+    // ADVERSARIAL A9. The deleted-contact test used to run in the EMIT loop,
+    // after the cap had already been spent - the same mistake the collect
+    // loop's own comment argues against for group threads. It got worse with
+    // the index source: the newest 100 UNREAD rows is exactly where resurfaced
+    // deleted contacts live by construction (the product rule keeps them unread
+    // indefinitely until someone reads them), where the newest 100 OPEN rows
+    // held only a small fraction. A hundred of them at the head of the index
+    // rendered Unreplied EMPTY, with warnIfCapped reporting "capped" rather
+    // than "filtered to nothing".
+    for (let i = 0; i < 100; i += 1) {
+      const id = `c-gone-${String(i).padStart(3, '0')}`;
+      const phone = `+1555030${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Gone',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-gone-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Gone ${id}`,
+        status: 'open',
+        // NEWEST, so they are scanned first and would fill the cap.
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-behind', 'Behind', 'Wall');
+    seedConversation({
+      conversationId: 'conv-behind',
+      participant_phone: '+15550309999',
+      participant_display_name: 'Behind Wall',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-behind', phone: '+15550309999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+
+    // The live person behind the wall is reachable, and no deleted contact is
+    // on the board.
+    expect(ids).toEqual(['c-behind']);
+  });
+
+  it('applies the deleted-contact rule to EVERY walked item: 250 deleted ahead of 5 live shows exactly the 5', async () => {
+    // ADVERSARIAL r3 FINDING 5 (fix wave 3). Fix wave 2 BROKE the pass past the
+    // bound, which is the same "stop the walk" decision both reviewers called
+    // BLOCKING for the inbox in round 2 - applied to the one surface with no
+    // cursor, no `truncated` on the wire and no Load more, so there is no
+    // forward path at all: every live unread thread behind the wall simply
+    // vanishes from Unreplied and the untriaged block, permanently, with only a
+    // server log line to say why.
+    //
+    // The bound now limits the LOOKUPS, not the walk: past it a 1:1 item is
+    // treated as non-deleted (the declared cost - a deleted contact past the
+    // bound can render) and the existing TODAY_UNREAD_CAP ends the pass.
+    for (let i = 0; i < 250; i += 1) {
+      const id = `c-deep-${String(i).padStart(3, '0')}`;
+      const phone = `+1555032${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Deep',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-deep-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Deep ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      const id = `c-alive-${i}`;
+      const phone = `+1555033${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Alive', String(i));
+      seedConversation({
+        conversationId: `conv-alive-${i}`,
+        participant_phone: phone,
+        participant_display_name: `Alive ${i}`,
+        status: 'open',
+        last_activity_at: iso(-400_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+
+    const ids = (await getItems()).filter((i) => i.group === 'unreplied').map((i) => i.refId);
+
+    // The live work the block exists to show is on the board.
+    for (let i = 0; i < 5; i += 1) expect(ids).toContain(`c-alive-${i}`);
+    // AND NO DELETED CONTACT LEAKS ONTO IT (adversarial r4 finding 1): the rule
+    // is applied to every 1:1 item walked, not to a bounded prefix. At 250
+    // deleted ahead of 5 live the old lookup bound rendered a FULL block of
+    // deleted contacts and zero live work - the board inverted.
+    expect(ids).toHaveLength(5);
+    for (const id of ids) expect(id).toMatch(/^c-alive-/);
+  });
+
+  it('has NO deleted-contact lookup bound: 101 deleted ahead of 1 live shows exactly the 1, and announces the skips', async () => {
+    // ADVERSARIAL r2 finding 6 / CONFORMANCE r2 finding 6. Moving the
+    // deleted-contact test ahead of the cap is right, but it made the check run
+    // on every 1:1 item the walk yields - bounded only by UNREAD_WALK_LIMIT
+    // (2000) - and `getContact` memoizes PER CONTACT ID, so distinct contacts
+    // each cost a real contacts.getById. The comment beside it claimed the move
+    // "costs no extra read". On an index head thick with deleted residue - the
+    // exact condition the fix exists for - /api/today could issue up to 2000
+    // sequential contact Gets, on a route every connected dashboard refetches.
+    //
+    // 101 DISTINCT deleted contacts: one past the bound. The LOOKUPS stop
+    // there (fix wave 3, adversarial r3 finding 5) - the walk does not - so the
+    // 101st deleted contact is treated as non-deleted and can render, while the
+    // live row behind the wall is still delivered. The WARN is what says the
+    // rule went unenforced past that point.
+    for (let i = 0; i < 101; i += 1) {
+      const id = `c-wall-${String(i).padStart(3, '0')}`;
+      const phone = `+1555031${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Wall',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-wall-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Wall ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-past-bound', 'Past', 'Bound');
+    seedConversation({
+      conversationId: 'conv-past-bound',
+      participant_phone: '+15550319999',
+      participant_display_name: 'Past Bound',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-past-bound', phone: '+15550319999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+    // The live row behind the wall IS shown, and NOTHING ELSE: there is no
+    // lookup bound any more (adversarial r4 finding 1 showed every threshold
+    // either hid live work or leaked deleted rows). The rule is applied to every
+    // walked 1:1 item; the cost is one memoized getById per DISTINCT contact,
+    // bounded by the walk budget - the same O(scanned) the badge pays, watched
+    // by the scanned WARN, and remedied by the BatchGet follow-up.
+    expect(unrep.map((i) => i.refId)).toEqual(['c-past-bound']);
+    // The skip count is still announced under its own label so the operator can
+    // tell "filtered by deleted residue" from "genuinely capped".
+    const skipWarns = harness.capture
+      .atLevel(40)
+      .filter((l) => l['group'] === 'unread:deleted_skips');
+    expect(skipWarns).toHaveLength(1);
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({
@@ -1055,5 +1353,223 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags']);
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
     expect(body.items.length).toBeGreaterThan(0);
+  });
+
+  // --- inbox-unread-index: the unread sections read byUnread, not the open walk --
+  // Today's unread half used to ride the SAME hard-capped 100-row open-partition
+  // Query the relay opt-out scan rides. Any unread thread ranking past that
+  // window was silently missing from Today - a correctness bug, not a cost one.
+  // The unread half now drives the sparse byUnread index (newest-activity-first)
+  // while the relay opt-out scan stays on the open-partition loop, unchanged.
+  describe('unread sections are fed by the byUnread index', () => {
+    /** An open, READ 1:1 - fills the open partition without entering the index. */
+    const seedReadOpen = (n: number): void => {
+      seedConversation({
+        conversationId: `conv-read-${String(n).padStart(4, '0')}`,
+        participant_phone: `+1555020${String(n).padStart(4, '0')}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - n * 1_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 0,
+      });
+    };
+
+    it('surfaces an unread 1:1 that ranks BEYOND the old 100-row open-partition window', async () => {
+      // 130 read threads all sort ahead of the target, so the open-partition
+      // Query's first 100 rows never reach it. Before this change that thread
+      // was invisible on Today no matter how long it sat unanswered.
+      for (let n = 0; n < 130; n += 1) seedReadOpen(n);
+      seedConversation({
+        conversationId: 'conv-deep-unread',
+        participant_phone: '+15550209999',
+        participant_display_name: 'Deep Unread',
+        status: 'open',
+        last_activity_at: iso(-500_000), // oldest of them all -> ~131st
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 2,
+      });
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId)).toEqual(['conv-deep-unread']);
+      expect(unrep[0]).toMatchObject({ who: 'Deep Unread', why: 'Unreplied' });
+    });
+
+    it('still emits the relay opt-out attention item - that scan stays on the open-partition loop', async () => {
+      // The relay thread carries NO unread, so it is structurally absent from
+      // the byUnread index. If the opt-out scan had moved to the index pass with
+      // the unread half, this item would vanish.
+      world.contacts.push({
+        contactId: 'c-loopintact',
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Loop',
+        lastName: 'Intact',
+        phone: '+15550211111',
+        sms_opt_out: true,
+      });
+      seedConversation({
+        conversationId: 'conv-relay-loopintact',
+        participant_phone: '+15550213333', // synthetic pool number
+        status: 'open',
+        last_activity_at: iso(-40_000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-200_000),
+        participants: [{ contactId: 'c-loopintact', phone: '+15550211111', name: 'Loop Intact' }],
+        relay_opted_out_members: {
+          'c-loopintact': {
+            contactId: 'c-loopintact',
+            phone: '+15550211111',
+            name: 'Loop Intact',
+            at: iso(-20_000),
+          },
+        },
+      } as ConversationItem);
+      expect(world.conversations.get('conv-relay-loopintact')?.unread_flag).toBeUndefined();
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+      expect(needs.find((i) => i.refId === 'c-loopintact')).toMatchObject({
+        why: 'Opted out of a relay group - not receiving messages',
+        tag: 'Relay group',
+        attention: true,
+      });
+    });
+
+    it('caps at 100 kept conversations and WARNS with the unread threshold, not the group-fetch one', async () => {
+      for (let n = 0; n < 150; n += 1) {
+        seedConversation({
+          conversationId: `conv-many-${String(n).padStart(4, '0')}`,
+          participant_phone: `+1555022${String(n).padStart(4, '0')}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep).toHaveLength(100);
+      const capWarns = harness.capture
+        .atLevel(40)
+        .filter((l) => l['group'] === 'unread' && String(l['msg'] ?? '').includes('hit the cap'));
+      expect(capWarns).toHaveLength(1);
+      // The LOGGED count is the unread cap, proving warnIfCapped now takes its
+      // threshold as a parameter instead of hardcoding GROUP_FETCH_LIMIT.
+      expect(capWarns[0]).toMatchObject({ group: 'unread', count: 100 });
+    });
+
+    it('FILTER-THEN-CAP: a burst of unread group threads cannot starve the 1:1 sections', async () => {
+      // 120 group_text threads all sort NEWER than the three 1:1s. A
+      // cap-then-filter walk would spend all 100 slots on rows Today never
+      // shows and emit nothing; filter-then-cap keeps only 1:1-bucket rows.
+      for (let n = 0; n < 120; n += 1) {
+        seedConversation({
+          conversationId: `conv-group-${String(n).padStart(4, '0')}`,
+          status: GROUP_TEXT_STATUS,
+          last_activity_at: iso(-1_000 - n * 100),
+          type: 'group_text',
+          ai_mode: 'manual',
+          created_at: iso(-900_000),
+          participants: [
+            { contactId: 'c-g1', phone: '+15550230001' },
+            { contactId: 'c-g2', phone: '+15550230002' },
+          ],
+          unread_count: 4,
+        });
+      }
+      for (const n of [1, 2, 3]) {
+        seedConversation({
+          conversationId: `conv-oneone-${n}`,
+          participant_phone: `+1555024000${n}`,
+          participant_display_name: `Solo ${n}`,
+          status: 'open',
+          last_activity_at: iso(-500_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+
+      const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+      expect(unrep.map((i) => i.refId).sort()).toEqual([
+        'conv-oneone-1',
+        'conv-oneone-2',
+        'conv-oneone-3',
+      ]);
+    });
+
+    it('still writes emittedUnknownPhones, so the contacts-triage pass de-dupes the same person', async () => {
+      // The unknown-triage branch moved into the second pass; the phone it
+      // records is consumed by the LATER contacts-triage pass, so the pass
+      // ORDER has to survive the split.
+      const phone = '+15550250001';
+      seedConversation({
+        conversationId: 'conv-unknown-dedupe',
+        participant_phone: phone,
+        participants: [{ contactId: 'c-unknown-dedupe', phone }],
+        status: 'open',
+        last_activity_at: iso(-30_000),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-60_000),
+        unread_count: 1,
+      });
+      world.contacts.push({
+        contactId: 'c-unknown-dedupe',
+        type: 'unknown',
+        status: 'needs_review',
+        phone, // SAME phone - the triage pass must skip it
+      });
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+
+      const forPerson = needs.filter((i) => i.refId === 'c-unknown-dedupe');
+      expect(forPerson).toHaveLength(1);
+      expect(forPerson[0]).toMatchObject({ refType: 'contact', why: 'New unknown contact' });
+    });
+
+    it('WARNS when the scan budget expires before the pass fills, instead of a silent short block', async () => {
+      // Budget seam (ApiRouterDeps.unreadWalkLimit): the walk stops after 2 raw
+      // rows, so the block is short for a reason the operator cannot otherwise
+      // see - neither capped nor exhausted.
+      for (let n = 0; n < 5; n += 1) {
+        seedConversation({
+          conversationId: `conv-budget-${n}`,
+          participant_phone: `+1555026000${n}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'auto',
+          created_at: iso(-900_000),
+          unread_count: 1,
+        });
+      }
+      const budgeted = makeWebhookHarness({ world, unreadWalkLimit: 2 });
+
+      const res = await request(budgeted.app)
+        .get('/api/today')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+
+      expect(res.status).toBe(200);
+      const unrep = (res.body as TodayResponse).items.filter((i) => i.group === 'unreplied');
+      expect(unrep).toHaveLength(2);
+      const budgetWarns = budgeted.capture
+        .atLevel(40)
+        .filter((l) => l['event'] === 'today_unread_walk_truncated');
+      expect(budgetWarns).toHaveLength(1);
+      expect(budgetWarns[0]).toMatchObject({ scanned: 2, kept: 2, budget: 2 });
+    });
   });
 });

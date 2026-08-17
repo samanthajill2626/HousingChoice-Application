@@ -18,6 +18,15 @@ const removeConversationMember = vi.fn();
 const closeConversation = vi.fn();
 const markConversationRead = vi.fn();
 const getContacts = vi.fn();
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
+
+// The nav badge's optimistic layer, spied so the mount-mark below can assert it
+// stays UNWIRED (adversarial A10). If a future edit wires noteRowsCleared into
+// that effect, this spy is what catches it.
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -135,8 +144,18 @@ describe('ConversationDetail dispatch', () => {
       'href',
       '/contacts/c2',
     );
-    // Marked read on view.
+    // Marked read on view...
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+    // ...and DELIBERATELY not through the nav badge's optimistic layer
+    // (adversarial A10). This mount-mark fires BLIND, with no unread knowledge,
+    // exactly like useMarkContactRead - so an optimistic decrement here could
+    // subtract a row the badge never counted. It reconciles through the cheap
+    // count refetch the mark-read's own SSE event triggers. The asymmetry is
+    // real and intended: opening this thread from an Inbox ROW decrements
+    // instantly (useInbox knows that row's unread), opening it from Today or a
+    // deep link does not.
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 
   it('shows the pinned Upcoming section for group-routed scheduled reminders', async () => {

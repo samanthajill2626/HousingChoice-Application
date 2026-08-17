@@ -40,7 +40,15 @@ function attributeDefinitions(spec: TableSpec): CreateTableCommandInput['Attribu
   return [...attrs.values()].map((a) => ({ AttributeName: a.name, AttributeType: a.type }));
 }
 
-function gsiInput(gsi: GsiSpec): NonNullable<CreateTableCommandInput['GlobalSecondaryIndexes']>[number] {
+/**
+ * Pure converter: GsiSpec -> the index input shape. Exported because
+ * app/scripts/db-update-gsis.ts passes the SAME object to UpdateTable's
+ * `GlobalSecondaryIndexUpdates: [{ Create: ... }]`, and the two paths must
+ * never drift on key schema or projection.
+ */
+export function gsiInput(
+  gsi: GsiSpec,
+): NonNullable<CreateTableCommandInput['GlobalSecondaryIndexes']>[number] {
   return {
     IndexName: gsi.indexName,
     KeySchema: keySchema(gsi.hashKey, gsi.rangeKey),

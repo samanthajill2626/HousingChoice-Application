@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventStreamHandlers } from '../../api/index.js';
 import { ApiError } from '../../api/index.js';
@@ -7,6 +8,8 @@ import type { InboxFilter, InboxPage, InboxRow } from '../../api/index.js';
 const getInbox = vi.fn();
 const markInboxRead = vi.fn();
 const markConversationRead = vi.fn();
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -22,7 +25,18 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
+// Stub the badge context rather than mounting a real UnreadProvider: a real one
+// would fire its own count + unmatched-email fetches through this file's api mock
+// and would fight for the shared `sse` capture above.
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
+
 import { useInbox, rowKey } from './useInbox.js';
+// The REAL component, for the composed cases at the bottom of this file: the
+// truncation flag only misfires where the hook's server statement meets the
+// component's render of the client-filtered list.
+import { Inbox } from './Inbox.js';
 
 function mkRow(over: Partial<InboxRow> = {}): InboxRow {
   return {
@@ -52,6 +66,8 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="unread">{s.rows.map((r) => r.unreadCount).join(',')}</span>
       <span data-testid="hasMore">{String(s.hasMore)}</span>
       <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
+      <span data-testid="truncated">{String(s.truncated)}</span>
+      <span data-testid="serverRowCount">{String(s.serverRowCount)}</span>
       <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
       <span data-testid="loadingMore">{String(s.loadingMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
@@ -68,6 +84,8 @@ beforeEach(() => {
   getInbox.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
   markConversationRead.mockReset().mockResolvedValue(undefined);
+  noteRowsCleared.mockReset();
+  rollbackRowsCleared.mockReset();
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -409,6 +427,16 @@ describe('useInbox - native group text rows', () => {
     await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
   });
 
+  it('mints the KIND-FREE cv: badge key for a group_text row, not its gt: row key', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([groupRow()]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('gt-1'));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['cv:gt-1']);
+  });
+
   it('surfaces the server truncation flag and clears it on a filter change', async () => {
     getInbox.mockResolvedValueOnce({ rows: [groupRow()], nextCursor: null, groupsTruncated: true });
     const { rerender } = render(<Probe filter="all" />);
@@ -421,5 +449,218 @@ describe('useInbox - native group text rows', () => {
       expect.objectContaining({ filter: 'groups' }),
       expect.anything(),
     );
+  });
+});
+
+// The nav badge's optimistic layer. The key is minted INSIDE the branch that
+// resolved the read action, so it always describes how the row was ACTUALLY
+// addressed - and it is a different vocabulary from `rowKey` (both group kinds
+// share `cv:` so the badge dedupes with the tour/placement tabs).
+describe('useInbox - badge clear keys', () => {
+  it('mints c:<contactId> for a contact row', async () => {
+    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 3 })]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('3'));
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'c1' }));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['c:c1']);
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('mints u:<phone> for an unknown row', async () => {
+    getInbox.mockResolvedValue(
+      pageOf([
+        mkRow({
+          kind: 'unknown',
+          contactId: undefined,
+          phone: '+15555550123',
+          unreadCount: 1,
+          needsTriage: true,
+        }),
+      ]),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'read:u:+15555550123' }).click());
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ phone: '+15555550123' }));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['u:+15555550123']);
+  });
+
+  it('mints cv:<conversationId> for a relay_group row', async () => {
+    getInbox.mockResolvedValue(
+      pageOf([
+        mkRow({ kind: 'relay_group', contactId: undefined, conversationId: 'g-1', unreadCount: 2 }),
+      ]),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:g:g-1' }).click());
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('g-1'));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['cv:g-1']);
+  });
+
+  // THE TRAP the per-branch minting exists for: the third branch catches rows by
+  // PHONE across kinds, so a `contact` row with no contactId is marked read BY
+  // PHONE. A key derived from `row.kind` would mint `c:undefined` here.
+  it('mints u:<phone> for a CONTACT row that had to be addressed by phone', async () => {
+    getInbox.mockResolvedValue(
+      pageOf([
+        mkRow({ kind: 'contact', contactId: undefined, phone: '+15555550999', unreadCount: 1 }),
+      ]),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'read:c:' }).click());
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ phone: '+15555550999' }));
+    expect(noteRowsCleared).toHaveBeenCalledWith(['u:+15555550999']);
+  });
+
+  it('never touches the badge for an UNADDRESSABLE row', async () => {
+    getInbox.mockResolvedValue(
+      pageOf([mkRow({ kind: 'contact', contactId: undefined, phone: undefined, unreadCount: 1 })]),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+    act(() => screen.getByRole('button', { name: 'read:c:' }).click());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(markInboxRead).not.toHaveBeenCalled();
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('rolls the badge clear back when the mark-read request fails', async () => {
+    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 3 })]));
+    markInboxRead.mockRejectedValue(new ApiError(500, 'http_500', 'no'));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('3'));
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(rollbackRowsCleared).toHaveBeenCalledWith(['c:c1']));
+    expect(noteRowsCleared).toHaveBeenCalledWith(['c:c1']);
+  });
+});
+
+describe('useInbox - the unread feed truncation flag', () => {
+  it('surfaces truncated from the first page', async () => {
+    getInbox.mockResolvedValue({ rows: [], nextCursor: null, truncated: true });
+    render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('truncated')).toHaveTextContent('true'));
+  });
+
+  it('surfaces truncated from a LOAD MORE page too', async () => {
+    getInbox
+      .mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'CUR'))
+      .mockResolvedValueOnce({
+        rows: [mkRow({ contactId: 'c2', lastActivityAt: '2026-06-17T09:00:00.000Z' })],
+        nextCursor: null,
+        truncated: true,
+      });
+    render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('truncated')).toHaveTextContent('false'));
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
+    expect(screen.getByTestId('truncated')).toHaveTextContent('true');
+  });
+
+  // A10. Without the reset the flag SURVIVES the tab switch while the new
+  // filter's first page is on the wire, and the moment that page lands empty the
+  // All tab renders the inbox ERROR state instead of "all caught up" (Inbox.tsx
+  // gates the failure block on rows.length === 0 && truncated). The mid-flight
+  // assertion is the one that discriminates: the success branch overwrites the
+  // flag, so only the reset can clear it BEFORE the page lands.
+  it('RESETS truncated on a filter change, so an empty All page is not an error', async () => {
+    getInbox.mockResolvedValueOnce({ rows: [], nextCursor: null, truncated: true });
+    const { rerender } = render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('truncated')).toHaveTextContent('true'));
+
+    let releaseAll: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseAll = () => res(pageOf([]));
+        }),
+    );
+    rerender(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+    expect(screen.getByTestId('truncated')).toHaveTextContent('false');
+
+    act(() => releaseAll());
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('truncated')).toHaveTextContent('false');
+    expect(screen.getByTestId('count')).toHaveTextContent('0');
+  });
+
+  // The OTHER reset A10 names. Kept on the SAME filter (a reconcile refetch that
+  // 404s), because a filter change would reset the flag through the filter effect
+  // and this branch would go untested.
+  it('RESETS truncated on the 404 (backend not live) branch', async () => {
+    getInbox.mockResolvedValueOnce({ rows: [], nextCursor: null, truncated: true });
+    render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('truncated')).toHaveTextContent('true'));
+
+    getInbox.mockRejectedValueOnce(new ApiError(404, 'http_404', 'nope'));
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x',
+        last_activity_at: '2026-06-17T11:00:00.000Z',
+        unread_count: 1,
+        type: 'tenant_1to1',
+        participant_display_name: 'T',
+      });
+    });
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('pending'));
+    expect(screen.getByTestId('truncated')).toHaveTextContent('false');
+  });
+
+  // ADVERSARIAL 4, and the test the two shipped halves never composed: one proved
+  // the hook surfaces `truncated`, the other proved Inbox renders the failure
+  // state on an empty truncated page, and nothing exercised the sequence that
+  // actually bites - a truncated page WITH rows that the operator clears. `rows`
+  // is the client-filtered list; `truncated` is the server's statement about its
+  // page. Pairing them made a successful triage session end in "We couldn't load
+  // your inbox." So this drives the REAL Inbox through the REAL hook.
+  it('COMPOSED: marking every row of a TRUNCATED page read leaves no failure banner', async () => {
+    getInbox.mockResolvedValue({
+      rows: [
+        mkRow({ contactId: 'c1', name: 'Tasha Williams' }),
+        mkRow({ contactId: 'c2', name: 'Rene Okafor', lastActivityAt: '2026-06-17T09:00:00.000Z' }),
+      ],
+      nextCursor: null,
+      truncated: true,
+    });
+    render(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument(),
+    );
+    // The server DID say truncated on a page it filled - the banner must not be
+    // showing even now, which is the shipped behavior this test must not weaken.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    act(() => screen.getByRole('button', { name: 'Mark Tasha Williams read' }).click());
+    act(() => screen.getByRole('button', { name: 'Mark Rene Okafor read' }).click());
+
+    await waitFor(() => expect(screen.getByText(/all caught up/i)).toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
+    expect(markInboxRead).toHaveBeenCalledTimes(2);
+  });
+
+  // The other half stays green: an EMPTY server page that says truncated is a
+  // real early end and still renders the failure state through the same wiring.
+  it('COMPOSED: an EMPTY truncated page still renders the failure state', async () => {
+    getInbox.mockResolvedValue({ rows: [], nextCursor: null, truncated: true });
+    render(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByText(/couldn.t load your inbox/i)).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 });

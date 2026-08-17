@@ -13,6 +13,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -34,6 +35,12 @@ function seedConversation(
     type: 'tenant_1to1' as const,
     ai_mode: 'auto' as const,
     created_at: '2026-06-12T09:00:00.000Z',
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts). This
+    // suite drives the conversation HUB, not the inbox - but its rows land in
+    // the SHARED world.conversations map the inbox/today routers read, so an
+    // unflagged unread row here is a trap armed for whoever adds the first
+    // unread assertion to this file. Overridable below.
+    ...unreadFlagFor(overrides),
     ...overrides,
   };
   world.conversations.set(id, item);

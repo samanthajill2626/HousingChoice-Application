@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
@@ -32,6 +33,10 @@ function seedConv(
     type: 'tenant_1to1',
     ai_mode: 'auto',
     created_at: overrides.last_activity_at,
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): the
+    // sparse byUnread index keys on `unread_flag`, so a fixture with unread and
+    // no flag is invisible to every index-fed read. Overridable below.
+    ...unreadFlagFor(overrides),
     ...overrides,
   } as ConversationItem;
   world.conversations.set(id, item);

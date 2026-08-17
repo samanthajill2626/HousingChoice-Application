@@ -76,6 +76,17 @@ import {
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
+import {
+  BADGE_COUNT_CAP,
+  collectUnreadRows,
+  isUnreadVisible,
+  UNREAD_WALK_LIMIT,
+  warnDeletedProbes,
+  warnTruncatedZeroCount,
+  warnUnreadScanned,
+  type UnreadCandidate,
+  type UnreadScanPosition,
+} from '../lib/unreadFeed.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
@@ -126,6 +137,30 @@ export interface InboxPage {
    *  budget. There is NO exact total - the partition cannot produce one without
    *  walking it (spec 11). Absent means "nothing was withheld". */
   groupsTruncated?: boolean;
+  /** TRUE when the UNREAD feed ended for a NON-NATURAL reason (spec 4.5 step 3):
+   *  the request's raw-scan budget expired before the page filled, or the
+   *  SEEN_SET_MAX depth cap ended paging. Set on the `filter=unread` branch
+   *  ONLY - never on all/unknown/groups. Absent means the feed ended because it
+   *  ran out of unread rows, which is the ordinary case. */
+  truncated?: true;
+}
+
+/**
+ * The nav badge's payload (spec 4.4). It counts VISIBLE INBOX ROWS - one per
+ * contact however many unread threads it owns, one per unknown number, one per
+ * relay group, one per native group thread.
+ *
+ * `capped` and `truncated` are SEPARATE fields because the client treats them
+ * differently: a capped count is a ceiling rendered "99+" and must NOT be
+ * decremented on mark-read, while a truncated count is small and real-so-far
+ * and SHOULD still decrement.
+ */
+export interface InboxUnreadCount {
+  unreadCount: number;
+  /** BADGE_COUNT_CAP stopped the count (the number is a floor at the cap). */
+  capped: boolean;
+  /** The request's raw-scan budget stopped the walk first (also a floor). */
+  truncated: boolean;
 }
 
 // --- Deps (injectable; default to the real repos, like TodayRouterDeps) ------
@@ -137,6 +172,14 @@ export interface InboxRouterDeps {
   messagesRepo?: MessagesRepo;
   placementsRepo?: PlacementsRepo;
   events?: EventBus;
+  /**
+   * TEST SEAM: the raw byUnread items ONE request may scan before it gives up
+   * and reports a floor. Production leaves it undefined and takes
+   * UNREAD_WALK_LIMIT; a route test sets it small so the `truncated` posture is
+   * reachable without seeding thousands of rows. Threaded in from
+   * ApiRouterDeps.
+   */
+  unreadWalkLimit?: number;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -171,21 +214,21 @@ export const INBOX_FILTERS: ReadonlySet<string> = new Set<InboxFilter>([
 export const GROUP_PAGE_ONE_LIMIT = 50;
 
 /**
- * The unread group read is an ACCEPTED FULL PARTITION WALK (spec 4.2 + 15.10),
- * NOT bounded work: unread state is not in the partition key, so there is no way
- * to ask DynamoDB for "the unread ones". Every unread group thread must appear
- * under `filter=unread` because the nav badge counts those rows - a cap here
- * silently undercounts the badge. The walk is what the contract says it is; this
- * number is only the repo walk's ceiling (20 pages x 100 rows).
+ * How many contactIds the unread cursor's SEEN-SET may carry (spec 4.3).
+ *
+ * The binding constraint is the TRANSPORT, not Node: CloudFront's URL limit is a
+ * fixed 8,192 bytes and fronts every deployed environment, so an oversized
+ * cursor would fail in dev/prod but not locally. 100 ids (~4.7KB of JSON ->
+ * ~6.3KB base64url) plus the rest of the request line stays inside that quota
+ * with margin, and ends the feed at ~4 pages (120+ unread contact rows), which
+ * has no product meaning to exceed: the badge caps at 100 and triage is
+ * top-down.
+ *
+ * THE SERVER NEVER MINTS A CURSOR IT WOULD REJECT - past this, the page returns
+ * `nextCursor: null` AND `truncated: true` rather than a cursor the decoder
+ * below would 400. That 400 exists for TAMPERED input only.
  */
-const GROUP_UNREAD_WALK_LIMIT = 2000;
-
-/**
- * Growth threshold for that walk (spec 4.2). At the known scale (132 threads)
- * the walk is ~2 query pages. Past this many group threads the unread read wants
- * a materialized counter instead - the WARN is the trigger to file it.
- */
-const GROUP_UNREAD_GROWTH_THRESHOLD = 500;
+const SEEN_SET_MAX = 100;
 
 export function isInboxFilter(value: unknown): value is InboxFilter {
   return typeof value === 'string' && INBOX_FILTERS.has(value);
@@ -233,7 +276,85 @@ function decodeCursor(cursor: string): Record<string, unknown> {
   if (typeof (parsed as { t?: unknown }).t === 'string') {
     throw new InboxBadRequestError('cursor does not match this filter');
   }
+  // The SAME namespacing in the other direction (spec 4.3): `filter=unread`
+  // pages the byUnread index with its own `{u,a,c,s}` cursor. Replaying it here
+  // would hand DynamoDB a key with the wrong hash attribute for the 'open'
+  // partition. A numeric `u` tag where none belongs is a 400, never a Query.
+  if (typeof (parsed as { u?: unknown }).u === 'number') {
+    throw new InboxBadRequestError('cursor does not match this filter');
+  }
   return parsed as Record<string, unknown>;
+}
+
+// --- The unread cursor (spec 4.3) -------------------------------------------
+// A DIFFERENT cursor namespace from the one above: `{u:1, a, c, s}` where (a,c)
+// is the byUnread scan position and `s` is the SEEN-SET of contactIds already
+// emitted on this and every prior page. Resume is therefore an EXACT position
+// plus pure set membership - no ordering comparison, no re-read of a contact's
+// threads, deterministic under `last_activity_at` ties.
+
+interface UnreadCursor {
+  /** Namespace tag. Any other value is a cursor from another filter -> 400. */
+  u: 1;
+  /** The scan position's `last_activity_at` (the index's range key). */
+  a: string;
+  /** The scan position's conversationId (the trailing table key). */
+  c: string;
+  /** Contact ids already emitted - suppressed on the next page. */
+  s: string[];
+}
+
+function encodeUnreadCursor(position: UnreadScanPosition, seen: ReadonlySet<string>): string {
+  const payload: UnreadCursor = {
+    u: 1,
+    a: position.lastActivityAt,
+    c: position.conversationId,
+    s: [...seen],
+  };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode + VALIDATE an unread cursor. Unlike `decodeCursor` (whose payload is a
+ * repo-defined LastEvaluatedKey we deliberately do not over-validate), every
+ * field here is ours, so every field is checked: a tampered `s` is what would
+ * otherwise let a client push an unbounded array into the resume path.
+ */
+function decodeUnreadCursor(cursor: string): UnreadCursor {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  const payload = parsed as { u?: unknown; a?: unknown; c?: unknown; s?: unknown };
+  // A cursor minted under `all`/`unknown` (a bare LastEvaluatedKey) or under
+  // `groups` (the repo's `{t,k}`) carries no `u:1` and lands here.
+  if (payload.u !== 1) throw new InboxBadRequestError('cursor does not match this filter');
+  if (typeof payload.a !== 'string' || typeof payload.c !== 'string') {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  // NON-EMPTY, not merely string (adversarial A4). Both fields become KEY
+  // attributes of the synthesized ExclusiveStartKey, and DynamoDB permits an
+  // empty String for a non-key attribute ONLY - an empty range or table key is
+  // a ValidationException, which nothing on this path maps, so a hand-made
+  // cursor turned the one decoder written to guarantee 400s into a 500.
+  if (payload.a.length === 0 || payload.c.length === 0) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (!Array.isArray(payload.s)) throw new InboxBadRequestError('invalid cursor');
+  // The server never mints one this long (it returns `truncated` instead), so
+  // an over-long seen-set can only be tampered input.
+  if (payload.s.length > SEEN_SET_MAX) throw new InboxBadRequestError('invalid cursor');
+  // An empty id would never match a contactId, so it can only be tampering -
+  // and the server never mints one (a contactId is always non-empty).
+  if (payload.s.some((id) => typeof id !== 'string' || id.length === 0)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  return { u: 1, a: payload.a, c: payload.c, s: payload.s as string[] };
 }
 
 // --- Pure helpers (no I/O) ---------------------------------------------------
@@ -356,11 +477,16 @@ export async function aggregateInbox(
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
 
   const { filter, limit, cursor } = opts;
-  // Under `filter=groups` the cursor belongs to the GROUP partition (the repo's
-  // own tagged cursor) and is decoded by listGroupTexts, not here - decoding it
-  // as an 'open'-partition LastEvaluatedKey is precisely the cross-partition
-  // replay the namespacing exists to prevent.
-  const startKey = filter !== 'groups' && cursor !== undefined ? decodeCursor(cursor) : undefined;
+  // ONLY `all` and `unknown` page the 'open' partition, so ONLY they decode the
+  // cursor here. The other two filters own their own cursor NAMESPACE and decode
+  // it themselves: `groups` inside listGroupTexts (the repo's tagged `{t,k}`),
+  // `unread` via decodeUnreadCursor (the `{u,a,c,s}` index cursor) in its branch
+  // below. Decoding either of those as an 'open'-partition LastEvaluatedKey is
+  // precisely the cross-partition replay the namespacing exists to prevent.
+  const startKey =
+    (filter === 'all' || filter === 'unknown') && cursor !== undefined
+      ? decodeCursor(cursor)
+      : undefined;
 
   // Per-request memoization (each contact/placement/user resolved at most once).
   const contactConvsCache = new Map<string, ConversationItem[]>();
@@ -440,6 +566,11 @@ export async function aggregateInbox(
   const passesFilter = (row: InboxRow): boolean => {
     switch (filter) {
       case 'unread':
+        // UNREACHABLE since spec 4.5 (the unread branch returns before any
+        // caller of this runs) but NOT removable: the switch is exhaustive over
+        // InboxFilter with no `default:`, so deleting the arm is a type error -
+        // and re-adding a `default:` is exactly how a new filter ships as a
+        // silent no-op.
         return row.unreadCount > 0;
       case 'unknown':
         return row.needsTriage;
@@ -451,10 +582,125 @@ export async function aggregateInbox(
   };
 
   /**
+   * THE contact row: presentation hydration (latest message, placement label),
+   * the deleted-contact resurfacing predicate, and the row literal.
+   *
+   * EXTRACTED, NEVER FORKED - both read paths call it: the open-partition pager
+   * (rowForConversation, below) and the index-backed unread page. That is what
+   * stops the two surfaces drifting into rendering the same contact
+   * differently.
+   *
+   * SINGLE-CAUSE RETURN: `undefined` means exactly one thing - resurfacing hid
+   * a soft-deleted row. Every other reason to skip a contact belongs to the
+   * CALLER (the filter arms, the newest-conversation identity guard, the dedupe
+   * set), and each caller records its own dedupe entry when this returns a row
+   * (the pager -> emittedContacts; the unread loop -> its seen-set). That is
+   * observably identical to adding it here, since the add only ever happened
+   * when a row was about to be returned.
+   *
+   * PHONE/EMAIL COME FROM `maxConv`, not from a caller-iterated conversation.
+   * On the pager path those coincide by construction - its identity guard only
+   * lets a contact emit while iterating the very conversation `newestOf` chose -
+   * so this is byte-identical there; the unread path passes its own hydrated
+   * `maxConv`.
+   */
+  const buildContactRow = async (
+    contact: ContactItem,
+    convs: ConversationItem[],
+    maxConv: ConversationItem,
+    unreadSum: number,
+    deleted: boolean,
+  ): Promise<InboxRow | undefined> => {
+    // Recomputed rather than taken as a parameter: `roleFromContact` is a
+    // MODULE-LEVEL pure derivation over `contact` alone, and the caller hands us
+    // the same contact object it derived its own `role` from, so the two values
+    // are identical by construction.
+    const role = roleFromContact(contact);
+    const phone = maxConv.participant_phone;
+    const email = maxConv.participant_email;
+    const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
+    if (deleted) {
+      // Surface ONLY while SOME conversation of this contact is unread AND that
+      // conversation's newest message is an inbound from AFTER the deletion.
+      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
+      // thread looks fresh": a contact owns one thread per participant key, so
+      // the unread and the fresh inbound can sit on different threads. Mixing
+      // them broke the rule both ways - a pre-deletion unread on thread A kept
+      // the row up forever after thread B's fresh inbound was read (single-conv
+      // mark-read from a placement/tour pane), and a newer empty/outbound thread
+      // buried a genuinely unread fresh inbound on an older one.
+      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
+      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
+      // Absent createdAt (no readable message row) -> never counts as new.
+      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
+        dir === 'inbound' &&
+        typeof at === 'string' &&
+        typeof contact.deleted_at === 'string' &&
+        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
+        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
+        // can momentarily hide a resurfaced row until the next inbound lands.
+        at > contact.deleted_at;
+
+      let resurfaces = false;
+      for (const c of convs) {
+        // Only an unread thread can resurface the row (spec Decision 3), so read
+        // threads are never probed.
+        if (unreadOf(c) === 0) continue;
+        // maxConv's latest is already in hand for presentation - reuse it rather
+        // than re-reading the same conversation.
+        const latest =
+          c.conversationId === maxConv.conversationId
+            ? { direction, createdAt }
+            : await latestMessageOf(c.conversationId, c);
+        if (isFreshInbound(latest.direction, latest.createdAt)) {
+          resurfaces = true;
+          break; // one qualifying thread is enough
+        }
+      }
+      if (!resurfaces) return undefined;
+    }
+
+    let placementContext: { placementId: string; label: string } | undefined;
+    if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
+      const label = await placementLabel(maxConv.placementId);
+      if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
+    }
+
+    // A type='unknown' contact IS an untriaged inbound (it just already has a
+    // record) - so it needs triage and belongs under the "unknown" filter, exactly
+    // like a no-contact number. Keying triage off the ROLE (not "no contact
+    // record") is what makes both cases surface.
+    // Name fallback when the contact has no resolved name: the formatted phone
+    // for a phone thread, else the email address for an email-only thread (never
+    // undefined - email-only contacts lack a phone).
+    const fallbackLabel =
+      phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
+    return {
+      kind: 'contact',
+      contactId: contact.contactId,
+      ...(maxConv.participant_phone !== undefined && { phone: maxConv.participant_phone }),
+      name: nameFromContact(contact) ?? fallbackLabel,
+      role,
+      ...(placementContext !== undefined && { placementContext }),
+      unreadCount: unreadSum,
+      preview,
+      channel,
+      direction,
+      lastActivityAt: maxConv.last_activity_at,
+      needsTriage: role === 'unknown',
+      ...(deleted && { deleted: true }),
+    };
+  };
+
+  /**
    * Build the row for a single raw conversation (or return undefined when this
    * conversation does NOT emit one: a relay_group, an already-emitted contact,
    * or a contact whose newest conversation is elsewhere). Pure of paging — the
    * caller owns the page-fill / boundary bookkeeping.
+   *
+   * THE OPEN-PARTITION PATH ONLY (filters `all` and `unknown`). `filter=unread`
+   * returns from its own index-backed branch before the pager runs, so the
+   * unread arms below are unreachable today - see their comments.
    */
   const rowForConversation = async (conv: ConversationItem): Promise<InboxRow | undefined> => {
     // relay_group threads are emitted by the SEPARATE relay source (relayRowFor
@@ -489,6 +735,9 @@ export async function aggregateInbox(
       if (phone === undefined) return undefined;
       // Unread is already carried on the conversation row. A read unknown number
       // cannot pass this filter, so do not fetch a latest message just to reject it.
+      // DEAD ARM (spec 4.5): `filter=unread` no longer reaches this function -
+      // it returns from the index-backed branch before the pager runs. Kept
+      // because `filter` is a runtime value and this is still its right answer.
       if (filter === 'unread' && unreadOf(conv) === 0) return undefined;
       // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
@@ -530,82 +779,20 @@ export async function aggregateInbox(
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
     // This must use the contact-wide sum, not unreadOf(conv): an older phone or
     // email thread can be unread while the representative newest thread is read.
+    // DEAD ARM (spec 4.5), same reason as the unknown-branch arm above.
     if (filter === 'unread' && unreadSum === 0) return undefined;
-    // Deleted fast-path: nothing unread → hidden, no message read needed.
+    // Deleted fast-path: nothing unread -> hidden, no message read needed. NOT
+    // dead - it still runs for `all` and `unknown`.
     if (deleted && unreadSum === 0) return undefined;
-    const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
-    if (deleted) {
-      // Surface ONLY while SOME conversation of this contact is unread AND that
-      // conversation's newest message is an inbound from AFTER the deletion.
-      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
-      // thread looks fresh": a contact owns one thread per participant key, so
-      // the unread and the fresh inbound can sit on different threads. Mixing
-      // them broke the rule both ways — a pre-deletion unread on thread A kept
-      // the row up forever after thread B's fresh inbound was read (single-conv
-      // mark-read from a placement/tour pane), and a newer empty/outbound thread
-      // buried a genuinely unread fresh inbound on an older one.
-      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
-      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
-      // Absent createdAt (no readable message row) → never counts as new.
-      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
-        dir === 'inbound' &&
-        typeof at === 'string' &&
-        typeof contact.deleted_at === 'string' &&
-        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
-        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
-        // can momentarily hide a resurfaced row until the next inbound lands.
-        at > contact.deleted_at;
 
-      let resurfaces = false;
-      for (const c of convs) {
-        // Only an unread thread can resurface the row (spec Decision 3), so read
-        // threads are never probed.
-        if (unreadOf(c) === 0) continue;
-        // maxConv's latest is already in hand for presentation — reuse it rather
-        // than re-reading the same conversation.
-        const latest =
-          c.conversationId === maxConv.conversationId
-            ? { direction, createdAt }
-            : await latestMessageOf(c.conversationId, c);
-        if (isFreshInbound(latest.direction, latest.createdAt)) {
-          resurfaces = true;
-          break; // one qualifying thread is enough
-        }
-      }
-      if (!resurfaces) return undefined;
-    }
-
-    let placementContext: { placementId: string; label: string } | undefined;
-    if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
-      const label = await placementLabel(maxConv.placementId);
-      if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
-    }
-
+    const row = await buildContactRow(contact, convs, maxConv, unreadSum, deleted);
+    // undefined here means exactly one thing: resurfacing hid a deleted row.
+    if (row === undefined) return undefined;
+    // The dedupe entry moves CALLER-SIDE with the extraction. It used to sit
+    // just above the row literal, which ran iff a row was about to be returned -
+    // so this is the same observable behavior at the same moment.
     emittedContacts.add(contact.contactId);
-    // A type='unknown' contact IS an untriaged inbound (it just already has a
-    // record) — so it needs triage and belongs under the "unknown" filter, exactly
-    // like a no-contact number. Keying triage off the ROLE (not "no contact
-    // record") is what makes both cases surface.
-    // Name fallback when the contact has no resolved name: the formatted phone
-    // for a phone thread, else the email address for an email-only thread (never
-    // undefined - email-only contacts lack a phone).
-    const fallbackLabel =
-      phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
-    return {
-      kind: 'contact',
-      contactId: contact.contactId,
-      ...(maxConv.participant_phone !== undefined && { phone: maxConv.participant_phone }),
-      name: nameFromContact(contact) ?? fallbackLabel,
-      role,
-      ...(placementContext !== undefined && { placementContext }),
-      unreadCount: unreadSum,
-      preview,
-      channel,
-      direction,
-      lastActivityAt: maxConv.last_activity_at,
-      needsTriage: role === 'unknown',
-      ...(deleted && { deleted: true }),
-    };
+    return row;
   };
 
   /**
@@ -716,6 +903,407 @@ export async function aggregateInbox(
       // Here `truncated` can only mean the repo's walk budget stopped early -
       // the caller's limit produces a nextCursor instead.
       ...(page.truncated && { groupsTruncated: true }),
+    };
+  }
+
+  // --- filter=unread: the sparse byUnread index IS the feed --------------------
+  // A SINGLE unified stream (spec 4.5): contacts, unknown numbers, relay groups
+  // and native group threads all come from ONE index walk, newest-first, up to
+  // `limit` rows TOTAL - so nothing below this point runs under this filter.
+  // That is what makes "skip the relay merge", "skip the group source" and
+  // "groupsTruncated is never set under unread" structural facts rather than
+  // three more conditionals: the open-partition pager and both merge blocks are
+  // simply out of reach. This branch keeps its OWN cursor state and never reads
+  // or writes `startKey`, which stays the page-one sentinel for filter=all.
+  if (filter === 'unread') {
+    const resume = cursor !== undefined ? decodeUnreadCursor(cursor) : undefined;
+    // THE SEEN-SET: every contact emitted as a candidate on this page or any
+    // prior one. Suppression is pure set membership - no ordering comparison, no
+    // re-read of a contact's threads - so it is deterministic under
+    // last_activity_at ties. It ACCUMULATES across the fill loop's iterations
+    // too: without that, iteration 2 re-emits a contact iteration 1 already
+    // emitted, which is a duplicate React key on one page.
+    const seen = new Set<string>(resume?.s ?? []);
+    let scanPosition: UnreadScanPosition | undefined =
+      resume === undefined ? undefined : { lastActivityAt: resume.a, conversationId: resume.c };
+    // ONE raw-scan budget for the whole REQUEST (spec 4.3), threaded into and
+    // back out of every collect. `unreadWalkLimit` is the deps test seam.
+    const startingBudget = deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT;
+    let remainingBudget = startingBudget;
+    // Both tripwires are REQUEST-level: this loop makes MANY collects, and a
+    // per-collect threshold could never fire for a request that spent a little
+    // in each of many of them.
+    let deletedProbes = 0;
+    // The WASTED half of that total is a BUDGET, not just a statistic: it is
+    // threaded into every collect (like `remainingBudget`) so the probe bound
+    // is per REQUEST. `deletedSkipped` is what the bound refused to read, and
+    // it makes this page's answer a floor.
+    let wastedProbes = 0;
+    let deletedSkipped = 0;
+    const unreadRows: InboxRow[] = [];
+    let consumedAll = false;
+    let budgetSpent = false;
+    /**
+     * Candidates hydration dropped on a LAGGING read (see `Hydrated` below),
+     * held for one retry once the rest of the request's reads are done.
+     *
+     * CONTACT candidates only, and the TYPE says so rather than a guard in the
+     * retry loop (adversarial r3 finding 8): `lagged: true` is returned from
+     * the contact arm alone - both non-contact returns are hard-coded
+     * `lagged: false` - so a non-contact lag is not a modelled state.
+     */
+    const laggedDrops: Extract<UnreadCandidate, { kind: 'contact' }>[] = [];
+
+    /**
+     * The outcome of hydrating ONE candidate. A drop carries WHY, because the
+     * two reasons are not the same fact (adversarial r2 finding 4):
+     *
+     * - `lagged: false` - the fresh, authoritative read says this row is read
+     *   or gone. The index entry is simply stale; dropping is CORRECT and the
+     *   page reached a genuine end. This is the ordinary mark-read race.
+     * - `lagged: true` - the fresh read does not know about the thread the
+     *   index just offered at all. Nothing here is authoritative, the row is
+     *   probably real, and the badge is certainly still counting it.
+     *
+     * Only the second kind may claim the page ended early, or the client's
+     * `serverRowCount === 0 && truncated` gate would render the inbox ERROR
+     * state at the end of an ordinary, successful triage session - exactly the
+     * regression conformance C2 fixed.
+     */
+    type Hydrated = { row: InboxRow } | { row: undefined; lagged: boolean };
+
+    /** Turn ONE candidate into a row, or drop it (spec 4.5 hydration). */
+    const hydrateUnread = async (candidate: UnreadCandidate): Promise<Hydrated> => {
+      if (candidate.kind === 'contact') {
+        // The freshest available sources, per-request cached exactly as the
+        // pager's are. They resolve via the participant GSIs, which lag
+        // INDEPENDENTLY of byUnread (spec 6) - hence the drop below.
+        const convs = await contactConversations(candidate.contact);
+        const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
+        const maxConv = newestOf(convs);
+        // A fresh sum of 0 DROPS the row - today's passesFilter contract, moved
+        // to hydration. (A zero sum is also the only way `convs` can be empty,
+        // so the maxConv guard is belt-and-braces for the type.)
+        if (unreadSum === 0 || maxConv === undefined) {
+          // LAG, or a real read? Discriminate with ONE AUTHORITATIVE BASE-TABLE
+          // READ of the thread the index just offered - the same point read the
+          // non-contact arm below already trusts (adversarial r3 finding 1).
+          //
+          // The fix-wave-2 discriminator asked instead whether the offered
+          // thread was ABSENT from the fresh participant set, and that is the
+          // wrong question: a GSI replicates the whole projected ITEM, so the
+          // window where byUnread carries the increment and byParticipantPhone
+          // does not shows the thread PRESENT with its PRE-increment
+          // `unread_count: 0`. Membership absence needs a conversation that did
+          // not exist a moment ago, which resolves to no contact and takes the
+          // `unknown` branch. So the dominant lag shape was classified
+          // authoritative: never retried, and not even flagged.
+          //
+          // THE OFFERED THREAD IS `unreadConversations[0]` (conformance r3
+          // finding 6): the collector emits a contact candidate AT its first
+          // offered thread and only merges later threads onto it, so [0] IS the
+          // thread whose index entry produced this candidate.
+          const offered = candidate.unreadConversations[0]?.conversationId;
+          if (offered === undefined) return { row: undefined, lagged: false };
+          // BEST-EFFORT, like every other external read in this module (header:
+          // "NEVER throws a 500"). A failed point read cannot prove lag, so it
+          // classifies as NOT lag: drop, no retry, page served (adversarial r4
+          // finding 5 / conformance r4 finding 3 - the earlier "deliberately
+          // uncaught" posture contradicted the module contract).
+          let base: ConversationItem | undefined;
+          try {
+            base = await conversations.getById(offered);
+          } catch (err) {
+            log.warn({ err, conversationId: offered }, 'inbox: lag discriminator read failed (best-effort)');
+            return { row: undefined, lagged: false };
+          }
+          // Base says still unread -> the participant image is behind, the 0 is
+          // a missing question, and a retry can learn something. Base says read,
+          // closed or gone -> an ORDINARY mark-read race (or a closed thread the
+          // index has not caught up with, conformance r3 finding 7): dropping is
+          // CORRECT and the page reached a genuine end.
+          return { row: undefined, lagged: base !== undefined && isUnreadVisible(base) };
+        }
+        // NOTE the newest-conversation IDENTITY GUARD is deliberately ABSENT
+        // here: row identity is the seen-set, and `newestOf` picks only the
+        // REPRESENTATION (phone / lastActivityAt / placement / latest-message
+        // source). A contact whose newest thread is READ and whose older thread
+        // is unread MUST render - carrying the guard over would drop it.
+        const built = await buildContactRow(
+          candidate.contact,
+          convs,
+          maxConv,
+          unreadSum,
+          isDeleted(candidate.contact),
+        );
+        // The only drop left in there is the deleted-contact resurfacing RULE,
+        // decided against fresh message reads: an answer, not a lag.
+        return built === undefined ? { row: undefined, lagged: false } : { row: built };
+      }
+
+      // Every non-contact candidate maps onto exactly ONE index item, so a
+      // single point read (an eventually-consistent base-table GetItem,
+      // typically fresher than any GSI - ConsistentRead deliberately not used)
+      // refreshes status + unread_count. A row the index still lists but the
+      // base table reports read or closed is dropped right here.
+      // BEST-EFFORT (module header: every external lookup degrades, never a
+      // 500): a failed point read drops the row for this page and the next
+      // reconcile refetch re-offers it. See the contact arm's twin above.
+      let fresh: ConversationItem | undefined;
+      try {
+        fresh = await conversations.getById(candidate.conversation.conversationId);
+      } catch (err) {
+        log.warn(
+          { err, conversationId: candidate.conversation.conversationId },
+          'inbox: unread point read failed (best-effort)',
+        );
+        return { row: undefined, lagged: false };
+      }
+      // A base-table point read IS authoritative, so this drop is never "lag":
+      // there is nothing a retry could learn.
+      if (fresh === undefined || !isUnreadVisible(fresh)) return { row: undefined, lagged: false };
+      if (candidate.kind !== 'unknown') {
+        // The two multi-party kinds reuse the pager's builders verbatim.
+        // groupRowFor is deliberately NOT relayRowFor: that one's status
+        // normalizer has an 'open' catch-all, which would report a group_open
+        // thread to the dashboard as a plain open relay group.
+        return {
+          row: candidate.kind === 'relay_group' ? await relayRowFor(fresh) : groupRowFor(fresh),
+        };
+      }
+      // The unknown-number row, built inline rather than extracted: the pager's
+      // literal reads its driving conversation directly, and ~10 duplicated
+      // lines are cheaper than a second parameterized helper (plan round 4).
+      const { channel, direction, preview } = await latestMessageOf(fresh.conversationId, fresh);
+      return {
+        row: {
+          kind: 'unknown',
+          phone: candidate.phone,
+          name: formatPhoneForDisplay(candidate.phone) ?? candidate.phone,
+          role: 'unknown',
+          unreadCount: unreadOf(fresh),
+          preview,
+          channel,
+          direction,
+          lastActivityAt: fresh.last_activity_at,
+          needsTriage: true,
+        },
+      };
+    };
+
+    // FILL-OR-EXHAUST (spec 4.5 step 1) - the same invariant the open-partition
+    // pager provides: collect -> hydrate -> drop -> refill, until the page is
+    // full, the SUPPLY runs out, or the request budget does. It TERMINATES
+    // because the only non-breaking outcome is `capped`, which by definition
+    // consumed at least one raw item, so `remainingBudget` strictly decreases.
+    for (;;) {
+      const collected = await collectUnreadRows(
+        { conversations, contacts, messages, logger: log },
+        {
+          maxRows: limit - unreadRows.length,
+          budget: remainingBudget,
+          ...(scanPosition !== undefined && { startAfter: scanPosition }),
+          excludeContactIds: seen,
+          wastedProbesBefore: wastedProbes,
+        },
+      );
+      deletedProbes += collected.deletedProbes;
+      wastedProbes += collected.wastedProbes;
+      deletedSkipped += collected.skippedDeletedThreads;
+      remainingBudget = collected.remainingBudget;
+      if (collected.scanPosition !== undefined) scanPosition = collected.scanPosition;
+
+      for (const candidate of collected.candidates) {
+        const hydrated = await hydrateUnread(candidate);
+        if (hydrated.row === undefined) {
+          // Held for ONE retry after the loop (adversarial r2 finding 4). A
+          // lag-dropped candidate is NOT re-offered by any later collect -
+          // `scanPosition` is already past its index item - so this is the last
+          // chance the request has to deliver it. The `kind` test is what TYPES
+          // the list; it is not a guard against a state the arms can produce.
+          if (hydrated.lagged && candidate.kind === 'contact') laggedDrops.push(candidate);
+          continue;
+        }
+        const row = hydrated.row;
+        // The seen-set records EMITTED contacts ONLY (spec 4.5 step 1, amended
+        // in review fix wave 1 - adversarial A3). Adding a DROPPED candidate
+        // suppressed it for the rest of the paging session, and the drop's own
+        // cause is a lagging participant GSI: the badge, which never hydrates,
+        // kept counting a row no page could ever show. Within-page duplication
+        // is not what this set defends - `scanPosition` advances past every
+        // consumed item, so a collect never re-offers one - it defends
+        // CROSS-PAGE and cross-iteration re-emission of a contact whose OLDER
+        // thread is still ahead in the index.
+        if (candidate.kind === 'contact') seen.add(candidate.contactId);
+        unreadRows.push(row);
+      }
+
+      if (unreadRows.length >= limit) break; // page full
+      if (collected.consumedAll) {
+        consumedAll = true;
+        break;
+      }
+      if (collected.truncated || remainingBudget === 0) {
+        budgetSpent = true;
+        break;
+      }
+      // Otherwise the collect stopped at its cap and hydration dropped rows -
+      // go again from the new scan position to refill the page.
+    }
+
+    // THE ONE DROP-AWARE RETRY (adversarial r2 finding 4). A candidate dropped
+    // because the participant GSI had not caught up is unreachable afterwards:
+    // it is not in the seen-set (fix wave 1 stopped suppressing it), but
+    // `scanPosition` is past its only index item, so no later page re-offers it
+    // either - while the badge, which never hydrates, keeps counting it.
+    //
+    // Retrying LAST is the point: every other read in the request has happened
+    // since, which is the settling time a lagging GSI usually needs. Exactly
+    // once, and only for the lag-shaped drops, so an ordinary mark-read race
+    // costs nothing extra. The per-request cache is dropped for those contacts,
+    // or the retry would re-read its own first answer.
+    //
+    // AND IT IS BOUNDED, at the page `limit` (adversarial r3 finding 4 /
+    // conformance r3 finding 2). Every retry costs a fresh
+    // `conversationsForContact` - one or more participant-GSI Queries - and a
+    // lagging or DEGRADED participant GSI (a thrown lookup degrades to an empty
+    // set, which reads as a fresh sum of 0) makes EVERY candidate a lag-shaped
+    // drop, so an unbounded retry doubles the reads of a page that returns
+    // nothing. `limit` is the natural bound: a retry that could not fit on the
+    // page is counted `unresolvedDrops` anyway.
+    let unresolvedDrops = 0;
+    let laggedRetries = 0;
+    for (const candidate of laggedDrops) contactConvsCache.delete(candidate.contactId);
+    for (const candidate of laggedDrops) {
+      if (seen.has(candidate.contactId)) continue; // emitted later
+      if (unreadRows.length >= limit || laggedRetries >= limit) {
+        // No room on the page, or the retry budget is spent. The row is still
+        // lost for this paging session, so it counts as unresolved rather than
+        // being quietly forgotten.
+        unresolvedDrops += 1;
+        continue;
+      }
+      laggedRetries += 1;
+      const hydrated = await hydrateUnread(candidate);
+      if (hydrated.row === undefined) {
+        unresolvedDrops += 1;
+        continue;
+      }
+      seen.add(candidate.contactId);
+      unreadRows.push(hydrated.row);
+    }
+
+    // Both tripwires fire ONCE, on the REQUEST total. The scanned total is
+    // exactly `startingBudget - remainingBudget` because ONE budget is threaded
+    // through every collect; the in-collector WARN is per-walk and would miss a
+    // request that scanned 200 in each of three collects.
+    warnDeletedProbes(log, {
+      probes: deletedProbes,
+      wasted: wastedProbes,
+      skipped: deletedSkipped,
+    });
+    warnUnreadScanned(log, startingBudget - remainingBudget);
+
+    // Rows sort by DISPLAYED lastActivityAt, as every other filter does. The
+    // stream ordered them by newest UNREAD activity, and for a multi-thread
+    // contact whose newest thread is read the two differ - spec 4.5's declared
+    // ordering nuance.
+    unreadRows.sort((a, b) =>
+      a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
+    );
+
+    // nextCursor keys on CONSUMPTION, never on scan state (spec 4.5 step 2);
+    // `truncated` names a NON-NATURAL end (step 3).
+    let unreadCursor: string | null = null;
+    let truncated = false;
+    if (scanPosition === undefined) {
+      // Nothing consumed at all (an empty index, or a cursor already past the
+      // end): no position to resume from. Whether anything was WITHHELD is a
+      // separate question - `budgetSpent` answers it (conformance N3). Consuming
+      // nothing while the budget died first is a real early end (a
+      // queryUnreadPage returning an empty page WITH a LastEvaluatedKey gets
+      // here in production; the unreadWalkLimit seam gets here in tests), and
+      // reporting it as a NATURAL end made a feed with unread behind it render
+      // "You're all caught up" - the exact silent-zero this branch's siblings
+      // exist to prevent.
+      unreadCursor = null;
+      truncated = budgetSpent;
+    } else if (consumedAll) {
+      // THE NATURAL END, checked FIRST: the supply ran out, so nothing was
+      // withheld and `truncated` must stay off (spec 4.5 step 3 defines it as a
+      // NON-NATURAL end). This branch outranks the depth cap on purpose. The cap
+      // ordered first fired on every consumedAll page past SEEN_SET_MAX ids, so
+      // a correct - even EMPTY - final unread page claimed an early end, and an
+      // empty one rendered the inbox failure state on a tab that was genuinely
+      // caught up (conformance finding 1).
+      unreadCursor = null;
+    } else if (seen.size > SEEN_SET_MAX) {
+      // THE DEPTH CAP, and now only when rows really are behind it: past this
+      // many ids the server can no longer mint a cursor it would itself accept,
+      // so paging is over while supply remains - and round 4's rule is that the
+      // cap must never be the one early-end path carrying no signal.
+      truncated = true;
+    } else if (budgetSpent) {
+      truncated = true;
+      // ...AND STILL MINT THE CURSOR (spec 4.5 step 2, amended in review fix
+      // wave 1 - conformance C1). Step 2 enumerates exactly TWO null-cursor
+      // conditions, and a budget-expired page is neither: it has a known
+      // position and a seen-set inside the cap. Returning null discarded a
+      // scanPosition the request had already paid for, so the only forward
+      // affordance left was Retry - which re-runs the identical prefix with a
+      // fresh budget and truncates identically. `truncated` is a SIGNAL layered
+      // ON paging, not a replacement for it. The empty-page invariant below
+      // still nulls this out when no rows survived.
+      unreadCursor = encodeUnreadCursor(scanPosition, seen);
+    } else {
+      unreadCursor = encodeUnreadCursor(scanPosition, seen);
+    }
+    // NOTE what is deliberately NOT here (fix wave 3, adversarial r3 finding 2):
+    // `deletedSkipped > 0` no longer forces `truncated`. Threads the probe bound
+    // called hidden without reading them do NOT make a DRAINED walk an early
+    // end - the assumption past the bound is "hidden", which is what an empty
+    // page already means, and forcing the flag turned a residue-only, genuinely
+    // caught-up org into a permanent inbox failure banner. The collector's own
+    // `truncated` (a stopped walk) still arrives through `budgetSpent` above,
+    // and the deleted-probe WARN carries the skipped depth to the operator.
+    //
+    // A row this request KNOWS it could not deliver IS still a floor (adversarial
+    // r2 finding 4). The page must not report a natural end while the badge
+    // counts a row no page in this session can show; `truncated` is the one
+    // honest name for "we may disagree with the badge".
+    if (unresolvedDrops > 0) truncated = true;
+    // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
+    // the dashboard's empty-state and Load-more gating both key on rows.length.
+    // This is LOAD-BEARING for the budget branch above (which mints a cursor
+    // unconditionally); for every other exit it is the defensive belt that
+    // keeps the invariant true if the loop ever grows another one. An empty
+    // truncated page keeps its error-state posture rather than offering a Load
+    // more the client has nothing to hang off.
+    if (unreadRows.length === 0) unreadCursor = null;
+
+    log.info(
+      {
+        filter,
+        count: unreadRows.length,
+        scanned: startingBudget - remainingBudget,
+        seen: seen.size,
+        hasMore: unreadCursor !== null,
+        ...(truncated && { truncated: true }),
+        // THE RETRY VOLUME, on the REQUEST-level line (adversarial r3 finding
+        // 4 asked for the request's WARN payload; the retry is now hard-capped
+        // at `limit`, so it is a per-request STATISTIC rather than a tripwire,
+        // and this is the line that already carries scanned/seen/truncated).
+        // Always present when nonzero, so the pair "the badge counts rows this
+        // page could not deliver" is readable without a second request.
+        ...(laggedRetries > 0 && { laggedRetries }),
+        ...(unresolvedDrops > 0 && { unresolvedDrops }),
+      },
+      'inbox feed assembled',
+    );
+    return {
+      rows: unreadRows,
+      nextCursor: unreadCursor,
+      ...(truncated && { truncated: true as const }),
     };
   }
 
@@ -850,18 +1438,12 @@ export async function aggregateInbox(
   // `unknown` never contains group rows (needsTriage is always false), so skip
   // the query outright rather than reading a partition to throw it all away.
   if (startKey === undefined && filter !== 'unknown') {
-    // UNREAD IS AN ACCEPTED FULL PARTITION WALK (spec 4.2 / 15.10), not bounded
-    // work: unread is not in the partition key. The nav badge counts the rows of
-    // a `filter=unread` page, so capping here would silently undercount it.
-    const unreadWalk = filter === 'unread';
-    const readLimit = unreadWalk ? GROUP_UNREAD_WALK_LIMIT : GROUP_PAGE_ONE_LIMIT;
-    const page = await readGroupSource(readLimit);
-    if (unreadWalk && page.items.length > GROUP_UNREAD_GROWTH_THRESHOLD) {
-      log.warn(
-        { walked: page.items.length, threshold: GROUP_UNREAD_GROWTH_THRESHOLD },
-        'inbox: group unread walk past the growth threshold - time to materialize unread counts',
-      );
-    }
+    // Only `filter=all` reaches here now (`groups` and `unread` returned above),
+    // so the read is always the page-one cap. The unread FULL PARTITION WALK
+    // this block used to run - and its growth WARN - died with spec 4.5: unread
+    // group rows come from the byUnread index like every other unread row, and
+    // page-one overflow of ANY kind is reachable through the unread cursor.
+    const page = await readGroupSource(GROUP_PAGE_ONE_LIMIT);
     // TRUNCATED means "rows this filter would have shown were withheld": the
     // repo's walk budget stopped early, or (page-one only) the cap did.
     groupsTruncated = page.truncated || page.nextCursor !== undefined;
@@ -881,6 +1463,77 @@ export async function aggregateInbox(
     'inbox feed assembled',
   );
   return { rows, nextCursor, ...(groupsTruncated && { groupsTruncated: true }) };
+}
+
+/**
+ * Count the unread inbox ROWS for the nav badge (spec 4.4).
+ *
+ * ONE `collectUnreadRows` call over the sparse byUnread index, capped at
+ * BADGE_COUNT_CAP. Because layer 1 is lazy and layer 2 stops at the cap, an
+ * empty index costs a single Query and a busy one scans only far enough to find
+ * 100 rows - never the whole index.
+ *
+ * NO HYDRATION: no previews, no placement labels, no latest-message reads. The
+ * deleted-contact resurfacing probe inside the collector is the one message read
+ * this path performs, and it is a VISIBILITY rule (spec 4.3 step 2), not
+ * presentation.
+ *
+ * Repo reads are NOT caught here: an index failure is a normal 500 and the
+ * client collapses any error to "no badge" (spec 4.4).
+ */
+export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnreadCount> {
+  const log = deps.logger ?? defaultLogger;
+  const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+
+  const result = await collectUnreadRows(
+    { conversations, contacts, messages, logger: log },
+    {
+      maxRows: BADGE_COUNT_CAP,
+      budget: deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT,
+    },
+  );
+  // ONE collect IS the whole request here, so this collect's probe total is the
+  // request total the tripwire wants. The shared module-scope limiter (the same
+  // instance the unread PAGE fires) owns the threshold - do not re-test it here.
+  warnDeletedProbes(log, {
+    probes: result.deletedProbes,
+    wasted: result.wastedProbes,
+    skipped: result.skippedDeletedThreads,
+  });
+  // THE SILENT ZERO (conformance C1): an early-stopped walk that found nothing
+  // renders as no badge at all, which the operator reads as "caught up" while
+  // unread rows sit behind the truncation. `truncated` is on the wire, but v1's
+  // client deliberately does not render it, so this WARN is the only place the
+  // state is observable.
+  if (result.candidates.length === 0 && result.truncated) {
+    warnTruncatedZeroCount(log, {
+      scanned: (deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT) - result.remainingBudget,
+      probes: result.deletedProbes,
+      // How DEEP the wall behind the zero is - the field `probes` cannot supply
+      // once the bound pins it to a constant (adversarial r3 finding 6).
+      skipped: result.skippedDeletedThreads,
+    });
+  }
+
+  // Deliberately no per-request INFO line: this is the highest-frequency call in
+  // the app (every SPA boot plus every debounced conversation event, per
+  // connected dashboard). The rate-limited WARN tripwires are the signal.
+  //
+  // TWO SURFACES, ONE FACT (conformance r3 finding 5). The badge returns the
+  // collector's `truncated` verbatim while the unread PAGE re-derives its own
+  // from the cursor branch chain (the page can end early for reasons the
+  // collector cannot see: the seen-set depth cap, an undeliverable lag drop).
+  // The two converge on the same wire meaning - "the scan ended EARLY, so this
+  // answer is a floor" - and the collector's derivation, with the fix-wave-3
+  // rule that a drained stream is a natural end, is at
+  // lib/unreadFeed.ts `collectUnreadRows`' return.
+  return {
+    unreadCount: result.candidates.length,
+    capped: result.capped,
+    truncated: result.truncated,
+  };
 }
 
 // --- Router ------------------------------------------------------------------
@@ -933,6 +1586,21 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       }
       log.error({ err }, 'inbox feed failed');
       throw err; // Express 5 forwards async throws to the error handler.
+    }
+  });
+
+  // GET /api/inbox/unread-count -> { unreadCount, capped, truncated }
+  // The nav badge's cheap read (spec 4.4): ONE index-backed collect, no
+  // hydration. Registered ABOVE the /:contactId/read param route - Express
+  // matches in REGISTRATION order, so a param route placed first would claim
+  // "unread-count" as a contactId. Today the param route is a POST two segments
+  // deep and cannot collide; keeping this above it is what makes that stay true.
+  router.get('/unread-count', async (_req, res) => {
+    try {
+      res.json(await countUnreadRows(deps));
+    } catch (err) {
+      log.error({ err }, 'inbox unread count failed');
+      throw err; // Express 5 forwards async throws to the error handler (500).
     }
   });
 

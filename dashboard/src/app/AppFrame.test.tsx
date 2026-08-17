@@ -3,9 +3,17 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../App.js';
 
+// A bare factory: it replaces the WHOLE module and vitest does not type-check it
+// against the real shape, so every field the context gains has to be added here
+// by hand (a missing function would be a runtime TypeError, not a compile error).
 vi.mock('./UnreadContext.js', () => ({
   UnreadProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useUnread: () => ({ unread: 4 }),
+  useUnread: () => ({
+    unread: 4,
+    unmatchedUnread: null,
+    noteRowsCleared: () => {},
+    rollbackRowsCleared: () => {},
+  }),
 }));
 
 // Render the whole app authenticated as the seeded VA (mock /auth/me 200), so

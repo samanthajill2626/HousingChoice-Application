@@ -30,10 +30,11 @@
 // Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
 // listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
 // non-terminal stage — attention + derived-stuck), tours listByScheduledRange,
-// listByLastActivity({status:'open'}), listByType (the unknown/needs_review
-// triage partition), and listRelayGroups('open') (byRelayStatus - the D5 relay
-// close-nags). Each fetch is capped and a log.warn fires if a cap is hit
-// (no silent truncation).
+// listByLastActivity({status:'open'}) (the relay opt-out attention scan),
+// queryUnreadPage over the sparse byUnread index (the unread sections -
+// inbox-unread-index), listByType (the unknown/needs_review triage partition),
+// and listRelayGroups('open') (byRelayStatus - the D5 relay close-nags). Each
+// fetch is capped and a log.warn fires if a cap is hit (no silent truncation).
 //
 // PII (doc §9): responses carry who/why to the authed client; LOG LINES are
 // counts/IDs only.
@@ -74,6 +75,13 @@ import {
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
+import {
+  isOneToOneBucket,
+  iterateUnreadConversations,
+  UNREAD_WALK_LIMIT,
+  type UnreadWalkState,
+} from '../lib/unreadFeed.js';
+import { createRateLimitedWarn } from '../lib/rateLimitedWarn.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
@@ -129,6 +137,15 @@ export interface TodayRouterDeps {
   toursRepo?: ToursRepo;
   /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
   extractionRepo?: ExtractionRepo;
+  /**
+   * Test seam: the raw byUnread items ONE request may scan before the unread
+   * pass reports a floor (inbox-unread-index). Production leaves it undefined
+   * and takes UNREAD_WALK_LIMIT; a route test sets it small so the
+   * budget-expired posture is reachable without seeding thousands of rows.
+   * Forwarded from the SINGLE ApiRouterDeps.unreadWalkLimit seam - not a
+   * second one.
+   */
+  unreadWalkLimit?: number;
 }
 
 // --- Grouping rules (match the spec + the frontend fallback) -----------------
@@ -152,6 +169,21 @@ const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']
  * truncation) so an operator drowning in work is visible in the logs.
  */
 const GROUP_FETCH_LIMIT = 100;
+
+/**
+ * How many 1:1-bucket unread conversations the byUnread pass KEEPS
+ * (inbox-unread-index spec 4.6). Same numeric bound Today always had, applied
+ * AFTER the 1:1 filter rather than before it - so a burst of unread group/relay
+ * threads can no longer starve the unreplied and untriaged-inbound sections.
+ */
+const TODAY_UNREAD_CAP = 100;
+
+/**
+ * Minimum gap between "the unread walk ran out of budget" WARNs. The signal is
+ * the RATE (is index accrual outrunning the walk at all), not each occurrence -
+ * every /api/today poll from every open dashboard would otherwise re-emit it.
+ */
+const TODAY_UNREAD_WARN_INTERVAL_MS = 5 * 60_000;
 
 /**
  * How many pages the untriaged-contacts read will walk past excluded rows (fix
@@ -277,6 +309,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  /** Raw byUnread rows ONE /api/today request may scan (spec 4.3's budget). */
+  const unreadWalkBudget = deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT;
+  /**
+   * ROUTER-FACTORY scoped, matching this repo's only other createRateLimitedWarn
+   * call sites (routes/webhooks/twilio.ts): one router per process in
+   * production, so one throttle window - and one per harness in tests, so a
+   * suite's second budget case is not swallowed by its first one's window.
+   */
+  const warnUnreadWalkTruncated = createRateLimitedWarn({
+    logger: log,
+    intervalMs: TODAY_UNREAD_WARN_INTERVAL_MS,
+  });
 
   const router = Router();
 
@@ -350,10 +394,19 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       return placement;
     };
 
-    /** Warn (never silently truncate) when a group's bounded fetch hit the cap. */
-    const warnIfCapped = (group: string, count: number): void => {
-      if (count >= GROUP_FETCH_LIMIT) {
-        log.warn({ group, count: GROUP_FETCH_LIMIT }, 'today: group fetch hit the cap — results truncated');
+    /**
+     * Warn (never silently truncate) when a group's bounded fetch hit its cap.
+     *
+     * The threshold is a PARAMETER rather than a hardcoded GROUP_FETCH_LIMIT:
+     * not every bounded read on this route is bounded by that constant any more
+     * (the byUnread pass carries its own TODAY_UNREAD_CAP), and a hardcoded
+     * threshold would both mis-compare and mis-report the logged count. Every
+     * pre-existing call site passes GROUP_FETCH_LIMIT, so their behavior is
+     * unchanged.
+     */
+    const warnIfCapped = (group: string, count: number, threshold: number): void => {
+      if (count >= threshold) {
+        log.warn({ group, count: threshold }, 'today: group fetch hit the cap - results truncated');
       }
     };
 
@@ -378,7 +431,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // follow_up → follow_ups. Soonest-first ⇒ the first row per (placement,group)
     // is the most urgent, so per-group dedup keeps the right one.
     const dueDeadlines = await placementDeadlines.listDue(nowIso, { limit: GROUP_FETCH_LIMIT });
-    warnIfCapped('deadlines', dueDeadlines.length);
+    warnIfCapped('deadlines', dueDeadlines.length, GROUP_FETCH_LIMIT);
     for (const d of dueDeadlines) {
       const placement = await getPlacement(d.placementId);
       if (!placement) continue; // orphan deadline (placement gone) → skip
@@ -424,7 +477,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     };
     for (const stage of ATTENTION_STAGES) {
       const page = await placements.listByStage(stage, { limit: GROUP_FETCH_LIMIT });
-      warnIfCapped(`attention:${stage}`, page.items.length);
+      warnIfCapped(`attention:${stage}`, page.items.length, GROUP_FETCH_LIMIT);
       for (const c of page.items) {
         // Cache the placement we just loaded so any deadline join reuses it.
         if (!placementCache.has(c.placementId)) placementCache.set(c.placementId, c);
@@ -490,7 +543,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     {
       const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled']);
       const todayTours = await tours.listByScheduledRange(toursWindow.from, toursWindow.to);
-      warnIfCapped('tours_today', todayTours.length);
+      warnIfCapped('tours_today', todayTours.length, GROUP_FETCH_LIMIT);
       for (const t of todayTours) {
         if (!TOURS_TODAY_STATUSES.has(t.status)) continue; // skip non-active statuses
         if (await isDeletedContact(t.tenantId)) continue; // deleted tenant → off the boards
@@ -512,12 +565,19 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // query + DERIVED stuck rows from the byStage scan.)
 
     // --- conversations: ONE bounded inbox Query (byLastActivity, open) --------
-    // Untriaged inbounds (unknown_1to1 + unread) → needs_you_now (refType
-    // 'conversation'); every other open conversation with unread → unreplied.
-    // Phones already emitted as an untriaged unknown_1to1 conversation row — so
-    // the contacts triage pass below can de-dupe the SAME person (auto-capture
-    // usually creates BOTH an unknown_1to1 conversation AND a needs_review
-    // contact) to one item, preferring the conversation (the actionable target).
+    // THIS PASS IS THE RELAY OPT-OUT ATTENTION SCAN ONLY (inbox-unread-index).
+    // The unread half - untriaged inbounds -> needs_you_now, every other unread
+    // 1:1 -> unreplied - moved to the byUnread index pass immediately below.
+    // Riding this hard-capped 100-row read meant an unread thread ranking past
+    // row 100 was silently missing from Today, however long it sat unanswered.
+    // The opt-out scan STAYS here: it is independent of unread (a relay thread's
+    // unread is pool-number noise) and the open partition IS its source.
+    //
+    // `emittedUnknownPhones` is written by the unread pass and read by the
+    // contacts-triage pass after it, so it stays declared out here, ahead of
+    // both: auto-capture usually creates BOTH an unknown_1to1 conversation AND a
+    // needs_review contact, and the triage pass de-dupes the SAME person to one
+    // item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
     {
       // NATIVE GROUP TEXTS ARE STRUCTURALLY ABSENT from this read: they live in
@@ -527,7 +587,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // Spec 11 also keeps them out of Today deliberately (inbox + thread view
       // only in v1), so there is nothing to add here.
       const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
-      warnIfCapped('conversations', page.items.length);
+      warnIfCapped('conversations', page.items.length, GROUP_FETCH_LIMIT);
       for (const conv of page.items) {
         // A2P — relay opt-out attention: a relay_group carrying opted-out members
         // surfaces ONE needs_you_now item PER still-opted-out member, linking to
@@ -578,8 +638,133 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             });
           }
         }
-        const unread = typeof conv.unread_count === 'number' ? conv.unread_count : 0;
-        if (unread <= 0) continue; // only inbound-last (unread) threads are actionable
+      }
+    }
+
+    // --- unread: ONE bounded byUnread index walk (newest-activity-first) ------
+    // The sparse byUnread GSI holds exactly the conversations with unread, so
+    // this pass sees the newest 100 unread 1:1 threads rather than whichever
+    // unread threads happened to fall inside the first 100 OPEN rows. Same
+    // numeric bound, larger realized payload on unread-heavy data - that growth
+    // IS the fix. Today gains one index Query and loses nothing; this is a
+    // CORRECTNESS fix, not a cost fix.
+    //
+    // FILTER-THEN-CAP, explicitly: keep only 1:1-bucket rows and stop after
+    // TODAY_UNREAD_CAP KEPT ones. Capping the raw stream first would let a burst
+    // of unread group_text / relay_group threads - which Today never shows -
+    // consume every slot and starve the sections this pass exists to fill.
+    //
+    // The iterator is LAZY, so breaking at the cap stops the paging too. It also
+    // applies the shared visibility rule (unread_count > 0 plus the per-type
+    // status gate), which for a 1:1 is exactly the `status: 'open'` + `unread >
+    // 0` gate this pass used to apply itself.
+    //
+    // ORDER MATTERS: this runs BEFORE the contacts-triage pass below, which
+    // consumes the `emittedUnknownPhones` written here.
+    {
+      const walkState: UnreadWalkState = { scanExhausted: false, scanned: 0 };
+      const unreadOneToOne: ConversationItem[] = [];
+      // DEDUPE BY EMITTED IDENTITY, AND BEFORE THE CAP (adversarial NEW-3).
+      // One contact can own SEVERAL unread threads - contactThreads.ts models
+      // exactly one conversation PER PARTICIPANT KEY, so a person with a phone
+      // thread and an email thread arrives here TWICE. Both emitted a row with
+      // the same refType/refId, which cost three things: duplicate React keys
+      // inside one group's <ul> (Today.tsx renders key=`${refType}:${refId}`),
+      // TWO consumed TODAY_UNREAD_CAP slots for one person - pushing real work
+      // off the queue the cap exists to protect - and a warnIfCapped tripwire
+      // counting the duplicate. Every other Today group carries a dedupe set
+      // (needsYouNowIds, followUpsIds); this one carried none.
+      //
+      // It sits in the COLLECT loop, ahead of the cap check, precisely so a
+      // duplicate cannot spend one of the 100 slots. Newest-activity-first
+      // order means the FIRST thread seen wins, which is the row the operator
+      // would want. Keyed PER DESTINATION GROUP, matching the per-group dedupe
+      // ruling above: an unknown thread emits into needs_you_now and a known
+      // 1:1 into unreplied, and Today renders those as separate <ul>s with
+      // independent keyspaces, so one contact legitimately appearing in both is
+      // not a duplicate.
+      const unreadRowKeys = new Set<string>();
+      /**
+       * DISTINCT deleted contacts this pass has skipped - one `contacts.getById`
+       * each, because `getContact` memoizes per contact ID (adversarial r2
+       * finding 6). It is both the read counter and the bound below.
+       */
+      const skippedDeletedContacts = new Set<string>();
+      for await (const conv of iterateUnreadConversations(
+        { conversations, logger: log },
+        { budget: unreadWalkBudget },
+        walkState,
+      )) {
+        if (!isOneToOneBucket(conv)) continue;
+        // DELETED CONTACTS, ALSO BEFORE THE CAP (adversarial A9). This test used
+        // to run in the emit loop below, after the cap had been spent - the very
+        // ordering the comment above rejects for group threads - and the index
+        // source makes it worse: the newest 100 UNREAD rows is where resurfaced
+        // deleted contacts live BY CONSTRUCTION (the product rule keeps them
+        // unread until someone reads them), where the newest 100 OPEN rows held
+        // only a small fraction of them. A hundred at the head of the index
+        // rendered Unreplied and the untriaged block EMPTY, with warnIfCapped
+        // announcing "capped" rather than "filtered to nothing".
+        //
+        // IT IS NOT FREE (adversarial r2 finding 6 - the earlier claim that the
+        // request cache made it so was wrong): `getContact` memoizes per contact
+        // ID, so every DISTINCT contact costs a real `contacts.getById`, and
+        // ahead of the cap this runs over every 1:1 item walked rather than the
+        // 100 kept ones. Unbounded, an index head thick with deleted residue
+        // could issue up to UNREAD_WALK_LIMIT (2000) sequential contact Gets on
+        // a route every connected dashboard SSE-refetches. So the skip work
+        // carries its own bound, at the same TODAY_UNREAD_CAP the kept rows use.
+        // Batching the lookups is the real remedy
+        // (docs/issues/contacts-batchget-amplified-reads.md).
+        //
+        // NO LOOKUP BOUND (planner fix, adversarial r4 finding 1). Every bound
+        // tried here was wrong at some threshold: fix wave 2 stopped the WALK
+        // (hid live work - the walk-stop that was BLOCKING for the inbox), and
+        // fix wave 3 stopped the LOOKUPS and treated the rest as non-deleted -
+        // which at 250 deleted ahead of 5 live rendered a FULL Unreplied block
+        // of deleted contacts and ZERO live work: the board inverted. There is
+        // no partial-knowledge state that is honest, so the rule is applied to
+        // every walked 1:1 item. COST: one memoized `getById` per DISTINCT
+        // contact, bounded by the raw walk budget - the same O(scanned index
+        // items) the nav badge pays, watched by the scanned-items WARN, and
+        // remedied by the BatchGet follow-up
+        // (docs/issues/contacts-batchget-amplified-reads.md).
+        const ownerId = oneToOneContactId(conv);
+        if (ownerId !== undefined && (await isDeletedContact(ownerId))) {
+          skippedDeletedContacts.add(ownerId);
+          continue;
+        }
+        const rowKey = unreadRowKeyOf(conv);
+        if (unreadRowKeys.has(rowKey)) continue;
+        unreadRowKeys.add(rowKey);
+        unreadOneToOne.push(conv);
+        if (unreadOneToOne.length >= TODAY_UNREAD_CAP) break;
+      }
+      warnIfCapped('unread', unreadOneToOne.length, TODAY_UNREAD_CAP);
+      // ITS OWN LABEL, deliberately not folded into the line above: it says
+      // "this many distinct deleted contacts were skipped on the way to the
+      // block" (residue accruing - the delete-time reset and backfill rule 3
+      // are the fixes), where the block-level line says "the block is full".
+      // Two different operational problems. The threshold reuses
+      // TODAY_UNREAD_CAP as a magnitude, not as any lookup bound.
+      warnIfCapped('unread:deleted_skips', skippedDeletedContacts.size, TODAY_UNREAD_CAP);
+      // UNDERFILLED FOR A REASON NOBODY CAN OTHERWISE SEE. Neither capped nor
+      // exhausted means the raw-scan budget ran out first, so the block is short
+      // while real unread work sits behind it - the same loud-problem-turned-
+      // silent shape the contacts-triage page-budget WARN below covers. Rate
+      // limited because the signal is the RATE, not each poll.
+      if (unreadOneToOne.length < TODAY_UNREAD_CAP && !walkState.scanExhausted) {
+        warnUnreadWalkTruncated(
+          {
+            event: 'today_unread_walk_truncated',
+            scanned: walkState.scanned,
+            kept: unreadOneToOne.length,
+            budget: unreadWalkBudget,
+          },
+          'today: the unread index walk hit its scan budget before filling the block - some unread threads are NOT shown',
+        );
+      }
+      for (const conv of unreadOneToOne) {
         const who = whoOfConversation(conv);
         if (conv.type === 'unknown_1to1') {
           // Untriaged inbound → link to the unknown CONTACT's page (the
@@ -588,8 +773,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // roster isn't linked yet (auto-capture race), DEFER to the contacts
           // triage pass below (it emits the proper contact row) rather than
           // emitting a dead conversation ref — so we never produce a nowhere-link.
+          // The deleted-contact test has already run, ahead of the cap.
           const contactId = oneToOneContactId(conv);
-          if (contactId !== undefined && !(await isDeletedContact(contactId))) {
+          if (contactId !== undefined) {
             if (typeof conv.participant_phone === 'string') {
               emittedUnknownPhones.add(conv.participant_phone);
             }
@@ -606,8 +792,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             });
           }
         } else if (
-          // A POSITIVE allowlist: every multi-party type (relay_group above,
-          // group_text unreachable here) falls out deliberately.
+          // A POSITIVE allowlist: every multi-party type falls out deliberately.
+          // relay_group and group_text are already gone (isOneToOneBucket drops
+          // both above); this list is the second, type-level guard, and it is
+          // also what makes a legacy row with NO `type` emit nothing - the same
+          // thing it emitted before this pass was index-fed.
           conv.type === 'tenant_1to1' ||
           conv.type === 'landlord_1to1' ||
           conv.type === 'partner_1to1'
@@ -618,10 +807,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // internal pool number violates "anchored to a placement/contact". Skip it
           // (and anything that isn't a known 1:1 type). Link to the contact page;
           // fall back to the conversation ref only if the roster isn't linked yet.
+          // A deleted contact's thread is off the boards (an unlinked thread -
+          // contactId undefined - has no contact to be deleted, so it stays);
+          // both rules are applied in the collect loop above, ahead of the cap.
           const contactId = oneToOneContactId(conv);
-          // A deleted contact's thread is off the boards (an unlinked thread —
-          // contactId undefined — has no contact to be deleted, so it stays).
-          if (contactId !== undefined && (await isDeletedContact(contactId))) continue;
           unreplied.push({
             item: {
               group: 'unreplied',
@@ -693,7 +882,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // group on this route respects, and a block a human is meant to work
       // through.
       const triaged = collected.slice(0, GROUP_FETCH_LIMIT);
-      warnIfCapped('contacts:triage', triaged.length);
+      warnIfCapped('contacts:triage', triaged.length, GROUP_FETCH_LIMIT);
       for (const contact of triaged) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;
         // GROUP-DETECTION STUBS ARE NOT A TODAY ROW (fix wave 5, adversarial 30;
@@ -748,7 +937,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     {
       const AI_SUGGESTIONS_ITEM_CAP = 20;
       const pending = await extraction.listPending({ limit: GROUP_FETCH_LIMIT });
-      warnIfCapped('ai_suggestions', pending.length);
+      warnIfCapped('ai_suggestions', pending.length, GROUP_FETCH_LIMIT);
       // Preserve first-seen order (listPending is newest-first) so the most recent
       // suggestion's contact leads.
       const byContact = new Map<string, number>();
@@ -886,4 +1075,25 @@ function whoOfConversation(conv: ConversationItem): string {
 function oneToOneContactId(conv: ConversationItem): string | undefined {
   const p = conv.participants?.[0];
   return typeof p?.contactId === 'string' && p.contactId.length > 0 ? p.contactId : undefined;
+}
+
+/**
+ * The Today row IDENTITY a 1:1 unread thread would emit: the destination group
+ * plus the `${refType}:${refId}` pair Today.tsx uses as its React key.
+ *
+ * Deliberately mirrors the two emit branches of the unread pass - an
+ * `unknown_1to1` goes to needs_you_now, every other 1:1-bucket type to
+ * unreplied, and both prefer the contact ref over the conversation ref. Two
+ * threads of the SAME person therefore collide here, which is the point.
+ *
+ * An unlinked thread (no contactId yet - the auto-capture race) falls back to
+ * its own conversationId, which is unique, so it never suppresses anything; the
+ * unknown branch drops it at emit time anyway.
+ */
+function unreadRowKeyOf(conv: ConversationItem): string {
+  const group = conv.type === 'unknown_1to1' ? 'needs_you_now' : 'unreplied';
+  const contactId = oneToOneContactId(conv);
+  return contactId !== undefined
+    ? `${group}:contact:${contactId}`
+    : `${group}:conversation:${conv.conversationId}`;
 }

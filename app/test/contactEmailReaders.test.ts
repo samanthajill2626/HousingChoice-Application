@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
+import { unreadFlagFor } from './helpers/unreadIndexFake.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 
 let app: ReturnType<typeof makeWebhookHarness>['app'];
@@ -39,6 +40,10 @@ function seedEmailConv(
     ai_mode: 'auto',
     created_at: now,
     ...(opts.unread !== undefined && { unread_count: opts.unread }),
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts). No
+    // caller passes `unread` today, so this emits nothing - it is here so the
+    // first one that does cannot seed a row the sparse byUnread index ignores.
+    ...unreadFlagFor({ unread_count: opts.unread }),
   };
   world.conversations.set(conversationId, conv);
 }

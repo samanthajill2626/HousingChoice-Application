@@ -15,6 +15,8 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     status: 'ready',
     rows: [],
     groupsTruncated: false,
+    truncated: false,
+    serverRowCount: 0,
     groupRowsShown: 0,
     hasMore: false,
     loadingMore: false,
@@ -101,6 +103,40 @@ describe('Inbox', () => {
     state = baseState({ status: 'ready', rows: [] });
     renderInbox();
     expect(screen.getByText(/No conversations yet/i)).toBeInTheDocument();
+  });
+
+  // An empty page the server TRUNCATED is not "all caught up" - the unread feed
+  // ended early. It reuses the SHIPPED failure copy (one error surface stays one
+  // surface), and the two blocks must never render together.
+  it('renders the failure copy - NOT all-caught-up - on an empty TRUNCATED unread page', () => {
+    state = baseState({ status: 'ready', rows: [], truncated: true });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.getByText(/couldn.t load your inbox/i)).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the all-caught-up copy on an empty unread page that was NOT truncated', () => {
+    state = baseState({ status: 'ready', rows: [], truncated: false });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  // ADVERSARIAL 4. `truncated` describes the SERVER page; `rows` is the
+  // client-filtered list the Unread tab empties as the operator marks rows read.
+  // Gated on `rows` this pairing turned a finished triage session into "We
+  // couldn't load your inbox.", an error banner with no server statement behind
+  // it. The gate is `serverRowCount` - a server claim judged against a server
+  // quantity - so the two states stay exact complements.
+  it('a truncated page whose rows were all marked read is caught up, NOT an error', () => {
+    state = baseState({ status: 'ready', rows: [], truncated: true, serverRowCount: 3 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
   });
 
   it('renders rows and a Load more button when there is another page', () => {

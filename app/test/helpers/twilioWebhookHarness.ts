@@ -174,6 +174,7 @@ import {
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import { queryUnreadPageFromItems } from './unreadIndexFake.js';
 import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
@@ -217,6 +218,13 @@ export interface FakeWorld {
   contactCreates: string[];
   /** conversationIds whose unread counter was bumped, in order (M1.2). */
   unreadIncrements: string[];
+  /**
+   * conversationIds whose unread counter was ZEROED, in order. The mirror of
+   * unreadIncrements: mark-read and reset fan-outs assert "called for exactly
+   * these threads, and not the already-read one", which an end-state count of
+   * 0 cannot distinguish from "never called".
+   */
+  unreadResets: string[];
   sent: SendMessageParams[];
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
@@ -374,6 +382,7 @@ export function createFakeWorld(): FakeWorld {
   const touches: FakeWorld['touches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
+  const unreadResets: string[] = [];
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
   // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
@@ -464,6 +473,11 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`incrementUnread: no conversation ${conversationId}`);
       conv.unread_count = (conv.unread_count ?? 0) + 1;
+      // Model the REAL primitive's single write: the sparse byUnread flag rides
+      // the same UpdateExpression as the counter, so the two can never
+      // disagree. A fake that bumped only the counter would leave every route
+      // test reading an index the production code would have populated.
+      conv.unread_flag = 'unread';
       unreadIncrements.push(conversationId);
       return conv.unread_count;
     },
@@ -471,7 +485,19 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`resetUnread: no conversation ${conversationId}`);
       conv.unread_count = 0;
+      // REMOVE, not "set empty" - absence of the HASH attribute is what takes
+      // the row out of byUnread.
+      delete conv.unread_flag;
+      unreadResets.push(conversationId);
       return conv;
+    },
+    async queryUnreadPage({ limit, exclusiveStartKey }) {
+      // Flag-derived, tuple-ordered - see helpers/unreadIndexFake.ts. Items are
+      // stored by reference and mutated in place, so this sees live state.
+      return queryUnreadPageFromItems(conversations.values(), {
+        limit,
+        ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      });
     },
     async listByLastActivity({ status, limit }) {
       const items = [...conversations.values()]
@@ -684,6 +710,13 @@ export function createFakeWorld(): FakeWorld {
       // W3: a reopen (-> open) clears the close-announce marker (folded into the
       // flip in the real repo) so a future close re-announces.
       if (status === 'open') delete conv.close_announced_at;
+      // A CLOSE zeroes unread and drops the byUnread flag in the same write
+      // (design 2026-08-16) so a closed group cannot sit unread and invisible.
+      // Reopen deliberately does NOT resurrect the count.
+      if (status === 'closed') {
+        conv.unread_count = 0;
+        delete conv.unread_flag;
+      }
       return conv;
     },
     async assignPoolNumberAndOpen(conversationId, poolNumber) {
@@ -3331,6 +3364,7 @@ export function createFakeWorld(): FakeWorld {
     touches,
     contactCreates,
     unreadIncrements,
+    unreadResets,
     sent,
     initiatedCalls,
     mediaPuts,
@@ -3415,6 +3449,11 @@ export interface HarnessOptions {
   /** Env overrides merged into the default test env (set a key to '' to unset… use delete semantics below). */
   env?: Record<string, string | undefined>;
   world?: FakeWorld;
+  /**
+   * Replace the logger the /api routers use. Only for tests that need a LOGGER
+   * FAILURE (a warn that throws): everything else should read `harness.capture`.
+   */
+  apiLogger?: NonNullable<Parameters<typeof buildApp>[0]>['logger'];
   suggestionResolutionHooks?: SuggestionResolutionHooks;
   suggestionResolutionNow?: () => string;
   suggestionResolutionLeaseId?: () => string;
@@ -3502,6 +3541,13 @@ export interface HarnessOptions {
    * route sent (body/author/automated) with no provider and no network.
    */
   sendMessageService?: SendMessageService;
+  /**
+   * The raw byUnread scan budget for ONE request (inbox-unread-index). Set it
+   * small to drive the `truncated` posture - the unread reads then report a
+   * floor after that many raw index items instead of walking UNREAD_WALK_LIMIT
+   * (2000) of them. Omit for the production budget.
+   */
+  unreadWalkLimit?: number;
 }
 
 export interface Harness {
@@ -3569,6 +3615,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     // M1.4 surfaces (contacts triage, admin users) share the SAME world
     // contacts + the session user repo so triage/role tests run end-to-end.
     api: {
+      // Override the /api router's logger. buildApp spreads `deps.api` AFTER its
+      // own `logger`, so this wins - which is how a test can make a best-effort
+      // helper's own WARN throw and prove its CALL SITE is guarded.
+      ...(opts.apiLogger !== undefined && { logger: opts.apiLogger }),
       // Voice Phase 1: the originate route (initiateCall) + self cell verify-start
       // (adapter.sendMessage) go through the SAME world adapter as the send
       // service, so world.initiatedCalls / world.sent capture them (no network).
@@ -3647,6 +3697,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.systemStatusService !== undefined && {
         systemStatusService: opts.systemStatusService,
       }),
+      // inbox-unread-index: the byUnread scan budget, forwarded to the routers
+      // that walk that index (the badge + the unread page).
+      ...(opts.unreadWalkLimit !== undefined && { unreadWalkLimit: opts.unreadWalkLimit }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair
     // signup writes the same contacts/conversations/units the authed API reads,

@@ -18,6 +18,7 @@ import {
   GROUP_TEXT_STATUS,
   type ConversationItem,
 } from '../src/repos/conversationsRepo.js';
+import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface GroupSeed {
   groups?: ConversationItem[];
@@ -43,10 +44,21 @@ function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
   const open = [...(seed.open ?? [])].sort((a, b) =>
     a.last_activity_at < b.last_activity_at ? 1 : -1,
   );
+  /** Every seeded row across the three partitions (the whole fake "table"). */
+  const allSeeded = (): ConversationItem[] => [...groups, ...open, ...(seed.relay ?? [])];
 
   const deps: InboxRouterDeps = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
     conversationsRepo: {
+      async getById(conversationId: string) {
+        return allSeeded().find((c) => c.conversationId === conversationId);
+      },
+      // The sparse byUnread index over EVERY seeded row regardless of which
+      // partition it belongs to - that is the point of the index: one stream,
+      // no per-source walk. Tuple-ordered; see helpers/unreadIndexFake.ts.
+      async queryUnreadPage(opts: { limit: number; exclusiveStartKey?: Record<string, unknown> }) {
+        return queryUnreadPageFromItems(allSeeded(), opts);
+      },
       async listByLastActivity({ limit }: { status: string; limit?: number }) {
         return { items: open.slice(0, limit ?? 50) };
       },
@@ -121,6 +133,10 @@ function groupConv(
       { contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' },
       { contactId: 'c-marcus', phone: '+14045550112', name: 'Marcus Landlord' },
     ],
+    // FLAG IFF COUNT>0, derived centrally (helpers/unreadIndexFake.ts): the
+    // sparse byUnread index keys on `unread_flag`, so a fixture with unread and
+    // no flag is invisible to this file's own queryUnreadPage. Overridable below.
+    ...unreadFlagFor(over),
     ...over,
   };
 }
@@ -262,7 +278,13 @@ describe('aggregateInbox - the group_text source (filter=all)', () => {
 });
 
 describe('aggregateInbox - group rows under the other filters', () => {
-  it('returns ALL unread group threads under filter=unread (the full-partition-walk contract)', async () => {
+  // REWRITTEN for spec 4.5. This test used to pin the RETIRED contract - unread
+  // read the WHOLE group_open partition (a 2000-row walk) so that every unread
+  // group row could land on page one uncapped, because the nav badge counted the
+  // rows of a `filter=unread` page. Both halves of that premise are gone: the
+  // badge has its own endpoint over the index, and unread group rows now arrive
+  // in the SAME unified stream as every other kind, paged by the unread cursor.
+  it('pages unread group threads through the unified stream and NEVER sets groupsTruncated', async () => {
     const groups = Array.from({ length: 60 }, (_, i) =>
       groupConv({
         conversationId: `gt-${i}`,
@@ -272,19 +294,53 @@ describe('aggregateInbox - group rows under the other filters', () => {
     );
     const { deps, calls } = makeDeps({ groups });
     const page = await aggregateInbox({ filter: 'unread', limit: 25 }, deps);
-    // NOT the 50-row page-one cap: the nav badge counts these rows.
-    expect(calls.groupLimits[0]).toBeGreaterThan(60);
-    expect(page.rows).toHaveLength(60);
+
+    // The group PARTITION is never read at all under this filter - the rows come
+    // from the byUnread index like every other unread row.
+    expect(calls.groupLimits).toEqual([]);
+    // A page is `limit` rows TOTAL now, of every kind, with the overflow behind
+    // the cursor rather than dumped onto page one.
+    expect(page.rows).toHaveLength(25);
+    expect(page.rows.every((r) => r.kind === 'group_text')).toBe(true);
+    expect(page.nextCursor).not.toBeNull();
+    // THE POINT OF THIS TEST: `groupsTruncated` has no producer under unread.
+    // Its meaning is group-scoped ("group rows this filter would show were
+    // withheld", linking to ?filter=groups), and withholding is now the pager's
+    // job for every kind at once, which that copy would mislabel.
     expect(page.groupsTruncated).toBeUndefined();
+
+    // ...and the withheld rows really are reachable, not lost.
+    const { deps: deps2 } = makeDeps({ groups });
+    const page2 = await aggregateInbox(
+      { filter: 'unread', limit: 25, cursor: page.nextCursor! },
+      deps2,
+    );
+    expect(page2.rows).toHaveLength(25);
+    expect(page2.groupsTruncated).toBeUndefined();
+    const seen = new Set([...page.rows, ...page2.rows].map((r) => r.conversationId));
+    expect(seen.size).toBe(50);
   });
 
-  it('drops read group threads under filter=unread', async () => {
-    const { deps } = makeDeps({
+  // ALSO REWRITTEN: the same fixtures, but the drop now has to happen in two
+  // different places, and the test says which is which.
+  it('drops read group threads under filter=unread - by index membership, then by the point read', async () => {
+    const { deps, calls } = makeDeps({
       groups: [
+        // Read: carries no unread_flag, so it is not in the sparse index at all.
         groupConv({
           conversationId: 'gt-read',
           last_activity_at: '2026-06-17T10:00:00.000Z',
           unread_count: 0,
+        }),
+        // STALE INDEX ROW: flagged, but the stored count is 0 - the state a
+        // lagging GSI image produces. Deliberately violates FLAG IFF COUNT>0,
+        // which is why the flag is stated explicitly here. Only hydration's
+        // point read can tell it apart from a genuine unread row.
+        groupConv({
+          conversationId: 'gt-stale',
+          last_activity_at: '2026-06-17T09:30:00.000Z',
+          unread_count: 0,
+          unread_flag: 'unread',
         }),
         groupConv({
           conversationId: 'gt-unread',
@@ -295,6 +351,7 @@ describe('aggregateInbox - group rows under the other filters', () => {
     });
     const page = await aggregateInbox({ filter: 'unread', limit: 25 }, deps);
     expect(page.rows.map((r) => r.conversationId)).toEqual(['gt-unread']);
+    expect(calls.groupLimits).toEqual([]);
   });
 
   it('never reads the group partition under filter=unknown (needsTriage is always false)', async () => {

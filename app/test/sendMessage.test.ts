@@ -25,6 +25,7 @@ import {
   createSendMessageService,
 } from '../src/services/sendMessage.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
+import { queryUnreadPageFromItems } from './helpers/unreadIndexFake.js';
 
 const ERROR = 50;
 
@@ -115,6 +116,10 @@ function makeFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    // Derived from the one stored conversation rather than stubbed to []: an
+    // empty page is indistinguishable from a broken index, and this suite
+    // asserts that OUTBOUND sends never touch unread state.
+    queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async (_id, mode) => {

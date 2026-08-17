@@ -14,7 +14,20 @@ import type { ConversationSummary, EventStreamHandlers, PlacementItem } from '..
 const getConversations = vi.fn();
 const markConversationRead = vi.fn();
 const markInboxRead = vi.fn();
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
 let streamHandlers: EventStreamHandlers | null = null;
+
+// Stub the nav badge context rather than mounting a real UnreadProvider: a real
+// one would fire its own count + unmatched-email fetches and would fight for the
+// shared `streamHandlers` capture below. The functions are do-nothing spies,
+// which is also exactly what the provider-less no-op defaults are - so every
+// assertion here holds for a bare render too (the REAL defaults are pinned in
+// app/UnreadContext.test.tsx and by PlacementDetail/PlacementConversation, which
+// mount this hook with no provider at all).
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -164,6 +177,8 @@ beforeEach(() => {
   getConversations.mockReset();
   markConversationRead.mockReset();
   markInboxRead.mockReset();
+  noteRowsCleared.mockReset();
+  rollbackRowsCleared.mockReset();
   streamHandlers = null;
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
@@ -443,5 +458,94 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
     // ...but only the ACTIVE (tenant) tab is ever auto-marked.
     expect(markInboxRead).not.toHaveBeenCalled();
     expect(markConversationRead).not.toHaveBeenCalled();
+  });
+});
+
+// The nav badge's optimistic layer. These calls are SOUND ONLY BECAUSE of the
+// close-reset ruling: closing a relay group zeroes its unread, so any group that
+// gets past the `unread <= 0` guard is open/connecting - a row the badge counts.
+// The keys are KIND-FREE and match what useInbox mints for the same thread
+// (`cv:` for either group kind, `c:` for a contact), so a duplicate clear from
+// two surfaces dedupes instead of double-decrementing.
+describe('usePlacementChannels - nav badge clears', () => {
+  it('markGroupRead clears the group by its cv: key', async () => {
+    getConversations.mockResolvedValue({
+      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
+      nextCursor: null,
+    });
+    render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
+    await userEvent.click(screen.getByRole('button', { name: 'markGroup' }));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['cv:g1']);
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('markPersonRead clears the contact by its c: key', async () => {
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      nextCursor: null,
+    });
+    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
+    await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledWith(['c:ten-1']);
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('NEVER touches the badge at or below the guards', async () => {
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
+      nextCursor: null,
+    });
+    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    // unread 0, an unresolved contact, an empty id, and a group with no thread.
+    await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
+    await userEvent.click(screen.getByRole('button', { name: 'markTenantUnresolved' }));
+    await userEvent.click(screen.getByRole('button', { name: 'markTenantEmptyId' }));
+    await userEvent.click(screen.getByRole('button', { name: 'markGroup' }));
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+
+  it('rolls the badge clear back when the group mark-read fails', async () => {
+    getConversations.mockResolvedValue({
+      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
+      nextCursor: null,
+    });
+    markConversationRead.mockRejectedValue(new Error('nope'));
+    render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
+    await userEvent.click(screen.getByRole('button', { name: 'markGroup' }));
+    await waitFor(() => expect(rollbackRowsCleared).toHaveBeenCalledWith(['cv:g1']));
+  });
+
+  it('rolls the badge clear back when the person fan-out fails', async () => {
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      nextCursor: null,
+    });
+    markInboxRead.mockRejectedValue(new Error('nope'));
+    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
+    await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
+    await waitFor(() => expect(rollbackRowsCleared).toHaveBeenCalledWith(['c:ten-1']));
+  });
+
+  it('does not fire the mark-read effect in a loop once the badge functions are wired', async () => {
+    // A11 in its concrete form: the badge functions flow into markGroupRead /
+    // markPersonRead deps, which flow into this hook's returned object, which is
+    // MarkReadChild's effect dependency. A churning identity POSTs forever.
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      nextCursor: null,
+    });
+    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+    expect(noteRowsCleared).toHaveBeenCalledTimes(1);
   });
 });

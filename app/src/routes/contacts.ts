@@ -1914,8 +1914,103 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       deletedAt,
     });
+    // ZERO the unread on every thread this contact still owns (inbox-unread-index
+    // spec 4.2, human ruling at the spec gate). A deleted contact's unread threads
+    // are invisible to every reader but stay resident in the sparse byUnread
+    // index, permanently inflating the badge's walk. Same fan-out shape as
+    // POST /api/inbox/:contactId/read (inbox.ts).
+    //
+    // DELETE-ONLY, DELIBERATELY: this does NOT live in
+    // propagateContactPresenceChange below, because RESTORE calls that too - and
+    // a reset on restore would zero exactly the post-deletion unread the
+    // deleted-contact RESURFACING rule depends on. Resurfacing is unaffected by
+    // the reset here: it requires a post-deletion INBOUND, and that inbound
+    // re-increments unread (and re-stamps the flag) on its own.
+    //
+    // IT EMITS ITS OWN conversation.updated, from the resetUnread ALL_NEW
+    // returns (adversarial A6), AND IT EMITS THEM LAST - after
+    // propagateContactPresenceChange below (adversarial r2 finding 5).
+    //
+    // What is actually true, stated exactly: NO dashboard consumer reads
+    // `unread_count` off this event today. Every handler is a refetch trigger
+    // (UnreadContext, useInbox, useToday, useContactTimeline, useRelayThread,
+    // useGroupThread, useTourChannels, usePlacementChannels), and the
+    // `unread_count` reads in the tour/placement channel hooks are over the
+    // ConversationSummary from that refetch, not over this payload. So this is
+    // about keeping the WIRE honest for a consumer that might, not about a
+    // defect any client has.
+    //
+    // Given that, the ordering is the whole point: the presence fan-out re-reads
+    // through the byParticipantPhone/byParticipantEmail GSIs, which lag, so the
+    // image IT broadcasts normally still carries the PRE-reset count. The
+    // reset's own post-update items are authoritative and already in hand, so
+    // they go out LAST-WRITER. The nav badge is unaffected either way (it
+    // refetches the authoritative count).
+    // DECLARED PRODUCT CHANGE (human-approved): a restored contact returns with
+    // unread 0.
+    //
+    // UNCONDITIONAL over every thread the union returns - NO `unread_count > 0`
+    // pre-filter (adversarial finding 2, sanctioned deviation from spec 4.2's
+    // "threads with unread > 0" wording). conversationsForContact resolves
+    // through the byParticipantPhone/byParticipantEmail GSIs, which lag; a stale
+    // image reporting 0 for a thread that IS unread made the reset skip that
+    // thread FOREVER, because nothing re-runs this fan-out for an already-deleted
+    // contact - leaving a permanent byUnread resident that costs a resurfacing
+    // probe on every badge request. The filter was only an optimization
+    // (resetUnread is already idempotent and conditional on
+    // attribute_exists(conversationId)), so paying a few IDEMPOTENT conditional
+    // writes buys the ruling reliably. IDEMPOTENT, not "no-op": that condition
+    // always passes for a live row, so an already-read thread is a REAL write -
+    // a WCU and a rewritten item - that simply lands on the state it found.
+    //
+    // BEST-EFFORT AS A WHOLE, matching propagateContactPresenceChange below: the
+    // delete has ALREADY persisted, so neither a row that vanished under us
+    // (racing retract/close) nor a transient failure of the thread lookup itself
+    // may turn a successful delete into a 500 - and a throw here would also skip
+    // the presence fan-out, leaving every dashboard showing the deleted contact.
+    //
+    // WHAT BEST-EFFORT COSTS (conformance N7 / C8): every reset is ISSUED - the
+    // promises are created eagerly, so none is skipped - but Promise.all
+    // observes only the FIRST rejection, so the outcomes of the rest are
+    // UNREPORTED. The practical exposure is a lost log line rather than a
+    // skipped write; a write that genuinely failed is unrecoverable here all the
+    // same, because nothing re-runs this fan-out for an already-deleted contact.
+    // The WARN below is therefore the ONLY signal that it happened, and
+    // app/scripts/backfill-unread-flag.ts (rule 3) is the only recovery.
+    let resetThreads: ConversationItem[] = [];
+    try {
+      const reset = await Promise.all(
+        (await conversationsForContact(updated, conversations)).map(async (c) => {
+          try {
+            return await conversations.resetUnread(c.conversationId);
+          } catch (err) {
+            if (err instanceof ConditionalCheckFailedException) return undefined; // race: already gone
+            throw err;
+          }
+        }),
+      );
+      resetThreads = reset.filter((c): c is ConversationItem => c !== undefined);
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact delete: unread reset fan-out failed (best-effort)');
+    }
     // Refresh the live views so this contact's Today/inbox cards drop without a reload.
-    await propagateContactPresenceChange(contactId, updated);
+    //
+    // GUARDED AT THE CALL SITE (conformance r3 finding 9). The helper is
+    // best-effort by construction, but that rests on its own catch BODIES never
+    // throwing - and since fix wave 2 the authoritative emits below sit BEHIND
+    // it, so any throw here would 500 a delete that has already persisted AND
+    // lose the last word on the wire. The emits must not be hostages to the
+    // fan-out.
+    try {
+      await propagateContactPresenceChange(contactId, updated);
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact delete: presence fan-out failed (best-effort)');
+    }
+    // ...and only NOW the authoritative counts, so they are the last word on the
+    // wire rather than the first (see the ordering note above).
+    for (const conv of resetThreads) {
+      events.emit('conversation.updated', toConversationUpdatedEvent(conv));
+    }
     log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');
     res.json({ contact: withPhones(updated) });
   });

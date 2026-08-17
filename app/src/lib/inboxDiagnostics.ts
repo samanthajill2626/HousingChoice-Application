@@ -31,7 +31,9 @@ export interface InboxTimingContext {
   wallNow: () => string;
 }
 
-export interface InboxProfilePlanEntry {
+/** A dashboard PAGE read: one `aggregateInbox` call for one filter tab. */
+export interface InboxProfilePageCase {
+  kind: 'inbox-page';
   caseId: string;
   filter: 'all' | 'unread' | 'unknown' | 'groups';
   limit: number;
@@ -39,21 +41,39 @@ export interface InboxProfilePlanEntry {
 }
 
 /**
+ * The nav badge, which reads its OWN endpoint (`GET /api/inbox/unread-count` ->
+ * `countUnreadRows`). It has NO filter and NO limit by construction: the count
+ * walks the unread index to a fixed cap and hydrates nothing, so a page-shaped
+ * `{ filter: 'unread', limit: 100 }` case would profile a workload the app no
+ * longer issues.
+ */
+export interface InboxProfileBadgeCase {
+  kind: 'unread-badge-endpoint';
+  caseId: string;
+  repeat: number;
+}
+
+export type InboxProfilePlanEntry = InboxProfilePageCase | InboxProfileBadgeCase;
+
+/**
  * The fixed comparison workload for the manual Inbox repository profiler.
- * Dashboard pages request 30 rows; the app-level badge requests 100. Five
- * repeats provide comparable dispersion without mutating the local data.
+ * Dashboard pages request 30 rows; the badge case drives the count endpoint
+ * instead of a page. Five repeats provide comparable dispersion without
+ * mutating the local data.
  */
 export function createInboxProfilePlan(): InboxProfilePlanEntry[] {
-  const cases = [
-    { caseId: 'all-page', filter: 'all', limit: 30 },
-    { caseId: 'unread-page', filter: 'unread', limit: 30 },
-    { caseId: 'unknown-page', filter: 'unknown', limit: 30 },
-    { caseId: 'groups-page', filter: 'groups', limit: 30 },
-    { caseId: 'unread-badge', filter: 'unread', limit: 100 },
-  ] as const;
+  const cases: ReadonlyArray<
+    Omit<InboxProfilePageCase, 'repeat'> | Omit<InboxProfileBadgeCase, 'repeat'>
+  > = [
+    { kind: 'inbox-page', caseId: 'all-page', filter: 'all', limit: 30 },
+    { kind: 'inbox-page', caseId: 'unread-page', filter: 'unread', limit: 30 },
+    { kind: 'inbox-page', caseId: 'unknown-page', filter: 'unknown', limit: 30 },
+    { kind: 'inbox-page', caseId: 'groups-page', filter: 'groups', limit: 30 },
+    { kind: 'unread-badge-endpoint', caseId: 'unread-badge' },
+  ];
 
   return cases.flatMap((profileCase) =>
-    Array.from({ length: 5 }, (_, repeat) => ({ ...profileCase, repeat })),
+    Array.from({ length: 5 }, (_, repeat): InboxProfilePlanEntry => ({ ...profileCase, repeat })),
   );
 }
 

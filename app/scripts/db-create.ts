@@ -15,6 +15,7 @@ import { createDynamoClient } from '../src/lib/dynamo.js';
 import { tableName } from '../src/lib/config.js';
 import { ensureTable, deleteTableIfExists } from '../src/lib/dynamoAdmin.js';
 import { TABLES } from '../src/lib/tables.js';
+import { OUTBOX_TABLE_BASE } from '../src/adapters/recordingMessaging.js';
 
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
 
@@ -64,6 +65,16 @@ export async function dropAllTables(endpoint: string): Promise<void> {
       await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: physicalName });
       console.log(`  dropped  ${physicalName}`);
     }
+    // The dev-outbox is created ON DEMAND by adapters/recordingMessaging.ts and
+    // is deliberately NOT in the TABLES manifest, so the loop above cannot see
+    // it. Dropping it here keeps teardown COMPLETE - without this a run leaves
+    // exactly one table behind (caught 2026-08-16 by counting tables after a
+    // full suite: 22 dropped, 1 survivor). Absent on a stack that never
+    // recorded an outbox send, and deleteTableIfExists tolerates that.
+    const outboxTable = tableName(OUTBOX_TABLE_BASE);
+    await deleteTableIfExists(client, outboxTable);
+    await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: outboxTable });
+    console.log(`  dropped  ${outboxTable}`);
   } finally {
     client.destroy();
   }
@@ -90,7 +101,25 @@ try {
 if (argvUrl && moduleUrl === argvUrl) {
   const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
   const reset = process.argv.includes('--reset');
+  // --drop: drop WITHOUT recreating. The teardown counterpart to the implicit
+  // create - used by scripts/e2e-stop.mjs to reclaim a finished lane's tables,
+  // which nothing used to do (every lane that ever ran left ~23 tables in the
+  // container until an operator stopped it). Same hard localhost gate as
+  // --reset, since it is equally destructive.
+  const dropOnly = process.argv.includes('--drop');
   try {
+    if (dropOnly) {
+      if (!isLocalEndpoint(endpoint)) {
+        throw new Error(
+          `--drop is destructive and only allowed against a localhost DynamoDB Local ` +
+            `endpoint; refusing to drop tables at ${endpoint}`,
+        );
+      }
+      console.log(`db:create — DROP: dropping ${TABLES.length} tables at ${endpoint}`);
+      await dropAllTables(endpoint);
+      console.log('db:create — done');
+      process.exit(0);
+    }
     if (reset) {
       if (!isLocalEndpoint(endpoint)) {
         throw new Error(

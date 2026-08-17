@@ -1248,14 +1248,16 @@ export async function aggregateInbox(
     } else {
       unreadCursor = encodeUnreadCursor(scanPosition, seen);
     }
-    // A FLOOR FOR A REASON THE BRANCHES ABOVE CANNOT SEE (fix wave 2): past the
-    // wasted-probe bound this request called some deleted-contact threads
-    // hidden WITHOUT reading them. That can happen on a walk that then drained
-    // its supply naturally, so it is ORed on rather than folded into the
-    // consumedAll/budget decision - the cursor keeps whatever those branches
-    // decided, and only the honesty flag changes.
-    if (deletedSkipped > 0) truncated = true;
-    // ...and so is a row this request KNOWS it could not deliver (adversarial
+    // NOTE what is deliberately NOT here (fix wave 3, adversarial r3 finding 2):
+    // `deletedSkipped > 0` no longer forces `truncated`. Threads the probe bound
+    // called hidden without reading them do NOT make a DRAINED walk an early
+    // end - the assumption past the bound is "hidden", which is what an empty
+    // page already means, and forcing the flag turned a residue-only, genuinely
+    // caught-up org into a permanent inbox failure banner. The collector's own
+    // `truncated` (a stopped walk) still arrives through `budgetSpent` above,
+    // and the deleted-probe WARN carries the skipped depth to the operator.
+    //
+    // A row this request KNOWS it could not deliver IS still a floor (adversarial
     // r2 finding 4). The page must not report a natural end while the badge
     // counts a row no page in this session can show; `truncated` is the one
     // honest name for "we may disagree with the badge".

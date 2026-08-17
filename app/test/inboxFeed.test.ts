@@ -1562,11 +1562,14 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     const seed = wallOfHiddenDeleted(27, 5);
 
     const badge = await countUnreadRows(makeDeps(seed, undefined, logger));
-    // The five live rows are COUNTED, not lost behind the wall - and the count
-    // is honestly flagged as a floor, because thread 27 was never read.
+    // The five live rows are COUNTED, not lost behind the wall. The walk then
+    // DRAINED, so this is a natural end and NOT a floor (fix wave 3,
+    // adversarial r3 finding 2): the threads the bound refused to read are all
+    // hidden ones, which no reader would have rendered anyway. The WARN below
+    // is the operator's signal that the wall exists.
     expect(badge.unreadCount).toBe(5);
     expect(badge.capped).toBe(false);
-    expect(badge.truncated).toBe(true);
+    expect(badge.truncated).toBe(false);
 
     const page = await aggregateInbox(
       { filter: 'unread', limit: 25 },
@@ -1579,7 +1582,7 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       'c-live-03',
       'c-live-04',
     ]);
-    expect(page.truncated).toBe(true);
+    expect(page.truncated).toBeUndefined();
 
     // THE TRIPWIRE (adversarial r2 finding 7): attempted and skipped are
     // SEPARATE fields, so the operator can tell 26 residents from 2,600 - the
@@ -1595,6 +1598,41 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     });
   });
 
+  it('RESIDUE-ONLY AND CAUGHT UP: a DRAINED wall of hidden threads is a natural end, not a failure banner', async () => {
+    // ADVERSARIAL r3 FINDING 2 (fix wave 3). Fix wave 2 made a skipped
+    // (unprobed) deleted thread set `truncated` even on a walk that then
+    // DRAINED its supply. An org whose index holds nothing but hidden residue
+    // and is otherwise genuinely caught up therefore got `{0, truncated}` on the
+    // badge and an empty truncated page - and Inbox.tsx gates its failure copy
+    // on `serverRowCount === 0 && truncated`, so the Unread tab rendered "We
+    // couldn't load your inbox." + Retry, permanently, over a deterministic
+    // prefix that reproduces itself.
+    //
+    // THE RULE: a DRAINED stream is a NATURAL end regardless of skipped-hidden
+    // deleted threads. The assumption made past the bound is "hidden", which is
+    // the overwhelmingly likely truth inside a wall of confirmed-hidden threads,
+    // and a hidden row is exactly what an empty page means. `truncated` stays
+    // for budget-stopped and cap-related early ends. The operator signal moves
+    // to the server WARN, which still fires below.
+    const seed = wallOfHiddenDeleted(30, 0);
+
+    const badge = await countUnreadRows(makeDeps(seed));
+    expect(badge).toEqual({ unreadCount: 0, capped: false, truncated: false });
+
+    const page = await aggregateInbox({ filter: 'unread', limit: 25 }, makeDeps(seed));
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    // The pair that decides the client: zero server rows + NO truncation is the
+    // all-caught-up state (Inbox.test.tsx, "keeps the all-caught-up copy on an
+    // empty unread page that was NOT truncated"), not the error banner.
+    expect(page.truncated).toBeUndefined();
+    // NOT SILENT: the wall is still announced with its depth by the
+    // deleted-probe tripwire, pinned in the PROBE BOUND test above. It cannot be
+    // re-asserted here - that WARN is rate limited on ONE module-scope 5-minute
+    // window shared by every caller in the process, so the first firing in this
+    // file suppresses the rest.
+  });
+
   it('PROBE BOUND: a page behind the wall still gets a FORWARD PATH while supply remains', async () => {
     // The other half of the dead-end: not merely rows, but a cursor. A page
     // that stops with supply left must hand back something to page WITH.
@@ -1603,8 +1641,9 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     const page1 = await aggregateInbox({ filter: 'unread', limit: 3 }, makeDeps(seed));
     expect(rowKeys(page1)).toEqual(['c-live-00', 'c-live-01', 'c-live-02']);
     expect(page1.nextCursor).not.toBeNull();
-    // Still a floor: the skipped threads were never read.
-    expect(page1.truncated).toBe(true);
+    // A FULL page that stopped because it was full: an ordinary end, and the
+    // skipped hidden threads behind it do not make it an early one (fix wave 3).
+    expect(page1.truncated).toBeUndefined();
 
     const page2 = await aggregateInbox(
       { filter: 'unread', limit: 3, cursor: page1.nextCursor! },

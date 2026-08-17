@@ -414,13 +414,10 @@ export interface CollectResult {
    */
   consumedAll: boolean;
   /**
-   * The candidate list is a FLOOR. Two causes, deliberately reported the same
-   * way because the caller's answer is identical: the request's raw-scan budget
-   * ran out before the supply did, or the deleted-resurfacing probe bound made
-   * this collect call some deleted-contact threads hidden WITHOUT reading them
-   * (UNREAD_DELETED_PROBE_LIMIT). The second cause can coexist with a fully
-   * drained stream, which is why it is ORed in rather than derived from the
-   * walk state alone.
+   * The candidate list is a FLOOR because the walk STOPPED EARLY: the request's
+   * raw-scan budget ran out before the supply did. A drained stream is never
+   * truncated, not even when the probe bound left `skippedDeletedThreads` behind
+   * it (fix wave 3, adversarial r3 finding 2) - see the derivation below.
    */
   truncated: boolean;
   /** `maxRows` stopped emission (the candidate list is a FLOOR). */
@@ -681,9 +678,19 @@ export async function collectUnreadRows(
     // The cap stopping emission tells us NOTHING about the remaining supply or
     // budget, so it excludes both other outcomes.
     consumedAll: !capped && state.scanExhausted,
-    // A skipped (unprobed) deleted thread makes the list a FLOOR even when the
-    // stream drained: the answer for those threads was assumed, not read.
-    truncated: !capped && (!state.scanExhausted || skippedDeletedThreads > 0),
+    // A DRAINED STREAM IS A NATURAL END, EVEN WITH SKIPPED THREADS BEHIND IT
+    // (fix wave 3, adversarial r3 finding 2). Fix wave 2 ORed
+    // `skippedDeletedThreads > 0` in here, which made a residue-only org that is
+    // GENUINELY caught up report a floor forever: zero rows plus `truncated` is
+    // the client's inbox-FAILURE state, over a deterministic prefix whose Retry
+    // reproduces it. The assumption made past the probe bound is "hidden" - the
+    // overwhelmingly likely truth inside a wall of confirmed-hidden threads -
+    // and a hidden row is exactly what an empty page means. `truncated` keeps
+    // its spec 4.5 step 3 meaning: rows this reader WOULD have shown were
+    // withheld, i.e. the scan stopped early. `skippedDeletedThreads` is still
+    // returned, and the deleted-probe WARN is what tells the operator the wall
+    // is there.
+    truncated: !capped && !state.scanExhausted,
     capped,
     remainingBudget: Math.max(0, opts.budget - state.scanned),
     deletedProbes,

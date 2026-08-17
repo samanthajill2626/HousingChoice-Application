@@ -1025,9 +1025,14 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     // The live row behind the wall is DELIVERED, not withheld.
     expect(candidateIds(result.candidates)).toEqual(['contact-behind']);
     expect(result.capped).toBe(false);
-    // The answer is still a FLOOR: threads past the bound were called hidden
-    // without being read, so the caller must be told it is not exact.
-    expect(result.truncated).toBe(true);
+    // ...and the walk DRAINED, so this is a NATURAL end (fix wave 3,
+    // adversarial r3 finding 2). Fix wave 2 reported a floor here, which made a
+    // residue-only, genuinely caught-up org render the inbox failure banner
+    // permanently. The assumption past the bound is "hidden", which is exactly
+    // what the empty half of this answer already means; `skippedDeletedThreads`
+    // and the probe WARN carry the wall's depth to the operator instead.
+    expect(result.truncated).toBe(false);
+    expect(result.consumedAll).toBe(true);
     // The MESSAGE work is bounded by the limit, NOT by the number of hidden
     // rows - and every probe past it becomes a counted SKIP instead.
     expect(result.deletedProbes).toBe(UNREAD_DELETED_PROBE_LIMIT);
@@ -1118,6 +1123,8 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     expect(calls.listByConversation).toBe(0);
     expect(result.deletedProbes).toBe(0);
     expect(result.skippedDeletedThreads).toBe(4);
-    expect(result.truncated).toBe(true);
+    // The SKIP total is the floor signal; `truncated` is not (fix wave 3,
+    // adversarial r3 finding 2 - a drained stream is a natural end).
+    expect(result.truncated).toBe(false);
   });
 });

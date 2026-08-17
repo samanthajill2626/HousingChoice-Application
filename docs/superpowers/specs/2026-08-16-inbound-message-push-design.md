@@ -99,16 +99,24 @@ Planner-settled technical decisions:
   session revocation by design) and an admin role change killed the
   cookies but left the subscriptions, so a signed-out, stolen, or
   offboarded device kept receiving every inbound until a Gone-prune or a
-  full account delete. Now usersRepo.bumpSessionEpoch and
-  setRoleAndRevoke (and the ops-script buildRoleUpdate mirror) REMOVE
-  push_subscriptions in the SAME atomic write, and the signing-out
-  browser best-effort unsubscribes its own subscription so its Settings
-  toggle stays honest. Cost accepted: after an explicit sign-out or role
-  change, every device re-enables notifications in Settings after
-  signing back in (a device other than the signing-out one may show the
-  toggle On for a subscription the server no longer has until it is
-  re-toggled - the pushsubscriptionchange gap, already filed). Normal
-  session expiry does NOT drop subscriptions.
+  full account delete. Now usersRepo.bumpSessionEpoch (the LOGOUT write
+  only) REMOVEs push_subscriptions in the SAME atomic write. Re-review
+  round 2 corrections, both accepted: (a) setRoleAndRevoke and the
+  ops-script buildRoleUpdate mirror KEEP push subscriptions - a
+  promotion, or the C2 verify-after-write rollback, is not a distrust of
+  the user's devices, and message pushes are not role-gated, so dropping
+  them there bought nothing and would silently outage the devices; (b)
+  the drop is attribute-wide (it silences the VOICE pre-ring on the
+  phone when the founder signs out on the laptop) and the Settings
+  toggle reads the BROWSER, so the dashboard now RECONCILES on boot:
+  every device re-POSTs the browser subscription it still holds
+  (idempotent on the server - dedupe by endpoint, replace), which
+  re-arms push on the next app open with no Settings visit and makes the
+  toggle truthful by construction. The signing-out browser also
+  best-effort unsubscribes its own copy. Both client helpers use
+  serviceWorker.getRegistration() (never .ready, which hangs forever with
+  no registration) under a bounded timeout, and never throw or block
+  sign-out. Normal session expiry does NOT drop subscriptions.
 
 ## 3. What gets built
 

@@ -192,7 +192,7 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     );
   });
 
-  it('bumpSessionEpoch and setRoleAndRevoke DROP push_subscriptions in the same write (a REMOVE of an absent attribute is a no-op)', async () => {
+  it('bumpSessionEpoch DROPS push_subscriptions in the same write (REMOVE of an absent attribute is a no-op); setRoleAndRevoke KEEPS them', async () => {
     const sub = {
       endpoint: 'https://fcm.googleapis.com/send/revoke-1',
       keys: { p256dh: 'k', auth: 'a' },
@@ -207,13 +207,14 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     expect((await users.findById(a.user.userId))!.push_subscriptions).toBeUndefined();
     expect(await users.bumpSessionEpoch(a.user.userId)).toBe(3);
 
-    // Role-change path: same drop, atomically with the role flip + bump.
+    // Role-change path: role flip + bump, push subscriptions KEPT (a role
+    // change is not a distrust; message pushes are not role-gated).
     const b = await users.invite({ email: 'revoke-b@housingchoice.org', role: 'va' });
     await users.addPushSubscription(b.user.userId, sub);
     expect(await users.setRoleAndRevoke(b.user.userId, 'admin')).toBe(2);
     const afterB = (await users.findById(b.user.userId))!;
     expect(afterB.role).toBe('admin');
-    expect(afterB.push_subscriptions).toBeUndefined();
+    expect(afterB.push_subscriptions).toHaveLength(1);
   });
 
   it('resolveInvitedUser REFUSES an un-invited identity (no auto-provision)', async () => {

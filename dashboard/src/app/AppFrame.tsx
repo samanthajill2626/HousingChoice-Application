@@ -8,8 +8,11 @@
 // focus to the hamburger.
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { logout } from '../api/index.js';
-import { forgetBrowserPushSubscription } from '../lib/pushSignOut.js';
+import { logout, subscribePush } from '../api/index.js';
+import {
+  forgetBrowserPushSubscription,
+  reconcileBrowserPushSubscription,
+} from '../lib/pushSignOut.js';
 import { Button } from '../ui/index.js';
 import { ChevronIcon, CloseIcon, MenuIcon } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
@@ -24,11 +27,21 @@ export function AppFrame(): React.JSX.Element {
   const drawerRef = useRef<HTMLElement>(null);
   const hamburgerRef = useRef<HTMLButtonElement>(null);
 
+  // Boot-time push reconcile: a server-side revocation (sign-out on another
+  // device, role change) drops this user's push subscriptions while this
+  // browser still holds its own, and the Settings toggle reads the BROWSER -
+  // so without this the toggle would say On while nothing (including the
+  // voice pre-ring) arrives. Re-POST what the browser holds; idempotent on
+  // the server, best-effort, never throws or hangs.
+  useEffect(() => {
+    void reconcileBrowserPushSubscription(subscribePush);
+  }, []);
+
   async function handleSignOut(): Promise<void> {
     try {
       // The server drops every push subscription with the revocation; forget
       // this browser's own copy too so its Settings toggle stays honest.
-      // Best-effort and never throws - it must not block sign-out.
+      // Best-effort, bounded, never throws - it must not block sign-out.
       await forgetBrowserPushSubscription();
       await logout();
     } finally {

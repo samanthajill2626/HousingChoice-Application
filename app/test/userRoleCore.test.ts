@@ -49,11 +49,11 @@ describe('parseUserRoleArgs', () => {
   });
 });
 
-describe('buildRoleUpdate (one atomic write: role flip + session-epoch bump + push-subscription drop)', () => {
-  it('flips #role, bumps session_epoch with the legacy-safe if_not_exists base, AND removes push_subscriptions', () => {
+describe('buildRoleUpdate (one atomic write: role flip + session-epoch bump; push subscriptions are KEPT)', () => {
+  it('flips #role AND bumps session_epoch with the legacy-safe if_not_exists base - and does NOT touch push_subscriptions (a role change is not a distrust)', () => {
     expect(buildRoleUpdate('admin')).toEqual({
       updateExpression:
-        'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
+        'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
       conditionExpression: 'attribute_exists(userId)',
       expressionAttributeNames: { '#role': 'role' },
       expressionAttributeValues: {

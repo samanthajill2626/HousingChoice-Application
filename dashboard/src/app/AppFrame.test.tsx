@@ -108,52 +108,80 @@ describe('AppFrame', () => {
     expect(within(menu).getByRole('button', { name: /Sign out/i })).toBeInTheDocument();
   });
 
+  // A service-worker stub for the push tests. `.ready` NEVER settles on purpose
+  // (it never resolves when nothing is registered - main.tsx says so); the app
+  // must use getRegistration(), which resolves undefined in that case.
+  function stubServiceWorker(subscription: unknown): void {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      serviceWorker: {
+        ready: new Promise(() => {}),
+        getRegistration: async () => ({
+          pushManager: { getSubscription: async () => subscription },
+        }),
+      },
+    });
+  }
+
+  function fetchCalls(): string[] {
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    return fetchMock.mock.calls.map((c) => String(c[0]));
+  }
+
   it('Sign out forgets the browser push subscription (best-effort) and still logs out', async () => {
     // Server-side revocation drops the user's push subscriptions; the
     // signing-out browser also unsubscribes itself so its Settings toggle
     // does not keep reading On for a subscription the server no longer has.
     const unsubscribe = vi.fn(async () => true);
-    vi.stubGlobal('navigator', {
-      ...navigator,
-      serviceWorker: {
-        ready: Promise.resolve({ pushManager: { getSubscription: async () => ({ unsubscribe }) } }),
-      },
-    });
+    stubServiceWorker({ unsubscribe, toJSON: () => ({ endpoint: 'e', keys: {} }) });
     renderAuthedApp();
     const trigger = await screen.findByRole('button', { name: 'Account menu' });
     fireEvent.click(trigger);
     fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: /Sign out/i }));
 
     await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
-    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-    await waitFor(() =>
-      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/auth/logout'))).toBe(true),
-    );
+    await waitFor(() => expect(fetchCalls().some((u) => u.includes('/auth/logout'))).toBe(true));
   });
 
   it('Sign out still logs out when the browser unsubscribe throws', async () => {
-    vi.stubGlobal('navigator', {
-      ...navigator,
-      serviceWorker: {
-        ready: Promise.resolve({
-          pushManager: {
-            getSubscription: async () => ({
-              unsubscribe: async () => {
-                throw new Error('push service down');
-              },
-            }),
-          },
-        }),
+    stubServiceWorker({
+      unsubscribe: async () => {
+        throw new Error('push service down');
       },
+      toJSON: () => ({ endpoint: 'e', keys: {} }),
     });
     renderAuthedApp();
     const trigger = await screen.findByRole('button', { name: 'Account menu' });
     fireEvent.click(trigger);
     fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: /Sign out/i }));
 
-    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() => expect(fetchCalls().some((u) => u.includes('/auth/logout'))).toBe(true));
+  });
+
+  it('Sign out still logs out when NO service worker is registered (.ready would hang forever)', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      serviceWorker: { ready: new Promise(() => {}), getRegistration: async () => undefined },
+    });
+    renderAuthedApp();
+    const trigger = await screen.findByRole('button', { name: 'Account menu' });
+    fireEvent.click(trigger);
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: /Sign out/i }));
+
+    await waitFor(() => expect(fetchCalls().some((u) => u.includes('/auth/logout'))).toBe(true));
+  });
+
+  it('on boot, re-POSTs the browser push subscription so the server matches the device', async () => {
+    // A server-side revocation (sign-out elsewhere, role change) drops the
+    // subscriptions; the browser still holds its own. Reconciling on boot
+    // makes the Settings toggle truthful by construction and re-arms push
+    // without a Settings visit.
+    const json = { endpoint: 'https://fcm.googleapis.com/send/x', keys: { p256dh: 'k', auth: 'a' } };
+    stubServiceWorker({ toJSON: () => json, unsubscribe: async () => true });
+    renderAuthedApp();
+    await screen.findByRole('button', { name: 'Account menu' });
     await waitFor(() =>
-      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/auth/logout'))).toBe(true),
+      expect(fetchCalls().some((u) => u.includes('/api/push/subscriptions'))).toBe(true),
     );
   });
 

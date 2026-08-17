@@ -213,7 +213,7 @@ describe('PATCH /api/users/:userId/role', () => {
     expect(after?.session_epoch).toBe(epochBefore + 1);
   });
 
-  it('a role change DROPS the target push subscriptions with the revocation (device credentials die with the sessions)', async () => {
+  it('a role change KEEPS the target push subscriptions (a promotion or the C2 rollback is not a distrust; pushes are not role-gated)', async () => {
     const { app, fakeUsers } = makeWebhookHarness();
     const target = fakeUsers.users.get(TEST_SESSION_USER.userId)!;
     target.push_subscriptions = [
@@ -231,7 +231,7 @@ describe('PATCH /api/users/:userId/role', () => {
       .send({ role: 'admin' });
 
     expect(res.status).toBe(200);
-    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toBeUndefined();
+    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
   });
 
   it('concurrent cross-demotion of two admins never reaches zero admins (C2 verify-after-rollback)', async () => {

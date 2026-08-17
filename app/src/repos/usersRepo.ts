@@ -242,8 +242,11 @@ export interface UsersRepo {
    * script's combined update (scripts/lib/userRoleCore.mjs buildRoleUpdate)
    * byte-for-byte. Returns the NEW session epoch. Throws if the user does not
    * exist. Use this from the in-app PATCH role route instead of a separate
-   * setRole + bumpSessionEpoch pair. Like bumpSessionEpoch, the SAME write
-   * REMOVES push_subscriptions (see there).
+   * setRole + bumpSessionEpoch pair. Unlike bumpSessionEpoch (logout), this
+   * write KEEPS push_subscriptions: a role change is not a distrust of the
+   * user's devices (a promotion, or the C2 verify-after-write rollback that
+   * leaves the role unchanged), and message pushes are not role-gated - so
+   * dropping them would buy nothing and silence the devices for no reason.
    */
   setRoleAndRevoke(userId: string, role: UserRole): Promise<number>;
   /**
@@ -256,9 +259,12 @@ export interface UsersRepo {
    * receives contact names and message bodies on every inbound, so a
    * revocation that killed the cookies but left the subscriptions would keep
    * feeding a signed-out (or stolen, or offboarded) device indefinitely.
-   * Revocation is global by design (all devices), so the drop is global too;
-   * each device re-arms push the next time it enables notifications in
-   * Settings after signing back in.
+   * Revocation is global by design (all devices), so the drop is global too.
+   * The dashboard re-POSTs whatever subscription each device still holds on
+   * its next boot (reconcileBrowserPushSubscription), so a device that was
+   * NOT the one signing out re-arms itself the next time the app opens; the
+   * signing-out browser also unsubscribes its own copy. This is the LOGOUT
+   * write only - setRoleAndRevoke keeps subscriptions (see there).
    */
   bumpSessionEpoch(userId: string): Promise<number>;
   /**
@@ -501,18 +507,19 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
     },
 
     async setRoleAndRevoke(userId, role) {
-      // ONE update: SET role AND bump session_epoch AND drop push
-      // subscriptions - atomic, so a role change can never land without
-      // revoking the user's sessions (H1) and their device push credentials.
-      // The expression mirrors bumpSessionEpoch + the ops-script
-      // buildRoleUpdate exactly: if_not_exists(..., 1) + 1 (NOT ADD), so a
-      // legacy item lacking the attribute (read as epoch 1) first bumps to 2.
+      // ONE update: SET role AND bump session_epoch - atomic, so a role change
+      // can never land without revoking the user's sessions (H1). The epoch
+      // expression mirrors bumpSessionEpoch + the ops-script buildRoleUpdate
+      // exactly: if_not_exists(..., 1) + 1 (NOT ADD), so a legacy item lacking
+      // the attribute (read as epoch 1) first bumps to 2. push_subscriptions
+      // are deliberately KEPT here (see the interface doc) - only the logout
+      // bump drops them.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { userId },
           UpdateExpression:
-            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
+            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeNames: { '#role': 'role' },
           ExpressionAttributeValues: { ':role': role, ':base': 1, ':one': 1 },

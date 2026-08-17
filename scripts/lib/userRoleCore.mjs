@@ -52,10 +52,9 @@ export function parseUserRoleArgs(argv) {
  * new role applies at their next sign-in — not at the 24h cookie refresh.
  * if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking session_epoch read
  * as epoch 1 in the app (usersRepo.sessionEpochOf), so the first bump must
- * land on 2 - mirrors usersRepo.bumpSessionEpoch exactly. The same write
- * REMOVES push_subscriptions: a push subscription is a device credential
- * (message pushes carry names + bodies), so revocation drops it too - mirrors
- * usersRepo.setRoleAndRevoke exactly.
+ * land on 2 - mirrors usersRepo.setRoleAndRevoke exactly. push_subscriptions
+ * are deliberately KEPT (a role change is not a distrust of the user's
+ * devices; only the LOGOUT epoch bump drops them - usersRepo.bumpSessionEpoch).
  *
  * @param {string} role the new role ('admin' | 'va')
  * @returns {{ updateExpression: string, conditionExpression: string,
@@ -65,7 +64,7 @@ export function parseUserRoleArgs(argv) {
 export function buildRoleUpdate(role) {
   return {
     updateExpression:
-      'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
+      'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
     conditionExpression: 'attribute_exists(userId)',
     expressionAttributeNames: { '#role': 'role' },
     expressionAttributeValues: { ':role': { S: role }, ':base': { N: '1' }, ':one': { N: '1' } },

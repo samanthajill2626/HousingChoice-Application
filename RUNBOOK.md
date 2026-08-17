@@ -1326,15 +1326,17 @@ do **not** apply to it.
   pre-ring push also carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather
   than delivered minutes late; missed-call and voicemail keep the late-is-better-than-never
   default deliberately.
-- **Signing out DROPS every push subscription for that user (all devices) - re-enable after
-  signing back in.** Since inbound-message push (2026-08-17) a subscribed device receives contact
-  names and message bodies on every inbound text/email, so sign-out (which is global revocation by
-  design) and an admin role change both clear the user's push subscriptions in the same write. The
-  browser that signed out also forgets its own subscription. On EVERY device you want notified,
-  after signing back in: **Settings -> Notifications -> enable**, then prove it with **Send test
-  notification**. A device that was NOT the one signing out may still show the toggle On while the
-  server has nothing - toggle it off and on. Normal session expiry does NOT do this; only an
-  explicit sign-out or a role change does.
+- **Signing out DROPS every push subscription for that user (all devices); each device re-arms
+  itself the next time the app opens.** Since inbound-message push (2026-08-17) a subscribed device
+  receives contact names and message bodies on every inbound text/email, so sign-out (which is
+  global revocation by design) clears the user's push subscriptions in the same write - INCLUDING
+  the voice pre-ring on the phone if you sign out on the laptop. The browser that signed out
+  forgets its own subscription; every OTHER device re-POSTs the subscription it still holds on its
+  next app open (boot reconcile), so opening the PWA on the phone after signing out elsewhere
+  re-arms push with no Settings visit. On the device that signed out, after signing back in:
+  **Settings -> Notifications -> enable**, then prove it with **Send test notification**. Normal
+  session expiry and an admin role change do NOT drop subscriptions; only an explicit sign-out
+  does.
 
 ### iPhone (installed PWA, iOS 16.4+)
 

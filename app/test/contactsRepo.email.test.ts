@@ -17,7 +17,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createContactsRepo, PrimaryEmailRemovalError } from '../src/repos/contactsRepo.js';
+import {
+  createContactsRepo,
+  emailRefId,
+  PrimaryEmailRemovalError,
+} from '../src/repos/contactsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -60,6 +64,24 @@ describe.skipIf(!reachable)('contactsRepo email against DynamoDB Local (throwawa
     doc.destroy();
     client.destroy();
   }, 120_000);
+
+  it('addEmail promotes a first address to primary and mirrors the scalar', async () => {
+    const address = nextEmail();
+    const created = await contacts.create({ type: 'tenant' });
+    expect(created.email).toBeUndefined();
+
+    const after = await contacts.addEmail(created.contactId, {
+      email: address,
+      label: 'personal',
+    });
+
+    expect(after.emails).toEqual([
+      expect.objectContaining({ email: address, primary: true, label: 'personal' }),
+    ]);
+    expect(after.email).toBe(address);
+    expect(await contacts.getById(emailRefId(address))).toBeUndefined();
+    expect((await contacts.findByEmail(address))?.contactId).toBe(created.contactId);
+  });
 
   it('addEmail seeds emails[] from the scalar, attaches a second address via a pointer, and findByEmail resolves the owner', async () => {
     const A = nextEmail();

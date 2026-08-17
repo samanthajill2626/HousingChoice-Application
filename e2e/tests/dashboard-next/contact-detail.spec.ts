@@ -142,7 +142,7 @@ test.describe('Contact detail — header actions + edit', () => {
     await page.getByRole('button', { name: /Manage phone numbers/i }).click();
     const dialog = page.getByRole('dialog', { name: /Manage numbers/i });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText('Primary')).toBeVisible();
+    await expect(dialog.getByText('Primary', { exact: true })).toBeVisible();
 
     // Add a throwaway number; it appears in the roster (server returned phones[]).
     await dialog.getByLabel(/New phone number/i).fill('+15550109876');
@@ -152,6 +152,27 @@ test.describe('Contact detail — header actions + edit', () => {
     // Remove it again — back to just the primary. (Cleanup keeps the seed pristine.)
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
     await expect(dialog.getByText(/\(555\) 010-9876/)).toHaveCount(0);
+  });
+
+  test('the first added email is immediately primary', async ({ page }) => {
+    const stamp = Date.now();
+    const address = `first-${stamp}@example.com`;
+
+    await devLogin(page);
+    const created = await page.request.post(`${NEXT}/api/contacts`, {
+      data: { type: 'tenant', firstName: 'FirstEmail', lastName: String(stamp) },
+    });
+    expect(created.ok()).toBeTruthy();
+    const contactId = ((await created.json()) as { contact: { contactId: string } }).contact.contactId;
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    await page.getByRole('button', { name: 'Add email' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Manage email' });
+    await dialog.getByLabel('New email address').fill(address);
+    await dialog.getByRole('button', { name: 'Add', exact: true }).click();
+
+    await expect(dialog.getByText('Primary')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Make primary' })).toHaveCount(0);
   });
 
   test('Do-Not-Contact toggles sms_opt_out and back', async ({ page }) => {

@@ -564,8 +564,9 @@ export interface ContactsRepo {
    * `email` MUST already be normalized (the route validates). Loads the contact
    * (throws ConditionalCheckFailedException when missing). If emails[] is absent,
    * SEEDS it from the scalar (the existing primary). An already-present address
-   * is an idempotent no-op. Otherwise appends a non-primary entry, persists
-   * emails[], and writes the email-pointer item. Returns the updated contact.
+   * is an idempotent no-op. The first address becomes primary and is mirrored
+   * to the scalar without a pointer. Later addresses are appended as
+   * non-primary entries with email-pointer items. Returns the updated contact.
    * The route enforces the cross-contact `email_in_use` conflict (findByEmail).
    */
   addEmail(contactId: string, opts: { email: string; label?: string }): Promise<ContactItem>;
@@ -1204,18 +1205,19 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         return contact;
       }
       const now = new Date().toISOString();
+      const isFirst = emails.length === 0;
       const entry: ContactEmail = {
         email,
-        primary: false,
+        primary: isFirst,
         firstSeenAt: now,
         lastSeenAt: now,
         ...(label !== undefined && { label }),
       };
       const next = [...emails, entry];
-      const updated = await persistEmails(contactId, next);
-      // Non-primary address -> make it resolvable via a pointer.
-      await putEmailPointer(email, contactId);
-      log.info({ contactId, emailCount: next.length }, 'contact email added');
+      const updated = await persistEmails(contactId, next, isFirst ? email : undefined);
+      // A primary resolves through the scalar; only a secondary needs a pointer.
+      if (!isFirst) await putEmailPointer(email, contactId);
+      log.info({ contactId, emailCount: next.length, primary: isFirst }, 'contact email added');
       return updated;
     },
 

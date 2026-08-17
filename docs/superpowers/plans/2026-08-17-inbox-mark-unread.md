@@ -792,19 +792,48 @@ treatment for these codes. Add one: `409 no_markable_thread` renders
 expected, retryable GSI-lag path, not an error the operator must reason about).
 Any other failure uses the same inline treatment.
 
-**No client-side already-unread guard on either surface.** The count guard is
-condition clause 3. Neither surface can evaluate it: the conversation page's
-header is fetched once per mount and is deterministically PRE-auto-read
-(`ConversationDetail.tsx:81-87`, `:118-152`, `:148-151` - nothing re-reads it),
-and the contact page has no unread datum at all (`useContact.ts:23-45`). Comment
-the reasoning on both so nobody "improves" it back.
+**Each header is a TOGGLE (spec D6, 7.3), like the row.** Show exactly one of
+"Mark read" / "Mark unread", chosen by a LIVE unread count. Never both, never
+"Mark unread" on a thread that is already unread.
 
-- **Group views**: "Mark unread" header action ->
-  `markConversationUnread(conversationId)`. HIDDEN for a closed relay group -
-  unlike the row, this guard IS live (reachable by deep link and from the
-  contact's relay-groups card).
-- **Contact page**: a "Mark unread" item in `ContactActionsMenu` (the kebab
-  at `ContactDetail.tsx:658`) -> `markInboxUnread({ contactId })`. Hidden when
+The live count comes from the SSE event, not from a re-fetch:
+`ConversationUpdatedEvent` carries `unread_count`
+(`dashboard/src/api/types.ts:1488`, built with `?? 0` at
+`app/src/lib/events.ts:89`), and every read/unread write emits it.
+
+- **Group views** seed from the mount header's raw `unread_count` - it rides
+  `ConversationHeader`'s INDEX SIGNATURE and is NOT a typed field, so read it
+  defensively and treat absent as 0 (never `NaN`) - then update on
+  `onConversationUpdated` for this `conversationId`. The mount auto-read emits
+  that event itself, which is how the page learns its post-read count without a
+  re-fetch. Do NOT gate on the seeded value alone; that is the frozen-header
+  trap an earlier draft could not get past.
+- **Contact page** has no unread datum and gets none. Derive: the mount fan-out
+  marks EVERY thread of the contact read, so a successful fan-out means read.
+  Track `hasUnread`, set false on fan-out success, set true by any
+  `onConversationUpdated` with `unread_count > 0` whose `conversationId` is in
+  the contact's timeline. A SKIPPED (background tab) or FAILED fan-out leaves
+  state UNKNOWN -> show "Mark unread" (safe default; the server refuses if
+  wrong).
+
+The server's condition clause 3 and the 200-already-unread arm STAY. The toggle
+is UI; the client's view can be stale by a round trip, and the condition is what
+makes a stale view harmless. Do not remove either as "now redundant".
+
+**"Mark read" reuses the EXISTING endpoints** - `markConversationRead` /
+`markInboxRead`. Nothing new server-side for that half.
+
+**Navigation is asymmetric.** "Mark unread" navigates to `/inbox` (D2). "Mark
+read" does NOT navigate - marking read while reading is not a departure. Both
+use the same inline error treatment on failure.
+
+- **Group views**: toggle in the header. `markConversationUnread(conversationId)`
+  / `markConversationRead(conversationId)`. The whole toggle is HIDDEN for a
+  closed relay group - unlike the row, this guard IS live (reachable by deep
+  link and from the contact's relay-groups card).
+- **Contact page**: the toggle is an item in `ContactActionsMenu` (the kebab at
+  `ContactDetail.tsx:658`), label swapping with state ->
+  `markInboxUnread({ contactId })` / `markInboxRead({ contactId })`. Hidden when
   the contact is soft-deleted. In the MENU, and specifically NOT in
   `ContactCommsPane` - that pane is shared with the tour and placement 1:1 tabs
   (`TourConversation.tsx:263`, `PlacementConversation.tsx:260`), so putting it
@@ -830,9 +859,23 @@ kebab):
 
 1. **Calls `suppressAndDrain` BEFORE the POST.** This is the component-level
    wiring test for S6's drain; without it, S6 can be perfect and S7 can still
-   fail to call it. Assert ORDER, not just that both happened.
-2. Navigates to `/inbox` on success.
+   fail to call it. Assert ORDER, not just that both happened. (Mark-unread
+   only - "Mark read" is the auto-read's own action and needs no suppression.)
+2. Navigates to `/inbox` on success. "Mark read" does NOT navigate.
 3. Does NOT navigate on rejection.
+3b. **The toggle (D6), both directions.** At a live count of 0: "Mark unread"
+   present, "Mark read" absent. At > 0: the reverse. An absence-only assertion
+   goes vacuous rather than red - assert both.
+3c. **The count is LIVE.** Seeded at 0, then an `onConversationUpdated` carrying
+   `unread_count: 3` flips the toggle to "Mark read" with NO re-fetch. This is
+   the assertion that proves the toggle is not reading the frozen mount value;
+   without it the whole D6 mechanism can be wired to a stale seed and pass.
+3d. The group views survive an ABSENT `unread_count` on the mount header (it is
+   untyped, on an index signature): treated as 0, never `NaN`.
+3e. The contact page: successful fan-out -> "Mark unread"; skipped/failed
+   fan-out -> "Mark unread" (unknown, safe default); an
+   `onConversationUpdated` with `unread_count > 0` for a timeline conversation
+   -> "Mark read".
 4. Renders the pending state while the drain/POST is outstanding.
 5. A `409 no_markable_thread` renders "Could not mark unread - try again" and
    LEAVES THE ACTION AVAILABLE.

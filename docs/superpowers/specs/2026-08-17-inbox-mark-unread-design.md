@@ -73,6 +73,13 @@ Two bounds on that goal, both established by review and both real:
   This preserves the two invariants ruled on 2026-08-16: a closed group can
   never sit unread-and-invisible in the `byUnread` index, and soft-deleting a
   contact draws a line under its unread.
+- **D6 - Every surface is a TOGGLE** (ruled 2026-08-17, after the review loop
+  closed). The inbox row already shows exactly one of "Mark read" / "Mark
+  unread" by its count; the two headers do the same. Offering "Mark unread" on
+  an already-unread thread is what creates the awkward case, so the fix is to
+  not offer it rather than to handle the click better. The server's already-read
+  condition and its 200-already-unread response STAY as the guarantee - a toggle
+  reads client state, which can be stale. Full mechanism in 7.3.
 
 ## 4. The load-bearing invariants
 
@@ -160,9 +167,10 @@ Behavior:
      ALREADY-READ precondition. `setUnread` is a `SET`, so writing it over a
      thread sitting at 5 is data loss. Section 4 says client-side hiding is
      never the guarantee; this is the clause that makes that true for the count
-     as well as for eligibility, and it is what lets both header surfaces drop
-     a client-side "only when read" rule that neither of them can actually
-     evaluate (7.3).
+     as well as for eligibility. The UI does not RELY on it - every surface is a
+     toggle showing only the action matching current state (7.2, 7.3) - but the
+     UI's view of that state can be stale, and this clause is what makes a stale
+     view harmless rather than destructive.
 - A `ConditionalCheckFailedException` is AMBIGUOUS across those three clauses,
   so the route CLASSIFIES it with one re-read rather than guessing - see 6.3.
 - `ReturnValues: 'ALL_NEW'`.
@@ -226,8 +234,9 @@ a `ConditionalCheckFailedException` by re-reading the item ONCE and answering,
 2. item INELIGIBLE by type/status -> `409 thread_not_markable_unread`.
 3. item eligible and `unread_count > 0` -> **`200` success, no write.** The
    operator asked for "this thread is unread" and it already is; the goal state
-   holds. This is not a fudge - it is what makes the feature usable at all,
-   given that neither header surface can see a live unread count (7.3).
+   holds. With D6's toggle this should be RARE - the UI does not offer the
+   action in that state - but the client's view can be stale by a round trip,
+   and answering an error for a goal state that already holds would be wrong.
 4. item eligible and `unread_count` is 0 or absent -> **RACED**: the row was
    concurrently reset between the write and this re-read. Reporting 200 would
    claim "unread" about a row reading 0. Retry the write ONCE, then classify
@@ -386,22 +395,50 @@ measure that avoids a pointless round trip.
 
 ### 7.3 Thread headers
 
-Both surfaces follow D2 - `await` the POST, then `navigate('/inbox')`; on
-failure stay put and render an inline error. This is NEW UI: neither surface
-has an existing inline treatment for these codes, so one is added.
+**D6 - the header is a TOGGLE, like the row** (human ruling, 2026-08-17, after
+the review loop closed). The row already shows exactly one of "Mark read" /
+"Mark unread" according to the row's count. The headers do the same. Showing
+"Mark unread" on a thread that is already unread is the situation that creates
+the contention in the first place; the fix is not to handle the click better but
+to not offer it.
 
-**No client-side "only when read" rule.** The count guard lives in `setUnread`'s
-`ConditionExpression` (6.1 clause 3), NOT on the client, because neither header
-surface can evaluate it. On `/conversations/:id` the only unread datum is the
-header fetched once per mount (`ConversationDetail.tsx:81-87`), and it is
-deterministically PRE-auto-read: the page renders its loading branch until the
-header resolves and only then mounts the child that fires the mount mark-read
-(`:118-152`), and nothing re-reads the header afterwards (`:148-151`). A client
-rule would therefore hide the action for the whole visit on exactly the flow the
-feature exists for - arriving at an unread thread. On `/contacts/:id` there is
-no unread datum at all: `useContact.ts:23-45` fetches the contact and nothing
-else, and `useMarkContactRead` returns `void`. Server-side is the only place
-this rule can be true, which is also what section 4 requires.
+The server's already-read condition (6.1 clause 3) and the 200-already-unread
+arm (6.3) STAY. They are the guarantee; the toggle is the UI. A toggle driven by
+a possibly-stale client view is exactly why the write still needs its own
+precondition.
+
+**Where the live count comes from.** An earlier draft dropped the client rule on
+the grounds that neither header could evaluate it. That was wrong about the
+mechanism available: `ConversationUpdatedEvent` carries `unread_count`
+(`dashboard/src/api/types.ts:1488`, built with `?? 0` at
+`app/src/lib/events.ts:89`), and every mark-read and mark-unread write emits it.
+So both surfaces can hold a LIVE count rather than the frozen one:
+
+- **Conversation page.** Seed from the header's raw `unread_count` at mount
+  (it rides `ConversationHeader`'s index signature - read it defensively, it is
+  not a typed field), then update on `onConversationUpdated` for this
+  `conversationId`. The mount auto-read emits that event itself, so the page
+  learns its post-read count without a re-fetch - which is precisely the
+  staleness the earlier draft could not get past.
+- **Contact page.** No unread datum exists, and none is added. Derive instead:
+  the mount fan-out marks EVERY thread of the contact read, so once it resolves
+  successfully the contact is read. Track a local `hasUnread`, set false on a
+  successful fan-out, and set true by any `onConversationUpdated` carrying
+  `unread_count > 0` for a conversation in the contact's timeline. When the
+  fan-out was skipped (background tab) or failed, state is UNKNOWN - show "Mark
+  unread", the safe default, and let the server refuse if it is wrong.
+
+**Navigation is asymmetric, deliberately.** "Mark unread" navigates to `/inbox`
+(D2 - it means "I am done here, put this back on my list"). "Mark read" does
+NOT navigate; marking read while reading is not a departure. Both render the
+same inline error treatment on failure (NEW UI - neither surface has an existing
+one for these codes).
+
+"Mark read" on the header calls the EXISTING read endpoints
+(`markConversationRead` / `markInboxRead`), not anything new. In practice it
+appears rarely, since arriving marks the thread read - but it is exactly right
+in the cases that made the earlier design awkward: a backgrounded tab where the
+auto-read was skipped, or a failed fan-out.
 
 **The auto-read latch (D2, revised).** Navigating away is not sufficient on its
 own. `useMarkContactRead.ts:20-50` fires uncancelled on mount, on
@@ -640,11 +677,25 @@ Dashboard:
   already-unread thread answering 5 leaves the row showing 5.
 - Neither header surface calls `noteRowsCleared` or `rollbackRowsCleared` -
   extend the existing regression spies rather than adding new ones.
-- Both header actions navigate to `/inbox` on success and do NOT navigate on
+- "Mark unread" navigates to `/inbox` on success and does NOT navigate on
   rejection; the conversation page action is absent for a closed relay group;
-  the contact page action is absent for a soft-deleted contact. There is NO
-  client-side already-unread guard to test - that rule moved to the write
-  condition.
+  the contact page action is absent for a soft-deleted contact.
+- **The header TOGGLE (D6)**, on both surfaces:
+  - at a live count of 0, "Mark unread" is shown and "Mark read" is absent;
+    at a count > 0, the reverse. Assert BOTH directions, as on the row - an
+    absence-only test goes vacuous rather than red.
+  - the count is LIVE: a surface seeded at 0 that then receives an
+    `onConversationUpdated` carrying `unread_count: 3` flips to "Mark read"
+    WITHOUT a re-fetch. This is the assertion that proves the toggle is not
+    reading the frozen mount value.
+  - the conversation page seeds its count from the mount header and survives
+    that field being absent (it is untyped, on an index signature) - an absent
+    count is treated as 0, never as `NaN` or a crash.
+  - the contact page treats a SKIPPED or FAILED mount fan-out as unknown and
+    shows "Mark unread"; a successful fan-out shows "Mark unread"; an
+    `onConversationUpdated` with `unread_count > 0` for one of the contact's
+    timeline conversations flips it to "Mark read".
+  - "Mark read" calls the EXISTING read endpoint and does NOT navigate.
 - A `409 no_markable_thread` renders the retryable inline message and leaves the
   action available (the GSI-lag path, 6.3).
 - The Unread truncation notice (7.4): renders when the server page is non-empty

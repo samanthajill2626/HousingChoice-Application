@@ -15,6 +15,11 @@ describe('formatCallDuration', () => {
 });
 
 describe('callPreview - the inbox preview line for a call row', () => {
+  // Producers: the voice paths STORE the terminal / voicemail strings via
+  // touchLastActivity; the inbox's deriveLatest DERIVES a preview from a
+  // call-latest row at read time (which is where the ringing arm is reached -
+  // during the ring, or forever after a caller-abandon). The in-progress arm is
+  // reached only when a Dial in-progress summary beats the whisper gate.
   it('ringing: inbound "Incoming call", outbound "Outgoing call"', () => {
     expect(callPreview({ direction: 'inbound', callStatus: 'ringing' })).toBe('Incoming call');
     expect(callPreview({ direction: 'outbound', callStatus: 'ringing' })).toBe('Outgoing call');

@@ -1413,18 +1413,43 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // non-goal (their thread carries roster semantics, not staff unread).
         // Uses the LOCAL outcome/duration - `fresh` may be the pre-transition
         // snapshot fetched for classification.
+        //
+        // OUTBOUND asymmetry (adversarial r2 HIGH 1): the outbound whisper gate
+        // runs on the NAVIGATOR's own leg and stamps answered_at BEFORE the
+        // target's phone rings, so `bridgeAccepted`/`outcome` say "answered"
+        // for every outbound call that got as far as a <Dial> - including one
+        // the target never picked up. The stored call_outcome keeps that
+        // (pre-existing) classification - see
+        // docs/issues/outbound-call-outcome-answered-before-target-rings.md -
+        // but the PREVIEW reads the Dial summary's own status, which on an
+        // outbound leg describes the target: completed/in-progress = the
+        // target answered, anything else = no answer.
         let touched: ConversationItem | undefined;
         if (isDialSummary && fresh.type === 'call' && fresh.masked !== true) {
+          const outbound = fresh.direction === 'outbound';
+          const previewOutcome = outbound
+            ? mapped === 'completed' || mapped === 'in-progress'
+              ? 'answered'
+              : 'missed'
+            : outcome;
+          const previewDuration = outbound
+            ? mapped === 'completed'
+              ? callDuration
+              : undefined
+            : bridgeAccepted
+              ? callDuration
+              : undefined;
           touched = await stampCallActivity(
             fresh.conversationId,
             callPreview({
               direction: fresh.direction,
               callStatus: mapped,
-              ...(outcome !== undefined && { callOutcome: outcome }),
-              ...(bridgeAccepted && callDuration !== undefined && { callDuration }),
+              ...(previewOutcome !== undefined && { callOutcome: previewOutcome }),
+              ...(previewDuration !== undefined && { callDuration: previewDuration }),
             }),
             now,
-            isMissed && fresh.direction !== 'outbound',
+            // Fail CLOSED: only an explicitly inbound miss is unread.
+            isMissed && fresh.direction === 'inbound',
             entryCallSid,
           );
         }

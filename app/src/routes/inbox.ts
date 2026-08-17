@@ -74,7 +74,14 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
-import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  type CallOutcome,
+  type CallStatus,
+  type MessageItem,
+  type MessagesRepo,
+} from '../repos/messagesRepo.js';
+import { callPreview } from '../lib/callPreview.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   BADGE_COUNT_CAP,
@@ -426,8 +433,37 @@ interface DerivedLatest {
  * record; else sms. Falls back to the conversation's denormalized preview (and
  * sms/inbound) when no message is available — never throws.
  */
+const CALL_STATUSES: ReadonlySet<string> = new Set<CallStatus>([
+  'ringing',
+  'in-progress',
+  'completed',
+  'no-answer',
+  'busy',
+  'failed',
+  'canceled',
+]);
+const CALL_OUTCOMES: ReadonlySet<string> = new Set<CallOutcome>(['answered', 'missed', 'voicemail']);
+function isCallStatus(v: unknown): v is CallStatus {
+  return typeof v === 'string' && CALL_STATUSES.has(v);
+}
+function isCallOutcome(v: unknown): v is CallOutcome {
+  return typeof v === 'string' && CALL_OUTCOMES.has(v);
+}
+
 function deriveLatest(
-  latest: { type?: unknown; direction?: unknown; body?: unknown; mediaUrls?: unknown; media_attachments?: unknown; created_at?: unknown } | undefined,
+  latest:
+    | {
+        type?: unknown;
+        direction?: unknown;
+        body?: unknown;
+        mediaUrls?: unknown;
+        media_attachments?: unknown;
+        created_at?: unknown;
+        call_status?: unknown;
+        call_outcome?: unknown;
+        call_duration?: unknown;
+      }
+    | undefined,
   conv: ConversationItem,
 ): DerivedLatest {
   const fallbackPreview =
@@ -452,7 +488,25 @@ function deriveLatest(
     channel = 'sms';
   }
   const direction: 'inbound' | 'outbound' = latest.direction === 'outbound' ? 'outbound' : 'inbound';
-  const preview = typeof latest.body === 'string' && latest.body.length > 0 ? latest.body : fallbackPreview;
+  // A call row has no body. Derive its preview from the row itself (the SAME
+  // strings the voice paths stamp into last_message_preview - call-inbox-unread)
+  // rather than falling back to the stored preview: the stored one is written
+  // only from the Dial summary / voicemail callback, so during the ring - or
+  // forever, when the caller abandons before any summary
+  // (docs/issues/voice-caller-abandon-no-dial-summary.md) - the stored preview
+  // is either empty (a brand-new caller) or the previous TEXT's body sitting
+  // under a "Call" chip. Zero extra reads: the row is already loaded.
+  const preview =
+    typeof latest.body === 'string' && latest.body.length > 0
+      ? latest.body
+      : channel === 'call'
+        ? callPreview({
+            direction,
+            callStatus: isCallStatus(latest.call_status) ? latest.call_status : 'ringing',
+            ...(isCallOutcome(latest.call_outcome) && { callOutcome: latest.call_outcome }),
+            ...(typeof latest.call_duration === 'number' && { callDuration: latest.call_duration }),
+          })
+        : fallbackPreview;
   const createdAt = typeof latest.created_at === 'string' ? latest.created_at : undefined;
   return { channel, direction, preview, ...(createdAt !== undefined && { createdAt }) };
 }

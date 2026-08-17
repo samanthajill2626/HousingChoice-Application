@@ -138,6 +138,22 @@ describe('inbound founder-bridge call -> inbox activity + unread', () => {
     expect(world.emitted.filter((e) => e.event === 'message.persisted')).toHaveLength(1);
   });
 
+  it('DURING the ring the inbox row already reads "Incoming call" on the Call channel (derived from the call row, never the previous text)', async () => {
+    // Adversarial r2 MED 4: with no ring stamp the STORED preview is empty (new
+    // caller) or the previous text (existing thread) - deriveLatest must build
+    // the call preview from the loaded call row instead. Also what an abandoned
+    // ring looks like forever (voice-caller-abandon-no-dial-summary).
+    const world = createFakeWorld();
+    const { conv } = await ringBridge(world);
+    const authed = (r: request.Test) => r.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    const harness = makeWebhookHarness({ world });
+    const rows = (await authed(request(harness.app).get('/api/inbox'))).body.rows as Array<Record<string, unknown>>;
+    const row = rows.find((r) => r['contactId'] === 'c-caller');
+    expect(row).toMatchObject({ channel: 'call', direction: 'inbound', preview: 'Incoming call', unreadCount: 0 });
+    // The stored preview stays untouched (the Dial summary owns the write).
+    expect(world.conversations.get(conv.conversationId)!.last_message_preview).toBeUndefined();
+  });
+
   it('a redelivered inbound webhook (dedupe) does not re-emit', async () => {
     const world = createFakeWorld();
     const { app } = await ringBridge(world);
@@ -453,14 +469,43 @@ describe('outbound originate -> "Outgoing call" lifecycle, never unread', () => 
     expect(fresh.unread_count ?? 0).toBe(0);
   });
 
-  it('outbound no-answer -> "Outgoing call - no answer"; NEVER unread (staff placed it)', async () => {
+  it('outbound no-answer THROUGH the gate accept (the only production path to a <Dial>) -> "Outgoing call - no answer"; NEVER unread', async () => {
+    // Adversarial r2 HIGH 1: the outbound gate stamps answered_at on the parent
+    // BEFORE the target rings, so the row's call_outcome reads 'answered' even
+    // when the target never picks up (pre-existing classification, tracked in
+    // docs/issues/outbound-call-outcome-answered-before-target-rings.md). The
+    // PREVIEW must still say no answer - it reads the Dial summary's own status.
     const world = createFakeWorld();
     const { app, conv, callSid } = await originate(world);
-    await noAnswer(app, callSid);
+    await signedTwilioPost(
+      app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conv.conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'no-answer',
+      DialCallDuration: '0',
+      ApiVersion: '2010-04-01',
+    });
     const fresh = world.conversations.get(conv.conversationId)!;
     expect(fresh.last_message_preview).toBe('Outgoing call - no answer');
     expect(fresh.unread_count ?? 0).toBe(0);
     expect(world.unreadIncrements).toHaveLength(0);
+    // Also busy: the target's line was busy - not an answered call either.
+    const world2 = createFakeWorld();
+    const o2 = await originate(world2);
+    await signedTwilioPost(
+      o2.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(o2.conv.conversationId)}&parentCallSid=${encodeURIComponent(o2.callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    await signedTwilioPost(o2.app, '/webhooks/twilio/voice/status', {
+      CallSid: o2.callSid,
+      DialCallStatus: 'busy',
+      ApiVersion: '2010-04-01',
+    });
+    expect(world2.conversations.get(o2.conv.conversationId)!.last_message_preview).toBe('Outgoing call - no answer');
   });
 });
 
@@ -478,9 +523,26 @@ describe('soft-deleted contacts: a missed call resurfaces the row, an outbound c
     await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
     await noAnswer(harness.app);
 
-    const rows = (await authed(request(harness.app).get('/api/inbox'))).body.rows as Array<Record<string, unknown>>;
-    const row = rows.find((r) => r['contactId'] === 'c-caller');
-    expect(row).toMatchObject({ contactId: 'c-caller', deleted: true, unreadCount: 1, channel: 'call', preview: 'Missed call' });
+    // BOTH resurfacing implementations: the open-partition pager (filter=all,
+    // inbox.ts isFreshInbound) AND the byUnread-index feed the Unread tab + nav
+    // badge use (unreadFeed.ts threadResurfaces).
+    for (const filter of ['all', 'unread']) {
+      const rows = (await authed(request(harness.app).get(`/api/inbox?filter=${filter}`))).body
+        .rows as Array<Record<string, unknown>>;
+      const row = rows.find((r) => r['contactId'] === 'c-caller');
+      expect(row, filter).toMatchObject({ contactId: 'c-caller', deleted: true, unreadCount: 1, channel: 'call', preview: 'Missed call' });
+    }
+    const count = await authed(request(harness.app).get('/api/inbox/unread-count'));
+    expect(count.body.unreadCount).toBe(1);
+
+    // The voicemail that follows re-flags through the SAME rule (a different
+    // handler + a second increment).
+    await authed(request(harness.app).post('/api/inbox/c-caller/read'));
+    expect((await authed(request(harness.app).get('/api/inbox?filter=unread'))).body.rows).toHaveLength(0);
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/recording', recordingParams());
+    const vmRows = (await authed(request(harness.app).get('/api/inbox?filter=unread'))).body
+      .rows as Array<Record<string, unknown>>;
+    expect(vmRows.find((r) => r['contactId'] === 'c-caller')).toMatchObject({ deleted: true, unreadCount: 1, preview: 'Voicemail' });
   });
 
   it('an OUTBOUND call to a soft-deleted contact (Dial summary no-answer) does not resurface the row', async () => {

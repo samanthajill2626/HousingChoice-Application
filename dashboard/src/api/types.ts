@@ -2692,7 +2692,7 @@ export interface InboxRow {
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
   preview: string; // latest item's text as a preview (relay: last_message_preview)
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
-  direction?: 'inbound' | 'outbound'; // 'outbound' → render "You: …" — OMITTED on relay_group rows
+  direction?: 'inbound' | 'outbound'; // 'outbound' -> render "You: ..." (except channel 'call', whose preview names its direction) - OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
   /** Deleted-contact resurfacing (2026-08-03 spec): present/true ONLY on a

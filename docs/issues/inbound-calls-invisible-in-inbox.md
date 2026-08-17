@@ -52,8 +52,13 @@ operator is not already looking at (and still cannot resurface a deleted
 contact's thread). Status: open.
 
 **Resolution (2026-08-17, branch `feat/call-inbox-unread`, small-fix lane with an
-end-of-branch adversarial review).** Design record, since this change has no
-separate spec:
+end-of-branch adversarial review, two rounds).** SCOPE: resolved for every call
+that produces a `<Dial action>` summary (answered, missed, voicemail, outbound
+that reached a dial). A caller who abandons during the ring may produce no
+summary at all - that path shows "Incoming call" on the Call channel (derived
+at read time, no re-sort, no unread) and is tracked separately in
+`docs/issues/voice-caller-abandon-no-dial-summary.md`. Design record, since
+this change has no separate spec:
 
 - Write-side wiring into the EXISTING primitives (`touchLastActivity` +
   `incrementUnread`), no schema/index/infra/deps change; the whole read stack
@@ -73,8 +78,22 @@ separate spec:
   would pin the thread at the top of the inbox forever - see
   `docs/issues/voice-caller-abandon-no-dial-summary.md`.
 - Outbound originate: the Dial summary stamps "Outgoing call - 42s" /
-  "Outgoing call - no answer", never unread. InboxRow drops its "You:" prefix
-  for call previews (they already name their direction).
+  "Outgoing call - no answer", never unread. The outbound PREVIEW reads the
+  Dial summary's own status (completed/in-progress = the target answered, else
+  no answer) because the outbound whisper gate stamps `answered_at` before the
+  target rings and the stored `call_outcome` therefore says "answered" for a
+  rung-out call (pre-existing, r2 HIGH 1 -
+  `docs/issues/outbound-call-outcome-answered-before-target-rings.md`).
+  InboxRow drops its "You:" prefix for call previews (they already name their
+  direction).
+- Read side, one deliberate addition (r2 MED 4): `deriveLatest` builds a
+  call-latest row's preview from the loaded call row (`callPreview` over
+  `call_status`/`call_outcome`/`call_duration`, zero extra reads) instead of
+  falling back to the stored preview - so during a ring, or forever after an
+  abandon, the row reads "Incoming call" on the Call channel rather than a
+  blank line or the previous text's body. The stored preview still feeds
+  `conversation.updated`, Today and the relay rows; the two agree by
+  construction (same function).
 - Ordering: the unread write lands BEFORE `message.persisted` (a staff member
   viewing the contact re-marks read on that event), `conversation.updated`
   follows - the SMS webhook's order - on BOTH the status and the recording
@@ -99,11 +118,21 @@ separate spec:
   callback and so requires the S3 mirror to have succeeded (the outcome upgrade
   always did); Today labels an auto-replied missed call "Unreplied" (a bot
   courtesy is not a staff reply - same as an auto-replied text); one call that
-  becomes a voicemail shows 2 on its row count; the Dial-summary stamp is two
-  awaited DynamoDB writes ahead of the TwiML (needed for the ordering rule);
-  `bridgeAccepted` still derives from an eventually-consistent read of
-  `answered_at` (pre-existing classification, now also feeding the durable
-  preview/unread).
+  becomes a voicemail shows 2 on its row count (OPERATOR-APPROVED at the design
+  gate; a "re-flag only if read" variant is possible with the existing
+  primitives - `incrementUnread` returns the new count - and was not chosen);
+  the Dial-summary stamp is two awaited DynamoDB writes ahead of the TwiML
+  (needed for the ordering rule); the recording callback's single
+  `message.persisted` now sits behind the voicemail upgrade + stamp (a hang
+  there would delay the timeline's "recording landed" refetch; a redelivery
+  200s without emitting - narrow, and the one post-upgrade emit means the
+  timeline sees `voicemail` on its first read); `bridgeAccepted` still derives
+  from an eventually-consistent read of `answered_at` (pre-existing
+  classification, now also feeding the durable preview/unread).
+- `useMarkContactRead`'s trailing re-mark is generation-scoped and
+  mount-guarded (r2 MED 2/3): switching contacts mid-flight marks the NEW
+  contact and never re-marks the old one; unmount cancels a pending trailing
+  re-mark (an unread the operator never looked at stays unread).
 
 Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
 `dashboard/src/routes/contact/useMarkContactRead.test.tsx`, `dashboard/src/routes/inbox/InboxRow.test.tsx`,

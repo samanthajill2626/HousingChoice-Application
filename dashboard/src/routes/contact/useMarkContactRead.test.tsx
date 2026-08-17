@@ -83,6 +83,49 @@ describe('useMarkContactRead', () => {
     expect(markInboxRead).toHaveBeenCalledTimes(2);
   });
 
+  it('switching contacts while A\'s mark-read is in flight marks B on arrival and never re-marks A', async () => {
+    let releaseA: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        releaseA = resolve;
+      }),
+    );
+    const view = render(<Probe id="A" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' }));
+
+    // Same hook instance, new contact (unkeyed route + useParams).
+    view.rerender(<Probe id="B" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
+
+    // A's request settles later: it must not spend a trailing re-mark on A.
+    await act(async () => {
+      releaseA?.();
+    });
+    await act(async () => {});
+    const contacts = (markInboxRead.mock.calls as unknown as Array<[{ contactId: string }]>).map(
+      (c) => c[0].contactId,
+    );
+    expect(contacts).toEqual(['A', 'B']);
+  });
+
+  it('a trailing re-mark never fires after unmount (an unread the operator never saw stays unread)', async () => {
+    let release: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const view = render(<Probe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    act(() => capturedOnMessage?.()); // arms the trailing re-mark
+    view.unmount();
+    await act(async () => {
+      release?.();
+    });
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT mark read when the tab is hidden (background tab)', () => {
     setVisibility('hidden');
     render(<Probe id="k1" />);

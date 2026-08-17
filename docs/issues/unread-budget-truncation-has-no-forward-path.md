@@ -119,3 +119,27 @@ so a truncated zero stops looking exactly like "all caught up". Note
 the depth-cap arm is a different case - it genuinely cannot mint a cursor the
 server would accept, which is
 [`seen-set-max-equals-max-inbox-limit`](./seen-set-max-equals-max-inbox-limit.md).
+
+**Round-4 addendum (2026-08-16, planner).** Two more facts about the residue
+wall belong here rather than in code, because every code-side bound tried
+against the wall was wrong at some threshold:
+
+- SILENT UNDERCOUNT INSIDE THE WALL (adversarial r4 finding 2 / conformance r4
+  finding 1). Past UNREAD_DELETED_PROBE_WARN wasted probes in one request,
+  further deleted-contact threads are SKIPPED WITHOUT PROBING and assumed hidden.
+  A resurface-eligible thread sitting behind that many confirmed-hidden ones is
+  therefore not counted, and because a DRAINED stream is a natural end (fix wave
+  3, adversarial r3 finding 2 - the alternative rendered a permanent false error
+  banner on a caught-up org), the badge and page report the floor with
+  `truncated` ABSENT. Reproduced: truth 20, badge 10, page 10 rows, no flag.
+  This is a knowing trade: the wall is a pathological state (the delete-time
+  reset, the relay-close reset, and backfill rules 2-3 exist to stop it forming),
+  and the operator-facing signal is the rate-limited deleted-probe WARN whose
+  payload now names attempted vs skipped. A wire-level "some rows could not be
+  checked" affordance is the durable fix and is out of v1 scope.
+- EXTRA POINT READ PER AUTHORITATIVE DROP (adversarial r4 finding 4). The lag
+  discriminator issues one base-table GetItem per hydration drop (600 in a
+  600-drop shape). It replaced a membership predicate that could not see the
+  dominant lag shape at all; the read is bounded by the page and its cost is
+  named in spec 4.4 (fix wave 3). Batching stays with
+  contacts-batchget-amplified-reads.

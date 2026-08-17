@@ -27,7 +27,8 @@ them.
 1. **Provisioning never buys at create time.** `poolNumbersService
    .provisionForGroup` runs a three-tier ladder: reuse a burnable active number
    -> take a warm spare -> connect-when-ready, where buying is solely
-   `warmOneNumber`. (`services/poolNumbers.ts:566-589`) DO NOT trust that
+   `warmOneNumber`. (Tiers 1-2 at `services/poolNumbers.ts:532-563`; tier 3 at
+   `566-589`.) DO NOT trust that
    module's file header (`poolNumbers.ts:5-13`): it still describes the OLD
    two-tier behavior, "(c) else PROVISION a fresh one through the adapter",
    which is the opposite of what the code now does. Section 9 files it.
@@ -140,8 +141,11 @@ export interface OpenPreviewParts {
   /** Members provisioning will put on the thread: phone-bearing, de-duped by
    *  phone (FIRST WINS), in roster order. Names as the BODY composer sees them. */
   bodyMembers: { name?: string; memberKey: string }[];
-  /** Every roster row in display order - including phone-less and
-   *  same-phone duplicates - with display names and reachability. */
+  /** Everyone who will be ON the thread, in display order, with display names
+   *  and reachability. The owner path passes its full roster view (phone-less
+   *  rows included - they are still participants); the standalone path passes
+   *  its phone-de-duplicated list, because create drops the duplicates before
+   *  they ever become participants. See 6.2 step 4. */
   recipients: { name?: string; memberKey: string; reachability: RosterReachability }[];
 }
 
@@ -178,10 +182,18 @@ not affect the intro body.
 1. Validate with `parseRelayMember` - the SAME parser create uses. Empty or
    absent members -> `400 { error: 'members (non-empty array) is required' }`,
    create's wording verbatim. A bad member returns create's 400 for that member.
-2. For each parsed member, resolve the display name with `nameFromContact` over
-   an explicit `contacts.getById` (NOT `resolveMemberName`, which short-circuits
-   - section 2.12) and determine suppression with `isMemberSuppressed(contacts,
-   conversations, member)` - the REAL send gate (section 2.8).
+2. For each parsed member, resolve the display name with `resolveMemberName` -
+   THE SAME resolver the create route uses, short-circuit included. This is
+   load-bearing: `resolveMemberName` returns a supplied `name` verbatim without
+   reading the contact (section 2.12), so if the preview instead recomputed the
+   name from the contact, a client-supplied name would produce ONE name in the
+   confirm dialog and a DIFFERENT one in the intro create actually sends. The
+   preview and the create must resolve names identically or the dialog is not a
+   preview of the send.
+   Determine suppression separately with `isMemberSuppressed(contacts,
+   conversations, member)` - the REAL send gate (section 2.8). Suppression and
+   naming are different questions and use different resolution rules; do not try
+   to serve both from one read.
 3. Reachability is `opted_out` when suppressed, else `reachable`. There is NO
    `no_phone` case on this route: `parseRelayMember` guarantees a phone
    (section 2.11).
@@ -246,7 +258,12 @@ GSI, no new dependency, no infra.
 In `dashboard/src/api/endpoints.ts`, modelled on `createTourRelay`:
 
 - `previewRelayGroup(members, signal?): Promise<RosterPreview>`
-- `createRelayGroup(members, tag?): Promise<{ conversation: ConversationItem }>`
+- `createRelayGroup(members, tag?): Promise<{ conversation: ConversationHeader }>`
+  - the dashboard type is `ConversationHeader`; there is no `ConversationItem`
+  in the dashboard (that is the app-side repo type). NOTE: `ConversationHeader`'s
+  `status` docblock does not list `'connecting'`, the value 6.6 branches on,
+  even though the server sends it - a fourth stale comment for issue 9.4. Verify
+  the union admits it and widen the DOC, not the behavior.
 
 Both receive the same `members` array value, passed through unchanged.
 
@@ -288,20 +305,27 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
   array to read the phone. Candidates are filtered out when they have no
   resolvable phone, are already added, or SHARE A PHONE with an already-added
   member (6.2: create would silently drop them).
-- ONE IDENTITY PER PERSON across the picker, the confirm dialog, and the intro
-  body. The name is built from `firstName`/`lastName` only. When that yields a
-  real name it is sent as `name` and the server uses it verbatim; when it yields
-  nothing, no `name` is sent, the server's `nameFromContact` also yields
-  undefined, the dialog renders "Unnamed number", and the picker MUST render the
-  same "Unnamed contact" wording rather than a phone. Do NOT use the dashboard's
-  `contactDisplayName` helper here: it falls back to a FORMATTED PHONE NUMBER
-  (`routes/contact/format.ts:101-110`), which would both print a phone in the
-  preview and embed one in the outbound intro body.
+- ONE IDENTITY PER PERSON across the picker and the confirm dialog. The name is
+  built from `firstName`/`lastName` ONLY. When that yields a real name it is
+  sent as `name`, and both the preview and create use it verbatim (6.2 step 2).
+  When it yields nothing, no `name` is sent and the picker MUST render the
+  dialog's exact string, `Unnamed number` - not a phone, and not a third
+  variant. Do NOT use the dashboard's `contactDisplayName` helper here: it falls
+  back to a FORMATTED PHONE NUMBER (`routes/contact/format.ts:101-110`), which
+  would both print a phone in the preview and embed one in the outbound intro.
+
+  SCOPE LIMIT, stated so the builder does not chase it: the rule CANNOT extend
+  to the intro body. `composeConnectionSentence` OMITS a nameless member from
+  the sentence entirely rather than rendering a placeholder, so a nameless
+  member appears in the picker and the dialog as "Unnamed number" but is simply
+  absent from the intro text. That is existing behavior on all three relay
+  surfaces and is not changed here.
 - Optional `Name (optional)` text input -> the create call's `tag` only.
 - `Create group` is disabled below 2 picked rows. This is a UI affordance over
-  PICKED ROWS, not a guarantee about the resulting group: the server may collapse
-  same-phone members and suppresses opted-out legs, so two rows can still yield
-  a one-recipient send. The confirm dialog is where the true count is shown.
+  PICKED ROWS, not a guarantee about the resulting group: opted-out legs are
+  suppressed at send, so two rows can still yield a one-recipient send. (The
+  picker filters same-phone candidates, so collapsing is not a factor from the
+  UI.) The confirm dialog is where the true count is shown.
 
 ### 6.6 The confirm step
 
@@ -328,16 +352,24 @@ dialog: an operator must never confirm a send whose content could not be shown.
 Outcomes after a successful create:
 
 - `conversation.status === 'connecting'` -> the group exists but has NO number
-  and NO intro was sent (section 2.2). Navigate to the conversation AND surface
-  a notice that names the unsent intro specifically - for example "This group is
-  still getting its number. The intro text has not been sent yet; it goes out
-  once the number is ready."
-  The existing connecting affordances are NOT sufficient on their own: the
-  conversation view shows a status pill and a composer note about replies being
-  queued, and neither says the intro has not gone out. The operator has just
-  been shown that exact intro body in a confirm dialog, so silence here reads as
-  "it was sent". A new notice is required; reusing the pill alone is not an
-  acceptable substitute.
+  and NO intro was sent (section 2.2). DO NOT navigate. The confirm dialog
+  closes and the picker modal REMAINS OPEN, replaced by a short result panel
+  that names the unsent intro specifically - for example "This group is still
+  getting its number. The intro text has not been sent yet; it goes out once the
+  number is ready." - with a single `Go to the group` button that navigates to
+  `/conversations/:conversationId`, and nothing else.
+
+  WHY IN THE MODAL: the notice must appear on a surface this flow already owns.
+  The dashboard has no toast system and no router-state banner precedent, so
+  "navigate and show a banner" has no seam to hang on and would mean inventing
+  one. The modal is already mounted, already owns the result of the create, and
+  is where the operator's attention is. It is also the only place a test can
+  assert the notice without depending on the conversation route.
+
+  The existing connecting affordances on the conversation view are NOT a
+  substitute: it shows a status pill and a composer note about replies being
+  queued, and neither says the intro has not gone out. The operator was just
+  shown that exact intro body in a confirm dialog, so silence reads as "sent".
 - otherwise -> navigate to `/conversations/:conversationId`, the same
   destination the card's rows link to.
 - Failure -> the dialog's own inline error path (`refusalMessage`); the dialog
@@ -394,12 +426,16 @@ Unit (Vitest):
   differ; quiet on/off against a fixed clock.
 - Parity test: the same member set through the owner path and the standalone
   builder yields the same `body`, `recipients`, `recipientCount`, and quiet
-  fields. Its fixture MUST contain NO suppressed members, so the two
-  reachability rules (6.2) agree by construction and the count comparison is
-  meaningful. Asserting equal counts while allowing different reachability would
-  be incoherent - the count is DERIVED from reachability. The asymmetry itself
-  gets its own separate test: one opted-out-by-phone-STOP member that
-  `isMemberSuppressed` catches and `describeRoster`'s rule does not.
+  fields. Its fixture MUST contain NO suppressed members AND NO two members
+  sharing a phone. Both constraints are load-bearing and for different reasons:
+  the reachability rules differ by design (6.2), and the count is DERIVED from
+  reachability, so a suppressed member makes the count comparison incoherent;
+  and only the STANDALONE side de-duplicates by phone (6.2 step 4), so a shared
+  phone makes the `recipients` comparison fail on a difference the design
+  intends. Each excluded case gets its OWN test rather than being folded in:
+  (a) an opted-out-by-phone-STOP member that `isMemberSuppressed` catches and
+  `describeRoster`'s rule does not; (b) a shared-phone roster where the owner
+  path lists both members and the standalone path lists one.
 - Existing tour/placement preview tests, UNMODIFIED, as the no-behavior-change
   proof.
 - Route: 400 on empty/absent members, 400 on a bad member, an opted-out member
@@ -412,10 +448,13 @@ Unit (Vitest):
 - `CreateRelayGroupModal`: seeds the contact, blocks Create below 2 rows,
   refuses to add uncommitted free text, filters already-added, phone-less, and
   same-phone candidates, sends a `name` only when built from first/last, renders
-  "Unnamed contact" for a nameless pick, previews before confirming, posts the
+  "Unnamed number" for a nameless pick, previews before confirming, posts the
   identical members array to both calls, keeps the picker mounted-and-restored
-  around the confirm dialog, shows the connecting notice naming the unsent
-  intro, and keeps the dialog open on failure.
+  around the confirm dialog, and keeps the dialog open on failure.
+- The connecting result: a create returning `status: 'connecting'` leaves the
+  MODAL open showing the unsent-intro notice and a `Go to the group` button, and
+  does NOT navigate; a create returning an open group navigates immediately and
+  shows no notice.
 - `RosterConfirmDialog`: `allowDefer={false}` inside quiet hours renders the
   two-button footer with `confirmLabel`, still shows the warning, and calls
   `onConfirm(false)`; the default is unchanged.
@@ -436,8 +475,10 @@ Gates, bare, from the worktree: `npm run typecheck`, `npm test`, `npm run e2e`.
 - `RosterConfirmDialog` is shared by TourDetail, PlacementDetail, and
   PeopleCard - THREE call sites, not two. `allowDefer` must default to true and
   all three existing usages must be left alone.
-- Previews carry names, never phone numbers. The new route must hold that line,
-  which is why the modal sends no client-derived name (6.5).
+- Previews carry names, never phone numbers. The new route must hold that line.
+  The modal MAY send a client-derived name, but ONLY one built from
+  `firstName`/`lastName` - never via `contactDisplayName`, whose phone fallback
+  is exactly how a number would leak into the preview and the intro (6.5).
 - This change authors NO new outbound copy; it reuses `relay.intro`. The
   connecting notice (6.6) is in-dashboard UI text, not an outbound message, so
   it does not go through the message catalog.
@@ -468,12 +509,14 @@ Copy `docs/issues/_TEMPLATE.md` for each:
 3. `relay-intro-editable-but-never-overridden.md` - `relay.intro` is
    `editable: true` in the catalog, but `composeIntroBody` never passes
    overrides, so an operator edit is silently inert.
-4. `relay-provisioning-stale-comments.md` - TWO stale comments that assert the
-   opposite of the code: `services/relayProvisioning.ts:87` claims provisioning
-   never throws the kill-switch error (contradicted by `poolNumbers.ts:577-579`),
-   and the `poolNumbers.ts:5-13` file header still describes the pre-tier-3
-   behavior "(c) else PROVISION a fresh one through the adapter" (contradicted
-   by `poolNumbers.ts:566-589`). Both are actively misleading to a reader.
+4. `relay-provisioning-stale-comments.md` - stale comments that assert the
+   opposite of, or omit, what the code does: `services/relayProvisioning.ts:87`
+   claims provisioning never throws the kill-switch error (contradicted by
+   `poolNumbers.ts:577-579`); the `poolNumbers.ts:5-13` file header still
+   describes the pre-tier-3 behavior "(c) else PROVISION a fresh one through the
+   adapter" (contradicted by `poolNumbers.ts:566-589`); and the dashboard
+   `ConversationHeader.status` docblock omits `'connecting'`, which the server
+   really sends. All three mislead a reader of otherwise-correct code.
 
 Items 2-4 are pre-existing defects this review surfaced, NOT regressions from
 this change.

@@ -13,16 +13,21 @@ way to put it back. Once read, a thread has no to-do affordance: the unread
 badge, the Unread filter, and the Today unread pass are all one-way (inbound
 message sets unread, human attention clears it).
 
-The ask: mark a thread unread so it resurfaces as a to-do item. Exactly one
-message's worth of unread - not a restoration of whatever the count used to be.
+The ask: mark a thread unread so it resurfaces as a to-do item. One message's
+worth of unread - not a restoration of whatever the count used to be.
+
+Precisely: the action's goal state is "this thread is unread". On a READ thread
+that means `unread_count = 1`. On a thread that is ALREADY unread the goal state
+already holds, so the action succeeds and writes nothing - it never overwrites a
+genuine count of 5 with 1 (6.1 clause 3, 6.3).
 
 ## 2. Goal
 
-Give the operator a "Mark unread" action that flips one conversation to
-`unread_count = 1`, so its inbox row shows the unread treatment, the row counts
-toward the nav badge, and it appears under the Unread filter - reusing the
-unread primitives merged 2026-08-17 (`feat/inbox-unread-index`) with no new
-state model.
+Give the operator a "Mark unread" action that makes one conversation unread
+(`unread_count = 1` when it was read; left alone when it already was), so its
+inbox row shows the unread treatment, the row counts toward the nav badge, and
+it appears under the Unread filter - reusing the unread primitives merged
+2026-08-17 (`feat/inbox-unread-index`) with no new state model.
 
 Two bounds on that goal, both established by review and both real:
 
@@ -51,10 +56,11 @@ Two bounds on that goal, both established by review and both real:
   NOT sufficient on its own - see 7.3. The navigation is the UX; an
   identity-keyed latch plus a drain of the in-flight auto-read is the
   correctness mechanism.)
-- **D3 - One thread, count 1.** A contact inbox row aggregates unread across
-  every 1:1 thread the contact owns (phone and email). Marking unread flips
-  exactly ONE conversation to `unread_count = 1` - the newest ELIGIBLE thread as
-  defined in 6.2. Never a fan-out, never a restored prior count. (Revised by
+- **D3 - One thread.** A contact inbox row aggregates unread across every 1:1
+  thread the contact owns (phone and email). Marking unread affects exactly ONE
+  conversation - the newest ELIGIBLE thread as defined in 6.2 - setting it to
+  `unread_count = 1` if it was read, and leaving an already-unread thread
+  untouched. Never a fan-out, never a restored prior count. (Revised by
   review: the contact PAGE uses this same rule rather than a "current tab"
   rule, because the contact page has no channel tabs - see 7.3.)
 - **D4 - Timestamps are not touched.** `last_activity_at` is never written by
@@ -203,16 +209,31 @@ stays symmetric.
 
 **Shared: classifying a condition failure.** `setUnread`'s condition has three
 clauses (6.1) and DynamoDB does not say which one failed, so every route handles
-a `ConditionalCheckFailedException` by re-reading the item ONCE and answering:
+a `ConditionalCheckFailedException` by re-reading the item ONCE and answering,
+**in this order**:
 
-- item absent -> `404 conversation_not_found`. This keeps the routes aligned
-  with the `/read` route they mirror, which maps the same exception to 404
-  (`app/src/routes/api.ts:2041-2045`).
-- item present and `unread_count > 0` -> **`200` success, no write.** The
-  operator asked for "this thread is unread" and it already is; the goal state
-  holds. This is not a fudge - it is what makes the feature usable at all, given
-  that neither header surface can see a live unread count (7.3).
-- otherwise (ineligible type/status) -> `409 thread_not_markable_unread`.
+1. item absent -> `404 conversation_not_found`. This keeps the routes aligned
+   with the `/read` route they mirror, which maps the same exception to 404
+   (`app/src/routes/api.ts:2041-2045`).
+2. item INELIGIBLE by type/status -> `409 thread_not_markable_unread`.
+3. item eligible and `unread_count > 0` -> **`200` success, no write.** The
+   operator asked for "this thread is unread" and it already is; the goal state
+   holds. This is not a fudge - it is what makes the feature usable at all,
+   given that neither header surface can see a live unread count (7.3).
+
+**Eligibility is checked BEFORE the count, and the order is load-bearing.** An
+ineligible-AND-unread thread is a real state, not a hypothetical: a closed relay
+group can be re-flagged unread by an inbound, which is the open issue
+`docs/issues/inbound-reflags-closed-relay-group.md`. Classifying on the count
+first would answer 200 for exactly that residue row - reporting success for a
+thread the feature is supposed to refuse.
+
+**Every route returns the authoritative resulting count** (`{ conversation }`
+already carries it; the two fan-in routes return `{ ok: true, unreadCount }`).
+The client commits THAT value rather than assuming 1 - otherwise the 200-no-write
+arm leaves an optimistic `1` committed against a server truth of 5, with no
+event to reconcile it. The no-write arm emits no `conversation.updated`, because
+nothing changed; the returned count is what keeps the client honest.
 
 The re-read costs one extra read on the failure path only.
 
@@ -320,8 +341,9 @@ surface is enforced by the server.
   shape `markRead` uses: multi-party -> `markConversationUnread` +
   `conversationClearKey`; contact -> `markInboxUnread({ contactId })` +
   `contactClearKey`; by-phone -> `markInboxUnread({ phone })` + `phoneClearKey`.
-- Optimistic patch `setPatch(key, { unreadCount: 1 })`, committed to `base` on
-  success and dropped on failure, as `markRead` does.
+- Optimistic patch `setPatch(key, { unreadCount: 1 })`, dropped on failure, as
+  `markRead` does. On success commit the count the SERVER returned (6.3), not a
+  hardcoded 1 - the already-unread arm can legitimately answer 5.
 - **Call `rollbackRowsCleared([clearKey])`** to purge a pending CLEAR for the
   same row. Do NOT add a "note set" counterpart. Mechanism, corrected by review:
   `UnreadContext` expires a pending clear on the first count fetch that STARTED
@@ -380,11 +402,28 @@ Mechanism, in two parts - the second is what actually closes the race:
 2. **Drain.** Setting a flag cannot recall a POST already on the wire, and the
    read fan-out is the heavier write (`inbox.ts:1661-1675` does a lookup plus a
    `resetUnread` per thread), so last-writer-wins would frequently be the
-   fan-out. The auto-read hooks therefore expose the in-flight request as a
-   settled-promise ref, and the mark-unread handler awaits it (latch first, then
-   drain, then POST). Awaiting rather than aborting is deliberate: a client-side
-   abort does not stop the server from committing the `resetUnread`, so it would
-   hide the race instead of closing it.
+   fan-out. The mark-unread handler therefore awaits the in-flight auto-read
+   before issuing its own POST (latch first, then drain, then POST). Awaiting
+   rather than aborting is deliberate: a client-side abort does not stop the
+   server from committing the `resetUnread`, so it would hide the race instead
+   of closing it.
+
+   **Shape.** `useMarkContactRead` currently returns `void`; it returns a handle
+   `{ suppressAndDrain(): Promise<void> }` instead. The conversation page has no
+   equivalent hook - the mount read is inline in two components
+   (`ConversationDetail.tsx:238-242`, `GroupTextView.tsx:259-263`) - so that
+   effect is extracted into one small shared hook exposing the same handle,
+   which both components mount. The drain's in-flight ref is keyed the same way
+   the latch is, so it can never order against a request belonging to a previous
+   `contactId` / `conversationId`.
+
+   **Bounded.** The drain awaits with a short timeout (the request has no
+   timeout of its own in `client.ts` and the auto-read passes no signal), and
+   the button renders a pending state while draining. On timeout the handler
+   proceeds anyway: an unbounded await would make the button look dead, which is
+   a worse and more likely failure than the narrow race it would be avoiding.
+   The latch still suppresses the late response client-side; only the server-side
+   ordering is unprotected in that tail case, and it is bounded by the timeout.
 
 Without part 2 the ordering bug ships, and it will surface first as an e2e flake
 (9.2 step 4 clicks within tens of milliseconds of mount) - the failure shape most
@@ -458,14 +497,23 @@ Repo:
   thread at `unread_count = 5` throws and is left at 5. This replaces the
   earlier "idempotent to 1" assertion, which pinned the data loss as correct.
 - `setUnread` throws `ConditionalCheckFailedException` for an unknown id.
-- **The condition bites, per bucket:** `{ bucket: 'relay_group' }` against a
-  `closed` thread throws; `{ bucket: 'one_to_one' }` against a `closed` thread
-  throws; `{ bucket: 'one_to_one' }` against a row whose `type` is
-  `relay_group` throws; and `{ bucket: 'relay_group' }` against an OPEN 1:1
+- **The condition bites, all three buckets:** `{ bucket: 'relay_group' }`
+  against a `closed` thread throws; `{ bucket: 'one_to_one' }` against a
+  `closed` thread throws; `{ bucket: 'one_to_one' }` against a row whose `type`
+  is `relay_group` throws; `{ bucket: 'relay_group' }` against an OPEN 1:1
   thread throws (the type clause added in 6.1 - without it this case would
-  silently pass).
+  silently pass); and `{ bucket: 'group_text' }` accepts `group_open` while
+  throwing on a row whose status is plain `open`. Do not skip `group_text` - it
+  is the bucket whose contract changed most and the one with the odd status
+  literal.
 - Legacy row with NO `type` and status `open` is accepted under
   `{ bucket: 'one_to_one' }` (matches `isOneToOneBucket`'s negative test).
+- **A thread with NO `unread_count` attribute at all is ACCEPTED.** The
+  attribute is genuinely sparse (`unread_count?: number`,
+  `conversationsRepo.ts:171`) - a thread that never received an inbound has
+  never had it written. This pins the `attribute_not_exists(unread_count)` half
+  of clause 3; a bare `unread_count = :zero` would 409 those threads forever,
+  and nothing else in the suite would catch it.
 - Round trip: `setUnread` then `queryUnreadPage` returns the row; `resetUnread`
   then `queryUnreadPage` does not.
 
@@ -483,12 +531,17 @@ Routes:
   the OTHER threads asserted still at 0 (the D3 asymmetry with the read
   fan-out); **200 does NOT select an open relay group** even when the contact's
   record carries the pool number (the 6.2 filter).
-- MU-1 as a property: for every route, a 200 response implies the written row
-  passes `isUnreadVisible`.
+- MU-1 as a property: for every route, a 200 response that WROTE implies the
+  written row passes `isUnreadVisible`. (Scoped to the writing arm - the
+  already-unread arm answers 200 with no written row, so the unscoped form the
+  earlier draft carried is not a true statement.)
 - **Condition-failure classification** (6.3), for every route: a conversation
-  deleted between the route's read and its write answers 404; an
-  already-unread thread answers 200 WITHOUT writing (assert the count is
-  unchanged, not reset to 1); an ineligible type/status answers 409.
+  deleted between the route's read and its write answers 404; an already-unread
+  thread answers 200 WITHOUT writing (assert the count is unchanged, not reset
+  to 1, and that the response carries the real count); an ineligible
+  type/status answers 409; and - the ORDER test - a thread that is BOTH
+  ineligible AND unread (a closed relay group re-flagged by an inbound) answers
+  409, not 200.
 
 Dashboard:
 - `InboxRow` renders "Mark unread" iff `unreadCount === 0`, never alongside
@@ -508,6 +561,11 @@ Dashboard:
   test stays green while the in-flight ordering bug ships.
 - The latch is keyed, not per-mount: after a FAILED mark-unread on
   `/contacts/a`, a param change to `/contacts/b` DOES mark b read.
+- The drain is BOUNDED: with an auto-read that never settles, the action still
+  issues its POST after the timeout and the button shows a pending state
+  meanwhile rather than appearing dead.
+- `useInbox.markUnread` commits the SERVER's returned count, not 1: an
+  already-unread thread answering 5 leaves the row showing 5.
 - Neither header surface calls `noteRowsCleared` or `rollbackRowsCleared` -
   extend the existing regression spies rather than adding new ones.
 - Both header actions navigate to `/inbox` on success and do NOT navigate on
@@ -580,6 +638,12 @@ fan-out and is mounted by `TourConversation.tsx:263` /
 `PlacementConversation.tsx:260`), clears the to-do - and clears it for every
 thread that contact owns, not just the flagged one. Making the flag survive that
 requires per-thread read semantics, a different feature.
+
+Two further readers inherit this without needing their own rule: the tour and
+placement 1:1 tabs render unread dots off the same per-conversation count, so a
+marked-unread thread simply shows as unread there (correct, and it is those same
+tabs' auto-read that erases it); and `buildToday`'s client-side fallback carries
+the same "Unreplied" phrasing as 10.2, though it is dead on the live server path.
 
 ### 10.4 Other watch items
 

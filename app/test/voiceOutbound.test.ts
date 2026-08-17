@@ -512,7 +512,7 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     const xml = res.text;
     expect(xml).not.toContain('<Dial');
     expect(xml).toContain('<Hangup');
-    expect(xml).toContain('text message');
+    expect(xml).toContain('text us your first name');
     expect(xml).not.toContain(CALLER);
     expect(world.pushSends).toHaveLength(0);
     // The misconfig is observable: an ERROR-level (50) log, PII-free.
@@ -537,7 +537,7 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     // No env-var fallback: an unverified holder cell means NO bridge at all.
     expect(xml).not.toContain('<Dial');
     expect(xml).not.toContain(HOLDER_CELL); // an unverified cell is never dialed
-    expect(xml).toContain('text message');
+    expect(xml).toContain('text us your first name');
     expect(world.pushSends).toHaveLength(0);
   });
 });

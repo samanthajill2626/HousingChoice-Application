@@ -376,7 +376,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('<Dial'); // never bridges the founder to themselves
     expect(res.text).toContain('<Hangup');
-    expect(res.text).toContain('different line');
+    expect(res.text).toContain('text us your first name');
     // No bogus call entry persisted, no pre-ring push fired.
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(0);
     expect(world.pushSends).toHaveLength(0);
@@ -394,7 +394,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     const xml = res.text;
     expect(xml).not.toContain('<Dial');
     expect(xml).toContain('<Hangup');
-    expect(xml).toContain('send us a text message'); // the graceful text-us fallback
+    expect(xml).toContain('text us your first name'); // the graceful text-us fallback
     expect(xml).not.toContain(CALLER);
     // No pre-ring push when we cannot bridge.
     expect(world.pushSends).toHaveLength(0);

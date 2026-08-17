@@ -416,8 +416,9 @@ Mechanism, in two parts - the second is what actually closes the race:
 
 1. **Latch.** Each auto-read site gains a `suppressed` ref; the auto-read
    callback returns early while it is set. It is KEYED to the identity it
-   protects and reset whenever that identity changes (`contactId` on the contact
-   page, `conversationId` on the conversation page). It is NOT per-mount:
+   protects. On the CONTACT page it is reset whenever `contactId` changes; the
+   conversation page needs no reset, for the reason in part 2 below. It is NOT
+   per-mount:
    `/contacts/a` -> `/contacts/b` is a React Router param change, not a remount
    (`ContactDetail.tsx:214`, and `useMarkContactRead`'s own `[contactId]`
    dependency at `useMarkContactRead.ts:20-37` refires for the new contact). A

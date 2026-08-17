@@ -299,7 +299,10 @@ export type MarkUnreadOutcome =
   | { kind: 'not_found' }
   | { kind: 'ineligible' }
   | { kind: 'already_unread'; conversation: ConversationItem }
-  | { kind: 'raced' };
+  // CARRIES the re-read: the retry must recompute the bucket from THIS value.
+  // Reusing the original bucket wastes the retry in the one case where a fresh
+  // one succeeds - a type transition.
+  | { kind: 'raced'; conversation: ConversationItem };
 
 export async function classifyConditionFailure(
   conversationId: string,
@@ -316,8 +319,9 @@ export async function classifyConditionFailure(
   if ((conv.unread_count ?? 0) > 0) return { kind: 'already_unread', conversation: conv };
   // Eligible AND read, yet the write was refused: the row was concurrently
   // RESET between our write and this re-read. Reporting 200 here would tell the
-  // client "unread" about a row reading 0. The caller retries the write ONCE.
-  return { kind: 'raced' };
+  // client "unread" about a row reading 0. The caller retries the write ONCE,
+  // recomputing the bucket from the conversation returned here.
+  return { kind: 'raced', conversation: conv };
 }
 ```
 
@@ -339,9 +343,6 @@ export type MarkUnreadResult =
   | { kind: 'already_unread'; conversation: ConversationItem }
   | { kind: 'gone' }
   | { kind: 'ineligible' };
-
-// classifyConditionFailure's raced arm carries the re-read so the retry can
-// recompute the bucket:  { kind: 'raced'; conversation: ConversationItem }
 
 export async function applyMarkUnread(
   conv: ConversationItem,
@@ -461,13 +462,16 @@ fan-in routes.
 
 **A correct condition can never produce `raced` on its own** - that is the
 point of it - so the fake needs a one-shot seam. Give the harness fake's
-`setUnread` an optional test-only hook: a settable "fail the next call with
-`ConditionalCheckFailedException` regardless of state" flag that clears itself
-after firing. Then:
+`setUnread` an optional test-only hook: a settable COUNTER of how many next
+calls must throw `ConditionalCheckFailedException` regardless of state,
+decremented on each throw. A counter rather than a self-clearing one-shot,
+because the twice-raced case below needs two consecutive failures from one
+seam. Then:
 
-- `raced`: arm the one-shot, leave the row eligible and READ. Assert the route
-  RETRIES and succeeds (200, count 1) - the retry is the behavior under test.
-- `raced` twice: arm it to fail twice; assert the terminal mapping and that no
+- `raced`: arm the counter to 1, leave the row eligible and READ. Assert the
+  route RETRIES and succeeds (200, count 1) - the retry is the behavior under
+  test, and assert the retry used a bucket recomputed from the re-read.
+- `raced` twice: arm the counter to 2; assert the terminal mapping and that no
   third write is attempted.
 - `gone`: arm the one-shot AND delete the row; assert 404 on the conversation
   route, retryable 409 on the two fan-in routes.

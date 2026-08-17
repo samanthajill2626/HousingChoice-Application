@@ -1309,15 +1309,26 @@ npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --revi
 
 **The current input set** lives in one folder, three subdirectories, one copy of
 each file - `--quo` at `quo-export`, `--airtable` at `airtable-export`,
-`--review` at `workbook-reviewed`:
+`--review` at `workbook-for-review`:
 
 ```
-W:\AI Projects\Housing Choice\Import Review\2026-08-15\
+W:\AI Projects\Housing Choice\Import Review\2026-08-16\
 ```
 
-Its README states provenance and lists the superseded workbook folders it
-replaces. The cutover export on 2026-08-17 gets its own dated folder in the same
-shape.
+Its README states provenance, the measured delta against the previous export,
+and the verification that every prior decision carried forward. It supersedes
+`2026-08-15`.
+
+That folder also holds a `workbook-pure-baseline\` - the same plan run with no
+prior, so nothing human is in it. Do NOT import it. It exists so the next round
+has a correct `--baseline-contacts`, and every round must leave one behind for
+the round after it. Stripping her file against the workbook she edited loses the
+previous round's outcomes, because those outcomes are already baked into that
+workbook's values.
+
+The port-day sweep export on 2026-08-17 gets its own dated folder in the same
+shape, with `--prior` and `--baseline-contacts` both pointing back at
+`2026-08-16`.
 
 ### The LOCAL run
 

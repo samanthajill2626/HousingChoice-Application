@@ -437,7 +437,7 @@ export interface AppConfig {
   emailSenderDomain?: string;
   /**
    * The From address outbound email is sent as (EMAIL_FROM_ADDRESS, e.g.
-   * team@mail.housingchoice.org). Non-secret naming value (Terraform params
+   * sam@mail.housingchoice.org). Non-secret naming value (Terraform params
    * module). REQUIRED by the ses driver (gated at boot).
    */
   emailFromAddress?: string;

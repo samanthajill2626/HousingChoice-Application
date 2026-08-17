@@ -23,7 +23,7 @@ const prodBase = {
 const prodEmail = {
   ...prodBase,
   EMAIL_SENDER_DOMAIN: 'mail.housingchoice.org',
-  EMAIL_FROM_ADDRESS: 'team@mail.housingchoice.org',
+  EMAIL_FROM_ADDRESS: 'sam@mail.housingchoice.org',
 };
 
 describe('EMAIL_DRIVER config', () => {
@@ -69,7 +69,7 @@ describe('EMAIL_DRIVER=ses sender-identity gate', () => {
   it('boots and exposes the trimmed sender identity when both are present', () => {
     const cfg = loadConfig({ ...prodEmail });
     expect(cfg.emailSenderDomain).toBe('mail.housingchoice.org');
-    expect(cfg.emailFromAddress).toBe('team@mail.housingchoice.org');
+    expect(cfg.emailFromAddress).toBe('sam@mail.housingchoice.org');
   });
 
   it('does NOT require a sender identity for the console driver', () => {

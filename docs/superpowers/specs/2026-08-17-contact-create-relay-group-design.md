@@ -26,7 +26,11 @@ them.
 
 1. **Provisioning never buys at create time.** `poolNumbersService
    .provisionForGroup` runs a three-tier ladder: reuse a burnable active number
-   -> take a warm spare -> connect-when-ready. (`services/poolNumbers.ts:5-13`)
+   -> take a warm spare -> connect-when-ready, where buying is solely
+   `warmOneNumber`. (`services/poolNumbers.ts:566-589`) DO NOT trust that
+   module's file header (`poolNumbers.ts:5-13`): it still describes the OLD
+   two-tier behavior, "(c) else PROVISION a fresh one through the adapter",
+   which is the opposite of what the code now does. Section 9 files it.
 2. **Tier 3 with the kill-switch ON returns `needs_connecting`**, and
    `provisionRelayGroup` then creates the group with NO pool number, enqueues a
    warm job, and sends **no intro at all** - the intro is deferred to the
@@ -34,12 +38,13 @@ them.
 3. **Tier 3 with the kill-switch OFF throws** `RelayProvisioningDisabledError`
    rather than returning `needs_connecting`, so a connecting group is never
    stranded. The route's 503 `relay_provisioning_disabled` IS reachable.
-   (`services/poolNumbers.ts:77-84`) Note: the comment at
-   `services/relayProvisioning.ts:87` claims provisioning never throws this;
-   that comment is stale (section 10 files it).
+   (`services/poolNumbers.ts:577-579`, the implementation, not the doc comment
+   at 77-84.) Note: the comment at `services/relayProvisioning.ts:87` claims
+   provisioning never throws this; that comment is stale (section 9 files it).
 4. **Tours and placements share this exact path** and already handle
    `connecting` explicitly in their audit, log, and milestone code
-   (`services/rosterProvision.ts:432-434, 597-610`). The confirm dialog's
+   (`services/rosterProvision.ts:432-434, 466-472`; the 597-610 block is the
+   placement idempotency guard, a different concern). The confirm dialog's
    "N recipients will receive this" is therefore ALREADY imprecise on tier 3 for
    both shipped surfaces. This change does not introduce that gap.
 5. **`buildOpenPreview` uses two different name sources**: the intro body is
@@ -59,10 +64,12 @@ them.
    logic (Oxford list, pluralization, brand/STOP shell) lives in
    `composeConnectionSentence` and a client copy would drift from it.
 8. **The real send-time suppression gate is `isMemberSuppressed`**
-   (`services/relayAnnouncements.ts:61-93`): contact by id, `findByPhone`
-   fallback, contact `sms_opt_out`, plus a per-phone STOP record read from the
-   1:1 conversation. `describeRoster`'s reachability rule is a different,
-   narrower predicate.
+   (`services/relayAnnouncements.ts:61` through its return): contact by id,
+   `findByPhone` fallback, contact `sms_opt_out`, plus a per-phone STOP record
+   read from the 1:1 conversation. `describeRoster`'s reachability rule is a
+   different, narrower predicate. It is deliberately NOT wrapped in try/catch -
+   a repo failure PROPAGATES so callers fail CLOSED rather than texting a
+   possibly-opted-out number.
 9. **The hermetic e2e stack lands a fresh pair CONNECTING by design** (twilio
    driver, spare target K=0, seeded numbers are `console`-provisioned and
    skipped by the reuse ladder) and ships helpers to drive it open.
@@ -178,11 +185,26 @@ not affect the intro body.
 3. Reachability is `opted_out` when suppressed, else `reachable`. There is NO
    `no_phone` case on this route: `parseRelayMember` guarantees a phone
    (section 2.11).
-4. Build `OpenPreviewParts`:
-   - `recipients` = EVERY parsed member, in the order sent, NOT de-duplicated.
-     De-duplicating here would make a shared-phone roster render a different
-     recipient list than the owner path does.
-   - `bodyMembers` = the same list filtered to first-wins by phone.
+4. Build `OpenPreviewParts`. `memberKey` is `contactId` when present, else
+   `` `phone:${e164}` `` - the SAME key shape `describeRoster` builds
+   (`lib/rosterResolution.ts:560`), so the core's reachable-key join behaves
+   identically on both paths.
+   - `recipients` = the parsed members after the SAME first-wins phone de-dupe
+     the create route applies (`routes/relayGroups.ts:267`), in the order sent.
+   - `bodyMembers` = that same de-duplicated list.
+
+   PARITY IS OF MEANING, NOT OF LIST CONSTRUCTION. `recipients` means "everyone
+   who will be on the thread". On the owner path every resolved member becomes a
+   participant, so nothing is dropped. On the standalone path CREATE ITSELF
+   de-dupes by phone, so a second member sharing a number never becomes a
+   participant at all - listing them would name a person in the confirm dialog
+   who will not be in the group and will not be texted, with no annotation
+   saying so (`toRecipient` carries only name and reachability; the roster
+   view's `sharesPhoneWithName` never reaches the dialog). De-duplicating here
+   is what makes the two paths agree.
+
+   The picker prevents this case from arising through the UI anyway (6.5), but
+   the route must be deterministic for any direct API caller.
 5. `buildOpenPreviewFromParts(parts, await quietHoursState())`, returned AS THE
    BODY (not wrapped), matching the two owner-scoped preview routes.
 
@@ -201,6 +223,11 @@ the tours and placements routers. This IS a new router dependency.
 The preview does NOT provision, does NOT touch pool numbers, and does NOT check
 `RELAY_LIVE_PROVISIONING`: a preview must never be what discovers provisioning
 is disabled. The create call surfaces that refusal, as it does today.
+
+`isMemberSuppressed` throws on a repo failure BY DESIGN (section 2.8). Do NOT
+catch it here. The preview then 5xxs, the picker shows the error, and the
+confirm dialog never opens - which is the correct outcome: a preview that
+cannot determine who is suppressed must not be rendered as though it could.
 
 CONSISTENCY RULE: with no server-side roster to resolve, the client's list IS
 the input to both calls. The modal MUST post the identical `members` array to
@@ -242,22 +269,34 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
 - SEEDED with the contact whose page this is, as a locked row; it cannot be
   removed. A group created from Sam's page that does not contain Sam is a
   foot-gun.
-- The seeded contact's phone is `contact.phones.find((p) => p.primary)?.phone
-  ?? contact.phone`. If that resolves to nothing, the row renders as "no mobile
-  number - cannot start a relay group" and Create stays disabled. The card
-  action still renders; the modal is where the reason is explained.
+- The seeded contact's phone is `contact.phones?.find((p) => p.primary)?.phone
+  ?? contact.phone` - `phones` is OPTIONAL on the dashboard `Contact`, so the
+  optional chain is required to typecheck. If that resolves to nothing, the row
+  renders as "no mobile number - cannot start a relay group" and Create stays
+  disabled. The card action still renders; the modal is where the reason is
+  explained.
 - Additional members via `ContactSearchField` over `useContacts('all')` (already
-  loaded by `ContactDetail` as `editCandidates`; it spans tenant/landlord/
-  unknown/partner/team_member). `ContactSearchField` yields only
-  `{ name, contactId }`, so the modal maps `contactId` back to its `Contact` in
-  the candidate array to read the phone. Candidates without a resolvable phone,
-  and those already added, are filtered out.
-- Members are sent as `{ phone, contactId }` and **never** carry `name`. The
-  server resolves the display name from `contactId` via `nameFromContact`, which
-  yields undefined when there is no real name. This is deliberate: the
-  dashboard's `contactDisplayName` falls back to a FORMATTED PHONE NUMBER
-  (`routes/contact/format.ts:101-110`), so sending a client-derived name could
-  print a phone number in the preview and embed one in the outbound intro body.
+  loaded by `ContactDetail` as `editCandidates`). SCOPE: `'all'` fans out across
+  `tenant`, `landlord`, and `unknown` ONLY - team members are excluded
+  (`routes/contacts/useContacts.ts:55-66`). Partner and team-member contacts are
+  therefore NOT pickable. Accepted limitation, called out so it is not mistaken
+  for a bug; widening the roster is out of scope.
+- `ContactSearchField` yields only `{ name, contactId }` and emits on EVERY
+  keystroke with `contactId` undefined for uncommitted free text. A member may
+  be added ONLY from a committed pick (`contactId` set); free text is never
+  addable. The modal maps `contactId` back to its `Contact` in the candidate
+  array to read the phone. Candidates are filtered out when they have no
+  resolvable phone, are already added, or SHARE A PHONE with an already-added
+  member (6.2: create would silently drop them).
+- ONE IDENTITY PER PERSON across the picker, the confirm dialog, and the intro
+  body. The name is built from `firstName`/`lastName` only. When that yields a
+  real name it is sent as `name` and the server uses it verbatim; when it yields
+  nothing, no `name` is sent, the server's `nameFromContact` also yields
+  undefined, the dialog renders "Unnamed number", and the picker MUST render the
+  same "Unnamed contact" wording rather than a phone. Do NOT use the dashboard's
+  `contactDisplayName` helper here: it falls back to a FORMATTED PHONE NUMBER
+  (`routes/contact/format.ts:101-110`), which would both print a phone in the
+  preview and embed one in the outbound intro body.
 - Optional `Name (optional)` text input -> the create call's `tag` only.
 - `Create group` is disabled below 2 picked rows. This is a UI affordance over
   PICKED ROWS, not a guarantee about the resulting group: the server may collapse
@@ -289,11 +328,16 @@ dialog: an operator must never confirm a send whose content could not be shown.
 Outcomes after a successful create:
 
 - `conversation.status === 'connecting'` -> the group exists but has NO number
-  and NO intro was sent (section 2.2). Navigate to the conversation and surface
-  a plain notice that the group is connecting and the intro goes out once its
-  number is ready. The builder must first check whether the conversation view
-  already renders a connecting state; if it does, use it rather than adding a
-  second one.
+  and NO intro was sent (section 2.2). Navigate to the conversation AND surface
+  a notice that names the unsent intro specifically - for example "This group is
+  still getting its number. The intro text has not been sent yet; it goes out
+  once the number is ready."
+  The existing connecting affordances are NOT sufficient on their own: the
+  conversation view shows a status pill and a composer note about replies being
+  queued, and neither says the intro has not gone out. The operator has just
+  been shown that exact intro body in a confirm dialog, so silence here reads as
+  "it was sent". A new notice is required; reusing the pill alone is not an
+  acceptable substitute.
 - otherwise -> navigate to `/conversations/:conversationId`, the same
   destination the card's rows link to.
 - Failure -> the dialog's own inline error path (`refusalMessage`); the dialog
@@ -349,20 +393,29 @@ Unit (Vitest):
   opted out (must count 0, not 1); body names vs recipient names when they
   differ; quiet on/off against a fixed clock.
 - Parity test: the same member set through the owner path and the standalone
-  builder yields the same `body`, `recipientCount`, and quiet fields. It must
-  NOT assert identical `reachability`, which is a deliberate asymmetry (6.2).
+  builder yields the same `body`, `recipients`, `recipientCount`, and quiet
+  fields. Its fixture MUST contain NO suppressed members, so the two
+  reachability rules (6.2) agree by construction and the count comparison is
+  meaningful. Asserting equal counts while allowing different reachability would
+  be incoherent - the count is DERIVED from reachability. The asymmetry itself
+  gets its own separate test: one opted-out-by-phone-STOP member that
+  `isMemberSuppressed` catches and `describeRoster`'s rule does not.
 - Existing tour/placement preview tests, UNMODIFIED, as the no-behavior-change
   proof.
 - Route: 400 on empty/absent members, 400 on a bad member, an opted-out member
-  listed but excluded from the count, same-phone members both listed but counted
-  once, `deferred` true/false against the injected clock, and that nothing is
-  provisioned.
+  listed but excluded from the count, same-phone members collapsed to ONE
+  recipient (matching what create will actually put on the thread), `deferred`
+  true/false against the injected clock, a propagated `isMemberSuppressed`
+  failure surfacing as a 5xx rather than a preview claiming everyone is
+  reachable, and that nothing is provisioned.
 - `GroupTextsCard`: renders the action when `onCreate` is set, not when absent.
 - `CreateRelayGroupModal`: seeds the contact, blocks Create below 2 rows,
-  filters already-added and phone-less candidates, sends NO `name` field,
-  previews before confirming, posts the identical members array to both calls,
-  keeps the picker mounted-and-restored around the confirm dialog, shows the
-  connecting notice, and keeps the dialog open on failure.
+  refuses to add uncommitted free text, filters already-added, phone-less, and
+  same-phone candidates, sends a `name` only when built from first/last, renders
+  "Unnamed contact" for a nameless pick, previews before confirming, posts the
+  identical members array to both calls, keeps the picker mounted-and-restored
+  around the confirm dialog, shows the connecting notice naming the unsent
+  intro, and keeps the dialog open on failure.
 - `RosterConfirmDialog`: `allowDefer={false}` inside quiet hours renders the
   two-button footer with `confirmLabel`, still shows the warning, and calls
   `onConfirm(false)`; the default is unchanged.
@@ -385,10 +438,20 @@ Gates, bare, from the worktree: `npm run typecheck`, `npm test`, `npm run e2e`.
   all three existing usages must be left alone.
 - Previews carry names, never phone numbers. The new route must hold that line,
   which is why the modal sends no client-derived name (6.5).
-- This change authors NO new outbound copy; it reuses `relay.intro`.
-- `isMemberSuppressed` does a contact read plus a GSI query per member. Picked
-  rosters are small (single digits), so this is acceptable; do not use it over
-  an unbounded list.
+- This change authors NO new outbound copy; it reuses `relay.intro`. The
+  connecting notice (6.6) is in-dashboard UI text, not an outbound message, so
+  it does not go through the message catalog.
+- PER-MEMBER COST: the name resolution does one `contacts.getById`, and
+  `isMemberSuppressed` independently does its own contact read (by id, or
+  `findByPhone`) PLUS a `findByParticipantPhone` GSI query. That is two contact
+  reads and one GSI query per member, and the two reads use different resolution
+  rules. Acceptable for a picked roster of single digits; never use this shape
+  over an unbounded list.
+- ACCEPTED TRADE (human decision, 2026-08-17): on tier 3 the confirm dialog
+  still says "N recipients will receive this" at the only moment the operator
+  can cancel, and the correction arrives only AFTER the irreversible create. The
+  alternative was editing a dialog three shipped surfaces depend on. Section 9
+  files the wording gap.
 
 ## 9. Follow-up issues to file in this change
 
@@ -405,8 +468,12 @@ Copy `docs/issues/_TEMPLATE.md` for each:
 3. `relay-intro-editable-but-never-overridden.md` - `relay.intro` is
    `editable: true` in the catalog, but `composeIntroBody` never passes
    overrides, so an operator edit is silently inert.
-4. `relay-provisioning-stale-kill-switch-comment.md` - the comment at
-   `services/relayProvisioning.ts:87` contradicts `poolNumbers.ts:77-84`.
+4. `relay-provisioning-stale-comments.md` - TWO stale comments that assert the
+   opposite of the code: `services/relayProvisioning.ts:87` claims provisioning
+   never throws the kill-switch error (contradicted by `poolNumbers.ts:577-579`),
+   and the `poolNumbers.ts:5-13` file header still describes the pre-tier-3
+   behavior "(c) else PROVISION a fresh one through the adapter" (contradicted
+   by `poolNumbers.ts:566-589`). Both are actively misleading to a reader.
 
 Items 2-4 are pre-existing defects this review surfaced, NOT regressions from
 this change.

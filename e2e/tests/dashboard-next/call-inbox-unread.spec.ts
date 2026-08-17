@@ -151,12 +151,12 @@ test('a MISSED business-line call marks the caller unread: nav badge, Unread tab
   await expect(readRow).toBeVisible({ timeout: 10_000 });
   await readRow.hover();
   await expect(page.getByRole('button', { name: 'Mark Caller Tester read' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Mark Caller Tester unread' }).click();
+  await page.getByRole('button', { name: 'Mark Caller Tester as unread' }).click();
   await expect(readRow.getByLabel('1 unread')).toBeVisible();
   await expect.poll(() => unreadCount(api)).toBe(1);
   await expect(navBadge(page)).toHaveAttribute('aria-label', '1 unread', { timeout: 10_000 });
   await readRow.hover();
-  await expect(page.getByRole('button', { name: 'Mark Caller Tester unread' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Mark Caller Tester as unread' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Mark Caller Tester read' })).toBeVisible();
   await page.getByRole('tab', { name: 'Unread' }).click();
   await expect(page.locator(`a[href="/contacts/${contactId}"]`)).toBeVisible({ timeout: 10_000 });

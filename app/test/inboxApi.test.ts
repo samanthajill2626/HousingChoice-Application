@@ -646,6 +646,19 @@ describe('Mark UNREAD - the row toggle (POST /api/inbox/:contactId/unread, /api/
     expect(world.conversations.get('conv-gt')!.status).toBe(GROUP_TEXT_STATUS);
 
     expect((await auth(request(app).post('/api/conversations/nope/unread'))).status).toBe(404);
+
+    // Each route owns its kind: a 1:1 is refused here (it would route around the
+    // contact-level rules), and the inbox routes refuse a thread the unread feed
+    // would never show (a closed relay reachable through its pool number).
+    seedConversation(world, 'conv-1to1', { participant_phone: '+15550000713', last_activity_at: '2026-06-10T10:00:00.000Z' });
+    const oneToOne = await auth(request(app).post('/api/conversations/conv-1to1/unread'));
+    expect(oneToOne.status).toBe(409);
+    expect(oneToOne.body).toEqual({ error: 'not_a_group_thread' });
+    expect(world.conversations.get('conv-1to1')!.unread_count ?? 0).toBe(0);
+    const viaPhone = await auth(request(app).post('/api/inbox/unread').send({ phone: '+15550009002' }));
+    expect(viaPhone.status).toBe(409);
+    expect(viaPhone.body).toEqual({ error: 'thread_closed' });
+    expect(world.conversations.get('conv-relay-closed')!.unread_flag).toBeUndefined();
   });
 });
 

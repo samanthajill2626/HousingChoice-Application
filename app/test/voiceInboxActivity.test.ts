@@ -201,11 +201,19 @@ describe('inbound founder-bridge call -> inbox activity + unread', () => {
     seed('predeploy', '+15550199203', {}, { call_status: 'no-answer', call_outcome: 'missed' });
     // (4) A live ring on a thread whose stored preview is the previous text.
     seed('ringing', '+15550199204', { last_message_preview: 'can we tour saturday?' }, { call_status: 'ringing' });
+    // (5) in-progress is NEVER derived as "in progress" (r4 MED 2: the gate
+    // writes it and only a Dial summary moves a call off it, so a call that
+    // ends without one would assert a live call forever): with a stored
+    // preview the stored one wins; with none it reads as a plain incoming call.
+    seed('inprog-stored', '+15550199205', { last_message_preview: 'Call - 3m 2s' }, { call_status: 'in-progress' });
+    seed('inprog-bare', '+15550199206', {}, { call_status: 'in-progress' });
 
     expect(await inboxRow('c-stored')).toMatchObject({ channel: 'call', preview: 'Outgoing call - no answer' });
     expect(await inboxRow('c-imported')).toMatchObject({ channel: 'call', preview: '' });
     expect(await inboxRow('c-predeploy')).toMatchObject({ channel: 'call', preview: 'Missed call', unreadCount: 0 });
     expect(await inboxRow('c-ringing')).toMatchObject({ channel: 'call', preview: 'Incoming call' });
+    expect(await inboxRow('c-inprog-stored')).toMatchObject({ channel: 'call', preview: 'Call - 3m 2s' });
+    expect(await inboxRow('c-inprog-bare')).toMatchObject({ channel: 'call', preview: 'Incoming call' });
   });
 
   it('a redelivered inbound webhook (dedupe) does not re-emit', async () => {

@@ -154,7 +154,19 @@ this change has no separate spec:
   in one write), 409 `contact_deleted` for a soft-deleted contact (a manual
   flag must not fake the fresh inbound the resurfacing rule means). The row
   flips optimistically; the nav badge follows the server's
-  `conversation.updated` (its optimistic layer models clears only).
+  `conversation.updated` (its optimistic layer models clears only). The three
+  routes share one guard (`isUnreadVisible` on the would-be flagged image; the
+  contact route also restricts to the row's own candidate set - open, never
+  relay_group - and the conversation route refuses 1:1s), the emitted image is
+  built from the increment's own return (a re-read is eventually consistent),
+  and the toggle is not offered on a `deleted` or `closed` row.
+  ADVISORY, NOT STICKY (r4 MED 3, planner's call pending the operator): Mark
+  unread raises the counter like an inbound would, so any surface that
+  auto-marks-read on view - a tour/placement comms tab open on that contact
+  (`ContactCommsTab` re-marks when the count rises), the contact page on its
+  next `message.persisted` / tab focus - will clear it again. A "keep this for
+  later" that survives open reader panes needs a sticky bit those surfaces
+  respect; not built here.
 
 Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
 `app/test/inboxApi.test.ts` (mark-unread routes),

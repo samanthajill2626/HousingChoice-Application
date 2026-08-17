@@ -91,7 +91,7 @@ describe('InboxRow', () => {
       </MemoryRouter>,
     );
     expect(screen.queryByRole('button', { name: 'Mark Tasha Williams read' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Mark Tasha Williams unread' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Tasha Williams as unread' }));
     expect(onMarkUnread).toHaveBeenCalledTimes(1);
     expect(onMarkRead).not.toHaveBeenCalled();
   });
@@ -106,7 +106,7 @@ describe('InboxRow', () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark Tasha Williams unread' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark Tasha Williams as unread' })).not.toBeInTheDocument();
   });
 
   it('shows a call channel label for call rows', () => {

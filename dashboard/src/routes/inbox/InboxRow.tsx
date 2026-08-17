@@ -132,12 +132,17 @@ export function InboxRow({
             >
               Mark read
             </button>
-          ) : onMarkUnread !== undefined ? (
+          ) : onMarkUnread !== undefined && !row.deleted && row.status !== 'closed' ? (
+            // Not offered where the server would refuse it: a soft-deleted
+            // contact's (resurfaced) row that was just marked read on the All
+            // tab (409 contact_deleted), or a relay row that closed under us
+            // (409 thread_closed). "as unread" keeps the two labels from being
+            // substrings of each other for assistive tech and selectors.
             <button
               type="button"
               className={styles.action}
               onClick={() => onMarkUnread(row)}
-              aria-label={`Mark ${row.name} unread`}
+              aria-label={`Mark ${row.name} as unread`}
             >
               Mark unread
             </button>

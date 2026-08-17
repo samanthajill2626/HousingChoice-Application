@@ -67,6 +67,7 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
+  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createContactsRepo,
@@ -505,16 +506,21 @@ function deriveLatest(
   // Never overrides a stored terminal preview - the outbound preview is
   // deliberately derived from the Dial status, not from the persisted
   // call_outcome (outbound-call-outcome-answered-before-target-rings), and
-  // re-deriving from the row here would undo that. Zero extra reads either way.
+  // re-deriving from the row here would undo that. Never derives "in progress"
+  // either: `in-progress` is written by the whisper gate the moment the bridge
+  // is accepted and nothing but a Dial summary moves a call off it, so a call
+  // that ends without one would assert a LIVE call forever; an in-progress row
+  // keeps the stored preview, or derives as a plain "Incoming call" /
+  // "Outgoing call" when nothing was stored (true, and never stale-false).
+  // Zero extra reads either way.
+  const callStatus: CallStatus | undefined = isCallStatus(latest.call_status) ? latest.call_status : undefined;
   const preview =
     typeof latest.body === 'string' && latest.body.length > 0
       ? latest.body
-      : channel === 'call' &&
-          isCallStatus(latest.call_status) &&
-          (latest.call_status === 'ringing' || latest.call_status === 'in-progress' || fallbackPreview === '')
+      : channel === 'call' && callStatus !== undefined && (callStatus === 'ringing' || fallbackPreview === '')
         ? callPreview({
             direction,
-            callStatus: latest.call_status,
+            callStatus: callStatus === 'in-progress' ? 'ringing' : callStatus,
             ...(isCallOutcome(latest.call_outcome) && { callOutcome: latest.call_outcome }),
             ...(typeof latest.call_duration === 'number' && { callDuration: latest.call_duration }),
           })
@@ -1751,19 +1757,33 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   // second increment), and the reply is the same 200 either way. Built on the
   // existing primitive (incrementUnread writes the counter + byUnread flag in
   // one expression), so the sparse-index invariant holds. Read-then-write, not
-  // conditional: a concurrent inbound landing between the read and the
-  // increment can leave the row at 2 - the same shape as two inbounds, and
-  // the next Mark read zeroes it.
+  // conditional: the "already unread?" test reads a GSI-fed image (the
+  // participant lookups lag), so a stale 0 for an already-unread thread - or a
+  // concurrent inbound landing between the read and the increment - can leave
+  // the row at 2: the same shape as two inbounds, and the next Mark read
+  // zeroes it. Only the row-visible candidate set is flaggable: the same
+  // `status open, not relay_group` filter contactConversations applies, so a
+  // manual flag can never plant an invisible byUnread resident (a closed relay
+  // reachable through a pool number, say) - the residue class
+  // scripts/backfill-unread-flag.ts exists to repair.
   const newestOf = (convs: ConversationItem[]): ConversationItem | undefined =>
     convs.reduce<ConversationItem | undefined>(
       (best, c) => (best === undefined || c.last_activity_at > best.last_activity_at ? c : best),
       undefined,
     );
-  const flagUnread = async (conv: ConversationItem): Promise<void> => {
-    if (unreadOf(conv) > 0) return; // already unread - idempotent no-op
-    await conversations.incrementUnread(conv.conversationId);
-    const updated = await conversations.getById(conv.conversationId);
-    if (updated) events.emit('conversation.updated', toConversationUpdatedEvent(updated));
+  /** Flag `conv` unread. false = refused (the unread feed would never show it). */
+  const flagUnread = async (conv: ConversationItem): Promise<boolean> => {
+    if (!isUnreadVisible({ ...conv, unread_count: 1 })) return false;
+    if (unreadOf(conv) > 0) return true; // already unread - idempotent no-op
+    const count = await conversations.incrementUnread(conv.conversationId);
+    // The event carries the post-increment image built from the write's own
+    // return (a re-read is eventually consistent and could hand back the
+    // pre-increment count); consumers refetch on it regardless.
+    events.emit(
+      'conversation.updated',
+      toConversationUpdatedEvent({ ...conv, unread_count: count, unread_flag: UNREAD_FLAG_VALUE }),
+    );
+    return true;
   };
 
   // POST /api/inbox/unread { phone } - unknown-number rows.
@@ -1783,7 +1803,10 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       res.status(404).json({ error: 'no_conversation_for_phone' });
       return;
     }
-    await flagUnread(newest);
+    if (!(await flagUnread(newest))) {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
     log.info({ phone, conversationId: newest.conversationId }, 'inbox: unknown-number mark-unread');
     res.json({ ok: true });
   });
@@ -1802,12 +1825,23 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       res.status(409).json({ error: 'contact_deleted' });
       return;
     }
-    const newest = newestOf(await conversationsForContact(contact, conversations));
+    // The row's own candidate set (the aggregator's contactConversations rule:
+    // status open, never a relay_group), NOT the raw phone/email union - a
+    // contact who owns a pool number must not be able to flag a relay thread
+    // through here.
+    const newest = newestOf(
+      (await conversationsForContact(contact, conversations)).filter(
+        (c) => c.status === 'open' && c.type !== 'relay_group',
+      ),
+    );
     if (newest === undefined) {
       res.status(404).json({ error: 'no_conversation_for_contact' });
       return;
     }
-    await flagUnread(newest);
+    if (!(await flagUnread(newest))) {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
     log.info({ contactId, conversationId: newest.conversationId }, 'inbox: contact mark-unread');
     res.json({ ok: true });
   });

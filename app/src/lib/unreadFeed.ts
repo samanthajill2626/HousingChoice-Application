@@ -136,6 +136,30 @@ function moduleRateLimitedWarn(
 
 const warnWalkScanned = moduleRateLimitedWarn(UNREAD_WARN_INTERVAL_MS);
 const warnProbeBurst = moduleRateLimitedWarn(UNREAD_WARN_INTERVAL_MS);
+const warnBadgeZero = moduleRateLimitedWarn(UNREAD_WARN_INTERVAL_MS);
+
+/**
+ * Fire the SILENT-ZERO tripwire: the badge answered 0 while its walk stopped
+ * early, so unread rows exist that the number does not represent (conformance
+ * C1).
+ *
+ * The client renders a zero as NO BADGE, which is indistinguishable from
+ * genuinely caught up, and giving the badge an indeterminate rendering is out
+ * of scope for v1 (docs/issues/unread-budget-truncation-has-no-forward-path.md
+ * stays open for the UI affordance). Until then the SERVER is the only place
+ * this state can be observed at all, so it says so here - rate limited, because
+ * the badge is the app's highest-frequency request and the signal is the RATE.
+ */
+export function warnTruncatedZeroCount(
+  logger: Logger | undefined,
+  fields: { scanned: number; probes: number },
+): void {
+  warnBadgeZero(
+    logger,
+    { event: 'unread_badge_truncated_zero', ...fields },
+    'unread badge: reported 0 while the walk stopped early - unread rows exist behind the answer',
+  );
+}
 
 /**
  * Fire the deleted-resurfacing-probe tripwire for a REQUEST's probe total.

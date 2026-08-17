@@ -82,6 +82,7 @@ import {
   isUnreadVisible,
   UNREAD_WALK_LIMIT,
   warnDeletedProbes,
+  warnTruncatedZeroCount,
   warnUnreadScanned,
   type UnreadCandidate,
   type UnreadScanPosition,
@@ -1107,13 +1108,26 @@ export async function aggregateInbox(
       truncated = true;
     } else if (budgetSpent) {
       truncated = true;
+      // ...AND STILL MINT THE CURSOR (spec 4.5 step 2, amended in review fix
+      // wave 1 - conformance C1). Step 2 enumerates exactly TWO null-cursor
+      // conditions, and a budget-expired page is neither: it has a known
+      // position and a seen-set inside the cap. Returning null discarded a
+      // scanPosition the request had already paid for, so the only forward
+      // affordance left was Retry - which re-runs the identical prefix with a
+      // fresh budget and truncates identically. `truncated` is a SIGNAL layered
+      // ON paging, not a replacement for it. The empty-page invariant below
+      // still nulls this out when no rows survived.
+      unreadCursor = encodeUnreadCursor(scanPosition, seen);
     } else {
       unreadCursor = encodeUnreadCursor(scanPosition, seen);
     }
     // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
     // the dashboard's empty-state and Load-more gating both key on rows.length.
-    // Defensive: every break above that can leave the page empty already yields
-    // null, and this keeps that true if the loop ever grows another exit.
+    // This is LOAD-BEARING for the budget branch above (which mints a cursor
+    // unconditionally); for every other exit it is the defensive belt that
+    // keeps the invariant true if the loop ever grows another one. An empty
+    // truncated page keeps its error-state posture rather than offering a Load
+    // more the client has nothing to hang off.
     if (unreadRows.length === 0) unreadCursor = null;
 
     log.info(
@@ -1325,10 +1339,21 @@ export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnrea
   // request total the tripwire wants. The shared module-scope limiter (the same
   // instance the unread PAGE fires) owns the threshold - do not re-test it here.
   warnDeletedProbes(log, result.deletedProbes);
+  // THE SILENT ZERO (conformance C1): an early-stopped walk that found nothing
+  // renders as no badge at all, which the operator reads as "caught up" while
+  // unread rows sit behind the truncation. `truncated` is on the wire, but v1's
+  // client deliberately does not render it, so this WARN is the only place the
+  // state is observable.
+  if (result.candidates.length === 0 && result.truncated) {
+    warnTruncatedZeroCount(log, {
+      scanned: (deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT) - result.remainingBudget,
+      probes: result.deletedProbes,
+    });
+  }
 
   // Deliberately no per-request INFO line: this is the highest-frequency call in
   // the app (every SPA boot plus every debounced conversation event, per
-  // connected dashboard). The two rate-limited WARN tripwires are the signal.
+  // connected dashboard). The rate-limited WARN tripwires are the signal.
   return {
     unreadCount: result.candidates.length,
     capped: result.capped,

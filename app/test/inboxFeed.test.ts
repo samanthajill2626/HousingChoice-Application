@@ -15,6 +15,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   aggregateInbox,
+  countUnreadRows,
   InboxBadRequestError,
   type InboxPage,
   type InboxRouterDeps,
@@ -1337,7 +1338,7 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(new Set(pages.flatMap((p) => rowKeys(p))).size).toBe(120);
   });
 
-  it('BUDGET: a spent raw-scan budget underfills the page and sets truncated', async () => {
+  it('BUDGET: a spent raw-scan budget underfills the page, sets truncated AND still mints a cursor', async () => {
     const seed = unreadWorld(5);
     const page = await aggregateInbox(
       { filter: 'unread', limit: 30 },
@@ -1345,8 +1346,54 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     );
 
     expect(page.rows).toHaveLength(2);
-    expect(page.nextCursor).toBeNull();
     expect(page.truncated).toBe(true);
+    // CONFORMANCE C1 (planner ruling as spec author; spec 4.5 step 2 amended).
+    // Returning null here DISCARDED a scanPosition the server had already paid
+    // for, leaving Retry as the only affordance - and Retry re-runs the
+    // identical prefix with a fresh budget, so it truncates identically. A
+    // guaranteed non-recovery where paging gives a guaranteed one. `truncated`
+    // is a SIGNAL layered on paging, not a substitute for it.
+    expect(page.nextCursor).not.toBeNull();
+
+    const page2 = await aggregateInbox(
+      { filter: 'unread', limit: 30, cursor: page.nextCursor! },
+      makeDeps(seed),
+    );
+    expect(rowKeys(page2)).toEqual(['c-002', 'c-003', 'c-004']);
+    expect(page2.nextCursor).toBeNull();
+    expect(page2.truncated).toBeUndefined();
+  });
+
+  it('BADGE: a TRUNCATED ZERO count logs a rate-limited WARN (the silent zero is observable)', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
+    const seed = unreadWorld(3);
+    // The newest index entry is stale (flagged, stored count 0), so the single
+    // raw item the budget buys yields no candidate: the badge answers 0 while
+    // three unread rows sit behind it.
+    seed.conversations.unshift({
+      ...conv({
+        conversationId: 'conv-stale-head-badge',
+        participant_phone: '+14045554002',
+        last_activity_at: T(23),
+        unread_count: 0,
+      }),
+      unread_flag: 'unread',
+    });
+
+    const count = await countUnreadRows(
+      makeDeps(seed, undefined, logger, { unreadWalkLimit: 1 }),
+    );
+
+    expect(count).toEqual({ unreadCount: 0, capped: false, truncated: true });
+    // The client renders a truncated zero as NO BADGE, indistinguishable from
+    // genuinely caught up. The UI affordance is out of scope for v1 (the issue
+    // stays open), so the SERVER has to be the one that says it happened.
+    const zeroWarns = warn.mock.calls.filter(
+      (c) => (c[0] as { event?: string })?.event === 'unread_badge_truncated_zero',
+    );
+    expect(zeroWarns).toHaveLength(1);
+    expect(zeroWarns[0]![0]).toMatchObject({ scanned: 1 });
   });
 
   it('BUDGET: an empty page still says truncated when the budget dies before any row', async () => {

@@ -87,6 +87,37 @@ async function pickUnit(user: ReturnType<typeof userEvent.setup>, query: string,
 }
 
 describe('PlacementCreateForm', () => {
+  // ── 0: the unit list is the WHOLE portfolio, not the first server page ──
+  it('walks every unit page so a property past page one can be picked', async () => {
+    // /api/units pages at 50; a first-page-only read left later properties
+    // unselectable, so a placement could not be created against them at all.
+    const user = userEvent.setup();
+    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
+      Promise.resolve(
+        params.cursor === undefined
+          ? { units: UNITS, nextCursor: 'page-2' }
+          : {
+              units: [
+                {
+                  unitId: 'unit-0099',
+                  landlordId: 'contact-landlord-0001',
+                  status: 'available',
+                  address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
+                },
+              ],
+              nextCursor: null,
+            },
+      ),
+    );
+    setup();
+    await screen.findByRole('dialog', { name: 'New placement' });
+
+    await pickUnit(user, 'Lastpage', /77 Lastpage Ln/);
+    expect((screen.getByRole('combobox', { name: 'Unit' }) as HTMLInputElement).value).toMatch(
+      /77 Lastpage Ln/,
+    );
+  });
+
   // ── 1: renders dialog + the four fields ──
   it('renders the dialog with Tenant, Unit, Starting stage, and Label fields', async () => {
     setup();

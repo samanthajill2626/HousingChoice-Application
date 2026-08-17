@@ -13,7 +13,6 @@ import {
   getContactGroupThreads,
   getContactRelayGroups,
   getTours,
-  getUnits,
   type ContactMediaItem,
   type ListingSendRow,
   type PlacementItem,
@@ -22,6 +21,7 @@ import {
   type Tour,
   type UnitItem,
 } from '../../api/index.js';
+import { getAllUnitPages } from '../listings/useListings.js';
 
 /** A slice that may not be live yet: 'loading' → 'pending' (404) | T[] (ready). */
 export type Slice<T> =
@@ -123,7 +123,11 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         const [placements, units, listingsSent, media, relayGroups, groupThreads] =
           await Promise.all([
           getPlacements(signal),
-          getUnits({}, signal),
+          // EVERY page (the server pages /api/units at 50): these units back the
+          // landlord's Properties panel AND the per-unit tours fan-out below, so
+          // a first-page-only read silently dropped both for anyone whose
+          // properties sat later in the scan.
+          getAllUnitPages(false, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
           // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
           // now derives from the live timeline; this fetch can be removed.
@@ -150,7 +154,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
             // Best-effort — tours degrade to empty if the API is unavailable
           }
         } else if (opts.contactType === 'landlord') {
-          const myUnitIds = units.units
+          const myUnitIds = units
             .filter((u) => u.landlordId === contactId)
             .map((u) => u.unitId);
           try {
@@ -167,7 +171,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         setState({
           status: 'ready',
           placements: placements.placements,
-          units: units.units,
+          units,
           tours,
           listingsSent,
           media,

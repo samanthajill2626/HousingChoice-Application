@@ -126,6 +126,38 @@ function localDatetime(msFromNow: number): string {
 const DAY = 24 * 3_600_000;
 
 describe('ScheduleTourForm', () => {
+  // ── 0: the property list is the WHOLE portfolio, not the first server page ──
+  it('walks every unit page so a property past page one can be picked', async () => {
+    // /api/units pages at 50. A first-page-only read meant a tour simply could
+    // not be scheduled on any property later in the scan - the typeahead never
+    // offered it.
+    const user = userEvent.setup();
+    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
+      Promise.resolve(
+        params.cursor === undefined
+          ? { units: UNITS, nextCursor: 'page-2' }
+          : {
+              units: [
+                {
+                  unitId: 'unit-0099',
+                  landlordId: 'contact-landlord-0001',
+                  status: 'available',
+                  address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
+                },
+              ],
+              nextCursor: null,
+            },
+      ),
+    );
+    setup();
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    await pickUnit(user, 'Lastpage', /77 Lastpage Ln/);
+    expect((screen.getByRole('combobox', { name: 'Unit' }) as HTMLInputElement).value).toMatch(
+      /77 Lastpage Ln/,
+    );
+  });
+
   // ── 1: renders the dialog + fields ──
   it('renders the dialog with Unit typeahead, Tour type select, and an optional Date and time', async () => {
     setup();

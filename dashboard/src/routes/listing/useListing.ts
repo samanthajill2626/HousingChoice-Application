@@ -18,7 +18,6 @@ import {
   getUnitActivity,
   getUnitRecipients,
   getUnitRelated,
-  getUnits,
   getUnitSimilar,
   type Contact,
   type ListingSendRow,
@@ -28,6 +27,7 @@ import {
   type UnitActivityEvent,
   type UnitItem,
 } from '../../api/index.js';
+import { getAllUnitPages } from '../listings/useListings.js';
 import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
 
 /** Same `media` array (order-sensitive; undefined treated as empty)? Used to
@@ -172,11 +172,11 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
 
         const [landlord, units, placements, relatedSlice, recipients, similar, activity, toursSlice] = await Promise.all([
           loadLandlord(unit.landlordId, signal),
-          // NOTE: first inbox page only (nextCursor not paged) for the
-          // same-landlord Related + placements-on-unit derivations — a transitional
-          // limitation matching the project-wide pattern; BE3's /related and a
-          // unit-scoped placements query supersede it.
-          getUnits({}, signal),
+          // EVERY page (the server pages /api/units at 50) for the same-landlord
+          // Related fallback: a first-page-only read left a sibling property
+          // later in the scan out of the card entirely. BE3's /related endpoint
+          // still supersedes this derivation when it answers.
+          getAllUnitPages(false, signal),
           getPlacements(signal),
           loadSlice((s) => getUnitRelated(unitId, s), signal),
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
@@ -195,7 +195,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         // derived same-landlord list (real data → 'ready', not 'pending').
         const related: Slice<RelatedUnit> =
           relatedSlice.status === 'pending'
-            ? { status: 'ready', rows: relatedByLandlord(units.units, unit) }
+            ? { status: 'ready', rows: relatedByLandlord(units, unit) }
             : relatedSlice;
 
         setState({

@@ -106,6 +106,32 @@ describe('useListing', () => {
     expect(screen.getByTestId('activity').textContent).toBe('pending');
   });
 
+  it('walks every unit page so the same-landlord fallback sees past page one', async () => {
+    // The server pages /api/units at 50. A sibling property on page two used to
+    // be invisible to the derived Related list, so a landlord with a large
+    // portfolio saw an empty "Related properties" card.
+    getUnit.mockResolvedValue(UNIT);
+    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
+      Promise.resolve(
+        params.cursor === undefined
+          ? { units: [UNIT], nextCursor: 'page-2' }
+          : { units: [{ unitId: 'u-sibling', landlordId: 'll1', status: 'available' }], nextCursor: null },
+      ),
+    );
+    getPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+
+    render(<Probe unitId="u1" />);
+
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(screen.getByTestId('related-status').textContent).toBe('ready');
+    expect(screen.getByTestId('related-rows').textContent).toBe('1');
+  });
+
   it('uses the live /related endpoint when it answers', async () => {
     getUnit.mockResolvedValue(UNIT);
     getUnits.mockResolvedValue(UNITS);

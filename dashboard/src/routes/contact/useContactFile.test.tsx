@@ -76,6 +76,29 @@ describe('useContactFile', () => {
     expect(screen.getByTestId('groups').textContent).toBe('pending');
   });
 
+  it('walks every unit page so a landlord past page one still gets their properties', async () => {
+    // The server pages /api/units at 50. The contact file's units back the
+    // landlord's "Properties" panel AND the per-unit tours fan-out, so a
+    // first-page-only read dropped both for anyone whose properties sat later
+    // in the scan.
+    getPlacements.mockResolvedValue(CASES);
+    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
+      Promise.resolve(
+        params.cursor === undefined
+          ? { units: [{ unitId: 'u1', landlordId: 'k1', status: 'available' }], nextCursor: 'page-2' }
+          : { units: [{ unitId: 'u2', landlordId: 'k1', status: 'available' }], nextCursor: null },
+      ),
+    );
+    getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+
+    render(<Probe contactId="k1" />);
+
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(screen.getByTestId('units').textContent).toBe('2');
+  });
+
   it('marks C4/C5 + relay-groups ready when those endpoints answer', async () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);

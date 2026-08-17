@@ -371,6 +371,72 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
     expect(counts[counts.length - 1]).toBe(0);
   });
 
+  it('a THROWING presence fan-out neither fails the delete nor swallows the authoritative emits', async () => {
+    // CONFORMANCE r3 FINDING 9. propagateContactPresenceChange is best-effort BY
+    // CONSTRUCTION - both halves sit in their own try/catch - but that guarantee
+    // rests on its own catch BODIES never throwing, and fix wave 2 moved the
+    // authoritative unread-reset emits BEHIND it. A throw from the helper would
+    // therefore 500 a delete that has already persisted AND lose the last-word
+    // emits the ordering exists to produce. The call site is now guarded, so the
+    // emits are not hostages to it.
+    //
+    // The seams model exactly that: the presence fan-out's own lookup fails
+    // (so the helper reaches its WARN) and the logger fails too (so the WARN
+    // escapes the helper). Nothing else in this file needs a throwing logger.
+    const world = createFakeWorld();
+    const real = world.conversationsRepo;
+    let lookups = 0;
+    world.conversationsRepo = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== 'findByParticipantPhone' || typeof value !== 'function') return value;
+        return async (phone: string) => {
+          lookups += 1;
+          // 1st = the unread reset fan-out (must succeed, or there are no
+          // authoritative emits to lose); 2nd = the presence fan-out.
+          if (lookups === 2) throw new Error('dynamo throttled');
+          return (value as (p: string) => Promise<ConversationItem[]>).call(target, phone);
+        };
+      },
+    });
+    // ONE-SHOT, like the lookup: the helper's OWN warn is the one that fails, so
+    // the throw escapes it. The guard's warn (the very next one) must still be
+    // able to record what happened.
+    let warns = 0;
+    const apiLogger = {
+      info: () => undefined,
+      debug: () => undefined,
+      error: () => undefined,
+      warn: () => {
+        warns += 1;
+        if (warns === 1) throw new Error('log sink unavailable');
+      },
+      child: () => apiLogger,
+    } as never;
+    const { app } = makeWebhookHarness({ world, apiLogger });
+    seedContact(world, { contactId: 'c-fanout', type: 'tenant', phone: '+15550000056' });
+    seedConversation(world, 'conv-fanout', {
+      participant_phone: '+15550000056',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 3,
+    });
+
+    const del = await auth(request(app).delete('/api/contacts/c-fanout'));
+
+    expect(del.status).toBe(200);
+    // The reset itself happened...
+    expect(world.conversations.get('conv-fanout')?.unread_count).toBe(0);
+    // ...and its authoritative emit still reached the wire.
+    const counts = world.emitted
+      .filter(
+        (e) =>
+          e.event === 'conversation.updated' &&
+          (e.payload as { conversationId?: string }).conversationId === 'conv-fanout',
+      )
+      .map((e) => (e.payload as { unread_count?: number }).unread_count);
+    expect(counts).toEqual([0]);
+  });
+
   it('a ConditionalCheckFailedException from one reset does not fail the delete', async () => {
     // The row can vanish between the thread read and the reset (a racing retract
     // or a concurrent close). The delete has ALREADY persisted at that point, so

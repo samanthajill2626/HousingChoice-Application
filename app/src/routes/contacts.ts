@@ -1994,7 +1994,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       log.warn({ err, contactId }, 'contact delete: unread reset fan-out failed (best-effort)');
     }
     // Refresh the live views so this contact's Today/inbox cards drop without a reload.
-    await propagateContactPresenceChange(contactId, updated);
+    //
+    // GUARDED AT THE CALL SITE (conformance r3 finding 9). The helper is
+    // best-effort by construction, but that rests on its own catch BODIES never
+    // throwing - and since fix wave 2 the authoritative emits below sit BEHIND
+    // it, so any throw here would 500 a delete that has already persisted AND
+    // lose the last word on the wire. The emits must not be hostages to the
+    // fan-out.
+    try {
+      await propagateContactPresenceChange(contactId, updated);
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact delete: presence fan-out failed (best-effort)');
+    }
     // ...and only NOW the authoritative counts, so they are the last word on the
     // wire rather than the first (see the ordering note above).
     for (const conv of resetThreads) {

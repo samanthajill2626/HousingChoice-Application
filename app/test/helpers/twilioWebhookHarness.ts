@@ -3438,6 +3438,11 @@ export interface HarnessOptions {
   /** Env overrides merged into the default test env (set a key to '' to unset… use delete semantics below). */
   env?: Record<string, string | undefined>;
   world?: FakeWorld;
+  /**
+   * Replace the logger the /api routers use. Only for tests that need a LOGGER
+   * FAILURE (a warn that throws): everything else should read `harness.capture`.
+   */
+  apiLogger?: NonNullable<Parameters<typeof buildApp>[0]>['logger'];
   suggestionResolutionHooks?: SuggestionResolutionHooks;
   suggestionResolutionNow?: () => string;
   suggestionResolutionLeaseId?: () => string;
@@ -3599,6 +3604,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     // M1.4 surfaces (contacts triage, admin users) share the SAME world
     // contacts + the session user repo so triage/role tests run end-to-end.
     api: {
+      // Override the /api router's logger. buildApp spreads `deps.api` AFTER its
+      // own `logger`, so this wins - which is how a test can make a best-effort
+      // helper's own WARN throw and prove its CALL SITE is guarded.
+      ...(opts.apiLogger !== undefined && { logger: opts.apiLogger }),
       // Voice Phase 1: the originate route (initiateCall) + self cell verify-start
       // (adapter.sendMessage) go through the SAME world adapter as the send
       // service, so world.initiatedCalls / world.sent capture them (no network).

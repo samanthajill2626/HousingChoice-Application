@@ -265,6 +265,45 @@ describe('inbound message push - plain 1:1 SMS', () => {
     expect(payload.title).toBe('(555) 010-0001');
   });
 
+  it('still pushes when ALL THREE awaited 1:1 side effects fail', async () => {
+    // Unlike the relay/group blocks, the 1:1 emit sits BEHIND three awaited
+    // side effects - captureContact, processInboundKeywords and
+    // mirrorInboundMedia. All three are internally guarded today, so the
+    // "one fresh append => one push" invariant holds only because those
+    // guards are there. Nothing else pins that, so an unguarded throw added
+    // to any of them would silently kill the alert on the highest-volume
+    // path. This is the 1:1 twin of the relay touchLastActivity tripwire.
+    world.contacts.push({
+      contactId: 'contact-T',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      firstName: 'Keisha',
+      lastName: 'Jones',
+    });
+    // (1) captureContact: the participants-claim write rejects.
+    world.conversationsRepo.setParticipantsIfAbsent = async (): Promise<never> => {
+      throw new Error('participants claim exploded');
+    };
+    // (2) processInboundKeywords: the inbound_text consent stamp rejects.
+    world.contactsRepo.update = async (): Promise<never> => {
+      throw new Error('consent stamp exploded');
+    };
+    // (3) mirrorInboundMedia: the media fetch rejects.
+    world.failMediaUrls.add('https://api.twilio.com/media/abc0');
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundMmsParams({ Body: 'still alive' }));
+
+    expect(res.status).toBe(200);
+    const conv = [...world.conversations.values()][0]!;
+    expect(soleMessagePayload(world)).toEqual({
+      title: 'Keisha Jones',
+      body: 'still alive',
+      kind: 'message',
+      conversationId: conv.conversationId,
+    });
+  });
+
   it('VOICE REGRESSION: a message push never touches the per-user sendToUser path', async () => {
     const { app } = makeWebhookHarness({ world });
 

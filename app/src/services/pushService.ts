@@ -127,6 +127,17 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * process holds its own), never module-global.
    */
   const USERS_CACHE_TTL_MS = 60_000;
+  /**
+   * How OLD the served list may get before a failed refresh stops falling back
+   * to it. Inside this bound a failed listAll is a blip and the cached list is
+   * still worth serving; past it the list is a liability rather than a
+   * fallback - it can hide a user whose only device was Gone-pruned and who
+   * then re-subscribed, and it keeps delivering names and message text to an
+   * offboarded user's device. 5x the TTL: long enough that every transient
+   * Dynamo blip is covered, short enough that the staleness stays a stated
+   * bound (D10 / section 5) rather than "for the whole outage".
+   */
+  const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
   let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
 
   /**
@@ -194,7 +205,22 @@ export function createPushService(deps: PushServiceDeps): PushService {
           options,
         );
         if (outcome.result === 'gone') {
-          await users.removePushSubscription(userId, record.endpoint);
+          try {
+            await users.removePushSubscription(userId, record.endpoint);
+          } catch (pruneErr) {
+            // The SEND answered correctly (the device is definitively dead);
+            // the fault is entirely ours. Its own line, so an operator chases
+            // the repo write instead of the push vendor - inside the send try
+            // this read as a transient SEND failure and sent them after FCM.
+            // Counted the same way the allowlist prune write is: ONE device
+            // failed. The subscription stays and the next send retries it.
+            failed += 1;
+            log.warn(
+              { userId, kind, err: (pruneErr as Error).message },
+              'push: pruning a Gone endpoint failed - kept, retried on the next send',
+            );
+            continue;
+          }
           pruned += 1;
           prunedEndpoints.push(record.endpoint);
         } else {
@@ -280,15 +306,28 @@ export function createPushService(deps: PushServiceDeps): PushService {
             );
             return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
           }
-          // A cached list EXISTS, so fan out to it instead of dropping the
-          // notification. Deliberate deviation from 3.1's literal wording: the
-          // spec already accepts a 60s staleness bound, and D1 ("everyone with
-          // a subscription is notified") plus the late-better-than-never
-          // posture make a slightly stale fan-out strictly better than a
-          // silent drop on a transient Dynamo blip. `fetchedAt` is left
-          // UNCHANGED so the very next send retries the refresh.
+          const staleMs = now() - usersCache.fetchedAt;
+          if (staleMs >= STALE_SERVE_MAX_MS) {
+            // The cached list is past the bound, so it is no longer a
+            // trustworthy recipient set: give up exactly as 3.1 says - ERROR
+            // (a permanently broken Scan MUST reach the error-log alarm, per
+            // this repo's 436c0388 precedent), zeroed result, never a throw.
+            log.error(
+              { err, kind: notification.kind, staleMs },
+              'push: listing users failed and the cached list is too stale to serve - broadcast not sent',
+            );
+            return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+          }
+          // A cached list exists and is still INSIDE the bound, so fan out to
+          // it instead of dropping the notification. Deliberate, spec-amended
+          // deviation from 3.1's original literal wording (see 3.1 / D10 /
+          // section 5): D1 ("everyone with a subscription is notified") plus
+          // the late-better-than-never posture make a slightly stale fan-out
+          // strictly better than a silent drop on a transient Dynamo blip.
+          // `fetchedAt` is left UNCHANGED, so the very next send retries the
+          // refresh AND the age keeps counting toward the bound above.
           log.warn(
-            { err, kind: notification.kind },
+            { err, kind: notification.kind, staleMs },
             'push: refreshing the user list failed - fanning out to the cached list (stale)',
           );
         }
@@ -323,12 +362,19 @@ export function createPushService(deps: PushServiceDeps): PushService {
             );
           }
         } catch (err) {
-          // Per-user isolation (the voice founder-loop shape): one failing
-          // user never aborts the fan-out. DEFENSE IN DEPTH ONLY - the shared
-          // loop isolates every per-device fault, prune writes included, so
-          // nothing in it is expected to reject; this catch exists for a
-          // genuinely unexpected throw. It cannot know how far the loop got,
-          // so its tally is deliberately pessimistic.
+          // Per-user isolation (the voice founder-loop shape, spec 3.1): one
+          // failing user never aborts the fan-out. LAST-RESORT GUARD - no
+          // known code path reaches it: the shared loop isolates every
+          // per-device fault, prune writes included, and isAllowedPushEndpoint
+          // swallows its own URL parse error, so sendToDevices is not expected
+          // to reject at all. It is kept because 3.1 requires per-user
+          // isolation and because an unguarded `await` added to the shared
+          // loop later would otherwise take the whole broadcast down. Its
+          // `failed += subs.length` tally is deliberately PESSIMISTIC: a
+          // rejected sendToDevices returns no partial counts, so the loop
+          // cannot know how many of this user's devices were already
+          // delivered. Covered by the pushService.sendToAll test that makes
+          // `record.endpoint` throw before the per-device try.
           failed += subs.length;
           log.warn(
             { userId: user.userId, kind: notification.kind, err: (err as Error).message },

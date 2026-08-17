@@ -10,7 +10,7 @@ import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createPushService } from '../src/services/pushService.js';
 import type { PushSubscription, SendOutcome, WebPushAdapter } from '../src/adapters/webPush.js';
-import type { UsersRepo } from '../src/repos/usersRepo.js';
+import type { PushSubscriptionRecord, UsersRepo } from '../src/repos/usersRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -257,6 +257,27 @@ function ep(name: string): string {
  * reaches the allowlist prune WRITE.
  */
 const BAD_HOST_ENDPOINT = 'https://169.254.169.254/x';
+
+/**
+ * A stored subscription record whose `endpoint` is an accessor that THROWS.
+ * The shared per-device loop reads it in `isAllowedPushEndpoint(record.endpoint)`
+ * BEFORE entering any per-device try, so this is the one fault shape that can
+ * still reject out of sendToDevices - i.e. the only way to exercise sendToAll's
+ * per-USER catch now that every per-device fault is isolated.
+ */
+function unreadableSubscription(): PushSubscriptionRecord {
+  const record = {
+    keys: { p256dh: 'p256-hostile', auth: 'auth-hostile' },
+    created_at: '2026-08-16T00:00:00.000Z',
+  };
+  Object.defineProperty(record, 'endpoint', {
+    enumerable: true,
+    get(): string {
+      throw new Error('unreadable subscription record');
+    },
+  });
+  return record as unknown as PushSubscriptionRecord;
+}
 
 /**
  * A purpose-made multi-user UsersRepo fake for the fan-out tests. It exists
@@ -570,6 +591,138 @@ describe('pushService.sendToAll', () => {
     world.setFailListAll(false);
     await service.sendToAll(note);
     expect(world.calls.listAll).toBe(3);
+  });
+
+  it('STOPS serving the stale list once it reaches 5x the TTL: ERROR, and nobody is sent', async () => {
+    // The fallback is bounded by the AGE OF THE SERVED LIST. Inside the bound a
+    // failed refresh is a blip and the cached list is still worth serving. Past
+    // it the list is a liability: a user whose only device was Gone-pruned and
+    // who then re-subscribed is invisible in it, and an offboarded user's
+    // device keeps receiving names and message text. So the fan-out gives up
+    // exactly as spec 3.1 always said - ERROR, zeroed result, never a throw.
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    world.setFailListAll(true);
+
+    // One millisecond INSIDE the bound: still served, WARN only.
+    sentTo.length = 0;
+    t = 299_999;
+    const inside = await service.sendToAll(note);
+    expect(inside).toEqual({ configured: true, users: 1, attempted: 1, sent: 1, pruned: 0, failed: 0 });
+    expect(sentTo).toEqual([ep('a1')]);
+    expect(capture.atLevel(50)).toHaveLength(0);
+
+    // AT the bound: the list is given up on.
+    sentTo.length = 0;
+    t = 300_000;
+    const past = await service.sendToAll(note);
+    expect(past).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(sentTo).toEqual([]);
+    // What the error-log alarm sees (repo precedent 436c0388: a give-up site is
+    // ERROR so it reaches the alarm), and NOT another cheerful stale WARN.
+    const errors = capture.atLevel(50);
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0]!['msg'])).toMatch(/listing users failed/);
+    expect(String(errors[0]!['msg'])).toMatch(/too stale/);
+  });
+
+  it('isolates a failing USER: a fault the per-device loop cannot catch never aborts the fan-out', async () => {
+    // The shared loop isolates every fault it can SEE, so the only way to reach
+    // sendToAll's per-USER catch is a throw before the per-device try - here the
+    // allowlist guard reading `record.endpoint`. Spec 3.1 requires per-user
+    // isolation and spec 6 pins it; this test is what keeps that guard live
+    // rather than merely present, and it records the pessimistic tally
+    // (failed += subs.length) as a decision instead of an assumption.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async listAll() {
+        return [
+          {
+            userId: 'usr_bad',
+            email: 'bad@example.com',
+            role: 'admin',
+            status: 'active',
+            created_at: '2026-08-16T00:00:00.000Z',
+            push_subscriptions: [unreadableSubscription()],
+          },
+          {
+            userId: 'usr_good',
+            email: 'good@example.com',
+            role: 'admin',
+            status: 'active',
+            created_at: '2026-08-16T00:00:00.000Z',
+            push_subscriptions: [
+              {
+                endpoint: ep('g1'),
+                keys: { p256dh: 'p256-g1', auth: 'auth-g1' },
+                created_at: '2026-08-16T00:00:00.000Z',
+              },
+            ],
+          },
+        ];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    // The bad user is booked pessimistically (all of their devices) and the
+    // fan-out CONTINUES to the next user.
+    expect(result).toEqual({ configured: true, users: 2, attempted: 2, sent: 1, pruned: 0, failed: 1 });
+    expect(sentTo).toEqual([ep('g1')]);
+    expect(
+      capture.atLevel(40).some((l) => /broadcast to one user failed/.test(String(l['msg']))),
+    ).toBe(true);
+  });
+
+  it('a failing GONE prune write logs a PRUNE failure, never a transient SEND failure', async () => {
+    // The send answered correctly - the device is definitively dead - and the
+    // fault is entirely ours (DynamoDB). Reporting it as a transient send
+    // failure sends an operator after FCM instead of the repo write that
+    // actually broke, while the dead endpoint is re-POSTed on every message.
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('gone'), ep('live')] }]);
+    world.setFailRemoveFor('usr_a', ep('gone'));
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({ [ep('gone')]: { result: 'gone' } });
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    // Counted the same way wave 1 counted the allowlist prune write: ONE device
+    // failed, nothing pruned, and the device after it still sent.
+    expect(result).toEqual({ configured: true, users: 1, attempted: 2, sent: 1, pruned: 0, failed: 1 });
+    expect(sentTo).toEqual([ep('gone'), ep('live')]);
+    const warns = capture.atLevel(40).map((l) => String(l['msg']));
+    expect(warns.some((m) => /pruning a Gone endpoint failed/.test(m))).toBe(true);
+    expect(warns.some((m) => /send to one device failed/.test(m))).toBe(false);
+    // Nothing proved the write happened, so the subscription stays.
+    expect(world.state.get('usr_a')!.map((s) => s.endpoint)).toEqual([ep('gone'), ep('live')]);
   });
 
   it('returns a zeroed result and logs error when listAll throws with NO cache to fall back on', async () => {

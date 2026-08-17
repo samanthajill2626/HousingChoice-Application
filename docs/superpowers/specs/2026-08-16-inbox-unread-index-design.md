@@ -304,7 +304,10 @@ proportionally to one page.
      merged/excluded. This is a CONSUMPTION fact, distinct from layer-1's
      scanExhausted (round-3 blocking finding: conflating them made every
      under-budget dataset return page one with a null cursor);
-   - `truncated` = the request budget ran out first;
+   - `truncated` = the walk stopped early without filling the cap or draining
+     the supply: the request budget ran out, OR the deleted-probe bound did
+     (AMENDED, A2 - the two are reported identically because the caller's
+     answer is identical: the list is a FLOOR);
    - `scanPosition` = position after the last index item CONSUMED, so
      resumption re-scans nothing and skips nothing.
 
@@ -389,6 +392,23 @@ undocumented tie order):
   DELETED-RESIDENT PROBE WARN when a single request issues more than
   UNREAD_DELETED_PROBE_WARN = 25 resurfacing probes. Both through
   lib/rateLimitedWarn.ts; both are the signal to revisit accrual.
+- PROBE BOUND (AMENDED, A2): the probe WARN is backed by a HARD BOUND,
+  UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1 probes per
+  collect, past which the collect STOPS WALKING and reports `truncated`. A
+  hidden deleted candidate never counts toward `maxRows`, so before this the
+  row cap could not stop the walk either and a wall of them cost a contact
+  Query plus a message probe per row - thousands of serial round trips on the
+  app's highest-frequency request, answering zero. Contact resolution is
+  additionally MEMOIZED per collect on the participant key. Consequence,
+  declared: rows behind such a wall are withheld with `truncated` rather than
+  paid for, and the residue itself is what has to go (the delete-time reset and
+  backfill rule 3). The +1 keeps the bound above the tripwire so tripping it
+  always warns.
+- SILENT ZERO (AMENDED, C1): when the badge answers 0 with `truncated` set, the
+  server logs a rate-limited WARN. A zero renders as NO badge, which is
+  indistinguishable from caught up, and v1 deliberately gives the client no
+  indeterminate rendering; the WARN is the only place that state is observable
+  until docs/issues/unread-budget-truncation-has-no-forward-path.md is closed.
 - Registered above the `/:contactId/read` param route; no collision with
   existing inbox routes (GET `/`, POST `/read`, POST `/:contactId/read`).
 - Error posture: normal 500; the client collapses any error to "no badge".
@@ -416,36 +436,42 @@ today's pager provides, inbox.ts:755-800):
    `consumedAll` OR the request budget is spent. STATE THREADING (round-3
    finding - both were underspecified): the loop OWNS (a) the exclude set,
    seeded from the cursor's seen-set and ACCUMULATED with every candidate
-   emitted by every iteration (without this, iteration 2 could emit a
-   second row for a contact iteration 1 already emitted - duplicate React
-   keys on one page), and (b) the remaining raw budget
+   EMITTED by every iteration - a candidate hydration DROPPED is NOT recorded
+   (AMENDED, A3: see the post-build amendments section; the set's job is
+   cross-page suppression of emitted contacts, and `scanPosition` already
+   makes within-page re-offering impossible) - and (b) the remaining raw budget
    (UNREAD_WALK_LIMIT per REQUEST), passed into and returned by each
    collect call.
 2. `nextCursor` keys on CONSUMPTION, never scan state: null when the final
    collect reported `consumedAll`; null when minting the cursor would
-   exceed SEEN_SET_MAX (the declared depth cap, 4.3); otherwise the cursor
+   exceed SEEN_SET_MAX (the declared depth cap, 4.3); otherwise - INCLUDING a
+   budget- or probe-truncated page that has rows (AMENDED, C1) - the cursor
    from the final scanPosition + accumulated seen-set. INVARIANT: an empty
    `rows` array implies `nextCursor: null` - the loop only stops empty on
    consumedAll, budget exhaustion, or the depth cap - so the dashboard's
-   empty-state and Load-more gating (Inbox.tsx:130-158, both keyed on
-   `rows.length`) keep working.
+   empty-state and Load-more gating (Inbox.tsx:130-158) keep working.
 3. EARLY-END SIGNALING (rounds 3-4): the InboxPage wire shape gains an
    optional `truncated?: true`, set on the unread branch ONLY, whenever
    the feed ended for a NON-NATURAL reason: the request budget expired
    before the page could fill, or the SEEN_SET_MAX depth cap ended paging
    (4.3). Never set elsewhere. Client handling (declared, small):
-   - `rows.length === 0 && truncated` on the FIRST page: render the
-     EXISTING inbox error state verbatim (its shipped copy "We couldn't
-     load your inbox." + retry - no new copy is invented; one error
+   - the SERVER returned no rows AND set truncated, on the FIRST page:
+     render the EXISTING inbox error state verbatim (its shipped copy "We
+     couldn't load your inbox." + retry - no new copy is invented; one error
      surface stays one surface) - and NOTE (round-4 precision): retry
      refetches the same prefix with a fresh budget and may fail again
      until the underlying accrual is addressed; the point of this state
-     is not lying ("all caught up"), not guaranteed recovery.
+     is not lying ("all caught up"), not guaranteed recovery. The gate is
+     `InboxState.serverRowCount === 0`, NOT the rendered `rows.length`
+     (AMENDED, C2 - marking every row on a truncated page read empties
+     `rows` and must not flip a successful triage session into the error
+     banner).
    - rows present + truncated (including when a LOAD-MORE page reports
      it - useInbox must surface the flag from loadMore responses too, not
-     only fetchFirstPage): the list simply ends; no new affordance.
-     Declared and accepted - the signal exists on the wire for a future
-     affordance without another schema change.
+     only fetchFirstPage): the list ends, but the cursor is still minted
+     (AMENDED, C1), so Load more remains the forward path; no NEW affordance
+     is invented. The signal exists on the wire for a future affordance
+     without another schema change.
 
 AMBIGUITY RECORDED ON-BRANCH (2026-08-16, review fix wave; NOT resolved here):
 steps 2 and 3 pull opposite ways on the BUDGET-truncated case. Step 2 enumerates
@@ -457,6 +483,11 @@ The SHIPPED CODE follows the plan's reading (`nextCursor: null` plus
 a product call for the human and is already filed, with the reproduction and
 both remedies, as
 `docs/issues/unread-budget-truncation-has-no-forward-path.md`.
+
+RESOLVED in the review fix wave (C1): the cursor IS minted when the page has
+rows, and stays null when it is empty. See the post-build amendments section at
+the end of this document; the filed issue stays open for its OTHER half (the
+badge's silent zero).
 
 DECLARED BEHAVIOR CHANGE - PAGE COMPOSITION: today's `filter=unread` page one
 is up to `limit` CONTACT rows PLUS all unread relay rows PLUS all unread
@@ -553,6 +584,17 @@ the 1:1 bucket - preserving per-conversation type/timestamp semantics.
   subset of the first 100 open threads emitted; now up to 100 items all
   emit). That growth is the point (the silent-miss fix) and is bounded by
   the same 100.
+- PER-DESTINATION-GROUP DEDUPE, AND THE DELETED-CONTACT TEST, BOTH BEFORE THE
+  CAP (AMENDED, C3 + A9). contactThreads models one conversation PER
+  PARTICIPANT KEY, so a person owning a phone thread and an email thread
+  arrives twice and used to emit TWO `unreplied` rows - duplicate React keys in
+  one <ul> and two consumed cap slots for one person. And the deleted-contact
+  test ran in the EMIT loop, after the cap: with the index source, where
+  resurfaced deleted contacts concentrate by construction, a wall of them
+  rendered the block empty while warnIfCapped said "capped". Both tests now sit
+  in the collect loop beside isOneToOneBucket, for the same reason the spec
+  already gives for filtering group threads first. DECLARED PRODUCT CHANGE: a
+  contact with unread on both channels is ONE Unreplied row.
 - NET COST: Today gains one index query and loses nothing. G5 is a
   correctness fix, not a cost fix.
 
@@ -961,9 +1003,72 @@ READERS of unread state (all accounted for):
 
 ## 11. Follow-up issues
 
+
 - docs/issues/contacts-batchget-amplified-reads.md (filed on this branch):
   the agreed next mission.
 - inbox-unread-sse-full-walk.md -> resolved by this feature when the build
   lands (status flipped on this branch).
 - inbox-filter-tabs-full-walk.md -> updated: unread half resolved here,
   unknown half remains open.
+
+## 12. Post-build amendments (2026-08-16, planner-ratified review fix wave)
+
+THE FILE THE HUMAN APPROVED AS v6 IS NO LONGER THIS FILE. Everything below was
+written AFTER the spec gate, during the independent review of the built branch,
+and every item was adjudicated by the planner (this document's author) against
+the conformance and plan-blind adversarial reports. Nothing here reverses a
+decision the human made at the gate; each item either resolves an ambiguity the
+build exposed, or declares a behavior the build introduced. A reader diffing v6
+against this file needs only this section.
+
+The two blocks written on-branch BEFORE this review - the "AMENDED ON-BRANCH"
+paragraph in 4.2 (the delete fan-out resets EVERY thread, not only unread ones)
+and the "AMBIGUITY RECORDED ON-BRANCH" paragraph in 4.5 (which reading governs a
+budget-truncated cursor) - are RATIFIED here rather than rewritten. The first
+stands as written; the second is now RESOLVED by item C1 below, and its
+paragraph says so in place.
+
+Ratified amendments, by review finding id:
+
+- A2 (4.3 layer 2, 4.4). Contact resolution is MEMOIZED per collect on the
+  participant key, and the deleted-contact resurfacing probe gains a HARD BOUND
+  of UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1 per collect,
+  past which the walk STOPS and the result reports `truncated`. `truncated`
+  therefore now means "budget OR probe bound", not "budget". DECLARED
+  CONSEQUENCE: rows sitting behind a wall of more than that many HIDDEN
+  deleted-contact threads are withheld with `truncated` rather than paid for at
+  unbounded read cost. Reason: a hidden deleted candidate never counts toward
+  `maxRows`, so the row cap could not stop the walk - the reviewer measured
+  4,020 serial round trips on one nav-badge request that then answered zero.
+- A3 (4.5 step 1). The fill loop's seen-set records EMITTED contacts ONLY. The
+  original wording ("accumulated with every candidate emitted", read by the
+  build as "kept AND dropped") suppressed a contact for the whole paging session
+  whenever hydration dropped it - and hydration drops on a lagging participant
+  GSI, so the badge counted a row no page could show. Within-page duplication is
+  NOT what the set defends: `scanPosition` advances past every consumed item, so
+  a collect cannot re-offer one.
+- C1 (4.5 step 2, 4.4). A budget- or probe-truncated page WITH rows mints its
+  cursor. Step 2's enumeration of null conditions is exhaustive and this case is
+  not in it; discarding a `scanPosition` already paid for left Retry as the only
+  affordance, and Retry reproduces the identical truncation. The empty-page
+  invariant is unchanged. The badge's half of the same issue is NOT fixed here -
+  an indeterminate badge is out of v1 scope - so instead the server logs a
+  rate-limited WARN when it answers 0 while truncated, and
+  docs/issues/unread-budget-truncation-has-no-forward-path.md stays open for the
+  UI affordance.
+- C2 (4.5 step 3). The client's early-end gate keys on the new
+  `InboxState.serverRowCount`, not on the rendered `rows.length`. The literal
+  gate turned a successful triage session (operator marks every row on a
+  truncated page read) into "We couldn't load your inbox." Both gates - error
+  and empty-state - move together so they stay exact complements.
+- C3 + A9 (4.6). Today's unread pass dedupes per destination group AND applies
+  the deleted-contact test INSIDE the collect loop, ahead of the cap. Both are
+  product-visible: a contact with unread on two channels is now ONE Unreplied
+  row, and a wall of deleted-contact threads no longer empties the block.
+
+Corrections made in the same wave that need NO spec change, recorded so the
+diff is fully accounted for: the RUNBOOK's rollout order (apply -> DEPLOY ->
+backfill, A1); cursor emptiness validation (A4); the backfill's contact-key
+pre-pass and its outcome-based counters (A5, A8); the contact-delete fan-out
+emitting from its own reset returns (A6); the shared index fake's
+LEK-at-the-Limit rule (A7); and comment-only rulings (A10, A12, C8).

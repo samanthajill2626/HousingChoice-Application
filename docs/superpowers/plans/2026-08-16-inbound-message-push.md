@@ -93,8 +93,8 @@ spec; read it first.
   `dashboard/public/sw.js`, extend `dashboard/src/sw/display.test.ts` +
   `dashboard/src/sw/route.test.ts`, create
   `dashboard/src/sw/mirror.test.ts`.
-- Modify: `app/src/repos/usersRepo.ts` (ONLY the stale premise comment
-  near lines 585-587).
+- Modify: `app/src/repos/usersRepo.ts` (ONLY a new comment block above
+  removePushSubscription ~612 - Task 8 Step 4).
 - Create: `docs/issues/push-subscription-prune-rmw-lost-update.md`,
   `docs/issues/consolidate-contact-display-name-helpers.md`,
   `docs/issues/e2e-push-seam-missing.md`.
@@ -199,7 +199,7 @@ export function capPushText(text: string, maxCodePoints: number): string {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm run test -w app -- pushText`
-Expected: PASS (5 tests)
+Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -469,9 +469,10 @@ git commit -m "refactor(inbox): extract relayThreadLabel for push/inbox label pa
 - [ ] **Step 1: Write the failing tests**
 
 Append to `app/test/pushService.test.ts` a new describe. Reuse the
-file's existing helpers (fake adapter factory, makeFakeUsersRepo,
-createLogCapture, the VAPID config fixture) - read the top of the file
-and follow its established construction pattern exactly. The new tests:
+file's fake ADAPTER factory, createLogCapture, and the VAPID config
+fixture - but NOT its users-repo helper (next paragraph). Add `UsersRepo`
+to the test file's type imports from ../src/repos/usersRepo.js. The new
+tests:
 
 Construction: do NOT use makeFakeUsersRepo (it is a single-identity
 session helper with the wrong shape). Build a purpose-made multi-user
@@ -492,9 +493,11 @@ function makeBroadcastWorld(userSpecs: Array<{ userId: string; endpoints: string
   );
   let listAllCalls = 0;
   let findByIdCalls = 0;
+  let failListAll = false;
   const usersRepo = {
     async listAll() {
       listAllCalls += 1;
+      if (failListAll) throw new Error('scan down');
       return userSpecs.map((u) => ({
         userId: u.userId,
         email: `${u.userId}@example.com`,
@@ -514,16 +517,22 @@ function makeBroadcastWorld(userSpecs: Array<{ userId: string; endpoints: string
       state.set(userId, (state.get(userId) ?? []).filter((s) => s.endpoint !== endpoint));
     },
   } as unknown as UsersRepo;
-  return { usersRepo, calls: { get listAll() { return listAllCalls; }, get findById() { return findByIdCalls; } }, state };
+  return {
+    usersRepo,
+    calls: { get listAll() { return listAllCalls; }, get findById() { return findByIdCalls; } },
+    setFailListAll(v: boolean) { failListAll = v; },
+    state,
+  };
 }
 ```
 
-(If UserItem requires more fields at typecheck, add dummy values - the
-cast is at the repo boundary, the item literals must still satisfy the
-fields pushService reads. Use the file's existing VAPID-configured
-`config` fixture, its fake-adapter factory for scripted outcomes, and
-createLogCapture, exactly as the existing describes do. Endpoints must
-be on an allowlisted host, e.g. `https://fcm.googleapis.com/send/<n>`.)
+(The double cast means the item literals are not type-checked - keep
+them carrying exactly the fields pushService reads: userId and
+push_subscriptions. Endpoints must be on an allowlisted host, e.g.
+`https://fcm.googleapis.com/send/<n>`. In the sketches below, "expect
+listAllCalls === N" means `world.calls.listAll`, "findByIdCalls" means
+`world.calls.findById`, and the listAll-throw case arms
+`world.setFailListAll(true)` - there is no `counting` wrapper.)
 
 ```ts
 describe('sendToAll', () => {
@@ -535,7 +544,7 @@ describe('sendToAll', () => {
   });
 
   it('never calls findById on a fan-out with no Gone endpoints', async () => {
-    // expect findByIdCalls === 0 after sendToAll
+    // expect world.calls.findById === 0 after sendToAll
   });
 
   it('skips zero-subscription users with no log line', async () => {
@@ -553,7 +562,7 @@ describe('sendToAll', () => {
   });
 
   it('returns a zeroed result and logs error when listAll throws', async () => {
-    // counting.listAll = async () => { throw new Error('scan down'); }
+    // world.setFailListAll(true);
     // expect { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 }
   });
 
@@ -564,9 +573,9 @@ describe('sendToAll', () => {
 
   it('caches the user list for 60s: a second send does not re-scan', async () => {
     // let t = 0; const now = () => t;
-    // sendToAll twice; expect listAllCalls === 1
-    // t = 59_999; third send; expect listAllCalls === 1
-    // t = 60_000; fourth send; expect listAllCalls === 2
+    // sendToAll twice; expect world.calls.listAll === 1
+    // t = 59_999; third send; expect world.calls.listAll === 1
+    // t = 60_000; fourth send; expect world.calls.listAll === 2
   });
 
   it('prunes a Gone endpoint from the repo AND does not re-attempt it within the TTL', async () => {
@@ -827,10 +836,9 @@ git commit -m "feat(push): sendToAll broadcast with 60s user-list TTL cache" -m 
 **Files:**
 - Modify: `app/src/routes/webhooks/twilio.ts`
 - Test: Create `app/test/inboundMessagePush.test.ts` (driven through
-  `app/test/helpers/twilioWebhookHarness.ts` - read an existing
-  harness-driven suite such as founderTriage.test.ts or a group-inbound
-  suite first and copy its setup shape: createFakeWorld, buildApp,
-  signed webhook POST helpers.)
+  `app/test/helpers/twilioWebhookHarness.ts` via makeWebhookHarness +
+  signedTwilioPost + inboundSmsParams; setup copied from the four
+  per-path suites named in Step 1)
 
 **Interfaces:**
 - Consumes: `capPushText/PUSH_TITLE_MAX/PUSH_BODY_MAX` (Task 1),
@@ -1154,8 +1162,16 @@ reset `broadcasts.length = 0` in beforeEach). New cases:
 
 pushService is a REQUIRED member of InboundEmailDeps (spec 3.3) - every
 existing deps-builder in the suite gains the recorder; there is no
-"absent pushService" case to test (an omission is a compile error, by
-design).
+"absent pushService" case to test. CAVEAT: the email suite's deps
+builder ends in `as unknown as InboundEmailDeps` (~inboundEmail.test.ts:298),
+which ERASES the compile-time check inside the tests - the recorder
+must be added to that builder deliberately, and the required-dep
+guarantee is real only at the three production construction sites
+(worker, ses, reingest), which use plain typed object literals.
+If the recorder array is created per deps-builder call, tests that
+build deps more than once must aggregate or re-read the right
+instance - simplest: one module-level `broadcasts` array reset in
+beforeEach and pushed to by every recorder the builder mints.
 
 Each sketched case becomes a real test using the suite's existing
 notice/fixture builders.
@@ -1547,19 +1563,20 @@ file). Contents, one paragraph each plus a suggested-fix paragraph:
 
 - [ ] **Step 3b: Close the origin issue.** Update
   `docs/issues/no-push-on-inbound-message.md` frontmatter to the
-  registry's closed convention (match how other resolved issues in
-  docs/issues/ mark it - e.g. `status: closed`) and append a short
-  resolution section: implemented by feat/inbound-message-push per
+  registry's closed convention: `status: resolved` plus a
+  `resolved: 2026-08-16` date line (the schema 66 existing resolved
+  issues use - NOT `closed`), and append a short resolution section:
+  implemented by feat/inbound-message-push per
   docs/superpowers/specs/2026-08-16-inbound-message-push-design.md;
   all four kinds of inbound (SMS 1:1/group/relay, matched + unmatched
   email) now push. ASCII only; added lines only (the file has
   pre-existing non-ASCII).
 
-- [ ] **Step 4: usersRepo comment amendment** - on the
-  `removePushSubscription` doc comment (~612 - the method whose
-  contention profile this feature changed; the "a person adds devices
-  serially, so a plain RMW is fine" premise near ~585-587 belongs to
-  add), append to the remove method's comment block:
+- [ ] **Step 4: usersRepo comment amendment** - the
+  `removePushSubscription` METHOD (~612) has no comment block of its
+  own today; ADD one above it (it is the method whose contention
+  profile this feature changed - the "a person adds devices serially,
+  so a plain RMW is fine" premise near ~585-587 belongs to add):
 
 ```
   // (Since inbound-message push, prunes also run on the message path

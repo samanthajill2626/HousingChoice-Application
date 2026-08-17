@@ -495,6 +495,12 @@ Readers/renderers and type-surface impacts:
 
 - dashboard/src/sw/display.ts + route.ts + the sw.js verbatim mirrors
   (3.5), including the notification data allowlist.
+- InboundEmailDeps.pushService is REQUIRED (3.3), so every
+  construction site of the email ingest deps is a surface: the three
+  production sites (worker.ts, ses.ts, unmatchedEmail.ts) are
+  compile-enforced; the email unit suite's deps builder casts through
+  `as unknown as InboundEmailDeps`, which erases the check there - it
+  gains the recorder deliberately (the plan says so).
 - The PushService interface change breaks BOTH in-repo test doubles:
   app/test/helpers/twilioWebhookHarness.ts:1819-1824 (the world.pushSends
   fake) and the never-resolving fake in app/test/founderTriage.test.ts.

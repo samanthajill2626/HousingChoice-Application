@@ -609,6 +609,16 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       return capped;
     },
 
+    // Read-modify-write like the add above, but its contention profile is NOT
+    // the add's. Since inbound-message push, a 410/404 Gone prune runs on the
+    // MESSAGE path, fire-and-forget, from TWO processes (app webhooks + the
+    // mail worker) - so the "a person adds devices serially" premise at :584
+    // does not cover this method. Overlapping writes on one user item can lose
+    // an update (a prune clobbering a fresh subscribe; two prunes of different
+    // dead endpoints resurrecting one). Accepted at team scale: the blast
+    // radius is one user's device list, no message is ever lost, and the next
+    // Gone prune or a Settings re-toggle self-corrects. Tracked in
+    // docs/issues/push-subscription-prune-rmw-lost-update.md.
     async removePushSubscription(userId, endpoint) {
       const current = await repo.findById(userId);
       if (!current) throw new Error(`removePushSubscription: no user ${userId}`);

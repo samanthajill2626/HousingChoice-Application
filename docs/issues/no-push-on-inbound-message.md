@@ -3,9 +3,10 @@ id: no-push-on-inbound-message
 title: No push notification is sent for an inbound text - push is voice-only
 type: improvement
 severity: med
-status: open
+status: resolved
 area: app/push
 created: 2026-08-16
+resolved: 2026-08-16
 refs: app/src/routes/webhooks/twilio.ts, app/src/services/pushService.ts, dashboard/public/sw.js
 ---
 
@@ -83,3 +84,21 @@ function - mirror how the native messaging apps behave":
 Delivery: via the feature workflow (brainstorm remainder -> spec -> plan ->
 mission build), queued to start once the 2026-08-16 voice-notification work
 (call-push tag fix + deploy + live re-tests) is finished.
+
+**Resolution (2026-08-16).** Implemented by `feat/inbound-message-push`, per
+docs/superpowers/specs/2026-08-16-inbound-message-push-design.md. Every inbound
+message kind now pushes to every user with an active subscription: SMS 1:1,
+native group texts, relay group texts, matched inbound email, and a fresh
+unmatched email. Sends go through one `pushService.sendToAll` fan-out and are
+fire-and-forget, so a push failure can never block or fail a message write. The
+four operator decisions above are what shipped - no owner/assignment filtering,
+per-conversation coalescing via the notification tag (unmatched email coalesces
+at the queue level), device DND as the only quiet gate, and full sender + body
+in the payload. Tap routing deep-links to `/conversations/<id>`, or `/email`
+for an unmatched-email push.
+
+Follow-ups filed rather than fixed here:
+[push-subscription-prune-rmw-lost-update](./push-subscription-prune-rmw-lost-update.md),
+[consolidate-contact-display-name-helpers](./consolidate-contact-display-name-helpers.md),
+[e2e-push-seam-missing](./e2e-push-seam-missing.md), and
+[sw-mirror-control-char-divergence](./sw-mirror-control-char-divergence.md).

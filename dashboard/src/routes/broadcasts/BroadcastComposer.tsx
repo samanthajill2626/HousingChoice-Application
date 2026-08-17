@@ -21,7 +21,6 @@ import {
   getContact,
   getContacts,
   getUnit,
-  getUnits,
   previewBroadcast,
   LISTING_STATUS_LABELS,
   type AudienceFilter,
@@ -34,6 +33,7 @@ import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { shortAddress } from '../listing/listingFormat.js';
+import { getAllUnitPages } from '../listings/useListings.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
@@ -44,6 +44,11 @@ import {
 } from './resolveTemplate.js';
 import { useComposerDraft } from './useComposerDraft.js';
 import styles from './BroadcastComposer.module.css';
+
+/** How many properties the browse list reveals at a time (the initial batch and
+ *  each "Load more"). The whole portfolio is loaded client-side either way - this
+ *  is purely how much of it is on screen at once. */
+const UNIT_BROWSE_BATCH = 12;
 
 /** The same-origin public flyer funnel URL (ListingDetail.tsx's pattern) - the
  *  fallback [FlyerLink] until the first draft returns the server's flyerUrl. */
@@ -83,6 +88,17 @@ export function BroadcastComposer(): React.JSX.Element {
   const [unitCandidates, setUnitCandidates] = useState<UnitItem[]>([]);
   const [unitPick, setUnitPick] = useState<UnitSearchValue>({ label: '' });
   const effectiveUnitId = unitId ?? unitPick.unitId;
+  // How many browse rows are revealed, and which query that reveal belongs to.
+  // A full portfolio is ~100 properties, so the list opens at one batch and
+  // grows on "Load more" rather than dumping everything. The query is part of
+  // the state (rather than an effect that resets it) so a NEW query DERIVES a
+  // fresh batch during render - each query is its own list, and carrying a
+  // previous reveal into it reads as an arbitrary cutoff. Same
+  // derive-don't-cascade pattern as useListings' `forDeleted`.
+  const [reveal, setReveal] = useState<{ query: string; count: number }>({
+    query: '',
+    count: UNIT_BROWSE_BATCH,
+  });
 
   // Resolved message mode: exactly ONE recipient and the filters are still off.
   // The editor shows the FINAL rendered text (what will actually send), not a
@@ -129,11 +145,15 @@ export function BroadcastComposer(): React.JSX.Element {
   }, [seedContactId]);
 
   // Property-picker candidates - only when the entry point did not fix a unit.
+  // EVERY page is walked (getAllUnitPages): the server pages at 50, and a
+  // one-shot first page left the rest of a real portfolio unpickable - not just
+  // unbrowsable, but unfindable by search too, since the search filters this
+  // array client-side.
   useEffect(() => {
     if (unitId !== undefined) return; // fixed by the entry point
     const controller = new AbortController();
-    getUnits({}, controller.signal)
-      .then((page) => setUnitCandidates(page.units))
+    getAllUnitPages(false, controller.signal)
+      .then(setUnitCandidates)
       .catch(() => {
         /* candidate load failed - the picker just has nothing to suggest */
       });
@@ -305,13 +325,18 @@ export function BroadcastComposer(): React.JSX.Element {
   // server-side and resumes at compose.
   if (effectiveUnitId === undefined && resumeDraftId === undefined) {
     const query = unitPick.label.trim().toLowerCase();
-    const shown = (
+    // The query matches across the WHOLE portfolio (every page was walked), not
+    // just the rows currently revealed.
+    const matching =
       query.length > 0
         ? unitCandidates.filter((u) =>
             shortAddress(u.address, u.unitId).toLowerCase().includes(query),
           )
-        : unitCandidates
-    ).slice(0, 12);
+        : unitCandidates;
+    // A query the reveal state doesn't belong to starts over at one batch.
+    const shownCount = reveal.query === query ? reveal.count : UNIT_BROWSE_BATCH;
+    const shown = matching.slice(0, shownCount);
+    const hasMore = matching.length > shown.length;
     return (
       <div className={styles.page}>
         <h1 className={styles.title}>Send a property</h1>
@@ -349,8 +374,27 @@ export function BroadcastComposer(): React.JSX.Element {
             </li>
           ))}
         </ul>
+        {hasMore ? (
+          <div className={styles.moreRow}>
+            <button
+              type="button"
+              className={styles.loadMoreBtn}
+              onClick={() => setReveal({ query, count: shownCount + UNIT_BROWSE_BATCH })}
+            >
+              Load more
+            </button>
+            <span className={styles.moreCount} role="status">
+              Showing {shown.length} of {matching.length}
+            </span>
+          </div>
+        ) : null}
         {unitCandidates.length === 0 ? (
           <p className={styles.pickerHint}>No properties yet - add one from the Properties page.</p>
+        ) : null}
+        {unitCandidates.length > 0 && matching.length === 0 ? (
+          <p className={styles.pickerHint}>
+            No properties match that search - clear it to browse them all.
+          </p>
         ) : null}
       </div>
     );

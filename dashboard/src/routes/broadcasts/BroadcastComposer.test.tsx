@@ -503,3 +503,110 @@ describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)'
     await screen.findByRole('combobox', { name: 'Property' });
   });
 });
+
+// The property step against a REAL portfolio (the Quo import landed ~100
+// properties). Two independent caps used to hide them: the candidate fetch took
+// only the FIRST server page (<=50, no cursor walk), and the browse list sliced
+// to 12 with no way to see the rest. Browsing stays capped at 12 by default -
+// that is the deliberate "don't dump 100 rows" default - but "Load more" reveals
+// the next batch, and a typed query matches across the WHOLE portfolio.
+describe('BroadcastComposer — property picker at portfolio scale', () => {
+  /** n browsable properties, addresses numbered so each label is unique. */
+  function manyUnits(n: number): UnitItem[] {
+    return Array.from({ length: n }, (_, i) =>
+      unit({
+        unitId: `u-${i + 1}`,
+        address: { line1: `${100 + i} Sample St`, city: 'Atlanta', state: 'GA', zip: '30303' },
+      }),
+    );
+  }
+
+  /** The browse-list rows (the picker's own dropdown renders `option`s, not buttons). */
+  function propertyRows(): HTMLElement[] {
+    return screen.getAllByRole('button', { name: /Sample St|Findme Ave/ });
+  }
+
+  it('browses the first 12 of a 100-property portfolio and says how many there are', async () => {
+    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    renderComposer();
+    await screen.findByRole('combobox', { name: 'Property' });
+    await waitFor(() => expect(propertyRows()).toHaveLength(12));
+    expect(screen.getByText(/Showing 12 of 100/)).toBeInTheDocument();
+  });
+
+  it('"Load more" reveals the next batch of properties', async () => {
+    const user = userEvent.setup();
+    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    renderComposer();
+    await waitFor(() => expect(propertyRows()).toHaveLength(12));
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(propertyRows()).toHaveLength(24));
+    expect(screen.getByText(/Showing 24 of 100/)).toBeInTheDocument();
+  });
+
+  it('hides "Load more" once every property is on screen', async () => {
+    getUnits.mockResolvedValue({ units: manyUnits(8), nextCursor: null });
+    renderComposer();
+    await waitFor(() => expect(propertyRows()).toHaveLength(8));
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Showing 8 of 8/)).not.toBeInTheDocument();
+  });
+
+  it('a typed query matches a property far past the browsable 12', async () => {
+    const user = userEvent.setup();
+    const units = manyUnits(100);
+    units[80] = unit({
+      unitId: 'u-findme',
+      address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
+    });
+    getUnits.mockResolvedValue({ units, nextCursor: null });
+    renderComposer();
+    await waitFor(() => expect(propertyRows()).toHaveLength(12));
+
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Findme');
+    await waitFor(() => expect(propertyRows()).toHaveLength(1));
+    expect(propertyRows()[0]).toHaveAccessibleName(/900 Findme Ave/);
+  });
+
+  it('a new query re-opens the browse list at 12 rather than keeping the revealed count', async () => {
+    const user = userEvent.setup();
+    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    renderComposer();
+    await waitFor(() => expect(propertyRows()).toHaveLength(12));
+    await user.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(propertyRows()).toHaveLength(24));
+
+    // "Sample St" matches all 100 — the reveal counter resets for the new query.
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Sample St');
+    await waitFor(() => expect(screen.getByText(/Showing 12 of 100/)).toBeInTheDocument());
+    expect(propertyRows()).toHaveLength(12);
+  });
+
+  it('walks every page of GET /api/units so a page-two property is pickable', async () => {
+    const user = userEvent.setup();
+    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
+      Promise.resolve(
+        params.cursor === undefined
+          ? { units: manyUnits(50), nextCursor: 'cursor-page-2' }
+          : {
+              units: [
+                unit({
+                  unitId: 'u-findme',
+                  address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
+                }),
+              ],
+              nextCursor: null,
+            },
+      ),
+    );
+    renderComposer();
+    await waitFor(() => expect(propertyRows()).toHaveLength(12));
+    // 50 first-page + 1 second-page property — the walk completed.
+    expect(screen.getByText(/Showing 12 of 51/)).toBeInTheDocument();
+
+    await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Findme');
+    await waitFor(() => expect(propertyRows()).toHaveLength(1));
+    expect(propertyRows()[0]).toHaveAccessibleName(/900 Findme Ave/);
+  });
+});

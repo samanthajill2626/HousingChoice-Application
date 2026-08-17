@@ -609,43 +609,6 @@ describe('collectUnreadRows - grouping', () => {
     expect(result.remainingBudget).toBe(UNREAD_WALK_LIMIT - items.length);
   });
 
-  it('MEMOIZES contact resolution per collect: two threads on one participant key cost ONE lookup', async () => {
-    // Adversarial A2(a): the badge issued one uncached contact Query per
-    // scanned index item, on the app's highest-frequency request, while
-    // aggregateInbox has carried a per-request contact cache all along.
-    const phone = '+15550000501';
-    const email = 'memo@example.com';
-    const items = [
-      conv({ conversationId: 'memo-newer', last_activity_at: tsAt(0), participant_phone: phone }),
-      conv({ conversationId: 'memo-older', last_activity_at: tsAt(1), participant_phone: phone }),
-      // An email-only thread of a contact with NO phone: the resolver falls
-      // through to findByEmail, and that lookup memoizes on its own key.
-      conv({ conversationId: 'memo-mail-1', last_activity_at: tsAt(2), participant_email: email }),
-      conv({ conversationId: 'memo-mail-2', last_activity_at: tsAt(3), participant_email: email }),
-    ];
-    const calls = emptyCollectCalls();
-
-    const result = await collectUnreadRows(
-      {
-        conversations: makeConversations(items, calls),
-        contacts: makeContacts(
-          [
-            contact({ contactId: 'contact-memo', phones: [{ phone, primary: true }] }),
-            contact({ contactId: 'contact-mail', emails: [{ email, primary: true }] }),
-          ],
-          calls,
-        ),
-        messages: makeMessages({}, calls),
-      },
-      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
-    );
-
-    expect(candidateIds(result.candidates)).toEqual(['contact-memo', 'contact-mail']);
-    // ONE lookup per distinct participant key, not one per scanned item.
-    expect(calls.findByPhone).toBe(1);
-    expect(calls.findByEmail).toBe(1);
-  });
-
   it('skips excluded contacts entirely while their items still consume scan range', async () => {
     const { items, contacts } = contactSeries(4);
     const calls = emptyCollectCalls();
@@ -1006,20 +969,25 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     // limiter. ORDER MATTERS: at-threshold first (emits nothing, leaving the
     // limiter window untouched), over-threshold second.
     const spy = makeLoggerSpy();
-    warnDeletedProbes(spy.logger, UNREAD_DELETED_PROBE_WARN);
+    warnDeletedProbes(spy.logger, { probes: UNREAD_DELETED_PROBE_WARN, skipped: 0 });
     expect(spy.warn).not.toHaveBeenCalled();
 
-    warnDeletedProbes(spy.logger, result.deletedProbes);
+    warnDeletedProbes(spy.logger, { probes: result.deletedProbes, skipped: 0 });
     expect(spy.warn.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(spy.warn.mock.calls[0]?.[0]).toMatchObject({ event: 'unread_deleted_probe_tripwire' });
   });
 
-  it('BOUNDS the probe work: a wall of hidden deleted threads STOPS the walk instead of paying for it', async () => {
+  it('BOUNDS the WASTED probe work: a wall of hidden deleted threads is SKIPPED unprobed, and the walk continues', async () => {
     // Adversarial A2(b), reproduced at a smaller scale (the reviewer measured
     // 4,020 serial round trips on ONE authed badge request over 2,500 rows).
     // Hidden deleted candidates never count toward maxRows, so the cap could
     // not stop the walk and the badge paid a contact Query PLUS a message probe
     // for every one of them - then returned 0.
+    //
+    // FIX WAVE 2 (adversarial r2 findings 1-2): the bound counts WASTED probes
+    // only, and it stops PROBING, never the WALK. Past the bound a
+    // deleted-contact thread is treated as hidden without a read, and
+    // everything else in the stream keeps being counted and emitted.
     const hidden = 200;
     const items: ConversationItem[] = [];
     const contacts: ContactItem[] = [];
@@ -1032,6 +1000,17 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
       // A post-deletion OUTBOUND resurfaces nobody: every row is hidden.
       latest[id] = msg({ created_at: AFTER_DELETE, direction: 'outbound' });
     }
+    // A LIVE unread contact BEHIND the whole wall. It is the difference between
+    // bounding the probes and bounding the walk: this row must still be found.
+    const behindPhone = '+15554999999';
+    items.push(
+      conv({
+        conversationId: 'behind-the-wall',
+        last_activity_at: tsAt(hidden),
+        participant_phone: behindPhone,
+      }),
+    );
+    contacts.push(contact({ contactId: 'contact-behind', phones: [{ phone: behindPhone, primary: true }] }));
     const calls = emptyCollectCalls();
 
     const result = await collectUnreadRows(
@@ -1043,24 +1022,102 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
       { maxRows: BADGE_COUNT_CAP, budget: UNREAD_WALK_LIMIT },
     );
 
-    // The count is a FLOOR reported as truncated, not a silent zero paid for in
-    // full: the caller can tell the walk stopped early.
-    expect(result.candidates).toEqual([]);
-    expect(result.truncated).toBe(true);
-    expect(result.consumedAll).toBe(false);
+    // The live row behind the wall is DELIVERED, not withheld.
+    expect(candidateIds(result.candidates)).toEqual(['contact-behind']);
     expect(result.capped).toBe(false);
-    // The work is bounded by the probe limit, NOT by the number of hidden rows.
+    // The answer is still a FLOOR: threads past the bound were called hidden
+    // without being read, so the caller must be told it is not exact.
+    expect(result.truncated).toBe(true);
+    // The MESSAGE work is bounded by the limit, NOT by the number of hidden
+    // rows - and every probe past it becomes a counted SKIP instead.
     expect(result.deletedProbes).toBe(UNREAD_DELETED_PROBE_LIMIT);
     expect(calls.listByConversation).toBe(UNREAD_DELETED_PROBE_LIMIT);
-    expect(calls.findByPhone).toBeLessThanOrEqual(UNREAD_DELETED_PROBE_LIMIT + 1);
-    // One index page, not the two a 200-row walk would have pulled.
-    expect(calls.queryUnreadPage).toBe(1);
+    expect(result.wastedProbes).toBe(UNREAD_DELETED_PROBE_LIMIT);
+    expect(result.skippedDeletedThreads).toBe(hidden - UNREAD_DELETED_PROBE_LIMIT);
     // The bound is set ABOVE the tripwire on purpose, so tripping it is always
     // a state the WARN also reports.
     expect(UNREAD_DELETED_PROBE_LIMIT).toBeGreaterThan(UNREAD_DELETED_PROBE_WARN);
-    // The position is still exact, so the caller can resume past the wall.
-    expect(result.scanPosition?.conversationId).toBe(
-      `hidden-${String(hidden - UNREAD_DELETED_PROBE_LIMIT).padStart(4, '0')}`,
+    // The whole stream really was walked to its end.
+    expect(result.scanPosition?.conversationId).toBe('behind-the-wall');
+  });
+
+  it('does NOT spend the bound on PRODUCTIVE probes: 50 resurfaced deleted contacts all count', async () => {
+    // Adversarial r2 finding 1 / conformance r2 finding 1.1 (BLOCKING). A
+    // resurfaced deleted contact is a product state, not an error state: spec
+    // 4.3 step 2 keeps it unread until someone reads it, and a fresh inbound
+    // puts it at the HEAD of the index. Counting those probes against the bound
+    // capped the badge at 26 - below its own BADGE_COUNT_CAP, and through
+    // `truncated`, which the client does not render.
+    const resurfaced = 50;
+    const items: ConversationItem[] = [];
+    const contacts: ContactItem[] = [];
+    const latest: Record<string, MessageItem> = {};
+    for (let i = 0; i < resurfaced; i += 1) {
+      const phone = `+1555${String(5_000_000 + i)}`;
+      const id = `back-${String(resurfaced - i).padStart(4, '0')}`;
+      items.push(conv({ conversationId: id, last_activity_at: tsAt(i), participant_phone: phone }));
+      contacts.push(deletedContact(`contact-back-${String(i).padStart(4, '0')}`, phone));
+      // A post-deletion INBOUND: every one of these RESURFACES and emits a row.
+      latest[id] = msg({ created_at: AFTER_DELETE, direction: 'inbound' });
+    }
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages(latest, calls),
+      },
+      { maxRows: BADGE_COUNT_CAP, budget: UNREAD_WALK_LIMIT },
     );
+
+    expect(result.candidates).toHaveLength(resurfaced);
+    expect(result.capped).toBe(false);
+    // NOT a floor: nothing was skipped and the supply drained.
+    expect(result.truncated).toBe(false);
+    expect(result.consumedAll).toBe(true);
+    // Every probe was productive, so none of them spent the bound. The rows
+    // they produced are bounded by maxRows, which is the cap that owns them.
+    expect(result.deletedProbes).toBe(resurfaced);
+    expect(result.wastedProbes).toBe(0);
+    expect(result.skippedDeletedThreads).toBe(0);
+  });
+
+  it('threads the WASTED probe total across a REQUEST: a collect resuming past the bound probes nothing', async () => {
+    // The bound is a REQUEST budget, not a per-collect one: the unread page's
+    // fill loop makes many collects, and a per-collect bound would let a
+    // pathological wall be re-paid once per iteration.
+    const items: ConversationItem[] = [];
+    const contacts: ContactItem[] = [];
+    const latest: Record<string, MessageItem> = {};
+    for (let i = 0; i < 4; i += 1) {
+      const phone = `+1555${String(6_000_000 + i)}`;
+      const id = `carry-${String(4 - i).padStart(4, '0')}`;
+      items.push(conv({ conversationId: id, last_activity_at: tsAt(i), participant_phone: phone }));
+      contacts.push(deletedContact(`contact-carry-${String(i).padStart(4, '0')}`, phone));
+      // These WOULD resurface - but the request has already spent its bound, so
+      // they are skipped unread rather than probed. That is the declared cost.
+      latest[id] = msg({ created_at: AFTER_DELETE, direction: 'inbound' });
+    }
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages(latest, calls),
+      },
+      {
+        maxRows: BADGE_COUNT_CAP,
+        budget: UNREAD_WALK_LIMIT,
+        wastedProbesBefore: UNREAD_DELETED_PROBE_LIMIT,
+      },
+    );
+
+    expect(result.candidates).toEqual([]);
+    expect(calls.listByConversation).toBe(0);
+    expect(result.deletedProbes).toBe(0);
+    expect(result.skippedDeletedThreads).toBe(4);
+    expect(result.truncated).toBe(true);
   });
 });

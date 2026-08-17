@@ -63,18 +63,28 @@ export const BADGE_COUNT_CAP = 100;
 export const UNREAD_DELETED_PROBE_WARN = 25;
 
 /**
- * Resurfacing probes ONE COLLECT may issue before it STOPS WALKING (review fix
- * wave 1, adversarial A2; spec 4.4 amended).
+ * WASTED resurfacing probes ONE REQUEST may issue before it stops probing
+ * (review fix wave 2, adversarial r2 findings 1-2; spec 4.4 amended).
  *
- * The tripwire above only warns. Nothing bounded the work, and a hidden deleted
- * candidate never counts toward `maxRows`, so the row cap could not stop the
- * walk either: a wall of hidden deleted-contact threads made the badge - the
- * app's highest-frequency request - pay one contact Query PLUS one message
- * probe per row, thousands of serial round trips, and then return zero.
+ * A WASTED probe is one whose answer was "still hidden": a read that bought no
+ * row. Those are the unbounded population - a hidden deleted candidate never
+ * counts toward `maxRows`, so the row cap cannot stop them, and a wall of them
+ * made the badge (the app's highest-frequency request) pay one contact Query
+ * PLUS one message probe per row, thousands of serial round trips, to answer
+ * zero.
  *
- * Past this many probes the collect stops and reports `truncated`, i.e. the
- * count is a FLOOR, exactly as it does when the raw-scan budget runs out. The
- * `scanPosition` is still exact, so a pager can resume past the wall.
+ * A PRODUCTIVE probe - one that resurfaces a contact - is NOT counted here.
+ * Resurfacing is the product rule (spec 4.3 step 2), a fresh inbound puts those
+ * rows at the HEAD of the index, and the rows they emit are already bounded by
+ * `maxRows`. Fix wave 1 counted them too, which capped the badge at 26 in an
+ * ordinary world.
+ *
+ * Past this many wasted probes IN ONE REQUEST, further deleted-contact threads
+ * are treated as hidden WITHOUT being read, and the result reports `truncated`
+ * - the count is a FLOOR. THE WALK CONTINUES: live contacts, unknowns, groups
+ * and relay threads behind the wall are still counted and still emitted, which
+ * is the difference between bounding the probes and bounding the walk (fix wave
+ * 1 did the latter and dead-ended the page at zero rows).
  *
  * DELIBERATELY ONE ABOVE THE WARN THRESHOLD: tripping the bound must always be
  * a state the tripwire also reports, otherwise the fix would silence the very
@@ -174,17 +184,27 @@ export function warnTruncatedZeroCount(
  * The WARN lives with the CALLER, not inside `collectUnreadRows`, because the
  * Unread page's fill-or-exhaust loop makes MANY collects per request: a
  * per-collect threshold could never fire for a request that spent 5 probes in
- * each of ten collects. Callers accumulate `CollectResult.deletedProbes`
- * across their collects and call this once, with the request total. No-ops at
- * or below the threshold.
+ * each of ten collects. Callers accumulate `CollectResult.deletedProbes` and
+ * `CollectResult.skippedDeletedThreads` across their collects and call this
+ * once, with the request totals. No-ops when neither is interesting.
+ *
+ * ATTEMPTED AND SKIPPED ARE SEPARATE FIELDS (adversarial r2 finding 7). Once
+ * the bound caps the reads, `probes` alone is a CONSTANT on the badge path, so
+ * on its own it can only ever say "this is happening" - never "how bad". The
+ * skipped count is free (it needs no read) and is what distinguishes 26
+ * deleted residents from 2,600, i.e. how urgent the cleanup is.
  */
-export function warnDeletedProbes(logger: Logger | undefined, probes: number): void {
-  if (probes <= UNREAD_DELETED_PROBE_WARN) return;
+export function warnDeletedProbes(
+  logger: Logger | undefined,
+  totals: { probes: number; skipped: number },
+): void {
+  if (totals.probes <= UNREAD_DELETED_PROBE_WARN && totals.skipped === 0) return;
   warnProbeBurst(
     logger,
     {
       event: 'unread_deleted_probe_tripwire',
-      probes,
+      probes: totals.probes,
+      skipped: totals.skipped,
       threshold: UNREAD_DELETED_PROBE_WARN,
     },
     'unread feed: deleted-contact resurfacing probes passed the tripwire - revisit index accrual',
@@ -394,11 +414,13 @@ export interface CollectResult {
    */
   consumedAll: boolean;
   /**
-   * The walk stopped EARLY without filling the cap or draining the supply, so
-   * the candidate list is a FLOOR. Two causes, deliberately reported the same
+   * The candidate list is a FLOOR. Two causes, deliberately reported the same
    * way because the caller's answer is identical: the request's raw-scan budget
-   * ran out, or the deleted-resurfacing probe bound did
-   * (UNREAD_DELETED_PROBE_LIMIT).
+   * ran out before the supply did, or the deleted-resurfacing probe bound made
+   * this collect call some deleted-contact threads hidden WITHOUT reading them
+   * (UNREAD_DELETED_PROBE_LIMIT). The second cause can coexist with a fully
+   * drained stream, which is why it is ORed in rather than derived from the
+   * walk state alone.
    */
   truncated: boolean;
   /** `maxRows` stopped emission (the candidate list is a FLOOR). */
@@ -406,10 +428,24 @@ export interface CollectResult {
   /** Budget left for the caller's NEXT collect in this same request. */
   remainingBudget: number;
   /**
-   * Resurfacing probes issued by THIS collect only. The CALLER accumulates
-   * them per request and owns the WARN (see warnDeletedProbes).
+   * Resurfacing probes ATTEMPTED by THIS collect only (a real message read
+   * each). The CALLER accumulates them per request and owns the WARN (see
+   * warnDeletedProbes).
    */
   deletedProbes: number;
+  /**
+   * Of those, the ones that found the thread still HIDDEN - the probes that
+   * bought no row. The CALLER accumulates these too and threads the running
+   * total into its next collect as `wastedProbesBefore`, which is what makes
+   * the bound a REQUEST budget instead of a per-collect one.
+   */
+  wastedProbes: number;
+  /**
+   * Deleted-contact threads this collect treated as hidden WITHOUT probing,
+   * because the request's wasted-probe bound was already spent. Free to count,
+   * and the only thing that says how DEEP the wall is.
+   */
+  skippedDeletedThreads: number;
 }
 
 type ContactCandidate = Extract<UnreadCandidate, { kind: 'contact' }>;
@@ -439,6 +475,13 @@ export async function collectUnreadRows(
     budget: number;
     startAfter?: UnreadScanPosition;
     excludeContactIds?: ReadonlySet<string>;
+    /**
+     * WASTED resurfacing probes already spent EARLIER IN THIS REQUEST. The
+     * bound is per REQUEST (spec 4.4 amended), and the unread page's fill loop
+     * makes many collects, so it threads its running total through here the
+     * same way it threads `remainingBudget`.
+     */
+    wastedProbesBefore?: number;
   },
 ): Promise<CollectResult> {
   const log = deps.logger ?? defaultLogger;
@@ -450,51 +493,39 @@ export async function collectUnreadRows(
    * threads passes the resurfacing probe.
    */
   const seenContacts = new Map<string, { candidate: ContactCandidate; emitted: boolean }>();
+  /** Resurfacing probes ATTEMPTED here (one message read each). */
   let deletedProbes = 0;
+  /** Of those, the ones that bought no row - what the bound actually counts. */
+  let wastedProbes = 0;
+  /** Deleted-contact threads called hidden WITHOUT a read (past the bound). */
+  let skippedDeletedThreads = 0;
   let capped = false;
-  /** The probe bound stopped the walk (see UNREAD_DELETED_PROBE_LIMIT). */
-  let probeBudgetSpent = false;
-
-  /**
-   * PER-COLLECT memoization of contact resolution, keyed on the PARTICIPANT KEY
-   * (adversarial A2(a) - the same shape aggregateInbox's `contactConvsCache`
-   * has always had). Without it the badge issued one uncached contact Query per
-   * scanned index item. A miss is cached too: an unknown number repeated across
-   * threads must not re-ask.
-   *
-   * A THROWN lookup is NOT cached - the degrade below is best-effort, and
-   * caching a transient failure would suppress the whole request's retries.
-   */
-  const contactByPhone = new Map<string, ContactItem | undefined>();
-  const contactByEmail = new Map<string, ContactItem | undefined>();
+  const wastedProbesBefore = opts.wastedProbesBefore ?? 0;
 
   /**
    * Contact resolution in the inbox reader's order: participant_phone first,
    * then participant_email, so an email-only thread folds into its contact's
    * row instead of surfacing as a phantom unknown. A lookup failure degrades
    * to "no contact" (best-effort) rather than dropping the row.
+   *
+   * DELIBERATELY NOT MEMOIZED on the participant key (adversarial r2 finding
+   * 3): two visible index items can never share one. `createOrGetByParticipantPhone`
+   * arbitrates through the `phone#<E164>` claim item, so there is at most one
+   * OPEN 1:1 conversation per phone, and `claimEmail` is the single arbiter of
+   * which conversation owns an address - while `isUnreadVisible` requires
+   * `status === 'open'` for the 1:1 bucket. Fix wave 1 added such a memo and it
+   * hit zero times in production shapes. The real amplification is one contact
+   * read per VISIBLE unread row, which is the design's stated cost model (spec
+   * 4.4) and belongs to the BatchGet follow-up
+   * (docs/issues/contacts-batchget-amplified-reads.md).
    */
   const resolveContact = async (item: ConversationItem): Promise<ContactItem | undefined> => {
     const phone = item.participant_phone;
     const email = item.participant_email;
     try {
       let contact: ContactItem | undefined;
-      if (phone !== undefined) {
-        if (contactByPhone.has(phone)) {
-          contact = contactByPhone.get(phone);
-        } else {
-          contact = await deps.contacts.findByPhone(phone);
-          contactByPhone.set(phone, contact);
-        }
-      }
-      if (!contact && email !== undefined) {
-        if (contactByEmail.has(email)) {
-          contact = contactByEmail.get(email);
-        } else {
-          contact = await deps.contacts.findByEmail(email);
-          contactByEmail.set(email, contact);
-        }
-      }
+      if (phone !== undefined) contact = await deps.contacts.findByPhone(phone);
+      if (!contact && email !== undefined) contact = await deps.contacts.findByEmail(email);
       return contact;
     } catch (err) {
       log.warn({ err }, 'unread feed: contact lookup failed (best-effort)');
@@ -509,33 +540,42 @@ export async function collectUnreadRows(
    * post-deletion OUTBOUND (a straggler scheduled send) resurfaces nobody. No
    * readable message row never counts as new.
    *
-   * The probe is UNCONDITIONAL - there is no `last_activity_at <= deleted_at`
-   * short-circuit. CLOCK CAVEAT: created_at is OUR ingest timestamp while
-   * message ordering (tsMsgId) and last_activity_at use the PROVIDER
-   * timestamp, and the append/touch gap can leave last_activity_at stale while
-   * a fresh post-deletion message exists. A saved Query is not worth silently
-   * suppressing a genuine resurfacing.
+   * The probe has NO `last_activity_at <= deleted_at` short-circuit. CLOCK
+   * CAVEAT: created_at is OUR ingest timestamp while message ordering (tsMsgId)
+   * and last_activity_at use the PROVIDER timestamp, and the append/touch gap
+   * can leave last_activity_at stale while a fresh post-deletion message
+   * exists. A saved Query is not worth silently suppressing a genuine
+   * resurfacing.
+   *
+   * It IS bounded, on WASTED probes only (spec 4.4 amended, fix wave 2). Past
+   * UNREAD_DELETED_PROBE_LIMIT wasted probes in one REQUEST the answer is
+   * assumed to be "hidden" without paying for it, the skip is counted, and the
+   * result reports `truncated` so the caller knows its list is a floor. The
+   * WALK is untouched: everything else in the stream keeps being consumed.
    */
   const threadResurfaces = async (item: ConversationItem, deletedAt: string): Promise<boolean> => {
-    // THE HARD BOUND (adversarial A2(b)). Past the limit this collect decides
-    // nothing more: the thread is treated as not-emitted and the walk stops
-    // right after, so the result is a FLOOR carrying `truncated` rather than an
-    // unbounded pile of reads that returns the same answer anyway.
-    if (deletedProbes >= UNREAD_DELETED_PROBE_LIMIT) {
-      probeBudgetSpent = true;
+    if (wastedProbesBefore + wastedProbes >= UNREAD_DELETED_PROBE_LIMIT) {
+      skippedDeletedThreads += 1;
       return false;
     }
     deletedProbes += 1;
     try {
       const page = await deps.messages.listByConversation(item.conversationId, { limit: 1 });
       const latest = page[0];
-      if (latest === undefined) return false;
-      return latest.direction === 'inbound' && latest.created_at > deletedAt;
+      const resurfaced =
+        latest !== undefined && latest.direction === 'inbound' && latest.created_at > deletedAt;
+      // Only a probe that bought NO row spends the bound. One that resurfaces a
+      // contact paid for itself and is bounded by `maxRows` like any candidate.
+      if (!resurfaced) wastedProbes += 1;
+      return resurfaced;
     } catch (err) {
       log.warn(
         { err, conversationId: item.conversationId },
         'unread feed: resurfacing probe failed (best-effort)',
       );
+      // A failed read bought no row either, and retrying a failing dependency
+      // for every thread in a wall is exactly the cost the bound exists for.
+      wastedProbes += 1;
       return false;
     }
   };
@@ -623,12 +663,11 @@ export async function collectUnreadRows(
       capped = true;
       break;
     }
-    // The probe bound, checked AFTER the cap so a collect that filled its rows
-    // is reported as `capped` (a supply statement) rather than `truncated` (a
-    // budget statement). Leaving the loop with neither the cap nor the stream
-    // exhausted is what makes `truncated` true below - the same posture the
-    // raw-scan budget produces, and the same forward path.
-    if (probeBudgetSpent) break;
+    // NOTHING ELSE STOPS THIS LOOP. The deleted-probe bound deliberately does
+    // NOT break here (fix wave 2): stopping the walk turned a wall of hidden
+    // deleted threads into a page of zero rows with no cursor, in a world that
+    // still had live unread behind it. The bound stops READING; the walk runs
+    // to the cap, the supply, or the budget as it always did.
   }
 
   return {
@@ -642,9 +681,13 @@ export async function collectUnreadRows(
     // The cap stopping emission tells us NOTHING about the remaining supply or
     // budget, so it excludes both other outcomes.
     consumedAll: !capped && state.scanExhausted,
-    truncated: !capped && !state.scanExhausted,
+    // A skipped (unprobed) deleted thread makes the list a FLOOR even when the
+    // stream drained: the answer for those threads was assumed, not read.
+    truncated: !capped && (!state.scanExhausted || skippedDeletedThreads > 0),
     capped,
     remainingBudget: Math.max(0, opts.budget - state.scanned),
     deletedProbes,
+    wastedProbes,
+    skippedDeletedThreads,
   };
 }

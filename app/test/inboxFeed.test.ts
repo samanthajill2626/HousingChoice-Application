@@ -1490,18 +1490,17 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(rowKeys(page)).toEqual(['c-live']);
   });
 
-  it('PROBE BOUND: a wall of hidden deleted threads truncates the page and fires the tripwire once', async () => {
-    const warn = vi.fn();
-    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
+  /**
+   * `hidden` deleted-contact threads (post-deletion OUTBOUND: each costs a
+   * probe and resurfaces nobody) NEWEST in the index, with `live` ordinary
+   * unread contacts behind them. The reviewers' A2 world.
+   */
+  function wallOfHiddenDeleted(hidden: number, live: number): Seed {
     const contacts: ContactItem[] = [];
     const conversations: ConversationItem[] = [];
     const latestMessage: Record<string, Partial<MessageItem>> = {};
     const DELETED_AT = '2026-06-01T00:00:00.000Z';
-
-    // 30 deleted contacts, each with ONE unread thread whose newest message is
-    // OUTBOUND: each costs a probe and none qualifies to resurface. They sit
-    // NEWEST in the index, ahead of the three rows the page actually wants.
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < hidden; i++) {
       const phone = `+1404555${String(6000 + i)}`;
       contacts.push({ contactId: `c-del-${i}`, type: 'tenant', phone, deleted_at: DELETED_AT });
       const id = `conv-del-${i}`;
@@ -1520,35 +1519,134 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
         created_at: '2026-06-11T00:00:00.000Z',
       };
     }
-    for (let i = 0; i < 3; i++) {
-      const made = unreadContact(`c-live-${i}`, `+1404555${String(7000 + i)}`, T(8 - i));
+    for (let i = 0; i < live; i++) {
+      const made = unreadContact(
+        `c-live-${String(i).padStart(2, '0')}`,
+        `+1404555${String(7000 + i)}`,
+        new Date(Date.parse(T(8)) - i * 60_000).toISOString(),
+      );
       contacts.push(made.contact);
       conversations.push(made.conversation);
     }
+    return { contacts, conversations, latestMessage };
+  }
+
+  it('PROBE BOUND: a wall of hidden deleted threads is skipped unprobed, and the LIVE rows behind it still render', async () => {
+    // BLOCKING regression from adversarial r2 finding 2 / conformance r2 1.1:
+    // fix wave 1 stopped the WALK at the bound, so this exact world returned
+    // ZERO rows with a NULL cursor - the inbox failure state, with a Retry that
+    // re-runs the identical deterministic prefix. Before that wave it returned
+    // all five rows, expensively. Fix wave 2 bounds the PROBES: past the bound
+    // a deleted-contact thread is treated as hidden without a read, and the
+    // walk carries on to the live rows behind it.
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
+    const seed = wallOfHiddenDeleted(27, 5);
+
+    const badge = await countUnreadRows(makeDeps(seed, undefined, logger));
+    // The five live rows are COUNTED, not lost behind the wall - and the count
+    // is honestly flagged as a floor, because thread 27 was never read.
+    expect(badge.unreadCount).toBe(5);
+    expect(badge.capped).toBe(false);
+    expect(badge.truncated).toBe(true);
 
     const page = await aggregateInbox(
-      { filter: 'unread', limit: 3 },
-      makeDeps({ contacts, conversations, latestMessage }, undefined, logger),
+      { filter: 'unread', limit: 25 },
+      makeDeps(seed, undefined, logger),
     );
-
-    // DELIBERATE POSTURE CHANGE (review fix wave 1, adversarial A2b): the walk
-    // used to pay a contact Query AND a message probe for every hidden row and
-    // only THEN reach the live ones. It now stops at UNREAD_DELETED_PROBE_LIMIT
-    // probes and reports a FLOOR - the three rows behind the wall are withheld
-    // with `truncated` rather than bought at unbounded cost. The residue itself
-    // is what has to go (backfill rule 3 / the delete-time reset), and the
-    // tripwire below is the signal that says so.
-    expect(page.rows).toHaveLength(0);
+    expect(rowKeys(page)).toEqual([
+      'c-live-00',
+      'c-live-01',
+      'c-live-02',
+      'c-live-03',
+      'c-live-04',
+    ]);
     expect(page.truncated).toBe(true);
+
+    // THE TRIPWIRE (adversarial r2 finding 7): attempted and skipped are
+    // SEPARATE fields, so the operator can tell 26 residents from 2,600 - the
+    // difference between "is this happening" and "how bad is it".
     const probeWarns = warn.mock.calls.filter(
       (c) => (c[0] as { event?: string })?.event === 'unread_deleted_probe_tripwire',
     );
-    expect(probeWarns).toHaveLength(1);
-    // The bound sits ONE above the tripwire, so tripping it always warns.
+    expect(probeWarns.length).toBeGreaterThanOrEqual(1);
     expect(probeWarns[0]![0]).toMatchObject({
       probes: UNREAD_DELETED_PROBE_LIMIT,
+      skipped: 27 - UNREAD_DELETED_PROBE_LIMIT,
       threshold: UNREAD_DELETED_PROBE_WARN,
     });
+  });
+
+  it('PROBE BOUND: a page behind the wall still gets a FORWARD PATH while supply remains', async () => {
+    // The other half of the dead-end: not merely rows, but a cursor. A page
+    // that stops with supply left must hand back something to page WITH.
+    const seed = wallOfHiddenDeleted(27, 5);
+
+    const page1 = await aggregateInbox({ filter: 'unread', limit: 3 }, makeDeps(seed));
+    expect(rowKeys(page1)).toEqual(['c-live-00', 'c-live-01', 'c-live-02']);
+    expect(page1.nextCursor).not.toBeNull();
+    // Still a floor: the skipped threads were never read.
+    expect(page1.truncated).toBe(true);
+
+    const page2 = await aggregateInbox(
+      { filter: 'unread', limit: 3, cursor: page1.nextCursor! },
+      makeDeps(seed),
+    );
+    expect(rowKeys(page2)).toEqual(['c-live-03', 'c-live-04']);
+  });
+
+  it('RESURFACING IS NOT WASTE: 50 resurfaced deleted contacts count in full and page in full', async () => {
+    // BLOCKING regression from adversarial r2 finding 1: fix wave 1 counted
+    // every probe against the bound, including the ones that produced a row, so
+    // a badge in this ordinary world answered 26 - not at BADGE_COUNT_CAP, and
+    // not through `capped`, the one flag the client was built to handle.
+    const DELETED_AT = '2026-06-01T00:00:00.000Z';
+    const contacts: ContactItem[] = [];
+    const conversations: ConversationItem[] = [];
+    const latestMessage: Record<string, Partial<MessageItem>> = {};
+    for (let i = 0; i < 50; i++) {
+      const phone = `+1404555${String(8000 + i)}`;
+      const id = `conv-back-${String(i).padStart(2, '0')}`;
+      contacts.push({
+        contactId: `c-back-${String(i).padStart(2, '0')}`,
+        type: 'tenant',
+        phone,
+        deleted_at: DELETED_AT,
+      });
+      conversations.push(
+        conv({
+          conversationId: id,
+          participant_phone: phone,
+          last_activity_at: new Date(Date.parse(T(12)) - i * 60_000).toISOString(),
+          unread_count: 1,
+        }),
+      );
+      // A post-deletion INBOUND: the product rule says this contact is BACK.
+      latestMessage[id] = {
+        type: 'sms',
+        direction: 'inbound',
+        body: 'are you still there?',
+        created_at: '2026-06-11T00:00:00.000Z',
+      };
+    }
+    const seed: Seed = { contacts, conversations, latestMessage };
+
+    const badge = await countUnreadRows(makeDeps(seed));
+    expect(badge).toEqual({ unreadCount: 50, capped: false, truncated: false });
+
+    const page1 = await aggregateInbox({ filter: 'unread', limit: 30 }, makeDeps(seed));
+    expect(page1.rows).toHaveLength(30);
+    expect(page1.truncated).toBeUndefined();
+    expect(page1.nextCursor).not.toBeNull();
+    const page2 = await aggregateInbox(
+      { filter: 'unread', limit: 30, cursor: page1.nextCursor! },
+      makeDeps(seed),
+    );
+    expect(page2.rows).toHaveLength(20);
+    expect(page2.truncated).toBeUndefined();
+    // All 50, once each.
+    const union = [...rowKeys(page1), ...rowKeys(page2)];
+    expect(new Set(union).size).toBe(50);
   });
 
   it('SCAN SENTINEL: the raw-scan total accumulates per REQUEST, not per collect', async () => {

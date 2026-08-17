@@ -949,6 +949,12 @@ export async function aggregateInbox(
     // per-collect threshold could never fire for a request that spent a little
     // in each of many of them.
     let deletedProbes = 0;
+    // The WASTED half of that total is a BUDGET, not just a statistic: it is
+    // threaded into every collect (like `remainingBudget`) so the probe bound
+    // is per REQUEST. `deletedSkipped` is what the bound refused to read, and
+    // it makes this page's answer a floor.
+    let wastedProbes = 0;
+    let deletedSkipped = 0;
     const unreadRows: InboxRow[] = [];
     let consumedAll = false;
     let budgetSpent = false;
@@ -1025,9 +1031,12 @@ export async function aggregateInbox(
           budget: remainingBudget,
           ...(scanPosition !== undefined && { startAfter: scanPosition }),
           excludeContactIds: seen,
+          wastedProbesBefore: wastedProbes,
         },
       );
       deletedProbes += collected.deletedProbes;
+      wastedProbes += collected.wastedProbes;
+      deletedSkipped += collected.skippedDeletedThreads;
       remainingBudget = collected.remainingBudget;
       if (collected.scanPosition !== undefined) scanPosition = collected.scanPosition;
 
@@ -1064,7 +1073,7 @@ export async function aggregateInbox(
     // exactly `startingBudget - remainingBudget` because ONE budget is threaded
     // through every collect; the in-collector WARN is per-walk and would miss a
     // request that scanned 200 in each of three collects.
-    warnDeletedProbes(log, deletedProbes);
+    warnDeletedProbes(log, { probes: deletedProbes, skipped: deletedSkipped });
     warnUnreadScanned(log, startingBudget - remainingBudget);
 
     // Rows sort by DISPLAYED lastActivityAt, as every other filter does. The
@@ -1121,6 +1130,13 @@ export async function aggregateInbox(
     } else {
       unreadCursor = encodeUnreadCursor(scanPosition, seen);
     }
+    // A FLOOR FOR A REASON THE BRANCHES ABOVE CANNOT SEE (fix wave 2): past the
+    // wasted-probe bound this request called some deleted-contact threads
+    // hidden WITHOUT reading them. That can happen on a walk that then drained
+    // its supply naturally, so it is ORed on rather than folded into the
+    // consumedAll/budget decision - the cursor keeps whatever those branches
+    // decided, and only the honesty flag changes.
+    if (deletedSkipped > 0) truncated = true;
     // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
     // the dashboard's empty-state and Load-more gating both key on rows.length.
     // This is LOAD-BEARING for the budget branch above (which mints a cursor
@@ -1338,7 +1354,10 @@ export async function countUnreadRows(deps: InboxRouterDeps): Promise<InboxUnrea
   // ONE collect IS the whole request here, so this collect's probe total is the
   // request total the tripwire wants. The shared module-scope limiter (the same
   // instance the unread PAGE fires) owns the threshold - do not re-test it here.
-  warnDeletedProbes(log, result.deletedProbes);
+  warnDeletedProbes(log, {
+    probes: result.deletedProbes,
+    skipped: result.skippedDeletedThreads,
+  });
   // THE SILENT ZERO (conformance C1): an early-stopped walk that found nothing
   // renders as no badge at all, which the operator reads as "caught up" while
   // unread rows sit behind the truncation. `truncated` is on the wire, but v1's

@@ -41,6 +41,20 @@ describe('notificationTag', () => {
     expect(notificationTag({})).toBeUndefined();
     expect(notificationTag(undefined)).toBeUndefined();
   });
+
+  it('gives unmatched_email a QUEUE-level tag - one shade entry for the whole triage queue', () => {
+    // No unmatchedId travels in the payload (the C1 data allowlist is
+    // {kind, callId, conversationId}), and the entry represents the QUEUE,
+    // not one item: each new arrival replaces it in place.
+    expect(notificationTag({ kind: 'unmatched_email' })).toBe('unmatched_email');
+  });
+
+  it('unmatched_email tag ignores stray ids (queue-level, always)', () => {
+    expect(notificationTag({ kind: 'unmatched_email', conversationId: 'conv-9' })).toBe(
+      'unmatched_email',
+    );
+    expect(notificationTag({ kind: 'unmatched_email', callId: 'CA9' })).toBe('unmatched_email');
+  });
 });
 
 describe('buildNotificationOptions', () => {
@@ -71,6 +85,46 @@ describe('buildNotificationOptions', () => {
       url: 'https://evil.example/phish',
     });
     expect(built.options.data).toEqual({ kind: 'missed_call', callId: 'CA2', conversationId: 'conv-2' });
+  });
+
+  it('message pushes renotify (alert per message) while staying non-time-sensitive', () => {
+    // D2: without renotify a same-tag replacement is SILENT, so every message
+    // after the first in a thread would land without a peep - the opposite of
+    // native messaging. It still must NOT pin itself to the shade.
+    const built = buildNotificationOptions({ kind: 'message', conversationId: 'conv-1' });
+    expect(built.options.renotify).toBe(true);
+    expect(built.options.requireInteraction).toBe(false);
+    expect(built.options.tag).toBe('message:conv-1');
+  });
+
+  it('unmatched_email pushes use the queue-level tag and renotify', () => {
+    const built = buildNotificationOptions({ kind: 'unmatched_email', title: 'Vendor' });
+    expect(built.options.tag).toBe('unmatched_email');
+    expect(built.options.renotify).toBe(true);
+    expect(built.options.requireInteraction).toBe(false);
+  });
+
+  it('requireInteraction remains exactly missed_call/pre_ring', () => {
+    for (const kind of ['message', 'unmatched_email', 'voicemail', 'test']) {
+      expect(
+        buildNotificationOptions({ kind, callId: 'x', conversationId: 'y' }).options
+          .requireInteraction,
+      ).toBe(false);
+    }
+    expect(buildNotificationOptions({ kind: 'missed_call', callId: 'x' }).options.requireInteraction).toBe(
+      true,
+    );
+    expect(buildNotificationOptions({ kind: 'pre_ring', callId: 'x' }).options.requireInteraction).toBe(
+      true,
+    );
+  });
+
+  it('never sets renotify without a tag, for an ALERTING kind either', () => {
+    // `renotify` REQUIRES a tag - setting it tagless throws in the browser.
+    // A message push with no conversationId has no tag, so it must not renotify.
+    const tagless = buildNotificationOptions({ kind: 'message' });
+    expect(tagless.options.tag).toBeUndefined();
+    expect(tagless.options.renotify).toBe(false);
   });
 
   it('falls back to the app title, always vibrates, and caps actions at two', () => {

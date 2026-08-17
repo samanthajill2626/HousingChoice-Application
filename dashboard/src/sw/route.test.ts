@@ -79,6 +79,17 @@ describe('resolveSafePath', () => {
       '/conversations/a%25b',
     );
   });
+
+  it('routes kind unmatched_email to /email', () => {
+    // An unmatched email has NO conversation - the tap lands on the triage queue.
+    expect(resolveSafePath({ kind: 'unmatched_email' })).toBe('/email');
+  });
+
+  it('conversationId still wins over kind', () => {
+    expect(resolveSafePath({ kind: 'unmatched_email', conversationId: 'c1' })).toBe(
+      '/conversations/c1',
+    );
+  });
 });
 
 describe('assertSameOriginPath - the LAST gate before navigation', () => {
@@ -106,6 +117,15 @@ describe('assertSameOriginPath - the LAST gate before navigation', () => {
 
   it('REFUSES the retired quick-reply path so a stale worker cannot 404 a user', () => {
     expect(assertSameOriginPath('/quick-reply/CA123', ORIGIN)).toBe('/');
+  });
+
+  it('allowlist admits exact /email only', () => {
+    // EXACT match, deliberately not a prefix: /email/quarantine is a second tab
+    // and never a push target, and /emails is not a route at all.
+    const origin = 'https://app.example';
+    expect(assertSameOriginPath('/email', origin)).toBe('/email');
+    expect(assertSameOriginPath('/email/quarantine', origin)).toBe('/');
+    expect(assertSameOriginPath('/emails', origin)).toBe('/');
   });
 
   it('strips a host that a candidate smuggled in, keeping only the path', () => {

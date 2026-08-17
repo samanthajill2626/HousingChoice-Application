@@ -154,6 +154,7 @@ import type {
 import {
   type PushNotification,
   type PushService,
+  type SendToAllResult,
   type SendToUserResult,
 } from '../../src/services/pushService.js';
 import {
@@ -267,6 +268,8 @@ export interface FakeWorld {
   vocabularyRepo: ContactVocabularyRepo;
   /** Every pushService.sendToUser call (M1.9b pre-ring/missed-call pushes), in order. */
   pushSends: { userId: string; notification: PushNotification }[];
+  /** sendToAll broadcasts (inbound-message pushes) - never used by voice. */
+  pushBroadcasts: { notification: PushNotification }[];
   /** Fake push service the voice router uses — records sends into pushSends. */
   pushService: PushService;
   /** VI create() inputs recorded by the fake adapter (voice-transcription), in order. */
@@ -1816,10 +1819,17 @@ export function createFakeWorld(): FakeWorld {
   // pre-ring / missed-call pushes (kind + payload — and that NO raw phone leaks
   // into them). Returns a "configured, 1 sent" tally; never touches the network.
   const pushSends: FakeWorld['pushSends'] = [];
+  // Fan-out pushes (inbound-message) land in their own recorder so the voice
+  // assertions on pushSends stay byte-identical.
+  const pushBroadcasts: FakeWorld['pushBroadcasts'] = [];
   const pushService: PushService = {
     async sendToUser(userId: string, notification: PushNotification): Promise<SendToUserResult> {
       pushSends.push({ userId, notification });
       return { configured: true, attempted: 1, sent: 1, pruned: 0, failed: 0 };
+    },
+    async sendToAll(notification: PushNotification): Promise<SendToAllResult> {
+      pushBroadcasts.push({ notification });
+      return { configured: true, users: 1, attempted: 1, sent: 1, pruned: 0, failed: 0 };
     },
   };
 
@@ -3320,6 +3330,7 @@ export function createFakeWorld(): FakeWorld {
     vocabularyAdds,
     vocabularyRepo,
     pushSends,
+    pushBroadcasts,
     pushService,
     viCreates,
     viTranscripts,

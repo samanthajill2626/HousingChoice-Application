@@ -32,7 +32,7 @@ import {
 import { registerMissedCallAutoTextJobHandler } from '../src/jobs/missedCallAutoText.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
-import type { PushService, SendToUserResult } from '../src/services/pushService.js';
+import type { PushService, SendToAllResult, SendToUserResult } from '../src/services/pushService.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -424,6 +424,14 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
       sendToUser(): Promise<SendToUserResult> {
         pushStarted = true;
         return new Promise<SendToUserResult>(() => {
+          /* deliberately never resolves */
+        });
+      },
+      // Interface completeness only: voice never broadcasts. It deliberately
+      // does NOT set pushStarted - that flag must stay proof of the PRE-RING
+      // send alone.
+      sendToAll(): Promise<SendToAllResult> {
+        return new Promise<SendToAllResult>(() => {
           /* deliberately never resolves */
         });
       },

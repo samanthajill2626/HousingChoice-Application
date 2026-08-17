@@ -10,6 +10,7 @@ import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createPushService } from '../src/services/pushService.js';
 import type { PushSubscription, SendOutcome, WebPushAdapter } from '../src/adapters/webPush.js';
+import type { UsersRepo } from '../src/repos/usersRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -242,5 +243,353 @@ describe('pushService.sendToUser', () => {
     expect(serialized).not.toContain('123 Main St');
     // The non-PII kind IS logged.
     expect(serialized).toContain('missed_call');
+  });
+});
+
+/** An allowlisted (FCM) push endpoint for the named device. */
+function ep(name: string): string {
+  return `https://fcm.googleapis.com/fcm/send/${name}`;
+}
+
+/**
+ * A purpose-made multi-user UsersRepo fake for the fan-out tests. It exists
+ * (rather than reusing makeFakeUsersRepo, which IS multi-user) because these
+ * tests need two things that helper does not offer: a listAll CALL COUNTER
+ * (the TTL cache asserts "did not re-scan") and failure injection on listAll
+ * and on the prune write. Only the three members pushService touches are
+ * implemented, so the whole literal is cast once.
+ *
+ * removePushSubscription bumps findByIdCalls on purpose: the real repo re-reads
+ * the user inside that write (usersRepo.ts:613), so the "no per-user read on
+ * the SEND path" assertion means what the spec says it means.
+ */
+function makeBroadcastWorld(userSpecs: { userId: string; endpoints: string[] }[]) {
+  const state = new Map(
+    userSpecs.map((u) => [
+      u.userId,
+      u.endpoints.map((endpoint) => ({
+        endpoint,
+        keys: { p256dh: `p256-${endpoint}`, auth: `auth-${endpoint}` },
+        created_at: '2026-08-16T00:00:00.000Z',
+      })),
+    ]),
+  );
+  let listAllCalls = 0;
+  let findByIdCalls = 0;
+  let failListAll = false;
+  let failRemoveFor: string | undefined;
+  const usersRepo = {
+    async listAll() {
+      listAllCalls += 1;
+      if (failListAll) throw new Error('scan down');
+      return userSpecs.map((u) => ({
+        userId: u.userId,
+        email: `${u.userId}@example.com`,
+        role: 'admin',
+        status: 'active',
+        created_at: '2026-08-16T00:00:00.000Z',
+        ...(state.get(u.userId)!.length > 0 && {
+          push_subscriptions: [...state.get(u.userId)!],
+        }),
+      }));
+    },
+    async findById(userId: string) {
+      findByIdCalls += 1;
+      const subs = state.get(userId);
+      if (subs === undefined) return undefined;
+      return {
+        userId,
+        email: `${userId}@example.com`,
+        role: 'admin',
+        status: 'active',
+        created_at: '2026-08-16T00:00:00.000Z',
+        push_subscriptions: [...subs],
+      };
+    },
+    async removePushSubscription(userId: string, endpoint: string) {
+      findByIdCalls += 1;
+      if (failRemoveFor === userId) throw new Error('prune write failed');
+      state.set(
+        userId,
+        (state.get(userId) ?? []).filter((s) => s.endpoint !== endpoint),
+      );
+    },
+  } as unknown as UsersRepo;
+  return {
+    usersRepo,
+    state,
+    calls: {
+      get listAll() {
+        return listAllCalls;
+      },
+      get findById() {
+        return findByIdCalls;
+      },
+    },
+    setFailListAll(v: boolean) {
+      failListAll = v;
+    },
+    /** Make the prune write (removePushSubscription) throw for ONE user. */
+    setFailRemoveFor(userId: string | undefined) {
+      failRemoveFor = userId;
+    },
+  };
+}
+
+describe('pushService.sendToAll', () => {
+  it('fans out to every user with subscriptions and aggregates the tally', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: [ep('a1'), ep('a2')] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+      { userId: 'usr_c', endpoints: [] },
+    ]);
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({ config, usersRepo: world.usersRepo, adapter });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    // users counts only the users that HAD a subscription (usr_c is skipped).
+    expect(result).toEqual({ configured: true, users: 2, attempted: 3, sent: 3, pruned: 0, failed: 0 });
+    expect(sentTo.slice().sort()).toEqual([ep('a1'), ep('a2'), ep('b1')].sort());
+  });
+
+  it('never calls findById on a fan-out with no Gone endpoints', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: [ep('a1')] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+    ]);
+    const { adapter } = fakeAdapter({});
+    const service = createPushService({ config, usersRepo: world.usersRepo, adapter });
+
+    await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    // listAll already returns full items; the SEND path must not re-read users.
+    expect(world.calls.listAll).toBe(1);
+    expect(world.calls.findById).toBe(0);
+  });
+
+  it('skips zero-subscription users with no log line', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_has', endpoints: [ep('a1')] },
+      { userId: 'usr_none', endpoints: [] },
+    ]);
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    // Subscription PRESENCE is the filter: a user with none costs no I/O and
+    // no log noise.
+    expect(JSON.stringify(capture.lines)).not.toContain('usr_none');
+  });
+
+  it('emits ONE aggregate info line per notification (kind + counts, never payload)', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: [ep('a1'), ep('a2')] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+    ]);
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    await service.sendToAll({
+      kind: 'message',
+      payload: { title: 'Keisha Jones', body: '123 Main St' },
+    });
+
+    const infoLines = capture.atLevel(30);
+    expect(infoLines).toHaveLength(1);
+    expect(infoLines[0]).toMatchObject({
+      msg: 'push: sendToAll complete',
+      kind: 'message',
+      users: 2,
+      attempted: 3,
+      sent: 3,
+      pruned: 0,
+      failed: 0,
+    });
+    const serialized = JSON.stringify(capture.lines);
+    expect(serialized).not.toContain('Keisha Jones');
+    expect(serialized).not.toContain('123 Main St');
+  });
+
+  it('isolates a failing DEVICE: an adapter throw is tallied and the next user still gets sent', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: [ep('a1')] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+    ]);
+    const { adapter, sentTo } = fakeAdapter({ [ep('a1')]: 'throw' });
+    const service = createPushService({ config, usersRepo: world.usersRepo, adapter });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    expect(result).toEqual({ configured: true, users: 2, attempted: 2, sent: 1, pruned: 0, failed: 1 });
+    // The adapter was still ASKED for both; only B succeeded.
+    expect(sentTo).toEqual([ep('a1'), ep('b1')]);
+    // A transient failure is never a prune signal.
+    expect(world.state.get('usr_a')!.map((s) => s.endpoint)).toEqual([ep('a1')]);
+  });
+
+  it('isolates a failing USER: a rejecting prune write does not abort the fan-out', async () => {
+    const config = loadConfig(VAPID_ENV);
+    // usr_a holds a NON-allowlisted endpoint, so the shared loop prunes it
+    // BEFORE any POST - and that await sits outside the per-device try, so a
+    // repo failure there really does reject out of the shared loop.
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: ['https://169.254.169.254/x'] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+    ]);
+    world.setFailRemoveFor('usr_a');
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    expect(result).toEqual({ configured: true, users: 2, attempted: 2, sent: 1, pruned: 0, failed: 1 });
+    expect(sentTo).toEqual([ep('b1')]);
+    expect(
+      capture.atLevel(40).some((l) => /broadcast to one user failed/.test(String(l['msg']))),
+    ).toBe(true);
+  });
+
+  it('returns a zeroed result and logs error when listAll throws', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    world.setFailListAll(true);
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    expect(result).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(sentTo).toEqual([]);
+    expect(capture.atLevel(50).some((l) => /listing users failed/.test(String(l['msg'])))).toBe(true);
+  });
+
+  it('is a single-log no-op when VAPID is unconfigured', async () => {
+    const config = loadConfig({ NODE_ENV: 'test' } as NodeJS.ProcessEnv);
+    const world = makeBroadcastWorld([
+      { userId: 'usr_a', endpoints: [ep('a1')] },
+      { userId: 'usr_b', endpoints: [ep('b1')] },
+    ]);
+    const capture = createLogCapture();
+    // No adapter injected: createWebPushAdapter returns undefined when off.
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    expect(result).toEqual({ configured: false, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    // ONE line for the whole broadcast, never one per user, and WARN not ERROR.
+    expect(capture.lines).toHaveLength(1);
+    expect(capture.atLevel(50)).toHaveLength(0);
+    expect(capture.atLevel(40).some((l) => /push not configured/.test(String(l['msg'])))).toBe(true);
+    // The user list is not even read when push is off.
+    expect(world.calls.listAll).toBe(0);
+  });
+
+  it('caches the user list for 60s: a second send does not re-scan', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(1);
+
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(1);
+
+    t = 59_999;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(1);
+
+    t = 60_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+  });
+
+  it('prunes a Gone endpoint from the repo AND does not re-attempt it within the TTL', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('live'), ep('dead')] }]);
+    const { adapter, sentTo } = fakeAdapter({ [ep('dead')]: { result: 'gone' } });
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    const first = await service.sendToAll(note);
+    expect(first).toEqual({ configured: true, users: 1, attempted: 2, sent: 1, pruned: 1, failed: 0 });
+    expect(world.state.get('usr_a')!.map((s) => s.endpoint)).toEqual([ep('live')]);
+
+    sentTo.length = 0;
+    t = 30_000;
+    const second = await service.sendToAll(note);
+
+    // Same cached list, but the dead endpoint was dropped from the cached item
+    // too - so it is never re-attempted.
+    expect(world.calls.listAll).toBe(1);
+    expect(sentTo).toEqual([ep('live')]);
+    expect(second).toEqual({ configured: true, users: 1, attempted: 1, sent: 1, pruned: 0, failed: 0 });
+  });
+
+  it('passes undefined options when ttlSeconds is unset (message pushes have no TTL)', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1'), ep('a2')] }]);
+    // The shared fakeAdapter drops options, so D9 needs the inline shape.
+    const seenOptions: unknown[] = [];
+    const adapter: WebPushAdapter = {
+      async sendToSubscription(_subscription, _payload, options) {
+        seenOptions.push(options);
+        return { result: 'sent', statusCode: 201 };
+      },
+    };
+    const service = createPushService({ config, usersRepo: world.usersRepo, adapter });
+
+    await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
+
+    expect(seenOptions).toEqual([undefined, undefined]);
   });
 });

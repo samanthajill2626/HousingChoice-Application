@@ -237,7 +237,10 @@ arm leaves an optimistic `1` committed against a server truth of 5, with no
 event to reconcile it. The no-write arm emits no `conversation.updated`, because
 nothing changed; the returned count is what keeps the client honest.
 
-The re-read costs one extra read on the failure path only.
+Cost: on the SUCCESS path, nothing extra. On a condition failure, one re-read.
+In the rare `raced` case (the row was concurrently reset between the write and
+the re-read) the route retries the write once and may re-classify, so the worst
+case is two reads and two writes - still bounded, and only on a contended row.
 
 **`POST /api/conversations/:conversationId/unread`** (`app/src/routes/api.ts`,
 beside the existing `/read`). Used by relay-group rows, group-text rows, and the
@@ -326,14 +329,22 @@ when `unreadCount === 0`, render "Mark unread" in the same slot, with
 `aria-label={`Mark ${row.name} unread`}`. Exactly one of the two actions is
 present at any time.
 
-**No client-side D5 guards on the row, deliberately.** Review established that
-both proposed guards are unreachable: a `deleted: true` row is emitted only when
-some thread is unread (`inbox.ts:786`, `:645-647`), and a CLOSED relay group is
-never an inbox row at all because the relay source reads only the `open` and
-`connecting` partitions (`inbox.ts:1396`). Both states are mutually exclusive
-with `unreadCount === 0`, so a guard would be dead code and a test for it would
-prove nothing. Carry a comment saying so, so nobody restores it. D5 on this
-surface is enforced by the server.
+**One client-side guard on the row: `deleted`. Not the closed-relay one.**
+(Corrected during plan review - the earlier claim that BOTH guards were dead
+code was half wrong.)
+
+- **`row.deleted` -> guard, and keep it.** A deleted row is normally emitted only
+  when some thread is unread (`inbox.ts:786`, `:645-647`), which would make the
+  guard unreachable. But `useInbox.markRead` sets `unreadCount: 0` optimistically
+  and COMMITS it to `base`, so on the `all` filter a deleted row can genuinely
+  sit at 0 with the action showing. Clicking it earns a silent 409.
+- **Closed relay group -> no guard.** That one IS unreachable on a row: the relay
+  source reads only the `open` and `connecting` partitions (`inbox.ts:1396`).
+  Say so in a comment so nobody adds it. (The conversation PAGE guard is live -
+  see 7.3.)
+
+D5 on this surface remains server-enforced; the `deleted` guard is a usability
+measure that avoids a pointless round trip.
 
 `useInbox` gains `markUnread(row)`, the mirror of `markRead`:
 
@@ -587,9 +598,13 @@ Dashboard:
 - `useInbox.markUnread`: per-kind endpoint dispatch, optimistic patch to 1,
   rollback on rejection, and `rollbackRowsCleared` called with the same key
   `markRead` would have used.
-- Mark-read-then-mark-unread: assert the pending clear is purged by driving the
-  FETCH-GENERATION seam (resolve a `getUnreadCount` and assert the displayed
-  count), NOT a clock. A clock-driven test passes with or without the call.
+- Mark-read-then-mark-unread: assert `rollbackRowsCleared` was called with the
+  right key. (Revised during plan review: an earlier draft demanded this be
+  proved through the FETCH-GENERATION seam, but `useInbox.test.tsx` stubs
+  `UnreadContext` wholesale by design, so that seam is not reachable from the
+  file that owns this test. The spy assertion is what that file can actually
+  prove; the generation behavior is `UnreadContext`'s own, already covered by
+  `UnreadContext.test.tsx`.)
 - The auto-read latch, TRIGGER path: with the contact page mounted, invoking the
   header action and then firing a `message.persisted` event does NOT issue
   `markInboxRead`. Same shape for the conversation page's mount-effect read.

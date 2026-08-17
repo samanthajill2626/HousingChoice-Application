@@ -44,9 +44,12 @@ review finding. Do not re-derive them; they are verified.
    `../src/...`. There is NO `app/src/repos/conversationsRepo.integration.test.ts`
    and no `seedConversation` helper anywhere.
 2. **The unread integration suite is `app/test/unreadIndexRepo.integration.test.ts`.**
-   It seeds rows with raw `PutCommand` (so it CAN express any shape: closed,
-   `group_text`, legacy-no-`type`, `unread_count: 5`), and asserts BOTH the item
-   shape via `getById` AND index membership via `queryUnreadPage`.
+   Its `byUnread` describe (line 51) creates rows THROUGH THE REPO and has no
+   raw-seed helper of its own; the raw `PutCommand` seeds elsewhere in the file
+   belong to other describes with different table variables. You will add a
+   local `seedRaw` (S1.1). It asserts BOTH the item shape (via its `rawItem`
+   helper - the only way to prove an attribute is genuinely ABSENT) AND index
+   membership via `queryUnreadPage`.
 3. **That suite SELF-SKIPS when DynamoDB Local is unreachable** (it probes
    `DYNAMODB_ENDPOINT`, default `http://localhost:8000`). A "green" run without
    Docker means SKIPPED, not passing - so the TDD red state is unobservable.
@@ -94,10 +97,34 @@ before trusting any red or green.
 
 ## S1.1 RED - tests
 
-Add a `describe('setUnread', ...)` block to
-`app/test/unreadIndexRepo.integration.test.ts`, using that file's existing raw
-`PutCommand` seeding idiom and its both-sides assertion style (item shape AND
-index membership). Cases:
+Add a `describe('setUnread', ...)` block INSIDE the existing
+`describe.skipIf(!reachable)('byUnread index + unread_flag ...')` at
+`app/test/unreadIndexRepo.integration.test.ts:51`, so it inherits that block's
+throwaway table prefix and lifecycle.
+
+**Seeding: write a local helper; there is no existing one to reuse.** That
+describe has `doc`, `table`, `rawItem`, `unreadIds` and `nextPhone` in scope but
+does NOT seed with `PutCommand` itself - it goes through the repo. The raw
+`PutCommand` seeds elsewhere in the file (lines ~333, ~400, ~426, ~598) live in
+the backfill/GSI describes and reference DIFFERENT table variables
+(`contactsTable`, `convTable`, `messagesTable`); do not reach for them.
+
+Add, inside the byUnread describe:
+
+```ts
+  /** Seed a conversation row of an ARBITRARY shape. The repo's creators cannot
+   *  express closed / group_text / legacy-no-type / a pre-set unread_count, and
+   *  every one of those is a case the condition must be proved against. */
+  async function seedRaw(item: Record<string, unknown>): Promise<string> {
+    const conversationId = `conv-${randomUUID()}`;
+    await doc.send(new PutCommand({ TableName: table, Item: { conversationId, ...item } }));
+    return conversationId;
+  }
+```
+
+Assert BOTH sides the way this file already does - item shape via `rawItem`
+(the only way to prove an attribute is genuinely ABSENT) and index membership
+via `unreadIds`. Cases:
 
 - read 1:1 -> `unread_count` 1, `unread_flag` stamped, row present in
   `queryUnreadPage`.
@@ -188,19 +215,24 @@ in the same commit - it is the doc every future reader trusts.
 
 ## S1.5 Update every full-literal `ConversationsRepo` fake (same commit)
 
-Adding a required interface method breaks typecheck in each of these. Add a
-`setUnread` implementation to all of them:
+Adding a required interface method breaks typecheck in every file holding a
+FULL OBJECT LITERAL of the repo. Do not trust this list blindly - a `resetUnread`
+mention is not the same as a literal. Derive it, then fix each:
 
-- `app/test/helpers/twilioWebhookHarness.ts` (the one S2/S3 route tests use)
-- `app/test/contactCapture.test.ts`
-- `app/test/conversationHub.integration.test.ts`
-- `app/test/scheduledSendSuppression.test.ts`
-- `app/test/sendMessage.test.ts`
-- `app/test/unreadIndexRepo.integration.test.ts` (if it holds a literal)
+```
+grep -rln "resetUnread" app --include=*.ts | grep -v node_modules
+```
 
-Confirm the list with:
-`grep -rln "resetUnread" app --include=*.ts | grep -v node_modules`
-and check each hit for a full object literal rather than a `Pick<>`.
+For each hit, open it and classify:
+- **Full literal** (an object satisfying `ConversationsRepo`) -> add `setUnread`.
+- **Injects the real repo** (e.g. `conversationHub.integration.test.ts`) -> no
+  change needed; it gets the method for free.
+- **`Pick<>` / partial** -> no change unless the picked set is widened.
+
+Known full literals at the time of writing:
+`app/test/helpers/twilioWebhookHarness.ts` (the one S2/S3 route tests use),
+`app/test/contactCapture.test.ts`, `app/test/scheduledSendSuppression.test.ts`,
+`app/test/sendMessage.test.ts`. Verify rather than assume.
 
 **The harness fake's `setUnread` MUST actually implement the condition** -
 refuse when the row is absent, when the bucket predicate fails, or when
@@ -275,23 +307,52 @@ undefined on empty/all-ineligible) and `bucketFor`.
 
 ## S2.2 The shared route body
 
-All three routes share this shape. Write it ONCE as a helper in
-`app/src/lib/markUnread.ts` taking the resolved conversation and the repo, and
-returning a discriminated result the route maps to status codes:
+All three routes share this shape. Write it ONCE in `app/src/lib/markUnread.ts`
+as a PURE function - it takes the conversation and a narrow repo view and
+RETURNS a discriminated result. **It must not emit events.** `markUnread.ts` is
+a lib with no event-bus dependency, and giving it one to save three lines at
+each call site would invert the layering; the ROUTE owns the emit.
 
-1. `setUnread(conversationId, { bucket: bucketFor(conv) })`.
-2. On `ConditionalCheckFailedException` -> `classifyConditionFailure`.
-   - `not_found` -> caller's not-found code (see S3.3: the contact route uses
-     `contact_not_found`, the others `conversation_not_found`).
-   - `ineligible` -> 409 `thread_not_markable_unread`.
-   - `already_unread` -> 200, no write, **no `conversation.updated` emit**
-     (nothing changed), carrying the real count.
-   - `raced` -> retry `setUnread` ONCE; if it fails again, classify once more
-     and map without a second retry (a `raced` on the retry becomes 409).
-3. On success emit `conversation.updated` with
-   `toConversationUpdatedEvent(conversation)`.
-4. Respond with a top-level `unreadCount` number in every 200 (see S4 - the
-   client has no other typed source for it).
+```ts
+export type MarkUnreadResult =
+  | { kind: 'wrote'; conversation: ConversationItem }
+  | { kind: 'already_unread'; conversation: ConversationItem }
+  | { kind: 'gone' }
+  | { kind: 'ineligible' };
+
+export async function applyMarkUnread(
+  conv: ConversationItem,
+  repo: Pick<ConversationsRepo, 'setUnread' | 'getById'>,
+): Promise<MarkUnreadResult>;
+```
+
+Behavior:
+
+1. `setUnread(conv.conversationId, { bucket: bucketFor(conv) })` -> `wrote`.
+2. On `ConditionalCheckFailedException` -> `classifyConditionFailure`:
+   - `not_found` -> `gone`
+   - `ineligible` -> `ineligible`
+   - `already_unread` -> `already_unread`
+   - `raced` -> retry `setUnread` ONCE. If the retry succeeds -> `wrote`. If it
+     fails, classify once more and map WITHOUT a second retry; a `raced` on the
+     retry also becomes `ineligible` at the boundary (see the code note below).
+
+Route mapping:
+
+- `wrote` -> emit `conversation.updated` with
+  `toConversationUpdatedEvent(conversation)`, respond 200.
+- `already_unread` -> 200, **no emit** (nothing changed).
+- `gone` / `ineligible` -> the caller's codes (S2.3, S3.1-S3.3).
+- Every 200 carries a top-level `unreadCount` number (S4 - the client has no
+  other typed source for it).
+
+**Code note on the terminal `raced`.** Collapsing a second `raced` into
+`ineligible` answers `thread_not_markable_unread` for a thread that IS markable
+- it says the opposite of what happened. It is accepted because a double race is
+vanishingly rare, the client treatment is identical (the retryable inline
+message), and the honest alternative is a fifth status code nothing would
+branch on. Put that reasoning in a comment; do not let a reader conclude the
+mapping is a mistake.
 
 ## S2.3 RED + GREEN - the conversation route
 
@@ -350,13 +411,27 @@ Response `{ ok: true, unreadCount }`. Tests:
   carries the pool number (the `newestMarkable` filter).
 - The same classification arms as S2.
 
-## S3.3 Not-found vocabulary
+## S3.3 The `gone` outcome on the fan-in routes
 
-The shared body's `not_found` outcome must map to **`contact_not_found`** on the
-contact route and `no_conversation_for_phone` / `conversation_not_found` on the
-others. Reusing one literal across all three leaks the wrong noun to the client.
+`gone` means THE SELECTED CONVERSATION vanished between selection and write - it
+does NOT mean the contact is missing. So on the two fan-in routes it must NOT
+map to `contact_not_found` (that code already means something else, and the
+contact demonstrably exists: the route loaded it in step 1). Map `gone` to the
+retryable **`409 no_markable_thread`**, which is exactly what it is - the chosen
+thread is no longer markable. `contact_not_found` stays reserved for the step-1
+lookup miss.
 
-## S3.4 Registration and comments
+On the conversation route `gone` maps to `404 conversation_not_found`, where the
+noun is correct.
+
+## S3.4 Route-level race tests
+
+Both fan-in routes need a test for the `raced` path (a concurrent reset between
+write and re-read) and for `gone`. Drive both through the harness fake's
+`setUnread`, which S1.5 requires to implement the condition. An earlier draft
+specified the classifier's unit tests but no route-level exercise of these arms.
+
+## S3.5 Registration and comments
 
 Keep `POST /unread` above `POST /:contactId/unread`. Comment that this is
 house-style belt-and-braces, NOT a live hazard - the paths are one and two
@@ -367,7 +442,7 @@ Comment the GSI-lag dependency on both
 degrades gracefully under participant-GSI lag, a fan-IN "pick exactly one" does
 not, so `409 no_markable_thread` is EXPECTED and RETRYABLE, not an error state.
 
-## S3.5 Verify
+## S3.6 Verify
 
 Route tests green; `npm run typecheck`. Commit.
 
@@ -427,24 +502,30 @@ export async function markInboxUnread(
 Files: `dashboard/src/routes/inbox/InboxRow.tsx`, `useInbox.ts`, `Inbox.tsx`,
 plus `InboxRow.test.tsx`, `useInbox.test.tsx`, `Inbox.test.tsx`.
 
-## S5.1 REQUIRED FIRST: fix the colliding selector idiom
+## S5.1 The existing row test goes VACUOUS, not red
 
-`InboxRow.test.tsx:78-81` (and the same idiom elsewhere) matches the Mark-read
-button with `/mark .* read/i`. **That regex also matches "Mark Ada unread"** -
-`.*` absorbs "Ada un" and "read" matches the tail of "unread". So the existing
-"omits the Mark read action for already-read rows" assertion goes RED the moment
-this feature ships, and it is not a real failure.
+There is NO selector collision. `/mark .* read/i` has a LITERAL SPACE before
+`read`, and "Mark Ada unread" has no space there ("un" precedes it), so the
+existing idiom cannot match the new button. Verified:
 
-Before writing any new row test, update the existing selectors to disambiguate.
-Use a word boundary: `/mark .*\bread\b/i` does NOT match inside "unread"
-(the `r` follows the word character `n`). Apply to:
-- `dashboard/src/routes/inbox/InboxRow.test.tsx`
-- every other dashboard test using the idiom
-  (`grep -rn "mark .\* read" dashboard/src`)
-- the e2e specs sharing it (`grep -rn "mark .\* read" e2e/`)
+```
+/mark .* read/i.test('Mark Ada read')   === true
+/mark .* read/i.test('Mark Ada unread') === false
+```
 
-Run those suites and confirm still-green BEFORE adding the feature. A red here
-after the feature lands is ambiguous; a green here first makes it diagnostic.
+Do NOT "fix" those selectors. An earlier draft of this plan mandated a
+required-first rewrite of them across dashboard and e2e; it was based on a
+misread of the regex and would have been pure churn.
+
+The real problem is quieter. `InboxRow.test.tsx:78-81` ("omits the Mark read
+action for already-read rows") keeps PASSING after this feature ships - but it
+now passes while a "Mark unread" button sits in that exact slot, so it no longer
+proves what its name claims. It goes vacuous rather than red, which is the
+failure mode nobody notices.
+
+Fix it by asserting MUTUAL EXCLUSION rather than absence, in S5.4's tests:
+at `unreadCount === 0` assert "Mark unread" present AND "Mark read" absent; at
+`unreadCount > 0` assert the reverse. Keep the existing test's regex as-is.
 
 ## S5.2 `InboxRow.tsx`
 
@@ -507,6 +588,14 @@ there is **that `rollbackRowsCleared` was called with the right key** - not a
 fetch-generation experiment. Do not attempt the generation seam in this file;
 the first draft named a test that file cannot deliver.
 
+`InboxRow.test.tsx` (the render list an earlier draft dropped):
+- **mutual exclusion** (S5.1): at `unreadCount === 0`, "Mark unread" present AND
+  "Mark read" absent; at `unreadCount > 0`, the reverse. Assert BOTH directions
+  - an absence-only test goes vacuous rather than red.
+- clicking "Mark unread" calls `onMarkUnread` once with the row.
+- a `deleted` row at `unreadCount 0` renders NEITHER action.
+
+`useInbox.test.tsx`:
 - per-kind dispatch (relay_group / group_text -> `markConversationUnread`;
   contact -> `markInboxUnread({ contactId })`; phone fallback ->
   `markInboxUnread({ phone })`)
@@ -526,7 +615,8 @@ the first draft named a test that file cannot deliver.
 
 Files: `dashboard/src/routes/contact/useMarkContactRead.ts`,
 `dashboard/src/routes/conversation/useMarkThreadRead.ts` (new),
-`RelayGroupView.tsx` / `GroupTextView.tsx` (the components that own the mount
+`ConversationDetail.tsx` (its local `RelayGroupView`) and `GroupTextView.tsx`
+(see S7 - `RelayGroupView` is NOT a file) (the components that own the mount
 read), plus tests.
 
 ## S6.1 Contract
@@ -590,6 +680,15 @@ ruling that this read is UNWIRED from the badge's optimistic layer, pinned by
 regression spies in `GroupTextView.test.tsx:27-31` and
 `ConversationDetail.test.tsx:149-151`.
 
+**No identity RESET here, unlike S6.2 - and say why in a comment.** The contact
+page needs one because it re-renders the same component across a param change.
+`ConversationDetail` does not: its loading branch (`:118-133`) unmounts the child
+view while the new header loads, so a `conversationId` change gives
+`useMarkThreadRead` a genuinely fresh mount and the ref starts null. That is a
+load-bearing property of an unrelated component, so an optimization that keeps
+the child mounted across the swap would silently resurrect the
+suppressed-forever bug. Leave the reason in the code, not just here.
+
 ## S6.4 Tests
 
 - TRIGGER: after `suppressAndDrain()`, a `message.persisted` event does NOT
@@ -616,15 +715,24 @@ than working around it.
 
 # S7 - Thread header actions
 
-Files: `dashboard/src/routes/conversation/RelayGroupView.tsx` AND
-`GroupTextView.tsx`, `dashboard/src/routes/contact/ContactDetail.tsx`,
+Files: `dashboard/src/routes/conversation/ConversationDetail.tsx` (which CONTAINS
+`RelayGroupView`), `dashboard/src/routes/conversation/GroupTextView.tsx`,
+`dashboard/src/routes/contact/ContactDetail.tsx`,
 `dashboard/src/routes/contact/ContactActionsMenu.tsx`, plus tests.
 
-**Both group views, explicitly.** `/conversations/:id` redirects a plain 1:1 to
-the contact page, so that route renders `RelayGroupView` or `GroupTextView` -
-and those components own the header and the mount read, not `ConversationDetail`.
-The first draft named only `ConversationDetail`, which would have shipped no
-action at all for group texts while every named test still passed.
+**Both group views, and note where they live.** `/conversations/:id` redirects a
+plain 1:1 to the contact page, so that route renders one of two components, each
+owning its own header and mount read:
+
+- `RelayGroupView` - **NOT a file.** It is a non-exported local function inside
+  `ConversationDetail.tsx` (props at `:169`, definition at `:175`, rendered at
+  `:141`). Edit it in place; do not go looking for `RelayGroupView.tsx`, and do
+  not extract it.
+- `GroupTextView` - a real file, `GroupTextView.tsx`.
+
+An earlier draft named only `ConversationDetail`, which would have shipped no
+action for group texts. The draft that "fixed" it named `RelayGroupView.tsx`, a
+file that does not exist. Both mistakes passed every test those drafts named.
 
 Flow on both surfaces: `await handle.suppressAndDrain()`, then `await` the POST,
 then `navigate('/inbox')`. Render a **pending state** while outstanding (assert
@@ -663,6 +771,29 @@ clear, so there is nothing to roll back. `ContactDetail.test.tsx` has NO
 
 Spec 9.2 step 4 drives the CONTACT page action; keep the e2e and this slice
 consistent about it living in the kebab.
+
+## S7 tests (spec 9.1's header assertions - do not skip)
+
+An earlier draft of this plan lost this list in a rewrite, leaving six spec
+assertions in no task at all - including the one the whole D2 arc rests on.
+
+For BOTH surfaces (the local `RelayGroupView`, `GroupTextView`, and the contact
+kebab):
+
+1. **Calls `suppressAndDrain` BEFORE the POST.** This is the component-level
+   wiring test for S6's drain; without it, S6 can be perfect and S7 can still
+   fail to call it. Assert ORDER, not just that both happened.
+2. Navigates to `/inbox` on success.
+3. Does NOT navigate on rejection.
+4. Renders the pending state while the drain/POST is outstanding.
+5. A `409 no_markable_thread` renders "Could not mark unread - try again" and
+   LEAVES THE ACTION AVAILABLE.
+6. Visibility: the group action is absent for a closed relay group; the contact
+   kebab item is absent for a soft-deleted contact.
+
+Plus: neither surface calls into `UnreadContext`. `GroupTextView.test.tsx` and
+`ConversationDetail.test.tsx` already have spies to extend;
+`ContactDetail.test.tsx` has NO `UnreadContext` mock, so ADD one there.
 
 ---
 

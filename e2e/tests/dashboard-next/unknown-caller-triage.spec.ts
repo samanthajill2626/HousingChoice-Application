@@ -75,11 +75,15 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
   expect(row!.why).toBe('New unknown contact');
 
   // (3) The Inbox row for the caller links to the CONTACT page (never the
-  // phone-fallback list URL) and carries the Needs-triage chip.
+  // phone-fallback list URL) and carries the Needs-triage chip. Addressed by
+  // href, NOT by preview copy: the row's preview is a race between the
+  // missed-call auto-text body and the "Voicemail" stamp (call-inbox-unread),
+  // and the old `hasText: 'Call'` only ever matched "...missed your call!" in
+  // the auto-text - never the channel chip.
   await page.goto(`${NEXT}/inbox`);
-  const inboxRow = page.getByRole('link', { name: /needs triage/i }).filter({ hasText: 'Call' });
+  const inboxRow = page.locator(`a[href="/contacts/${stub!.contactId}"]`);
   await expect(inboxRow).toBeVisible();
-  await expect(inboxRow).toHaveAttribute('href', `/contacts/${stub!.contactId}`);
+  await expect(inboxRow).toContainText(/needs triage/i);
 
   // (4) The legacy ?phone= deep-link seeds the Unknown list's search box and
   // shows the captured caller's row.

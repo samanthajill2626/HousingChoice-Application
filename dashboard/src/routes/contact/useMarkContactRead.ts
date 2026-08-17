@@ -13,14 +13,24 @@ import { useCallback, useEffect, useRef } from 'react';
 import { markInboxRead, useEventStream } from '../../api/index.js';
 
 export function useMarkContactRead(contactId: string): void {
-  // Skip overlapping calls (the fan-out does a phone→conversations lookup); the
-  // server is idempotent so a missed one is reconciled by the next trigger.
+  // Coalesce overlapping calls (the fan-out does a phone->conversations lookup):
+  // ONE request in flight, and a trigger that lands meanwhile schedules exactly
+  // ONE trailing re-mark once it settles. Without the trailing re-fire, a second
+  // event inside one round trip (a missed call's terminal summary right behind
+  // its ring, two texts in quick succession) was DROPPED, and the read that was
+  // in flight had been issued against a thread that was still read - leaving the
+  // thread unread while the operator was looking straight at it. The server is
+  // idempotent, so the trailing call is cheap when it turns out redundant.
   const inFlight = useRef(false);
+  const trailing = useRef(false);
 
   const markRead = useCallback(() => {
     if (contactId.length === 0) return;
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-    if (inFlight.current) return;
+    if (inFlight.current) {
+      trailing.current = true;
+      return;
+    }
     inFlight.current = true;
     void markInboxRead({ contactId })
       .catch(() => {
@@ -28,6 +38,10 @@ export function useMarkContactRead(contactId: string): void {
       })
       .finally(() => {
         inFlight.current = false;
+        if (trailing.current) {
+          trailing.current = false;
+          markRead();
+        }
       });
   }, [contactId]);
 

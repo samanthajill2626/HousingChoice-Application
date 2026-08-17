@@ -85,6 +85,12 @@ describe('InboxRow', () => {
     expect(screen.getByText('Call')).toBeInTheDocument();
   });
 
+  it('does NOT prefix an outbound CALL preview with "You:" (the preview already names its direction)', () => {
+    renderRow(mkRow({ channel: 'call', direction: 'outbound', preview: 'Outgoing call - 42s' }));
+    expect(screen.getByText('Outgoing call - 42s')).toBeInTheDocument();
+    expect(screen.queryByText(/^You:/)).not.toBeInTheDocument();
+  });
+
   it('renders a relay_group row with a Relay group chip, linking to the conversation view', () => {
     renderRow(
       mkRow({

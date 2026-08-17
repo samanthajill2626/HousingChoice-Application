@@ -11,8 +11,7 @@
 // phone never rides the TwiML URL.
 import type { MessagingAdapter } from '../adapters/messaging.js';
 import type { AppConfig } from '../lib/config.js';
-import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
-import { callPreview } from '../lib/callPreview.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import {
@@ -191,31 +190,19 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
         transcriptChannelRoles: { '1': 'staff', '2': 'client' },
       });
       if (!appended.deduped) {
-        // INBOX (inbound-calls-invisible-in-inbox): an outbound call re-sorts
-        // the contact's thread with an "Outgoing call" preview - never unread
-        // (staff placed it). Same touchLastActivity the text senders use; the
-        // status callback re-stamps the outcome later. Best-effort: a touch
-        // failure logs and never fails the originate (the call is live).
-        let touched;
-        try {
-          touched = await conversations.touchLastActivity(
-            conversation.conversationId,
-            callPreview({ direction: 'outbound', callStatus: 'ringing' }),
-            startedAt,
-          );
-        } catch (err) {
-          log.error(
-            { err, callSid, conversationId: conversation.conversationId },
-            'originate: touchLastActivity failed - call row persisted, inbox stale',
-          );
-        }
+        // INBOX (inbound-calls-invisible-in-inbox): deliberately NO conversation
+        // stamp here. The navigator's own leg has no status callback and a
+        // never-accepted originate (unanswered cell, whisper timeout, DNC
+        // re-check) emits no <Dial>, so nothing would ever close out an
+        // "Outgoing call" stamped now - it would pin the thread at the top of
+        // the inbox forever. The <Dial action> summary (/voice/status) stamps
+        // the outbound outcome once the target was actually dialed.
         events.emit('message.persisted', {
           conversationId: conversation.conversationId,
           tsMsgId: appended.tsMsgId,
           direction: 'outbound',
           deliveryStatus: 'delivered',
         });
-        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
       }
     } catch (err) {
       // The call is already placed; a persist failure must not 5xx the caller

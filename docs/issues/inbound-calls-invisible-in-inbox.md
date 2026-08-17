@@ -60,17 +60,28 @@ separate spec:
   (byUnread index, Unread tab, nav badge, Today, `conversation.updated` SSE,
   the deleted-contact resurfacing rule) picks calls up unchanged. Rejected:
   read-side derivation (defeats the index) and a separate call log surface.
-- Founder-bridge inbound call, three stamp points on the caller's 1:1 thread:
-  ring -> "Incoming call" (already-read); terminal Dial summary -> the outcome
-  preview ("Missed call" / "Call - 12m 3s") and `incrementUnread` ONLY when
-  `isMissed && direction inbound && !masked`, gated on the forward-only
-  `transitioned` so a redelivered summary never double-counts; voicemail
-  upgrade -> "Voicemail" and `incrementUnread` AGAIN (deliberate: a read miss
-  must re-flag when the voicemail lands; the badge counts rows).
-- Outbound originate: "Outgoing call" lifecycle stamps, never unread.
+- Founder-bridge inbound call, two stamp points on the caller's 1:1 thread,
+  BOTH driven by callbacks that carry a real outcome: the terminal `<Dial
+  action>` summary -> the outcome preview ("Missed call" / "Call - 12m 3s") and
+  `incrementUnread` ONLY when `isMissed && direction inbound && !masked`, gated
+  on the forward-only `transitioned` so a redelivered summary never
+  double-counts; the voicemail upgrade -> "Voicemail" and `incrementUnread`
+  AGAIN (deliberate: a read miss must re-flag when the voicemail lands; the
+  badge counts rows). NO stamp at ring time and NO stamp at outbound placement
+  (adversarial r1 HIGH 1 + Q1): a caller-abandon or a never-accepted originate
+  produces no Dial summary, so a stamp made then could never be closed out and
+  would pin the thread at the top of the inbox forever - see
+  `docs/issues/voice-caller-abandon-no-dial-summary.md`.
+- Outbound originate: the Dial summary stamps "Outgoing call - 42s" /
+  "Outgoing call - no answer", never unread. InboxRow drops its "You:" prefix
+  for call previews (they already name their direction).
 - Ordering: the unread write lands BEFORE `message.persisted` (a staff member
   viewing the contact re-marks read on that event), `conversation.updated`
-  follows - the SMS webhook's order.
+  follows - the SMS webhook's order - on BOTH the status and the recording
+  (voicemail) paths (r1 HIGH 2 fixed the latter: one emit, after the counter).
+  `useMarkContactRead` now coalesces triggers that land mid-flight into ONE
+  trailing re-mark, so a second event inside one round trip (a miss right
+  behind its ring, two rapid texts) is no longer dropped.
 - Preview strings live in `app/src/lib/callPreview.ts` (stored, like message
   bodies; staff dashboard copy, not catalog copy).
 - Non-goals: masked/pool-number relay calls (touching a relay thread would
@@ -81,6 +92,19 @@ separate spec:
   re-previews the thread with the auto-text body (`sendMessage` touches), so an
   unread missed-call row can read as the auto-text; the row stays unread and the
   timeline shows both. Follow-up if it grates: a call-aware preview.
+- Also accepted at the r1 adjudication (planner's call, code-level): the final
+  preview of a miss-with-voicemail is whichever writer lands last (auto-text
+  body vs "Voicemail") - same last-activity semantic as texts, and "Voicemail"
+  winning is the better outcome; the voicemail re-flag rides the recording
+  callback and so requires the S3 mirror to have succeeded (the outcome upgrade
+  always did); Today labels an auto-replied missed call "Unreplied" (a bot
+  courtesy is not a staff reply - same as an auto-replied text); one call that
+  becomes a voicemail shows 2 on its row count; the Dial-summary stamp is two
+  awaited DynamoDB writes ahead of the TwiML (needed for the ordering rule);
+  `bridgeAccepted` still derives from an eventually-consistent read of
+  `answered_at` (pre-existing classification, now also feeding the durable
+  preview/unread).
 
 Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
+`dashboard/src/routes/contact/useMarkContactRead.test.tsx`, `dashboard/src/routes/inbox/InboxRow.test.tsx`,
 `e2e/tests/dashboard-next/call-inbox-unread.spec.ts`.

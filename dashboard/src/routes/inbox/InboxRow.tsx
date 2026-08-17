@@ -102,7 +102,10 @@ export function InboxRow({
             {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>
           <span className={`${styles.preview} ${unread ? styles.bold : ''}`}>
-            {row.direction === 'outbound' ? `You: ${row.preview}` : row.preview}
+            {/* "You:" disambiguates an outbound message BODY. A call preview
+                already names its direction ("Outgoing call - 42s"), so the
+                prefix would double-encode it. */}
+            {row.direction === 'outbound' && row.channel !== 'call' ? `You: ${row.preview}` : row.preview}
           </span>
           {unread ? (
             <span className={styles.count} aria-label={`${row.unreadCount} unread`}>

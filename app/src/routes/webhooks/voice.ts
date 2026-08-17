@@ -626,23 +626,18 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         transcriptChannelRoles: { '1': 'client', '2': 'staff' },
       });
       if (!appended.deduped) {
-        // Inbox: the ringing call surfaces/re-sorts the caller's thread NOW
-        // ("Incoming call", already-read); the terminal summary re-stamps the
-        // outcome and decides unread. Fresh-append-only, like the emits.
-        const touched = await stampCallActivity(
-          conversation.conversationId,
-          callPreview({ direction: 'inbound', callStatus: 'ringing' }),
-          startedAt,
-          false,
-          CallSid,
-        );
+        // INBOX: deliberately NO conversation stamp at ring time. The thread is
+        // stamped from the <Dial action> summary (/voice/status) with the real
+        // outcome. A caller who abandons during the ring produces no Dial
+        // summary (docs/issues/voice-caller-abandon-no-dial-summary.md), and a
+        // ring-time "Incoming call" stamp would then sit at the top of the
+        // inbox forever, already-read, for a call the summary never closed.
         events.emit('message.persisted', {
           conversationId: conversation.conversationId,
           tsMsgId: appended.tsMsgId,
           direction: 'inbound',
           deliveryStatus: 'delivered',
         });
-        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
       }
     } catch (err) {
       // Never 5xx a webhook on a persist failure — bridge regardless (a
@@ -1429,7 +1424,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
               ...(bridgeAccepted && callDuration !== undefined && { callDuration }),
             }),
             now,
-            isMissed && fresh.direction === 'inbound',
+            isMissed && fresh.direction !== 'outbound',
             entryCallSid,
           );
         }
@@ -1651,33 +1646,34 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    // The claim succeeded AND the media is in S3 → announce the now-recorded
-    // call so the timeline updates live.
-    events.emit('message.persisted', {
-      conversationId: entry.conversationId,
-      tsMsgId: entry.tsMsgId,
-      direction: entry.direction,
-      deliveryStatus: entry.delivery_status,
-    });
     log.info(
       { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored: true },
       'founder-bridge recording mirrored to S3',
     );
     // Voicemail outcome upgrade (spec 4.2): promote 'missed' -> 'voicemail' via a
     // CONDITIONAL write (only-if-missed) - which also makes a redelivered recording
-    // callback idempotent. On the FIRST delivery (the upgrade won): emit the live
-    // update + fire the best-effort "New voicemail" push (never throws; a push
-    // failure must not 5xx the callback - the recording is already safe). Answered
-    // calls never match; masked already refused.
+    // callback idempotent. On the FIRST delivery (the upgrade won): stamp the
+    // inbox, then emit the live update + fire the best-effort "New voicemail"
+    // push (never throws; a push failure must not 5xx the callback - the
+    // recording is already safe). Answered calls never match; masked already
+    // refused. Note the voicemail's inbox re-flag rides this handler, i.e. it is
+    // reached only once the recording is mirrored: a mirror failure returns
+    // above with the miss still flagged and no voicemail preview (accepted -
+    // the outcome upgrade itself has always lived behind the mirror).
+    let voicemailUpgraded = false;
+    let voicemailTouched: ConversationItem | undefined;
     if (isVoicemail) {
-      const upgraded = await messages.upgradeCallOutcomeToVoicemail(entryCallSid);
-      if (upgraded) {
+      voicemailUpgraded = await messages.upgradeCallOutcomeToVoicemail(entryCallSid);
+      if (voicemailUpgraded) {
         // INBOX: a voicemail is NEW information on a call already counted as a
         // miss - re-stamp "Voicemail" and bump unread AGAIN, deliberately: if
         // staff read the miss and navigated away, the voicemail must re-flag
         // the row (the badge counts rows, so the double only shows on the
-        // row's own count). Idempotent via the conditional upgrade above.
-        const touched = await stampCallActivity(
+        // row's own count). Idempotent via the conditional upgrade above. The
+        // stamp lands BEFORE the single message.persisted below (the ordering
+        // rule in stampCallActivity's doc): the contact page re-marks read on
+        // that event and must see the counter already moved.
+        voicemailTouched = await stampCallActivity(
           entry.conversationId,
           callPreview({
             direction: entry.direction,
@@ -1688,18 +1684,23 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           true,
           entryCallSid,
         );
-        events.emit('message.persisted', {
-          conversationId: entry.conversationId,
-          tsMsgId: entry.tsMsgId,
-          direction: entry.direction,
-          deliveryStatus: entry.delivery_status,
-        });
-        if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
-        try {
-          await sendVoicemailPush(entry.conversationId, entryCallSid);
-        } catch (err) {
-          log.error({ err, callSid: entryCallSid }, 'voicemail push failed');
-        }
+      }
+    }
+    // The claim succeeded AND the media is in S3 (and any voicemail upgrade +
+    // inbox stamp are done) -> ONE announcement of the now-recorded call so the
+    // timeline updates live, then the inbox event, then the voicemail push.
+    events.emit('message.persisted', {
+      conversationId: entry.conversationId,
+      tsMsgId: entry.tsMsgId,
+      direction: entry.direction,
+      deliveryStatus: entry.delivery_status,
+    });
+    if (voicemailTouched) events.emit('conversation.updated', toConversationUpdatedEvent(voicemailTouched));
+    if (voicemailUpgraded) {
+      try {
+        await sendVoicemailPush(entry.conversationId, entryCallSid);
+      } catch (err) {
+        log.error({ err, callSid: entryCallSid }, 'voicemail push failed');
       }
     }
     // Create leg (spec 3.2): request VI transcription now that the recording is

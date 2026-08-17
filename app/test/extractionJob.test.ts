@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_EXTRACTION_ATTEMPTS,
   MAX_TRANSCRIPT_MESSAGES,
+  MAX_TRANSCRIPT_MESSAGES_MANUAL,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
@@ -1418,6 +1419,48 @@ describe('manual runs waive both gates', () => {
     });
     await runDueExtractions(NOW, auto.deps);
     expect(auto.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBe(30);
+  });
+
+  it('reads newest-200 on a manual run and newest-50 otherwise, and records which', async () => {
+    // 2026-08-17: with the age floor waived, the page cap is what decides how
+    // far back a press can see, so manual runs get a larger one. The read AND
+    // the record must agree - a run log that said 50 while the read was 200
+    // would misdescribe every manual window.
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(manual.deps.messages.listByConversation).toHaveBeenCalledWith('conv1', { limit: MAX_TRANSCRIPT_MESSAGES_MANUAL });
+    expect(manual.runs[0]!.window!.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES_MANUAL);
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(auto.deps.messages.listByConversation).toHaveBeenCalledWith('conv1', { limit: MAX_TRANSCRIPT_MESSAGES });
+    expect(auto.runs[0]!.window!.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES);
+  });
+
+  it('judges windowCappedAtLimit against the manual cap: a 50-row page is NOT capped', async () => {
+    // Under the automatic cap a 50-row page means "there may be more". Under
+    // the manual cap the same page was read with room to spare, so the record
+    // must not claim unseen history that the read would have returned.
+    const page: MessageItem[] = [];
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES; i++) page.push(msg(i, 'inbound', `m${i}`));
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: page,
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.window!.windowCappedAtLimit).toBe(false);
   });
 
   it('a manual run still records the aged-out ids as empty, not as excluded', async () => {

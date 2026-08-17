@@ -3,7 +3,6 @@
 import { createHash } from 'node:crypto';
 import type { TranscriptUtterance } from '../../adapters/extraction.js';
 import {
-  MAX_TRANSCRIPT_MESSAGES,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
@@ -29,6 +28,11 @@ export interface WindowMessagePieces extends LightWindowMessage {
 export interface BuildLightRunWindowInput {
   cursor: string;
   fetchedCount: number;
+  /** The page cap the read actually used (50 automatic, 200 manual). Taken from
+   *  the caller for the same reason as maxTranscriptAgeDays: the record must
+   *  describe THIS run's read. It decides windowCappedAtLimit and is stored in
+   *  the full window's windowParams. */
+  maxTranscriptMessages: number;
   agedOutTsMsgIds: string[];
   messages: LightWindowMessage[];
   newestTsMsgId?: string;
@@ -54,14 +58,15 @@ export function hashRenderedMessage(utterances: TranscriptUtterance[]): string {
 
 const tierOf = (tsMsgId: string, cursor: string): 'new' | 'seen' => (tsMsgId > cursor ? 'new' : 'seen');
 
-const cappedAtLimit = (fetchedCount: number): boolean => fetchedCount === MAX_TRANSCRIPT_MESSAGES;
+const cappedAtLimit = (fetchedCount: number, maxTranscriptMessages: number): boolean =>
+  fetchedCount === maxTranscriptMessages;
 
 export function buildLightRunWindow(input: BuildLightRunWindowInput): RunWindow {
   return {
     detail: 'light',
     cursor: input.cursor,
     ...(input.newestTsMsgId !== undefined && { newestTsMsgId: input.newestTsMsgId }),
-    windowCappedAtLimit: cappedAtLimit(input.fetchedCount),
+    windowCappedAtLimit: cappedAtLimit(input.fetchedCount, input.maxTranscriptMessages),
     messages: input.messages.map((message) => ({ ...message, tier: tierOf(message.tsMsgId, input.cursor) })),
     excluded: input.agedOutTsMsgIds.map((tsMsgId) => ({ tsMsgId, cause: 'age_30d' as const })),
   };
@@ -107,12 +112,12 @@ export function buildFullRunWindow(input: BuildFullRunWindowInput): RunWindow {
     ...(input.newestTsMsgId !== undefined && { newestTsMsgId: input.newestTsMsgId }),
     hasInferredRoleContent: input.hasInferredRoleContent,
     totalChars,
-    windowCappedAtLimit: cappedAtLimit(input.fetchedCount),
+    windowCappedAtLimit: cappedAtLimit(input.fetchedCount, input.maxTranscriptMessages),
     windowParams: {
       newMessageCharCap: NEW_MESSAGE_CHAR_CAP,
       seenMessageCharCap: SEEN_MESSAGE_CHAR_CAP,
       windowCharBudget: WINDOW_CHAR_BUDGET,
-      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
+      maxTranscriptMessages: input.maxTranscriptMessages,
       maxTranscriptAgeDays: input.maxTranscriptAgeDays,
       truncationMarker: TRUNCATION_MARKER,
     },

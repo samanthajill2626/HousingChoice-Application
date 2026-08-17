@@ -51,6 +51,17 @@ import { parseExtractionOps } from '../services/extraction/schema.js';
 export const MAX_EXTRACTION_ATTEMPTS = 5;
 /** Newest N messages pulled per conversation for the transcript window. */
 export const MAX_TRANSCRIPT_MESSAGES = 50;
+/**
+ * The same page cap for a MANUAL run (2026-08-17). A press exists to reach
+ * imported history that no run has read, and the 30-day floor it waives was
+ * doing most of the bounding on automatic runs; without it, newest-50 is what
+ * decides how far back a press can see. Raised for manual only: automatic runs
+ * keep 50 (their age floor already bounds them), and a press is one-at-a-time
+ * and human-initiated. WINDOW_CHAR_BUDGET still applies unchanged, so on a
+ * thread of long emails or call transcripts the char budget, not this count,
+ * is what bites first. Recorded per run in windowParams.maxTranscriptMessages.
+ */
+export const MAX_TRANSCRIPT_MESSAGES_MANUAL = 200;
 /** Messages older than this are dropped from the transcript window. */
 export const MAX_TRANSCRIPT_AGE_DAYS = 30;
 
@@ -436,9 +447,13 @@ async function processRow(
     const failure = await completeOrFail(cursor);
     return failure ?? { record: true, outcome: 'skipped' };
   }
+  // The page cap this run applies. Passed to BOTH window builders below so the
+  // record (windowParams.maxTranscriptMessages, windowCappedAtLimit) describes
+  // the read that actually happened, not the automatic default.
+  const maxTranscriptMessages = manual ? MAX_TRANSCRIPT_MESSAGES_MANUAL : MAX_TRANSCRIPT_MESSAGES;
   let newestFirst: MessageItem[];
   try {
-    newestFirst = await messages.listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES });
+    newestFirst = await messages.listByConversation(conversationId, { limit: maxTranscriptMessages });
   } catch (err) {
     return failed('repo', err);
   }
@@ -465,8 +480,8 @@ async function processRow(
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const chronological = [...newestFirst].reverse();
   // A manual run waives the age floor: the imported history this feature exists
-  // to reach is historical by definition. Newest-50 and the 60k char budget
-  // still bound the window.
+  // to reach is historical by definition. The page cap (newest-200 for manual,
+  // newest-50 otherwise) and the 60k char budget still bound the window.
   const fresh = manual ? chronological : chronological.filter((m) => m.created_at >= cutoff);
   const agedOutTsMsgIds = manual
     ? []
@@ -475,6 +490,7 @@ async function processRow(
   const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
     cursor,
     fetchedCount,
+    maxTranscriptMessages,
     agedOutTsMsgIds,
     messages: fresh.map((m) => ({ tsMsgId: m.tsMsgId, type: m.type, direction: m.direction })),
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
@@ -519,7 +535,7 @@ async function processRow(
   // A failed upgrade keeps the LIGHT window already assembled above: it built
   // successfully from the same data, so retaining it degrades nothing.
   const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
-    cursor, fetchedCount, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
+    cursor, fetchedCount, maxTranscriptMessages, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
     maxTranscriptAgeDays: manual ? null : MAX_TRANSCRIPT_AGE_DAYS,
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
   }));

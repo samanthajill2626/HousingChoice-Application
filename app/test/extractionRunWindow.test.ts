@@ -6,6 +6,7 @@ import type { TranscriptUtterance } from '../src/adapters/extraction.js';
 import {
   MAX_TRANSCRIPT_AGE_DAYS,
   MAX_TRANSCRIPT_MESSAGES,
+  MAX_TRANSCRIPT_MESSAGES_MANUAL,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
@@ -86,6 +87,7 @@ describe('hashRenderedMessage', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 3,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: pieces,
       included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
@@ -104,6 +106,7 @@ describe('buildLightRunWindow', () => {
     const window = buildLightRunWindow({
       cursor: SMS_ID,
       fetchedCount: 2,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: ['2026-07-01T00:00:00.000Z#s0'],
       messages: [
         { tsMsgId: SMS_ID, type: 'sms', direction: 'inbound' },
@@ -130,13 +133,22 @@ describe('buildLightRunWindow', () => {
   });
 
   it('flags the fetch cap only when the returned row count equals the cap', () => {
-    const base = { cursor: '', agedOutTsMsgIds: [], messages: [] };
+    const base = { cursor: '', agedOutTsMsgIds: [], messages: [], maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES };
     expect(buildLightRunWindow({ ...base, fetchedCount: MAX_TRANSCRIPT_MESSAGES }).windowCappedAtLimit).toBe(true);
     expect(buildLightRunWindow({ ...base, fetchedCount: MAX_TRANSCRIPT_MESSAGES - 1 }).windowCappedAtLimit).toBe(false);
   });
 
+  it('judges the cap against the limit the CALLER passed, not the automatic constant', () => {
+    // A manual run reads newest-200. A 50-row page under that cap is NOT capped
+    // (there is no unseen history), and a 200-row page IS. Keying this off the
+    // module constant would report the wrong thing for every manual run.
+    const base = { cursor: '', agedOutTsMsgIds: [], messages: [], maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES_MANUAL };
+    expect(buildLightRunWindow({ ...base, fetchedCount: MAX_TRANSCRIPT_MESSAGES }).windowCappedAtLimit).toBe(false);
+    expect(buildLightRunWindow({ ...base, fetchedCount: MAX_TRANSCRIPT_MESSAGES_MANUAL }).windowCappedAtLimit).toBe(true);
+  });
+
   it('records an honest empty window', () => {
-    const window = buildLightRunWindow({ cursor: 'c', fetchedCount: 0, agedOutTsMsgIds: [], messages: [] });
+    const window = buildLightRunWindow({ cursor: 'c', fetchedCount: 0, maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES, agedOutTsMsgIds: [], messages: [] });
     expect(window).toMatchObject({
       detail: 'light',
       cursor: 'c',
@@ -153,6 +165,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 3,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: multiMessagePieces(),
       included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
@@ -177,6 +190,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: SMS_ID,
       fetchedCount: 2,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: [{ ...sms!, capChars: SEEN_MESSAGE_CHAR_CAP }, call!],
       included: new Set([SMS_ID, CALL_ID]),
@@ -195,6 +209,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: 'zzz',
       fetchedCount: 1,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: [{ tsMsgId: SMS_ID, type: 'sms', direction: 'inbound', raw: [long], capped: [clipped], capChars: SEEN_MESSAGE_CHAR_CAP }],
       included: new Set([SMS_ID]),
@@ -210,6 +225,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 3,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: ['old#1'],
       perMessage: [sms!, call!],
       included: new Set([CALL_ID]),
@@ -227,6 +243,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 2,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: [
         { tsMsgId: CALL_ID, type: 'call', direction: 'inbound', raw: [], capped: [], capChars: NEW_MESSAGE_CHAR_CAP },
@@ -245,6 +262,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 2,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: [
         { tsMsgId: 'a#1', type: 'sms', direction: 'inbound', raw: [utt('a#1', '2026-08-06T10:00:00.000Z', 'aaaa')], capped: [utt('a#1', '2026-08-06T10:00:00.000Z', 'aaaa')], capChars: NEW_MESSAGE_CHAR_CAP },
@@ -264,6 +282,7 @@ describe('buildFullRunWindow', () => {
     const window = buildFullRunWindow({
       cursor: '',
       fetchedCount: 3,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
       agedOutTsMsgIds: [],
       perMessage: multiMessagePieces(),
       included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
@@ -273,5 +292,19 @@ describe('buildFullRunWindow', () => {
     expect(window.windowParams!.maxTranscriptAgeDays).toBeNull();
     // The other byte-affecting constants are untouched by the waiver.
     expect(window.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES);
+  });
+
+  it('records the message cap the caller passed (a manual run reads newest-200)', () => {
+    const window = buildFullRunWindow({
+      cursor: '',
+      fetchedCount: 3,
+      maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES_MANUAL,
+      agedOutTsMsgIds: [],
+      perMessage: multiMessagePieces(),
+      included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
+      hasInferredRoleContent: false,
+      maxTranscriptAgeDays: null,
+    });
+    expect(window.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES_MANUAL);
   });
 });

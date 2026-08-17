@@ -65,12 +65,17 @@ run over that contact's stored conversation history **without an age floor**,
 outcome that changed nothing. Suggestions appear without a reload and the run is
 recorded in the AI run log.
 
-"Without an age floor" is the precise claim. It is not "all history": the
-newest-50 message page (`MAX_TRANSCRIPT_MESSAGES`) and the 60k-char window
-budget (`WINDOW_CHAR_BUDGET`) still bound every run, there is no backward
-pagination, and pressing again re-reads the same newest page. A contact with
-more than 50 messages of imported history will have its oldest messages read by
-no run, manual or automatic. See section 8.
+"Without an age floor" is the precise claim. It is not "all history": a message
+page cap and the 60k-char window budget (`WINDOW_CHAR_BUDGET`) still bound every
+run, there is no backward pagination, and pressing again re-reads the same
+newest page. The page cap is per trigger (amended 2026-08-17): a manual run
+reads the newest 200 messages (`MAX_TRANSCRIPT_MESSAGES_MANUAL`), an automatic
+run the newest 50 (`MAX_TRANSCRIPT_MESSAGES`). With the age floor waived the
+page cap is what decides how far back a press can see, so it was raised for
+manual runs only; automatic runs are already bounded by the floor. The applied
+cap is recorded per run in `windowParams.maxTranscriptMessages` and judges
+`windowCappedAtLimit`. A contact with more than 200 messages of imported history
+will still have its oldest messages read by no run. See section 8.
 
 ## 3. Locked decisions
 
@@ -697,10 +702,16 @@ per eligible thread, and the sliding upsert already collapses bursts.
 
 ## 6. Cost
 
-One manual run per eligible thread per press, bounded by the same newest-50 and
-60k-char caps as any other run - a worst-case input of roughly 15k tokens per
-the note at `app/src/jobs/extraction.ts:56-62`. Waiving the age cutoff does not
-raise the ceiling; it changes which messages fill the same fixed budget.
+One manual run per eligible thread per press, bounded by the same 60k-char
+budget as any other run - a worst-case input of roughly 15k tokens per the note
+at `app/src/jobs/extraction.ts:56-62`. Waiving the age cutoff does not raise
+that ceiling; it changes which messages fill the same fixed budget. The larger
+manual page cap (200 vs 50, section 2) does not raise it either: the char budget
+is the cost bound, and it applies unchanged. What the larger page changes is
+how often the message count, rather than the char budget, is the cap that
+bites - on short-message SMS threads a 200-message page fits inside 60k chars
+with room to spare, while a thread of long emails or call transcripts hits the
+char budget well before 50 messages, let alone 200.
 
 ## 7. Testing
 
@@ -711,6 +722,10 @@ Unit:
   without the flag skips **`no_new_client`** (not `empty_window` - see 1.2).
 - The job waives `no_new_client` when the flag is set and does not when absent.
 - `windowParams.maxTranscriptAgeDays` is `null` on a manual run, `30` otherwise.
+- The read uses `limit: 200` on a manual run and `limit: 50` otherwise, and
+  `windowParams.maxTranscriptMessages` records the cap that was applied.
+  `windowCappedAtLimit` is judged against the applied cap: a 50-row page under
+  the manual cap is NOT capped (amended 2026-08-17).
 - `requestManualExtraction` sets the flag and the `requestId`, and leaves
   `channel` untouched; `scheduleExtraction` never sets either; `claim` removes
   both.
@@ -808,12 +823,24 @@ an `EXTRACT:` marker, without touching lean's byte stability.
 
 ## 8. Risks and consequences
 
-- **Long imported histories are still truncated.** Newest-50 and 60k chars, no
-  backward paging. A contact with hundreds of imported messages will have its
-  oldest history read by no run. Pressing again does not reach further back - it
-  re-reads the same page. This is a real limit of the feature, not a bug in it,
-  and it is the strongest argument for treating a real backfill (section 9) as
-  its own design rather than a loop over this button.
+- **Long imported histories are still truncated.** Newest-200 (manual; 50
+  automatic) and 60k chars, no backward paging. A contact with more imported
+  messages than that will have its oldest history read by no run. Pressing again
+  does not reach further back - it re-reads the same page. This is a real limit
+  of the feature, not a bug in it, and it is the strongest argument for treating
+  a real backfill (section 9) as its own design rather than a loop over this
+  button. Raising the manual page cap (2026-08-17) moved the line; it did not
+  remove it.
+- **A 200-row read can silently return fewer than 200.** `listByConversation`
+  is a single DynamoDB Query, and a Query page is also bounded at 1 MB of items.
+  A thread of 200 messages averaging over ~5 KB each (long emails with stored
+  bodies) would return a shorter page with no error, and `windowCappedAtLimit`
+  would then read false while unseen history exists. Same behavior as the
+  automatic 50 at ~20 KB average, four times more reachable at 200. Accepted:
+  the run itself is unaffected (it extracts what it read), and the observability
+  gap is bounded by the 60k char budget, which would have dropped most of those
+  bodies anyway. Not paginating the read is deliberate - it is the same
+  "no backward paging" boundary as above.
 - **The age waiver removes the 30-day bound on whole-run demotion.** A single
   unknown-speaker utterance demotes EVERY write in a run to a suggestion
   (`app/src/services/extraction/apply.ts:222,331`). Older call transcripts now
@@ -875,6 +902,7 @@ an `EXTRACT:` marker, without touching lean's byte stability.
 - **Backward pagination of the transcript window.**
 - **Ignoring dismissal tombstones on a manual run.** Locked decision 6.
 - **A configurable window horizon.** Rejected in brainstorming: the only value
-  anyone would set is "all of it", which is what a manual run now does.
+  anyone would set is "all of it", which is what a manual run now does. The
+  2026-08-17 manual page cap is a second constant, not a setting.
 - **Making the importer schedule extraction at import time.** A larger change to
   the import path with its own cost profile.

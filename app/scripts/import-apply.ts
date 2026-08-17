@@ -401,6 +401,10 @@ if (unroutable.calls.length > 0) {
 }
 console.log(`  units written           : ${report.units.written}`);
 console.log(`    dropped by review     : ${report.units.skippedDropped}`);
+console.log(
+  `    human-owned           : ${report.units.humanOwned} ` +
+    `(edited in the dashboard - only absent fields were filled)`,
+);
 
 if (report.warnings.length > 0) {
   console.log(`\n--- warnings (${report.warnings.length}) ---`);

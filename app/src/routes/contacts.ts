@@ -1928,17 +1928,24 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // re-increments unread (and re-stamps the flag) on its own.
     //
     // IT EMITS ITS OWN conversation.updated, from the resetUnread ALL_NEW
-    // returns (adversarial A6). Sequencing this ahead of the presence fan-out
-    // buys nothing on its own: that fan-out re-reads through the
-    // byParticipantPhone/byParticipantEmail GSIs, which lag, so the image it
-    // broadcasts normally still carries the PRE-reset count - and
-    // toConversationUpdatedEvent puts unread_count on the wire, where the
-    // tour/placement channel hooks patch their per-tab unread from it, so a
-    // delete could RAISE an unread dot on an open pane. The reset's own
-    // post-update items are authoritative and already in hand. The presence
-    // fan-out still runs and may still emit a count that is stale by one GSI
-    // hop; these emits are the correcting ones, and the nav badge is unaffected
-    // either way (it refetches the authoritative count).
+    // returns (adversarial A6), AND IT EMITS THEM LAST - after
+    // propagateContactPresenceChange below (adversarial r2 finding 5).
+    //
+    // What is actually true, stated exactly: NO dashboard consumer reads
+    // `unread_count` off this event today. Every handler is a refetch trigger
+    // (UnreadContext, useInbox, useToday, useContactTimeline, useRelayThread,
+    // useGroupThread, useTourChannels, usePlacementChannels), and the
+    // `unread_count` reads in the tour/placement channel hooks are over the
+    // ConversationSummary from that refetch, not over this payload. So this is
+    // about keeping the WIRE honest for a consumer that might, not about a
+    // defect any client has.
+    //
+    // Given that, the ordering is the whole point: the presence fan-out re-reads
+    // through the byParticipantPhone/byParticipantEmail GSIs, which lag, so the
+    // image IT broadcasts normally still carries the PRE-reset count. The
+    // reset's own post-update items are authoritative and already in hand, so
+    // they go out LAST-WRITER. The nav badge is unaffected either way (it
+    // refetches the authoritative count).
     // DECLARED PRODUCT CHANGE (human-approved): a restored contact returns with
     // unread 0.
     //
@@ -1970,6 +1977,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // same, because nothing re-runs this fan-out for an already-deleted contact.
     // The WARN below is therefore the ONLY signal that it happened, and
     // app/scripts/backfill-unread-flag.ts (rule 3) is the only recovery.
+    let resetThreads: ConversationItem[] = [];
     try {
       const reset = await Promise.all(
         (await conversationsForContact(updated, conversations)).map(async (c) => {
@@ -1981,14 +1989,17 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
           }
         }),
       );
-      for (const conv of reset) {
-        if (conv !== undefined) events.emit('conversation.updated', toConversationUpdatedEvent(conv));
-      }
+      resetThreads = reset.filter((c): c is ConversationItem => c !== undefined);
     } catch (err) {
       log.warn({ err, contactId }, 'contact delete: unread reset fan-out failed (best-effort)');
     }
     // Refresh the live views so this contact's Today/inbox cards drop without a reload.
     await propagateContactPresenceChange(contactId, updated);
+    // ...and only NOW the authoritative counts, so they are the last word on the
+    // wire rather than the first (see the ordering note above).
+    for (const conv of resetThreads) {
+      events.emit('conversation.updated', toConversationUpdatedEvent(conv));
+    }
     log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');
     res.json({ contact: withPhones(updated) });
   });

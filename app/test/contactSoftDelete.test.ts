@@ -319,15 +319,16 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
     ).toHaveLength(1);
   });
 
-  it('emits conversation.updated carrying unread 0 from the RESET ITSELF, not a lagging GSI read', async () => {
-    // ADVERSARIAL A6. The handler's comment claimed that running the reset
-    // before propagateContactPresenceChange made that fan-out's emits carry
-    // unread 0. It cannot: the fan-out re-reads through the participant GSIs,
-    // which lag, so the image it broadcasts still carries the pre-reset count -
-    // and toConversationUpdatedEvent puts unread_count on the wire, where the
-    // tour/placement channel hooks patch their per-tab unread from it. Deleting
-    // a contact could therefore RAISE an unread dot on an open pane. The reset's
-    // own ALL_NEW return values are authoritative and were being discarded.
+  it('emits conversation.updated carrying unread 0 from the RESET ITSELF, and emits it LAST', async () => {
+    // ADVERSARIAL A6, corrected in fix wave 2 (adversarial r2 finding 5). The
+    // reset's own ALL_NEW return values are authoritative and were being
+    // discarded, while propagateContactPresenceChange re-reads through the
+    // participant GSIs, which lag, so the image IT broadcasts still carries the
+    // pre-reset count. No dashboard consumer reads unread_count off this event
+    // today (every handler is a refetch trigger), so this is about keeping the
+    // WIRE honest for one that might - which means the authoritative emit has
+    // to be the LAST word, not merely present. Fix wave 1 emitted it FIRST and
+    // asserted only `toContain(0)`, which passes whatever the order is.
     const world = createFakeWorld();
     const real = world.conversationsRepo;
     world.conversationsRepo = new Proxy(real, {
@@ -363,8 +364,11 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
           (e.payload as { conversationId?: string }).conversationId === 'conv-emit',
       )
       .map((e) => (e.payload as { unread_count?: number }).unread_count);
-    // At least one emit states the truth the reset just wrote.
-    expect(counts).toContain(0);
+    // The stale fan-out emit still happens - it carries the frozen 7 - so this
+    // assertion can genuinely fail: it is ORDER-SENSITIVE, and it fails if the
+    // authoritative emit moves back ahead of the presence fan-out.
+    expect(counts).toContain(7);
+    expect(counts[counts.length - 1]).toBe(0);
   });
 
   it('a ConditionalCheckFailedException from one reset does not fail the delete', async () => {

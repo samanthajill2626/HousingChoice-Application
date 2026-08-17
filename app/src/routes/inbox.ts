@@ -958,9 +958,32 @@ export async function aggregateInbox(
     const unreadRows: InboxRow[] = [];
     let consumedAll = false;
     let budgetSpent = false;
+    /**
+     * Candidates hydration dropped on a LAGGING read (see `Hydrated` below),
+     * held for one retry once the rest of the request's reads are done.
+     */
+    const laggedDrops: UnreadCandidate[] = [];
+
+    /**
+     * The outcome of hydrating ONE candidate. A drop carries WHY, because the
+     * two reasons are not the same fact (adversarial r2 finding 4):
+     *
+     * - `lagged: false` - the fresh, authoritative read says this row is read
+     *   or gone. The index entry is simply stale; dropping is CORRECT and the
+     *   page reached a genuine end. This is the ordinary mark-read race.
+     * - `lagged: true` - the fresh read does not know about the thread the
+     *   index just offered at all. Nothing here is authoritative, the row is
+     *   probably real, and the badge is certainly still counting it.
+     *
+     * Only the second kind may claim the page ended early, or the client's
+     * `serverRowCount === 0 && truncated` gate would render the inbox ERROR
+     * state at the end of an ordinary, successful triage session - exactly the
+     * regression conformance C2 fixed.
+     */
+    type Hydrated = { row: InboxRow } | { row: undefined; lagged: boolean };
 
     /** Turn ONE candidate into a row, or drop it (spec 4.5 hydration). */
-    const hydrateUnread = async (candidate: UnreadCandidate): Promise<InboxRow | undefined> => {
+    const hydrateUnread = async (candidate: UnreadCandidate): Promise<Hydrated> => {
       if (candidate.kind === 'contact') {
         // The freshest available sources, per-request cached exactly as the
         // pager's are. They resolve via the participant GSIs, which lag
@@ -971,19 +994,31 @@ export async function aggregateInbox(
         // A fresh sum of 0 DROPS the row - today's passesFilter contract, moved
         // to hydration. (A zero sum is also the only way `convs` can be empty,
         // so the maxConv guard is belt-and-braces for the type.)
-        if (unreadSum === 0 || maxConv === undefined) return undefined;
+        if (unreadSum === 0 || maxConv === undefined) {
+          // LAG, or a real read? The discriminator is whether this fresh set
+          // contains the very thread the index offered. Absent (or an empty set
+          // entirely) means the participant GSI has not caught up, so the 0 is
+          // not an answer - it is a missing question.
+          const offered = candidate.unreadConversations[0]?.conversationId;
+          const knowsOfferedThread =
+            offered !== undefined && convs.some((c) => c.conversationId === offered);
+          return { row: undefined, lagged: !knowsOfferedThread };
+        }
         // NOTE the newest-conversation IDENTITY GUARD is deliberately ABSENT
         // here: row identity is the seen-set, and `newestOf` picks only the
         // REPRESENTATION (phone / lastActivityAt / placement / latest-message
         // source). A contact whose newest thread is READ and whose older thread
         // is unread MUST render - carrying the guard over would drop it.
-        return await buildContactRow(
+        const built = await buildContactRow(
           candidate.contact,
           convs,
           maxConv,
           unreadSum,
           isDeleted(candidate.contact),
         );
+        // The only drop left in there is the deleted-contact resurfacing RULE,
+        // decided against fresh message reads: an answer, not a lag.
+        return built === undefined ? { row: undefined, lagged: false } : { row: built };
       }
 
       // Every non-contact candidate maps onto exactly ONE index item, so a
@@ -992,29 +1027,35 @@ export async function aggregateInbox(
       // refreshes status + unread_count. A row the index still lists but the
       // base table reports read or closed is dropped right here.
       const fresh = await conversations.getById(candidate.conversation.conversationId);
-      if (fresh === undefined || !isUnreadVisible(fresh)) return undefined;
+      // A base-table point read IS authoritative, so this drop is never "lag":
+      // there is nothing a retry could learn.
+      if (fresh === undefined || !isUnreadVisible(fresh)) return { row: undefined, lagged: false };
       if (candidate.kind !== 'unknown') {
         // The two multi-party kinds reuse the pager's builders verbatim.
         // groupRowFor is deliberately NOT relayRowFor: that one's status
         // normalizer has an 'open' catch-all, which would report a group_open
         // thread to the dashboard as a plain open relay group.
-        return candidate.kind === 'relay_group' ? await relayRowFor(fresh) : groupRowFor(fresh);
+        return {
+          row: candidate.kind === 'relay_group' ? await relayRowFor(fresh) : groupRowFor(fresh),
+        };
       }
       // The unknown-number row, built inline rather than extracted: the pager's
       // literal reads its driving conversation directly, and ~10 duplicated
       // lines are cheaper than a second parameterized helper (plan round 4).
       const { channel, direction, preview } = await latestMessageOf(fresh.conversationId, fresh);
       return {
-        kind: 'unknown',
-        phone: candidate.phone,
-        name: formatPhoneForDisplay(candidate.phone) ?? candidate.phone,
-        role: 'unknown',
-        unreadCount: unreadOf(fresh),
-        preview,
-        channel,
-        direction,
-        lastActivityAt: fresh.last_activity_at,
-        needsTriage: true,
+        row: {
+          kind: 'unknown',
+          phone: candidate.phone,
+          name: formatPhoneForDisplay(candidate.phone) ?? candidate.phone,
+          role: 'unknown',
+          unreadCount: unreadOf(fresh),
+          preview,
+          channel,
+          direction,
+          lastActivityAt: fresh.last_activity_at,
+          needsTriage: true,
+        },
       };
     };
 
@@ -1041,8 +1082,16 @@ export async function aggregateInbox(
       if (collected.scanPosition !== undefined) scanPosition = collected.scanPosition;
 
       for (const candidate of collected.candidates) {
-        const row = await hydrateUnread(candidate);
-        if (row === undefined) continue;
+        const hydrated = await hydrateUnread(candidate);
+        if (hydrated.row === undefined) {
+          // Held for ONE retry after the loop (adversarial r2 finding 4). A
+          // lag-dropped candidate is NOT re-offered by any later collect -
+          // `scanPosition` is already past its index item - so this is the last
+          // chance the request has to deliver it.
+          if (hydrated.lagged) laggedDrops.push(candidate);
+          continue;
+        }
+        const row = hydrated.row;
         // The seen-set records EMITTED contacts ONLY (spec 4.5 step 1, amended
         // in review fix wave 1 - adversarial A3). Adding a DROPPED candidate
         // suppressed it for the rest of the paging session, and the drop's own
@@ -1067,6 +1116,39 @@ export async function aggregateInbox(
       }
       // Otherwise the collect stopped at its cap and hydration dropped rows -
       // go again from the new scan position to refill the page.
+    }
+
+    // THE ONE DROP-AWARE RETRY (adversarial r2 finding 4). A candidate dropped
+    // because the participant GSI had not caught up is unreachable afterwards:
+    // it is not in the seen-set (fix wave 1 stopped suppressing it), but
+    // `scanPosition` is past its only index item, so no later page re-offers it
+    // either - while the badge, which never hydrates, keeps counting it.
+    //
+    // Retrying LAST is the point: every other read in the request has happened
+    // since, which is the settling time a lagging GSI usually needs. Exactly
+    // once, and only for the lag-shaped drops, so an ordinary mark-read race
+    // costs nothing extra. The per-request cache is dropped for those contacts,
+    // or the retry would re-read its own first answer.
+    let unresolvedDrops = 0;
+    for (const candidate of laggedDrops) {
+      if (candidate.kind !== 'contact') continue;
+      contactConvsCache.delete(candidate.contactId);
+    }
+    for (const candidate of laggedDrops) {
+      if (candidate.kind === 'contact' && seen.has(candidate.contactId)) continue; // emitted later
+      if (unreadRows.length >= limit) {
+        // No room. The row is still lost for this paging session, so it counts
+        // as unresolved rather than being quietly forgotten.
+        unresolvedDrops += 1;
+        continue;
+      }
+      const hydrated = await hydrateUnread(candidate);
+      if (hydrated.row === undefined) {
+        unresolvedDrops += 1;
+        continue;
+      }
+      if (candidate.kind === 'contact') seen.add(candidate.contactId);
+      unreadRows.push(hydrated.row);
     }
 
     // Both tripwires fire ONCE, on the REQUEST total. The scanned total is
@@ -1137,6 +1219,11 @@ export async function aggregateInbox(
     // consumedAll/budget decision - the cursor keeps whatever those branches
     // decided, and only the honesty flag changes.
     if (deletedSkipped > 0) truncated = true;
+    // ...and so is a row this request KNOWS it could not deliver (adversarial
+    // r2 finding 4). The page must not report a natural end while the badge
+    // counts a row no page in this session can show; `truncated` is the one
+    // honest name for "we may disagree with the badge".
+    if (unresolvedDrops > 0) truncated = true;
     // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
     // the dashboard's empty-state and Load-more gating both key on rows.length.
     // This is LOAD-BEARING for the budget branch above (which mints a cursor

@@ -717,10 +717,17 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     // fresh unread SUM is therefore 0 - so the row DROPS rather than rendering
     // an unread row whose count nobody could compute.
     expect(page.rows).toEqual([]);
+    // ...and the page says so. A failed read is a LAG-shaped drop (the fresh
+    // set does not contain the thread the index just offered), so it gets the
+    // one end-of-request retry - hence TWO participant reads - and, still
+    // unresolved, ends the page `truncated` instead of claiming a natural end
+    // while the badge counts the row (adversarial r2 finding 4).
+    expect(page.truncated).toBe(true);
     expect(calls).toEqual({
       queryUnreadPage: 1,
       findByPhone: 1,
-      findByParticipantPhone: 1,
+      findByParticipantPhone: 2,
+      // Still NO downstream hydration: the drop happens before any of it.
       listByConversation: 0,
       getPlacementById: 0,
     });
@@ -1846,6 +1853,99 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       makeDeps({ contacts, conversations }),
     );
     expect(rowKeys(page2)).toEqual(['c-b']);
+  });
+
+  /**
+   * Make the participant GSI hide `phone` on its FIRST read only - the lagging
+   * image that has caught up by the time anything asks again. The seam has to
+   * be per-CALL, not a static projection, because that is exactly what a
+   * drop-aware RETRY can tell apart from a genuinely-read thread.
+   */
+  function lagOnceOnPhone(deps: InboxRouterDeps, phone: string): InboxRouterDeps {
+    const repo = deps.conversationsRepo as unknown as {
+      findByParticipantPhone(p: string): Promise<ConversationItem[]>;
+    };
+    const real = repo.findByParticipantPhone.bind(repo);
+    let lagging = true;
+    repo.findByParticipantPhone = async (p: string) => {
+      if (p === phone && lagging) {
+        lagging = false;
+        return [];
+      }
+      return await real(p);
+    };
+    return deps;
+  }
+
+  it('DROPPED SINGLE-THREAD CONTACT: one retry at the end of the loop brings it back', async () => {
+    // Adversarial r2 finding 4, the round-1 reproduction verbatim: contact B
+    // owns exactly ONE unread thread and the participant GSI has not caught up,
+    // so hydration drops it. Fix wave 1 stopped SUPPRESSING it (it is no longer
+    // written into the seen-set) but nothing RE-OFFERS it: `scanPosition` is
+    // already past its only index item, so the badge counted a row no page
+    // would ever show, and the page reported a natural end.
+    const bPhone = '+14045557001';
+    const aPhone = '+14045557002';
+    const contacts: ContactItem[] = [
+      { contactId: 'c-b', type: 'tenant', phone: bPhone },
+      { contactId: 'c-a', type: 'tenant', phone: aPhone },
+    ];
+    const bConv = conv({
+      conversationId: 'conv-b',
+      participant_phone: bPhone,
+      last_activity_at: T(12),
+      unread_count: 1,
+    });
+    const aConv = conv({
+      conversationId: 'conv-a',
+      participant_phone: aPhone,
+      last_activity_at: T(10),
+      unread_count: 1,
+    });
+    const seed: Seed = { contacts, conversations: [bConv, aConv] };
+
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      lagOnceOnPhone(makeDeps(seed), bPhone),
+    );
+
+    // B renders. The retry runs AFTER every other read in the request, which is
+    // what gives the participant image time to settle.
+    expect(rowKeys(page)).toEqual(['c-b', 'c-a']);
+    expect(page.truncated).toBeUndefined();
+  });
+
+  it('DROPPED SINGLE-THREAD CONTACT: a drop the retry cannot fix ends the page TRUNCATED, never silently', async () => {
+    // The same world with an image that never catches up. The row cannot be
+    // delivered, so the page must at least stop claiming it reached the end of
+    // the supply - the badge is still counting that row.
+    const bPhone = '+14045557011';
+    const aPhone = '+14045557012';
+    const contacts: ContactItem[] = [
+      { contactId: 'c-b', type: 'tenant', phone: bPhone },
+      { contactId: 'c-a', type: 'tenant', phone: aPhone },
+    ];
+    const bConv = conv({
+      conversationId: 'conv-b',
+      participant_phone: bPhone,
+      last_activity_at: T(12),
+      unread_count: 1,
+    });
+    const aConv = conv({
+      conversationId: 'conv-a',
+      participant_phone: aPhone,
+      last_activity_at: T(10),
+      unread_count: 1,
+    });
+
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      // The participant image knows NOTHING about B's thread, ever.
+      makeDeps({ contacts, conversations: [bConv, aConv], participantProjection: [aConv] }),
+    );
+
+    expect(rowKeys(page)).toEqual(['c-a']);
+    expect(page.truncated).toBe(true);
   });
 
   it('AGREEMENT: the pager and the index path build the SAME contact row', async () => {

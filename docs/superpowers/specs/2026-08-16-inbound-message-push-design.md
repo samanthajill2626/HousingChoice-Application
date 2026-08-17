@@ -1,7 +1,10 @@
 # Inbound-Message Push Notifications - Design Spec
 
-Date: 2026-08-16 (rev 5: r2-r3 = adversarial spec review rounds 1-2;
-r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments)
+Date: 2026-08-16 (rev 6: r2-r3 = adversarial spec review rounds 1-2;
+r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments;
+r6 = BUILD-TIME amendments from review round 2 - the bounded stale-user-list
+fallback in 3.1/D10/section 5, and the honest restatement of the sendToUser
+promise in 3.1)
 Branch: feat/inbound-message-push (worktree W:\tmp\inbound-message-push, cut
 from main @d0c28678)
 Origin issue: docs/issues/no-push-on-inbound-message.md
@@ -64,8 +67,13 @@ Planner-settled technical decisions:
   spec gate): sendToAll caches the listAll result in-process with a
   60-second TTL so notification sends do not scan on every message -
   users are added/removed rarely, and this is a non-mission-critical
-  consumer. Accepted staleness bound: a just-subscribed device can lag
-  up to 60s behind; each process (app, worker) holds its own cache.
+  consumer. Accepted staleness bound (r6 amendment): up to 60s
+  normally, and up to 5 minutes during a users-table outage - a failed
+  refresh keeps serving the cached list until it reaches 5x the TTL,
+  after which the fan-out logs ERROR and sends to nobody (3.1). So a
+  just-subscribed device can lag up to 60s behind, or up to 5 minutes
+  while listAll is failing; each process (app, worker) holds its own
+  cache.
   The voice paths and admin routes are NOT moved onto the cache.
 - D11 Emission is fire-and-forget (void promise + .catch log) at every
   site: a push must never delay or fail a webhook ack or the email
@@ -107,8 +115,18 @@ Behavior:
   subscriptions are skipped silently (no I/O, no log line).
 - The per-device loop (allowlist prune, Gone prune, transient keep) is
   shared with sendToUser via an internal helper so the two methods
-  cannot drift; sendToUser keeps its exact current behavior and log
-  lines (the voice paths and their tests are untouched). Logging
+  cannot drift. sendToUser keeps its payloads, recipient resolution, TTL
+  handling and every pre-existing log string byte-identical (the voice
+  paths and their tests are untouched), with ONE deliberate correction
+  (r6 amendment): a failing prune WRITE used to reject out of
+  sendToUser, aborting that user's remaining devices; it is now isolated
+  per-device, so the remaining devices ARE attempted and a NEW warn line
+  can appear on the voice path ("pruning a non-allowlisted endpoint
+  failed - kept, not sent" / "pruning a Gone endpoint failed - kept,
+  retried on the next send"). This brings the code in line with the
+  PushService interface's own documented contract - "Never throws on a
+  single dead/failing device" - and it helps the voice path: a broken
+  repo write can no longer swallow a founder's other phones. Logging
   precision: the per-device EXCEPTION warns inside the shared loop
   (allowlist prune, transient failure) are kept in BOTH methods - they
   are rare and diagnostic. What sendToAll drops are sendToUser's
@@ -116,8 +134,26 @@ Behavior:
   replaced by the one aggregate line below.
 - Per-USER isolation: one failing user never aborts the fan-out (the
   voice founder-loop shape, voice.ts:1858-1864).
-- If listAll() itself throws: log error, return zeroed result - never
-  throw (mirrors resolveFounders, voice.ts:716-724).
+- If listAll() itself throws (r6 amendment - the built behavior): a
+  failed refresh falls back to the cached list, BOUNDED BY THAT LIST'S
+  AGE at 5x the TTL (STALE_SERVE_MAX_MS = 300s). Concretely:
+  - a cached list exists and is YOUNGER than the bound -> log WARN
+    ("refreshing the user list failed - fanning out to the cached list
+    (stale)") and fan out to it. fetchedAt is NOT restamped, so the next
+    send retries the scan and the age keeps counting toward the bound;
+  - the cached list is AT OR PAST the bound, or no list has ever been
+    fetched -> log ERROR and return the zeroed result, exactly as this
+    bullet originally read. Never throw (mirrors resolveFounders,
+    voice.ts:716-724).
+  Rationale for the fallback: dropping a broadcast over a transient
+  Dynamo blip serves nobody, and D1 plus the late-better-than-never
+  posture make a slightly stale fan-out strictly better. Rationale for
+  the bound: an UNBOUNDED fallback silently excludes a user whose only
+  device was Gone-pruned and who then re-subscribed (the cached item is
+  mutated in place by the prune), keeps delivering names and message
+  text to an offboarded user's device, and hides a permanently broken
+  Scan behind a WARN that never reaches the error-log alarm. The bound
+  restores an upper limit on all three.
 - Logging: ONE aggregate line per notification - kind + user/device
   counts ({ users, attempted, sent, pruned, failed }), never the
   payload, never per-user lines.
@@ -399,7 +435,15 @@ No catalog entries, no new channel in MessageDef.
   (voice.ts:710-724); this feature EXTENDS that acceptance to the
   inbound-message path, which is higher-frequency - accepted in writing
   at current team scale, revisit with a GSI if the users table grows.
-  sendToAll performs NO additional per-user reads (3.1).
+  sendToAll performs NO additional per-user reads (3.1). STALENESS
+  UNDER FAILURE (r6 amendment): when the Scan itself fails, the
+  recipient list can be up to 60s stale normally and up to 5 minutes
+  stale during a users-table outage - the failed refresh keeps serving
+  the cached list until it reaches 5x the TTL, then gives up with an
+  ERROR and sends to nobody (3.1). Both the "a just-subscribed device
+  is invisible" degradation and the "a just-offboarded user's device
+  still receives names and message text" exposure are therefore
+  bounded at 5 minutes, not at the outage's length.
 - ACCEPTED RISK (write path): subscription pruning is a whole-list
   read-modify-write with no version condition (usersRepo.ts:581-631).
   Moving prunes onto the message path from two processes (app webhook +

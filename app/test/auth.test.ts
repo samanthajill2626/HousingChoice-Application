@@ -611,37 +611,55 @@ describe('session epoch — the server-side kill switch', () => {
     expect(res.status).toBe(401);
   });
 
-  it('logout revokes the sessions but KEEPS the push subscriptions (the signing-out DEVICE removes only its own; other devices keep working)', async () => {
+  it('logout with { pushEndpoint } removes THAT device subscription only, in the same request as the revocation; other devices keep theirs', async () => {
     // Operator ruling 2026-08-17 (inbound-message-push D13, option 2): a
     // sign-out on the tablet must not silence the phone. The signing-out
-    // browser DELETEs its own subscription before logging out (dashboard
-    // pushSignOut.ts); the server-side epoch bump touches nothing else.
-    // Offboarding is DELETE /api/users/:id, which removes the whole row and
-    // every subscription on it.
-    const { app, fakeUsers } = makeAuthApp({
-      seedUsers: [
-        testUserItem({
-          push_subscriptions: [
-            {
-              endpoint: 'https://fcm.googleapis.com/send/dev-1',
-              keys: { p256dh: 'k', auth: 'a' },
-              created_at: '2026-08-16T00:00:00.000Z',
-            },
-          ],
-        }),
-      ],
+    // browser names its own endpoint in the logout body so the removal and
+    // the epoch bump ride ONE request (no separate DELETE that a bounded
+    // client timeout or a slow network could leave un-confirmed before the
+    // session is revoked). Offboarding is DELETE /api/users/:id, which
+    // removes the whole row and every subscription on it.
+    const sub = (n: string) => ({
+      endpoint: `https://fcm.googleapis.com/send/${n}`,
+      keys: { p256dh: 'k', auth: 'a' },
+      created_at: '2026-08-16T00:00:00.000Z',
     });
-    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
+    const { app, fakeUsers } = makeAuthApp({
+      seedUsers: [testUserItem({ push_subscriptions: [sub('tablet'), sub('phone')] })],
+    });
 
     const logout = await request(app)
       .post('/auth/logout')
       .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE);
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ pushEndpoint: 'https://fcm.googleapis.com/send/tablet' });
     expect(logout.status).toBe(204);
 
     const after = fakeUsers.users.get(TEST_SESSION_USER.userId);
     expect(after?.session_epoch).toBe(2);
-    expect(after?.push_subscriptions).toHaveLength(1);
+    expect(after?.push_subscriptions?.map((s) => s.endpoint)).toEqual([
+      'https://fcm.googleapis.com/send/phone',
+    ]);
+  });
+
+  it('logout without a pushEndpoint (or with garbage) touches no subscription and still succeeds', async () => {
+    const sub = {
+      endpoint: 'https://fcm.googleapis.com/send/phone',
+      keys: { p256dh: 'k', auth: 'a' },
+      created_at: '2026-08-16T00:00:00.000Z',
+    };
+    for (const body of [undefined, {}, { pushEndpoint: 42 }, { pushEndpoint: 'x'.repeat(5000) }]) {
+      const { app, fakeUsers } = makeAuthApp({
+        seedUsers: [testUserItem({ push_subscriptions: [sub] })],
+      });
+      const req = request(app)
+        .post('/auth/logout')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      const res = await (body === undefined ? req : req.send(body));
+      expect(res.status, JSON.stringify(body)).toBe(204);
+      expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
+    }
   });
 
   it('a role change + epoch bump (the user:role script) revokes within the window; the next login carries the new role', async () => {

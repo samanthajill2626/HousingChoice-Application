@@ -8,9 +8,10 @@
 // focus to the hamburger.
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { logout, subscribePush, unsubscribePush } from '../api/index.js';
+import { logout, subscribePush } from '../api/index.js';
 import {
   forgetBrowserPushSubscription,
+  readBrowserPushEndpoint,
   reconcileBrowserPushSubscription,
 } from '../lib/pushSignOut.js';
 import { Button } from '../ui/index.js';
@@ -39,12 +40,14 @@ export function AppFrame(): React.JSX.Element {
 
   async function handleSignOut(): Promise<void> {
     try {
-      // Sign-out is per-device for push: remove THIS device's subscription on
-      // the server (while the session is still valid) and in the browser, so
-      // a signed-out device stops receiving and its toggle stays honest -
-      // other devices are untouched. Best-effort, bounded, never throws.
-      await forgetBrowserPushSubscription(unsubscribePush);
-      await logout();
+      // Sign-out is per-device for push: name THIS device's endpoint in the
+      // logout request so the server removes it in the same write as the
+      // revocation (other devices are untouched), then drop the browser copy
+      // so the toggle stays honest. Both push steps are bounded, best-effort,
+      // and never throw - nothing on the push side blocks sign-out.
+      const pushEndpoint = await readBrowserPushEndpoint();
+      await logout(pushEndpoint === null ? {} : { pushEndpoint });
+      void forgetBrowserPushSubscription();
     } finally {
       // Re-probe → AuthContext flips to anonymous → the shell shows Login.
       await refresh();

@@ -204,7 +204,7 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
     },
     async setRoleAndRevoke(userId, role) {
       // ONE write changes both (mirrors the real repo's atomic update, H1).
-      // push_subscriptions are KEPT - only the logout bump drops them.
+      // push_subscriptions are KEPT (no revocation write drops them).
       const user = users.get(userId);
       if (!user) throw new Error(`setRoleAndRevoke: no user ${userId}`);
       user.role = role;

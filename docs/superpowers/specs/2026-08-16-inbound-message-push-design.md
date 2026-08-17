@@ -106,11 +106,15 @@ Planner-settled technical decisions:
   per-device sessions (an auth change, out of scope). The operator chose
   (2), on the verified fact that offboarding is DELETE /api/users/:id,
   which hard-deletes the whole user row and therefore every subscription
-  on it. Mechanism: the dashboard sign-out first DELETEs this device's
-  endpoint on the server (/api/push/subscriptions, while the session
-  cookie is still valid), then unsubscribes the browser, then calls
-  /auth/logout; usersRepo.bumpSessionEpoch and setRoleAndRevoke (and the
-  ops-script buildRoleUpdate mirror) touch NO subscription. Accepted
+  on it. Mechanism: the dashboard sign-out reads this device's push
+  endpoint and names it in the POST /auth/logout body ({ pushEndpoint });
+  the logout handler removes exactly that record and bumps the epoch in
+  the SAME request (re-review round 4: a separate DELETE could be left
+  un-confirmed by the client timeout or a slow network before the epoch
+  bump killed the session it needed), then the browser drops its own
+  copy afterwards, best-effort. usersRepo.bumpSessionEpoch and
+  setRoleAndRevoke (and the ops-script buildRoleUpdate mirror) touch NO
+  subscription; a bad or absent pushEndpoint is ignored, never an error. Accepted
   residual: a LOST device that cannot be signed out from itself keeps its
   subscription until the user is removed and re-invited (deterministic
   userId makes that clean) or the endpoint is Gone-pruned; the RUNBOOK
@@ -122,8 +126,9 @@ Planner-settled technical decisions:
   Settings toggle, which reads the BROWSER, stays truthful. Both client
   helpers use serviceWorker.getRegistration() (never .ready, which hangs
   forever with no registration), are bounded end to end (registration
-  lookup, getSubscription, and the DELETE/unsubscribe or re-POST - 1.5s
-  default), never throw, and never block sign-out. Normal session expiry
+  lookup, getSubscription, and the unsubscribe or re-POST - 1.5s
+  default), never throw, and never block sign-out (the endpoint read is
+  bounded; the browser unsubscribe runs AFTER the logout request). Normal session expiry
   and an admin role change touch no subscription.
 
 ## 3. What gets built

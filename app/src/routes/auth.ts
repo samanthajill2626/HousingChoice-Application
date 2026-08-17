@@ -98,6 +98,24 @@ const NOT_INVITED_HTML = `<!doctype html>
 <p><a href="/auth/login">Try a different account</a></p>
 </body></html>`;
 
+/** Longest push endpoint URL we store (mirrors routes/push.ts MAX_ENDPOINT_LENGTH). */
+const MAX_PUSH_ENDPOINT_LENGTH = 2048;
+
+/**
+ * The optional { pushEndpoint } a signing-out browser names in POST /auth/
+ * logout so its OWN push subscription is removed in the same request as the
+ * session revocation. Anything absent, non-string, empty or oversize reads as
+ * "none" - never an error, sign-out must not fail on a bad body. Exported for
+ * the unit test.
+ */
+export function pushEndpointFromLogoutBody(body: unknown): string | undefined {
+  if (body === null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)['pushEndpoint'];
+  if (typeof value !== 'string') return undefined;
+  if (value.length === 0 || value.length > MAX_PUSH_ENDPOINT_LENGTH) return undefined;
+  return value;
+}
+
 export interface AuthRouterDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -271,15 +289,30 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
   // user's session_epoch invalidates every cookie sealed with the old epoch
   // — all browsers, all devices — within the 60s epoch-cache TTL ("log me
   // out everywhere" and "this laptop was stolen" are the same button).
-  // Push subscriptions are NOT dropped here (operator ruling 2026-08-17): a
-  // subscription is a DEVICE credential and sign-out is per-device for push -
-  // signing out on the tablet must not silence the phone. The signing-out
-  // browser removes its own subscription (DELETE /api/push/subscriptions,
-  // then a browser unsubscribe - dashboard pushSignOut.ts) BEFORE calling
-  // this route, while its cookie is still valid. Offboarding is the user
+  // Push is PER-DEVICE on sign-out (operator ruling 2026-08-17): a push
+  // subscription is a DEVICE credential and signing out on the tablet must
+  // not silence the phone. The signing-out browser names ITS OWN endpoint in
+  // the body ({ pushEndpoint }) and this handler removes exactly that record
+  // in the SAME request as the revocation - one round trip, so no separate
+  // DELETE can be left un-confirmed by a client timeout or a slow network
+  // before the epoch bump kills the session it needed. Other devices'
+  // subscriptions are untouched. Best-effort: a removal failure never blocks
+  // sign-out (the endpoint is Gone-pruned on its next send anyway). Absent,
+  // malformed or oversize endpoints are ignored. Offboarding is the user
   // DELETE, which removes the whole row and every subscription on it.
   router.post('/logout', sessionMw, async (req: AuthedRequest, res) => {
     if (req.user) {
+      const pushEndpoint = pushEndpointFromLogoutBody(req.body);
+      if (pushEndpoint !== undefined) {
+        try {
+          await usersRepo.removePushSubscription(req.user.userId, pushEndpoint);
+        } catch (err) {
+          log.warn(
+            { userId: req.user.userId, err: (err as Error).message },
+            'logout: removing this device push subscription failed - continuing (Gone-prune will catch it)',
+          );
+        }
+      }
       await usersRepo.bumpSessionEpoch(req.user.userId);
       epochCache.delete(req.user.userId); // this process enforces immediately
     }

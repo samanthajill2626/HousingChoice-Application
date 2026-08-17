@@ -4,11 +4,15 @@
 // WHY: a push subscription is a device credential (message pushes carry
 // contact names + bodies), and sign-out is PER-DEVICE for push by operator
 // ruling (2026-08-17): signing out on the tablet must not silence the phone.
-// So the signing-out browser removes ITS OWN subscription - on the server
-// (DELETE, while the session cookie is still valid) and then in the browser
-// (forgetBrowserPushSubscription); the server-side session revocation touches
-// no other device's subscription. Offboarding is DELETE /api/users/:id, which
-// removes the whole user row and every subscription on it.
+// So the signing-out browser removes ITS OWN subscription: it reads its
+// endpoint (readBrowserPushEndpoint), names it in the POST /auth/logout body
+// so the server removes exactly that record in the SAME request as the
+// session revocation (no separate DELETE that a timeout or a slow network
+// could leave un-confirmed before the epoch bump kills the session it
+// needed), and then drops the browser copy afterwards
+// (forgetBrowserPushSubscription) so the Settings toggle stays honest. Other
+// devices' subscriptions are untouched. Offboarding is DELETE /api/users/:id,
+// which removes the whole user row and every subscription on it.
 //
 // The Settings toggle derives its state from the BROWSER, so any drift where
 // the server lost a subscription the browser still holds (a Gone-prune, a
@@ -72,31 +76,31 @@ async function bounded(work: () => Promise<boolean>, opts?: PushSyncOptions): Pr
 }
 
 /**
- * Sign-out: remove THIS device's push subscription - on the SERVER first
- * (`unsubscribeServer`, the API's unsubscribePush(endpoint), while the session
- * cookie is still valid), then in the browser. Per-device by operator ruling
- * (2026-08-17): signing out on the tablet must not silence the phone; the
- * server-side epoch bump touches no other device's subscription. Offboarding
- * is DELETE /api/users/:id, which removes the whole row and every
- * subscription on it. Never throws or hangs. Resolves true only when both
- * halves succeeded (the browser half still runs when the server half fails,
- * so the toggle never lies On for a subscription that is being abandoned).
+ * Sign-out step 1: THIS device's push endpoint, to name in the logout request
+ * (the server removes exactly that record in the same request as the
+ * revocation). null when there is nothing to name. Never throws or hangs.
  */
-export function forgetBrowserPushSubscription(
-  unsubscribeServer: (endpoint: string) => Promise<unknown>,
-  opts?: PushSyncOptions,
-): Promise<boolean> {
+export async function readBrowserPushEndpoint(opts?: PushSyncOptions): Promise<string | null> {
+  const endpoint = await withTimeout(
+    currentSubscription()
+      .then((s) => (s === null ? null : s.endpoint))
+      .catch(() => null),
+    opts?.timeoutMs ?? OPERATION_TIMEOUT_MS,
+  );
+  return typeof endpoint === 'string' && endpoint.length > 0 ? endpoint : null;
+}
+
+/**
+ * Sign-out step 3 (after the logout request): drop the browser's own copy so
+ * the Settings toggle stays honest. Best-effort - the server record is
+ * already gone with the logout, so this can never sit in front of sign-out.
+ * Never throws or hangs. Resolves true when a subscription was unsubscribed.
+ */
+export function forgetBrowserPushSubscription(opts?: PushSyncOptions): Promise<boolean> {
   return bounded(async () => {
     const subscription = await currentSubscription();
     if (subscription === null) return false;
-    let serverOk = true;
-    try {
-      await unsubscribeServer(subscription.endpoint);
-    } catch {
-      serverOk = false;
-    }
-    const browserOk = await subscription.unsubscribe();
-    return serverOk && browserOk;
+    return await subscription.unsubscribe();
   }, opts);
 }
 

@@ -1020,9 +1020,18 @@ export async function aggregateInbox(
           // thread whose index entry produced this candidate.
           const offered = candidate.unreadConversations[0]?.conversationId;
           if (offered === undefined) return { row: undefined, lagged: false };
-          // A throw here fails the request exactly as the non-contact arm's
-          // point read does - deliberately not degraded to a silent drop.
-          const base = await conversations.getById(offered);
+          // BEST-EFFORT, like every other external read in this module (header:
+          // "NEVER throws a 500"). A failed point read cannot prove lag, so it
+          // classifies as NOT lag: drop, no retry, page served (adversarial r4
+          // finding 5 / conformance r4 finding 3 - the earlier "deliberately
+          // uncaught" posture contradicted the module contract).
+          let base: ConversationItem | undefined;
+          try {
+            base = await conversations.getById(offered);
+          } catch (err) {
+            log.warn({ err, conversationId: offered }, 'inbox: lag discriminator read failed (best-effort)');
+            return { row: undefined, lagged: false };
+          }
           // Base says still unread -> the participant image is behind, the 0 is
           // a missing question, and a retry can learn something. Base says read,
           // closed or gone -> an ORDINARY mark-read race (or a closed thread the
@@ -1052,7 +1061,19 @@ export async function aggregateInbox(
       // typically fresher than any GSI - ConsistentRead deliberately not used)
       // refreshes status + unread_count. A row the index still lists but the
       // base table reports read or closed is dropped right here.
-      const fresh = await conversations.getById(candidate.conversation.conversationId);
+      // BEST-EFFORT (module header: every external lookup degrades, never a
+      // 500): a failed point read drops the row for this page and the next
+      // reconcile refetch re-offers it. See the contact arm's twin above.
+      let fresh: ConversationItem | undefined;
+      try {
+        fresh = await conversations.getById(candidate.conversation.conversationId);
+      } catch (err) {
+        log.warn(
+          { err, conversationId: candidate.conversation.conversationId },
+          'inbox: unread point read failed (best-effort)',
+        );
+        return { row: undefined, lagged: false };
+      }
       // A base-table point read IS authoritative, so this drop is never "lag":
       // there is nothing a retry could learn.
       if (fresh === undefined || !isUnreadVisible(fresh)) return { row: undefined, lagged: false };

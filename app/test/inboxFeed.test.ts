@@ -41,6 +41,8 @@ interface Seed {
   latestMessage?: Record<string, Partial<MessageItem>>;
   placements?: Record<string, { stage: string }>;
   participantConversationLookupError?: Error;
+  /** Make the base-table point read (`conversations.getById`) throw. */
+  getByIdError?: Error;
   /**
    * The `byUnread` GSI's own image, when it must DIFFER from the base table.
    * Spec section 6 makes the three read tiers independently stale, and the
@@ -113,6 +115,7 @@ function makeDeps(
     }),
     conversationsRepo: {
       async getById(conversationId: string) {
+        if (seed.getByIdError !== undefined) throw seed.getByIdError;
         return seed.conversations.find((c) => c.conversationId === conversationId);
       },
       // The sparse byUnread index. NOTE the deliberate difference from
@@ -2027,6 +2030,62 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(page.truncated).toBeUndefined();
     // ONE participant-GSI read: the drop was answered, not retried.
     expect(calls.findByParticipantPhone).toBe(1);
+  });
+
+  it('LAG DISCRIMINATOR degrades: a THROWING base-table read is a best-effort drop, never a 500', async () => {
+    // Adversarial r4 finding 5 / conformance r4 finding 3. The module header
+    // promises every external lookup degrades ("NEVER throws a 500"); the lag
+    // discriminator's point read was the one read that did not. A repo throw
+    // while classifying an ordinary mark-read drop is treated as NOT lag: the
+    // row is dropped (it may not be unread at all), no retry, and the page is
+    // served. Same rule for the non-contact arm's point read below.
+    const calls = emptyCallCounts();
+    const phone = '+14045557041';
+    const c = conv({
+      conversationId: 'conv-throw',
+      participant_phone: phone,
+      last_activity_at: T(12),
+      unread_count: 1,
+    });
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      makeDeps(
+        {
+          contacts: [{ contactId: 'c-throw', type: 'tenant', phone }],
+          conversations: [c],
+          // Participant image says READ (fresh sum 0) -> the discriminator asks
+          // the base table -> which throws.
+          participantProjection: [{ ...c, unread_count: 0 }],
+          getByIdError: new Error('base read unavailable'),
+        },
+        calls,
+      ),
+    );
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    // ONE participant read: dropped as not-lag, never retried.
+    expect(calls.findByParticipantPhone).toBe(1);
+  });
+
+  it('NON-CONTACT point read degrades: a THROWING getById drops the group row best-effort, never a 500', async () => {
+    const calls = emptyCallCounts();
+    const group = conv({
+      conversationId: 'gt-throw',
+      type: 'group_text',
+      status: 'group_open',
+      last_activity_at: T(12),
+      unread_count: 2,
+      participants: [{ contactId: 'c-1', phone: '+14045557051', name: 'A' }],
+    });
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      makeDeps(
+        { contacts: [], conversations: [group], getByIdError: new Error('base read unavailable') },
+        calls,
+      ),
+    );
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
   });
 
   it('LAG RETRY IS BOUNDED by the page limit, and the request line reports the count', async () => {

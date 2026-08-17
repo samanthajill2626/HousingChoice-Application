@@ -1702,7 +1702,10 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       {
         contactId: 'c-b',
         type: 'tenant',
-        phones: [{ phone: bNewPhone, primary: true }, { phone: bOldPhone }],
+        phones: [
+          { phone: bNewPhone, primary: true },
+          { phone: bOldPhone, primary: false },
+        ],
       },
       { contactId: 'c-a', type: 'tenant', phone: aPhone },
     ];

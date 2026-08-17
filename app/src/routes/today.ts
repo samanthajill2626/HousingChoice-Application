@@ -690,6 +690,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         walkState,
       )) {
         if (!isOneToOneBucket(conv)) continue;
+        // DELETED CONTACTS, ALSO BEFORE THE CAP (adversarial A9). This test used
+        // to run in the emit loop below, after the cap had been spent - the very
+        // ordering the comment above rejects for group threads - and the index
+        // source makes it worse: the newest 100 UNREAD rows is where resurfaced
+        // deleted contacts live BY CONSTRUCTION (the product rule keeps them
+        // unread until someone reads them), where the newest 100 OPEN rows held
+        // only a small fraction of them. A hundred at the head of the index
+        // rendered Unreplied and the untriaged block EMPTY, with warnIfCapped
+        // announcing "capped" rather than "filtered to nothing". The contact
+        // lookup is request-cached, so moving it up costs no extra read.
+        const ownerId = oneToOneContactId(conv);
+        if (ownerId !== undefined && (await isDeletedContact(ownerId))) continue;
         const rowKey = unreadRowKeyOf(conv);
         if (unreadRowKeys.has(rowKey)) continue;
         unreadRowKeys.add(rowKey);
@@ -722,8 +734,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // roster isn't linked yet (auto-capture race), DEFER to the contacts
           // triage pass below (it emits the proper contact row) rather than
           // emitting a dead conversation ref — so we never produce a nowhere-link.
+          // The deleted-contact test has already run, ahead of the cap.
           const contactId = oneToOneContactId(conv);
-          if (contactId !== undefined && !(await isDeletedContact(contactId))) {
+          if (contactId !== undefined) {
             if (typeof conv.participant_phone === 'string') {
               emittedUnknownPhones.add(conv.participant_phone);
             }
@@ -755,10 +768,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // internal pool number violates "anchored to a placement/contact". Skip it
           // (and anything that isn't a known 1:1 type). Link to the contact page;
           // fall back to the conversation ref only if the roster isn't linked yet.
-          const contactId = oneToOneContactId(conv);
           // A deleted contact's thread is off the boards (an unlinked thread —
-          // contactId undefined — has no contact to be deleted, so it stays).
-          if (contactId !== undefined && (await isDeletedContact(contactId))) continue;
+          // contactId undefined — has no contact to be deleted, so it stays);
+          // both rules are applied in the collect loop above, ahead of the cap.
+          const contactId = oneToOneContactId(conv);
           unreplied.push({
             item: {
               group: 'unreplied',

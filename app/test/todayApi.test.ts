@@ -764,6 +764,63 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).toContain('c-bulk-098');
   });
 
+  it('a DELETED contact does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
+    // ADVERSARIAL A9. The deleted-contact test used to run in the EMIT loop,
+    // after the cap had already been spent - the same mistake the collect
+    // loop's own comment argues against for group threads. It got worse with
+    // the index source: the newest 100 UNREAD rows is exactly where resurfaced
+    // deleted contacts live by construction (the product rule keeps them unread
+    // indefinitely until someone reads them), where the newest 100 OPEN rows
+    // held only a small fraction. A hundred of them at the head of the index
+    // rendered Unreplied EMPTY, with warnIfCapped reporting "capped" rather
+    // than "filtered to nothing".
+    for (let i = 0; i < 100; i += 1) {
+      const id = `c-gone-${String(i).padStart(3, '0')}`;
+      const phone = `+1555030${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Gone',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-gone-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Gone ${id}`,
+        status: 'open',
+        // NEWEST, so they are scanned first and would fill the cap.
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-behind', 'Behind', 'Wall');
+    seedConversation({
+      conversationId: 'conv-behind',
+      participant_phone: '+15550309999',
+      participant_display_name: 'Behind Wall',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-behind', phone: '+15550309999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+
+    // The live person behind the wall is reachable, and no deleted contact is
+    // on the board.
+    expect(ids).toEqual(['c-behind']);
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({

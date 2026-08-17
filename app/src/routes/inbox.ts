@@ -1744,5 +1744,73 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
     res.json({ ok: true });
   });
 
+  // --- Mark UNREAD (the inbox row's toggle counterpart to Mark read) ---------
+  // The row is per CONTACT (newest-conversation rule), so "mark this row
+  // unread" flags the contact's NEWEST 1:1 thread - the one the row shows -
+  // never a fan-out. Idempotent: an already-unread thread is left alone (no
+  // second increment), and the reply is the same 200 either way. Built on the
+  // existing primitive (incrementUnread writes the counter + byUnread flag in
+  // one expression), so the sparse-index invariant holds. Read-then-write, not
+  // conditional: a concurrent inbound landing between the read and the
+  // increment can leave the row at 2 - the same shape as two inbounds, and
+  // the next Mark read zeroes it.
+  const newestOf = (convs: ConversationItem[]): ConversationItem | undefined =>
+    convs.reduce<ConversationItem | undefined>(
+      (best, c) => (best === undefined || c.last_activity_at > best.last_activity_at ? c : best),
+      undefined,
+    );
+  const flagUnread = async (conv: ConversationItem): Promise<void> => {
+    if (unreadOf(conv) > 0) return; // already unread - idempotent no-op
+    await conversations.incrementUnread(conv.conversationId);
+    const updated = await conversations.getById(conv.conversationId);
+    if (updated) events.emit('conversation.updated', toConversationUpdatedEvent(updated));
+  };
+
+  // POST /api/inbox/unread { phone } - unknown-number rows.
+  router.post('/unread', async (req, res) => {
+    const payload = (req.body ?? {}) as { phone?: unknown };
+    const phone = payload.phone;
+    if (typeof phone !== 'string' || phone.length === 0) {
+      res.status(400).json({ error: 'phone must be a non-empty string' });
+      return;
+    }
+    if (!/^\+\d+$/.test(phone)) {
+      res.status(400).json({ error: 'phone must be E.164 (e.g. +15550001234)' });
+      return;
+    }
+    const newest = newestOf(await conversations.findByParticipantPhone(phone));
+    if (newest === undefined) {
+      res.status(404).json({ error: 'no_conversation_for_phone' });
+      return;
+    }
+    await flagUnread(newest);
+    log.info({ phone, conversationId: newest.conversationId }, 'inbox: unknown-number mark-unread');
+    res.json({ ok: true });
+  });
+
+  // POST /api/inbox/:contactId/unread - contact rows. A soft-deleted contact
+  // is refused: their row is only ever visible while unread (resurfacing), and
+  // a manual flag must not fake the "fresh inbound" the resurfacing rule means.
+  router.post('/:contactId/unread', async (req, res) => {
+    const { contactId } = req.params;
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    if (isDeleted(contact)) {
+      res.status(409).json({ error: 'contact_deleted' });
+      return;
+    }
+    const newest = newestOf(await conversationsForContact(contact, conversations));
+    if (newest === undefined) {
+      res.status(404).json({ error: 'no_conversation_for_contact' });
+      return;
+    }
+    await flagUnread(newest);
+    log.info({ contactId, conversationId: newest.conversationId }, 'inbox: contact mark-unread');
+    res.json({ ok: true });
+  });
+
   return router;
 }

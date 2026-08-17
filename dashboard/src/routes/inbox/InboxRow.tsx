@@ -15,6 +15,10 @@ export interface InboxRowProps {
   row: InboxRowData;
   onOpen: (row: InboxRowData) => void;
   onMarkRead: (row: InboxRowData) => void;
+  /** The toggle's other half: shown INSTEAD of Mark read when the row is read.
+   *  Optional so existing callers (and tests) that only mark read keep working;
+   *  when absent a read row simply shows no action. */
+  onMarkUnread?: (row: InboxRowData) => void;
 }
 
 const CHANNEL_LABEL: Record<InboxChannel, string> = {
@@ -47,6 +51,7 @@ export function InboxRow({
   row,
   onOpen,
   onMarkRead,
+  onMarkUnread,
 }: InboxRowProps): React.JSX.Element {
   const unread = row.unreadCount > 0;
   const isRelay = row.kind === 'relay_group';
@@ -115,6 +120,9 @@ export function InboxRow({
         </Link>
 
         <div className={styles.actions}>
+          {/* ONE toggle, never both: Mark read while unread, Mark unread while
+              read. The affordance always describes the state change it makes,
+              so there is no "click Mark read on an already-read row" case. */}
           {unread ? (
             <button
               type="button"
@@ -123,6 +131,15 @@ export function InboxRow({
               aria-label={`Mark ${row.name} read`}
             >
               Mark read
+            </button>
+          ) : onMarkUnread !== undefined ? (
+            <button
+              type="button"
+              className={styles.action}
+              onClick={() => onMarkUnread(row)}
+              aria-label={`Mark ${row.name} unread`}
+            >
+              Mark unread
             </button>
           ) : null}
         </div>

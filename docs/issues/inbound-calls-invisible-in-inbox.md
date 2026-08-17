@@ -142,6 +142,21 @@ this change has no separate spec:
   contact and never re-marks the old one; unmount cancels a pending trailing
   re-mark (an unread the operator never looked at stays unread).
 
+- Mark-UNREAD toggle (operator decision 2026-08-17, added on this branch): the
+  inbox row's action is ONE toggle - "Mark read" while unread, "Mark unread"
+  while read - never both, so there is no "click Mark read on a read row"
+  case. `POST /api/inbox/:contactId/unread` flags the contact's NEWEST 1:1
+  thread (the one the row shows; never a fan-out), `POST /api/inbox/unread
+  { phone }` the unknown-number twin, `POST /api/conversations/:id/unread` for
+  relay/group rows (409 on a closed relay / non-group_open group thread, so a
+  manual flag never plants an invisible byUnread resident). All idempotent
+  (an unread thread is left alone), built on `incrementUnread` (counter + flag
+  in one write), 409 `contact_deleted` for a soft-deleted contact (a manual
+  flag must not fake the fresh inbound the resurfacing rule means). The row
+  flips optimistically; the nav badge follows the server's
+  `conversation.updated` (its optimistic layer models clears only).
+
 Coverage: `app/test/voiceInboxActivity.test.ts`, `app/test/callPreview.test.ts`,
+`app/test/inboxApi.test.ts` (mark-unread routes),
 `dashboard/src/routes/contact/useMarkContactRead.test.tsx`, `dashboard/src/routes/inbox/InboxRow.test.tsx`,
 `e2e/tests/dashboard-next/call-inbox-unread.spec.ts`.

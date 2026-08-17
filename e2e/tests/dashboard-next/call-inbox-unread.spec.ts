@@ -4,7 +4,8 @@
 // a missed inbound business-line call re-sorts the caller's thread to the TOP,
 // marks it UNREAD (nav badge + Unread tab), and staff clear it exactly like a
 // text (Mark read / opening the contact). Only a MISS (and a voicemail) is
-// unread; an ANSWERED call re-sorts already-read.
+// unread; an ANSWERED call re-sorts already-read. The row action is ONE toggle:
+// Mark read while unread, Mark unread while read (operator decision 2026-08-17).
 //
 // Driving notes:
 //   - Calls come in through the fake-twilio voice control API from a fresh
@@ -142,6 +143,23 @@ test('a MISSED business-line call marks the caller unread: nav badge, Unread tab
   await expect(navBadge(page)).toHaveCount(0);
   await expect.poll(() => unreadCount(api)).toBe(0);
   await expect(page.locator(`a[href="/contacts/${contactId}"]`)).toHaveCount(0);
+
+  // The toggle's other half: on the All tab the now-read row offers Mark UNREAD
+  // (never both), and flagging it re-lists it as unread with the badge back.
+  await page.getByRole('tab', { name: 'All' }).click();
+  const readRow = page.locator(`a[href="/contacts/${contactId}"]`);
+  await expect(readRow).toBeVisible({ timeout: 10_000 });
+  await readRow.hover();
+  await expect(page.getByRole('button', { name: 'Mark Caller Tester read' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Mark Caller Tester unread' }).click();
+  await expect(readRow.getByLabel('1 unread')).toBeVisible();
+  await expect.poll(() => unreadCount(api)).toBe(1);
+  await expect(navBadge(page)).toHaveAttribute('aria-label', '1 unread', { timeout: 10_000 });
+  await readRow.hover();
+  await expect(page.getByRole('button', { name: 'Mark Caller Tester unread' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Mark Caller Tester read' })).toBeVisible();
+  await page.getByRole('tab', { name: 'Unread' }).click();
+  await expect(page.locator(`a[href="/contacts/${contactId}"]`)).toBeVisible({ timeout: 10_000 });
 });
 
 test('with the auto-text OFF the row reads "Missed call" on the Call channel; a left voicemail re-flags it as "Voicemail"', async ({

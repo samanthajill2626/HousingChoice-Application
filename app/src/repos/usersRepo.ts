@@ -242,13 +242,23 @@ export interface UsersRepo {
    * script's combined update (scripts/lib/userRoleCore.mjs buildRoleUpdate)
    * byte-for-byte. Returns the NEW session epoch. Throws if the user does not
    * exist. Use this from the in-app PATCH role route instead of a separate
-   * setRole + bumpSessionEpoch pair.
+   * setRole + bumpSessionEpoch pair. Like bumpSessionEpoch, the SAME write
+   * REMOVES push_subscriptions (see there).
    */
   setRoleAndRevoke(userId: string, role: UserRole): Promise<number>;
   /**
    * +1 the session epoch and return the NEW value — revokes every session
    * sealed with the old epoch (effective within the middleware's 60s epoch
    * cache). Throws if the user does not exist.
+   *
+   * The SAME write also REMOVES push_subscriptions. A push subscription is a
+   * device-scoped credential: since inbound-message push, a subscribed device
+   * receives contact names and message bodies on every inbound, so a
+   * revocation that killed the cookies but left the subscriptions would keep
+   * feeding a signed-out (or stolen, or offboarded) device indefinitely.
+   * Revocation is global by design (all devices), so the drop is global too;
+   * each device re-arms push the next time it enables notifications in
+   * Settings after signing back in.
    */
   bumpSessionEpoch(userId: string): Promise<number>;
   /**
@@ -491,17 +501,18 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
     },
 
     async setRoleAndRevoke(userId, role) {
-      // ONE update: SET role AND bump session_epoch — atomic, so a role change
-      // can never land without revoking the user's sessions (H1). The epoch
-      // expression mirrors bumpSessionEpoch + the ops-script buildRoleUpdate
-      // exactly: if_not_exists(…, 1) + 1 (NOT ADD), so a legacy item lacking
-      // the attribute (read as epoch 1) first bumps to 2.
+      // ONE update: SET role AND bump session_epoch AND drop push
+      // subscriptions - atomic, so a role change can never land without
+      // revoking the user's sessions (H1) and their device push credentials.
+      // The expression mirrors bumpSessionEpoch + the ops-script
+      // buildRoleUpdate exactly: if_not_exists(..., 1) + 1 (NOT ADD), so a
+      // legacy item lacking the attribute (read as epoch 1) first bumps to 2.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { userId },
           UpdateExpression:
-            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeNames: { '#role': 'role' },
           ExpressionAttributeValues: { ':role': role, ':base': 1, ':one': 1 },
@@ -526,8 +537,10 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
           Key: { userId },
           // if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking the
           // attribute read as epoch 1 (sessionEpochOf), so their first bump
-          // must land on 2 — ADD would mint 1 and revoke nothing.
-          UpdateExpression: 'SET session_epoch = if_not_exists(session_epoch, :base) + :one',
+          // must land on 2 - ADD would mint 1 and revoke nothing. REMOVE of an
+          // absent push_subscriptions attribute is a no-op (never a failure).
+          UpdateExpression:
+            'SET session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeValues: { ':base': 1, ':one': 1 },
           ReturnValues: 'UPDATED_NEW',
@@ -537,7 +550,10 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       if (typeof epoch !== 'number') {
         throw new Error(`bumpSessionEpoch(${userId}): UPDATED_NEW returned no session_epoch`);
       }
-      log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped — all prior sessions revoked');
+      log.info(
+        { userId, sessionEpoch: epoch },
+        'session epoch bumped - all prior sessions revoked, push subscriptions dropped',
+      );
       return epoch;
     },
 

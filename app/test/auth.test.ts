@@ -611,6 +611,37 @@ describe('session epoch — the server-side kill switch', () => {
     expect(res.status).toBe(401);
   });
 
+  it('logout DROPS the push subscriptions in the same revocation - a signed-out device stops receiving pushes', async () => {
+    // Push subscriptions are device-scoped credentials. Global logout ("log
+    // me out everywhere" / "this phone was stolen") must stop message pushes
+    // - which now carry contact names + message bodies to every subscribed
+    // device - not just kill the cookies.
+    const { app, fakeUsers } = makeAuthApp({
+      seedUsers: [
+        testUserItem({
+          push_subscriptions: [
+            {
+              endpoint: 'https://fcm.googleapis.com/send/dev-1',
+              keys: { p256dh: 'k', auth: 'a' },
+              created_at: '2026-08-16T00:00:00.000Z',
+            },
+          ],
+        }),
+      ],
+    });
+    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
+
+    const logout = await request(app)
+      .post('/auth/logout')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(logout.status).toBe(204);
+
+    const after = fakeUsers.users.get(TEST_SESSION_USER.userId);
+    expect(after?.session_epoch).toBe(2);
+    expect(after?.push_subscriptions).toBeUndefined();
+  });
+
   it('a role change + epoch bump (the user:role script) revokes within the window; the next login carries the new role', async () => {
     const { app, fakeUsers } = makeAuthApp({
       seedUsers: [testUserItem()],

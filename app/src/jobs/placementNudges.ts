@@ -566,7 +566,7 @@ async function processNudgeRow(
       // unbounded wait re-lists this rung every tick forever, never sent and
       // never visibly skipped. Past the grace window, retire it VISIBLY.
       if (rosterWaitExpired(row.dueAt, nowIso)) {
-        log.warn(
+        log.error(
           { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind, dueAt: row.dueAt },
           'placement nudge: roster STILL unreadable past the grace window - retiring (claim-skipped)',
         );

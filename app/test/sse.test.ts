@@ -274,11 +274,15 @@ describe('GET /api/events — connection cap (H4 partial)', () => {
 
     const second = await connectSse(port);
     expect(second.response.status).toBe(503);
-    const warn = capture
-      .atLevel(40)
+    // ERROR, not WARN: hitting the cap is a state that should not occur at our
+    // scale (default 50 streams, ~10 devices), so if it fires the likely cause
+    // is a LEAKED slot whose close never decremented - a bug worth alarming on.
+    // Level 50 also puts it in reach of the ErrorLogs metric filter.
+    const capHit = capture
+      .atLevel(50)
       .find((l) => String(l['msg']).includes('sse connection cap reached'))!;
-    expect(warn).toBeDefined();
-    expect(typeof warn['correlationId']).toBe('string');
+    expect(capHit).toBeDefined();
+    expect(typeof capHit['correlationId']).toBe('string');
 
     // Disconnecting the first stream frees its slot (close is async — poll).
     first.abort();

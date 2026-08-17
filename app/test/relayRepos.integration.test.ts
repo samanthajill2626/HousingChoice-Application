@@ -547,7 +547,7 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect((await poolNumbers.get(pn))!.last_group_closed_at).toBe('2026-07-01T00:00:00.000Z');
   });
 
-  it('noteGroupClosed on a MISSING pool record does not throw and WARNs distinctly (AF-11)', async () => {
+  it('noteGroupClosed on a MISSING pool record does not throw and ERRORs distinctly (AF-11)', async () => {
     const capture = createLogCapture();
     const repo = createPoolNumbersRepo({
       doc,
@@ -557,14 +557,18 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     const missing = poolPn('+1555099'); // never created
     // Best-effort: never throws even when the pool record is absent.
     await expect(repo.noteGroupClosed(missing, '2026-07-01T00:00:00.000Z')).resolves.toBeUndefined();
-    // Distinct diagnostic: a MISSING record WARNs (not a silent swallow); the
-    // line carries hasRecord:false only - never the number (PII).
-    const WARN = 40;
-    const warned = capture
-      .atLevel(WARN)
+    // Distinct diagnostic: a MISSING record ERRORs (not a silent swallow); the
+    // line carries hasRecord:false only - never the number (PII). ERROR rather
+    // than WARN because a missing record means the retirement clock is never
+    // stamped, so the number outlives its schedule - a state that should not
+    // exist, and only level >= 50 reaches the ErrorLogs metric filter. See
+    // docs/issues/give-up-paths-inconsistently-levelled-and-unsurfaced.md.
+    const ERROR = 50;
+    const errored = capture
+      .atLevel(ERROR)
       .find((l) => String(l['msg']).includes('pool record missing'));
-    expect(warned).toBeDefined();
-    expect(warned?.['hasRecord']).toBe(false);
+    expect(errored).toBeDefined();
+    expect(errored?.['hasRecord']).toBe(false);
   });
 
   it('releaseNumber flips releasing->released once; a second call returns undefined', async () => {

@@ -2056,7 +2056,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   let sseConnections = 0;
   router.get('/events', (req, res) => {
     if (sseConnections >= config.sseMaxConnections) {
-      log.warn(
+      log.error(
         { sseConnections, sseMaxConnections: config.sseMaxConnections },
         'sse connection cap reached — rejecting new stream with 503',
       );

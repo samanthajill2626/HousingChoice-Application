@@ -666,6 +666,104 @@ describe('today action-queue API (BE6/C7)', () => {
     });
   });
 
+  // --- ADVERSARIAL NEW-3: one contact, several unread threads, ONE row ---------
+  // contactThreads.ts models exactly one conversation PER PARTICIPANT KEY, so a
+  // person with a phone thread and an email thread reaches the unread pass
+  // TWICE. Both emitted an `unreplied` row with the same refType/refId.
+  it('a contact with an unread PHONE thread AND an unread EMAIL thread yields exactly ONE unreplied row', async () => {
+    seedTenant('c-dupe', 'Dee', 'Dupe');
+    seedConversation({
+      conversationId: 'conv-dupe-phone',
+      participant_phone: '+15550108888',
+      participant_display_name: 'Dee Dupe',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+    seedConversation({
+      conversationId: 'conv-dupe-email',
+      participant_email: 'dee@example.test',
+      status: 'open',
+      last_activity_at: iso(-60_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-dupe', phone: '+15550108888' }],
+    } as ConversationItem);
+
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+
+    expect(unrep.filter((i) => i.refId === 'c-dupe')).toHaveLength(1);
+    // The actual breakage: Today.tsx renders key={`${refType}:${refId}`} inside
+    // ONE <ul> per group, so two rows for one contact are duplicate React keys.
+    const keys = unrep.map((i) => `${i.refType}:${i.refId}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Newest-activity-first, so the PHONE thread is the representative - which
+    // is also why the surviving row carries a name rather than the email
+    // thread's blank `who`.
+    expect(unrep.find((i) => i.refId === 'c-dupe')?.who).toBe('Dee Dupe');
+  });
+
+  it('a duplicate thread does NOT consume one of the TODAY_UNREAD_CAP slots', async () => {
+    // The cap is 100. Seed 99 single-thread contacts plus ONE contact owning two
+    // unread threads: 101 index rows, 100 distinct people. Deduping only at emit
+    // time would collect the duplicate into the cap and starve the oldest real
+    // contact, leaving 99 rows - so this pins that the dedupe runs BEFORE the
+    // cap is counted.
+    for (let i = 0; i < 99; i += 1) {
+      const id = `c-bulk-${String(i).padStart(3, '0')}`;
+      const phone = `+1555020${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Bulk', id);
+      seedConversation({
+        conversationId: `conv-bulk-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Bulk ${id}`,
+        status: 'open',
+        // Older than the duplicate pair below, so the pair is scanned first and
+        // the starved contact is one of these.
+        last_activity_at: iso(-200_000 - i * 1_000),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-twin', 'Twin', 'Threads');
+    for (const [suffix, offset] of [
+      ['phone', -10_000],
+      ['email', -20_000],
+    ] as const) {
+      seedConversation({
+        conversationId: `conv-twin-${suffix}`,
+        participant_phone: '+15550209999',
+        participant_display_name: 'Twin Threads',
+        status: 'open',
+        last_activity_at: iso(offset),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: 'c-twin', phone: '+15550209999' }],
+      } as ConversationItem);
+    }
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+
+    expect(new Set(ids).size).toBe(ids.length); // no duplicate React keys
+    expect(ids).toHaveLength(100); // every distinct person fits
+    expect(ids).toContain('c-twin');
+    // The OLDEST real contact is the one a wasted slot would have pushed off.
+    expect(ids).toContain('c-bulk-098');
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({

@@ -1938,14 +1938,24 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact - leaving a permanent byUnread resident that costs a resurfacing
     // probe on every badge request. The filter was only an optimization
     // (resetUnread is already idempotent and conditional on
-    // attribute_exists(conversationId)), so paying a few no-op conditional writes
-    // buys the ruling reliably.
+    // attribute_exists(conversationId)), so paying a few IDEMPOTENT conditional
+    // writes buys the ruling reliably. IDEMPOTENT, not "no-op": that condition
+    // always passes for a live row, so an already-read thread is a REAL write -
+    // a WCU and a rewritten item - that simply lands on the state it found.
     //
     // BEST-EFFORT AS A WHOLE, matching propagateContactPresenceChange below: the
     // delete has ALREADY persisted, so neither a row that vanished under us
     // (racing retract/close) nor a transient failure of the thread lookup itself
     // may turn a successful delete into a 500 - and a throw here would also skip
     // the presence fan-out, leaving every dashboard showing the deleted contact.
+    //
+    // WHAT BEST-EFFORT COSTS (conformance N7): Promise.all rejects on the FIRST
+    // rejection, so the remaining resets' outcomes are UNOBSERVED - some may
+    // have landed, some not, and nothing re-runs this fan-out for an
+    // already-deleted contact. That is the same "skipped FOREVER" shape dropping
+    // the pre-filter was introduced to close, reintroduced on the failure path.
+    // The WARN below is therefore the ONLY signal that it happened, and
+    // app/scripts/backfill-unread-flag.ts (rule 3) is the only recovery.
     try {
       await Promise.all(
         (await conversationsForContact(updated, conversations)).map(async (c) => {

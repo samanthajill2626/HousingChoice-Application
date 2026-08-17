@@ -23,8 +23,11 @@
 // resurfacing.
 //
 // Rows already in the right state are skipped, and every write is conditional
-// on the state it transitions FROM - so re-running is always safe, and a
-// concurrent run cannot double-apply.
+// on the state the PLANNER DECIDED FROM - not merely on the attribute it is
+// about to change - so re-running is always safe, a concurrent run cannot
+// double-apply, and a row that moved under the runner is skipped and left for
+// the next run rather than written from a stale decision. See `stamp` and
+// `reset` below for the two races that shape those conditions.
 //
 // Targets DYNAMODB_ENDPOINT (default DynamoDB Local). Against a deployed env it
 // resolves the physical tables via lib/config.tableName (respects TABLE_PREFIX).
@@ -299,7 +302,8 @@ export async function backfillUnreadFlag(
     probed: 0,
   };
 
-  /** SET the flag; conditional on it still being absent (idempotent write). */
+  /** SET the flag; conditional on it still being absent AND the row still
+   *  carrying unread (idempotent write). */
   const stamp = async (conversationId: unknown): Promise<void> => {
     await doc.send(
       new UpdateCommand({
@@ -308,8 +312,26 @@ export async function backfillUnreadFlag(
         UpdateExpression: 'SET unread_flag = :flag',
         // Guards the state this transitions FROM: a concurrent run cannot
         // double-stamp, and a row already flagged is a silent no-op.
-        ConditionExpression: 'attribute_exists(conversationId) AND attribute_not_exists(unread_flag)',
-        ExpressionAttributeValues: { ':flag': UNREAD_FLAG_VALUE },
+        //
+        // `unread_count > :zero` IS LOAD-BEARING, not belt-and-braces. The
+        // planner decided `stamp` from the Scan image; the flag's absence alone
+        // does NOT preserve that decision, because the window between the Scan
+        // page read and this write is long (awaited writes, plus a
+        // listByConversation per deleted-contact probe, for every row of the
+        // page). A VA marking the thread read inside that window leaves the row
+        // at count 0 with the flag STILL absent - so without this clause the
+        // condition passes and the migration stamps a flag onto a READ row.
+        // That row - {unread_count: 0, unread_flag: 'unread'} - is a member of
+        // the sparse GSI (the flag is the HASH) that isUnreadVisible rejects
+        // forever, and NO runtime path removes it: resetUnread is the only
+        // REMOVE and it will not run again for an already-read thread. A
+        // permanent invisible resident, burning scan budget on every nav-badge
+        // request, reported as `stamped` SUCCESS. planUnreadBackfill rule 5
+        // calls that state `remove`; the migration must not manufacture it.
+        // Losing this condition just means the row is already correct.
+        ConditionExpression:
+          'attribute_exists(conversationId) AND attribute_not_exists(unread_flag) AND unread_count > :zero',
+        ExpressionAttributeValues: { ':flag': UNREAD_FLAG_VALUE, ':zero': 0 },
       }),
     );
   };
@@ -326,16 +348,62 @@ export async function backfillUnreadFlag(
     );
   };
 
-  /** Zero the count AND drop the flag in ONE write, exactly like the runtime's
-   *  resetUnread; conditional on the row still carrying unread. */
-  const reset = async (conversationId: unknown): Promise<void> => {
+  /**
+   * Zero the count AND drop the flag in ONE write, exactly like the runtime's
+   * resetUnread - conditional on the STATE THE DECISION WAS MADE FROM, not
+   * merely on "still carries some unread".
+   *
+   * `unread_count > :zero` was the wrong question. It asks "does this row still
+   * carry ANY unread", when the runner needs "does it still carry the unread I
+   * decided about". The two differ exactly where it matters:
+   *
+   * - DELETED-CONTACT reset (rule 3, after the probe): the decision point is the
+   *   listByConversation probe. A genuine POST-deletion INBOUND landing after
+   *   that probe - precisely the event the resurfacing rule exists to surface -
+   *   satisfies `> 0`, so the reset fired and zeroed it. The message survived in
+   *   the thread but the contact never resurfaced in the inbox and never reached
+   *   the badge: the operator was never told the person wrote back.
+   * - CLOSED-RELAY reset (rule 2): an inbound on a closed relay group increments
+   *   unread AND (via touchLastActivity) can flip status back to 'open'. `> 0`
+   *   let the runner zero a group that is no longer closed.
+   *
+   * So both callers condition on the OBSERVED count, and the closed-relay caller
+   * additionally re-asserts the type/status its rule selected on. A row that
+   * moved under the runner fails the condition, is skipped (the losing write is
+   * swallowed as always), and is left for a re-run - which re-reads it and
+   * decides again from fresh state. Conservative in the right direction: the
+   * cost of skipping is one more run; the cost of firing is a destroyed
+   * resurfacing.
+   *
+   * NOT fully precise, and deliberately so: the deleted-contact decision also
+   * rests on the contact's `deleted_at` from the pre-pass, which lives in
+   * ANOTHER table and therefore cannot enter a single-item ConditionExpression.
+   * A contact RESTORED between the pre-pass and this write still has its threads
+   * zeroed. That gap is inherent to a non-transactional cross-table decision, is
+   * bounded by one run, and is the same exposure the pre-pass has always had.
+   */
+  const reset = async (
+    conversationId: unknown,
+    expected: { count: number; closedRelay: boolean },
+  ): Promise<void> => {
     await doc.send(
       new UpdateCommand({
         TableName: table,
         Key: { conversationId },
         UpdateExpression: 'SET unread_count = :zero REMOVE unread_flag',
-        ConditionExpression: 'attribute_exists(conversationId) AND unread_count > :zero',
-        ExpressionAttributeValues: { ':zero': 0 },
+        ConditionExpression: expected.closedRelay
+          ? 'attribute_exists(conversationId) AND unread_count = :seen AND #type = :relay AND #status = :closed'
+          : 'attribute_exists(conversationId) AND unread_count = :seen',
+        // `type` and `status` are both DynamoDB reserved words - names, not
+        // literals. Only supplied on the branch that references them.
+        ...(expected.closedRelay && {
+          ExpressionAttributeNames: { '#type': 'type', '#status': 'status' },
+        }),
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':seen': expected.count,
+          ...(expected.closedRelay && { ':relay': 'relay_group', ':closed': 'closed' }),
+        },
       }),
     );
   };
@@ -398,7 +466,16 @@ export async function backfillUnreadFlag(
           result.removed += 1;
           break;
         case 'reset':
-          await write(() => reset(conversationId));
+          // `planned.kind === 'reset'` is EXACTLY rule 2 (a closed relay group);
+          // every other reset arrived through the probe. Derived from the plan
+          // rather than from `resetBucket` so the extra type/status guard cannot
+          // drift away from the rule that asked for it.
+          await write(() =>
+            reset(conversationId, {
+              count: unreadCountOf(item),
+              closedRelay: planned.kind === 'reset',
+            }),
+          );
           result[resetBucket] += 1;
           break;
         case 'skip':

@@ -1371,6 +1371,42 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(page.truncated).toBe(true);
   });
 
+  // CONFORMANCE N3. `scanPosition === undefined` means "no position to resume
+  // from" - it does NOT mean "nothing was withheld". Reported as a natural end,
+  // a feed with unread behind it renders "You're all caught up": the exact
+  // silent-zero the truncated flag exists to prevent, in the one branch that
+  // used to skip the question.
+  it('BUDGET: a budget spent before ANYTHING was consumed still says truncated', async () => {
+    const seed = unreadWorld(50);
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      // Budget 0: not one raw index item is scanned, so scanPosition never
+      // advances and branch (a) takes the decision. In production the same
+      // branch is reached by a queryUnreadPage that returns an empty page WITH
+      // a LastEvaluatedKey.
+      makeDeps(seed, undefined, undefined, { unreadWalkLimit: 0 }),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    // 50 unread contacts are sitting behind this answer.
+    expect(page.truncated).toBe(true);
+  });
+
+  it('NATURAL END: an empty index reports no truncation (branch (a) is not blanket-truncated)', async () => {
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps(unreadWorld(0)),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    // Genuinely caught up: nothing was withheld, so the dashboard must render
+    // the empty state, not the error banner. The pair with the test above is
+    // what makes `truncated = budgetSpent` a decision rather than a constant.
+    expect(page.truncated).toBeUndefined();
+  });
+
   it('STALE INDEX ROW: a point read drops a group/unknown row the index still lists as unread', async () => {
     const live = unreadContact('c-live', '+14045555001', T(6));
     const staleUnknown = conv({

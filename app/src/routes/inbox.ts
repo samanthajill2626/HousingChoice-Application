@@ -1063,8 +1063,16 @@ export async function aggregateInbox(
     let truncated = false;
     if (scanPosition === undefined) {
       // Nothing consumed at all (an empty index, or a cursor already past the
-      // end): no position to resume from, and nothing was withheld.
+      // end): no position to resume from. Whether anything was WITHHELD is a
+      // separate question - `budgetSpent` answers it (conformance N3). Consuming
+      // nothing while the budget died first is a real early end (a
+      // queryUnreadPage returning an empty page WITH a LastEvaluatedKey gets
+      // here in production; the unreadWalkLimit seam gets here in tests), and
+      // reporting it as a NATURAL end made a feed with unread behind it render
+      // "You're all caught up" - the exact silent-zero this branch's siblings
+      // exist to prevent.
       unreadCursor = null;
+      truncated = budgetSpent;
     } else if (consumedAll) {
       // THE NATURAL END, checked FIRST: the supply ran out, so nothing was
       // withheld and `truncated` must stay off (spec 4.5 step 3 defines it as a

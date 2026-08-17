@@ -196,8 +196,10 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
     // to skip these, but the thread list comes from the eventually-consistent
     // participant GSIs, so "already read" is a claim this handler cannot trust;
     // see the stale-image test below. resetUnread is idempotent and conditional,
-    // so the cost is one no-op write per already-read thread of a contact being
-    // deleted - and the benefit is that no unread thread is skipped FOREVER.
+    // so the cost is one IDEMPOTENT write per already-read thread of a contact
+    // being deleted - a REAL write, not a no-op: resetUnread's condition is
+    // attribute_exists(conversationId), which a live row always satisfies. The
+    // benefit is that no unread thread is skipped FOREVER.
     seedConversation(world, 'conv-read-phone', {
       participant_phone: '+15550000050',
       last_activity_at: '2026-06-09T10:00:00.000Z',

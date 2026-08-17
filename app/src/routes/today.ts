@@ -664,12 +664,35 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     {
       const walkState: UnreadWalkState = { scanExhausted: false, scanned: 0 };
       const unreadOneToOne: ConversationItem[] = [];
+      // DEDUPE BY EMITTED IDENTITY, AND BEFORE THE CAP (adversarial NEW-3).
+      // One contact can own SEVERAL unread threads - contactThreads.ts models
+      // exactly one conversation PER PARTICIPANT KEY, so a person with a phone
+      // thread and an email thread arrives here TWICE. Both emitted a row with
+      // the same refType/refId, which cost three things: duplicate React keys
+      // inside one group's <ul> (Today.tsx renders key=`${refType}:${refId}`),
+      // TWO consumed TODAY_UNREAD_CAP slots for one person - pushing real work
+      // off the queue the cap exists to protect - and a warnIfCapped tripwire
+      // counting the duplicate. Every other Today group carries a dedupe set
+      // (needsYouNowIds, followUpsIds); this one carried none.
+      //
+      // It sits in the COLLECT loop, ahead of the cap check, precisely so a
+      // duplicate cannot spend one of the 100 slots. Newest-activity-first
+      // order means the FIRST thread seen wins, which is the row the operator
+      // would want. Keyed PER DESTINATION GROUP, matching the per-group dedupe
+      // ruling above: an unknown thread emits into needs_you_now and a known
+      // 1:1 into unreplied, and Today renders those as separate <ul>s with
+      // independent keyspaces, so one contact legitimately appearing in both is
+      // not a duplicate.
+      const unreadRowKeys = new Set<string>();
       for await (const conv of iterateUnreadConversations(
         { conversations, logger: log },
         { budget: unreadWalkBudget },
         walkState,
       )) {
         if (!isOneToOneBucket(conv)) continue;
+        const rowKey = unreadRowKeyOf(conv);
+        if (unreadRowKeys.has(rowKey)) continue;
+        unreadRowKeys.add(rowKey);
         unreadOneToOne.push(conv);
         if (unreadOneToOne.length >= TODAY_UNREAD_CAP) break;
       }
@@ -1000,4 +1023,25 @@ function whoOfConversation(conv: ConversationItem): string {
 function oneToOneContactId(conv: ConversationItem): string | undefined {
   const p = conv.participants?.[0];
   return typeof p?.contactId === 'string' && p.contactId.length > 0 ? p.contactId : undefined;
+}
+
+/**
+ * The Today row IDENTITY a 1:1 unread thread would emit: the destination group
+ * plus the `${refType}:${refId}` pair Today.tsx uses as its React key.
+ *
+ * Deliberately mirrors the two emit branches of the unread pass - an
+ * `unknown_1to1` goes to needs_you_now, every other 1:1-bucket type to
+ * unreplied, and both prefer the contact ref over the conversation ref. Two
+ * threads of the SAME person therefore collide here, which is the point.
+ *
+ * An unlinked thread (no contactId yet - the auto-capture race) falls back to
+ * its own conversationId, which is unique, so it never suppresses anything; the
+ * unknown branch drops it at emit time anyway.
+ */
+function unreadRowKeyOf(conv: ConversationItem): string {
+  const group = conv.type === 'unknown_1to1' ? 'needs_you_now' : 'unreplied';
+  const contactId = oneToOneContactId(conv);
+  return contactId !== undefined
+    ? `${group}:contact:${contactId}`
+    : `${group}:conversation:${conv.conversationId}`;
 }

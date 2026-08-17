@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { logout } from '../api/index.js';
+import { forgetBrowserPushSubscription } from '../lib/pushSignOut.js';
 import { Button } from '../ui/index.js';
 import { ChevronIcon, CloseIcon, MenuIcon } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
@@ -25,6 +26,10 @@ export function AppFrame(): React.JSX.Element {
 
   async function handleSignOut(): Promise<void> {
     try {
+      // The server drops every push subscription with the revocation; forget
+      // this browser's own copy too so its Settings toggle stays honest.
+      // Best-effort and never throws - it must not block sign-out.
+      await forgetBrowserPushSubscription();
       await logout();
     } finally {
       // Re-probe → AuthContext flips to anonymous → the shell shows Login.

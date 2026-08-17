@@ -95,6 +95,55 @@ describe('AppFrame', () => {
     expect(within(menu).getByRole('button', { name: /Sign out/i })).toBeInTheDocument();
   });
 
+  it('Sign out forgets the browser push subscription (best-effort) and still logs out', async () => {
+    // Server-side revocation drops the user's push subscriptions; the
+    // signing-out browser also unsubscribes itself so its Settings toggle
+    // does not keep reading On for a subscription the server no longer has.
+    const unsubscribe = vi.fn(async () => true);
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      serviceWorker: {
+        ready: Promise.resolve({ pushManager: { getSubscription: async () => ({ unsubscribe }) } }),
+      },
+    });
+    renderAuthedApp();
+    const trigger = await screen.findByRole('button', { name: 'Account menu' });
+    fireEvent.click(trigger);
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: /Sign out/i }));
+
+    await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/auth/logout'))).toBe(true),
+    );
+  });
+
+  it('Sign out still logs out when the browser unsubscribe throws', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      serviceWorker: {
+        ready: Promise.resolve({
+          pushManager: {
+            getSubscription: async () => ({
+              unsubscribe: async () => {
+                throw new Error('push service down');
+              },
+            }),
+          },
+        }),
+      },
+    });
+    renderAuthedApp();
+    const trigger = await screen.findByRole('button', { name: 'Account menu' });
+    fireEvent.click(trigger);
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: /Sign out/i }));
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/auth/logout'))).toBe(true),
+    );
+  });
+
   it('shows the Inbox unread badge from the unread provider', async () => {
     renderAuthedApp();
     await waitFor(() =>

@@ -587,7 +587,7 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
           // older-timestamp no-op). Best-effort still returns (the group is
           // already closed), but the missing pool record is worth noticing.
           if (err.Item === undefined) {
-            log.warn(
+            log.error(
               { hasRecord: false },
               'noteGroupClosed: pool record missing - retirement clock not stamped',
             );

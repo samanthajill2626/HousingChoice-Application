@@ -4,8 +4,9 @@
 // that mints a REAL session for a seeded user, mirroring the OAuth callback.
 // Also exposes the recorded-message outbox, reseed, and a deterministic
 // tour-reminder tick for e2e testing.
+import { randomUUID } from 'node:crypto';
 import { Router, json } from 'express';
-import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
 import {
@@ -38,7 +39,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
-import { createMessagesRepo } from '../repos/messagesRepo.js';
+import { createMessagesRepo, type MessageItem } from '../repos/messagesRepo.js';
 import { createSettingsRepo } from '../repos/settingsRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
@@ -613,6 +614,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
         // AI run log: the dev tick records runs too, which is what makes
         // /settings/ai-runs exercisable in e2e and local development.
         aiRuns: createAiRunsRepo({ logger: log }),
+        // ai_run.completed. Same process as the SSE route here, so the emit
+        // reaches connected clients directly, with no bridge hop.
+        events: appEvents,
         // REAL wall clock. This tick deliberately passes runDueExtractions a
         // SIMULATED FUTURE nowIso (see the tick handler below), so the record's
         // timestamps must NOT come from it.
@@ -764,6 +768,63 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       'dev voice transcript-fixture applied',
     );
     res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/extraction/message-fixture - plant ONE message on a conversation
+  // with an ARBITRARY created_at, so an e2e can put real transcript content
+  // outside the extraction age window (jobs/extraction.ts filters on created_at).
+  // Body: { conversationId, body, createdAt, direction? }. Same triple-gate /
+  // hermetic-LOCAL-only construction as the seams above (the dev router only
+  // mounts behind lib/devRoutes.ts, structurally absent in every deployed env);
+  // json() is scoped to this route.
+  //
+  // A direct doc-client write ON PURPOSE: MessagesRepo has no put(), and append()
+  // hard-stamps created_at: now (messagesRepo.ts:1713) with no caller-supplied
+  // path anywhere. Widening a production write path for a test-only need is the
+  // worse trade. Reuses the router-scoped `doc` so an injected deps.doc is
+  // honoured. NOTE: unlike append() this writes NO `sid#` pointer item, so the
+  // planted row is invisible to getByProviderSid - no delivery callback can find
+  // it. That is fine here: the extraction window reads by conversation.
+  // PII: ids ONLY - NEVER the planted body.
+  router.post('/__dev/extraction/message-fixture', json(), async (req, res) => {
+    const reqBody = (req.body ?? {}) as {
+      conversationId?: unknown;
+      body?: unknown;
+      createdAt?: unknown;
+      direction?: unknown;
+    };
+    const conversationId = typeof reqBody.conversationId === 'string' ? reqBody.conversationId : '';
+    const messageBody = typeof reqBody.body === 'string' ? reqBody.body : '';
+    const createdAt = typeof reqBody.createdAt === 'string' ? reqBody.createdAt : '';
+    if (conversationId.length === 0 || messageBody.length === 0 || createdAt.length === 0) {
+      res
+        .status(400)
+        .json({ error: 'conversationId, body and createdAt (non-empty strings) are required' });
+      return;
+    }
+    const direction: 'inbound' | 'outbound' = reqBody.direction === 'outbound' ? 'outbound' : 'inbound';
+    const providerSid = `dev-${randomUUID()}`;
+    // tsMsgId keeps the repo's `<ts>#<msgId>` sort-key shape, so the planted row
+    // sorts by its aged timestamp in listByConversation too - not just in the
+    // created_at filter.
+    const item: MessageItem = {
+      conversationId,
+      tsMsgId: `${createdAt}#${providerSid}`,
+      type: 'sms',
+      direction,
+      author: direction === 'inbound' ? 'tenant' : 'teammate',
+      body: messageBody,
+      provider_sid: providerSid,
+      provider_ts: createdAt,
+      delivery_status: 'delivered',
+      created_at: createdAt,
+    };
+    await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
+    log.info(
+      { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },
+      'dev extraction message-fixture planted',
+    );
+    res.status(200).json({ tsMsgId: item.tsMsgId });
   });
 
   // POST /__dev/placements/:placementId/deadline-fixture — hermetic e2e-only seam

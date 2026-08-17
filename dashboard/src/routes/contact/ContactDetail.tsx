@@ -19,22 +19,25 @@
 // (status, opt-out, phone/suggestion changes). Narrow widths lead with comms + a
 // segmented Comms | Profile toggle.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
   deleteContact,
   restoreContact,
+  runExtraction,
   setContactOptOut,
   setContactVoiceOptOut,
   setTenantStatus,
   suggestionResolutionErrorMessage,
   updateContact,
+  useEventStream,
   LANDLORD_STATUSES,
   LANDLORD_STATUS_LABELS,
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
+  type AiRunCompletedEvent,
   type ContactType,
   type LandlordStatus,
   type TenantStatus,
@@ -79,6 +82,60 @@ import styles from './ContactDetail.module.css';
 
 type Pane = 'comms' | 'profile';
 
+/** How long the manual-extraction indicator waits before it stops claiming to
+ *  know (manual-extraction-trigger 4.6). Comfortably above the observed 5-40s
+ *  (a 30s worker poll plus the run itself), because the poll can be delayed by a
+ *  long-running row ahead of this one in the same pass. Exported for the test. */
+export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
+
+/** The manual-run indicator's three states. `running` accumulates across the
+ *  press's scheduled threads: it resolves only once EVERY one has reported, so
+ *  one failing thread cannot hide what the others found. */
+type ExtractionState =
+  | { phase: 'idle' }
+  | {
+      phase: 'running';
+      /** '' until the POST answers - no event can match an empty key, which is
+       *  what keeps a same-instant unrelated run from resolving this press. */
+      requestId: string;
+      pending: Set<string>;
+      /** How many threads the press SCHEDULED. Fixed for the life of the run -
+       *  `pending` shrinks as each thread reports, so reading the count off it
+       *  would silently drop "on 3 threads" back to "..." after two reported
+       *  (4.6 state 1 names `scheduled`, not what is left). */
+      scheduledCount: number;
+      wrote: number;
+      suggested: number;
+      /** Note lines the run(s) appended. A run whose ONLY output is notes is
+       *  outcome `applied` in the job, so the resolved copy must be able to say
+       *  so rather than reporting "nothing new". */
+      noted: number;
+      /** Threads the server could not queue at all (a partial-failure 200). */
+      failedThreads: number;
+      /** Threads whose run resolved to a DIFFERENT contact than this page (the
+       *  conversation's participant contactId diverges from the phone roster -
+       *  see docs/issues/extraction-conversation-contact-divergence.md). The
+       *  facts landed on that other record; silently timing out here would hide
+       *  a billed, committed write. */
+      misfiled: number;
+      errorKind?: string;
+    }
+  | {
+      phase: 'done';
+      tone: 'status' | 'alert';
+      message: string;
+      /** Carried through from the running state: a thread that was never queued
+       *  is one no run is coming for, and dropping the fact at resolution would
+       *  leave the operator with an outcome that silently omits it. */
+      failedThreads?: number;
+    };
+
+/** The partial-failure sentence, identical in the running and resolved states. */
+function failedThreadsCopy(failedThreads: number): string {
+  if (failedThreads <= 0) return '';
+  return ` ${failedThreads} thread${failedThreads === 1 ? '' : 's'} could not be queued.`;
+}
+
 export function ContactDetail(): React.JSX.Element {
   const { contactId = '' } = useParams<{ contactId: string }>();
   const navigate = useNavigate();
@@ -107,6 +164,24 @@ export function ContactDetail(): React.JSX.Element {
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // The manual "Run AI extraction" press and its indicator (4.6). Session-local:
+  // a reload shows the current facts instead, which by then are usually the
+  // result of the run.
+  const [extraction, setExtraction] = useState<ExtractionState>({ phase: 'idle' });
+  // Which press an in-flight POST still belongs to. The POST resolves on its own
+  // clock, so without this its response would write the indicator even after the
+  // operator navigated to another contact (A's outcome rendered on B's page, and
+  // B's kebab item disabled) or after the 180s timeout already resolved it. Every
+  // press, every contact change and the timeout bump it, so a late response is
+  // dropped rather than resurrecting a run nobody is watching.
+  const pressGenerationRef = useRef(0);
+  // ai_run.completed events seen since the CURRENT press began (cleared at
+  // press time), so one that beats the POST response can be replayed once the
+  // response names this press's requestId - the state machine drops events
+  // while requestId is still ''. Staleness across presses is prevented by the
+  // per-press server-minted UUID, not by the size cap; the cap only bounds a
+  // same-window org-wide burst, since every client receives every run event.
+  const recentRunEventsRef = useRef<AiRunCompletedEvent[]>([]);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -122,6 +197,12 @@ export function ContactDetail(): React.JSX.Element {
     setStatusBusy(false);
     setSuggestionBusy(null);
     setSuggestionError(null);
+    // Same reason: a manual run pressed on contact A must not appear to be
+    // running on contact B. Resetting the state is not enough on its own - A's
+    // POST is still in flight and would write B's indicator when it lands - so
+    // the press generation is bumped too, which invalidates that response.
+    setExtraction({ phase: 'idle' });
+    pressGenerationRef.current += 1;
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -131,6 +212,113 @@ export function ContactDetail(): React.JSX.Element {
   // Viewing the contact page (while the tab is visible) marks its comms read —
   // so the Inbox unread badge clears once you've actually seen the messages here.
   useMarkContactRead(contactId);
+
+  // --- Manual AI extraction (manual-extraction-trigger 4.6) ------------------
+  // These three hooks MUST stay above the loading/error early returns below, or
+  // the page renders a different number of hooks per pass and crashes.
+
+  const onRunExtraction = useCallback(async (): Promise<void> => {
+    const press = (pressGenerationRef.current += 1);
+    // The ring holds "events since THIS press began" - clearing it here is what
+    // makes that true. Without the clear it accumulates every org-wide run
+    // event forever and a burst could evict this press's own early event.
+    recentRunEventsRef.current = [];
+    // Busy from the PRESS, not from the response: otherwise a double-click fires
+    // two POSTs before the first one resolves.
+    setExtraction({
+      phase: 'running',
+      requestId: '',
+      pending: new Set(),
+      scheduledCount: 0,
+      wrote: 0,
+      suggested: 0,
+      noted: 0,
+      failedThreads: 0,
+      misfiled: 0,
+    });
+    try {
+      const res = await runExtraction(contactId);
+      // Dropped when this press is no longer the current one - see
+      // pressGenerationRef.
+      if (pressGenerationRef.current !== press) return;
+      setExtraction({
+        phase: 'running',
+        requestId: res.requestId,
+        pending: new Set(res.scheduled),
+        scheduledCount: res.scheduled.length,
+        wrote: 0,
+        suggested: 0,
+        noted: 0,
+        failedThreads: res.failed.length,
+        misfiled: 0,
+      });
+      // Replay any completion event that arrived BEFORE the POST response.
+      // The run happens on the worker poll seconds later, but the dev tick and
+      // a stalled response can invert that order - and an event dropped here
+      // could only ever resolve by the 180s timeout. The handler below records
+      // every event it sees; events for this press are recognisable by the
+      // requestId the response just gave us.
+      const early = recentRunEventsRef.current.filter((ev) => ev.requestId === res.requestId);
+      if (early.length > 0) {
+        setExtraction((prev) => early.reduce((s, ev) => applyRunEvent(s, ev, contactId), prev));
+      }
+    } catch (err) {
+      if (pressGenerationRef.current !== press) return;
+      // The server is the only gate (4.6), so every refusal arrives here rather
+      // than being predicted client-side.
+      setExtraction({ phase: 'done', tone: 'alert', message: extractionRefusalCopy(err) });
+    }
+  }, [contactId]);
+
+  // Resolution waits for EVERY scheduled thread before it decides, so one
+  // failing thread does not hide what the others found. Three guards, each
+  // closing a different way the wrong run could speak for this press (spec 7):
+  //
+  //  - requestId: an unrelated inbound run must not resolve this indicator.
+  //  - contactId: a MISMATCH is this press's run resolved to ANOTHER contact
+  //    (see the misfiled branch in applyRunEvent) - counted and reported, never
+  //    silently dropped. A `no_contact` run carries no contactId at all and
+  //    resolves normally.
+  //  - pending membership: a thread the server could not queue sits in
+  //    `failed[]` and no run is coming for it, so an event naming it must not
+  //    add counts to a banner that simultaneously says it was never queued. It
+  //    also makes a duplicate event for an already-reported thread a no-op.
+  useEventStream({
+    onAiRunCompleted: (e) => {
+      // Recorded BEFORE the state update so an event that beats the POST
+      // response is replayable once the response names this press's requestId.
+      // A tiny ring: only same-instant events matter, never history.
+      recentRunEventsRef.current = [...recentRunEventsRef.current.slice(-7), e];
+      setExtraction((prev) => applyRunEvent(prev, e, contactId));
+    },
+  });
+
+  // The indicator must never spin forever: the event can be legitimately late
+  // (an inbound message sliding dueAt forward) or lost (an unset
+  // EVENT_BRIDGE_URL drops the worker-to-app hop). Keyed on `phase` only, so the
+  // POST answering mid-run does not restart the clock.
+  useEffect(() => {
+    if (extraction.phase !== 'running') return undefined;
+    const timer = setTimeout(() => {
+      // A POST slower than the timeout would otherwise land here and put the
+      // page back into `running` with a fresh 180s clock.
+      pressGenerationRef.current += 1;
+      setExtraction((prev) => ({
+        phase: 'done',
+        // A misfiled thread is a KNOWN, billed outcome - the timeout must not
+        // downgrade it to a bare "still running". Alert tone when present.
+        tone: prev.phase === 'running' && prev.misfiled > 0 ? 'alert' : 'status',
+        message:
+          prev.phase === 'running' && prev.misfiled > 0
+            ? `Still running - check Settings > AI runs.${misfiledClauseOf(prev.misfiled)}`
+            : 'Still running - check Settings > AI runs.',
+        ...(prev.phase === 'running' && prev.failedThreads > 0
+          ? { failedThreads: prev.failedThreads }
+          : {}),
+      }));
+    }, RUN_INDICATOR_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [extraction.phase]);
 
   // Load the full contact roster so the edit dialog can link relationships to
   // existing contacts (finding #1). Called unconditionally (hooks rules); the
@@ -475,6 +663,8 @@ export function ContactDetail(): React.JSX.Element {
             onDelete={() => setConfirmingDelete(true)}
             onRestore={onRestore}
             deleteBusy={deleteBusy}
+            onRunExtraction={() => void onRunExtraction()}
+            extractionBusy={extraction.phase === 'running'}
           />
         </div>
       </header>
@@ -488,6 +678,32 @@ export function ContactDetail(): React.JSX.Element {
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
+          </Button>
+        </div>
+      ) : null}
+
+      {/* The manual AI extraction indicator (4.6). This is the operator's ONLY
+          feedback that the press did anything, so it is load-bearing. The
+          aria-label keeps it distinguishable from the page's Spinners, which
+          also carry role="status". */}
+      {extraction.phase === 'running' ? (
+        <div className={styles.extractionBanner} role="status" aria-label="AI extraction">
+          <span>
+            {`Running AI extraction${extraction.scheduledCount > 1 ? ` on ${extraction.scheduledCount} threads` : ''}...`}
+            {failedThreadsCopy(extraction.failedThreads)}
+          </span>
+        </div>
+      ) : null}
+      {extraction.phase === 'done' ? (
+        <div className={styles.extractionBanner} role={extraction.tone} aria-label="AI extraction">
+          <span>{`${extraction.message}${failedThreadsCopy(extraction.failedThreads ?? 0)}`}</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            onClick={() => setExtraction({ phase: 'idle' })}
+          >
+            Dismiss
           </Button>
         </div>
       ) : null}
@@ -754,5 +970,161 @@ export function ContactDetail(): React.JSX.Element {
       }
     }
     return parts.join(' - ');
+  }
+}
+
+// --- Manual-extraction copy (manual-extraction-trigger 4.6) ------------------
+// Every string here is written in the operator's terms, never the job's enum.
+// The message catalog does not cover this surface: it carries outbound contact
+// copy on the sms/voice/email channels, not dashboard banners.
+
+/** The aggregate a finished run reports. `wrote` are fields the run applied
+ *  itself; `suggested` are the ones parked as review chips. */
+function extractionAppliedCopy(wrote: number, suggested: number, noted: number): string {
+  // A run whose ONLY output was note lines is outcome `applied` in the job
+  // (notedLines counts toward `touched`), so reporting it as "nothing new"
+  // would contradict the run log the banner points people at.
+  if (wrote + suggested === 0 && noted > 0) {
+    return `Added ${noted} note line${noted === 1 ? '' : 's'} to the contact.`;
+  }
+  if (wrote + suggested === 0) return 'Ran - nothing new to extract.';
+  // Only name the halves that actually happened. "Updated 0 fields, 1
+  // suggestion." was the live result of the first self-QA run, and it is not an
+  // edge case: a manual run waives the age floor, so it pulls in older
+  // multi-speaker content, and a single unknown-speaker line demotes EVERY
+  // write in the run to a suggestion (design 8). wrote=0 with suggestions is
+  // therefore the COMMON success shape for this feature's target data, and
+  // "Updated 0 fields" both reads badly and claims something that did not
+  // happen. The both-non-zero string is unchanged from design 4.6.
+  const fields = `Updated ${wrote} field${wrote === 1 ? '' : 's'}`;
+  const chips = `${suggested} suggestion${suggested === 1 ? '' : 's'} to review`;
+  // Notes ride every branch, not only the note-only one: the success banner
+  // must never report LESS than the failure banner does about the same run.
+  const notes = noted > 0 ? `, ${noted} note line${noted === 1 ? '' : 's'} added` : '';
+  if (wrote === 0) return `${chips.charAt(0).toUpperCase()}${chips.slice(1)}${notes}.`;
+  if (suggested === 0) return `${fields}${notes}.`;
+  return `${fields}, ${suggested} suggestion${suggested === 1 ? '' : 's'}${notes}.`;
+}
+
+/** `truncated` gets its own actionable sentence: it is the one failure an
+ *  operator can do something about, and the likeliest one here - a manual run
+ *  waives the age cutoff, so it sends the widest windows the system produces. */
+function extractionFailureCopy(errorKind: string): string {
+  return errorKind === 'truncated'
+    ? 'Extraction ran out of room - the transcript may be too long.'
+    : 'Extraction failed - see Settings > AI runs.';
+}
+
+/** The results that DID land, for a resolution whose headline is a failure.
+ *  One thread failing must not erase what the other threads (or the failed
+ *  run itself, when its cursor write was the only casualty) already did -
+ *  those writes are committed and billed whether or not the banner mentions
+ *  them. Undefined when there is nothing to report. */
+function extractionPartialResults(wrote: number, suggested: number, noted: number): string | undefined {
+  const parts: string[] = [];
+  if (wrote > 0) parts.push(`${wrote} field${wrote === 1 ? '' : 's'} updated`);
+  if (suggested > 0) parts.push(`${suggested} suggestion${suggested === 1 ? '' : 's'} to review`);
+  if (noted > 0) parts.push(`${noted} note line${noted === 1 ? '' : 's'} added`);
+  if (parts.length === 0) return undefined;
+  return `Results that still landed: ${parts.join(', ')}.`;
+}
+
+/**
+ * One completion event against the indicator state - PURE, so the live handler
+ * and the early-event replay in onRunExtraction share one implementation
+ * instead of drifting. requestId guards against an unrelated run, and pending
+ * membership against an unqueued thread's event and duplicate delivery. A
+ * contactId MISMATCH is NOT rejected: a matching requestId means it is this
+ * press's run, resolved by the job to another contact, so it is counted as
+ * misfiled and reported - the facts landed there and billed.
+ */
+function applyRunEvent(
+  prev: ExtractionState,
+  e: AiRunCompletedEvent,
+  contactId: string,
+): ExtractionState {
+  if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
+    return prev;
+  }
+  if (!prev.pending.has(e.conversationId)) return prev;
+  const pending = new Set(prev.pending);
+  pending.delete(e.conversationId);
+  // A matching requestId with a DIFFERENT contactId is not noise - it is THIS
+  // press's run, resolved by the job to another contact (the conversation's
+  // participant pointer diverges from the phone roster). The facts landed on
+  // that record and billed; leaving the thread in `pending` would hide that
+  // behind a 180s timeout. Count it and say so instead of spinning.
+  if (e.contactId !== undefined && e.contactId !== contactId) {
+    const misfiled = prev.misfiled + 1;
+    if (pending.size > 0) return { ...prev, pending, misfiled };
+    return finishRun({ ...prev, pending, misfiled });
+  }
+  const wrote = prev.wrote + e.wrote;
+  const suggested = prev.suggested + e.suggested;
+  const noted = prev.noted + e.notedLines;
+  // First failure wins the copy; 'driver' stands for "failed, kind not
+  // reported" and maps to the generic sentence.
+  const errorKind = prev.errorKind ?? (e.outcome === 'failed' ? (e.errorKind ?? 'driver') : undefined);
+  if (pending.size > 0) {
+    return { ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) };
+  }
+  return finishRun({ ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) });
+}
+
+/** The misfiled sentence, shared by finishRun and the timeout so the two can
+ *  never disagree. Pronoun-free on purpose - "its" read wrong in the plural. */
+function misfiledClauseOf(misfiled: number): string {
+  const subject = misfiled === 1 ? 'One thread is' : `${misfiled} threads are`;
+  return ` ${subject} filed under a different contact - the results landed there. See Settings > AI runs.`;
+}
+
+/** Assemble the resolved banner from a running state whose `pending` emptied.
+ *  One assembly site for BOTH exits (the normal resolution and the misfiled
+ *  one), so the failure headline, the results-that-landed clause, the unqueued
+ *  clause and the misfiled clause can never disagree between paths. */
+function finishRun(last: Extract<ExtractionState, { phase: 'running' }>): ExtractionState {
+  const unqueued = last.failedThreads > 0 ? { failedThreads: last.failedThreads } : {};
+  const misfiledClause = last.misfiled > 0 ? misfiledClauseOf(last.misfiled) : '';
+  if (last.errorKind !== undefined) {
+    const partial = extractionPartialResults(last.wrote, last.suggested, last.noted);
+    const body = partial === undefined
+      ? extractionFailureCopy(last.errorKind)
+      : `${extractionFailureCopy(last.errorKind)} ${partial}`;
+    return { phase: 'done', tone: 'alert', message: `${body}${misfiledClause}`, ...unqueued };
+  }
+  if (last.misfiled > 0) {
+    const partial = extractionPartialResults(last.wrote, last.suggested, last.noted);
+    const body = partial === undefined ? misfiledClause.trim() : `${partial}${misfiledClause}`;
+    return { phase: 'done', tone: 'alert', message: body, ...unqueued };
+  }
+  return {
+    phase: 'done',
+    tone: 'status',
+    message: extractionAppliedCopy(last.wrote, last.suggested, last.noted),
+    ...unqueued,
+  };
+}
+
+/** A refusal from the endpoint. `ApiError.message` is the RAW code and must
+ *  never be shown, so the copy always comes from `.code`; an unrecognised
+ *  failure (including a network drop, which is not an ApiError at all) gets the
+ *  generic retry sentence rather than silence. */
+function extractionRefusalCopy(err: unknown): string {
+  const code = err instanceof ApiError ? err.code : undefined;
+  switch (code) {
+    case 'extraction_disabled':
+      return 'AI extraction is turned off for this environment.';
+    case 'ineligible_contact_type':
+      return 'Only tenants and untriaged contacts can be extracted.';
+    case 'contact_deleted':
+      return 'This is a deleted contact.';
+    case 'contact_not_found':
+      return 'This contact could not be found.';
+    case 'no_conversations':
+      return 'This contact has no conversations to extract.';
+    case 'no_eligible_conversations':
+      return 'This contact has no eligible conversations to extract.';
+    default:
+      return 'Extraction could not be started - try again.';
   }
 }

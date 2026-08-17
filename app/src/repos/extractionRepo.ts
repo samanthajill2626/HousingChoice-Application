@@ -15,7 +15,9 @@
 // attributes are present, so claim/complete/park REMOVE BOTH _duePartition AND
 // dueAt together - the row then leaves the byDueAt index and persists only as the
 // conversation's cursor record. Same for byPending (_pendingPartition + createdAt
-// present only while a suggestion is pending).
+// present only while a suggestion is pending). Park (and backoff re-arm) do this
+// CONDITIONALLY: a row re-armed since it was listed keeps its fresh schedule and
+// only records the error (see fail).
 //
 // PII: never log message bodies or phone numbers. Log only ids/counts.
 import { randomUUID } from 'node:crypto';
@@ -48,12 +50,18 @@ export interface DueExtractionItem {
   /** PK - `due#<conversationId>`. */
   itemId: string;
   conversationId: string;
-  /** What scheduled the run: an inbound text (sms), an inbound email (email),
-   *  a fresh call transcript (voice), or a human triage flip to tenant
-   *  (triage). voice/triage runs bypass the job's client-freshness gate -
-   *  their signal is content the cursor logic can't see (a late transcript /
-   *  newly-applicable tenant facts); sms/email runs use the cursor gate. */
-  channel: 'sms' | 'voice' | 'triage' | 'email';
+  /** What scheduled the run through an INBOUND path. OPTIONAL because a manual
+   *  press can create a row that no inbound path ever scheduled - see
+   *  requestManualExtraction, which deliberately does not write it. */
+  channel?: 'sms' | 'voice' | 'triage' | 'email';
+  /** Sticky manual marker (sparse). Set by requestManualExtraction, REMOVEd by
+   *  claim and by fail's park branch. The single source of truth for the job's
+   *  gate waivers and the recorded trigger - an inbound sliding dueAt forward
+   *  cannot erase it. */
+  manualRequested?: true;
+  /** Correlates one press to the one run it produces (sparse). Cleared wherever
+   *  manualRequested is, so a dead press's key can never ride a later run. */
+  requestId?: string;
   /** ISO - byDueAt GSI range key; present ONLY while a run is scheduled. */
   dueAt?: string;
   /** byDueAt GSI hash key (fixed 'due'); present ONLY while scheduled (sparse). */
@@ -124,12 +132,25 @@ export interface ExtractionRepo {
     channel: 'sms' | 'voice' | 'triage' | 'email',
     dueAt: string,
   ): Promise<void>;
+  /**
+   * Arm a row for an IMMEDIATE manual run. Same sliding upsert as
+   * scheduleExtraction, plus manualRequested and the caller's requestId, and
+   * deliberately WITHOUT touching `channel`. The failure state (`attempts` /
+   * `lastError`) also deliberately rides along: a press does NOT start from a
+   * clean slate, so a press on a row already at attempts >= 4 gets one attempt
+   * and parks on its first failure (design section 8 - resetting would change
+   * automatic backoff semantics for a manual reason). As for `channel` - `channel` has no clearing site,
+   * so a 'manual' value stored there would outlive the flag and could later
+   * label an automatic run as manual in the run log.
+   */
+  requestManualExtraction(conversationId: string, dueAt: string, requestId: string): Promise<void>;
   /** All scheduled due items with dueAt <= now (byDueAt GSI; paginated). */
   listDue(nowIso: string): Promise<DueExtractionItem[]>;
   /**
    * Atomically claim a due item BEFORE running: SET claimedAt, REMOVE
-   * _duePartition + dueAt, conditional on the row still being scheduled AND its
-   * dueAt still equal to `listedDueAt` (the value listDue returned). Returns
+   * _duePartition + dueAt + manualRequested + requestId, conditional on the row
+   * still being scheduled AND its dueAt still equal to `listedDueAt` (the value
+   * listDue returned). Returns
    * false when the item slid forward or was already claimed - the sliding-
    * debounce correctness hinges on the `dueAt = listedDueAt` clause.
    */
@@ -137,11 +158,40 @@ export interface ExtractionRepo {
   /** Record a successful run: SET cursor + lastRanAt, clear claim/attempts/error. */
   complete(conversationId: string, cursor: string, ranAt: string): Promise<void>;
   /**
-   * Record a failed run: increment attempts, keep lastError. nextDueAt non-null
-   * re-arms the item (back in the due index at nextDueAt); null parks it
-   * (removed from the index, no further retries until re-scheduled).
+   * Record a failed run. `nextDueAt` non-null re-arms with backoff; null parks.
+   *
+   * Both branches are CONDITIONAL on nobody having re-armed the row since it
+   * was listed. Unconditional writes destroyed a press or an inbound that
+   * landed during the failing run - the park branch permanently, since the row
+   * then leaves the due index with nothing left to re-arm it.
+   *
+   * ONE predicate serves both paths:
+   *
+   *   attribute_not_exists(_duePartition) OR dueAt = :listedDueAt
+   *
+   * The first arm covers the normal path, where the claim removed the index
+   * keys. The second arm covers a claim that THREW without un-arming the row:
+   * without it that path could never satisfy the condition, so it would never
+   * back off and never park, and the poll would retry the row every interval
+   * forever - an unbounded billed retry loop.
+   *
+   * Deliberately NOT a per-path conjunct keyed on whether the claim returned.
+   * `claim` rethrows everything that is not a ConditionalCheckFailedException,
+   * so a throw does NOT mean the write was not applied: a claim whose update
+   * committed and whose response was then lost leaves the row un-armed while
+   * the job believes the claim failed. A per-path `dueAt = :listedDueAt` is
+   * false there, so the row would be stranded de-armed with nothing to re-arm
+   * it and no reaper. The first arm of the disjunct self-heals exactly that.
+   *
+   * On a condition failure a second, scheduling-free update records only
+   * lastError and attempts, leaving the fresh dueAt and marker alone.
    */
-  fail(conversationId: string, error: string, nextDueAt: string | null): Promise<void>;
+  fail(
+    conversationId: string,
+    error: string,
+    nextDueAt: string | null,
+    opts: { listedDueAt: string; manual: boolean },
+  ): Promise<void>;
   getDue(conversationId: string): Promise<DueExtractionItem | undefined>;
   /**
    * Upsert a pending suggestion (latest wins - a re-put on the same
@@ -221,6 +271,37 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       log.debug({ conversationId, dueAt }, 'extraction scheduled (sliding upsert)');
     },
 
+    async requestManualExtraction(conversationId, dueAt, requestId) {
+      const now = new Date().toISOString();
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { itemId: dueId(conversationId) },
+          UpdateExpression:
+            'SET #dueAt = :dueAt, #dp = :dp, #manual = :manual, #requestId = :requestId, #conversationId = :conversationId, #updatedAt = :updatedAt, #createdAt = if_not_exists(#createdAt, :now)',
+          ExpressionAttributeNames: {
+            '#dueAt': 'dueAt',
+            '#dp': '_duePartition',
+            '#manual': 'manualRequested',
+            '#requestId': 'requestId',
+            '#conversationId': 'conversationId',
+            '#updatedAt': 'updatedAt',
+            '#createdAt': 'createdAt',
+          },
+          ExpressionAttributeValues: {
+            ':dueAt': dueAt,
+            ':dp': 'due',
+            ':manual': true,
+            ':requestId': requestId,
+            ':conversationId': conversationId,
+            ':updatedAt': now,
+            ':now': now,
+          },
+        }),
+      );
+      log.debug({ conversationId, requestId }, 'manual extraction requested');
+    },
+
     async listDue(nowIso) {
       // Query the byDueAt GSI: all scheduled rows (fixed 'due' partition) with
       // dueAt <= now. Paginate with LastEvaluatedKey so rows beyond the 1 MB
@@ -258,13 +339,15 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
           new UpdateCommand({
             TableName: table,
             Key: { itemId: dueId(conversationId) },
-            UpdateExpression: 'SET #claimedAt = :claimedAt REMOVE #dp, #dueAt',
+            UpdateExpression: 'SET #claimedAt = :claimedAt REMOVE #dp, #dueAt, #manual, #requestId',
             ConditionExpression:
               'attribute_exists(#dp) AND #dueAt <= :now AND #dueAt = :listedDueAt',
             ExpressionAttributeNames: {
               '#dp': '_duePartition',
               '#dueAt': 'dueAt',
               '#claimedAt': 'claimedAt',
+              '#manual': 'manualRequested',
+              '#requestId': 'requestId',
             },
             ExpressionAttributeValues: {
               ':claimedAt': nowIso,
@@ -304,50 +387,95 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       log.debug({ conversationId, cursor }, 'extraction completed (cursor advanced)');
     },
 
-    async fail(conversationId, error, nextDueAt) {
+    async fail(conversationId, error, nextDueAt, opts) {
       // Increment attempts; keep lastError. nextDueAt non-null re-arms the item
       // (back in the due index at nextDueAt); null parks it - REMOVE both byDueAt
       // key attrs so a parked item never re-lists until re-scheduled (D2).
+      //
+      // BOTH branches are conditional on nobody having re-armed the row since it
+      // was listed, so a press (or an inbound) that landed during the failing
+      // run survives. ONE disjunct serves both paths - see the interface doc for
+      // why a per-path conjunct strands a row whose claim landed but whose
+      // response was lost. A failed condition falls back to a scheduling-free
+      // update that records the error only.
       const common = {
         TableName: table,
         Key: { itemId: dueId(conversationId) },
       };
-      if (nextDueAt !== null) {
+      const condition = 'attribute_not_exists(#dp) OR #dueAt = :listedDueAt';
+
+      const scheduling = async (): Promise<void> => {
+        if (nextDueAt !== null) {
+          await doc.send(
+            new UpdateCommand({
+              ...common,
+              UpdateExpression: opts.manual
+                ? 'SET #lastError = :error, #dueAt = :dueAt, #dp = :dp, #manual = :manual ADD #attempts :one'
+                : 'SET #lastError = :error, #dueAt = :dueAt, #dp = :dp ADD #attempts :one',
+              ConditionExpression: condition,
+              ExpressionAttributeNames: {
+                '#lastError': 'lastError',
+                '#dueAt': 'dueAt',
+                '#dp': '_duePartition',
+                '#attempts': 'attempts',
+                ...(opts.manual && { '#manual': 'manualRequested' }),
+              },
+              ExpressionAttributeValues: {
+                ':error': error,
+                ':dueAt': nextDueAt,
+                ':dp': 'due',
+                ':one': 1,
+                ':listedDueAt': opts.listedDueAt,
+                ...(opts.manual && { ':manual': true }),
+              },
+            }),
+          );
+          log.debug({ conversationId, nextDueAt }, 'extraction failed - re-armed');
+          return;
+        }
+        // Park. REMOVE the correlation key with the flag: a dead press's
+        // requestId riding a later automatic run would resolve a stale
+        // indicator on someone's screen.
         await doc.send(
           new UpdateCommand({
             ...common,
             UpdateExpression:
-              'SET #lastError = :error, #dueAt = :dueAt, #dp = :dp ADD #attempts :one',
+              'SET #lastError = :error REMOVE #dp, #dueAt, #manual, #requestId ADD #attempts :one',
+            ConditionExpression: condition,
             ExpressionAttributeNames: {
               '#lastError': 'lastError',
-              '#dueAt': 'dueAt',
               '#dp': '_duePartition',
+              '#dueAt': 'dueAt',
+              '#manual': 'manualRequested',
+              '#requestId': 'requestId',
               '#attempts': 'attempts',
             },
             ExpressionAttributeValues: {
               ':error': error,
-              ':dueAt': nextDueAt,
-              ':dp': 'due',
               ':one': 1,
+              ':listedDueAt': opts.listedDueAt,
             },
-          }),
-        );
-        log.debug({ conversationId, nextDueAt }, 'extraction failed - re-armed');
-      } else {
-        await doc.send(
-          new UpdateCommand({
-            ...common,
-            UpdateExpression: 'SET #lastError = :error REMOVE #dp, #dueAt ADD #attempts :one',
-            ExpressionAttributeNames: {
-              '#lastError': 'lastError',
-              '#dp': '_duePartition',
-              '#dueAt': 'dueAt',
-              '#attempts': 'attempts',
-            },
-            ExpressionAttributeValues: { ':error': error, ':one': 1 },
           }),
         );
         log.warn({ conversationId }, 'extraction failed - parked (max attempts)');
+      };
+
+      try {
+        await scheduling();
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        await doc.send(
+          new UpdateCommand({
+            ...common,
+            UpdateExpression: 'SET #lastError = :error ADD #attempts :one',
+            ExpressionAttributeNames: { '#lastError': 'lastError', '#attempts': 'attempts' },
+            ExpressionAttributeValues: { ':error': error, ':one': 1 },
+          }),
+        );
+        log.debug(
+          { conversationId },
+          'extraction failed - row re-armed by someone else, schedule left alone',
+        );
       }
     },
 

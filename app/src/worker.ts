@@ -21,6 +21,7 @@ const { installProcessErrorHandlers } = await import('./lib/errors.js');
 const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
+const { startPoll: startPollLoop } = await import('./jobs/pollLoop.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { configureJobQueues } = await import('./jobs/queueWiring.js');
 const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
@@ -281,12 +282,24 @@ runWithContext(bootContext, () => {
   );
 });
 
+// Every poll loop below starts through jobs/pollLoop.ts, which wraps the whole
+// tick (including the rejection handler) in a fresh pollRunId context - see
+// that module for why the previous bare setIntervals made every poll log line
+// an orphan. Bound once here so the five call sites stay one line each.
+function startPoll(pollName: string, run: (nowIso: string) => Promise<unknown>): void {
+  startPollLoop(pollName, run, {
+    logger,
+    intervalMs: config.workerPollIntervalMs,
+    baseContext: bootContext,
+  });
+}
+
 // Tour-reminder poll: runs on the shared WORKER_POLL_INTERVAL_MS cadence
 // (30s by default), stateless (state is the DynamoDB rows).
 // Dynamic imports mirror the SQS consumer pattern above — DynamoDB client is
 // created lazily (at first poll) so the worker boots fast and errors surface
-// at poll time, not boot time. The setInterval is .unref()'d so it doesn't
-// prevent process exit on shutdown.
+// at poll time, not boot time. The interval is .unref()'d (in pollLoop.ts) so
+// it doesn't prevent process exit on shutdown.
 {
   const { createTourRemindersRepo } = await import('./repos/tourRemindersRepo.js');
   const { createToursRepo } = await import('./repos/toursRepo.js');
@@ -333,12 +346,7 @@ runWithContext(bootContext, () => {
     logger,
   };
 
-  setInterval(() => {
-    const now = new Date().toISOString();
-    void runDueTourReminders(now, tourReminderDeps).catch((err: unknown) => {
-      logger.error({ err }, 'tour reminder poll error');
-    });
-  }, config.workerPollIntervalMs).unref();
+  startPoll('tour reminder', (now) => runDueTourReminders(now, tourReminderDeps));
 }
 
 // Placement application-nudge poll: same stateless shared cadence as the
@@ -374,12 +382,7 @@ runWithContext(bootContext, () => {
     logger,
   };
 
-  setInterval(() => {
-    const now = new Date().toISOString();
-    void runDuePlacementNudges(now, placementNudgeDeps).catch((err: unknown) => {
-      logger.error({ err }, 'placement nudge poll error');
-    });
-  }, config.workerPollIntervalMs).unref();
+  startPoll('placement nudge', (now) => runDuePlacementNudges(now, placementNudgeDeps));
 }
 
 // Pending-roster-action poll (contact-rosters Task 13): the same stateless 60s
@@ -427,12 +430,7 @@ runWithContext(bootContext, () => {
     logger,
   };
 
-  setInterval(() => {
-    const now = new Date().toISOString();
-    void runDuePendingRosterActions(now, rosterActionDeps).catch((err: unknown) => {
-      logger.error({ err }, 'roster action poll error');
-    });
-  }, config.workerPollIntervalMs).unref();
+  startPoll('roster action', (now) => runDuePendingRosterActions(now, rosterActionDeps));
 }
 
 // Conversation-fact-extraction poll: same stateless shared cadence (state is the
@@ -464,6 +462,11 @@ if (config.aiExtractionEnabled) {
     // AI run log (design 2026-08-06). Best-effort: a failed run-log write must
     // never fail an extraction run, re-arm a due row, or burn a retry attempt.
     aiRuns: createAiRunsRepo({ logger }),
+    // ai_run.completed. This is the WORKER's bus, so the emit reaches the app's
+    // SSE clients only via lib/eventBridge.ts (EVENT_BRIDGE_URL set); with the
+    // URL unset the event is dropped and the page's indicator falls back to its
+    // timeout, exactly as suggestion.updated already does.
+    events: appEvents,
     // REAL wall clock for the record's timestamps (the poll's nowIso is the
     // domain clock and the dev tick simulates it forward).
     now: () => new Date().toISOString(),
@@ -488,12 +491,7 @@ if (config.aiExtractionEnabled) {
     logger,
   };
 
-  setInterval(() => {
-    const now = new Date().toISOString();
-    void runDueExtractions(now, extractionDeps).catch((err: unknown) => {
-      logger.error({ err }, 'extraction poll error');
-    });
-  }, config.workerPollIntervalMs).unref();
+  startPoll('extraction', (now) => runDueExtractions(now, extractionDeps));
 }
 
 // Native group texting: the guardrail duties (T6.3). Same shared poll as every
@@ -511,12 +509,7 @@ if (config.aiExtractionEnabled) {
 
   const guardrailDeps = { logger };
 
-  setInterval(() => {
-    const now = new Date().toISOString();
-    void runGroupGuardrails(now, guardrailDeps).catch((err: unknown) => {
-      logger.error({ err }, 'group guardrail poll error');
-    });
-  }, config.workerPollIntervalMs).unref();
+  startPoll('group guardrail', (now) => runGroupGuardrails(now, guardrailDeps));
 }
 
 // Keep the process alive until a shutdown signal arrives (also covers the

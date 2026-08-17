@@ -103,6 +103,7 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'ensureContactConversation', 'request:POST', '/api/contacts/:contactId/conversation'),
   entry(ENDPOINTS, 'ensureEmailConversation', 'request:POST', '/api/contacts/:contactId/email-conversation'),
   entry(ENDPOINTS, 'restoreContact', 'request:POST', '/api/contacts/:contactId/restore'),
+  entry(ENDPOINTS, 'runExtraction', 'request:POST', '/api/contacts/:contactId/extraction-run'),
   entry(ENDPOINTS, 'devLogin', 'request:POST', '/auth/dev-login'),
   entry(ENDPOINTS, 'markInboxRead', 'request:POST', '/api/inbox/:contactId/read', 'automatic_in_scope'),
   entry(ENDPOINTS, 'markInboxRead', 'request:POST', '/api/inbox/read', 'automatic_in_scope'),

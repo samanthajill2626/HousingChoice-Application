@@ -153,6 +153,29 @@ describe('GET /api/events — stream mechanics', () => {
     expect(client.received()).toContain(`data: ${JSON.stringify({ unmatchedId: 'um-sse-1' })}`);
   });
 
+  it('forwards ai_run.completed frames (the manual-run indicator live path)', async () => {
+    // Registering the listener is hand-written per event in the SSE route, so
+    // nothing in the type system catches a missing registration - only this.
+    const { app, world } = makeWebhookHarness();
+    const port = await startServer(app);
+    const client = await connectSse(port);
+    await client.waitFor(': connected');
+
+    const payload = {
+      conversationId: 'conv-sse-1',
+      runId: 'run-sse-1',
+      requestId: 'req-sse-1',
+      outcome: 'applied' as const,
+      wrote: 1,
+      suggested: 0,
+      notedLines: 0,
+    };
+    world.events.emit('ai_run.completed', payload);
+
+    await client.waitFor('event: ai_run.completed');
+    expect(client.received()).toContain(`data: ${JSON.stringify(payload)}`);
+  });
+
   it('sends heartbeat as an observable named event (not a comment) on the configured interval', async () => {
     const { app } = makeWebhookHarness({ sseHeartbeatMs: 20 });
     const port = await startServer(app);
@@ -172,6 +195,12 @@ describe('GET /api/events — stream mechanics', () => {
 
     // The harness itself holds one recorder listener per event.
     const baseline = world.events.listenerCount('conversation.updated');
+    // ...but only for SOME events. The harness recorder is a deliberately
+    // partial list, so an event it does not record starts at 0 while
+    // conversation.updated starts at 1. Reusing the shared baseline for such a
+    // name asserts 1 === 2 and fails for a reason that has nothing to do with
+    // the cleanup under test - which is why this one carries its own baseline.
+    const aiRunBaseline = world.events.listenerCount('ai_run.completed');
 
     const client = await connectSse(port);
     await client.waitFor(': connected');
@@ -181,6 +210,7 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('message.persisted')).toBe(baseline + 1);
     expect(world.events.listenerCount('broadcast.updated')).toBe(baseline + 1);
     expect(world.events.listenerCount('placement.updated')).toBe(baseline + 1);
+    expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline + 1);
 
     client.abort();
     const deadline = Date.now() + 3_000;
@@ -192,6 +222,10 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('message.persisted')).toBe(baseline);
     expect(world.events.listenerCount('broadcast.updated')).toBe(baseline);
     expect(world.events.listenerCount('placement.updated')).toBe(baseline);
+    // The whole close handler runs in one synchronous block, so the loop above
+    // having drained conversation.updated proves every other off() ran too.
+    // A deleted events.off('ai_run.completed', ...) fails HERE, not silently.
+    expect(world.events.listenerCount('ai_run.completed')).toBe(aiRunBaseline);
   });
 });
 
@@ -240,11 +274,15 @@ describe('GET /api/events — connection cap (H4 partial)', () => {
 
     const second = await connectSse(port);
     expect(second.response.status).toBe(503);
-    const warn = capture
-      .atLevel(40)
+    // ERROR, not WARN: hitting the cap is a state that should not occur at our
+    // scale (default 50 streams, ~10 devices), so if it fires the likely cause
+    // is a LEAKED slot whose close never decremented - a bug worth alarming on.
+    // Level 50 also puts it in reach of the ErrorLogs metric filter.
+    const capHit = capture
+      .atLevel(50)
       .find((l) => String(l['msg']).includes('sse connection cap reached'))!;
-    expect(warn).toBeDefined();
-    expect(typeof warn['correlationId']).toBe('string');
+    expect(capHit).toBeDefined();
+    expect(typeof capHit['correlationId']).toBe('string');
 
     // Disconnecting the first stream frees its slot (close is async — poll).
     first.abort();

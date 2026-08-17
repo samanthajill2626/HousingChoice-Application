@@ -207,7 +207,7 @@ export type AiRunScope =
   | `conversations#${string}`
   | `contacts#${string}`;
 
-export type AiRunTrigger = 'sms' | 'voice' | 'triage' | 'email';
+export type AiRunTrigger = 'sms' | 'voice' | 'triage' | 'email' | 'manual';
 export type AiRunDriver = 'anthropic' | 'console' | 'fake';
 export type AiRunDecisionOutcome = 'wrote' | 'suggested' | 'dropped' | 'no_finding' | 'not_addressed';
 export type AiRunVerdict =
@@ -289,7 +289,10 @@ export interface AiRunRecordView {
   window?: {
     detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
     totalChars?: number; windowCappedAtLimit: boolean;
-    windowParams?: { newMessageCharCap: number; seenMessageCharCap: number; windowCharBudget: number; maxTranscriptMessages: number; maxTranscriptAgeDays: number; truncationMarker: string };
+    // maxTranscriptAgeDays is `null` when the run applied NO age floor at all -
+    // a manual run waives the 30-day cutoff (manual-extraction-trigger 4.3), and
+    // recording 30 there would describe a window that was never sent.
+    windowParams?: { newMessageCharCap: number; seenMessageCharCap: number; windowCharBudget: number; maxTranscriptMessages: number; maxTranscriptAgeDays: number | null; truncationMarker: string };
     messages: Array<Omit<AiRunWindowMessage, 'available' | 'text'>>;
     excluded: Array<{ tsMsgId: string; cause: 'age_30d' | 'char_budget' }>;
     noContent?: string[];
@@ -1565,6 +1568,29 @@ export interface TourUpdatedEvent {
  *  accepted/dismissed) - the contact page refetches its suggestions. */
 export interface SuggestionUpdatedEvent {
   contactId: string;
+}
+
+/** GET /api/events 'ai_run.completed' payload (manual-extraction-trigger 4.4b).
+ *  One extraction run finished - emitted for EVERY outcome, including the skips
+ *  and failures `suggestion.updated` never reports, because those are exactly
+ *  what the contact page's manual-run indicator has to explain. `requestId` is
+ *  present only when a human press started the run and is what correlates that
+ *  press to THIS run; `conversationId` names the thread, not the run, so it
+ *  cannot do that job alone. Mirrors app/src/lib/events.ts AiRunCompletedEvent.
+ *  Ids and counts only - NO PII. */
+export interface AiRunCompletedEvent {
+  conversationId: string;
+  runId: string;
+  requestId?: string;
+  contactId?: string;
+  /** The server's literal union, shared with the run log so a new outcome
+   *  server-side surfaces here as a compile error rather than a silent gap. */
+  outcome: AiRunOutcome;
+  skipReason?: string;
+  errorKind?: string;
+  wrote: number;
+  suggested: number;
+  notedLines: number;
 }
 
 /** GET /api/events 'unmatched_email.updated' payload (email-channel-v1 B2/B3).

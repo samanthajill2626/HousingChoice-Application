@@ -1065,13 +1065,77 @@ remaining code change in this area. A brand-new authority needs no code change t
 
 **Parked conversations recover on their own - except the quiet ones.** Five consecutive failures park a
 row (`fail()` REMOVEs `dueAt`, so it leaves the `byDueAt` index and no poll will ever list it again).
-There is no manual un-park step and none is needed: `scheduleExtraction` is an unconditional sliding
-upsert, so the **next inbound message on that conversation re-arms the row**, and a successful
-`complete()` REMOVEs `attempts` outright, clearing the counter. The real residue is different and worth
-naming: a conversation that was parked and then **went quiet is never retried**, so the facts in that
-window stay unextracted. After fixing a systemic extraction fault, audit the run log for parked runs and
-decide per conversation whether to re-trigger one manually - it is a data-completeness gap, not a
-pending failure.
+That park write is **conditional**: if something re-armed the row while the run was failing - an inbound
+message, or a press of the button below - the REMOVE is refused, only the error and attempt count are
+recorded, and the row stays armed at its fresh `dueAt`. Two things re-arm a parked row:
+`scheduleExtraction` is an unconditional sliding upsert, so the **next inbound message on that
+conversation re-arms it**; and the **Run AI extraction** action on the contact page arms every eligible
+1:1 thread for an immediate run. A successful `complete()` REMOVEs `attempts` outright, clearing the
+counter. The real residue is worth naming: a conversation that was parked and then **went quiet is never
+retried automatically**, so the facts in that window stay unextracted until someone presses the button.
+After fixing a systemic extraction fault, audit the run log for parked runs and decide per conversation
+whether to re-trigger one - it is a data-completeness gap, not a pending failure.
+
+**Run AI extraction (the operator's button).** On a contact page, the **More actions** menu carries
+**Run AI extraction**. It arms every eligible 1:1 thread of that contact - phone AND email threads,
+`tenant_1to1` and `unknown_1to1` only - for an immediate run, then returns; the same worker poll does
+the work, so the wait is the poll interval plus the run itself (roughly 5-40 seconds). The status
+banner on the contact page reports the outcome, including an outcome that changed nothing, and stops
+claiming to know if the run does not report back in time ("Still running - check Settings > AI runs.").
+Suggestions and auto-applied writes appear without a reload **when `EVENT_BRIDGE_URL` is set** - the run
+executes in the worker and that variable is the hop back to the app. It is set in every deployed env and
+in the local runners. With it UNSET nothing reports back at all: no chip, no resolved banner, and the
+timeout message is the only outcome an operator ever sees. Check that variable first if the banner never
+resolves on a run that the AI run log shows completing.
+
+**Each press bills one real model call per eligible thread.** A contact with three eligible threads
+costs three calls. Repeated presses on the same contact collapse into one run while the row is still
+waiting (the due row is a sliding upsert), but presses across different contacts do not collapse.
+A press is recorded in the audit trail (`extraction_run_requested` on `contacts#<contactId>`, with the
+scheduled/failed counts) and the runs it produces land in **Settings > AI runs** with `trigger: manual` -
+that page, not the banner, is where to look afterwards. Both of those writes are deliberately
+best-effort: a fault in either is logged and the press still succeeds rather than being reported as a
+failure, and a run whose claim was lost writes no run-log row at all. So a MISSING audit entry or run row
+means "no record was kept", not "nothing ran".
+
+**A press waives the 30-day age floor, for that run only.** An ordinary run drops every message older
+than 30 days before building its window; a manual run reads the whole newest-50 page regardless of age,
+and also bypasses the "nothing new since the cursor" gate, so pressing again on an already-extracted
+thread really does re-run it. The newest-50 message cap and the 60k-character window budget still apply,
+so a very long imported history is still truncated to its newest page.
+
+**How long the waiver lives.** It is a flag on the due row, and a successful claim clears it - so the
+next run after a manual run that COMPLETED is an ordinary one. Two windows keep it alive longer, both by
+design:
+
+- **Between the press and the claim.** An inbound message on that thread slides `dueAt` but cannot clear
+  the flag, so the run that eventually fires is still the operator's press: it waives both gates and is
+  logged `trigger: manual`.
+- **Across a failed manual run's backoff.** A manual run that fails re-arms with the flag still set, so
+  each of its retries (up to the five-attempt park) also waives both gates and is also logged `manual` -
+  and no banner is watching them, because the press's correlation id is not restored. An inbound landing
+  inside that window slides `dueAt` without clearing the flag either.
+
+Two operational consequences. `trigger: manual` in the run log means "a press is behind this run", NOT
+"an operator pressed at this moment" - so an unexplained `manual` row on a conversation nobody just
+pressed is expected, not a bug to chase. And one press can bill more than once on a thread whose runs
+keep failing, which is why the per-press cost above is a floor rather than a fixed price.
+
+**The seven refusals** (each renders its own sentence in the banner):
+
+| Reason | Status | What it means |
+|---|---|---|
+| `contact_not_found` | 404 | No such contact (or the id is a phone-pointer row, not a contact). |
+| `contact_deleted` | 409 | The contact is soft-deleted. Deliberate: do not spend money writing facts onto a record staff have removed from view. Restore the contact first. |
+| `extraction_disabled` | 409 | `AI_EXTRACTION_ENABLED` is off in this environment - the whole feature is inert, not just the button. |
+| `ineligible_contact_type` | 409 | The contact is a landlord, partner, or team member. Only tenants and untriaged (unknown) contacts are extracted. |
+| `no_conversations` | 409 | The contact has no threads at all - nothing to read. |
+| `no_eligible_conversations` | 409 | Threads exist, but none is a 1:1 tenant/unknown thread (e.g. only a relay group or a landlord thread). Check the thread's TYPE, not the data. |
+| `schedule_failed` | 500 | Every scheduling write threw. Usually that means nothing was queued - but a write that threw AFTER committing (a lost response) leaves the row armed with this press's id, and it will run and bill, so treat the disposition as UNKNOWN rather than "nothing happened". Pressing again is harmless (the due row is a sliding upsert, so a duplicate collapses into one run); check **Settings > AI runs** for this contact before assuming nothing ran. |
+
+A press that queues SOME threads and fails others answers success, not failure: the banner names how
+many threads could not be queued and carries that count through to the resolved message. Those threads
+produce no run.
 
 **Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
 `POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the
@@ -1309,15 +1373,26 @@ npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --revi
 
 **The current input set** lives in one folder, three subdirectories, one copy of
 each file - `--quo` at `quo-export`, `--airtable` at `airtable-export`,
-`--review` at `workbook-reviewed`:
+`--review` at `workbook-for-review`:
 
 ```
-W:\AI Projects\Housing Choice\Import Review\2026-08-15\
+W:\AI Projects\Housing Choice\Import Review\2026-08-16\
 ```
 
-Its README states provenance and lists the superseded workbook folders it
-replaces. The cutover export on 2026-08-17 gets its own dated folder in the same
-shape.
+Its README states provenance, the measured delta against the previous export,
+and the verification that every prior decision carried forward. It supersedes
+`2026-08-15`.
+
+That folder also holds a `workbook-pure-baseline\` - the same plan run with no
+prior, so nothing human is in it. Do NOT import it. It exists so the next round
+has a correct `--baseline-contacts`, and every round must leave one behind for
+the round after it. Stripping her file against the workbook she edited loses the
+previous round's outcomes, because those outcomes are already baked into that
+workbook's values.
+
+The port-day sweep export on 2026-08-17 gets its own dated folder in the same
+shape, with `--prior` and `--baseline-contacts` both pointing back at
+`2026-08-16`.
 
 ### The LOCAL run
 

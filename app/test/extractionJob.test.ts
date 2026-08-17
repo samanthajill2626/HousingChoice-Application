@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_EXTRACTION_ATTEMPTS,
   MAX_TRANSCRIPT_MESSAGES,
+  MAX_TRANSCRIPT_MESSAGES_MANUAL,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
@@ -120,6 +121,23 @@ function emailMsg(
   };
 }
 
+/** A message far outside the 30-day window, for the manual-run age waiver. */
+function agedMsg(direction: 'inbound' | 'outbound', body: string): MessageItem {
+  const ts = '2026-01-05T12:00:00.000Z';
+  return {
+    conversationId: 'conv1',
+    tsMsgId: `${ts}#aged`,
+    type: 'sms',
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    body,
+    provider_sid: 'aged',
+    provider_ts: ts,
+    delivery_status: 'delivered',
+    created_at: ts,
+  };
+}
+
 function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
@@ -162,6 +180,7 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
   );
   return {
     scheduleExtraction: vi.fn(async () => {}),
+    requestManualExtraction: vi.fn(async () => {}),
     listDue: vi.fn(async () => dueRows),
     claim: vi.fn(async () => claimResult),
     complete: vi.fn(async () => {}),
@@ -187,6 +206,7 @@ interface Harness {
   runs: AiRunRecordInput[];
   aiRuns: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   applyEvents: { emit: ReturnType<typeof vi.fn> };
+  jobEvents: { emit: ReturnType<typeof vi.fn> };
 }
 
 function makeHarness(opts: {
@@ -233,6 +253,10 @@ function makeHarness(opts: {
   // throw is one of the few paths that actually reaches runDueExtractions'
   // backstop. See Task 20.
   const applyEvents = { emit: vi.fn() };
+  // DISTINCT from applyEvents on purpose: a test makes applyEvents.emit throw to
+  // reach the per-row backstop, and a shared emitter would make the job's own
+  // completion emit throw with it.
+  const jobEvents = { emit: vi.fn() };
   const applyDeps: ApplyDeps = {
     contacts,
     extraction: repo,
@@ -245,6 +269,7 @@ function makeHarness(opts: {
   const deps: ExtractionJobDeps = {
     repo,
     aiRuns,
+    events: jobEvents,
     now: () => WALL_NOW,
     conversations: { getById: vi.fn(async () => opts.conversation) },
     messages: { listByConversation: vi.fn(async () => opts.messages ?? []) },
@@ -255,7 +280,7 @@ function makeHarness(opts: {
     logger: opts.logger ?? silentLogger,
   };
 
-  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents };
+  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents };
 }
 
 function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
@@ -413,7 +438,10 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 0, failed: 1 });
     // now + DEBOUNCE * 2^1 = now + 60s
     const expected = new Date(Date.parse(NOW) + DEBOUNCE * 2).toISOString();
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('driver boom'), expected);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('driver boom'), expected, {
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
     expect(h.repo.complete).not.toHaveBeenCalled();
   });
 
@@ -435,7 +463,10 @@ describe('runDueExtractions', () => {
     const out = await runDueExtractions(NOW, h.deps);
 
     expect(out).toEqual({ processed: 0, failed: 1 });
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.any(String), null);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.any(String), null, {
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
   });
 
   it('refusal error follows the failure path', async () => {
@@ -457,7 +488,10 @@ describe('runDueExtractions', () => {
 
     expect(out).toEqual({ processed: 0, failed: 1 });
     const expected = new Date(Date.parse(NOW) + DEBOUNCE).toISOString();
-    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected);
+    expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected, {
+      listedDueAt: dueRow().dueAt!,
+      manual: false,
+    });
   });
 
   it('call transcript: parses the four line forms into voice utterances', async () => {
@@ -1303,5 +1337,300 @@ describe('runDueExtractions - group_ambiguous_origin exclusion (T3.7)', () => {
     await runDueExtractions(NOW, h.deps);
 
     expect(h.runs[0]!.window!.windowCappedAtLimit).toBe(true);
+  });
+});
+
+describe('manual runs waive both gates', () => {
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+
+  it('reaches the driver when every message predates the 30-day cutoff', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
+  });
+
+  it('the SAME fixture without the flag skips no_new_client, not empty_window', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(0);
+    expect(h.runs[0]!.outcome).toBe('skipped');
+    expect(h.runs[0]!.skipReason).toBe('no_new_client');
+  });
+
+  it('waives no_new_client when the cursor is already past every message', async () => {
+    const fresh = msg(10, 'inbound', EXTRACT_BODY);
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, cursor: fresh.tsMsgId })],
+      messages: [fresh],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen).toHaveLength(1);
+  });
+
+  it('records trigger manual from the flag even when channel says sms', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'sms', manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
+  });
+
+  it('records a defined trigger for a row with no channel at all', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: undefined, manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.trigger).toBe('manual');
+  });
+
+  it('records the age floor it actually applied: null when waived, 30 otherwise', async () => {
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(manual.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBeNull();
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(auto.runs[0]!.window!.windowParams!.maxTranscriptAgeDays).toBe(30);
+  });
+
+  it('reads newest-200 on a manual run and newest-50 otherwise, and records which', async () => {
+    // 2026-08-17: with the age floor waived, the page cap is what decides how
+    // far back a press can see, so manual runs get a larger one. The read AND
+    // the record must agree - a run log that said 50 while the read was 200
+    // would misdescribe every manual window.
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(manual.deps.messages.listByConversation).toHaveBeenCalledWith('conv1', { limit: MAX_TRANSCRIPT_MESSAGES_MANUAL });
+    expect(manual.runs[0]!.window!.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES_MANUAL);
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(auto.deps.messages.listByConversation).toHaveBeenCalledWith('conv1', { limit: MAX_TRANSCRIPT_MESSAGES });
+    expect(auto.runs[0]!.window!.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES);
+  });
+
+  it('judges windowCappedAtLimit against the manual cap: a 50-row page is NOT capped', async () => {
+    // Under the automatic cap a 50-row page means "there may be more". Under
+    // the manual cap the same page was read with room to spare, so the record
+    // must not claim unseen history that the read would have returned.
+    const page: MessageItem[] = [];
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES; i++) page.push(msg(i, 'inbound', `m${i}`));
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: page,
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.window!.windowCappedAtLimit).toBe(false);
+  });
+
+  it('a manual run still records the aged-out ids as empty, not as excluded', async () => {
+    // The waiver is not "hide the aged messages" - they are IN the window, so
+    // there is nothing aged OUT to record. A non-empty list here would mean the
+    // record claims the model never saw messages it did in fact see.
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true })],
+      messages: [agedMsg('inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.window!.excluded.filter((e) => e.cause === 'age_30d')).toEqual([]);
+  });
+});
+
+describe('ai_run.completed', () => {
+  const EXTRACT_BODY = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}';
+  const emitted = (h: ReturnType<typeof makeHarness>) =>
+    h.jobEvents.emit.mock.calls.filter((c) => c[0] === 'ai_run.completed');
+
+  it('emits once for an applied run, carrying the counts', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'applied', wrote: 1, suggested: 0 });
+  });
+
+  it('emits for a SKIPPED run - the case the indicator most needs', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'skipped' });
+  });
+
+  it('emits for a NO_OP run (the model proposed nothing)', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'just saying hi')], // no EXTRACT marker
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'no_op', wrote: 0, suggested: 0 });
+  });
+
+  it('emits for a FAILED run, carrying the error kind', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      driver: {
+        kind: 'fake',
+        extract: async () => ({
+          ok: false as const,
+          meta: { driver: 'fake' as const },
+          failure: 'driver' as const,
+          message: 'boom',
+        }),
+      },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)[0]![1]).toMatchObject({ outcome: 'failed', errorKind: 'driver' });
+  });
+
+  it('still emits when the run-log write fails', async () => {
+    const aiRuns = {
+      beginFinalization: vi.fn(async () => true),
+      putRun: vi.fn(async () => { throw new Error('dynamo down'); }),
+      setVerdict: vi.fn(async () => true),
+    };
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      aiRuns,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(1);
+  });
+
+  it('carries the requestId of the press that started it, and none for an automatic run', async () => {
+    const manual = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, manual.deps);
+    expect(emitted(manual)[0]![1].requestId).toBe('req-abc');
+
+    const auto = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, auto.deps);
+    expect(emitted(auto)[0]![1].requestId).toBeUndefined();
+  });
+
+  it('a no_contact run emits with conversationId and no contactId', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'hi')],
+      contact: undefined,
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const payload = emitted(h)[0]![1];
+    expect(payload.conversationId).toBe('conv1');
+    expect(payload.contactId).toBeUndefined();
+  });
+
+  it('carries ids and counts only - no body, no phone, no field value', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    const payload = emitted(h)[0]![1];
+    const serialized = JSON.stringify(payload);
+    // The run really did carry all three - so their ABSENCE here is the assertion.
+    expect(serialized).not.toContain('EXTRACT:');
+    expect(serialized).not.toContain('yes');
+    expect(serialized).not.toContain('+15551230001');
+    // And the payload is exactly the id/count vocabulary, nothing else.
+    expect(Object.keys(payload).sort()).toEqual(
+      ['conversationId', 'contactId', 'notedLines', 'outcome', 'runId', 'suggested', 'wrote'].sort(),
+    );
+  });
+
+  it('a lost claim emits nothing - there is no outcome to report', async () => {
+    // Documented consequence (spec 4.4b): the indicator resolves by its timeout
+    // on this path, because the row was never this run's to report on.
+    const h = makeHarness({
+      dueRows: [dueRow({ manualRequested: true, requestId: 'req-abc' })],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      claimResult: false,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(emitted(h)).toHaveLength(0);
+  });
+
+  it('a throwing emitter never fails the run', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', EXTRACT_BODY)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+    h.jobEvents.emit.mockImplementation(() => { throw new Error('bus down'); });
+    const result = await runDueExtractions(NOW, h.deps);
+    expect(result).toEqual({ processed: 1, failed: 0 });
+    expect(h.repo.complete).toHaveBeenCalledTimes(1);
   });
 });

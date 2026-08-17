@@ -81,6 +81,44 @@ async function containerArgs() {
   return JSON.parse(stdout.trim());
 }
 
+/**
+ * Days after which a running container is worth flagging. Long uptime is the
+ * one accumulation the per-run teardowns CANNOT reclaim: DynamoDB Local exposes
+ * no way to enumerate or drop a database, only tables under a key you already
+ * hold, so the databases of DELETED worktrees and abandoned lanes are
+ * unreachable forever. They are also the ones nobody will ever tear down.
+ * Stopping the container is the only thing that frees them (-inMemory).
+ */
+const STALE_UPTIME_DAYS = 3;
+
+/** Container start time (docker inspect .State.StartedAt), or null. */
+async function containerStartedAt() {
+  try {
+    const { stdout } = await docker('inspect', '--format', '{{.State.StartedAt}}', CONTAINER_NAME);
+    const t = Date.parse(stdout.trim());
+    return Number.isFinite(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WARN ONLY - never acts. Restarting wipes every lane's in-memory tables, so
+ * whether to do it is an OPERATOR call (a neighbour's stack may be live). This
+ * only makes the cost visible, because a stale container's symptom is
+ * misleading: integration tests time out at their budget in a full run and pass
+ * solo in milliseconds, which reads as a real regression. Observed 2026-08-16
+ * on an 8-day-old container - 15 failures, all green after a restart, no code
+ * change.
+ * @param {number|null} startedAtMs
+ * @param {number} nowMs
+ */
+export function staleUptimeDays(startedAtMs, nowMs) {
+  if (startedAtMs === null) return null;
+  const days = (nowMs - startedAtMs) / 86_400_000;
+  return days >= STALE_UPTIME_DAYS ? days : null;
+}
+
 /** Idempotent start: running -> no-op; stopped -> start; absent -> run.
  *  A legacy -sharedDb container is removed + recreated (WIPES its in-memory
  *  tables — every lane/dev stack must reseed; sequenced in the rollout note of
@@ -99,6 +137,18 @@ export async function ensureDbStarted() {
   }
   if (state === 'running') {
     console.log(`db:start — ${CONTAINER_NAME} already running`);
+    const staleDays = staleUptimeDays(await containerStartedAt(), Date.now());
+    if (staleDays !== null) {
+      console.warn(
+        `db:start — ${CONTAINER_NAME} has been up ${staleDays.toFixed(1)} days. Databases for ` +
+          'DELETED worktrees and abandoned lanes are unreachable (DynamoDB Local cannot ' +
+          'enumerate or drop a database) and accumulate until the container stops. A stale ' +
+          'container makes integration tests time out at their budget in full runs while ' +
+          'passing solo in milliseconds. If suites are flaking that way, consider ' +
+          '`npm run db:stop && npm run db:start` — but ONLY when no other lane or dev stack ' +
+          'is live: it wipes every in-memory table and they must all reseed.',
+      );
+    }
   } else if (state === 'stopped') {
     console.log(`db:start — starting existing container ${CONTAINER_NAME}`);
     await docker('start', CONTAINER_NAME);

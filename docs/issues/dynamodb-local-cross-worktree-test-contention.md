@@ -9,6 +9,15 @@ created: 2026-07-02
 refs: app/test/devOutbox.integration.test.ts, e2e/support/lane.mjs, scripts/db.mjs
 ---
 
+> **Same symptom, SECOND cause (2026-08-16).** If you are here because integration
+> tests time out in a full run and pass solo, check
+> [`dynamodb-local-tables-never-reclaimed`](./dynamodb-local-tables-never-reclaimed.md)
+> too. The `-sharedDb` write lock diagnosed below was real and its fix holds, but
+> a long-lived container degrades identically for a different reason: nothing
+> ever deleted the tables, so databases accumulated until someone stopped it.
+> Distinguishing them: the write lock hurt only under CONCURRENT runs; the
+> accumulation hurts a container that has simply been up for days.
+
 **Problem.** All worktrees share ONE DynamoDB Local container (`:8000`). The e2e layer is
 lane-isolated (`hc-local-<L>-` table prefixes), but the **Vitest integration suites** are
 not throughput-isolated: when two or more agents/worktrees run `npx vitest run` (or a full

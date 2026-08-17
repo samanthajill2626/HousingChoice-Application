@@ -961,8 +961,13 @@ export async function aggregateInbox(
     /**
      * Candidates hydration dropped on a LAGGING read (see `Hydrated` below),
      * held for one retry once the rest of the request's reads are done.
+     *
+     * CONTACT candidates only, and the TYPE says so rather than a guard in the
+     * retry loop (adversarial r3 finding 8): `lagged: true` is returned from
+     * the contact arm alone - both non-contact returns are hard-coded
+     * `lagged: false` - so a non-contact lag is not a modelled state.
      */
-    const laggedDrops: UnreadCandidate[] = [];
+    const laggedDrops: Extract<UnreadCandidate, { kind: 'contact' }>[] = [];
 
     /**
      * The outcome of hydrating ONE candidate. A drop carries WHY, because the
@@ -995,14 +1000,35 @@ export async function aggregateInbox(
         // to hydration. (A zero sum is also the only way `convs` can be empty,
         // so the maxConv guard is belt-and-braces for the type.)
         if (unreadSum === 0 || maxConv === undefined) {
-          // LAG, or a real read? The discriminator is whether this fresh set
-          // contains the very thread the index offered. Absent (or an empty set
-          // entirely) means the participant GSI has not caught up, so the 0 is
-          // not an answer - it is a missing question.
+          // LAG, or a real read? Discriminate with ONE AUTHORITATIVE BASE-TABLE
+          // READ of the thread the index just offered - the same point read the
+          // non-contact arm below already trusts (adversarial r3 finding 1).
+          //
+          // The fix-wave-2 discriminator asked instead whether the offered
+          // thread was ABSENT from the fresh participant set, and that is the
+          // wrong question: a GSI replicates the whole projected ITEM, so the
+          // window where byUnread carries the increment and byParticipantPhone
+          // does not shows the thread PRESENT with its PRE-increment
+          // `unread_count: 0`. Membership absence needs a conversation that did
+          // not exist a moment ago, which resolves to no contact and takes the
+          // `unknown` branch. So the dominant lag shape was classified
+          // authoritative: never retried, and not even flagged.
+          //
+          // THE OFFERED THREAD IS `unreadConversations[0]` (conformance r3
+          // finding 6): the collector emits a contact candidate AT its first
+          // offered thread and only merges later threads onto it, so [0] IS the
+          // thread whose index entry produced this candidate.
           const offered = candidate.unreadConversations[0]?.conversationId;
-          const knowsOfferedThread =
-            offered !== undefined && convs.some((c) => c.conversationId === offered);
-          return { row: undefined, lagged: !knowsOfferedThread };
+          if (offered === undefined) return { row: undefined, lagged: false };
+          // A throw here fails the request exactly as the non-contact arm's
+          // point read does - deliberately not degraded to a silent drop.
+          const base = await conversations.getById(offered);
+          // Base says still unread -> the participant image is behind, the 0 is
+          // a missing question, and a retry can learn something. Base says read,
+          // closed or gone -> an ORDINARY mark-read race (or a closed thread the
+          // index has not caught up with, conformance r3 finding 7): dropping is
+          // CORRECT and the page reached a genuine end.
+          return { row: undefined, lagged: base !== undefined && isUnreadVisible(base) };
         }
         // NOTE the newest-conversation IDENTITY GUARD is deliberately ABSENT
         // here: row identity is the seen-set, and `newestOf` picks only the
@@ -1087,8 +1113,9 @@ export async function aggregateInbox(
           // Held for ONE retry after the loop (adversarial r2 finding 4). A
           // lag-dropped candidate is NOT re-offered by any later collect -
           // `scanPosition` is already past its index item - so this is the last
-          // chance the request has to deliver it.
-          if (hydrated.lagged) laggedDrops.push(candidate);
+          // chance the request has to deliver it. The `kind` test is what TYPES
+          // the list; it is not a guard against a state the arms can produce.
+          if (hydrated.lagged && candidate.kind === 'contact') laggedDrops.push(candidate);
           continue;
         }
         const row = hydrated.row;
@@ -1129,25 +1156,34 @@ export async function aggregateInbox(
     // once, and only for the lag-shaped drops, so an ordinary mark-read race
     // costs nothing extra. The per-request cache is dropped for those contacts,
     // or the retry would re-read its own first answer.
+    //
+    // AND IT IS BOUNDED, at the page `limit` (adversarial r3 finding 4 /
+    // conformance r3 finding 2). Every retry costs a fresh
+    // `conversationsForContact` - one or more participant-GSI Queries - and a
+    // lagging or DEGRADED participant GSI (a thrown lookup degrades to an empty
+    // set, which reads as a fresh sum of 0) makes EVERY candidate a lag-shaped
+    // drop, so an unbounded retry doubles the reads of a page that returns
+    // nothing. `limit` is the natural bound: a retry that could not fit on the
+    // page is counted `unresolvedDrops` anyway.
     let unresolvedDrops = 0;
+    let laggedRetries = 0;
+    for (const candidate of laggedDrops) contactConvsCache.delete(candidate.contactId);
     for (const candidate of laggedDrops) {
-      if (candidate.kind !== 'contact') continue;
-      contactConvsCache.delete(candidate.contactId);
-    }
-    for (const candidate of laggedDrops) {
-      if (candidate.kind === 'contact' && seen.has(candidate.contactId)) continue; // emitted later
-      if (unreadRows.length >= limit) {
-        // No room. The row is still lost for this paging session, so it counts
-        // as unresolved rather than being quietly forgotten.
+      if (seen.has(candidate.contactId)) continue; // emitted later
+      if (unreadRows.length >= limit || laggedRetries >= limit) {
+        // No room on the page, or the retry budget is spent. The row is still
+        // lost for this paging session, so it counts as unresolved rather than
+        // being quietly forgotten.
         unresolvedDrops += 1;
         continue;
       }
+      laggedRetries += 1;
       const hydrated = await hydrateUnread(candidate);
       if (hydrated.row === undefined) {
         unresolvedDrops += 1;
         continue;
       }
-      if (candidate.kind === 'contact') seen.add(candidate.contactId);
+      seen.add(candidate.contactId);
       unreadRows.push(hydrated.row);
     }
 
@@ -1241,6 +1277,14 @@ export async function aggregateInbox(
         seen: seen.size,
         hasMore: unreadCursor !== null,
         ...(truncated && { truncated: true }),
+        // THE RETRY VOLUME, on the REQUEST-level line (adversarial r3 finding
+        // 4 asked for the request's WARN payload; the retry is now hard-capped
+        // at `limit`, so it is a per-request STATISTIC rather than a tripwire,
+        // and this is the line that already carries scanned/seen/truncated).
+        // Always present when nonzero, so the pair "the badge counts rows this
+        // page could not deliver" is readable without a second request.
+        ...(laggedRetries > 0 && { laggedRetries }),
+        ...(unresolvedDrops > 0 && { unresolvedDrops }),
       },
       'inbox feed assembled',
     );

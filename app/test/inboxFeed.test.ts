@@ -1197,10 +1197,16 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       makeDeps(
         {
           contacts: [drop.contact, keep.contact],
-          conversations: [drop.conversation, keep.conversation],
-          // The participant GSI lags independently (spec 6): it reports c-drop's
-          // thread as already read, so the fresh sum is 0 and the row drops.
-          participantProjection: [{ ...drop.conversation, unread_count: 0 }, keep.conversation],
+          // THE ORDINARY MARK-READ RACE, in its authoritative shape (fix wave 3,
+          // adversarial r3 finding 1): the BASE TABLE says c-drop is read and
+          // only the byUnread index is still behind. The fresh sum is 0, the row
+          // drops, and the base-table discriminator confirms the drop is an
+          // ANSWER - so nothing is retried and nothing is truncated.
+          conversations: [
+            { ...drop.conversation, unread_count: 0, unread_flag: undefined },
+            keep.conversation,
+          ],
+          unreadIndexProjection: [drop.conversation, keep.conversation],
         },
         calls,
       ),
@@ -1221,11 +1227,16 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       { filter: 'unread', limit: 25 },
       makeDeps({
         contacts: [a.contact, b.contact],
-        conversations: [a.conversation, b.conversation],
-        participantProjection: [
-          { ...a.conversation, unread_count: 0 },
-          { ...b.conversation, unread_count: 0 },
+        // Both were genuinely READ (base table), with only the index behind -
+        // the authoritative shape of the mark-read race (fix wave 3). This is
+        // the fixture that keeps the lag rule NARROW: were every zero-sum drop
+        // treated as lag, the end of an ordinary triage session would render the
+        // inbox ERROR state, which is the C2 regression.
+        conversations: [
+          { ...a.conversation, unread_count: 0, unread_flag: undefined },
+          { ...b.conversation, unread_count: 0, unread_flag: undefined },
         ],
+        unreadIndexProjection: [a.conversation, b.conversation],
       }),
     );
 
@@ -1876,6 +1887,138 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     };
     return deps;
   }
+
+  /**
+   * The lag shape production ACTUALLY produces (adversarial r3 finding 1), on
+   * the FIRST read only: a DynamoDB GSI replicates the whole projected item, so
+   * in the window where byUnread carries the increment and byParticipantPhone
+   * does not, the thread is PRESENT in the participant image carrying its
+   * PRE-increment `unread_count: 0`. Membership absence (lagOnceOnPhone above)
+   * happens only for a conversation that did not exist a moment ago, which
+   * resolves to no contact and takes the `unknown` branch anyway - so a
+   * discriminator keyed on membership never fires for the dominant shape.
+   */
+  function staleCountOnceOnPhone(deps: InboxRouterDeps, phone: string): InboxRouterDeps {
+    const repo = deps.conversationsRepo as unknown as {
+      findByParticipantPhone(p: string): Promise<ConversationItem[]>;
+    };
+    const real = repo.findByParticipantPhone.bind(repo);
+    let lagging = true;
+    repo.findByParticipantPhone = async (p: string) => {
+      const items = await real(p);
+      if (p !== phone || !lagging) return items;
+      lagging = false;
+      return items.map((c) => ({ ...c, unread_count: 0 }));
+    };
+    return deps;
+  }
+
+  it('LAG DISCRIMINATOR: a STALE PROJECTED COUNT is lag - retried and rendered', async () => {
+    // ADVERSARIAL r3 FINDING 1. Fix wave 2 discriminated lag by GSI MEMBERSHIP
+    // ("is the offered thread absent from the fresh set?"), which is the shape a
+    // reproduction reaches for and NOT the shape a lagging GSI produces: the
+    // thread is there, carrying a stale zero. Every real lag was therefore
+    // classified authoritative - never retried, and not even reported through
+    // `truncated`, so the page claimed a clean natural end while the badge went
+    // on counting the row. The discriminator is now ONE authoritative base-table
+    // read of the offered thread.
+    const bPhone = '+14045557021';
+    const aPhone = '+14045557022';
+    const contacts: ContactItem[] = [
+      { contactId: 'c-b', type: 'tenant', phone: bPhone },
+      { contactId: 'c-a', type: 'tenant', phone: aPhone },
+    ];
+    const bConv = conv({
+      conversationId: 'conv-b',
+      participant_phone: bPhone,
+      last_activity_at: T(12),
+      unread_count: 1,
+    });
+    const aConv = conv({
+      conversationId: 'conv-a',
+      participant_phone: aPhone,
+      last_activity_at: T(10),
+      unread_count: 1,
+    });
+    const seed: Seed = { contacts, conversations: [bConv, aConv] };
+
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      staleCountOnceOnPhone(makeDeps(seed), bPhone),
+    );
+
+    // The BASE TABLE says conv-b is unread, so the fresh 0 was a missing
+    // question rather than an answer: retry, and the row renders.
+    expect(rowKeys(page)).toEqual(['c-b', 'c-a']);
+    expect(page.truncated).toBeUndefined();
+  });
+
+  it('LAG DISCRIMINATOR: a thread the BASE TABLE says is closed/read is NOT lag - dropped, no retry, no truncation', async () => {
+    // The other side of the same discriminator (conformance r3 finding 7). The
+    // index still lists this thread as unread while the base table has it
+    // CLOSED, so `contactConversations` (open-only) returns an empty set - the
+    // membership shape fix wave 2 called lag. It is not: the point read is
+    // authoritative, nothing a retry could learn, and claiming `truncated` here
+    // would render the inbox ERROR state at the end of an ordinary triage
+    // session (the C2 regression).
+    const calls = emptyCallCounts();
+    const gonePhone = '+14045557031';
+    const closed = conv({
+      conversationId: 'conv-gone',
+      participant_phone: gonePhone,
+      last_activity_at: T(12),
+      unread_count: 1,
+      status: 'closed',
+    });
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 2 },
+      makeDeps(
+        {
+          contacts: [{ contactId: 'c-gone', type: 'tenant', phone: gonePhone }],
+          conversations: [closed],
+          // The index image is the stale one: still open, still unread.
+          unreadIndexProjection: [{ ...closed, status: 'open', unread_flag: 'unread' }],
+        },
+        calls,
+      ),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    expect(page.truncated).toBeUndefined();
+    // ONE participant-GSI read: the drop was answered, not retried.
+    expect(calls.findByParticipantPhone).toBe(1);
+  });
+
+  it('LAG RETRY IS BOUNDED by the page limit, and the request line reports the count', async () => {
+    // ADVERSARIAL r3 FINDING 4 / CONFORMANCE r3 FINDING 2. Correcting the
+    // discriminator above makes this live: EVERY lag-classified drop used to be
+    // retried, one fresh `conversationsForContact` each, so a degraded or
+    // lagging participant GSI doubled the request's reads - up to
+    // UNREAD_WALK_LIMIT of them - for a page that returns nothing. The cap is
+    // the page `limit`: a retry that cannot fit on the page is counted
+    // unresolved anyway.
+    const info = vi.fn();
+    const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never;
+    const calls = emptyCallCounts();
+    const seed = unreadWorld(200);
+    // The stale-count shape on EVERY contact: 200 lag-classified drops.
+    seed.participantProjection = seed.conversations.map((c) => ({ ...c, unread_count: 0 }));
+
+    const page = await aggregateInbox(
+      { filter: 'unread', limit: 30 },
+      makeDeps(seed, calls, logger),
+    );
+
+    expect(page.rows).toEqual([]);
+    // 200 hydrations + AT MOST `limit` retries - not 400.
+    expect(calls.findByParticipantPhone).toBe(230);
+    // The page still refuses to claim a natural end while the badge counts rows
+    // it could not deliver.
+    expect(page.truncated).toBe(true);
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled');
+    expect(assembled?.[0]).toMatchObject({ laggedRetries: 30, unresolvedDrops: 200 });
+  });
 
   it('DROPPED SINGLE-THREAD CONTACT: one retry at the end of the loop brings it back', async () => {
     // Adversarial r2 finding 4, the round-1 reproduction verbatim: contact B

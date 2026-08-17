@@ -821,7 +821,7 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).toEqual(['c-behind']);
   });
 
-  it('KEEPS WALKING past the deleted-skip bound: 150 deleted ahead of 5 live still shows the 5', async () => {
+  it('applies the deleted-contact rule to EVERY walked item: 250 deleted ahead of 5 live shows exactly the 5', async () => {
     // ADVERSARIAL r3 FINDING 5 (fix wave 3). Fix wave 2 BROKE the pass past the
     // bound, which is the same "stop the walk" decision both reviewers called
     // BLOCKING for the inbox in round 2 - applied to the one surface with no
@@ -833,7 +833,7 @@ describe('today action-queue API (BE6/C7)', () => {
     // The bound now limits the LOOKUPS, not the walk: past it a 1:1 item is
     // treated as non-deleted (the declared cost - a deleted contact past the
     // bound can render) and the existing TODAY_UNREAD_CAP ends the pass.
-    for (let i = 0; i < 150; i += 1) {
+    for (let i = 0; i < 250; i += 1) {
       const id = `c-deep-${String(i).padStart(3, '0')}`;
       const phone = `+1555032${String(i).padStart(4, '0')}`;
       world.contacts.push({
@@ -879,14 +879,15 @@ describe('today action-queue API (BE6/C7)', () => {
 
     // The live work the block exists to show is on the board.
     for (let i = 0; i < 5; i += 1) expect(ids).toContain(`c-alive-${i}`);
-    // The first TODAY_UNREAD_CAP distinct deleted contacts were still looked up
-    // and still filtered out - the bound caps the reads, it does not disable the
-    // rule.
-    expect(ids).not.toContain('c-deep-000');
-    expect(ids).not.toContain('c-deep-099');
+    // AND NO DELETED CONTACT LEAKS ONTO IT (adversarial r4 finding 1): the rule
+    // is applied to every 1:1 item walked, not to a bounded prefix. At 250
+    // deleted ahead of 5 live the old lookup bound rendered a FULL block of
+    // deleted contacts and zero live work - the board inverted.
+    expect(ids).toHaveLength(5);
+    for (const id of ids) expect(id).toMatch(/^c-alive-/);
   });
 
-  it('BOUNDS the deleted-contact skip at TODAY_UNREAD_CAP distinct lookups, and says so', async () => {
+  it('has NO deleted-contact lookup bound: 101 deleted ahead of 1 live shows exactly the 1, and announces the skips', async () => {
     // ADVERSARIAL r2 finding 6 / CONFORMANCE r2 finding 6. Moving the
     // deleted-contact test ahead of the cap is right, but it made the check run
     // on every 1:1 item the walk yields - bounded only by UNREAD_WALK_LIMIT
@@ -941,15 +942,15 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
 
-    // The live row behind the wall IS shown - that is the whole point of
-    // bounding the reads instead of the walk.
-    expect(unrep.map((i) => i.refId)).toContain('c-past-bound');
-    // DECLARED COST: exactly the deleted contacts met PAST the bound leak onto
-    // the board (here the single 101st one), because the pass stopped asking.
-    expect(unrep.map((i) => i.refId)).toEqual(['c-wall-100', 'c-past-bound']);
-    // ...and it is announced with its own label, not folded into the generic
-    // 'unread' cap line, so the operator can tell "filtered to nothing by
-    // deleted residue" from "genuinely capped".
+    // The live row behind the wall IS shown, and NOTHING ELSE: there is no
+    // lookup bound any more (adversarial r4 finding 1 showed every threshold
+    // either hid live work or leaked deleted rows). The rule is applied to every
+    // walked 1:1 item; the cost is one memoized getById per DISTINCT contact,
+    // bounded by the walk budget - the same O(scanned) the badge pays, watched
+    // by the scanned WARN, and remedied by the BatchGet follow-up.
+    expect(unrep.map((i) => i.refId)).toEqual(['c-past-bound']);
+    // The skip count is still announced under its own label so the operator can
+    // tell "filtered by deleted residue" from "genuinely capped".
     const skipWarns = harness.capture
       .atLevel(40)
       .filter((l) => l['group'] === 'unread:deleted_skips');

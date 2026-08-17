@@ -717,25 +717,20 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // Batching the lookups is the real remedy
         // (docs/issues/contacts-batchget-amplified-reads.md).
         //
-        // THE BOUND STOPS THE LOOKUPS, NEVER THE WALK (fix wave 3, adversarial
-        // r3 finding 5). Fix wave 2 BROKE the pass past the bound, which is the
-        // same walk-stop that was BLOCKING for the inbox in round 2 - and Today
-        // is worse: no cursor, no `truncated` on the wire, no Load more, so
-        // every live unread thread behind the wall was dropped permanently with
-        // only a log line to say why. Past the bound a 1:1 item is simply
-        // treated as NON-deleted and the existing TODAY_UNREAD_CAP ends the
-        // pass, exactly as the unread collector's wasted-probe bound does.
-        // DECLARED COST: a deleted contact met past the bound CAN render an
-        // Unreplied row. That is bounded (the pass still stops at 100 kept rows)
-        // and is the lesser harm - the alternative hid the live work the block
-        // exists to show. warnIfCapped announces the state either way.
+        // NO LOOKUP BOUND (planner fix, adversarial r4 finding 1). Every bound
+        // tried here was wrong at some threshold: fix wave 2 stopped the WALK
+        // (hid live work - the walk-stop that was BLOCKING for the inbox), and
+        // fix wave 3 stopped the LOOKUPS and treated the rest as non-deleted -
+        // which at 250 deleted ahead of 5 live rendered a FULL Unreplied block
+        // of deleted contacts and ZERO live work: the board inverted. There is
+        // no partial-knowledge state that is honest, so the rule is applied to
+        // every walked 1:1 item. COST: one memoized `getById` per DISTINCT
+        // contact, bounded by the raw walk budget - the same O(scanned index
+        // items) the nav badge pays, watched by the scanned-items WARN, and
+        // remedied by the BatchGet follow-up
+        // (docs/issues/contacts-batchget-amplified-reads.md).
         const ownerId = oneToOneContactId(conv);
-        // A contact ALREADY known deleted stays filtered past the bound: that
-        // answer is in the set, so re-applying it costs no read at all.
-        const canAnswer =
-          ownerId !== undefined &&
-          (skippedDeletedContacts.size < TODAY_UNREAD_CAP || skippedDeletedContacts.has(ownerId));
-        if (canAnswer && (await isDeletedContact(ownerId))) {
+        if (ownerId !== undefined && (await isDeletedContact(ownerId))) {
           skippedDeletedContacts.add(ownerId);
           continue;
         }
@@ -746,11 +741,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (unreadOneToOne.length >= TODAY_UNREAD_CAP) break;
       }
       warnIfCapped('unread', unreadOneToOne.length, TODAY_UNREAD_CAP);
-      // ITS OWN LABEL, deliberately not folded into the line above: it now says
-      // "the lookups stopped, so deleted rows past this point may be showing"
-      // (fix wave 3) where the block-level line says "the block is full" - two
-      // different operational problems with different fixes
-      // (the delete-time reset and backfill rule 3 versus nothing at all).
+      // ITS OWN LABEL, deliberately not folded into the line above: it says
+      // "this many distinct deleted contacts were skipped on the way to the
+      // block" (residue accruing - the delete-time reset and backfill rule 3
+      // are the fixes), where the block-level line says "the block is full".
+      // Two different operational problems. The threshold reuses
+      // TODAY_UNREAD_CAP as a magnitude, not as any lookup bound.
       warnIfCapped('unread:deleted_skips', skippedDeletedContacts.size, TODAY_UNREAD_CAP);
       // UNDERFILLED FOR A REASON NOBODY CAN OTHERWISE SEE. Neither capped nor
       // exhausted means the raw-scan budget ran out first, so the block is short

@@ -1,13 +1,29 @@
 ---
 id: unread-budget-truncation-has-no-forward-path
-title: A budget-truncated unread feed mints no cursor and the nav badge renders nothing
+title: A budget-truncated unread badge renders nothing (half fixed - the page now pages)
 type: bug
-severity: med
+severity: low
 status: open
 area: app/inbox
 created: 2026-08-16
+updated: 2026-08-16
 refs: app/src/routes/inbox.ts, app/src/lib/unreadFeed.ts, dashboard/src/app/UnreadContext.tsx, dashboard/src/app/NavContents.tsx
 ---
+
+**HALF RESOLVED 2026-08-16** (review fix wave 1, conformance C1; spec 4.5 step 2
+amended). Half 1 below - the missing forward path - is FIXED: a truncated page
+that HAS rows now mints its cursor from the `scanPosition` it already paid for,
+so Load more advances past the truncation point. An EMPTY truncated page still
+returns null, which is the invariant the client's empty-state gating rests on.
+
+Half 2 - the silent-zero badge - REMAINS OPEN and is what this issue now tracks.
+Rendering an indeterminate badge is out of v1's scope, so the interim measure is
+server-side only: `countUnreadRows` logs a rate-limited WARN
+(`unread_badge_truncated_zero`) when it answers 0 with the walk stopped early,
+which makes the state observable but still leaves the OPERATOR looking at a
+blank nav item. Note the walk can now also stop early on the deleted-probe bound
+(`UNREAD_DELETED_PROBE_LIMIT`), not only on the raw-scan budget, which makes
+this state cheaper to reach than the 2000-resident estimate below.
 
 **Problem.** Filed from the plan-blind adversarial review of
 `feat/inbox-unread-index` (finding 1, CONFIRMED - reproduced against the real
@@ -16,12 +32,13 @@ halves, one cause: when the request's raw-scan budget (`UNREAD_WALK_LIMIT`,
 2000) expires before the unread page fills, the feed reports the early end and
 then throws away everything needed to get past it.
 
-1. NO FORWARD PATH. The cursor block sets `truncated = true` and leaves
-   `unreadCursor = null` even though `scanPosition` IS known at that moment. The
-   position is deliberately discarded, so Retry re-runs the same deterministic
-   prefix with a fresh budget and produces the identical answer. Every row
-   behind the truncation point is unreachable through the API until the index
-   itself is cleaned.
+1. NO FORWARD PATH - FIXED, see the note above. The cursor block set
+   `truncated = true` and left
+   `unreadCursor = null` even though `scanPosition` WAS known at that moment.
+   The position was deliberately discarded, so Retry re-ran the same
+   deterministic prefix with a fresh budget and produced the identical answer.
+   Every row behind the truncation point was unreachable through the API until
+   the index itself was cleaned.
 2. SILENT-ZERO BADGE. `countUnreadRows` returns
    `{unreadCount: 0, capped: false, truncated: true}`, but `UnreadContext` reads
    only `unreadCount` and `capped` - the word `truncated` appears in that file
@@ -60,12 +77,10 @@ that "the point of this state is not lying, not guaranteed recovery"). This
 issue is about the missing forward path and the silent-zero badge, not about
 re-litigating that ruling.
 
-**Suggested fix.** Mint the cursor from the known `scanPosition` when the stop
-was the BUDGET (truncation is about this request's budget, not the end of the
-feed), which makes Retry / Load more actually advance; keep `truncated` as the
-signal that the page ended early. For the badge, either surface `truncated` in
-`UnreadContext` (an indeterminate marker rather than nothing) or, at minimum,
-log a WARN on a truncated count of zero so the silent state is observable. Note
+**Suggested fix.** The cursor half is done as described (mint from the known
+`scanPosition`, keep `truncated` as the early-end signal). WHAT IS LEFT: surface
+`truncated` in `UnreadContext` and give `NavContents` an indeterminate marker,
+so a truncated zero stops looking exactly like "all caught up". Note
 the depth-cap arm is a different case - it genuinely cannot mint a cursor the
 server would accept, which is
 [`seen-set-max-equals-max-inbox-limit`](./seen-set-max-equals-max-inbox-limit.md).

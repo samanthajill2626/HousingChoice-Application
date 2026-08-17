@@ -135,7 +135,11 @@ export interface ExtractionRepo {
   /**
    * Arm a row for an IMMEDIATE manual run. Same sliding upsert as
    * scheduleExtraction, plus manualRequested and the caller's requestId, and
-   * deliberately WITHOUT touching `channel` - `channel` has no clearing site,
+   * deliberately WITHOUT touching `channel`. The failure state (`attempts` /
+   * `lastError`) deliberately rides along too - a press does NOT start from a
+   * clean slate, so a press on a row already at attempts >= 4 gets one attempt
+   * and parks on its first failure (design section 8; resetting would change
+   * automatic backoff semantics for a manual reason) - `channel` has no clearing site,
    * so a 'manual' value stored there would outlive the flag and could later
    * label an automatic run as manual in the run log.
    */

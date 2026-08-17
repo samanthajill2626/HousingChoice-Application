@@ -869,7 +869,11 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect((await repo.getDue('conv-2'))!.manualRequested).toBeUndefined();
   });
 
-  it('parking REMOVEs BOTH the flag and the request id', async () => {
+  // NOTE: on this path `claim` already cleared the flag and request id, so the
+  // assertions below cannot fail against park's REMOVE list - the thrown-claim
+  // test after this one is the guarded version. Kept because it still pins the
+  // claimed-path park end-state (nothing manual left behind, however cleared).
+  it('a claimed run that parks leaves no manual residue behind', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     await repo.requestManualExtraction('conv-1', T1, 'req-abc');

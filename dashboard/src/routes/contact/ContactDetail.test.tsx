@@ -1299,6 +1299,27 @@ describe('ContactDetail', () => {
       expect(resolved).not.toHaveTextContent(/nothing new/i);
     });
 
+    // Handback review R2 (adversarial): the first fix named notes ONLY when
+    // nothing else landed, so the success banner reported less than the
+    // failure banner about the same run. Notes ride every branch.
+    it('names the note lines even when fields also changed', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 0,
+        notedLines: 3,
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /updated 2 fields, 3 note lines added\./i,
+      );
+    });
+
     // Handback review (adversarial, MEDIUM): one thread failing must not erase
     // what the other threads already did - those writes are committed and
     // billed whether or not the banner mentions them.
@@ -1330,7 +1351,7 @@ describe('ContactDetail', () => {
         suggested: 0,
         notedLines: 0,
       });
-      const resolved = await screen.findByRole('alert');
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
       expect(resolved).toHaveTextContent(/extraction failed/i);
       expect(resolved).toHaveTextContent(/2 fields updated/i);
       expect(resolved).toHaveTextContent(/1 suggestion to review/i);
@@ -1481,10 +1502,14 @@ describe('ContactDetail', () => {
       );
     });
 
-    it('IGNORES an event naming a DIFFERENT contact', async () => {
-      // requestId alone is not the whole guard (spec 7). A run for another
-      // contact that somehow carried this press's id must not resolve here and
-      // report its counts as if they had landed on this record.
+    // Handback review R2 (adversarial): a matching requestId with a different
+    // contactId is THIS press's run, resolved by the job to another contact -
+    // the conversation's participant pointer diverges from the phone roster,
+    // a reachable state under the documented phone-curation flow. The facts
+    // landed on that record and billed; the old behavior (ignore, spin, 180s
+    // timeout) hid a committed write. It must resolve and say where they went,
+    // and must NOT report the counts as if they landed on this record.
+    it('resolves a mismatched-contact event as misfiled instead of spinning', async () => {
       renderAt('k1');
       await pressRun();
       await screen.findByRole('status', { name: /ai extraction/i });
@@ -1498,9 +1523,10 @@ describe('ContactDetail', () => {
         suggested: 9,
         notedLines: 0,
       });
-      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
-        /running ai extraction/i,
-      );
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/filed under a different contact/i);
+      expect(resolved).not.toHaveTextContent(/9 field/i);
+      expect(resolved).not.toHaveTextContent(/9 suggestion/i);
     });
 
     it('IGNORES an event for a thread the server could not queue', async () => {

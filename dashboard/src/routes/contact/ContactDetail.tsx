@@ -112,6 +112,12 @@ type ExtractionState =
       noted: number;
       /** Threads the server could not queue at all (a partial-failure 200). */
       failedThreads: number;
+      /** Threads whose run resolved to a DIFFERENT contact than this page (the
+       *  conversation's participant contactId diverges from the phone roster -
+       *  see docs/issues/extraction-conversation-contact-divergence.md). The
+       *  facts landed on that other record; silently timing out here would hide
+       *  a billed, committed write. */
+      misfiled: number;
       errorKind?: string;
     }
   | {
@@ -169,10 +175,12 @@ export function ContactDetail(): React.JSX.Element {
   // press, every contact change and the timeout bump it, so a late response is
   // dropped rather than resurrecting a run nobody is watching.
   const pressGenerationRef = useRef(0);
-  // The last few ai_run.completed events, so one that beats the POST response
-  // can be replayed once the response names this press's requestId (the state
-  // machine drops events while requestId is still ''). Same-instant events
-  // only - the cap keeps it from ever being history.
+  // ai_run.completed events seen since the CURRENT press began (cleared at
+  // press time), so one that beats the POST response can be replayed once the
+  // response names this press's requestId - the state machine drops events
+  // while requestId is still ''. Staleness across presses is prevented by the
+  // per-press server-minted UUID, not by the size cap; the cap only bounds a
+  // same-window org-wide burst, since every client receives every run event.
   const recentRunEventsRef = useRef<AiRunCompletedEvent[]>([]);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
@@ -211,6 +219,10 @@ export function ContactDetail(): React.JSX.Element {
 
   const onRunExtraction = useCallback(async (): Promise<void> => {
     const press = (pressGenerationRef.current += 1);
+    // The ring holds "events since THIS press began" - clearing it here is what
+    // makes that true. Without the clear it accumulates every org-wide run
+    // event forever and a burst could evict this press's own early event.
+    recentRunEventsRef.current = [];
     // Busy from the PRESS, not from the response: otherwise a double-click fires
     // two POSTs before the first one resolves.
     setExtraction({
@@ -222,6 +234,7 @@ export function ContactDetail(): React.JSX.Element {
       suggested: 0,
       noted: 0,
       failedThreads: 0,
+      misfiled: 0,
     });
     try {
       const res = await runExtraction(contactId);
@@ -237,6 +250,7 @@ export function ContactDetail(): React.JSX.Element {
         suggested: 0,
         noted: 0,
         failedThreads: res.failed.length,
+        misfiled: 0,
       });
       // Replay any completion event that arrived BEFORE the POST response.
       // The run happens on the worker poll seconds later, but the dev tick and
@@ -977,9 +991,12 @@ function extractionAppliedCopy(wrote: number, suggested: number, noted: number):
   // happen. The both-non-zero string is unchanged from design 4.6.
   const fields = `Updated ${wrote} field${wrote === 1 ? '' : 's'}`;
   const chips = `${suggested} suggestion${suggested === 1 ? '' : 's'} to review`;
-  if (wrote === 0) return `${chips.charAt(0).toUpperCase()}${chips.slice(1)}.`;
-  if (suggested === 0) return `${fields}.`;
-  return `${fields}, ${suggested} suggestion${suggested === 1 ? '' : 's'}.`;
+  // Notes ride every branch, not only the note-only one: the success banner
+  // must never report LESS than the failure banner does about the same run.
+  const notes = noted > 0 ? `, ${noted} note line${noted === 1 ? '' : 's'} added` : '';
+  if (wrote === 0) return `${chips.charAt(0).toUpperCase()}${chips.slice(1)}${notes}.`;
+  if (suggested === 0) return `${fields}${notes}.`;
+  return `${fields}, ${suggested} suggestion${suggested === 1 ? '' : 's'}${notes}.`;
 }
 
 /** `truncated` gets its own actionable sentence: it is the one failure an
@@ -1022,10 +1039,19 @@ function applyRunEvent(
   if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
     return prev;
   }
-  if (e.contactId !== undefined && e.contactId !== contactId) return prev;
   if (!prev.pending.has(e.conversationId)) return prev;
   const pending = new Set(prev.pending);
   pending.delete(e.conversationId);
+  // A matching requestId with a DIFFERENT contactId is not noise - it is THIS
+  // press's run, resolved by the job to another contact (the conversation's
+  // participant pointer diverges from the phone roster). The facts landed on
+  // that record and billed; leaving the thread in `pending` would hide that
+  // behind a 180s timeout. Count it and say so instead of spinning.
+  if (e.contactId !== undefined && e.contactId !== contactId) {
+    const misfiled = prev.misfiled + 1;
+    if (pending.size > 0) return { ...prev, pending, misfiled };
+    return finishRun({ ...prev, pending, misfiled });
+  }
   const wrote = prev.wrote + e.wrote;
   const suggested = prev.suggested + e.suggested;
   const noted = prev.noted + e.notedLines;
@@ -1035,22 +1061,35 @@ function applyRunEvent(
   if (pending.size > 0) {
     return { ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) };
   }
-  const unqueued = prev.failedThreads > 0 ? { failedThreads: prev.failedThreads } : {};
-  if (errorKind !== undefined) {
-    const partial = extractionPartialResults(wrote, suggested, noted);
-    return {
-      phase: 'done',
-      tone: 'alert',
-      message: partial === undefined
-        ? extractionFailureCopy(errorKind)
-        : `${extractionFailureCopy(errorKind)} ${partial}`,
-      ...unqueued,
-    };
+  return finishRun({ ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) });
+}
+
+/** Assemble the resolved banner from a running state whose `pending` emptied.
+ *  One assembly site for BOTH exits (the normal resolution and the misfiled
+ *  one), so the failure headline, the results-that-landed clause, the unqueued
+ *  clause and the misfiled clause can never disagree between paths. */
+function finishRun(last: Extract<ExtractionState, { phase: 'running' }>): ExtractionState {
+  const unqueued = last.failedThreads > 0 ? { failedThreads: last.failedThreads } : {};
+  const misfiledClause =
+    last.misfiled > 0
+      ? ` ${last.misfiled === 1 ? 'One thread is' : `${last.misfiled} threads are`} filed under a different contact - its results landed there. See Settings > AI runs.`
+      : '';
+  if (last.errorKind !== undefined) {
+    const partial = extractionPartialResults(last.wrote, last.suggested, last.noted);
+    const body = partial === undefined
+      ? extractionFailureCopy(last.errorKind)
+      : `${extractionFailureCopy(last.errorKind)} ${partial}`;
+    return { phase: 'done', tone: 'alert', message: `${body}${misfiledClause}`, ...unqueued };
+  }
+  if (last.misfiled > 0) {
+    const partial = extractionPartialResults(last.wrote, last.suggested, last.noted);
+    const body = partial === undefined ? misfiledClause.trim() : `${partial}${misfiledClause}`;
+    return { phase: 'done', tone: 'alert', message: body, ...unqueued };
   }
   return {
     phase: 'done',
     tone: 'status',
-    message: extractionAppliedCopy(wrote, suggested, noted),
+    message: extractionAppliedCopy(last.wrote, last.suggested, last.noted),
     ...unqueued,
   };
 }

@@ -2069,14 +2069,20 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
 
   it('NON-CONTACT point read degrades: a THROWING getById drops the group row best-effort, never a 500', async () => {
     const calls = emptyCallCounts();
-    const group = conv({
-      conversationId: 'gt-throw',
+    // A native group thread carries no participant_phone; build it the way the
+    // stream tests do (spread over conv(), then override type/status).
+    const group: ConversationItem = {
+      ...conv({
+        conversationId: 'gt-throw',
+        participant_phone: '+14045557051',
+        last_activity_at: T(12),
+        unread_count: 2,
+      }),
       type: 'group_text',
       status: 'group_open',
-      last_activity_at: T(12),
-      unread_count: 2,
       participants: [{ contactId: 'c-1', phone: '+14045557051', name: 'A' }],
-    });
+    };
+    delete (group as { participant_phone?: string }).participant_phone;
     const page = await aggregateInbox(
       { filter: 'unread', limit: 2 },
       makeDeps(

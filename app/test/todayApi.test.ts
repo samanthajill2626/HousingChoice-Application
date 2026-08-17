@@ -821,6 +821,71 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).toEqual(['c-behind']);
   });
 
+  it('KEEPS WALKING past the deleted-skip bound: 150 deleted ahead of 5 live still shows the 5', async () => {
+    // ADVERSARIAL r3 FINDING 5 (fix wave 3). Fix wave 2 BROKE the pass past the
+    // bound, which is the same "stop the walk" decision both reviewers called
+    // BLOCKING for the inbox in round 2 - applied to the one surface with no
+    // cursor, no `truncated` on the wire and no Load more, so there is no
+    // forward path at all: every live unread thread behind the wall simply
+    // vanishes from Unreplied and the untriaged block, permanently, with only a
+    // server log line to say why.
+    //
+    // The bound now limits the LOOKUPS, not the walk: past it a 1:1 item is
+    // treated as non-deleted (the declared cost - a deleted contact past the
+    // bound can render) and the existing TODAY_UNREAD_CAP ends the pass.
+    for (let i = 0; i < 150; i += 1) {
+      const id = `c-deep-${String(i).padStart(3, '0')}`;
+      const phone = `+1555032${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Deep',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-deep-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Deep ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      const id = `c-alive-${i}`;
+      const phone = `+1555033${String(i).padStart(4, '0')}`;
+      seedTenant(id, 'Alive', String(i));
+      seedConversation({
+        conversationId: `conv-alive-${i}`,
+        participant_phone: phone,
+        participant_display_name: `Alive ${i}`,
+        status: 'open',
+        last_activity_at: iso(-400_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+
+    const ids = (await getItems()).filter((i) => i.group === 'unreplied').map((i) => i.refId);
+
+    // The live work the block exists to show is on the board.
+    for (let i = 0; i < 5; i += 1) expect(ids).toContain(`c-alive-${i}`);
+    // The first TODAY_UNREAD_CAP distinct deleted contacts were still looked up
+    // and still filtered out - the bound caps the reads, it does not disable the
+    // rule.
+    expect(ids).not.toContain('c-deep-000');
+    expect(ids).not.toContain('c-deep-099');
+  });
+
   it('BOUNDS the deleted-contact skip at TODAY_UNREAD_CAP distinct lookups, and says so', async () => {
     // ADVERSARIAL r2 finding 6 / CONFORMANCE r2 finding 6. Moving the
     // deleted-contact test ahead of the cap is right, but it made the check run
@@ -831,9 +896,11 @@ describe('today action-queue API (BE6/C7)', () => {
     // exact condition the fix exists for - /api/today could issue up to 2000
     // sequential contact Gets, on a route every connected dashboard refetches.
     //
-    // 101 DISTINCT deleted contacts: one past the bound. The pass stops there,
-    // which costs the live row behind them - the same posture the unread pass's
-    // own cap takes, announced the same way instead of silently.
+    // 101 DISTINCT deleted contacts: one past the bound. The LOOKUPS stop
+    // there (fix wave 3, adversarial r3 finding 5) - the walk does not - so the
+    // 101st deleted contact is treated as non-deleted and can render, while the
+    // live row behind the wall is still delivered. The WARN is what says the
+    // rule went unenforced past that point.
     for (let i = 0; i < 101; i += 1) {
       const id = `c-wall-${String(i).padStart(3, '0')}`;
       const phone = `+1555031${String(i).padStart(4, '0')}`;
@@ -874,8 +941,12 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
 
-    // DECLARED COST: the walk stopped, so the row behind the wall is not shown.
-    expect(unrep.map((i) => i.refId)).toEqual([]);
+    // The live row behind the wall IS shown - that is the whole point of
+    // bounding the reads instead of the walk.
+    expect(unrep.map((i) => i.refId)).toContain('c-past-bound');
+    // DECLARED COST: exactly the deleted contacts met PAST the bound leak onto
+    // the board (here the single 101st one), because the pass stopped asking.
+    expect(unrep.map((i) => i.refId)).toEqual(['c-wall-100', 'c-past-bound']);
     // ...and it is announced with its own label, not folded into the generic
     // 'unread' cap line, so the operator can tell "filtered to nothing by
     // deleted residue" from "genuinely capped".

@@ -713,15 +713,30 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // 100 kept ones. Unbounded, an index head thick with deleted residue
         // could issue up to UNREAD_WALK_LIMIT (2000) sequential contact Gets on
         // a route every connected dashboard SSE-refetches. So the skip work
-        // carries its own bound, at the same TODAY_UNREAD_CAP the kept rows use:
-        // past it the pass STOPS and says so, exactly like the cap it sits
-        // beside, instead of paying an unbounded read bill for a block that is
-        // being filtered to nothing anyway. Batching the lookups is the real
-        // remedy (docs/issues/contacts-batchget-amplified-reads.md).
+        // carries its own bound, at the same TODAY_UNREAD_CAP the kept rows use.
+        // Batching the lookups is the real remedy
+        // (docs/issues/contacts-batchget-amplified-reads.md).
+        //
+        // THE BOUND STOPS THE LOOKUPS, NEVER THE WALK (fix wave 3, adversarial
+        // r3 finding 5). Fix wave 2 BROKE the pass past the bound, which is the
+        // same walk-stop that was BLOCKING for the inbox in round 2 - and Today
+        // is worse: no cursor, no `truncated` on the wire, no Load more, so
+        // every live unread thread behind the wall was dropped permanently with
+        // only a log line to say why. Past the bound a 1:1 item is simply
+        // treated as NON-deleted and the existing TODAY_UNREAD_CAP ends the
+        // pass, exactly as the unread collector's wasted-probe bound does.
+        // DECLARED COST: a deleted contact met past the bound CAN render an
+        // Unreplied row. That is bounded (the pass still stops at 100 kept rows)
+        // and is the lesser harm - the alternative hid the live work the block
+        // exists to show. warnIfCapped announces the state either way.
         const ownerId = oneToOneContactId(conv);
-        if (ownerId !== undefined && (await isDeletedContact(ownerId))) {
+        // A contact ALREADY known deleted stays filtered past the bound: that
+        // answer is in the set, so re-applying it costs no read at all.
+        const canAnswer =
+          ownerId !== undefined &&
+          (skippedDeletedContacts.size < TODAY_UNREAD_CAP || skippedDeletedContacts.has(ownerId));
+        if (canAnswer && (await isDeletedContact(ownerId))) {
           skippedDeletedContacts.add(ownerId);
-          if (skippedDeletedContacts.size > TODAY_UNREAD_CAP) break;
           continue;
         }
         const rowKey = unreadRowKeyOf(conv);
@@ -731,9 +746,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (unreadOneToOne.length >= TODAY_UNREAD_CAP) break;
       }
       warnIfCapped('unread', unreadOneToOne.length, TODAY_UNREAD_CAP);
-      // ITS OWN LABEL, deliberately not folded into the line above: "the block
-      // is short because the head of the index is deleted residue" and "the
-      // block is full" are different operational problems with different fixes
+      // ITS OWN LABEL, deliberately not folded into the line above: it now says
+      // "the lookups stopped, so deleted rows past this point may be showing"
+      // (fix wave 3) where the block-level line says "the block is full" - two
+      // different operational problems with different fixes
       // (the delete-time reset and backfill rule 3 versus nothing at all).
       warnIfCapped('unread:deleted_skips', skippedDeletedContacts.size, TODAY_UNREAD_CAP);
       // UNDERFILLED FOR A REASON NOBODY CAN OTHERWISE SEE. Neither capped nor

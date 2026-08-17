@@ -213,6 +213,27 @@ describe('PATCH /api/users/:userId/role', () => {
     expect(after?.session_epoch).toBe(epochBefore + 1);
   });
 
+  it('a role change KEEPS the target push subscriptions (a promotion or the C2 rollback is not a distrust; pushes are not role-gated)', async () => {
+    const { app, fakeUsers } = makeWebhookHarness();
+    const target = fakeUsers.users.get(TEST_SESSION_USER.userId)!;
+    target.push_subscriptions = [
+      {
+        endpoint: 'https://fcm.googleapis.com/send/dev-1',
+        keys: { p256dh: 'k', auth: 'a' },
+        created_at: '2026-08-16T00:00:00.000Z',
+      },
+    ];
+
+    const res = await request(app)
+      .patch(`/api/users/${TEST_SESSION_USER.userId}/role`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ role: 'admin' });
+
+    expect(res.status).toBe(200);
+    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
+  });
+
   it('concurrent cross-demotion of two admins never reaches zero admins (C2 verify-after-rollback)', async () => {
     // Exactly TWO admins (A = the harness admin, B = a second). Each demotes the
     // OTHER concurrently — both pass the pre-write last-admin guard (each sees

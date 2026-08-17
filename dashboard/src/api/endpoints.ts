@@ -88,9 +88,14 @@ export function getMe(signal?: AbortSignal): Promise<Me> {
   return request<Me>('/auth/me', { ...(signal !== undefined && { signal }) });
 }
 
-/** POST /auth/logout - global session revocation (204). */
-export function logout(): Promise<void> {
-  return request<void>('/auth/logout', { method: 'POST' });
+/** POST /auth/logout - global session revocation (204). `pushEndpoint` names
+ *  THIS device's push subscription so the server removes it in the same
+ *  request (sign-out is per-device for push; other devices keep theirs). */
+export function logout(opts: { pushEndpoint?: string } = {}): Promise<void> {
+  return request<void>('/auth/logout', {
+    method: 'POST',
+    ...(opts.pushEndpoint !== undefined && { body: { pushEndpoint: opts.pushEndpoint } }),
+  });
 }
 
 /** The login URL - a plain navigation (the server drives the OAuth dance).

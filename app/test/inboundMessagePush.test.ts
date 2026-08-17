@@ -177,6 +177,22 @@ afterEach(() => {
   _resetForTests();
 });
 
+describe('inbound message push - fire-and-forget (spec D11)', () => {
+  it('a sendToAll that NEVER resolves does not delay or fail the webhook ack', async () => {
+    // The emit is `void pushService.sendToAll(...)`. If anyone ever awaits it,
+    // this test hangs and fails on the vitest timeout instead of passing - the
+    // recording fake resolves instantly, so nothing else pins the contract.
+    world.pushService.sendToAll = (): Promise<never> => new Promise(() => {});
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'hello' }));
+
+    expect(res.status).toBe(200);
+    // The message was still filed - the push is a side effect, never a gate.
+    expect(world.conversations.size).toBe(1);
+  });
+});
+
 describe('inbound message push - plain 1:1 SMS', () => {
   it('pushes ONE flat message payload titled with the contact display name', async () => {
     world.contacts.push({

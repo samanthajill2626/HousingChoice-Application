@@ -1,10 +1,13 @@
 # Inbound-Message Push Notifications - Design Spec
 
-Date: 2026-08-16 (rev 6: r2-r3 = adversarial spec review rounds 1-2;
+Date: 2026-08-16 (rev 8: r2-r3 = adversarial spec review rounds 1-2;
 r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments;
 r6 = BUILD-TIME amendments from review round 2 - the bounded stale-user-list
 fallback in 3.1/D10/section 5, and the honest restatement of the sendToUser
-promise in 3.1)
+promise in 3.1 - ACCEPTED by the planner's post-merge review 2026-08-17 on
+the operator's go; r7 = post-merge review fix: revocation drops push
+subscriptions; r8 = operator option-2 ruling: sign-out is PER-DEVICE for
+push, D13 below)
 Branch: feat/inbound-message-push (worktree W:\tmp\inbound-message-push, cut
 from main @d0c28678)
 Origin issue: docs/issues/no-push-on-inbound-message.md
@@ -89,6 +92,44 @@ Planner-settled technical decisions:
   status - counted failed, subscription kept, so the oversize push
   fails silently and would fail again forever. The cap must be
   server-side at the send site.
+
+- D13 (rev 8; raised as a post-merge adversarial MUST-FIX 2026-08-17,
+  final shape = OPTION 2 by operator ruling the same day) Sign-out is
+  PER-DEVICE for push. A push subscription is a device-scoped credential
+  and message pushes carry contact names + bodies to every subscribed
+  device; before this, a device that had signed out (or been lost) kept
+  receiving every inbound until a Gone-prune or a full account delete.
+  Three designs were weighed: (1) drop ALL subscriptions in the global
+  logout write - secure, but signing out on the tablet silences the phone
+  (including the VOICE pre-ring) until it is next opened signed in;
+  (2) the signing-out DEVICE removes only its own subscription; (3) real
+  per-device sessions (an auth change, out of scope). The operator chose
+  (2), on the verified fact that offboarding is DELETE /api/users/:id,
+  which hard-deletes the whole user row and therefore every subscription
+  on it. Mechanism: the dashboard sign-out reads this device's push
+  endpoint and names it in the POST /auth/logout body ({ pushEndpoint });
+  the logout handler removes exactly that record and bumps the epoch in
+  the SAME request (re-review round 4: a separate DELETE could be left
+  un-confirmed by the client timeout or a slow network before the epoch
+  bump killed the session it needed), then the browser drops its own
+  copy afterwards, best-effort. usersRepo.bumpSessionEpoch and
+  setRoleAndRevoke (and the ops-script buildRoleUpdate mirror) touch NO
+  subscription; a bad or absent pushEndpoint is ignored, never an error. Accepted
+  residual: a LOST device that cannot be signed out from itself keeps its
+  subscription until the user is removed and re-invited (deterministic
+  userId makes that clean) or the endpoint is Gone-pruned; the RUNBOOK
+  says so. Companion, kept: the dashboard RECONCILES on boot - every
+  device re-POSTs the browser subscription it still holds when the
+  authenticated shell mounts (idempotent on the server - dedupe by
+  endpoint, replace) - so any server/browser drift (a Gone-prune, a
+  subscription rotation) heals on the next signed-in open and the
+  Settings toggle, which reads the BROWSER, stays truthful. Both client
+  helpers use serviceWorker.getRegistration() (never .ready, which hangs
+  forever with no registration), are bounded end to end (registration
+  lookup, getSubscription, and the unsubscribe or re-POST - 1.5s
+  default), never throw, and never block sign-out (the endpoint read is
+  bounded; the browser unsubscribe runs AFTER the logout request). Normal session expiry
+  and an admin role change touch no subscription.
 
 ## 3. What gets built
 

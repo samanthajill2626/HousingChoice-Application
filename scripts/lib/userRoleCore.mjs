@@ -52,7 +52,9 @@ export function parseUserRoleArgs(argv) {
  * new role applies at their next sign-in — not at the 24h cookie refresh.
  * if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking session_epoch read
  * as epoch 1 in the app (usersRepo.sessionEpochOf), so the first bump must
- * land on 2 — mirrors usersRepo.bumpSessionEpoch exactly.
+ * land on 2 - mirrors usersRepo.setRoleAndRevoke exactly. push_subscriptions
+ * are deliberately KEPT (a role change is not a distrust of the user's
+ * devices; only the LOGOUT epoch bump drops them - usersRepo.bumpSessionEpoch).
  *
  * @param {string} role the new role ('admin' | 'va')
  * @returns {{ updateExpression: string, conditionExpression: string,

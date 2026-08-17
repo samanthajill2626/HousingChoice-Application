@@ -1153,6 +1153,25 @@ describe('PII posture', () => {
 // kind/conversationId at the JSON root) and every title/body is capped (D12).
 // ---------------------------------------------------------------------------
 
+describe('inbound-message push: fire-and-forget (spec D11)', () => {
+  it('a sendToAll that NEVER resolves does not delay or fail the ingest (matched and unmatched)', async () => {
+    // Both emits are `void deps.pushService.sendToAll(...)`. If anyone ever
+    // awaits them, these ingests hang and the test fails on the vitest timeout
+    // instead of passing - the recording fake resolves instantly, so nothing
+    // else pins the contract.
+    const matched = makeWorld({});
+    matched.pushService.sendToAll.mockImplementation((): Promise<never> => new Promise(() => {}));
+    const out = await ingestInboundEmail(notice(), matched.deps);
+    expect(out.outcome).toBe('threaded');
+
+    const unmatched = makeWorld({});
+    unmatched.setContact(undefined);
+    unmatched.pushService.sendToAll.mockImplementation((): Promise<never> => new Promise(() => {}));
+    const out2 = await ingestInboundEmail(notice(), unmatched.deps);
+    expect(out2.outcome).toBe('unmatched');
+  });
+});
+
 describe('inbound-message push: matched (threaded) email', () => {
   it('broadcasts ONE message push carrying the contact display name and the subject', async () => {
     const w = makeWorld({});

@@ -192,6 +192,33 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     );
   });
 
+  it('bumpSessionEpoch and setRoleAndRevoke both KEEP push_subscriptions; remove() takes the whole row (offboarding drops every subscription)', async () => {
+    const sub = {
+      endpoint: 'https://fcm.googleapis.com/send/revoke-1',
+      keys: { p256dh: 'k', auth: 'a' },
+      created_at: '2026-08-16T00:00:00.000Z',
+    };
+    // Logout path: the epoch bump touches nothing but the epoch (option 2 -
+    // the signing-out DEVICE removes only its own subscription, client-side).
+    const a = await users.invite({ email: 'revoke-a@housingchoice.org', role: 'va' });
+    await users.addPushSubscription(a.user.userId, sub);
+    expect((await users.findById(a.user.userId))!.push_subscriptions).toHaveLength(1);
+    expect(await users.bumpSessionEpoch(a.user.userId)).toBe(2);
+    expect((await users.findById(a.user.userId))!.push_subscriptions).toHaveLength(1);
+    // Offboarding: the row goes, and every subscription with it.
+    await users.remove(a.user.userId);
+    expect(await users.findById(a.user.userId)).toBeUndefined();
+
+    // Role-change path: role flip + bump, push subscriptions KEPT (a role
+    // change is not a distrust; message pushes are not role-gated).
+    const b = await users.invite({ email: 'revoke-b@housingchoice.org', role: 'va' });
+    await users.addPushSubscription(b.user.userId, sub);
+    expect(await users.setRoleAndRevoke(b.user.userId, 'admin')).toBe(2);
+    const afterB = (await users.findById(b.user.userId))!;
+    expect(afterB.role).toBe('admin');
+    expect(afterB.push_subscriptions).toHaveLength(1);
+  });
+
   it('resolveInvitedUser REFUSES an un-invited identity (no auto-provision)', async () => {
     const identity = {
       sub: 'sub-uninvited',

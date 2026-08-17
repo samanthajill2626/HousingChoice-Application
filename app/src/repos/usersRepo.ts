@@ -69,6 +69,23 @@ export interface PushSubscriptionRecord {
 /** Per-user device cap: oldest subscriptions are dropped past this (LRU by created_at). */
 export const MAX_PUSH_SUBSCRIPTIONS = 10;
 
+/**
+ * The role-change revocation UpdateExpression, exported so the ops-script
+ * mirror (scripts/lib/userRoleCore.mjs buildRoleUpdate) can be pinned EQUAL to
+ * it by test rather than to a hand-copied literal - the two were edited twice
+ * in two days and only a literal in each test file kept them in step.
+ * if_not_exists(..., 1) + 1 (NOT ADD): a legacy item lacking the attribute
+ * reads as epoch 1 (sessionEpochOf), so its first bump must land on 2.
+ * Neither revocation write touches push_subscriptions (see bumpSessionEpoch).
+ */
+export const ROLE_REVOKE_UPDATE_EXPRESSION =
+  'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one';
+
+/** The LOGOUT revocation UpdateExpression: bump the epoch only (see
+ *  bumpSessionEpoch for why push subscriptions are deliberately untouched). */
+export const SESSION_REVOKE_UPDATE_EXPRESSION =
+  'SET session_epoch = if_not_exists(session_epoch, :base) + :one';
+
 export interface UserItem {
   userId: string;
   /** Normalized login email — the byEmail GSI key (normalizeEmail). */
@@ -242,13 +259,27 @@ export interface UsersRepo {
    * script's combined update (scripts/lib/userRoleCore.mjs buildRoleUpdate)
    * byte-for-byte. Returns the NEW session epoch. Throws if the user does not
    * exist. Use this from the in-app PATCH role route instead of a separate
-   * setRole + bumpSessionEpoch pair.
+   * setRole + bumpSessionEpoch pair. Like bumpSessionEpoch, this write KEEPS
+   * push_subscriptions (a role change is not a distrust of the user's
+   * devices, and message pushes are not role-gated).
    */
   setRoleAndRevoke(userId: string, role: UserRole): Promise<number>;
   /**
    * +1 the session epoch and return the NEW value — revokes every session
    * sealed with the old epoch (effective within the middleware's 60s epoch
    * cache). Throws if the user does not exist.
+   *
+   * push_subscriptions are deliberately UNTOUCHED (operator ruling
+   * 2026-08-17, inbound-message-push D13 option 2). Session revocation is
+   * global by design, but a push subscription is a DEVICE credential and
+   * sign-out is per-device for push: signing out on the tablet must not
+   * silence the phone. The signing-out browser removes ITS OWN subscription
+   * (DELETE /api/push/subscriptions, then browser unsubscribe - dashboard
+   * pushSignOut.ts) before calling /auth/logout. Offboarding is remove():
+   * the whole row goes, and every subscription on it. The accepted residual:
+   * a lost device that cannot be signed out from itself keeps its
+   * subscription until the user is removed and re-invited (or the device is
+   * Gone-pruned).
    */
   bumpSessionEpoch(userId: string): Promise<number>;
   /**
@@ -491,17 +522,18 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
     },
 
     async setRoleAndRevoke(userId, role) {
-      // ONE update: SET role AND bump session_epoch — atomic, so a role change
+      // ONE update: SET role AND bump session_epoch - atomic, so a role change
       // can never land without revoking the user's sessions (H1). The epoch
       // expression mirrors bumpSessionEpoch + the ops-script buildRoleUpdate
-      // exactly: if_not_exists(…, 1) + 1 (NOT ADD), so a legacy item lacking
-      // the attribute (read as epoch 1) first bumps to 2.
+      // exactly: if_not_exists(..., 1) + 1 (NOT ADD), so a legacy item lacking
+      // the attribute (read as epoch 1) first bumps to 2. push_subscriptions
+      // are deliberately KEPT here (see the interface doc) - only the logout
+      // bump drops them.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { userId },
-          UpdateExpression:
-            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+          UpdateExpression: ROLE_REVOKE_UPDATE_EXPRESSION,
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeNames: { '#role': 'role' },
           ExpressionAttributeValues: { ':role': role, ':base': 1, ':one': 1 },
@@ -526,8 +558,8 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
           Key: { userId },
           // if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking the
           // attribute read as epoch 1 (sessionEpochOf), so their first bump
-          // must land on 2 — ADD would mint 1 and revoke nothing.
-          UpdateExpression: 'SET session_epoch = if_not_exists(session_epoch, :base) + :one',
+          // must land on 2 - ADD would mint 1 and revoke nothing.
+          UpdateExpression: SESSION_REVOKE_UPDATE_EXPRESSION,
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeValues: { ':base': 1, ':one': 1 },
           ReturnValues: 'UPDATED_NEW',
@@ -537,7 +569,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       if (typeof epoch !== 'number') {
         throw new Error(`bumpSessionEpoch(${userId}): UPDATED_NEW returned no session_epoch`);
       }
-      log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped — all prior sessions revoked');
+      log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped - all prior sessions revoked');
       return epoch;
     },
 

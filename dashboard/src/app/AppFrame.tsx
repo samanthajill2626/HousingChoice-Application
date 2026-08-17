@@ -8,7 +8,12 @@
 // focus to the hamburger.
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { logout } from '../api/index.js';
+import { logout, subscribePush } from '../api/index.js';
+import {
+  forgetBrowserPushSubscription,
+  readBrowserPushEndpoint,
+  reconcileBrowserPushSubscription,
+} from '../lib/pushSignOut.js';
 import { Button } from '../ui/index.js';
 import { ChevronIcon, CloseIcon, MenuIcon } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
@@ -23,9 +28,26 @@ export function AppFrame(): React.JSX.Element {
   const drawerRef = useRef<HTMLElement>(null);
   const hamburgerRef = useRef<HTMLButtonElement>(null);
 
+  // Boot-time push reconcile: if the server ever lost this device's
+  // subscription (a Gone-prune, a subscription rotation) while the browser
+  // still holds it, the Settings toggle - which reads the BROWSER - would say
+  // On while nothing (including the voice pre-ring) arrives. Re-POST what the
+  // browser holds; idempotent on the server, best-effort, never throws or
+  // hangs.
+  useEffect(() => {
+    void reconcileBrowserPushSubscription(subscribePush);
+  }, []);
+
   async function handleSignOut(): Promise<void> {
     try {
-      await logout();
+      // Sign-out is per-device for push: name THIS device's endpoint in the
+      // logout request so the server removes it in the same write as the
+      // revocation (other devices are untouched), then drop the browser copy
+      // so the toggle stays honest. Both push steps are bounded, best-effort,
+      // and never throw - nothing on the push side blocks sign-out.
+      const pushEndpoint = await readBrowserPushEndpoint();
+      await logout(pushEndpoint === null ? {} : { pushEndpoint });
+      void forgetBrowserPushSubscription();
     } finally {
       // Re-probe → AuthContext flips to anonymous → the shell shows Login.
       await refresh();

@@ -24,8 +24,12 @@ implement.
   in the route (it cannot ride the condition - different item).
 - Condition clause 3: `(attribute_not_exists(unread_count) OR unread_count = :zero)`.
   `unread_count` is genuinely sparse - the `attribute_not_exists` half is load-bearing.
-- Classification order, ALL routes: absent -> 404; ineligible -> 409;
-  eligible-and-already-unread -> 200 no write. **Eligibility BEFORE count.**
+- Classification order, ALL routes: **eligibility BEFORE count.** The ABSENT
+  arm differs by route (spec 6.3 clause 1): the conversation route answers 404;
+  the two fan-in routes answer a retryable `409 no_markable_thread`, because the
+  client named a contact or phone, not the conversation the route selected.
+  Then: ineligible -> 409; eligible-and-already-unread -> 200 no write;
+  eligible-and-read -> RACED, retry once.
 - Every route returns the authoritative resulting count as a TOP-LEVEL
   `unreadCount` number.
 - `last_activity_at` is NEVER written by this feature.
@@ -117,7 +121,17 @@ Add, inside the byUnread describe:
    *  every one of those is a case the condition must be proved against. */
   async function seedRaw(item: Record<string, unknown>): Promise<string> {
     const conversationId = `conv-${randomUUID()}`;
-    await doc.send(new PutCommand({ TableName: table, Item: { conversationId, ...item } }));
+    await doc.send(
+      new PutCommand({
+        TableName: table,
+        // last_activity_at is the byUnread RANGE key (tables.ts:182-186). A row
+        // seeded without it writes fine and setUnread SUCCEEDS, but the row
+        // never enters the index - so the round-trip assertions fail against a
+        // CORRECT implementation, with a symptom that reads as "setUnread does
+        // not index". Always seed it.
+        Item: { conversationId, last_activity_at: new Date().toISOString(), ...item },
+      }),
+    );
     return conversationId;
   }
 ```
@@ -234,12 +248,18 @@ Known full literals at the time of writing:
 `app/test/contactCapture.test.ts`, `app/test/scheduledSendSuppression.test.ts`,
 `app/test/sendMessage.test.ts`. Verify rather than assume.
 
-**The harness fake's `setUnread` MUST actually implement the condition** -
-refuse when the row is absent, when the bucket predicate fails, or when
-`unread_count > 0`, throwing `ConditionalCheckFailedException`. If it
-unconditionally succeeds, every classification test in S2/S3 is vacuous: they
-would assert route branches that the fake can never trigger. Fakes elsewhere may
-throw "not implemented" if their suites never reach it.
+**The harness fake's `setUnread` MUST implement BOTH halves.**
+
+- *Refusal*: throw `ConditionalCheckFailedException` when the row is absent,
+  when the bucket predicate fails, or when `unread_count > 0`. A fake that
+  unconditionally succeeds makes every classification test in S2/S3 vacuous -
+  they would assert route branches the fake can never trigger.
+- *Write*: set `unread_count = 1` AND `unread_flag = UNREAD_FLAG_VALUE`. Setting
+  only the count satisfies every word of the refusal rule while leaving the
+  fake's modelled index wrong, because the index filters on `unread_flag`
+  ALONE - so index-membership assertions would silently test nothing.
+
+Fakes elsewhere may throw "not implemented" if their suites never reach it.
 
 ## S1.6 Verify
 
@@ -320,6 +340,9 @@ export type MarkUnreadResult =
   | { kind: 'gone' }
   | { kind: 'ineligible' };
 
+// classifyConditionFailure's raced arm carries the re-read so the retry can
+// recompute the bucket:  { kind: 'raced'; conversation: ConversationItem }
+
 export async function applyMarkUnread(
   conv: ConversationItem,
   repo: Pick<ConversationsRepo, 'setUnread' | 'getById'>,
@@ -333,9 +356,11 @@ Behavior:
    - `not_found` -> `gone`
    - `ineligible` -> `ineligible`
    - `already_unread` -> `already_unread`
-   - `raced` -> retry `setUnread` ONCE. If the retry succeeds -> `wrote`. If it
-     fails, classify once more and map WITHOUT a second retry; a `raced` on the
-     retry also becomes `ineligible` at the boundary (see the code note below).
+   - `raced` -> carries the RE-READ conversation. Recompute the bucket from it
+     (`bucketFor(fresh)`) and retry `setUnread` ONCE. Reusing the original
+     bucket would waste the retry in the one case where a fresh one succeeds -
+     a type transition. If the retry succeeds -> `wrote`; if it fails, classify
+     once more and map WITHOUT a second retry (see the code note below).
 
 Route mapping:
 
@@ -344,7 +369,11 @@ Route mapping:
 - `already_unread` -> 200, **no emit** (nothing changed).
 - `gone` / `ineligible` -> the caller's codes (S2.3, S3.1-S3.3).
 - Every 200 carries a top-level `unreadCount` number (S4 - the client has no
-  other typed source for it).
+  other typed source for it). **Narrow it at the boundary**: `unread_count` is
+  `number | undefined` on `ConversationItem`, so write
+  `conversation.unread_count ?? 0` rather than casting. A route that types this
+  as `number` by assertion will compile and then serve `undefined` as JSON,
+  which the client reads as `NaN`.
 
 **Code note on the terminal `raced`.** Collapsing a second `raced` into
 `ineligible` answers `thread_not_markable_unread` for a thread that IS markable
@@ -424,12 +453,27 @@ lookup miss.
 On the conversation route `gone` maps to `404 conversation_not_found`, where the
 noun is correct.
 
-## S3.4 Route-level race tests
+## S3.4 Route-level race tests (all THREE routes, including S2's)
 
-Both fan-in routes need a test for the `raced` path (a concurrent reset between
-write and re-read) and for `gone`. Drive both through the harness fake's
-`setUnread`, which S1.5 requires to implement the condition. An earlier draft
-specified the classifier's unit tests but no route-level exercise of these arms.
+Every route needs a `raced` test and a `gone` test. An earlier draft specified
+the classifier's unit tests but no route-level exercise, and named only the
+fan-in routes.
+
+**A correct condition can never produce `raced` on its own** - that is the
+point of it - so the fake needs a one-shot seam. Give the harness fake's
+`setUnread` an optional test-only hook: a settable "fail the next call with
+`ConditionalCheckFailedException` regardless of state" flag that clears itself
+after firing. Then:
+
+- `raced`: arm the one-shot, leave the row eligible and READ. Assert the route
+  RETRIES and succeeds (200, count 1) - the retry is the behavior under test.
+- `raced` twice: arm it to fail twice; assert the terminal mapping and that no
+  third write is attempted.
+- `gone`: arm the one-shot AND delete the row; assert 404 on the conversation
+  route, retryable 409 on the two fan-in routes.
+
+Keep the seam clearly test-only and named as such; it must not look like
+production behavior to the next reader.
 
 ## S3.5 Registration and comments
 
@@ -682,7 +726,7 @@ regression spies in `GroupTextView.test.tsx:27-31` and
 
 **No identity RESET here, unlike S6.2 - and say why in a comment.** The contact
 page needs one because it re-renders the same component across a param change.
-`ConversationDetail` does not: its loading branch (`:118-133`) unmounts the child
+`ConversationDetail` does not: its loading branch (`:107-113`) unmounts the child
 view while the new header loads, so a `conversationId` change gives
 `useMarkThreadRead` a genuinely fresh mount and the ref starts null. That is a
 load-bearing property of an unrelated component, so an optimization that keeps

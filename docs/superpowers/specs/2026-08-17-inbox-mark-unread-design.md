@@ -214,14 +214,24 @@ clauses (6.1) and DynamoDB does not say which one failed, so every route handles
 a `ConditionalCheckFailedException` by re-reading the item ONCE and answering,
 **in this order**:
 
-1. item absent -> `404 conversation_not_found`. This keeps the routes aligned
-   with the `/read` route they mirror, which maps the same exception to 404
-   (`app/src/routes/api.ts:2041-2045`).
+1. item absent -> **depends on whether the CLIENT named that conversation.**
+   - Conversation route: `404 conversation_not_found`, aligned with the `/read`
+     route it mirrors (`app/src/routes/api.ts:2041-2045`).
+   - The two FAN-IN routes: `409 no_markable_thread` (retryable). The client
+     named a contact or a phone, not a conversation; the selected thread is an
+     internal detail. Answering 404 there would assert that the CONTACT is
+     missing, which is false - the route loaded it one step earlier.
+     `contact_not_found` and `no_conversation_for_phone` stay reserved for the
+     step-1 lookup miss.
 2. item INELIGIBLE by type/status -> `409 thread_not_markable_unread`.
 3. item eligible and `unread_count > 0` -> **`200` success, no write.** The
    operator asked for "this thread is unread" and it already is; the goal state
    holds. This is not a fudge - it is what makes the feature usable at all,
    given that neither header surface can see a live unread count (7.3).
+4. item eligible and `unread_count` is 0 or absent -> **RACED**: the row was
+   concurrently reset between the write and this re-read. Reporting 200 would
+   claim "unread" about a row reading 0. Retry the write ONCE, then classify
+   again without a second retry.
 
 **Eligibility is checked BEFORE the count, and the order is load-bearing.** An
 ineligible-AND-unread thread is a real state, not a hypothetical: a closed relay
@@ -273,7 +283,7 @@ unknown-number rows, which carry no contactId.
 4. Apply 6.2's selection; `409 no_markable_thread` if nothing survives.
 5. `setUnread` on that ONE thread (NOT a fan-out - the deliberate asymmetry with
    the read routes), classify a condition failure per the shared rule, emit
-   `conversation.updated`, respond `{ ok: true }`.
+   `conversation.updated`, respond `{ ok: true, unreadCount }`.
 
 **`POST /api/inbox/:contactId/unread`** (same file). Used by contact rows and
 the contact page.
@@ -283,7 +293,7 @@ the contact page.
 3. `conversationsForContact(contact, conversations)` for the phone+email union,
    then 6.2's selection; `409 no_markable_thread` if nothing survives.
 4. `setUnread` on that ONE thread, classify a condition failure per the shared
-   rule, emit `conversation.updated`, respond `{ ok: true }`.
+   rule, emit `conversation.updated`, respond `{ ok: true, unreadCount }`.
 
 **Both fan-in routes depend on the eventually-consistent participant GSIs**
 (`byParticipantPhone` / `byParticipantEmail`), whose lag is an open filed defect
@@ -299,7 +309,8 @@ that machinery is not warranted for a manual, repeatable, single-row action):
 - The set can come back empty or all-ineligible for a row the operator is
   looking at, producing `409 no_markable_thread`. This 409 is EXPECTED and
   RETRYABLE, not an error state: both surfaces render "Could not mark unread -
-  try again" via the surface's existing inline error treatment, and the action
+  try again" via a NEW inline error treatment (neither surface has an existing
+  one for these codes - see 7.3), and the action
   stays available. It must not be reported as a failure the operator has to
   reason about.
 
@@ -376,7 +387,8 @@ measure that avoids a pointless round trip.
 ### 7.3 Thread headers
 
 Both surfaces follow D2 - `await` the POST, then `navigate('/inbox')`; on
-failure stay put and surface the surface's existing inline error treatment.
+failure stay put and render an inline error. This is NEW UI: neither surface
+has an existing inline treatment for these codes, so one is added.
 
 **No client-side "only when read" rule.** The count guard lives in `setUnread`'s
 `ConditionExpression` (6.1 clause 3), NOT on the client, because neither header
@@ -428,7 +440,11 @@ Mechanism, in two parts - the second is what actually closes the race:
    effect is extracted into one small shared hook exposing the same handle,
    which both components mount. The drain's in-flight ref is keyed the same way
    the latch is, so it can never order against a request belonging to a previous
-   `contactId` / `conversationId`.
+   `contactId` on the contact page. The conversation page needs NO reset:
+   `ConversationDetail` renders its loading branch (`:107-113`) while a new
+   header loads, which unmounts the child view, so a `conversationId` change
+   already gives the hook a fresh mount. That is a load-bearing property of an
+   unrelated component and belongs in a comment there.
 
    **Bounded.** The drain awaits with a short timeout (the request has no
    timeout of its own in `client.ts` and the auto-read passes no signal), and
@@ -585,7 +601,9 @@ Routes:
   already-unread arm answers 200 with no written row, so the unscoped form the
   earlier draft carried is not a true statement.)
 - **Condition-failure classification** (6.3), for every route: a conversation
-  deleted between the route's read and its write answers 404; an already-unread
+  deleted between the route's read and its write answers 404 on the
+  CONVERSATION route and a retryable 409 on the two fan-in routes (6.3 clause
+  1); an already-unread
   thread answers 200 WITHOUT writing (assert the count is unchanged, not reset
   to 1, and that the response carries the real count); an ineligible
   type/status answers 409; and - the ORDER test - a thread that is BOTH
@@ -654,7 +672,8 @@ strict mode - a trap the existing suite documents
 2. Reveal the row's actions, click "Mark unread"; assert the row (anchored by
    href) shows the unread treatment and a count of 1.
 3. Switch to the Unread filter; assert the row is present.
-4. From the contact page, click the header "Mark unread"; assert the browser
+4. From the contact page, open the actions kebab and click "Mark unread"
+   (it is a menu item, not a bare header button - 7.3); assert the browser
    lands on the inbox with that row unread.
 
 ### 9.3 Gates

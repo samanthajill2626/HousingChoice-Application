@@ -178,9 +178,9 @@ the datalist mirror in the dashboard has no mechanical drift guard against `CANO
 CORRECTED 2026-08-10 (on the tenant-list-visibility branch): the `byJurisdiction` GSI is no
 longer owed here. That feature REMOVED the index from the schema (`app/src/lib/tables.ts`) and
 regenerated both `infra/envs/{dev,prod}/tables.auto.tfvars.json`, per the gate ruling that
-DESIGNING an infra change is feature work. What remains owed is only the `terraform apply` on
-dev (and prod at its gate) to drop the index - non-destructive, a GSI is a projection; stale
-local lanes keep a harmless extra index and fresh lanes create without it.
+DESIGNING an infra change is feature work. **The `terraform apply` that drops the index is DONE on
+dev and prod** (operator confirmed 2026-08-16 at main @41627198); nothing infra-side is owed here.
+Stale local lanes keep a harmless extra index and fresh lanes create without it.
 
 **Founder's caseworker-org list (2026-08-13, via Cameron):** "Step Up, DCA, Hope
 Atlanta, Claratel, Hud Vash (list will expand over time but these are core ones

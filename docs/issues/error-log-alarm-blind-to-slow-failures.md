@@ -3,17 +3,28 @@ id: error-log-alarm-blind-to-slow-failures
 title: The error-log alarm cannot see a slow, steady failure - a full pipeline outage never paged
 type: bug
 severity: high
-status: in-progress
+status: resolved
 area: observability
 created: 2026-08-16
+resolved: 2026-08-17
 refs: infra/modules/observability/main.tf
 ---
 
-**Status 2026-08-16.** The companion alarm is written
-(`${name_prefix}error-logs-sustained`, threshold 1, 3 consecutive 300s periods)
-on branch `fix/orphan-logs`. It is NOT yet applied - a `terraform apply` to dev
-and prod closes this. The two follow-on questions below (DLQ companion, missing
-DLQ datapoint) are deliberately still open.
+**Resolution (2026-08-17).** The companion alarm
+(`${name_prefix}error-logs-sustained`: threshold 1, `Sum(ErrorLogs)`, 300s
+periods, 3-of-3, `treat_missing_data = notBreaching`) is merged to `main` in
+`infra/modules/observability/main.tf` and APPLIED to dev and prod (operator
+confirmed 2026-08-17). The burst alarm keeps its own threshold and was not
+retuned, per the decision recorded below. Branch `fix/orphan-logs` has been
+retired; read the module for current truth.
+
+The give-up paths that this alarm was the missing surface for were promoted to
+ERROR under
+[`give-up-paths-inconsistently-levelled-and-unsurfaced`](./give-up-paths-inconsistently-levelled-and-unsurfaced.md),
+so the existing `{ $.level >= 50 }` metric filter now feeds them into it with no
+further terraform. The DLQ-companion question below was decided NOT to add, and
+the `NumberOfMessagesSent` note is kept as guidance for future SQS alarms -
+neither is outstanding work.
 
 **Problem.** `hc-<env>-error-logs` fires on `Sum(ErrorLogs) >= 5` in a single
 300s period, 1 evaluation period. That shape only detects a BURST. A failure

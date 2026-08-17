@@ -238,6 +238,23 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
     }
   });
 
+  // DELETE /Conversations/:sid/Participants/:psid - how the adapter drops a
+  // STALE projected-address participant (a previous business number) before
+  // attaching the current one. 404 when the participant is already gone, which
+  // the adapter reads as the asked-for end state.
+  router.delete('/Conversations/:sid/Participants/:psid', (req, res) => {
+    const record = engine.resolve(req.params.sid);
+    if (!record) {
+      notFound(res, `/Conversations/${req.params.sid}`);
+      return;
+    }
+    if (!engine.removeParticipant(record, req.params.psid)) {
+      notFound(res, `/Conversations/${record.sid}/Participants/${req.params.psid}`);
+      return;
+    }
+    res.status(204).end();
+  });
+
   // GET /Conversations/:sid/Participants - the read-back the adapter builds
   // its MBxx map from (a create response carries no participant SIDs).
   router.get('/Conversations/:sid/Participants', (req, res) => {
@@ -282,6 +299,21 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
       return;
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
+    // THE AUTHOR MUST BE A PARTICIPANT (prod incident 2026-08-17). Real Group
+    // MMS returns 50513 when the Author is not among the rail's participants -
+    // which is what happens when the rail carries no projected-address
+    // participant for the business number the app posts as (or carries a
+    // previous one). This fake let those posts through, so 135 unpostable prod
+    // rails were invisible to every test. Same code, same status, same shape.
+    if (!engine.isAuthorParticipant(record, firstString(body['Author']))) {
+      res.status(400).json({
+        code: 50513,
+        message: 'Message author should be among Group MMS participants.',
+        more_info: 'https://www.twilio.com/docs/errors/50513',
+        status: 400,
+      });
+      return;
+    }
     // Real contract: only a caller that sets X-Twilio-Webhook-Enabled gets its
     // own post echoed back as onMessageAdded. The adapter deliberately does not.
     const webhookEnabled = String(req.header('x-twilio-webhook-enabled') ?? '').toLowerCase() === 'true';

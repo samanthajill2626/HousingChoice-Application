@@ -147,6 +147,45 @@ export interface GroupConversationsPort {
    * must not be followed by a create that will collide on the UniqueName.
    */
   removeConversation(conversationSid: string): Promise<boolean>;
+  /**
+   * ATTACH THE BUSINESS NUMBER to an existing rail as its projected-address
+   * participant - the AUTHOR repair (prod incident 2026-08-17).
+   *
+   * A rail with no projected participant for the CURRENT business number
+   * refuses every post with 50513 ("author should be among Group MMS
+   * participants"). Two ways to get there, both seen live: the individual-add
+   * fallback's business add was refused and nothing looked (132 imported rails
+   * had NO business participant), and BUSINESS_PHONE_NUMBER changed under a
+   * rail built for the old number (3 rails carried the released temp number).
+   * Inbound keeps flowing through the number's SMS webhook, so the thread looks
+   * alive while every staff reply dies.
+   *
+   * THROWS on refusal. The one thing that must never happen again is a refused
+   * business add being read as success - the caller records the rail failure.
+   */
+  addProjectedParticipant(conversationSid: string, businessNumber: string): Promise<GroupParticipantRef>;
+  /**
+   * DETACH one participant by MBxx - used ONLY to drop a STALE projected-address
+   * participant (a previous business number) before the current one is attached.
+   * `true` when this call removed it, `false` when it was already gone; anything
+   * else throws.
+   */
+  removeParticipant(conversationSid: string, participantSid: string): Promise<boolean>;
+}
+
+/**
+ * The rail refused a post because its AUTHOR is not among its participants -
+ * Twilio 50513. This is the projected-address participant being absent or
+ * naming a previous business number, and it is HEALABLE: attach the current
+ * business number and post again. Distinct from `GroupConversationsUnavailableError`
+ * (closed/gone, healed by delete-and-rebuild) because the remedy is different -
+ * the rail is fine, its business participant is not.
+ */
+export class GroupConversationsAuthorRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
 }
 
 /**
@@ -201,13 +240,23 @@ interface ConversationMessageInstanceLike {
   dateCreated?: Date | null;
 }
 
+interface ParticipantContextLike {
+  remove(): Promise<boolean>;
+}
+
 interface ConversationContextLike {
   fetch(): Promise<ConversationInstanceLike>;
   remove(): Promise<boolean>;
   messages: {
     create(params: { author?: string; body?: string }): Promise<ConversationMessageInstanceLike>;
   };
-  participants: {
+  /**
+   * twilio v6's ParticipantListInstance is CALLABLE: `participants(sid)` is the
+   * ParticipantContext (remove/fetch/update) and `participants.create/list`
+   * the collection operations - the same callable-plus-methods shape as
+   * `conversations` one level up.
+   */
+  participants: ((participantSid: string) => ParticipantContextLike) & {
     create(params: Record<string, string | undefined>): Promise<ParticipantInstanceLike>;
     list(params?: { limit?: number }): Promise<ParticipantInstanceLike[]>;
   };
@@ -564,6 +613,39 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     }
   }
 
+  async addProjectedParticipant(
+    conversationSid: string,
+    businessNumber: string,
+  ): Promise<GroupParticipantRef> {
+    // The SAME shape the create paths use: projected address ONLY. Nothing here
+    // catches - a refusal is the caller's rail failure to record, because a
+    // swallowed one is precisely the defect this operation exists to fix.
+    const created = await this.scope
+      .conversations(conversationSid)
+      .participants.create({ 'messagingBinding.projectedAddress': businessNumber });
+    this.log.info(
+      { event: 'group_rail_author_attached', conversationSid, participantSid: created.sid },
+      'attached the business number to an existing rail as its projected-address participant',
+    );
+    return toParticipantRef(created);
+  }
+
+  async removeParticipant(conversationSid: string, participantSid: string): Promise<boolean> {
+    try {
+      await this.scope.conversations(conversationSid).participants(participantSid).remove();
+      this.log.warn(
+        { event: 'group_rail_participant_removed', conversationSid, participantSid },
+        'removed a stale projected-address participant from a rail',
+      );
+      return true;
+    } catch (err) {
+      // Same contract as removeConversation: already gone is the end state
+      // asked for; anything else is the caller's to record.
+      if (twilioStatus(err) === 404 || twilioErrorCode(err) === '20404') return false;
+      throw err;
+    }
+  }
+
   /**
    * "No timers (account default null) - ASSERT, DO NOT SET" (spec 6.1). We
    * never send timers; nothing verified they were absent (fix wave 5,
@@ -638,6 +720,20 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
         );
         throw new GroupConversationsUnavailableError(
           `the Conversations rail refused this post (${code ?? status ?? 'unknown'}) - it is closed or gone`,
+        );
+      }
+      // 50513 "Message author should be among Group MMS participants" (prod
+      // incident 2026-08-17): the rail has no projected-address participant for
+      // the number we author as. The rail itself is alive - members are attached,
+      // inbound flows - so the remedy is to attach the business number, not to
+      // rebuild. Translated so groupSend can do exactly that and retry.
+      if (code === '50513') {
+        this.log.warn(
+          { event: 'group_rail_author_rejected', conversationSid: input.conversationSid, code, status },
+          'Conversations refused a post because the author is not a participant - the rail has no projected-address participant for the current business number',
+        );
+        throw new GroupConversationsAuthorRejectedError(
+          'the Conversations rail refused this post (50513) - the business number is not among its participants',
         );
       }
       throw err;
@@ -749,6 +845,17 @@ export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
     // into a create that this driver also refuses, one round trip later and
     // under a reason that names creation instead of the real cause.
     throw this.unavailable('group rail deletion');
+  }
+
+  async addProjectedParticipant(
+    _conversationSid: string,
+    _businessNumber: string,
+  ): Promise<GroupParticipantRef> {
+    throw this.unavailable('group rail author attach');
+  }
+
+  async removeParticipant(_conversationSid: string, _participantSid: string): Promise<boolean> {
+    throw this.unavailable('group rail participant removal');
   }
 }
 

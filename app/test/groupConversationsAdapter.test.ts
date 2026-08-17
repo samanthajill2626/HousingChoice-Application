@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   TwilioGroupConversationsDriver,
   ConsoleGroupConversationsDriver,
+  GroupConversationsAuthorRejectedError,
   GroupConversationsUnavailableError,
   createGroupConversationsAdapter,
 } from '../src/adapters/groupConversations.js';
@@ -40,6 +41,7 @@ function fakeConversationsClient(
     fetch?: ReturnType<typeof vi.fn>;
     messageCreate?: ReturnType<typeof vi.fn>;
     remove?: ReturnType<typeof vi.fn>;
+    participantRemove?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   const bulkCreate =
@@ -67,8 +69,10 @@ function fakeConversationsClient(
       .mockResolvedValue({ sid: 'IMposted', index: 3, dateCreated: new Date('2026-08-11T13:06:45.433Z') });
 
   const remove = overrides.remove ?? vi.fn().mockResolvedValue(true);
+  const participantRemove = overrides.participantRemove ?? vi.fn().mockResolvedValue(true);
 
   const addressed: string[] = [];
+  const participantsAddressed: string[] = [];
   const conversations = Object.assign(
     (sidOrUniqueName: string) => {
       addressed.push(sidOrUniqueName);
@@ -76,7 +80,15 @@ function fakeConversationsClient(
         fetch,
         remove,
         messages: { create: messageCreate },
-        participants: { create: participantCreate, list: participantList },
+        // twilio v6: `participants` is a callable list instance - call it with
+        // an MBxx to get the ParticipantContext (remove/fetch/update).
+        participants: Object.assign(
+          (participantSid: string) => {
+            participantsAddressed.push(participantSid);
+            return { remove: participantRemove };
+          },
+          { create: participantCreate, list: participantList },
+        ),
       };
     },
     { create: conversationCreate },
@@ -97,7 +109,9 @@ function fakeConversationsClient(
     fetch,
     messageCreate,
     remove,
+    participantRemove,
     addressed,
+    participantsAddressed,
   };
 }
 
@@ -441,6 +455,144 @@ describe('TwilioGroupConversationsDriver.removeConversation', () => {
   });
 });
 
+// THE DEFECT THESE PIN (prod incident 2026-08-17). Twilio's 50513 - "Message
+// author should be among Group MMS participants" - is what a post returns when
+// the rail carries no projected-address participant for the CURRENT business
+// number: 132 imported rails had none at all, and 3 carried the released
+// pre-port number. Untranslated it was a bare `group_send_failed` 503 that told
+// staff nothing and healed nothing. Translated, groupSend can repair the rail's
+// business participant and retry - which needs the two participant operations
+// below.
+describe('TwilioGroupConversationsDriver.postGroupMessage author refusal (50513)', () => {
+  it('translates 50513 into GroupConversationsAuthorRejectedError so the send can repair the rail', async () => {
+    const f = fakeConversationsClient({
+      messageCreate: vi.fn().mockRejectedValue(
+        Object.assign(new Error('Message author should be among Group MMS participants.'), {
+          code: 50513,
+          status: 400,
+        }),
+      ),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await expect(
+      driver.postGroupMessage({ conversationSid: 'CHrail1', author: '+14045550000', body: 'hi' }),
+    ).rejects.toBeInstanceOf(GroupConversationsAuthorRejectedError);
+  });
+
+  it('leaves every OTHER 400 untranslated - only the author refusal means "repair the rail"', async () => {
+    const f = fakeConversationsClient({
+      messageCreate: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('bad body'), { code: 50501, status: 400 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    const err = await driver
+      .postGroupMessage({ conversationSid: 'CHrail1', author: '+14045550000', body: 'hi' })
+      .catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(GroupConversationsAuthorRejectedError);
+    expect(err).not.toBeInstanceOf(GroupConversationsUnavailableError);
+    expect((err as { code?: number }).code).toBe(50501);
+  });
+});
+
+describe('TwilioGroupConversationsDriver.addProjectedParticipant', () => {
+  it('attaches the business number as a projected-address-ONLY participant and returns it', async () => {
+    const f = fakeConversationsClient({
+      participantCreate: vi.fn().mockResolvedValue({
+        sid: 'MBbiz2',
+        messagingBinding: { projected_address: '+14045550000' },
+      }),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    const ref = await driver.addProjectedParticipant('CHrail1', '+14045550000');
+
+    expect(ref).toEqual({ participantSid: 'MBbiz2', projectedAddress: '+14045550000' });
+    expect(f.addressed).toContain('CHrail1');
+    const params = f.participantCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params['messagingBinding.projectedAddress']).toBe('+14045550000');
+    // No address, no identity - the shape that avoids the misleading 50407.
+    expect(params['messagingBinding.address']).toBeUndefined();
+    expect(params['identity']).toBeUndefined();
+  });
+
+  it('RE-THROWS a refusal - the caller records the rail failure, never a silent "attached"', async () => {
+    // Swallowing this is EXACTLY how 132 rails shipped without a business
+    // participant: the individual-add fallback's business add was refused,
+    // nothing looked, and "roster covered" counted as success.
+    const f = fakeConversationsClient({
+      participantCreate: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('not owned'), { code: 50407, status: 400 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await expect(driver.addProjectedParticipant('CHrail1', '+14045550000')).rejects.toMatchObject({
+      code: 50407,
+    });
+  });
+});
+
+describe('TwilioGroupConversationsDriver.removeParticipant', () => {
+  it('removes the participant by MBxx on the addressed conversation', async () => {
+    const f = fakeConversationsClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    expect(await driver.removeParticipant('CHrail1', 'MBstale')).toBe(true);
+    expect(f.addressed).toContain('CHrail1');
+    expect(f.participantsAddressed).toEqual(['MBstale']);
+    expect(f.participantRemove).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an ALREADY GONE participant as the asked-for end state', async () => {
+    const f = fakeConversationsClient({
+      participantRemove: vi.fn().mockRejectedValue(Object.assign(new Error('gone'), { code: 20404 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    expect(await driver.removeParticipant('CHrail1', 'MBstale')).toBe(false);
+  });
+
+  it('RE-THROWS anything else', async () => {
+    const f = fakeConversationsClient({
+      participantRemove: vi.fn().mockRejectedValue(Object.assign(new Error('boom'), { status: 500 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await expect(driver.removeParticipant('CHrail1', 'MBstale')).rejects.toThrow('boom');
+  });
+});
+
 describe('ConsoleGroupConversationsDriver', () => {
   it('creates NO rail - it logs and refuses, so a thread is never stamped with a rail that does not exist', async () => {
     const driver = new ConsoleGroupConversationsDriver({ logger: silentLogger });
@@ -526,14 +678,16 @@ function dualScopeClient() {
       .mockResolvedValue({ sid: `CH${tag}`, uniqueName: 'conv-1', state: 'active' });
     // ONE shared context, so a test can assert which scope's conversation
     // resource was addressed AND which operation ran on it.
+    const participantRemove = vi.fn().mockResolvedValue(true);
     const ctx = {
       fetch: vi.fn().mockResolvedValue({ sid: `CH${tag}`, uniqueName: 'conv-1', state: 'active' }),
       remove: vi.fn().mockResolvedValue(true),
       messages: { create: vi.fn().mockResolvedValue({ sid: 'IM1', index: 0 }) },
-      participants: {
+      participants: Object.assign(() => ({ remove: participantRemove }), {
         create: vi.fn().mockResolvedValue({ sid: 'MB1' }),
         list: vi.fn().mockResolvedValue([]),
-      },
+      }),
+      participantRemove,
     };
     // `conversations` must itself be a SPY, not a plain arrow. Asserting only
     // that services(sid) ran proves nothing about any single operation - the
@@ -590,6 +744,16 @@ const SCOPED_OPERATIONS: {
     name: 'removeConversation',
     run: (d) => d.removeConversation('CHrail'),
     ran: (s) => s.ctx.remove.mock.calls.length > 0,
+  },
+  {
+    name: 'addProjectedParticipant',
+    run: (d) => d.addProjectedParticipant('CHrail', '+14045550000'),
+    ran: (s) => s.ctx.participants.create.mock.calls.length > 0,
+  },
+  {
+    name: 'removeParticipant',
+    run: (d) => d.removeParticipant('CHrail', 'MBstale'),
+    ran: (s) => s.ctx.participantRemove.mock.calls.length > 0,
   },
   {
     name: 'postGroupMessage',

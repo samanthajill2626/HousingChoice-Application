@@ -19,9 +19,11 @@ import {
   GROUP_SEND_STALENESS_MS,
 } from '../src/repos/messagesRepo.js';
 import {
+  GroupConversationsAuthorRejectedError,
   GroupConversationsUnavailableError,
   type GroupConversationRef,
   type GroupConversationsPort,
+  type GroupParticipantRef,
 } from '../src/adapters/groupConversations.js';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messaging.js';
 import {
@@ -138,6 +140,9 @@ function makeFakes(
       MBann: 'phone#+16175550111',
       MBmarcus: 'phone#+16175550222',
     },
+    // A rail VERIFIED for the default business number below - the state every
+    // rail reaches after one ensure. Tests of the unverified case clear it.
+    twilio_projected_address: '+14045550000',
     ...overrides.conversation,
   };
   const contacts =
@@ -174,6 +179,12 @@ function makeFakes(
     },
     removeConversation: async () => {
       throw new Error('groupSend must never delete a rail directly - that is ensureGroupRail');
+    },
+    addProjectedParticipant: async () => {
+      throw new Error('groupSend must never attach the author directly - that is ensureGroupRail');
+    },
+    removeParticipant: async () => {
+      throw new Error('groupSend must never detach a participant directly - that is ensureGroupRail');
     },
     postGroupMessage: async (input) => {
       fakes.posted.push(input);
@@ -606,10 +617,58 @@ describe('groupSend - the rail', () => {
     expect(f.appended).toEqual([]);
   });
 
-  it('never calls ensureGroupRail when a rail is already attached', async () => {
+  it('never calls ensureGroupRail when a VERIFIED rail is already attached', async () => {
     const f = makeFakes();
     await f.send({ conversationId: 'group-1', body: 'hi' });
     expect(f.railCalls).toEqual([]);
+  });
+
+  // THE DEFECT THESE PIN (prod incident 2026-08-17). A stamped sid whose map
+  // covered the roster was posted to BLIND. 135 of 136 prod rails did not carry
+  // the current business number as a participant (132 never had one; 3 carried
+  // the released pre-port number), so every staff reply was 50513 -> a bare
+  // `group_send_failed` 503, forever, while inbound kept flowing through the SMS
+  // webhook and the thread looked perfectly alive.
+  it('routes a rail NOT verified for the current business number through ensureGroupRail BEFORE posting', async () => {
+    const f = makeFakes({
+      // The 132: stamped, roster covered, author never verified.
+      conversation: { twilio_projected_address: undefined },
+      rail: {
+        ensureGroupRail: async () => ({
+          status: 'created',
+          twilioConversationSid: 'CHrail1',
+          participantMap: { MBann: 'phone#+16175550111', MBmarcus: 'phone#+16175550222' },
+        }),
+      },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    // Same rail, verified first, then posted into exactly once.
+    expect(f.posted.map((p) => p.conversationSid)).toEqual(['CHrail1']);
+  });
+
+  it('routes a rail verified for a PREVIOUS business number through ensureGroupRail too', async () => {
+    const f = makeFakes({
+      // The 3: verified for the temp number, then BUSINESS_PHONE_NUMBER changed.
+      conversation: { twilio_projected_address: '+19387775065' },
+      rail: {
+        ensureGroupRail: async () => ({
+          status: 'created',
+          twilioConversationSid: 'CHrail1',
+          participantMap: { MBann: 'phone#+16175550111', MBmarcus: 'phone#+16175550222' },
+        }),
+      },
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.posted.map((p) => p.conversationSid)).toEqual(['CHrail1']);
+  });
+
+  it('refuses when the unverified rail cannot be verified, rather than posting into it blind', async () => {
+    const f = makeFakes({ conversation: { twilio_projected_address: undefined } });
+    const err = await f.send({ conversationId: 'group-1', body: 'hi' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GroupRailUnavailableError);
+    expect(f.railCalls).toEqual(['group-1']);
+    expect(f.posted).toEqual([]);
+    expect(f.appended).toEqual([]);
   });
 
   it('refuses when the business number is unconfigured - the rail has no author to post as', async () => {
@@ -930,9 +989,15 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
         sid: string,
         map: Record<string, string>,
         token: string,
+        projectedAddress: string,
       ) {
         if (row.rail_creating?.token !== token) return undefined;
-        const next = { ...row, twilio_conversation_sid: sid, twilio_participant_map: map };
+        const next = {
+          ...row,
+          twilio_conversation_sid: sid,
+          twilio_participant_map: map,
+          twilio_projected_address: projectedAddress,
+        };
         delete next.rail_creating;
         row = next;
         return { ...next };
@@ -985,6 +1050,12 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
       },
       addParticipants: async () => {
         throw new Error('a freshly created rail is not short of anyone');
+      },
+      addProjectedParticipant: async () => {
+        throw new Error('a freshly bulk-created rail already carries its author');
+      },
+      removeParticipant: async () => {
+        throw new Error('nothing stale on a fresh rail');
       },
       postGroupMessage: async (input) => {
         postedTo.push(input.conversationSid);
@@ -1040,6 +1111,10 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
       },
       fetchParticipants: async () => [],
       addParticipants: async () => [],
+      addProjectedParticipant: async () => {
+        throw new Error('never reached - the create refused first');
+      },
+      removeParticipant: async () => true,
       postGroupMessage: async () => {
         throw new GroupConversationsUnavailableError('the rail is closed or gone');
       },
@@ -1055,6 +1130,111 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
 
     expect(err).toBeInstanceOf(SendRefusedError);
     expect((err as SendRefusedError).code).toBe('group_rail_unavailable');
+  });
+
+  // THE DEFECT THIS PINS (prod incident 2026-08-17), Twilio's-word variant. The
+  // row can SAY the rail is verified (a hand repair reverted, a participant
+  // removed in the console, an older build's stamp) and Twilio still refuse the
+  // author with 50513. The refusal is healed like a closed rail - drop the
+  // stored rail, re-adopt the SAME live conversation through the REAL
+  // ensureGroupRail, attach the business number, retry - and NOTHING is deleted,
+  // because the rail is alive and its members are attached.
+  it('an AUTHOR-REFUSED rail (50513) is re-adopted, its business number attached, and the post retried', async () => {
+    const attached: string[] = [];
+    const postedAs: { sid: string; author: string }[] = [];
+    const cleared: string[] = [];
+    let railParticipants: GroupParticipantRef[] = [
+      { participantSid: 'MBann', address: ANN.phone },
+      { participantSid: 'MBmarcus', address: MARCUS.phone },
+    ];
+
+    const port: GroupConversationsPort = {
+      // ALIVE - the adopt half finds it and must keep it.
+      fetchByUniqueName: async () => ({ conversationSid: 'CHrail1', uniqueName: 'group-1', state: 'active' }),
+      removeConversation: async () => {
+        throw new Error('an author refusal must never delete a live rail');
+      },
+      createConversationWithParticipants: async () => {
+        throw new Error('an author refusal must never mint a second rail');
+      },
+      fetchParticipants: async () => railParticipants,
+      addParticipants: async () => {
+        throw new Error('the roster is fully attached');
+      },
+      addProjectedParticipant: async (_sid, businessNumber) => {
+        attached.push(businessNumber);
+        const ref = { participantSid: 'MBbiz', projectedAddress: businessNumber };
+        railParticipants = [...railParticipants, ref];
+        return ref;
+      },
+      removeParticipant: async () => {
+        throw new Error('nothing stale to remove');
+      },
+      postGroupMessage: async (input) => {
+        postedAs.push({ sid: input.conversationSid, author: input.author });
+        // Twilio's 50513 until the business number is a participant.
+        if (!railParticipants.some((p) => p.projectedAddress === input.author)) {
+          throw new GroupConversationsAuthorRejectedError('author is not among the participants');
+        }
+        return { messageSid: 'IMhealed2', dateCreated: '2026-08-11T13:00:02.000Z' };
+      },
+    };
+
+    const f = makeFakes({
+      port,
+      // The row SAYS verified; Twilio disagrees.
+      rail: realRailOver(port, railLessThread()),
+      clearGroupRail: async (_conversationId, sid) => {
+        cleared.push(sid);
+        return true;
+      },
+    });
+
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+
+    expect(cleared).toEqual(['CHrail1']);
+    expect(attached).toEqual(['+14045550000']);
+    // Same rail both times: refused, repaired, accepted.
+    expect(postedAs).toEqual([
+      { sid: 'CHrail1', author: '+14045550000' },
+      { sid: 'CHrail1', author: '+14045550000' },
+    ]);
+    expect(f.appended[0]?.groupRailSnapshot?.conversationSid).toBe('CHrail1');
+    expect(out.providerSid).toBe('IMhealed2');
+  });
+
+  it('an author refusal that SURVIVES the repair refuses as rail-unavailable rather than looping', async () => {
+    const port: GroupConversationsPort = {
+      fetchByUniqueName: async () => ({ conversationSid: 'CHrail1', uniqueName: 'group-1', state: 'active' }),
+      removeConversation: async () => true,
+      createConversationWithParticipants: async () => {
+        throw new Error('never');
+      },
+      fetchParticipants: async () => [
+        { participantSid: 'MBann', address: ANN.phone },
+        { participantSid: 'MBmarcus', address: MARCUS.phone },
+      ],
+      addParticipants: async () => [],
+      addProjectedParticipant: async (_sid, businessNumber) => ({
+        participantSid: 'MBbiz',
+        projectedAddress: businessNumber,
+      }),
+      removeParticipant: async () => true,
+      postGroupMessage: async () => {
+        throw new GroupConversationsAuthorRejectedError('still refused');
+      },
+    };
+    const f = makeFakes({
+      port,
+      rail: realRailOver(port, railLessThread()),
+      clearGroupRail: async () => true,
+    });
+
+    const err = await f.send({ conversationId: 'group-1', body: 'hi' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SendRefusedError);
+    expect((err as SendRefusedError).code).toBe('group_rail_unavailable');
+    expect(f.appended).toEqual([]);
   });
 });
 

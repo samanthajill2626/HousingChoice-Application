@@ -34,6 +34,7 @@
     "import:apply:dev": "tsx app/scripts/import-apply.ts --env dev",
     "import:apply:prod": "tsx app/scripts/import-apply.ts --env prod",
     "import:convert-groups": "tsx app/scripts/import-convert-groups.ts",
+    "rail:verify": "tsx app/scripts/rail-verify.ts",
     "issues": "node scripts/issues.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:fake-twilio": "npm run test -w @housingchoice/fake-twilio",

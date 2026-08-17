@@ -618,7 +618,9 @@ export interface SendToAllResult {
         prunedEndpoints.push(record.endpoint);
         log.warn(
           { userId, kind },
-          'push: stored endpoint failed the host allowlist — pruned, not sent',
+          // CUT-PASTE the existing string from sendToUser VERBATIM - it
+          // contains an em dash; do not retype it. ASCII stand-in here:
+          'push: stored endpoint failed the host allowlist - pruned, not sent',
         );
         continue;
       }
@@ -639,7 +641,9 @@ export interface SendToAllResult {
         failed += 1;
         log.warn(
           { userId, kind, err: (err as Error).message },
-          'push: send to one device failed (transient) — kept subscription',
+          // CUT-PASTE the existing string from sendToUser VERBATIM - it
+          // contains an em dash; do not retype it. ASCII stand-in here:
+          'push: send to one device failed (transient) - kept subscription',
         );
       }
     }
@@ -682,7 +686,7 @@ export interface SendToAllResult {
       if (adapter === undefined || !isPushConfigured(config)) {
         log.warn(
           { kind: notification.kind },
-          'push not configured (VAPID unset) — broadcast skipped (no-op)',
+          'push not configured (VAPID unset) - broadcast skipped (no-op)',
         );
         return { configured: false, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
       }
@@ -694,7 +698,7 @@ export interface SendToAllResult {
         try {
           usersCache = { items: await users.listAll(), fetchedAt: now() };
         } catch (err) {
-          log.error({ err, kind: notification.kind }, 'push: listing users failed — broadcast not sent');
+          log.error({ err, kind: notification.kind }, 'push: listing users failed - broadcast not sent');
           return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
         }
       }
@@ -727,7 +731,7 @@ export interface SendToAllResult {
           failed += subs.length;
           log.warn(
             { userId: user.userId, kind: notification.kind, err: (err as Error).message },
-            'push: broadcast to one user failed — continuing',
+            'push: broadcast to one user failed - continuing',
           );
         }
       }

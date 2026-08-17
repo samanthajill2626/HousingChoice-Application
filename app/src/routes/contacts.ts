@@ -1925,15 +1925,30 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // re-increments unread (and re-stamps the flag) on its own.
     //
     // Runs BEFORE the presence fan-out so the conversation.updated emits that
-    // fan-out re-reads carry unread 0 rather than a stale count. BEST-EFFORT per
-    // thread: the delete has already persisted, so a row that vanished under us
-    // (racing retract/close) must not turn a successful delete into a 500.
+    // fan-out re-reads carry unread 0 rather than a stale count.
     // DECLARED PRODUCT CHANGE (human-approved): a restored contact returns with
     // unread 0.
-    await Promise.all(
-      (await conversationsForContact(updated, conversations))
-        .filter((c) => typeof c.unread_count === 'number' && c.unread_count > 0)
-        .map(async (c) => {
+    //
+    // UNCONDITIONAL over every thread the union returns - NO `unread_count > 0`
+    // pre-filter (adversarial finding 2, sanctioned deviation from spec 4.2's
+    // "threads with unread > 0" wording). conversationsForContact resolves
+    // through the byParticipantPhone/byParticipantEmail GSIs, which lag; a stale
+    // image reporting 0 for a thread that IS unread made the reset skip that
+    // thread FOREVER, because nothing re-runs this fan-out for an already-deleted
+    // contact - leaving a permanent byUnread resident that costs a resurfacing
+    // probe on every badge request. The filter was only an optimization
+    // (resetUnread is already idempotent and conditional on
+    // attribute_exists(conversationId)), so paying a few no-op conditional writes
+    // buys the ruling reliably.
+    //
+    // BEST-EFFORT AS A WHOLE, matching propagateContactPresenceChange below: the
+    // delete has ALREADY persisted, so neither a row that vanished under us
+    // (racing retract/close) nor a transient failure of the thread lookup itself
+    // may turn a successful delete into a 500 - and a throw here would also skip
+    // the presence fan-out, leaving every dashboard showing the deleted contact.
+    try {
+      await Promise.all(
+        (await conversationsForContact(updated, conversations)).map(async (c) => {
           try {
             await conversations.resetUnread(c.conversationId);
           } catch (err) {
@@ -1941,7 +1956,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
             throw err;
           }
         }),
-    );
+      );
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact delete: unread reset fan-out failed (best-effort)');
+    }
     // Refresh the live views so this contact's Today/inbox cards drop without a reload.
     await propagateContactPresenceChange(contactId, updated);
     log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');

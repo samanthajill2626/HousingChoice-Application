@@ -16,6 +16,7 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     rows: [],
     groupsTruncated: false,
     truncated: false,
+    serverRowCount: 0,
     groupRowsShown: 0,
     hasMore: false,
     loadingMore: false,
@@ -122,6 +123,20 @@ describe('Inbox', () => {
     renderInbox('/inbox?filter=unread');
     expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  // ADVERSARIAL 4. `truncated` describes the SERVER page; `rows` is the
+  // client-filtered list the Unread tab empties as the operator marks rows read.
+  // Gated on `rows` this pairing turned a finished triage session into "We
+  // couldn't load your inbox.", an error banner with no server statement behind
+  // it. The gate is `serverRowCount` - a server claim judged against a server
+  // quantity - so the two states stay exact complements.
+  it('a truncated page whose rows were all marked read is caught up, NOT an error', () => {
+    state = baseState({ status: 'ready', rows: [], truncated: true, serverRowCount: 3 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
   });
 
   it('renders rows and a Load more button when there is another page', () => {

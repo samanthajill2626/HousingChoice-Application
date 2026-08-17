@@ -1276,28 +1276,61 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(page.rows.find((r) => r.contactId === 'c-multi')!.unreadCount).toBe(2);
   });
 
-  it('DEPTH CAP: past SEEN_SET_MAX contact ids the page mints no cursor and says truncated', async () => {
-    const seed = unreadWorld(101);
+  /** Walk `filter=unread` with the dashboard's page size until the cursor dies. */
+  async function pageThroughUnread(seed: Seed, pages: number): Promise<InboxPage[]> {
+    const out: InboxPage[] = [];
     let cursor: string | null = null;
-    const pages: InboxPage[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < pages; i++) {
       const page: InboxPage = await aggregateInbox(
         { filter: 'unread', limit: 30, ...(cursor !== null && { cursor }) },
         makeDeps(seed),
       );
-      pages.push(page);
+      out.push(page);
       cursor = page.nextCursor;
     }
+    return out;
+  }
+
+  // CONFORMANCE FINDING 1. `truncated` names a NON-NATURAL end (spec 4.5 step 3):
+  // rows were WITHHELD. The depth cap used to be evaluated ahead of consumedAll,
+  // so it also fired on the natural last page of any unread feed past
+  // SEEN_SET_MAX ids - and this test asserted that false positive. The pair below
+  // is the discriminating one: identical mechanics, opposite supply, opposite
+  // answer.
+  it('DEPTH CAP: past SEEN_SET_MAX ids on a page that EXHAUSTED the supply is a natural end, NOT truncated', async () => {
+    const seed = unreadWorld(101);
+    const pages = await pageThroughUnread(seed, 4);
 
     expect(pages.map((p) => p.rows.length)).toEqual([30, 30, 30, 11]);
     // Pages 1-3 stay inside the cap (30/60/90 ids) and page normally.
     expect(pages.slice(0, 3).every((p) => p.nextCursor !== null)).toBe(true);
     expect(pages.slice(0, 3).every((p) => p.truncated === undefined)).toBe(true);
-    // Page 4 pushes the seen-set to 101 - past SEEN_SET_MAX - so the server
-    // refuses to mint a cursor it would itself reject, and SAYS so rather than
-    // ending the feed with no signal at all.
+    // Page 4 pushes the seen-set to 101 - past SEEN_SET_MAX - so no cursor can be
+    // minted. But it also CONSUMED THE WHOLE INDEX: nothing is behind it, so the
+    // feed ended naturally and must not claim otherwise. Under the old ordering
+    // this page said truncated, and an empty one (every candidate dropped in
+    // hydration) rendered "We couldn't load your inbox." on a caught-up tab.
+    expect(pages[3]!.nextCursor).toBeNull();
+    expect(pages[3]!.truncated).toBeUndefined();
+    // All 101 really were handed down - the natural-end claim is not a cover for
+    // lost rows.
+    expect(new Set(pages.flatMap((p) => rowKeys(p))).size).toBe(101);
+  });
+
+  it('DEPTH CAP: past SEEN_SET_MAX ids with supply REMAINING withholds rows and says truncated', async () => {
+    // 130 unread contacts at limit 30: page 4 fills completely and takes the
+    // seen-set to 120, past the cap - so the server can mint no cursor it would
+    // itself accept while 10 contacts are still unreached. THAT is a truncation.
+    const seed = unreadWorld(130);
+    const pages = await pageThroughUnread(seed, 4);
+
+    expect(pages.map((p) => p.rows.length)).toEqual([30, 30, 30, 30]);
+    expect(pages.slice(0, 3).every((p) => p.truncated === undefined)).toBe(true);
     expect(pages[3]!.nextCursor).toBeNull();
     expect(pages[3]!.truncated).toBe(true);
+    // The signal is load-bearing: 10 of the 130 are unreachable through the API,
+    // which is exactly why the feed must not end silently.
+    expect(new Set(pages.flatMap((p) => rowKeys(p))).size).toBe(120);
   });
 
   it('BUDGET: a spent raw-scan budget underfills the page and sets truncated', async () => {

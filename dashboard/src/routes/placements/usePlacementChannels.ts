@@ -285,11 +285,17 @@ export function usePlacementChannels(
       setState((prev) =>
         prev.group.unread === 0 ? prev : { ...prev, group: { ...prev.group, unread: 0 } },
       );
-      // Past the guard this group is UNREAD, and by the close-reset ruling an
-      // unread relay group is necessarily open/connecting (closing one zeroes its
-      // unread) - i.e. a row the nav badge counts, so decrementing it is sound.
-      // Pre-ruling this wiring was excluded: a closed-but-unread group would have
-      // decremented a row the badge never counted.
+      // Past the guard this group is UNREAD, and the close-reset ruling zeroes a
+      // relay group's unread as it closes - so every row THIS rail realistically
+      // shows (a placement's live group, rendered from a feed of open/connecting
+      // groups the operator is working right now) is a row the nav badge counts,
+      // and decrementing it is sound. Pre-ruling this wiring was excluded
+      // outright: a closed-but-unread group would have decremented a row the
+      // badge never counted. NOT a universal invariant - an inbound landing on an
+      // already-closed group still re-stamps the flag, so a closed row can carry
+      // unread; see docs/issues/inbound-reflags-closed-relay-group.md. The
+      // residual cost there is a transient badge under-count until the next
+      // reconcile, not a wrong write.
       const clearKey = conversationClearKey(conversationId);
       noteRowsCleared([clearKey]);
       void markConversationRead(conversationId).catch(() => {

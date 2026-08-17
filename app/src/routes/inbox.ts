@@ -1065,14 +1065,21 @@ export async function aggregateInbox(
       // Nothing consumed at all (an empty index, or a cursor already past the
       // end): no position to resume from, and nothing was withheld.
       unreadCursor = null;
-    } else if (seen.size > SEEN_SET_MAX) {
-      // THE DEPTH CAP, checked BEFORE consumedAll on purpose: past this many ids
-      // the server can no longer mint a cursor it would itself accept, so paging
-      // is over regardless of what the supply looks like - and round 4's rule is
-      // that the cap must never be the one early-end path carrying no signal.
-      truncated = true;
     } else if (consumedAll) {
-      unreadCursor = null; // the natural end
+      // THE NATURAL END, checked FIRST: the supply ran out, so nothing was
+      // withheld and `truncated` must stay off (spec 4.5 step 3 defines it as a
+      // NON-NATURAL end). This branch outranks the depth cap on purpose. The cap
+      // ordered first fired on every consumedAll page past SEEN_SET_MAX ids, so
+      // a correct - even EMPTY - final unread page claimed an early end, and an
+      // empty one rendered the inbox failure state on a tab that was genuinely
+      // caught up (conformance finding 1).
+      unreadCursor = null;
+    } else if (seen.size > SEEN_SET_MAX) {
+      // THE DEPTH CAP, and now only when rows really are behind it: past this
+      // many ids the server can no longer mint a cursor it would itself accept,
+      // so paging is over while supply remains - and round 4's rule is that the
+      // cap must never be the one early-end path carrying no signal.
+      truncated = true;
     } else if (budgetSpent) {
       truncated = true;
     } else {

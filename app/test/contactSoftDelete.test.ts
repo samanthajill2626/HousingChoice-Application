@@ -173,7 +173,7 @@ describe('DELETE /api/contacts/:id (soft delete) + restore', () => {
 // restored contact returns with unread 0. Resurfacing is UNAFFECTED - that rule
 // requires a POST-deletion inbound, and the inbound itself re-increments unread.
 describe('DELETE /api/contacts/:id resets unread across the contact threads', () => {
-  it('resets EXACTLY the unread threads (phone AND email) and leaves the read one alone', async () => {
+  it('resets EVERY thread it finds (phone AND email), read ones included', async () => {
     const { app, world } = makeWebhookHarness();
     seedContact(world, {
       contactId: 'c-reset',
@@ -192,8 +192,12 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
       last_activity_at: '2026-06-11T10:00:00.000Z',
       unread_count: 3,
     });
-    // Already read: it must NOT be written at all (a blanket fan-out over every
-    // thread would burn a conditional write per already-read row).
+    // Already read - and reset ANYWAY (adversarial finding 2). The fan-out used
+    // to skip these, but the thread list comes from the eventually-consistent
+    // participant GSIs, so "already read" is a claim this handler cannot trust;
+    // see the stale-image test below. resetUnread is idempotent and conditional,
+    // so the cost is one no-op write per already-read thread of a contact being
+    // deleted - and the benefit is that no unread thread is skipped FOREVER.
     seedConversation(world, 'conv-read-phone', {
       participant_phone: '+15550000050',
       last_activity_at: '2026-06-09T10:00:00.000Z',
@@ -205,13 +209,112 @@ describe('DELETE /api/contacts/:id resets unread across the contact threads', ()
     expect(del.status).toBe(200);
     // Sorted, so the assertion pins WHICH threads were reset without pinning the
     // Promise.all fan-out order.
-    expect([...world.unreadResets].sort()).toEqual(['conv-unread-email', 'conv-unread-phone']);
-    for (const id of ['conv-unread-phone', 'conv-unread-email']) {
+    expect([...world.unreadResets].sort()).toEqual([
+      'conv-read-phone',
+      'conv-unread-email',
+      'conv-unread-phone',
+    ]);
+    for (const id of ['conv-unread-phone', 'conv-unread-email', 'conv-read-phone']) {
       const conv = world.conversations.get(id);
       expect(conv?.unread_count).toBe(0);
       // The FLAG is what index membership keys on - absence is the whole point.
       expect(conv?.unread_flag).toBeUndefined();
     }
+  });
+
+  // ADVERSARIAL FINDING 2. conversationsForContact resolves through
+  // byParticipantPhone/byParticipantEmail, GSIs that lag independently of
+  // byUnread. An inbound at t=0 flags the thread; a delete at t=0.3s reads a
+  // participant image that still says unread_count 0. The old `unread_count > 0`
+  // pre-filter dropped that thread, and NOTHING re-runs this fan-out for an
+  // already-deleted contact - so the row stayed in byUnread permanently, costing
+  // a resurfacing probe on every badge request forever. The reset must therefore
+  // depend on the thread SET the GSI returns, never on the unread values in it.
+  it('STALE GSI: resets a flagged thread whose participant-GSI image still says read', async () => {
+    const world = createFakeWorld();
+    const real = world.conversationsRepo;
+    world.conversationsRepo = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== 'findByParticipantPhone' || typeof value !== 'function') return value;
+        // The GSI's own projection, one replication beat behind the base table:
+        // a COPY reporting the pre-inbound counter, while the stored row (which
+        // resetUnread writes and the index reads) is unread and flagged.
+        return async (phone: string) => {
+          const items = (await (value as (p: string) => Promise<ConversationItem[]>).call(
+            target,
+            phone,
+          )) as ConversationItem[];
+          return items.map((c) => ({ ...c, unread_count: 0, unread_flag: undefined }));
+        };
+      },
+    });
+    const { app } = makeWebhookHarness({ world });
+    seedContact(world, { contactId: 'c-stale', type: 'tenant', phone: '+15550000053' });
+    seedConversation(world, 'conv-stale', {
+      participant_phone: '+15550000053',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 1,
+    });
+    expect(world.conversations.get('conv-stale')?.unread_flag).toBe('unread');
+
+    const del = await auth(request(app).delete('/api/contacts/c-stale'));
+
+    expect(del.status).toBe(200);
+    expect(world.unreadResets).toEqual(['conv-stale']);
+    const conv = world.conversations.get('conv-stale');
+    expect(conv?.unread_count).toBe(0);
+    // The row is OUT of the sparse byUnread index - the point of the whole reset.
+    expect(conv?.unread_flag).toBeUndefined();
+  });
+
+  // CONFORMANCE FINDING 3 / adversarial 2 (tail). The block's comment promised
+  // best-effort, but only ConditionalCheckFailedException was swallowed and the
+  // thread LOOKUP was unguarded - so a transient repo error 500'd a delete whose
+  // deleted_at was already durable AND skipped propagateContactPresenceChange,
+  // leaving every dashboard showing a contact the database considers deleted.
+  it('a transient thread-lookup failure neither fails the delete nor skips the presence fan-out', async () => {
+    const world = createFakeWorld();
+    const real = world.conversationsRepo;
+    let firstLookup = true;
+    world.conversationsRepo = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== 'findByParticipantPhone' || typeof value !== 'function') return value;
+        // ONE-SHOT: the unread fan-out's lookup throws, the presence fan-out's
+        // succeeds. A permanent throw could not tell "the request survived" from
+        // "the presence fan-out ran".
+        return async (phone: string) => {
+          if (firstLookup) {
+            firstLookup = false;
+            throw new Error('dynamo throttled');
+          }
+          return (value as (p: string) => Promise<ConversationItem[]>).call(target, phone);
+        };
+      },
+    });
+    const { app } = makeWebhookHarness({ world });
+    seedContact(world, { contactId: 'c-flaky', type: 'tenant', phone: '+15550000054' });
+    seedConversation(world, 'conv-flaky', {
+      participant_phone: '+15550000054',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 1,
+    });
+
+    const del = await auth(request(app).delete('/api/contacts/c-flaky'));
+
+    expect(del.status).toBe(200);
+    expect(typeof del.body.contact.deleted_at).toBe('string');
+    // The delete is durable...
+    expect(typeof world.contacts.find((c) => c.contactId === 'c-flaky')?.deleted_at).toBe('string');
+    // ...and the live views still got told, so no dashboard keeps the card.
+    expect(
+      world.emitted.filter(
+        (e) =>
+          e.event === 'conversation.updated' &&
+          (e.payload as { conversationId?: string }).conversationId === 'conv-flaky',
+      ),
+    ).toHaveLength(1);
   });
 
   it('a ConditionalCheckFailedException from one reset does not fail the delete', async () => {

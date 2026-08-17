@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventStreamHandlers } from '../../api/index.js';
 import { ApiError } from '../../api/index.js';
@@ -32,6 +33,10 @@ vi.mock('../../app/UnreadContext.js', () => ({
 }));
 
 import { useInbox, rowKey } from './useInbox.js';
+// The REAL component, for the composed cases at the bottom of this file: the
+// truncation flag only misfires where the hook's server statement meets the
+// component's render of the client-filtered list.
+import { Inbox } from './Inbox.js';
 
 function mkRow(over: Partial<InboxRow> = {}): InboxRow {
   return {
@@ -62,6 +67,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="hasMore">{String(s.hasMore)}</span>
       <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
       <span data-testid="truncated">{String(s.truncated)}</span>
+      <span data-testid="serverRowCount">{String(s.serverRowCount)}</span>
       <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
       <span data-testid="loadingMore">{String(s.loadingMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
@@ -605,5 +611,56 @@ describe('useInbox - the unread feed truncation flag', () => {
     });
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('pending'));
     expect(screen.getByTestId('truncated')).toHaveTextContent('false');
+  });
+
+  // ADVERSARIAL 4, and the test the two shipped halves never composed: one proved
+  // the hook surfaces `truncated`, the other proved Inbox renders the failure
+  // state on an empty truncated page, and nothing exercised the sequence that
+  // actually bites - a truncated page WITH rows that the operator clears. `rows`
+  // is the client-filtered list; `truncated` is the server's statement about its
+  // page. Pairing them made a successful triage session end in "We couldn't load
+  // your inbox." So this drives the REAL Inbox through the REAL hook.
+  it('COMPOSED: marking every row of a TRUNCATED page read leaves no failure banner', async () => {
+    getInbox.mockResolvedValue({
+      rows: [
+        mkRow({ contactId: 'c1', name: 'Tasha Williams' }),
+        mkRow({ contactId: 'c2', name: 'Rene Okafor', lastActivityAt: '2026-06-17T09:00:00.000Z' }),
+      ],
+      nextCursor: null,
+      truncated: true,
+    });
+    render(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Mark Tasha Williams read' })).toBeInTheDocument(),
+    );
+    // The server DID say truncated on a page it filled - the banner must not be
+    // showing even now, which is the shipped behavior this test must not weaken.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    act(() => screen.getByRole('button', { name: 'Mark Tasha Williams read' }).click());
+    act(() => screen.getByRole('button', { name: 'Mark Rene Okafor read' }).click());
+
+    await waitFor(() => expect(screen.getByText(/all caught up/i)).toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
+    expect(markInboxRead).toHaveBeenCalledTimes(2);
+  });
+
+  // The other half stays green: an EMPTY server page that says truncated is a
+  // real early end and still renders the failure state through the same wiring.
+  it('COMPOSED: an EMPTY truncated page still renders the failure state', async () => {
+    getInbox.mockResolvedValue({ rows: [], nextCursor: null, truncated: true });
+    render(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByText(/couldn.t load your inbox/i)).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
   });
 });

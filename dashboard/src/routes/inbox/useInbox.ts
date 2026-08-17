@@ -57,11 +57,26 @@ export interface InboxState {
   /** The UNREAD feed ended for a NON-NATURAL reason (the server's request budget
    *  expired before the page filled, or its seen-set depth cap ended paging).
    *  Only a `filter=unread` response can set it. A page with rows simply ends -
-   *  no affordance; an EMPTY page with this flag is NOT "all caught up", so
-   *  Inbox.tsx renders the existing failure state + Retry instead of lying. It
-   *  is a statement about the LATEST page read, so it is replaced (never OR-ed)
-   *  by each page and reset on every filter change. */
+   *  no affordance; an EMPTY SERVER page with this flag is NOT "all caught up",
+   *  so Inbox.tsx renders the existing failure state + Retry instead of lying.
+   *  It is a statement about the LATEST page read, so it is replaced (never
+   *  OR-ed) by each page and reset on every filter change. */
   truncated: boolean;
+  /** How many rows the SERVER has handed down for this filter (all pages so
+   *  far), BEFORE the optimistic patches and the Unread narrowing produce
+   *  `rows`.
+   *
+   *  Adversarial 4, the same drift the `groupRowsShown` comment above records
+   *  and the mirror-image correction: `truncated` is a statement about the
+   *  SERVER PAGE while `rows` is the CLIENT-FILTERED list, so pairing the two
+   *  rendered the wrong surface. `rows.length === 0 && truncated` was reachable
+   *  by an operator marking every row on a truncated page read - a successful
+   *  local action producing "We couldn't load your inbox." with no server
+   *  statement behind it. `groupRowsShown` moved a claim about the RENDERED list
+   *  onto the rendered list; this moves a claim about the SERVER page onto the
+   *  server page. Mark-read cannot move it (it only patches `unreadCount`); only
+   *  a fetch installing new rows does. */
+  serverRowCount: number;
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
@@ -363,6 +378,9 @@ export function useInbox(filter: InboxFilter): InboxState {
     rows,
     groupsTruncated,
     truncated,
+    // Counted off the SERVER list, never the rendered one (adversarial 4) - see
+    // `InboxState`. `base` is exactly what the server handed down; `rows` is not.
+    serverRowCount: base.length,
     // Counted off the RENDERED list (adversarial 30) - see `InboxState`.
     groupRowsShown: countGroupRows(rows),
     hasMore: cursor !== null,

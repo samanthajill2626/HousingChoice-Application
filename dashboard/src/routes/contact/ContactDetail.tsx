@@ -275,8 +275,10 @@ export function ContactDetail(): React.JSX.Element {
   // closing a different way the wrong run could speak for this press (spec 7):
   //
   //  - requestId: an unrelated inbound run must not resolve this indicator.
-  //  - contactId: nor may a run for a DIFFERENT contact. A `no_contact` run
-  //    carries no contactId at all, so only a MISMATCH is rejected.
+  //  - contactId: a MISMATCH is this press's run resolved to ANOTHER contact
+  //    (see the misfiled branch in applyRunEvent) - counted and reported, never
+  //    silently dropped. A `no_contact` run carries no contactId at all and
+  //    resolves normally.
   //  - pending membership: a thread the server could not queue sits in
   //    `failed[]` and no run is coming for it, so an event naming it must not
   //    add counts to a banner that simultaneously says it was never queued. It
@@ -303,8 +305,13 @@ export function ContactDetail(): React.JSX.Element {
       pressGenerationRef.current += 1;
       setExtraction((prev) => ({
         phase: 'done',
-        tone: 'status',
-        message: 'Still running - check Settings > AI runs.',
+        // A misfiled thread is a KNOWN, billed outcome - the timeout must not
+        // downgrade it to a bare "still running". Alert tone when present.
+        tone: prev.phase === 'running' && prev.misfiled > 0 ? 'alert' : 'status',
+        message:
+          prev.phase === 'running' && prev.misfiled > 0
+            ? `Still running - check Settings > AI runs.${misfiledClauseOf(prev.misfiled)}`
+            : 'Still running - check Settings > AI runs.',
         ...(prev.phase === 'running' && prev.failedThreads > 0
           ? { failedThreads: prev.failedThreads }
           : {}),
@@ -1025,11 +1032,11 @@ function extractionPartialResults(wrote: number, suggested: number, noted: numbe
 /**
  * One completion event against the indicator state - PURE, so the live handler
  * and the early-event replay in onRunExtraction share one implementation
- * instead of drifting. Three guards, each closing a different way the wrong
- * run could speak for a press: requestId (an unrelated run), contactId (a
- * different contact's run - absent on no_contact runs, so only a MISMATCH
- * rejects), and pending membership (an unqueued thread's event, and duplicate
- * delivery).
+ * instead of drifting. requestId guards against an unrelated run, and pending
+ * membership against an unqueued thread's event and duplicate delivery. A
+ * contactId MISMATCH is NOT rejected: a matching requestId means it is this
+ * press's run, resolved by the job to another contact, so it is counted as
+ * misfiled and reported - the facts landed there and billed.
  */
 function applyRunEvent(
   prev: ExtractionState,
@@ -1064,16 +1071,20 @@ function applyRunEvent(
   return finishRun({ ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) });
 }
 
+/** The misfiled sentence, shared by finishRun and the timeout so the two can
+ *  never disagree. Pronoun-free on purpose - "its" read wrong in the plural. */
+function misfiledClauseOf(misfiled: number): string {
+  const subject = misfiled === 1 ? 'One thread is' : `${misfiled} threads are`;
+  return ` ${subject} filed under a different contact - the results landed there. See Settings > AI runs.`;
+}
+
 /** Assemble the resolved banner from a running state whose `pending` emptied.
  *  One assembly site for BOTH exits (the normal resolution and the misfiled
  *  one), so the failure headline, the results-that-landed clause, the unqueued
  *  clause and the misfiled clause can never disagree between paths. */
 function finishRun(last: Extract<ExtractionState, { phase: 'running' }>): ExtractionState {
   const unqueued = last.failedThreads > 0 ? { failedThreads: last.failedThreads } : {};
-  const misfiledClause =
-    last.misfiled > 0
-      ? ` ${last.misfiled === 1 ? 'One thread is' : `${last.misfiled} threads are`} filed under a different contact - its results landed there. See Settings > AI runs.`
-      : '';
+  const misfiledClause = last.misfiled > 0 ? misfiledClauseOf(last.misfiled) : '';
   if (last.errorKind !== undefined) {
     const partial = extractionPartialResults(last.wrote, last.suggested, last.noted);
     const body = partial === undefined

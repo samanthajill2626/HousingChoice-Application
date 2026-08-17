@@ -219,6 +219,28 @@ Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add â†’ backfill 4 rows â
 
 All FOUR changes are already in both `tables.auto.tfvars.json` files (GSIs regenerated in Phase A; the `unmatched_email` table in B3; the `messages` TTL in the fix wave). **Online** operations - no recreate, **no backfill**: both GSI adds are sparse and populate as email participation is written (existing phone-only threads and contacts without an email never carry the indexed attribute, so they never index), the new table starts empty, and enabling `messages` TTL only reaps future orphan parked events. Post-merge on **dev**: `npm run plan -- dev` (review: two GSI adds + one new table with TTL + one TTL enable on `messages`) -> `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
+**Inbox unread index schema - NOT YET APPLIED anywhere (feature branch `feat/inbox-unread-index`). Apply to DEV after merge; PROD rides the M1.11 cutover. This one has a BACKFILL, and an order.**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| Unread read model (2026-08) - **committed, NOT YET APPLIED anywhere** | `conversations` (existing) | **GSI add** - `byUnread` (sparse, hash `unread_flag` = the constant `'unread'`, range `last_activity_at`) | `GET /api/inbox/unread-count` (the nav badge), `GET /api/inbox?filter=unread`, and Today's unread sections read ONLY unread rows instead of walking every open conversation |
+
+In the regenerated `tables.auto.tfvars.json` files. **Online** operation - no recreate - but it DOES need a one-time **backfill**: the two unread primitives maintain `unread_flag` from now on, so a row that was ALREADY unread when the index landed carries no flag and is invisible to every reader above until it is stamped. On **dev**, in this order (schema BEFORE code, per the rule at the top of this section):
+
+1. `npm run plan -- dev` -> `npm run apply -- dev`. **EXPECT A LARGE PLAN.** This apply carries the ENTIRE owed backlog above it - the `byJurisdiction` GSI delete, several new tables (`ai_runs`, `pendingRosterActions`, `placementDeadlines`, `unmatched_email`), and other GSI adds/drops. That is EXPECTED, not an error; read the plan against the tables in this section and approve it once every line matches something recorded here.
+2. Backfill, dry run FIRST: `npx tsx app/scripts/backfill-unread-flag.ts --dry-run`, then the same command without the flag, with the dev environment active. It resolves the table from the ambient `TABLE_PREFIX` and has NO endpoint guard by design (same as the broadcast backfill above), so set the environment deliberately. Idempotent, and it applies the two retroactive resets the runtime now makes as well as the stamping: a relay group closed while unread is zeroed, and a soft-deleted contact's thread keeps its unread only when the newest message would resurface it (that costs one message read per such thread, on every run).
+3. `npm run deploy:dev` (the app image built from this `main`).
+
+**Prod** rides M1.11: `npm run plan -- prod` / `npm run apply -- prod` + the promote, then the same dry-run-first backfill against prod.
+
+**The founder's imported LOCAL dataset** (DynamoDB Local, `TABLE_PREFIX=hc-local-`) needs the same two operations in the same order - and **never `db:create --reset` there**, which would destroy the imported data:
+
+1. `npm run db:update-gsis` - adds the missing GSIs to the live local tables in place (localhost-endpoint-guarded; it never drops an index).
+2. `npx tsx app/scripts/backfill-unread-flag.ts --dry-run`, then the same command live.
+3. Restart the local dev stack.
+
+**The order is load-bearing.** The backfill stamps `unread_flag`, but until `byUnread` exists locally those stamped rows are still unreadable through it - run the backfill first and the badge and the Unread tab stay empty until you re-run it. Disposable e2e lanes need neither step (they bootstrap their own tables); a STALE lane predating the index is fixed by deleting that lane's `hc-local-<L>-*` tables under its own `accessKeyId=hclane<L>`, per `docs/issues/e2e-lane-tables-stale-schema.md`.
+
 ### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
 
 **Infra change - `feat/unit-photos` MERGED to main (@05aba86). DEV: CORS APPLIED 2026-07-16 (upload path live on dev). PROD: rides the M1.11 cutover (still to apply).**

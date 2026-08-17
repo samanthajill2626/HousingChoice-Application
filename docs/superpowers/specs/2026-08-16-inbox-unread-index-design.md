@@ -94,11 +94,25 @@ and app/test/genTables.test.ts:182-188 update in the same commit.
 
 `ConversationItem` gains `unread_flag?: 'unread'`
 (app/src/repos/conversationsRepo.ts, next to `unread_count?: number` at :162)
-so seed fixtures typecheck. WIRE EXPOSURE: the attribute deliberately appears
-on no wire shape we construct (SSE payload and conversation summaries project
-explicit fields - events.ts:100, api.ts:416); it DOES ride the raw item
-returned by `GET /api/conversations/:conversationId` (api.ts:1688-1697), which
-is accepted (internal client; ignores unknown fields).
+so seed fixtures typecheck. WIRE EXPOSURE (corrected against source during the
+build - this paragraph originally named ONE response; there are TEN): the
+attribute deliberately appears on no wire shape we CONSTRUCT (SSE payload and
+conversation summaries project explicit fields - events.ts:100, api.ts:416),
+but it rides every response that returns a RAW `ConversationItem`, and there
+are ten of those:
+
+- api.ts x2 - `GET /api/conversations/:conversationId` and
+  `POST /api/conversations/:conversationId/read`;
+- contacts.ts x3 - the phone create-or-get conversation route (both its
+  name-denorm and plain branches) and the email create-or-get route;
+- relayGroups.ts x5 - the close/reopen route (its already-closed and
+  already-open idempotent no-op branches plus the normal transition) and the
+  close-nag defer route (its closed-group no-op and its refreshed read).
+
+Every one is authed and internal, so the original acceptance (internal client;
+ignores unknown fields) holds for all ten unchanged. This is a precision fix,
+not a design change. Located by route rather than by line because the exact
+lines move with every slice.
 
 WHY A CONSTANT HASH, NOT A STATUS-ENCODED ONE: encoding status into the key
 (like relay_status = 'relay_group#<status>') would obligate three more writers

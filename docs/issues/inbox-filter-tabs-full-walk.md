@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app
 created: 2026-08-03
-refs: app/src/routes/inbox.ts:346, app/src/routes/inbox.ts:522
+updated: 2026-08-16
+refs: app/src/routes/inbox.ts, app/src/lib/unreadFeed.ts
 ---
 
 **Problem.** The inbox pager walks the byLastActivity GSI in chunks and applies
@@ -25,3 +26,19 @@ conversation item, so the pre-filter costs nothing). The `unknown` filter needs
 the contact to decide `needsTriage`, so it cannot pre-filter the same way; if it
 ever matters, a sparse GSI (or denormalized triage flag on the conversation) is
 the escalation. No urgency - file-and-watch.
+
+**Update (2026-08-16) - HALF of this is fixed; the issue STAYS OPEN for the
+other half.**
+
+- **UNREAD: RESOLVED.** The inbox-unread-index feature
+  (`docs/superpowers/specs/2026-08-16-inbox-unread-index-design.md`, branch
+  `feat/inbox-unread-index`) took the escalation rather than the cheap
+  pre-filter: `filter=unread` no longer walks `byLastActivity` at all. It reads
+  the new sparse `byUnread` GSI, so the tab hydrates only rows that are actually
+  unread. Same read model backs the nav badge and Today's unread sections.
+- **UNKNOWN: STILL OPEN, unchanged.** `filter=unknown` still walks
+  `byLastActivity` and still needs the contact to decide `needsTriage`, so it
+  hydrates every open conversation when matches are sparse - exactly as
+  described above. The unread work did not touch that path, and a triage flag
+  or second sparse index remains the escalation if it ever matters. Still
+  file-and-watch: this issue tracks the unknown tab from here on.

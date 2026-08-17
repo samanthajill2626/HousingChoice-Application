@@ -110,6 +110,15 @@ them.
   numbers are claimed by burn overlap, so a second group for the SAME pair can
   never reuse the first group's number - it forces a new number every time.
 
+  SEPARATE WORK IN FLIGHT (human decision, 2026-08-17): a parallel effort is
+  changing exactly this - same-pair number reuse when the prior group is CLOSED,
+  plus a strong warning when an OPEN group with the same contacts already
+  exists. It is NOT part of this mission. This spec must not pre-empt it: do not
+  add a duplicate-group check, and do not change `provisionForGroup`. The two
+  branches touch overlapping files (`services/rosterEdits.ts`,
+  `routes/relayGroups.ts`), so THIS branch is sequenced FIRST and that work
+  builds on the preview core this one introduces.
+
 ## 5. Why a standalone preview route is needed
 
 `RosterConfirmDialog` renders a server-built `RosterPreview`. The only producers
@@ -298,11 +307,24 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
   disabled. The card action still renders; the modal is where the reason is
   explained.
 - Additional members via `ContactSearchField` over `useContacts('all')` (already
-  loaded by `ContactDetail` as `editCandidates`). SCOPE: `'all'` fans out across
-  `tenant`, `landlord`, and `unknown` ONLY - team members are excluded
-  (`routes/contacts/useContacts.ts:55-66`). Partner and team-member contacts are
-  therefore NOT pickable. Accepted limitation, called out so it is not mistaken
-  for a bug; widening the roster is out of scope.
+  loaded by `ContactDetail` as `editCandidates`).
+
+  INCLUDED FIX (human decision, 2026-08-17): `TYPES_FOR.all` in
+  `routes/contacts/useContacts.ts:55-66` currently reads
+  `['tenant','landlord','unknown']` under a comment claiming it "fans out across
+  every audience type (team members excluded)". `partner` became a first-class
+  `ContactType` on 2026-07-21 (`repos/contactsRepo.ts:50`; a caseworker or
+  agency contact) and was never added, so the comment and the code disagree and
+  partners are invisible everywhere `'all'` is used. ADD `'partner'` to
+  `TYPES_FOR.all`. Team members stay excluded - they are staff, not an audience.
+
+  BLAST RADIUS, deliberately accepted: `useContacts('all')` has EIGHT call sites
+  - `contacts/ContactsList.tsx` (the "All" tab), `email/EmailTriage.tsx`,
+  `shared/PeopleCard.tsx`, `conversation/ConversationDetail.tsx`,
+  `tours/ToursPage.tsx`, `listing/ListingDetail.tsx`, and
+  `contact/ContactDetail.tsx`. All of them gain partner contacts. That is the
+  intended correction, not a side effect. Any test asserting the narrower set
+  must be updated to assert the new one, and the stale comment corrected.
 - `ContactSearchField` yields only `{ name, contactId }` and emits on EVERY
   keystroke with `contactId` undefined for uncommitted free text. A member may
   be added ONLY from a committed pick (`contactId` set); free text is never

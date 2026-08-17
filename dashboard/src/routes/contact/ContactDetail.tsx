@@ -37,6 +37,7 @@ import {
   LANDLORD_STATUS_LABELS,
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
+  type AiRunCompletedEvent,
   type ContactType,
   type LandlordStatus,
   type TenantStatus,
@@ -105,6 +106,10 @@ type ExtractionState =
       scheduledCount: number;
       wrote: number;
       suggested: number;
+      /** Note lines the run(s) appended. A run whose ONLY output is notes is
+       *  outcome `applied` in the job, so the resolved copy must be able to say
+       *  so rather than reporting "nothing new". */
+      noted: number;
       /** Threads the server could not queue at all (a partial-failure 200). */
       failedThreads: number;
       errorKind?: string;
@@ -164,6 +169,11 @@ export function ContactDetail(): React.JSX.Element {
   // press, every contact change and the timeout bump it, so a late response is
   // dropped rather than resurrecting a run nobody is watching.
   const pressGenerationRef = useRef(0);
+  // The last few ai_run.completed events, so one that beats the POST response
+  // can be replayed once the response names this press's requestId (the state
+  // machine drops events while requestId is still ''). Same-instant events
+  // only - the cap keeps it from ever being history.
+  const recentRunEventsRef = useRef<AiRunCompletedEvent[]>([]);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -210,6 +220,7 @@ export function ContactDetail(): React.JSX.Element {
       scheduledCount: 0,
       wrote: 0,
       suggested: 0,
+      noted: 0,
       failedThreads: 0,
     });
     try {
@@ -224,8 +235,19 @@ export function ContactDetail(): React.JSX.Element {
         scheduledCount: res.scheduled.length,
         wrote: 0,
         suggested: 0,
+        noted: 0,
         failedThreads: res.failed.length,
       });
+      // Replay any completion event that arrived BEFORE the POST response.
+      // The run happens on the worker poll seconds later, but the dev tick and
+      // a stalled response can invert that order - and an event dropped here
+      // could only ever resolve by the 180s timeout. The handler below records
+      // every event it sees; events for this press are recognisable by the
+      // requestId the response just gave us.
+      const early = recentRunEventsRef.current.filter((ev) => ev.requestId === res.requestId);
+      if (early.length > 0) {
+        setExtraction((prev) => early.reduce((s, ev) => applyRunEvent(s, ev, contactId), prev));
+      }
     } catch (err) {
       if (pressGenerationRef.current !== press) return;
       // The server is the only gate (4.6), so every refusal arrives here rather
@@ -247,39 +269,11 @@ export function ContactDetail(): React.JSX.Element {
   //    also makes a duplicate event for an already-reported thread a no-op.
   useEventStream({
     onAiRunCompleted: (e) => {
-      setExtraction((prev) => {
-        if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
-          return prev;
-        }
-        if (e.contactId !== undefined && e.contactId !== contactId) return prev;
-        if (!prev.pending.has(e.conversationId)) return prev;
-        const pending = new Set(prev.pending);
-        pending.delete(e.conversationId);
-        const wrote = prev.wrote + e.wrote;
-        const suggested = prev.suggested + e.suggested;
-        // First failure wins the copy; 'driver' stands for "failed, kind not
-        // reported" and maps to the generic sentence.
-        const errorKind =
-          prev.errorKind ?? (e.outcome === 'failed' ? (e.errorKind ?? 'driver') : undefined);
-        if (pending.size > 0) {
-          return { ...prev, pending, wrote, suggested, ...(errorKind !== undefined && { errorKind }) };
-        }
-        const unqueued = prev.failedThreads > 0 ? { failedThreads: prev.failedThreads } : {};
-        if (errorKind !== undefined) {
-          return {
-            phase: 'done',
-            tone: 'alert',
-            message: extractionFailureCopy(errorKind),
-            ...unqueued,
-          };
-        }
-        return {
-          phase: 'done',
-          tone: 'status',
-          message: extractionAppliedCopy(wrote, suggested),
-          ...unqueued,
-        };
-      });
+      // Recorded BEFORE the state update so an event that beats the POST
+      // response is replayable once the response names this press's requestId.
+      // A tiny ring: only same-instant events matter, never history.
+      recentRunEventsRef.current = [...recentRunEventsRef.current.slice(-7), e];
+      setExtraction((prev) => applyRunEvent(prev, e, contactId));
     },
   });
 
@@ -965,7 +959,13 @@ export function ContactDetail(): React.JSX.Element {
 
 /** The aggregate a finished run reports. `wrote` are fields the run applied
  *  itself; `suggested` are the ones parked as review chips. */
-function extractionAppliedCopy(wrote: number, suggested: number): string {
+function extractionAppliedCopy(wrote: number, suggested: number, noted: number): string {
+  // A run whose ONLY output was note lines is outcome `applied` in the job
+  // (notedLines counts toward `touched`), so reporting it as "nothing new"
+  // would contradict the run log the banner points people at.
+  if (wrote + suggested === 0 && noted > 0) {
+    return `Added ${noted} note line${noted === 1 ? '' : 's'} to the contact.`;
+  }
   if (wrote + suggested === 0) return 'Ran - nothing new to extract.';
   // Only name the halves that actually happened. "Updated 0 fields, 1
   // suggestion." was the live result of the first self-QA run, and it is not an
@@ -989,6 +989,70 @@ function extractionFailureCopy(errorKind: string): string {
   return errorKind === 'truncated'
     ? 'Extraction ran out of room - the transcript may be too long.'
     : 'Extraction failed - see Settings > AI runs.';
+}
+
+/** The results that DID land, for a resolution whose headline is a failure.
+ *  One thread failing must not erase what the other threads (or the failed
+ *  run itself, when its cursor write was the only casualty) already did -
+ *  those writes are committed and billed whether or not the banner mentions
+ *  them. Undefined when there is nothing to report. */
+function extractionPartialResults(wrote: number, suggested: number, noted: number): string | undefined {
+  const parts: string[] = [];
+  if (wrote > 0) parts.push(`${wrote} field${wrote === 1 ? '' : 's'} updated`);
+  if (suggested > 0) parts.push(`${suggested} suggestion${suggested === 1 ? '' : 's'} to review`);
+  if (noted > 0) parts.push(`${noted} note line${noted === 1 ? '' : 's'} added`);
+  if (parts.length === 0) return undefined;
+  return `Results that still landed: ${parts.join(', ')}.`;
+}
+
+/**
+ * One completion event against the indicator state - PURE, so the live handler
+ * and the early-event replay in onRunExtraction share one implementation
+ * instead of drifting. Three guards, each closing a different way the wrong
+ * run could speak for a press: requestId (an unrelated run), contactId (a
+ * different contact's run - absent on no_contact runs, so only a MISMATCH
+ * rejects), and pending membership (an unqueued thread's event, and duplicate
+ * delivery).
+ */
+function applyRunEvent(
+  prev: ExtractionState,
+  e: AiRunCompletedEvent,
+  contactId: string,
+): ExtractionState {
+  if (prev.phase !== 'running' || !prev.requestId || e.requestId !== prev.requestId) {
+    return prev;
+  }
+  if (e.contactId !== undefined && e.contactId !== contactId) return prev;
+  if (!prev.pending.has(e.conversationId)) return prev;
+  const pending = new Set(prev.pending);
+  pending.delete(e.conversationId);
+  const wrote = prev.wrote + e.wrote;
+  const suggested = prev.suggested + e.suggested;
+  const noted = prev.noted + e.notedLines;
+  // First failure wins the copy; 'driver' stands for "failed, kind not
+  // reported" and maps to the generic sentence.
+  const errorKind = prev.errorKind ?? (e.outcome === 'failed' ? (e.errorKind ?? 'driver') : undefined);
+  if (pending.size > 0) {
+    return { ...prev, pending, wrote, suggested, noted, ...(errorKind !== undefined && { errorKind }) };
+  }
+  const unqueued = prev.failedThreads > 0 ? { failedThreads: prev.failedThreads } : {};
+  if (errorKind !== undefined) {
+    const partial = extractionPartialResults(wrote, suggested, noted);
+    return {
+      phase: 'done',
+      tone: 'alert',
+      message: partial === undefined
+        ? extractionFailureCopy(errorKind)
+        : `${extractionFailureCopy(errorKind)} ${partial}`,
+      ...unqueued,
+    };
+  }
+  return {
+    phase: 'done',
+    tone: 'status',
+    message: extractionAppliedCopy(wrote, suggested, noted),
+    ...unqueued,
+  };
 }
 
 /** A refusal from the endpoint. `ApiError.message` is the RAW code and must

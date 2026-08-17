@@ -1278,6 +1278,95 @@ describe('ContactDetail', () => {
       );
     });
 
+    // Handback review (adversarial, MEDIUM): the job counts notedLines toward
+    // `applied`, so a note-only run is a REAL outcome and "nothing new to
+    // extract" would contradict the run log the banner points people at.
+    it('a note-only run says notes were added, not nothing-new', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 3,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/added 3 note lines/i);
+      expect(resolved).not.toHaveTextContent(/nothing new/i);
+    });
+
+    // Handback review (adversarial, MEDIUM): one thread failing must not erase
+    // what the other threads already did - those writes are committed and
+    // billed whether or not the banner mentions them.
+    it('a failed thread does not erase the other threads results', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 1,
+        notedLines: 0,
+      });
+      emitRunCompleted({
+        conversationId: 'conv-b',
+        runId: 'r2',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'driver',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('alert');
+      expect(resolved).toHaveTextContent(/extraction failed/i);
+      expect(resolved).toHaveTextContent(/2 fields updated/i);
+      expect(resolved).toHaveTextContent(/1 suggestion to review/i);
+    });
+
+    // Handback review (adversarial, MEDIUM): an event that beats the POST
+    // response used to be dropped - the state machine ignores events while
+    // requestId is '' - leaving the 180s timeout as the only resolution. The
+    // handler now records recent events and the press replays the ones carrying
+    // its requestId once the response names it.
+    it('an event that beats the POST response still resolves the indicator', async () => {
+      let resolvePost!: (v: { requestId: string; scheduled: string[]; failed: string[] }) => void;
+      runExtraction.mockImplementation(
+        () => new Promise((resolve) => { resolvePost = resolve; }),
+      );
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      // The run's event arrives while the POST is still in flight.
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      await act(async () => {
+        resolvePost({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /updated 1 field\./i,
+      );
+    });
+
     // Found by live self-QA, not by a unit test: this is the COMMON success
     // shape for this feature's target data, because a manual run waives the age
     // floor and one unknown-speaker line demotes every write to a suggestion

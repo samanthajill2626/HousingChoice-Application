@@ -879,6 +879,28 @@ describe('extractionRepo.fail - re-arm survival', () => {
     expect(item!.manualRequested).toBeUndefined();
     expect(item!.requestId).toBeUndefined();
   });
+
+  // Handback review (conformance, MEDIUM): the test above is VACUOUS for the
+  // flag - claim already cleared it, so park's REMOVE list was unguarded. The
+  // path where park's REMOVE actually matters is a THROWN claim: the row was
+  // never un-armed, the flag and request id are still present, and the
+  // disjunct's second arm (dueAt = listedDueAt) is what lets the park land.
+  // A dead press's requestId left behind here would ride whatever automatic
+  // run schedules this conversation next and resolve a stale indicator.
+  it('parking after a THROWN claim strips the flag and request id the claim never cleared', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.requestManualExtraction('conv-1', T1, 'req-abc');
+    // No claim: models a claim that threw. The row is still armed and flagged.
+    await repo.fail('conv-1', 'boom', null, opts({ manual: true, listedDueAt: T1 }));
+    const item = await repo.getDue('conv-1');
+    expect(item!._duePartition).toBeUndefined();
+    expect(item!.dueAt).toBeUndefined();
+    expect(item!.manualRequested).toBeUndefined();
+    expect(item!.requestId).toBeUndefined();
+    expect(item!.attempts).toBe(1);
+    expect(item!.lastError).toBe('boom');
+  });
 });
 
 // ---------------------------------------------------------------------------

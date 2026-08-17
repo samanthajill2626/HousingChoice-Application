@@ -768,8 +768,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // internal pool number violates "anchored to a placement/contact". Skip it
           // (and anything that isn't a known 1:1 type). Link to the contact page;
           // fall back to the conversation ref only if the roster isn't linked yet.
-          // A deleted contact's thread is off the boards (an unlinked thread —
-          // contactId undefined — has no contact to be deleted, so it stays);
+          // A deleted contact's thread is off the boards (an unlinked thread -
+          // contactId undefined - has no contact to be deleted, so it stays);
           // both rules are applied in the collect loop above, ahead of the cap.
           const contactId = oneToOneContactId(conv);
           unreplied.push({

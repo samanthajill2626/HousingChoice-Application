@@ -204,6 +204,7 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
     },
     async setRoleAndRevoke(userId, role) {
       // ONE write changes both (mirrors the real repo's atomic update, H1).
+      // push_subscriptions are KEPT (no revocation write drops them).
       const user = users.get(userId);
       if (!user) throw new Error(`setRoleAndRevoke: no user ${userId}`);
       user.role = role;
@@ -214,6 +215,8 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       const user = users.get(userId);
       if (!user) throw new Error(`bumpSessionEpoch: no user ${userId}`);
       user.session_epoch = sessionEpochOf(user) + 1;
+      // push_subscriptions are UNTOUCHED, like the real write (sign-out is
+      // per-device for push - the browser DELETEs its own endpoint).
       return user.session_epoch;
     },
     async listAll() {

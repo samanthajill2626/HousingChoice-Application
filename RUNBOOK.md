@@ -1328,6 +1328,23 @@ do **not** apply to it.
   pre-ring push also carries a 60s TTL, so a stale pre-ring is DROPPED by the push service rather
   than delivered minutes late; missed-call and voicemail keep the late-is-better-than-never
   default deliberately.
+- **Signing out removes push for THAT device only; other devices keep working.** Since
+  inbound-message push (2026-08-17) a subscribed device receives contact names and message bodies on
+  every inbound text/email, so the browser that signs out names its own subscription in the sign-out
+  request (the server removes it in the same write as the revocation), then unsubscribes itself - your phone
+  keeps its subscription (and its voice pre-ring) when you sign out on the tablet. Sign-out is still
+  a GLOBAL session revocation (the other devices will show Login next time), but their push
+  subscriptions are untouched and every device also re-POSTs the subscription it holds on each
+  signed-in open (boot reconcile), so drift heals itself. On the device that signed out, after
+  signing back in: **Settings -> Notifications -> enable**, then prove it with **Send test
+  notification**. Normal session expiry and an admin role change touch no subscription.
+- **Offboarding = remove the user (Settings -> Users), not sign-out.** Removing a user hard-deletes
+  the whole user row, and the push subscriptions live ON that row - so every device that user ever
+  subscribed stops receiving within the fan-out's user-list cache window (60s per process; up to
+  5 minutes only if the users table is failing at that moment), and their sessions die with the row. **A LOST device is the
+  one case sign-out cannot reach:** its subscription stays live until you remove and re-invite the
+  user (userId is deterministic from the email, so a re-invite is clean; they re-enable push on the
+  devices they still have) or the endpoint is pruned as Gone.
 
 ### iPhone (installed PWA, iOS 16.4+)
 

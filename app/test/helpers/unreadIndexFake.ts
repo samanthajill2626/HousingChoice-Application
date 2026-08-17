@@ -82,9 +82,16 @@ function keyOf(item: ConversationItem): UnreadIndexKey {
 /**
  * One page of the byUnread index over an in-memory item collection.
  *
- * `limit` is honored exactly (the real Query's Limit); `lastEvaluatedKey` is
- * returned ONLY when more flagged rows remain after the page, which is how the
- * repo contract signals "keep paging".
+ * `limit` is honored exactly (the real Query's Limit), and `lastEvaluatedKey`
+ * is returned whenever the page REACHED that limit - not merely when more rows
+ * are known to remain. That is the service's rule, and the difference is
+ * observable (adversarial A7): a walk over exactly n * limit rows costs one
+ * MORE round trip than "items remaining" modelling suggests, and the
+ * interleaving the route's cursor block is written for - a non-empty page
+ * carrying a key, followed by an empty page with none - cannot occur at all
+ * under the weaker model. Since the unit tests here assert on the NUMBER of
+ * queryUnreadPage calls, an under-counting fake would calibrate every one of
+ * those assertions one round trip short of production.
  */
 export function queryUnreadPageFromItems(
   items: Iterable<ConversationItem>,
@@ -109,9 +116,12 @@ export function queryUnreadPageFromItems(
 
   const page = remaining.slice(0, opts.limit);
   const last = page[page.length - 1];
-  const more = remaining.length > page.length;
+  // LIMIT REACHED, not "rows remain": DynamoDB stops at the Limit and hands
+  // back the position it stopped at, so the caller has to ask again to learn
+  // that the stream ended.
+  const limitReached = page.length === opts.limit;
   return {
     items: page,
-    ...(more && last !== undefined && { lastEvaluatedKey: keyOf(last) }),
+    ...(limitReached && last !== undefined && { lastEvaluatedKey: keyOf(last) }),
   };
 }

@@ -452,6 +452,35 @@ describe('iterateUnreadConversations', () => {
     expect(calls.queryUnreadPage).toBe(1);
   });
 
+  it('pays the extra Query DynamoDB charges for a page that exactly fills its Limit', async () => {
+    // Adversarial A7. The real service returns a LastEvaluatedKey whenever the
+    // request's Limit was REACHED, whether or not anything remains - so an
+    // exact-multiple walk costs one more round trip than "items remaining"
+    // modelling suggests, and the "non-empty page carrying a LEK followed by an
+    // empty page with none" interleaving that the route's cursor block says
+    // "gets here in production" could not be produced by the fake at all. Every
+    // query-count assertion in this file is calibrated against that model, so
+    // the model has to be the service's.
+    const items = visibleSeries(100); // exactly UNREAD_QUERY_PAGE_SIZE
+    const calls = emptyQueryCalls();
+    const state = freshState();
+
+    const yielded = await drain(
+      iterateUnreadConversations(
+        { conversations: makeConversations(items, calls) },
+        { budget: UNREAD_WALK_LIMIT },
+        state,
+      ),
+    );
+
+    expect(yielded).toHaveLength(100);
+    expect(state.scanned).toBe(100);
+    // TWO queries: the full page WITH a key, then the empty page that proves
+    // the stream really ended. Only the second one can set scanExhausted.
+    expect(calls.queryUnreadPage).toBe(2);
+    expect(state.scanExhausted).toBe(true);
+  });
+
   it('resumes exactly after startAfter', async () => {
     const items = visibleSeries(5);
     const calls = emptyQueryCalls();

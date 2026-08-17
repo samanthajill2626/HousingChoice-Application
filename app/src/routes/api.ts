@@ -52,7 +52,6 @@ import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
-  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
@@ -146,6 +145,7 @@ import {
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
+import { markUnread } from '../lib/markUnread.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -2055,6 +2055,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // thread the unread feed would not show anyway - a closed relay thread or a
   // group thread outside group_open (isUnreadVisible) - so a manual flag can
   // never plant an invisible byUnread resident (backfill rule 3 territory).
+  //
+  // H1: that refusal is a GUARANTEE, not a pre-check. The reads below stay
+  // because they answer with specific errors, but the write itself is
+  // conditional (conversationsRepo.setUnread) and lib/markUnread.ts classifies
+  // a refusal, so a close committing between this read and that write loses.
   router.post('/conversations/:conversationId/unread', async (req, res) => {
     const { conversationId } = req.params;
     mergeContext({ conversationId });
@@ -2074,15 +2079,32 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(409).json({ error: 'thread_closed' });
       return;
     }
-    let updated = conversation;
-    if ((conversation.unread_count ?? 0) === 0) {
-      // Build the returned/emitted image from the write's own return (a
-      // re-read is eventually consistent and could hand back the old count).
-      const count = await conversations.incrementUnread(conversationId);
-      updated = { ...conversation, unread_count: count, unread_flag: UNREAD_FLAG_VALUE };
+    if ((conversation.unread_count ?? 0) > 0) {
+      // Already unread - idempotent no-op. NO write, so NO event: H1 aligns
+      // this arm with inbox.ts's flagUnread, which has always been silent here.
+      // The delivered code emitted unconditionally, announcing a write that did
+      // not happen; no test pinned that, and every client handler is a refetch
+      // trigger, so the only change is one fewer redundant event.
+      res.json({ conversation });
+      return;
     }
-    events.emit('conversation.updated', toConversationUpdatedEvent(updated));
-    res.json({ conversation: updated });
+    const outcome = await markUnread(conversations, conversation);
+    if (outcome.kind === 'gone') {
+      // This route was named BY conversationId, so "gone" is genuinely a 404 -
+      // unlike the fan-in routes, where the client named a contact or a phone.
+      res.status(404).json({ error: 'conversation_not_found' });
+      return;
+    }
+    if (outcome.kind === 'ineligible') {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
+    // Emit ONLY on a real write, from the write's own return (ALL_NEW) - a
+    // re-read is eventually consistent and could hand back the old count.
+    if (outcome.kind === 'wrote') {
+      events.emit('conversation.updated', toConversationUpdatedEvent(outcome.item));
+    }
+    res.json({ conversation: outcome.item });
   });
 
   // GET /api/events — the live-update SSE stream (M1.2).

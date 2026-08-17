@@ -60,6 +60,21 @@ describe('GET /api/contacts/:id - emails serialization (A1)', () => {
 });
 
 describe('POST /api/contacts/:id/emails - attach (A1)', () => {
+  it('makes the first address primary for a contact with no email', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-noemail', type: 'tenant' });
+
+    const res = await auth(
+      request(app).post('/api/contacts/c-noemail/emails').send({ email: 'first@example.com' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.contact.email).toBe('first@example.com');
+    expect(res.body.contact.emails).toEqual([
+      expect.objectContaining({ email: 'first@example.com', primary: true }),
+    ]);
+  });
+
   it('attaches an address (200), normalizes it, updates emails[], audits', async () => {
     const { app, world } = makeWebhookHarness();
     seedContact(world, { contactId: 'c-1', type: 'landlord', email: 'marcus@example.com' });

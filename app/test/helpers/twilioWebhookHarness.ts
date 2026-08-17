@@ -1655,17 +1655,19 @@ export function createFakeWorld(): FakeWorld {
         return contact;
       }
       const now = new Date().toISOString();
+      const isFirst = emails.length === 0;
       contact.emails = [
         ...emails,
         {
           email,
-          primary: false,
+          primary: isFirst,
           firstSeenAt: now,
           lastSeenAt: now,
           ...(label !== undefined && { label }),
         },
       ];
-      fakePutEmailPointer(email, contactId);
+      if (isFirst) contact.email = email;
+      else fakePutEmailPointer(email, contactId);
       return contact;
     },
     async setPrimaryEmail(contactId, email, { primary, label }) {

@@ -62,6 +62,26 @@ export const BADGE_COUNT_CAP = 100;
  */
 export const UNREAD_DELETED_PROBE_WARN = 25;
 
+/**
+ * Resurfacing probes ONE COLLECT may issue before it STOPS WALKING (review fix
+ * wave 1, adversarial A2; spec 4.4 amended).
+ *
+ * The tripwire above only warns. Nothing bounded the work, and a hidden deleted
+ * candidate never counts toward `maxRows`, so the row cap could not stop the
+ * walk either: a wall of hidden deleted-contact threads made the badge - the
+ * app's highest-frequency request - pay one contact Query PLUS one message
+ * probe per row, thousands of serial round trips, and then return zero.
+ *
+ * Past this many probes the collect stops and reports `truncated`, i.e. the
+ * count is a FLOOR, exactly as it does when the raw-scan budget runs out. The
+ * `scanPosition` is still exact, so a pager can resume past the wall.
+ *
+ * DELIBERATELY ONE ABOVE THE WARN THRESHOLD: tripping the bound must always be
+ * a state the tripwire also reports, otherwise the fix would silence the very
+ * signal that says accrual needs attention.
+ */
+export const UNREAD_DELETED_PROBE_LIMIT = UNREAD_DELETED_PROBE_WARN + 1;
+
 /** Rows fetched per internal Query page (spec 4.3: "Query Limit ~100"). */
 const UNREAD_QUERY_PAGE_SIZE = 100;
 
@@ -342,7 +362,13 @@ export interface CollectResult {
    * report page one with a null cursor.
    */
   consumedAll: boolean;
-  /** The request budget ran out before either the cap or the supply did. */
+  /**
+   * The walk stopped EARLY without filling the cap or draining the supply, so
+   * the candidate list is a FLOOR. Two causes, deliberately reported the same
+   * way because the caller's answer is identical: the request's raw-scan budget
+   * ran out, or the deleted-resurfacing probe bound did
+   * (UNREAD_DELETED_PROBE_LIMIT).
+   */
   truncated: boolean;
   /** `maxRows` stopped emission (the candidate list is a FLOOR). */
   capped: boolean;
@@ -395,6 +421,21 @@ export async function collectUnreadRows(
   const seenContacts = new Map<string, { candidate: ContactCandidate; emitted: boolean }>();
   let deletedProbes = 0;
   let capped = false;
+  /** The probe bound stopped the walk (see UNREAD_DELETED_PROBE_LIMIT). */
+  let probeBudgetSpent = false;
+
+  /**
+   * PER-COLLECT memoization of contact resolution, keyed on the PARTICIPANT KEY
+   * (adversarial A2(a) - the same shape aggregateInbox's `contactConvsCache`
+   * has always had). Without it the badge issued one uncached contact Query per
+   * scanned index item. A miss is cached too: an unknown number repeated across
+   * threads must not re-ask.
+   *
+   * A THROWN lookup is NOT cached - the degrade below is best-effort, and
+   * caching a transient failure would suppress the whole request's retries.
+   */
+  const contactByPhone = new Map<string, ContactItem | undefined>();
+  const contactByEmail = new Map<string, ContactItem | undefined>();
 
   /**
    * Contact resolution in the inbox reader's order: participant_phone first,
@@ -407,8 +448,22 @@ export async function collectUnreadRows(
     const email = item.participant_email;
     try {
       let contact: ContactItem | undefined;
-      if (phone !== undefined) contact = await deps.contacts.findByPhone(phone);
-      if (!contact && email !== undefined) contact = await deps.contacts.findByEmail(email);
+      if (phone !== undefined) {
+        if (contactByPhone.has(phone)) {
+          contact = contactByPhone.get(phone);
+        } else {
+          contact = await deps.contacts.findByPhone(phone);
+          contactByPhone.set(phone, contact);
+        }
+      }
+      if (!contact && email !== undefined) {
+        if (contactByEmail.has(email)) {
+          contact = contactByEmail.get(email);
+        } else {
+          contact = await deps.contacts.findByEmail(email);
+          contactByEmail.set(email, contact);
+        }
+      }
       return contact;
     } catch (err) {
       log.warn({ err }, 'unread feed: contact lookup failed (best-effort)');
@@ -431,6 +486,14 @@ export async function collectUnreadRows(
    * suppressing a genuine resurfacing.
    */
   const threadResurfaces = async (item: ConversationItem, deletedAt: string): Promise<boolean> => {
+    // THE HARD BOUND (adversarial A2(b)). Past the limit this collect decides
+    // nothing more: the thread is treated as not-emitted and the walk stops
+    // right after, so the result is a FLOOR carrying `truncated` rather than an
+    // unbounded pile of reads that returns the same answer anyway.
+    if (deletedProbes >= UNREAD_DELETED_PROBE_LIMIT) {
+      probeBudgetSpent = true;
+      return false;
+    }
     deletedProbes += 1;
     try {
       const page = await deps.messages.listByConversation(item.conversationId, { limit: 1 });
@@ -529,6 +592,12 @@ export async function collectUnreadRows(
       capped = true;
       break;
     }
+    // The probe bound, checked AFTER the cap so a collect that filled its rows
+    // is reported as `capped` (a supply statement) rather than `truncated` (a
+    // budget statement). Leaving the loop with neither the cap nor the stream
+    // exhausted is what makes `truncated` true below - the same posture the
+    // raw-scan budget produces, and the same forward path.
+    if (probeBudgetSpent) break;
   }
 
   return {

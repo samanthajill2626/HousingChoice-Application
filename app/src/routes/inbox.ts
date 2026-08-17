@@ -336,11 +336,21 @@ function decodeUnreadCursor(cursor: string): UnreadCursor {
   if (typeof payload.a !== 'string' || typeof payload.c !== 'string') {
     throw new InboxBadRequestError('invalid cursor');
   }
+  // NON-EMPTY, not merely string (adversarial A4). Both fields become KEY
+  // attributes of the synthesized ExclusiveStartKey, and DynamoDB permits an
+  // empty String for a non-key attribute ONLY - an empty range or table key is
+  // a ValidationException, which nothing on this path maps, so a hand-made
+  // cursor turned the one decoder written to guarantee 400s into a 500.
+  if (payload.a.length === 0 || payload.c.length === 0) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
   if (!Array.isArray(payload.s)) throw new InboxBadRequestError('invalid cursor');
   // The server never mints one this long (it returns `truncated` instead), so
   // an over-long seen-set can only be tampered input.
   if (payload.s.length > SEEN_SET_MAX) throw new InboxBadRequestError('invalid cursor');
-  if (payload.s.some((id) => typeof id !== 'string')) {
+  // An empty id would never match a contactId, so it can only be tampering -
+  // and the server never mints one (a contactId is always non-empty).
+  if (payload.s.some((id) => typeof id !== 'string' || id.length === 0)) {
     throw new InboxBadRequestError('invalid cursor');
   }
   return { u: 1, a: payload.a, c: payload.c, s: payload.s as string[] };
@@ -1021,12 +1031,19 @@ export async function aggregateInbox(
       if (collected.scanPosition !== undefined) scanPosition = collected.scanPosition;
 
       for (const candidate of collected.candidates) {
-        // The seen-set grows for EVERY contact candidate, kept or dropped: a
-        // dropped candidate still consumed its scan range, and re-emitting it
-        // on the next iteration would duplicate a row key on one page.
-        if (candidate.kind === 'contact') seen.add(candidate.contactId);
         const row = await hydrateUnread(candidate);
-        if (row !== undefined) unreadRows.push(row);
+        if (row === undefined) continue;
+        // The seen-set records EMITTED contacts ONLY (spec 4.5 step 1, amended
+        // in review fix wave 1 - adversarial A3). Adding a DROPPED candidate
+        // suppressed it for the rest of the paging session, and the drop's own
+        // cause is a lagging participant GSI: the badge, which never hydrates,
+        // kept counting a row no page could ever show. Within-page duplication
+        // is not what this set defends - `scanPosition` advances past every
+        // consumed item, so a collect never re-offers one - it defends
+        // CROSS-PAGE and cross-iteration re-emission of a contact whose OLDER
+        // thread is still ahead in the index.
+        if (candidate.kind === 'contact') seen.add(candidate.contactId);
+        unreadRows.push(row);
       }
 
       if (unreadRows.length >= limit) break; // page full

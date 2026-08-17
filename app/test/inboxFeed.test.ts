@@ -20,6 +20,10 @@ import {
   type InboxRouterDeps,
   type InboxRow,
 } from '../src/routes/inbox.js';
+import {
+  UNREAD_DELETED_PROBE_LIMIT,
+  UNREAD_DELETED_PROBE_WARN,
+} from '../src/lib/unreadFeed.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
@@ -1439,7 +1443,7 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
     expect(rowKeys(page)).toEqual(['c-live']);
   });
 
-  it('PROBE SENTINEL: resurfacing probes accumulate per REQUEST and fire the tripwire once', async () => {
+  it('PROBE BOUND: a wall of hidden deleted threads truncates the page and fires the tripwire once', async () => {
     const warn = vi.fn();
     const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never;
     const contacts: ContactItem[] = [];
@@ -1480,13 +1484,24 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       makeDeps({ contacts, conversations, latestMessage }, undefined, logger),
     );
 
-    expect(page.rows).toHaveLength(3);
-    // 30 probes > UNREAD_DELETED_PROBE_WARN (25), accumulated by the REQUEST.
+    // DELIBERATE POSTURE CHANGE (review fix wave 1, adversarial A2b): the walk
+    // used to pay a contact Query AND a message probe for every hidden row and
+    // only THEN reach the live ones. It now stops at UNREAD_DELETED_PROBE_LIMIT
+    // probes and reports a FLOOR - the three rows behind the wall are withheld
+    // with `truncated` rather than bought at unbounded cost. The residue itself
+    // is what has to go (backfill rule 3 / the delete-time reset), and the
+    // tripwire below is the signal that says so.
+    expect(page.rows).toHaveLength(0);
+    expect(page.truncated).toBe(true);
     const probeWarns = warn.mock.calls.filter(
       (c) => (c[0] as { event?: string })?.event === 'unread_deleted_probe_tripwire',
     );
     expect(probeWarns).toHaveLength(1);
-    expect(probeWarns[0]![0]).toMatchObject({ probes: 30, threshold: 25 });
+    // The bound sits ONE above the tripwire, so tripping it always warns.
+    expect(probeWarns[0]![0]).toMatchObject({
+      probes: UNREAD_DELETED_PROBE_LIMIT,
+      threshold: UNREAD_DELETED_PROBE_WARN,
+    });
   });
 
   it('SCAN SENTINEL: the raw-scan total accumulates per REQUEST, not per collect', async () => {
@@ -1576,6 +1591,113 @@ describe('aggregateInbox - filter=unread over the byUnread index', () => {
       makeDeps(seed),
     );
     expect(page.rows.length).toBeGreaterThan(0);
+  });
+
+  it('CURSOR VALIDATION: an EMPTY scan position (or seen-set entry) is a 400, never a malformed key', async () => {
+    // Adversarial A4. `a` and `c` become KEY attributes of the byUnread
+    // ExclusiveStartKey, and DynamoDB refuses an empty key attribute with a
+    // ValidationException - which nothing on this path maps, so the one decoder
+    // written to guarantee 400s produced a 500 instead.
+    const seed = unreadWorld(2);
+    const cursorFor = (payload: unknown): string =>
+      Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+
+    await expect(
+      aggregateInbox(
+        { filter: 'unread', limit: 25, cursor: cursorFor({ u: 1, a: '', c: 'conv-x', s: [] }) },
+        makeDeps(seed),
+      ),
+    ).rejects.toBeInstanceOf(InboxBadRequestError);
+
+    await expect(
+      aggregateInbox(
+        { filter: 'unread', limit: 25, cursor: cursorFor({ u: 1, a: T(23), c: '', s: [] }) },
+        makeDeps(seed),
+      ),
+    ).rejects.toBeInstanceOf(InboxBadRequestError);
+
+    await expect(
+      aggregateInbox(
+        {
+          filter: 'unread',
+          limit: 25,
+          cursor: cursorFor({ u: 1, a: T(23), c: 'conv-x', s: [''] }),
+        },
+        makeDeps(seed),
+      ),
+    ).rejects.toBeInstanceOf(InboxBadRequestError);
+
+    // A well-formed cursor still resumes - this is a shape check, not a blanket
+    // refusal.
+    const page = await aggregateInbox(
+      {
+        filter: 'unread',
+        limit: 25,
+        cursor: cursorFor({ u: 1, a: T(23), c: 'conv-none', s: ['c-000'] }),
+      },
+      makeDeps(seed),
+    );
+    expect(page.rows.length).toBeGreaterThan(0);
+  });
+
+  it('SEEN-SET: a candidate DROPPED by hydration stays reachable (never suppressed for the session)', async () => {
+    // Adversarial A3, reproduced. c-b owns TWO unread threads and is the newest
+    // thing in the index, but the byParticipantPhone image hydration reads lags
+    // INDEPENDENTLY of byUnread (spec 6) and reports nothing for it, so its
+    // fresh unread sum is 0 and the row drops. Recording a DROPPED candidate in
+    // the seen-set suppressed that contact for the WHOLE paging session while
+    // the badge - which never hydrates - went on counting it: the operator saw
+    // an unread count with no row anywhere to reach.
+    const bNewPhone = '+14045553001';
+    const bOldPhone = '+14045553002';
+    const aPhone = '+14045553003';
+    const contacts: ContactItem[] = [
+      {
+        contactId: 'c-b',
+        type: 'tenant',
+        phones: [{ phone: bNewPhone, primary: true }, { phone: bOldPhone }],
+      },
+      { contactId: 'c-a', type: 'tenant', phone: aPhone },
+    ];
+    const bNew = conv({
+      conversationId: 'conv-b-new',
+      participant_phone: bNewPhone,
+      last_activity_at: T(12),
+      unread_count: 1,
+    });
+    const aConv = conv({
+      conversationId: 'conv-a',
+      participant_phone: aPhone,
+      last_activity_at: T(10),
+      unread_count: 1,
+    });
+    const bOld = conv({
+      conversationId: 'conv-b-old',
+      participant_phone: bOldPhone,
+      last_activity_at: T(8),
+      unread_count: 1,
+    });
+    const conversations = [bNew, aConv, bOld];
+
+    // PAGE 1 while the participant image still hides BOTH of c-b's threads.
+    const page1 = await aggregateInbox(
+      { filter: 'unread', limit: 1 },
+      makeDeps({ contacts, conversations, participantProjection: [aConv] }),
+    );
+    expect(rowKeys(page1)).toEqual(['c-a']);
+    expect(page1.nextCursor).not.toBeNull();
+    const resumed = JSON.parse(
+      Buffer.from(page1.nextCursor!, 'base64url').toString('utf8'),
+    ) as { s: string[] };
+    expect(resumed.s).toEqual(['c-a']);
+
+    // PAGE 2 once that image caught up. c-b's older thread is still behind the
+    // scan position, so a contact that was never EMITTED is offered again.
+    const page2 = await aggregateInbox(
+      { filter: 'unread', limit: 1, cursor: page1.nextCursor! },
+      makeDeps({ contacts, conversations }),
+    );
+    expect(rowKeys(page2)).toEqual(['c-b']);
   });
 
   it('AGREEMENT: the pager and the index path build the SAME contact row', async () => {

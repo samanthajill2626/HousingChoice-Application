@@ -21,6 +21,8 @@ import {
   iterateUnreadConversations,
   toExclusiveStartKey,
   warnDeletedProbes,
+  BADGE_COUNT_CAP,
+  UNREAD_DELETED_PROBE_LIMIT,
   UNREAD_DELETED_PROBE_WARN,
   UNREAD_WALK_LIMIT,
   UNREAD_WALK_WARN,
@@ -578,6 +580,43 @@ describe('collectUnreadRows - grouping', () => {
     expect(result.remainingBudget).toBe(UNREAD_WALK_LIMIT - items.length);
   });
 
+  it('MEMOIZES contact resolution per collect: two threads on one participant key cost ONE lookup', async () => {
+    // Adversarial A2(a): the badge issued one uncached contact Query per
+    // scanned index item, on the app's highest-frequency request, while
+    // aggregateInbox has carried a per-request contact cache all along.
+    const phone = '+15550000501';
+    const email = 'memo@example.com';
+    const items = [
+      conv({ conversationId: 'memo-newer', last_activity_at: tsAt(0), participant_phone: phone }),
+      conv({ conversationId: 'memo-older', last_activity_at: tsAt(1), participant_phone: phone }),
+      // An email-only thread of a contact with NO phone: the resolver falls
+      // through to findByEmail, and that lookup memoizes on its own key.
+      conv({ conversationId: 'memo-mail-1', last_activity_at: tsAt(2), participant_email: email }),
+      conv({ conversationId: 'memo-mail-2', last_activity_at: tsAt(3), participant_email: email }),
+    ];
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(
+          [
+            contact({ contactId: 'contact-memo', phones: [{ phone, primary: true }] }),
+            contact({ contactId: 'contact-mail', emails: [{ email, primary: true }] }),
+          ],
+          calls,
+        ),
+        messages: makeMessages({}, calls),
+      },
+      { maxRows: 100, budget: UNREAD_WALK_LIMIT },
+    );
+
+    expect(candidateIds(result.candidates)).toEqual(['contact-memo', 'contact-mail']);
+    // ONE lookup per distinct participant key, not one per scanned item.
+    expect(calls.findByPhone).toBe(1);
+    expect(calls.findByEmail).toBe(1);
+  });
+
   it('skips excluded contacts entirely while their items still consume scan range', async () => {
     const { items, contacts } = contactSeries(4);
     const calls = emptyCollectCalls();
@@ -944,5 +983,55 @@ describe('collectUnreadRows - deleted-contact resurfacing', () => {
     warnDeletedProbes(spy.logger, result.deletedProbes);
     expect(spy.warn.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(spy.warn.mock.calls[0]?.[0]).toMatchObject({ event: 'unread_deleted_probe_tripwire' });
+  });
+
+  it('BOUNDS the probe work: a wall of hidden deleted threads STOPS the walk instead of paying for it', async () => {
+    // Adversarial A2(b), reproduced at a smaller scale (the reviewer measured
+    // 4,020 serial round trips on ONE authed badge request over 2,500 rows).
+    // Hidden deleted candidates never count toward maxRows, so the cap could
+    // not stop the walk and the badge paid a contact Query PLUS a message probe
+    // for every one of them - then returned 0.
+    const hidden = 200;
+    const items: ConversationItem[] = [];
+    const contacts: ContactItem[] = [];
+    const latest: Record<string, MessageItem> = {};
+    for (let i = 0; i < hidden; i += 1) {
+      const phone = `+1555${String(4_000_000 + i)}`;
+      const id = `hidden-${String(hidden - i).padStart(4, '0')}`;
+      items.push(conv({ conversationId: id, last_activity_at: tsAt(i), participant_phone: phone }));
+      contacts.push(deletedContact(`contact-hidden-${String(i).padStart(4, '0')}`, phone));
+      // A post-deletion OUTBOUND resurfaces nobody: every row is hidden.
+      latest[id] = msg({ created_at: AFTER_DELETE, direction: 'outbound' });
+    }
+    const calls = emptyCollectCalls();
+
+    const result = await collectUnreadRows(
+      {
+        conversations: makeConversations(items, calls),
+        contacts: makeContacts(contacts, calls),
+        messages: makeMessages(latest, calls),
+      },
+      { maxRows: BADGE_COUNT_CAP, budget: UNREAD_WALK_LIMIT },
+    );
+
+    // The count is a FLOOR reported as truncated, not a silent zero paid for in
+    // full: the caller can tell the walk stopped early.
+    expect(result.candidates).toEqual([]);
+    expect(result.truncated).toBe(true);
+    expect(result.consumedAll).toBe(false);
+    expect(result.capped).toBe(false);
+    // The work is bounded by the probe limit, NOT by the number of hidden rows.
+    expect(result.deletedProbes).toBe(UNREAD_DELETED_PROBE_LIMIT);
+    expect(calls.listByConversation).toBe(UNREAD_DELETED_PROBE_LIMIT);
+    expect(calls.findByPhone).toBeLessThanOrEqual(UNREAD_DELETED_PROBE_LIMIT + 1);
+    // One index page, not the two a 200-row walk would have pulled.
+    expect(calls.queryUnreadPage).toBe(1);
+    // The bound is set ABOVE the tripwire on purpose, so tripping it is always
+    // a state the WARN also reports.
+    expect(UNREAD_DELETED_PROBE_LIMIT).toBeGreaterThan(UNREAD_DELETED_PROBE_WARN);
+    // The position is still exact, so the caller can resume past the wall.
+    expect(result.scanPosition?.conversationId).toBe(
+      `hidden-${String(hidden - UNREAD_DELETED_PROBE_LIMIT).padStart(4, '0')}`,
+    );
   });
 });

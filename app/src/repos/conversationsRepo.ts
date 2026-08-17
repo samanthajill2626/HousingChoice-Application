@@ -270,6 +270,17 @@ export interface ConversationItem {
    */
   twilio_participant_map?: Record<string, string>;
   /**
+   * `group_text` only: the business number the rail was VERIFIED to carry as
+   * its projected-address participant - i.e. the one Author a post can use.
+   * Written by the same fenced finalize as the sid. `ensureGroupRail` trusts a
+   * stored rail without a Twilio read ONLY while this equals the current
+   * BUSINESS_PHONE_NUMBER; absent (every rail finalized before 2026-08-17) or
+   * different (the number changed under the rail), it re-reads Twilio and
+   * repairs. Prod incident 2026-08-17: 135 rails were posted to as a number
+   * they did not carry, and every staff group reply failed with 50513.
+   */
+  twilio_projected_address?: string;
+  /**
    * `group_text` only: the in-flight rail-creation claim ({token, at}).
    * ensureGroupRail claims it before talking to Twilio and setTwilioConversation
    * finalizes CONDITIONAL on the token still matching, so an expired claimant
@@ -915,6 +926,13 @@ export interface ConversationsRepo {
     twilioConversationSid: string,
     participantMap: Record<string, string>,
     claimToken: string,
+    /**
+     * The business number the rail was verified to carry as its projected
+     * participant (`twilio_projected_address`). Lands in the SAME fenced write
+     * as the sid, so a rail is never "verified" for an author it was not
+     * checked against.
+     */
+    projectedAddress: string,
   ): Promise<ConversationItem | undefined>;
   /**
    * MIGRATION (group-texting spec section 9): flip an imported
@@ -2241,7 +2259,8 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             // The map goes with the sid: a map without a sid describes a rail
             // that no longer exists, and every receipt mapped through it would
             // be attributed to a dead conversation.
-            UpdateExpression: 'REMOVE twilio_conversation_sid, twilio_participant_map',
+            UpdateExpression:
+              'REMOVE twilio_conversation_sid, twilio_participant_map, twilio_projected_address',
             ConditionExpression: 'attribute_exists(conversationId) AND twilio_conversation_sid = :sid',
             ExpressionAttributeValues: { ':sid': expectedSid },
           }),
@@ -2259,15 +2278,23 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       }
     },
 
-    async setTwilioConversation(conversationId, twilioConversationSid, participantMap, claimToken) {
+    async setTwilioConversation(
+      conversationId,
+      twilioConversationSid,
+      participantMap,
+      claimToken,
+      projectedAddress,
+    ) {
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
-            // The sid and its MBxx map land together (a sid without a map makes
-            // late receipts unattributable), and the claim is cleared in the same
-            // write so the rail is never "done" while still marked in-flight.
+            // The sid, its MBxx map AND the verified projected address land
+            // together (a sid without a map makes late receipts unattributable;
+            // a sid without a verified author is a rail every post fails on),
+            // and the claim is cleared in the same write so the rail is never
+            // "done" while still marked in-flight.
             //
             // AND `rail_failed` GOES WITH IT (fix wave 5, adversarial 10). It
             // used to be written on every non-terminal path and cleared by
@@ -2279,7 +2306,8 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             // "this rail is broken right now" rather than "this rail was broken
             // at some point in its history".
             UpdateExpression:
-              'SET twilio_conversation_sid = :sid, twilio_participant_map = :map ' +
+              'SET twilio_conversation_sid = :sid, twilio_participant_map = :map, ' +
+              'twilio_projected_address = :projected ' +
               'REMOVE #rc, rail_failed',
             // FENCING (spec 15.3): only the claimant that still owns the token may
             // finalize. An expired claimant waking up late fails here rather than
@@ -2289,6 +2317,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             ExpressionAttributeValues: {
               ':sid': twilioConversationSid,
               ':map': participantMap,
+              ':projected': projectedAddress,
               ':token': claimToken,
             },
             ReturnValues: 'ALL_NEW',

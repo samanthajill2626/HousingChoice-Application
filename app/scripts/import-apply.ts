@@ -401,6 +401,15 @@ if (unroutable.calls.length > 0) {
 }
 console.log(`  units written           : ${report.units.written}`);
 console.log(`    dropped by review     : ${report.units.skippedDropped}`);
+// A dry run never calls upsertUnit, so it cannot know this - and printing a
+// bare 0 would read as "nobody has edited anything", which is exactly the
+// reassurance a dry run is NOT entitled to give.
+console.log(
+  `    human-owned           : ` +
+    (dryRun
+      ? 'not determined on a dry run (no rows were read)'
+      : `${report.units.humanOwned} (edited in the dashboard - only absent fields were filled)`),
+);
 
 if (report.warnings.length > 0) {
   console.log(`\n--- warnings (${report.warnings.length}) ---`);

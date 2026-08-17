@@ -247,6 +247,26 @@ export class ConversationsEngine {
     return participant;
   }
 
+  /** DELETE /Conversations/:sid/Participants/:psid. `false` when already gone. */
+  removeParticipant(record: ConversationRecord, participantSid: string): boolean {
+    const removed = this.store.removeParticipant(record, participantSid);
+    if (removed) this.emitUpdated(record);
+    return removed;
+  }
+
+  /**
+   * Can this author post into the rail? Real Group MMS refuses with 50513
+   * unless the Author is a participant - for us, the business number carried
+   * as a PROJECTED address (a member address would also pass, as it does live).
+   * Modelled because it is exactly the refusal production hit on 2026-08-17:
+   * 135 rails posted to as a number they did not carry, and this fake let every
+   * one of those posts through, so no test could see it.
+   */
+  isAuthorParticipant(record: ConversationRecord, author: string | undefined): boolean {
+    if (author === undefined || author.length === 0) return false;
+    return record.participants.some((p) => p.projectedAddress === author || p.address === author);
+  }
+
   /**
    * Post a message into the rail: fan it out to every member's fake phone and
    * schedule the per-participant `onDeliveryUpdated` progression.
@@ -259,9 +279,14 @@ export class ConversationsEngine {
   postMessage(record: ConversationRecord, input: PostMessageInput): ConversationRecord['messages'][number] {
     const sid = this.mintSid('IM');
     const now = this.clock.nowIso();
-    const business = this.store.businessParticipant(record);
     const members = this.store.memberParticipants(record);
-    const from = business?.projectedAddress ?? input.author ?? '';
+    // The legs go out FROM the author, which `isAuthorParticipant` has already
+    // pinned to a projected address the rail carries - so this is the business
+    // number, never a guess at one. (Before 2026-08-17 this fell back to "any
+    // projected participant, else the author", which is how a rail with the
+    // WRONG business number still fanned out happily in every test.)
+    const business = record.participants.find((p) => p.projectedAddress === input.author);
+    const from = input.author ?? '';
 
     // SKIPPED, not failed. A participant on the suppression list gets no leg at
     // all - no carrier message, no state, and (because the progression is

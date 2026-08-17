@@ -32,9 +32,11 @@ it appears under the Unread filter - reusing the unread primitives merged
 Two bounds on that goal, both established by review and both real:
 
 - **The ~100-row cap (section 10.1).** All three unread surfaces are ordered
-  newest-`last_activity_at`-first and capped at 100. Because D4 forbids touching
-  the timestamp, a thread marked unread re-enters at its OLD position. On an
-  inbox with more than ~100 newer unread rows it contributes to none of them.
+  newest-`last_activity_at`-first and capped. Because D4 forbids touching the
+  timestamp, a thread marked unread re-enters at its OLD position, so past the
+  cap it contributes to none of them. Accepted by the human at the spec gate on
+  the grounds that newer unread is genuinely more pressing - conditional on the
+  Unread list SAYING it is capped, which it does not do today (7.4).
 - **Today covers 1:1 threads only.** Today's unread pass skips both group kinds
   (`app/src/routes/today.ts:698`), so marking a relay group or group text unread
   reaches the badge and the Unread filter but never Today.
@@ -463,7 +465,43 @@ and that ruling is pinned by regression spies
 from them, and there is nothing to roll back. `rollbackRowsCleared` belongs to
 `useInbox` alone (7.2), which is the only surface here that records clears.
 
-### 7.4 Nav badge and Today
+### 7.4 The Unread list's truncation notice (human ruling, spec gate)
+
+The Unread feed pages 30 rows at a time and reaches ~120+ unread rows before
+`SEEN_SET_MAX` ends it with `nextCursor: null` AND `truncated: true`
+(`inbox.ts:217-231`). Today, a NON-EMPTY truncated page ends SILENTLY: `hasMore`
+is false so no "Load more" renders, and the truncated banner in `Inbox.tsx`
+is gated on `serverEndedEarlyEmpty` - i.e. it fires only when the page came back
+with no rows at all. A partially-filled truncated list therefore looks exactly
+like the end of the feed.
+
+That is a pre-existing gap in the merged unread work, not one this feature
+introduces. It is in scope here by the human's explicit ruling at the spec gate:
+a cap is acceptable, but only if the list SAYS it is capped, and this feature's
+whole point is putting things into that list.
+
+Add a notice to the Unread list, rendered when
+`inbox.truncated && inbox.serverRowCount > 0`:
+
+- Gate on `serverRowCount`, NOT `rows.length` - the same adversarial-4 lesson
+  the existing banner records: `truncated` and `serverRowCount` both describe
+  the SERVER page, while `rows` is the client-filtered list that empties as the
+  operator marks rows read. Keyed on `rows`, the notice would vanish mid-triage.
+- The condition is the exact complement of `serverEndedEarlyEmpty`
+  (`serverRowCount === 0 && truncated`), so the notice and the empty/error
+  surface can never render together.
+- Reuse the existing `styles.notice` treatment the group-text truncation already
+  uses (`Inbox.tsx:88-116`).
+- **No count in the copy.** That same block records why: on the Unread filter
+  the operator clears rows while the server's flag stands, so any count reaches
+  zero with the notice still rendering. Copy states the fact without a number,
+  e.g. "Showing the most recent unread. There are older unread threads not shown
+  here."
+
+This does not change D4 and adds no server work - `truncated` is already on the
+wire.
+
+### 7.5 Nav badge and Today
 
 No code change to either. Both read the server's index-backed count, so a
 mark-unread reaches them through `conversation.updated`.
@@ -575,6 +613,11 @@ Dashboard:
   condition.
 - A `409 no_markable_thread` renders the retryable inline message and leaves the
   action available (the GSI-lag path, 6.3).
+- The Unread truncation notice (7.4): renders when the server page is non-empty
+  AND `truncated`; does NOT render on an untruncated page; does NOT render
+  alongside the empty/error surface; and STAYS rendered after the operator marks
+  every visible row read (the `serverRowCount`-not-`rows.length` gate - a test
+  keyed on `rows` would pass while the regression it guards ships).
 
 ### 9.2 e2e (`npm run e2e`)
 
@@ -606,16 +649,22 @@ strict mode - a trap the existing suite documents
 
 ## 10. Accepted boundaries and risks
 
-### 10.1 The ~100-row cap (raised to the human at the spec gate)
+### 10.1 The ~100-row cap (RULED at the human's spec gate: accepted)
 
 All three unread surfaces read `byUnread` newest-`last_activity_at`-first
 (`conversationsRepo.ts:1569-1581`) and cap at 100: `BADGE_COUNT_CAP`
 (`unreadFeed.ts:55`), `SEEN_SET_MAX` (`inbox.ts:231`), `TODAY_UNREAD_CAP`
 (`today.ts:179`). D4 forbids touching the timestamp, so a marked-unread thread
-re-enters at its old position. Past ~100 newer unread rows it contributes to
-none of the three - i.e. the feature is weakest exactly on a backlogged inbox,
-which is when a to-do affordance matters most. Consequence of an explicit human
-ruling; stated here rather than engineered around.
+re-enters at its old position. Past the cap it contributes to none of the three
+- i.e. the feature is weakest exactly on a backlogged inbox.
+
+RULED at the spec gate: ACCEPTED, on the grounds that when a backlog exists the
+newer unread genuinely is more pressing, so a capped to-do list is the right
+product answer rather than a compromise. The precise shape matters and was
+checked before ruling: the Unread PAGE is not a hard 100 - it pages 30 at a time
+to ~120+ rows (`SEEN_SET_MAX` bounds cursor SIZE, a CloudFront URL limit, not
+rows). Only the BADGE is a hard 100 floor. The acceptance was made conditional
+on the list disclosing the cap, which is 7.4.
 
 ### 10.2 Today will label marked-unread threads "Unreplied"
 

@@ -492,7 +492,7 @@ export function createGroupReceiptsService(
     const existing = await messages.listParkedGroupReceipts(input.messageSid);
     const isNewSlot = !existing.some((p) => p.participantSid === input.participantSid);
     if (isNewSlot && existing.length >= MAX_PARKED_GROUP_RECEIPTS) {
-      log.warn(
+      log.error(
         { event: 'group_receipt_park_bounded', providerSid: input.messageSid },
         'group delivery receipt dropped: too many parked receipts already held for this message',
       );
@@ -544,7 +544,7 @@ export function createGroupReceiptsService(
   ): Promise<GroupReceiptOutcome> {
     const ruling = conversationsStatusRuling(input.status);
     if (ruling === undefined) {
-      log.warn(
+      log.error(
         { event: 'group_receipt_status_unmapped', providerSid: input.messageSid, status: input.status },
         'group delivery receipt carries a status this app does not map - dropped rather than guessed',
       );

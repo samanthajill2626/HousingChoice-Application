@@ -11,6 +11,7 @@
 // resolving a contact's type to tenant/landlord PROPAGATES that to the linked
 // conversation(s)' type (unknown_1to1 → tenant_1to1/landlord_1to1). Triage
 // happens HERE, so the propagation is implemented HERE.
+import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { parseContactName } from '../lib/contactName.js';
@@ -46,6 +47,8 @@ import {
   contactEmails,
   contactPhones,
   createContactsRepo,
+  isDeleted,
+  PHONE_REF_PREFIX,
   PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
   type ContactItem,
@@ -2001,6 +2004,126 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     await propagateContactPresenceChange(contactId, updated);
     log.info({ contactId, actor: req.user?.userId }, 'contact restored');
     res.json({ contact: withPhones(updated) });
+  });
+
+  // POST /api/contacts/:contactId/extraction-run -> 200 { requestId, scheduled, failed }
+  // Manual extraction trigger (design 4.5). Arms each eligible 1:1 thread for an
+  // IMMEDIATE run (dueAt = now, no debounce) under ONE requestId and returns; the
+  // worker poll does the work. Refusals each carry a distinct machine-readable
+  // reason so the UI can explain itself: 404 contact_not_found, 409
+  // contact_deleted / extraction_disabled / ineligible_contact_type /
+  // no_conversations / no_eligible_conversations, 500 schedule_failed.
+  router.post('/:contactId/extraction-run', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    // A phone-pointer id 404s exactly like an unknown contact, as every sibling
+    // per-contact route does - not a new status for the same non-entity.
+    if (contactId.startsWith(PHONE_REF_PREFIX)) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    if (isDeleted(contact)) {
+      // Deliberate divergence from the job, which has no soft-delete check:
+      // spending money to write facts onto a record staff have removed from
+      // view is not something to do on a human's button press. The parity gap
+      // on the automatic path is filed as its own issue.
+      res.status(409).json({ error: 'contact_deleted' });
+      return;
+    }
+    if (!aiExtractionEnabled) {
+      res.status(409).json({ error: 'extraction_disabled' });
+      return;
+    }
+    // Mirrors the job's eligibility rule (jobs/extraction.ts): queuing a row
+    // guaranteed to skip would burn a poll cycle and write a misleading
+    // `skipped` record. Eligible types are tenant and unknown.
+    if (
+      contact.type === 'landlord' ||
+      contact.type === 'partner' ||
+      contact.type === 'team_member'
+    ) {
+      res.status(409).json({ error: 'ineligible_contact_type' });
+      return;
+    }
+
+    const all = await conversationsForContact(contact, conversations);
+    if (all.length === 0) {
+      res.status(409).json({ error: 'no_conversations' });
+      return;
+    }
+    // The SAME predicate the inbound sms and email sites apply. Mandatory here
+    // because this endpoint FANS OUT across a contact's threads, and
+    // conversationsForContact returns the raw phone+email union - a phone query
+    // can return relay_group threads, which front a pool number. Distinct from
+    // no_conversations on purpose: a contact whose only thread is mis-typed is
+    // a real state, and "no conversations" would send the operator looking for
+    // missing data instead of at the thread's type.
+    const eligible = all.filter((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
+    if (eligible.length === 0) {
+      res.status(409).json({ error: 'no_eligible_conversations' });
+      return;
+    }
+
+    const requestId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const scheduled: string[] = [];
+    const failed: string[] = [];
+    for (const conv of eligible) {
+      try {
+        await extraction.requestManualExtraction(conv.conversationId, nowIso, requestId);
+        scheduled.push(conv.conversationId);
+      } catch (err) {
+        // A partial failure is NOT a total one: a queued run will bill, so a
+        // 500 here would tell the operator nothing happened when something did.
+        log.error(
+          { err, contactId, conversationId: conv.conversationId, requestId },
+          'manual extraction schedule failed',
+        );
+        failed.push(conv.conversationId);
+      }
+    }
+    // UNCONDITIONAL (design 4.5 step 6) and BEST-EFFORT, in that order.
+    //
+    // Unconditional: the entry is written for every press, including the one
+    // that started nothing - an audit that cannot distinguish a press that
+    // started three runs from one that started none is most of the value gone,
+    // and the counts are what make that distinction.
+    //
+    // Best-effort: by the time this runs the queued runs will bill. An
+    // unguarded throw becomes a 500 whose body carries no reason code, which
+    // the UI renders as "Extraction could not be started - try again" - the
+    // exact false "nothing happened" report the partial-failure rule exists to
+    // prevent, on a press that already spent money. So an audit fault is logged
+    // (ids only) and the response stands.
+    try {
+      await audit.append(`contacts#${contactId}`, 'extraction_run_requested', {
+        actor: req.user?.userId,
+        requestId,
+        scheduled: scheduled.length,
+        failed: failed.length,
+      });
+    } catch (err) {
+      log.error(
+        { err, contactId, requestId, scheduled: scheduled.length, failed: failed.length },
+        'manual extraction audit append failed (best-effort)',
+      );
+    }
+    if (scheduled.length === 0) {
+      res.status(500).json({ error: 'schedule_failed' });
+      return;
+    }
+
+    log.info(
+      { contactId, requestId, scheduled: scheduled.length, failed: failed.length, actor: req.user?.userId },
+      'manual extraction run requested',
+    );
+    res.json({ requestId, scheduled, failed });
   });
 
   // --- BE1/C1 contact-phones CRUD (manual curation / merge) ------------------

@@ -122,6 +122,22 @@
   font-size: var(--fs-sm);
 }
 
+/* Standing banner under the header while a manual AI extraction runs, and for
+ * its outcome (manual-extraction-trigger 4.6). Deliberately the same band as
+ * .deletedBanner: it is informational, not an error treatment, and the two can
+ * never be more than one row apart. */
+.extractionBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
 .actions {
   composes: actions from '../../ui/twoPaneShell.module.css';
 }

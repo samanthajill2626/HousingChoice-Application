@@ -22,6 +22,11 @@ import { applyNumberSuppression } from '../src/services/numberSuppression.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
 const WARN = 40;
+// Terminal give-ups log at ERROR so they reach the ErrorLogs metric filter
+// ({ $.level >= 50 }) and the sustained alarm - see
+// docs/issues/give-up-paths-inconsistently-levelled-and-unsurfaced.md. WARN
+// stays for the degraded-but-recoverable lines above.
+const ERROR = 50;
 
 const ANN_KEY = 'phone#+16175550111';
 const MARCUS_KEY = 'phone#+16175550222';
@@ -337,7 +342,7 @@ describe('applying a receipt', () => {
     });
     expect(out).toEqual({ outcome: 'dropped', reason: 'unmapped_status' });
     expect(
-      f.capture.atLevel(WARN).some((l) => l['event'] === 'group_receipt_status_unmapped'),
+      f.capture.atLevel(ERROR).some((l) => l['event'] === 'group_receipt_status_unmapped'),
     ).toBe(true);
     expect(slot(f, ANN_KEY)?.status).toBe('queued');
   });
@@ -677,7 +682,7 @@ describe('park and drain (a receipt CAN beat the append)', () => {
     });
     expect(out).toEqual({ outcome: 'dropped', reason: 'park_bounded' });
     expect(
-      f.capture.atLevel(WARN).some((l) => l['event'] === 'group_receipt_park_bounded'),
+      f.capture.atLevel(ERROR).some((l) => l['event'] === 'group_receipt_park_bounded'),
     ).toBe(true);
   });
 

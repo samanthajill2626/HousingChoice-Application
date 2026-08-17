@@ -39,6 +39,13 @@ export interface PushNotification {
    * push service ENCRYPTED — but it contains PII, so it is never logged.
    */
   payload: Record<string, unknown>;
+  /**
+   * Optional queue lifetime (seconds) at the push service - see
+   * WebPushSendOptions.ttlSeconds. Set it on TIME-SENSITIVE kinds (pre_ring)
+   * whose notification is worthless once its moment passes; leave unset for
+   * kinds where late is better than never (missed_call, voicemail).
+   */
+  ttlSeconds?: number;
 }
 
 /** Per-call outcome: how many devices we sent to, and how many dead ones we pruned. */
@@ -129,7 +136,11 @@ export function createPushService(deps: PushServiceDeps): PushService {
           continue;
         }
         try {
-          const outcome = await adapter.sendToSubscription(toBrowserSubscription(record), body);
+          const outcome = await adapter.sendToSubscription(
+            toBrowserSubscription(record),
+            body,
+            notification.ttlSeconds === undefined ? undefined : { ttlSeconds: notification.ttlSeconds },
+          );
           if (outcome.result === 'gone') {
             await users.removePushSubscription(userId, record.endpoint);
             pruned += 1;

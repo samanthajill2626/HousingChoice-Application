@@ -405,7 +405,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     if (hasMedia && !mediaStore) {
       // Degenerate no-bucket config: relay the text notice, but there is no
       // store to presign the media from. Log once (IDs/counts only).
-      log.warn(
+      log.error(
         { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId, mediaCount: sourceMedia.length },
         'relayFanOut: source has media but no MediaStore - relaying body only, media dropped',
       );

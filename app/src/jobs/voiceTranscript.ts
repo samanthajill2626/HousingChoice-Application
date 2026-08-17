@@ -112,6 +112,35 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     runAt: new Date(Date.now() + cfg.voiceTranscriptReconcileSeconds * 1000),
   });
 
+  /**
+   * Re-enqueue the next attempt, reporting whether it actually got queued.
+   *
+   * PROD INCIDENT 2026-08-16: both retry chains below advance their attempt
+   * counter INSIDE the envelope they enqueue, so a throwing enqueue() does not
+   * just lose one retry - it freezes `attempt` at its current value, making the
+   * capped-attempts exhaustion branch (the thing that stamps 'failed' so the UI
+   * can never hang on "Transcribing...") permanently unreachable. The worker
+   * process had no OutboundQueueAdapter configured, so every enqueue threw and a
+   * voicemail sat pending forever. The backstop must never depend on the
+   * mechanism it is backing up: false here means "nobody will ever retry this",
+   * and the caller closes the lifecycle immediately instead.
+   */
+  const tryRequeue = async (
+    jobName: string,
+    payload: CreateVoiceTranscriptPayload | ReconcileVoiceTranscriptPayload,
+    opts: { runAt: Date },
+    logIds: Record<string, string>,
+    failureMessage = 'voice transcript: retry re-enqueue failed - closing the lifecycle now',
+  ): Promise<boolean> => {
+    try {
+      await enqueue(jobName, payload, opts);
+      return true;
+    } catch (err) {
+      log.error({ err, ...logIds, jobName }, failureMessage);
+      return false;
+    }
+  };
+
   /** Stamp transcript_status failed (pending -> failed) + emit SSE (spec 3.7:
    * every transition announces live). Returns whether the stamp won. */
   const stampFailedAndEmit = async (repo: MessagesRepo, bus: EventBus, callSid: string): Promise<boolean> => {
@@ -174,33 +203,50 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
       }));
     } catch (err) {
       if (payload.attempt < CREATE_MAX_ATTEMPTS) {
-        await enqueue(
+        const requeued = await tryRequeue(
           CREATE_VOICE_TRANSCRIPT_JOB,
           { callSid: payload.callSid, recordingSid: payload.recordingSid, attempt: payload.attempt + 1 },
           reconcileDelay(config),
+          { callSid: payload.callSid, recordingSid: payload.recordingSid },
         );
-        log.warn(
-          { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempt: payload.attempt + 1 },
-          'createVoiceTranscript: VI create failed - retry enqueued',
-        );
-        return;
+        if (requeued) {
+          log.warn(
+            { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempt: payload.attempt + 1 },
+            'createVoiceTranscript: VI create failed - retry enqueued',
+          );
+          return;
+        }
+        // The retry that owns closing this lifecycle could not be queued, so
+        // NOTHING downstream will ever stamp it - fall through to the stamp now.
       }
       const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
-      log.warn(
+      log.error(
         { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempts: payload.attempt, stamped },
         'createVoiceTranscript: exhausted attempts - stamped transcript_status failed',
       );
       return;
     }
-    await enqueue(
-      RECONCILE_VOICE_TRANSCRIPT_JOB,
-      { callSid: payload.callSid, transcriptSid, attempt: 1 },
-      reconcileDelay(config),
-    );
-    log.info(
-      { callSid: payload.callSid, transcriptSid },
-      'createVoiceTranscript: VI transcript created, reconcile enqueued',
-    );
+    // The create SUCCEEDED - the transcript exists at Twilio. A throw from here
+    // would fail the JOB, and SQS redelivery would re-run the create leg above
+    // and mint a SECOND transcript for one call (the duplicate-create path
+    // adjudication F1 closed on the inline route in voice.ts; this leg had the
+    // same hole). Swallow it exactly as voice.ts does: only that call's
+    // lost-webhook self-heal is given up, and the completion webhook still
+    // delivers the transcript that was minted.
+    if (
+      await tryRequeue(
+        RECONCILE_VOICE_TRANSCRIPT_JOB,
+        { callSid: payload.callSid, transcriptSid, attempt: 1 },
+        reconcileDelay(config),
+        { callSid: payload.callSid, transcriptSid },
+        'reconcile enqueue failed after successful create - VI transcript stands, self-heal given up',
+      )
+    ) {
+      log.info(
+        { callSid: payload.callSid, transcriptSid },
+        'createVoiceTranscript: VI transcript created, reconcile enqueued',
+      );
+    }
   });
 
   defineJobHandler(RECONCILE_VOICE_TRANSCRIPT_JOB, async (rawPayload) => {
@@ -230,23 +276,29 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     if (outcome !== 'not-completed') return;
 
     if (payload.attempt < RECONCILE_MAX_ATTEMPTS) {
-      await enqueue(
+      const requeued = await tryRequeue(
         RECONCILE_VOICE_TRANSCRIPT_JOB,
         { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempt: payload.attempt + 1 },
         reconcileDelay(config),
+        { callSid: payload.callSid, transcriptSid: payload.transcriptSid },
       );
-      log.info(
-        { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempt: payload.attempt + 1 },
-        'reconcileVoiceTranscript: still in progress - re-enqueued',
-      );
-      return;
+      if (requeued) {
+        log.info(
+          { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempt: payload.attempt + 1 },
+          'reconcileVoiceTranscript: still in progress - re-enqueued',
+        );
+        return;
+      }
+      // The re-enqueue that carries attempt+1 failed, so the attempt counter can
+      // never advance and no later run will reach the exhaustion stamp below.
+      // Close the lifecycle NOW rather than leaving "Transcribing..." forever.
     }
 
     // Exhausted: stamp transcript_status failed (spec 3.4/3.7) + emit SSE. A very
     // late webhook can still upgrade failed -> completed (setCallTranscript
     // condition is on transcript, not status).
     const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
-    log.warn(
+    log.error(
       { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempts: payload.attempt, stamped },
       'reconcileVoiceTranscript: exhausted attempts - stamped transcript_status failed',
     );

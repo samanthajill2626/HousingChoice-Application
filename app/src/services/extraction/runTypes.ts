@@ -86,7 +86,9 @@ export interface RunWindowParams {
   seenMessageCharCap: number;
   windowCharBudget: number;
   maxTranscriptMessages: number;
-  maxTranscriptAgeDays: number;
+  /** The floor this run actually applied; null when waived (a manual run).
+   *  Legacy stored records always carry a number. */
+  maxTranscriptAgeDays: number | null;
   truncationMarker: string;
 }
 

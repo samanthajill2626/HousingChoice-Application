@@ -18,6 +18,20 @@ export interface CorrelationContext {
    */
   originType?: 'synthesized';
   /**
+   * One TICK of a worker poll loop (tour reminders, placement nudges, roster
+   * actions, extraction, group guardrails). The polls are timer-driven, not
+   * request- or envelope-driven, so nothing upstream mints them an id: before
+   * this existed every line they logged was an orphan (prod incident
+   * 2026-08-16 - the extraction poll alone produced ~40-47 orphan lines a day
+   * and kept `hc-prod-orphan-logs` flapping).
+   *
+   * Deliberately NOT `jobRunId`: a poll tick is not a dispatched job, and
+   * collapsing the two would make "which of these ran as a queued job"
+   * unanswerable from a log line. Ranks BELOW jobRunId so a job dispatched
+   * from inside a tick still reports its own run id.
+   */
+  pollRunId?: string;
+  /**
    * Process-lifecycle correlation: entrypoints generate one bootId per process
    * start and wrap startup/shutdown in it, so lifecycle log lines ("app
    * listening", "worker ready", shutdown) are never orphans. Lowest-precedence
@@ -64,6 +78,11 @@ export function newJobRunId(): string {
 }
 
 export function newBootId(): string {
+  return randomUUID();
+}
+
+/** A fresh id for ONE tick of a worker poll loop (see CorrelationContext.pollRunId). */
+export function newPollRunId(): string {
   return randomUUID();
 }
 

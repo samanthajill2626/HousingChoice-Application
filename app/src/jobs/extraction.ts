@@ -18,6 +18,7 @@
 // PII (doc section 9): NEVER log message bodies or phone numbers. Log only
 // conversationId / contactId / counts.
 import type { AppConfig } from '../lib/config.js';
+import type { EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { createExtractionRepo, DueExtractionItem } from '../repos/extractionRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -92,6 +93,12 @@ export interface ExtractionJobDeps {
    * exercised (design 8).
    */
   aiRuns: Pick<AiRunsRepo, 'beginFinalization' | 'putRun' | 'setVerdict'>;
+  /**
+   * The completion emitter. REQUIRED so a missed construction site is a
+   * typecheck failure rather than a silently dead indicator - the same reasoning
+   * as `aiRuns` above.
+   */
+  events: Pick<EventBus, 'emit'>;
   /**
    * REAL WALL-CLOCK now, for the run record's timestamps ONLY (design section 6,
    * as amended). NOT the poll's nowIso: the dev tick runs a SIMULATED FUTURE
@@ -290,12 +297,32 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
+  /** Counts for the completion event, sourced from applyOutcome where they
+   *  exist - NOT re-derived from `decisions`, which is best-effort. */
+  wrote?: number;
+  suggested?: number;
+  /** The press this run answers, carried from the due row (manual runs only). */
+  requestId?: string;
   displaced: Array<{ target: string; runId: string; createdAt: string }>;
 }
 
 /** Allocate a draft before processing so the outer backstop retains all evidence. */
 export function newRunDraft(row: DueExtractionItem, startedAt: string): RunDraft {
-  return { runId: randomUUID(), startedAt, conversationId: row.conversationId, trigger: row.channel, displaced: [] };
+  const manual = row.manualRequested === true;
+  // The `?? 'manual'` arm is a totality device, not a second labelling rule. A
+  // row with no `channel` can only have been created by
+  // requestManualExtraction, which always sets the flag - and every
+  // flag-clearing site also de-arms the row, so listDue cannot return a
+  // channel-less row without the flag.
+  const trigger: RunTrigger = manual ? 'manual' : (row.channel ?? 'manual');
+  return {
+    runId: randomUUID(),
+    startedAt,
+    conversationId: row.conversationId,
+    trigger,
+    ...(row.requestId !== undefined && { requestId: row.requestId }),
+    displaced: [],
+  };
 }
 
 /** Only a lost claim and a defensive malformed due row are deliberately unrecorded. */
@@ -347,6 +374,9 @@ async function processRow(
   const { repo, conversations, messages, contacts, driver, applyDeps, logger } = deps;
   const conversationId = row.conversationId;
   const cursor = row.cursor ?? '';
+  // The single source of truth for both waivers and the recorded trigger. Read
+  // from the row listDue returned, which is BEFORE claim clears it.
+  const manual = row.manualRequested === true;
   const failed = (kind: RunErrorKind, err: unknown): ProcessRowResult => {
     draft.error = { kind, message: err instanceof Error ? err.message : String(err) };
     return { record: true, outcome: 'failed' };
@@ -366,6 +396,8 @@ async function processRow(
   try {
     claimed = await repo.claim(conversationId, nowIso, listedDueAt);
   } catch (err) {
+    // A throw does NOT tell us whether the claim's write landed, which is why
+    // fail() asserts a disjunct rather than a per-path predicate.
     return failed('repo', err);
   }
   if (!claimed) {
@@ -432,8 +464,13 @@ async function processRow(
   }
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const chronological = [...newestFirst].reverse();
-  const fresh = chronological.filter((m) => m.created_at >= cutoff);
-  const agedOutTsMsgIds = chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
+  // A manual run waives the age floor: the imported history this feature exists
+  // to reach is historical by definition. Newest-50 and the 60k char budget
+  // still bound the window.
+  const fresh = manual ? chronological : chronological.filter((m) => m.created_at >= cutoff);
+  const agedOutTsMsgIds = manual
+    ? []
+    : chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
   const newestTsMsgId = fresh[fresh.length - 1]?.tsMsgId;
   const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
     cursor,
@@ -446,7 +483,9 @@ async function processRow(
   // entirely rather than storing half of one.
   if (lightWindow !== undefined) draft.window = lightWindow;
 
-  const hasNewClient = row.channel === 'voice' || row.channel === 'triage' || fresh.some(
+  // A manual run joins the existing voice/triage bypasses: the operator asked
+  // for this run, so "nothing new since the cursor" is not a reason to skip it.
+  const hasNewClient = manual || row.channel === 'voice' || row.channel === 'triage' || fresh.some(
     (m) => m.tsMsgId > cursor && (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
   );
   if (!hasNewClient) {
@@ -481,6 +520,7 @@ async function processRow(
   // successfully from the same data, so retaining it degrades nothing.
   const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
     cursor, fetchedCount, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
+    maxTranscriptAgeDays: manual ? null : MAX_TRANSCRIPT_AGE_DAYS,
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
   }));
   if (fullWindow !== undefined) draft.window = fullWindow;
@@ -495,7 +535,7 @@ async function processRow(
   if (call.meta.usage !== undefined) draft.usage = call.meta.usage;
   if (call.meta.rawText !== undefined) draft.rawText = call.meta.rawText;
   const warnUnexplained = (target: DecisionTarget): void => {
-    logger.warn({ conversationId, target }, 'ai run log: unexplained dropped decision');
+    logger.error({ conversationId, target }, 'ai run log: unexplained dropped decision');
   };
   if (!call.ok) {
     const failureDecisions = draftPiece(logger, draft, () => buildDecisions({
@@ -530,6 +570,10 @@ async function processRow(
   }));
   if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
   draft.notedLines = applyOutcome.notedLines;
+  // `wrote` and `suggested` are string[] of target names on applyOutcome; the
+  // event carries COUNTS only.
+  draft.wrote = applyOutcome.wrote.length;
+  draft.suggested = applyOutcome.suggested.length;
   draft.displaced = applyOutcome.displaced;
   const nextCursor = newestTsMsgId !== undefined && newestTsMsgId > cursor ? newestTsMsgId : cursor;
   const completeFailure = await completeOrFail(nextCursor);
@@ -661,12 +705,46 @@ export async function runDueExtractions(
       logger.error({ conversationId: row.conversationId, attempts, parked }, 'extraction poll: row failed');
       if (draft.error !== undefined) draft.error = { ...draft.error, attempts, parked };
       try {
-        await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt);
+        await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt, {
+          // UNREACHABLE today: processRow returns { record: false } when dueAt is
+          // absent, so a row without one never gets here. It exists only to
+          // satisfy the optional type. If that guard ever moves, an empty
+          // listedDueAt would make the second arm of fail's condition never
+          // match, leaving only the un-armed arm to keep the row terminating.
+          listedDueAt: row.dueAt ?? '',
+          manual: row.manualRequested === true,
+        });
       } catch (failErr) {
         logger.error({ conversationId: row.conversationId, err: failErr }, 'extraction poll: fail() write errored');
       }
     }
     await recordRun(deps, outcome, draft);
+    // AFTER recordRun but NOT dependent on it: recordRun is best-effort and
+    // swallows its own failures, and the indicator must not hinge on an
+    // observability write.
+    //
+    // Note what this placement deliberately excludes: a draft-allocation throw
+    // (`continue` above) and `!result.record` - a lost claim or a dueAt-less
+    // row - emit NOTHING, because neither produced a run whose outcome this
+    // process can honestly report. A press whose row lost the claim to a
+    // concurrent poll therefore resolves by the indicator's timeout (spec 4.6),
+    // which is exactly what that timeout is for.
+    try {
+      deps.events.emit('ai_run.completed', {
+        conversationId: draft.conversationId,
+        runId: draft.runId,
+        ...(draft.requestId !== undefined && { requestId: draft.requestId }),
+        ...(draft.contactId !== undefined && { contactId: draft.contactId }),
+        outcome,
+        ...(draft.skipReason !== undefined && { skipReason: draft.skipReason }),
+        ...(draft.error !== undefined && { errorKind: draft.error.kind }),
+        wrote: draft.wrote ?? 0,
+        suggested: draft.suggested ?? 0,
+        notedLines: draft.notedLines ?? 0,
+      });
+    } catch (err) {
+      deps.logger.warn({ conversationId: draft.conversationId, err }, 'ai run completed emit failed');
+    }
     await stampSuperseded(deps, draft);
   }
 

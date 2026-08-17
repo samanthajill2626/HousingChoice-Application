@@ -3,7 +3,6 @@
 import { createHash } from 'node:crypto';
 import type { TranscriptUtterance } from '../../adapters/extraction.js';
 import {
-  MAX_TRANSCRIPT_AGE_DAYS,
   MAX_TRANSCRIPT_MESSAGES,
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
@@ -39,6 +38,10 @@ export interface BuildFullRunWindowInput extends Omit<BuildLightRunWindowInput, 
   perMessage: WindowMessagePieces[];
   included: Set<string>;
   hasInferredRoleContent: boolean;
+  /** The floor this run actually applied; null when waived. Taken from the
+   *  caller rather than the module constant so a manual run, which skips the
+   *  cutoff entirely, cannot record a window it never sent. */
+  maxTranscriptAgeDays: number | null;
 }
 
 /** sha256 first-16-hex over the exact rendered lines sent for one message. */
@@ -110,7 +113,7 @@ export function buildFullRunWindow(input: BuildFullRunWindowInput): RunWindow {
       seenMessageCharCap: SEEN_MESSAGE_CHAR_CAP,
       windowCharBudget: WINDOW_CHAR_BUDGET,
       maxTranscriptMessages: MAX_TRANSCRIPT_MESSAGES,
-      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
+      maxTranscriptAgeDays: input.maxTranscriptAgeDays,
       truncationMarker: TRUNCATION_MARKER,
     },
     messages,

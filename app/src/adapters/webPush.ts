@@ -27,6 +27,22 @@ export type { PushSubscription } from 'web-push';
  */
 export type SendOutcome = { result: 'sent'; statusCode: number } | { result: 'gone' };
 
+/** Per-send delivery options (subset of the web-push protocol headers). */
+export interface WebPushSendOptions {
+  /**
+   * Seconds the push service may QUEUE the message when the device is
+   * unreachable, before dropping it. Unset = web-push's default (4 weeks).
+   *
+   * WHY IT EXISTS (observed live 2026-08-16): Android defers even
+   * urgency:'high' deliveries while the device dozes, then flushes the whole
+   * backlog when the FCM socket wakes - so an unexpired pre-ring push arrived
+   * MINUTES after its call ended, as pure noise. A time-sensitive kind should
+   * set a TTL about as long as the moment it describes; better never delivered
+   * than delivered stale.
+   */
+  ttlSeconds?: number;
+}
+
 export interface WebPushAdapter {
   /**
    * Send one notification. `payload` is a pre-serialized string (the service
@@ -34,7 +50,11 @@ export interface WebPushAdapter {
    * field. Resolves to {result:'gone'} for 404/410, {result:'sent'} on 2xx;
    * throws WebPushError/network errors otherwise.
    */
-  sendToSubscription(subscription: PushSubscription, payload: string): Promise<SendOutcome>;
+  sendToSubscription(
+    subscription: PushSubscription,
+    payload: string,
+    options?: WebPushSendOptions,
+  ): Promise<SendOutcome>;
 }
 
 /** HTTP statuses from a push service that mean "this subscription is dead — prune it". */
@@ -113,7 +133,7 @@ export function createWebPushAdapter(config: AppConfig): WebPushAdapter | undefi
   };
 
   return {
-    async sendToSubscription(subscription, payload) {
+    async sendToSubscription(subscription, payload, options) {
       // Defense in depth (C1): never POST to an endpoint that isn't a known
       // web-push vendor host, even if a bad one was stored before the guard.
       // Treat it as a dead subscription so the caller prunes it.
@@ -130,6 +150,8 @@ export function createWebPushAdapter(config: AppConfig): WebPushAdapter | undefi
         const res = await webpush.sendNotification(subscription, payload, {
           vapidDetails,
           urgency: 'high',
+          // TTL only when the caller declares one - see WebPushSendOptions.
+          ...(options?.ttlSeconds !== undefined && { TTL: options.ttlSeconds }),
         });
         return { result: 'sent', statusCode: res.statusCode };
       } catch (err) {

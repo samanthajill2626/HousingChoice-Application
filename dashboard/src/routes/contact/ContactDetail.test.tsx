@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -31,6 +31,17 @@ const createTour = vi.fn();
 const getSuggestions = vi.fn();
 const acceptSuggestion = vi.fn();
 const dismissSuggestion = vi.fn();
+// Manual extraction trigger (Task 6): the press endpoint.
+const runExtraction = vi.fn();
+
+// The handlers every useEventStream caller in this tree registers, MERGED.
+// ContactDetail's subtree has five callers (useContact, useSuggestions,
+// useContactTimeline, useMarkContactRead and the page's own ai_run.completed
+// listener), so a stub that ASSIGNS is last-writer-wins and would leave
+// onAiRunCompleted undefined - every resolution test would then silently no-op
+// rather than fail loudly. Merging keeps one live handler per event name, each
+// refreshed on every render.
+let capturedHandlers: Record<string, ((e: unknown) => void) | undefined> = {};
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -60,14 +71,17 @@ vi.mock('../../api/index.js', async () => {
     getSuggestions: (...a: unknown[]) => getSuggestions(...a),
     acceptSuggestion: (...a: unknown[]) => acceptSuggestion(...a),
     dismissSuggestion: (...a: unknown[]) => dismissSuggestion(...a),
+    runExtraction: (...a: unknown[]) => runExtraction(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
-    useEventStream: () => {},
+    useEventStream: (handlers: Record<string, ((e: unknown) => void) | undefined>) => {
+      Object.assign(capturedHandlers, handlers);
+    },
   };
 });
 
-import { ContactDetail } from './ContactDetail.js';
+import { ContactDetail, RUN_INDICATOR_TIMEOUT_MS } from './ContactDetail.js';
 
 function renderAt(contactId: string) {
   return render(
@@ -77,6 +91,41 @@ function renderAt(contactId: string) {
       </Routes>
     </MemoryRouter>,
   );
+}
+
+/** Deliver one ai_run.completed to the page. The dispatch originates outside
+ *  React's event system, so it is act-wrapped here: the resolution tests assert
+ *  SYNCHRONOUSLY right after emitting. */
+function emitRunCompleted(payload: Record<string, unknown>): void {
+  act(() => {
+    capturedHandlers['onAiRunCompleted']?.(payload);
+  });
+}
+
+/** Open the kebab and press "Run AI extraction".
+ *
+ *  `fakeTimers` swaps user-event for the synchronous fireEvent. user-event is
+ *  unusable under vitest's fake clock here: every one of its awaits goes through
+ *  RTL's asyncWrapper, which flushes with a real-looking `setTimeout(resolve, 0)`
+ *  and only knows how to nudge JEST fake timers past it - under vitest's the
+ *  timer is faked, never advanced, and the click never returns. Passing
+ *  user-event an `advanceTimers` option does not help, because the stuck await
+ *  is RTL's, not user-event's. fireEvent is act-wrapped and synchronous, and
+ *  these two buttons need no typing or pointer sequence. */
+async function pressRun(opts: { fakeTimers?: boolean } = {}): Promise<void> {
+  if (opts.fakeTimers === true) {
+    fireEvent.click(screen.getByRole('button', { name: /more actions/i }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
+    return;
+  }
+  const { default: userEvent } = await import('@testing-library/user-event');
+  const user = userEvent.setup();
+  // The kebab does not exist during the loading early return (the page renders
+  // only a Spinner), so every kebab test in this file waits for the contact
+  // first.
+  await screen.findByText('Tasha Williams');
+  await user.click(screen.getByRole('button', { name: /more actions/i }));
+  await user.click(screen.getByRole('menuitem', { name: /run ai extraction/i }));
 }
 
 const TENANT: Contact = {
@@ -1092,6 +1141,574 @@ describe('ContactDetail', () => {
         screen.queryByRole('dialog', { name: /Record consent before texting/i }),
       ).not.toBeInTheDocument();
       expect(updateContact).not.toHaveBeenCalled();
+    });
+  });
+
+  // Manual extraction trigger (spec 4.6). The status region is the operator's
+  // ONLY feedback that the press did anything, so all three of its states -
+  // pressed, resolved, timed out - are pinned here. It carries
+  // aria-label="AI extraction" so these queries can never match a Spinner
+  // (ui/Spinner.tsx also uses role="status").
+  describe('Run AI extraction', () => {
+    beforeEach(() => {
+      // The outer beforeEach resets ~20 mocks but never seeds getContact, and it
+      // does not know about runExtraction at all - without the reset a
+      // mockRejectedValue from the refusal rows leaks into the next test.
+      getContact.mockResolvedValue(TENANT);
+      runExtraction.mockReset();
+      runExtraction.mockResolvedValue({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
+      capturedHandlers = {};
+    });
+
+    // A test that TIMES OUT never reaches its own `finally`, so fake timers
+    // would leak into every later test and wedge waitFor. Belt and braces.
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('enters a running state on press', async () => {
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+      expect(runExtraction).toHaveBeenCalledWith('k1');
+    });
+
+    it('names the thread count when more than one was scheduled', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction on 2 threads/i,
+      );
+    });
+
+    it('keeps naming the SCHEDULED count after some threads have reported', async () => {
+      // The count names `scheduled` (4.6 state 1), not what is left: reading it
+      // off the pending set would drop "on 3 threads" back to a bare "Running
+      // AI extraction..." as soon as one thread reported, which reads to the
+      // operator as the run having shrunk.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b', 'conv-c'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction on 3 threads/i,
+      );
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction on 3 threads/i,
+      );
+    });
+
+    it('disables the item against a second press', async () => {
+      renderAt('k1');
+      await pressRun();
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('button', { name: /more actions/i }));
+      expect(screen.getByRole('menuitem', { name: /run ai extraction/i })).toBeDisabled();
+      expect(runExtraction).toHaveBeenCalledTimes(1);
+    });
+
+    it('times out to the still-running copy when no event arrives', async () => {
+      // Fake-timer idiom per RemindersPanel.test.tsx:293-306 and test/setup.ts:
+      // the global Date pin must be released BEFORE useFakeTimers (vitest throws
+      // a self-explanatory error otherwise) and every flush goes through
+      // advanceTimersByTimeAsync inside act. The press itself drops user-event
+      // for fireEvent - see pressRun for why user-event cannot survive vitest's
+      // fake clock under RTL.
+      vi.useRealTimers();
+      vi.useFakeTimers();
+      try {
+        renderAt('k1');
+        // Flush the mount fetches so the kebab exists (the contact fetch and the
+        // file/timeline fan-out are chained promises, hence more than one tick).
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        await pressRun({ fakeTimers: true });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(RUN_INDICATOR_TIMEOUT_MS + 1);
+        });
+        // Synchronous assert: the state change already flushed inside act, and
+        // findByRole's polling is itself timer-based under fake timers.
+        expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+          /still running/i,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('resolves to the applied copy', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 1,
+        notedLines: 0,
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /updated 2 fields, 1 suggestion/i,
+      );
+    });
+
+    // Handback review (adversarial, MEDIUM): the job counts notedLines toward
+    // `applied`, so a note-only run is a REAL outcome and "nothing new to
+    // extract" would contradict the run log the banner points people at.
+    it('a note-only run says notes were added, not nothing-new', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 3,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/added 3 note lines/i);
+      expect(resolved).not.toHaveTextContent(/nothing new/i);
+    });
+
+    // Handback review R2 (adversarial): the first fix named notes ONLY when
+    // nothing else landed, so the success banner reported less than the
+    // failure banner about the same run. Notes ride every branch.
+    it('names the note lines even when fields also changed', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 0,
+        notedLines: 3,
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /updated 2 fields, 3 note lines added\./i,
+      );
+    });
+
+    // Handback review (adversarial, MEDIUM): one thread failing must not erase
+    // what the other threads already did - those writes are committed and
+    // billed whether or not the banner mentions them.
+    it('a failed thread does not erase the other threads results', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 1,
+        notedLines: 0,
+      });
+      emitRunCompleted({
+        conversationId: 'conv-b',
+        runId: 'r2',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'driver',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/extraction failed/i);
+      expect(resolved).toHaveTextContent(/2 fields updated/i);
+      expect(resolved).toHaveTextContent(/1 suggestion to review/i);
+    });
+
+    // Handback review (adversarial, MEDIUM): an event that beats the POST
+    // response used to be dropped - the state machine ignores events while
+    // requestId is '' - leaving the 180s timeout as the only resolution. The
+    // handler now records recent events and the press replays the ones carrying
+    // its requestId once the response names it.
+    it('an event that beats the POST response still resolves the indicator', async () => {
+      let resolvePost!: (v: { requestId: string; scheduled: string[]; failed: string[] }) => void;
+      runExtraction.mockImplementation(
+        () => new Promise((resolve) => { resolvePost = resolve; }),
+      );
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      // The run's event arrives while the POST is still in flight.
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      await act(async () => {
+        resolvePost({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /updated 1 field\./i,
+      );
+    });
+
+    // Found by live self-QA, not by a unit test: this is the COMMON success
+    // shape for this feature's target data, because a manual run waives the age
+    // floor and one unknown-speaker line demotes every write to a suggestion
+    // (design 8). It must not read "Updated 0 fields, 1 suggestion."
+    it('never claims it updated 0 fields when everything was suggested', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 0,
+        suggested: 1,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/1 suggestion to review\./i);
+      expect(resolved).not.toHaveTextContent(/updated 0 fields/i);
+    });
+
+    it('says nothing-new for a skipped run', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'skipped',
+        skipReason: 'no_new_client',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /nothing new to extract/i,
+      );
+    });
+
+    it('gives a truncated failure its own actionable copy', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'truncated',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(await screen.findByRole('alert', { name: /ai extraction/i })).toHaveTextContent(
+        /ran out of room/i,
+      );
+    });
+
+    it('waits for EVERY scheduled thread, including when one fails', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a', 'conv-b'],
+        failed: [],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'driver',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+      emitRunCompleted({
+        conversationId: 'conv-b',
+        runId: 'r2',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      expect(await screen.findByRole('alert', { name: /ai extraction/i })).toHaveTextContent(
+        /extraction failed/i,
+      );
+    });
+
+    it('IGNORES an event carrying a different requestId', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'someone-else',
+        outcome: 'applied',
+        wrote: 9,
+        suggested: 9,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+    });
+
+    // Handback review R2 (adversarial): a matching requestId with a different
+    // contactId is THIS press's run, resolved by the job to another contact -
+    // the conversation's participant pointer diverges from the phone roster,
+    // a reachable state under the documented phone-curation flow. The facts
+    // landed on that record and billed; the old behavior (ignore, spin, 180s
+    // timeout) hid a committed write. It must resolve and say where they went,
+    // and must NOT report the counts as if they landed on this record.
+    it('resolves a mismatched-contact event as misfiled instead of spinning', async () => {
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        contactId: 'someone-else',
+        outcome: 'applied',
+        wrote: 9,
+        suggested: 9,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/filed under a different contact/i);
+      expect(resolved).not.toHaveTextContent(/9 field/i);
+      expect(resolved).not.toHaveTextContent(/9 suggestion/i);
+    });
+
+    it('IGNORES an event for a thread the server could not queue', async () => {
+      // A thread in `failed[]` has no run coming, so counting its event would
+      // let the resolved banner report results from a thread the same sentence
+      // says was never queued.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-b',
+        runId: 'r-unqueued',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 7,
+        suggested: 7,
+        notedLines: 0,
+      });
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /running ai extraction/i,
+      );
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      // 1 field, not 8: the unqueued thread's counts never joined the total.
+      expect(resolved).toHaveTextContent(/updated 1 field\./i);
+      expect(resolved).toHaveTextContent(/1 thread could not be queued/i);
+    });
+
+    it('reports threads that could not be queued', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b'],
+      });
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('status', { name: /ai extraction/i })).toHaveTextContent(
+        /1 thread could not be queued/i,
+      );
+    });
+
+    it('still reports the unqueued threads once the run RESOLVES', async () => {
+      // A thread that was never queued is one no run is coming for. Dropping it
+      // at resolution would leave the operator with an outcome that silently
+      // omits a thread the running banner had already told them about.
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 1,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('status', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/updated 1 field/i);
+      expect(resolved).toHaveTextContent(/1 thread could not be queued/i);
+    });
+
+    it('carries the unqueued threads into a FAILED resolution too', async () => {
+      runExtraction.mockResolvedValue({
+        requestId: 'req-1',
+        scheduled: ['conv-a'],
+        failed: ['conv-b', 'conv-c'],
+      });
+      renderAt('k1');
+      await pressRun();
+      await screen.findByRole('status', { name: /ai extraction/i });
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'failed',
+        errorKind: 'driver',
+        wrote: 0,
+        suggested: 0,
+        notedLines: 0,
+      });
+      const resolved = await screen.findByRole('alert', { name: /ai extraction/i });
+      expect(resolved).toHaveTextContent(/extraction failed/i);
+      expect(resolved).toHaveTextContent(/2 threads could not be queued/i);
+    });
+
+    it('a press that RESOLVES after the operator navigated away leaves the next contact alone', async () => {
+      // The /contacts/:contactId route re-renders the SAME instance on a param
+      // change, and the POST resolves on its own clock. Without the press guard
+      // contact A's response writes contact B's page: B's banner reads "Running
+      // AI extraction...", B's kebab item is disabled, and A's outcome later
+      // renders on B - a money-spending action reporting an update to a record
+      // it never touched.
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const { Link } = await import('react-router-dom');
+      const user = userEvent.setup();
+      getContact.mockImplementation((id: unknown) =>
+        id === 'z99' ? Promise.resolve(OTHER) : Promise.resolve(TENANT),
+      );
+      let settle: ((v: { requestId: string; scheduled: string[]; failed: string[] }) => void) | undefined;
+      runExtraction.mockReturnValue(
+        new Promise<{ requestId: string; scheduled: string[]; failed: string[] }>((resolve) => {
+          settle = resolve;
+        }),
+      );
+      render(
+        <MemoryRouter initialEntries={['/contacts/k1']}>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await pressRun();
+      expect(screen.getByRole('status', { name: /ai extraction/i })).toBeInTheDocument();
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      await screen.findByText('Bob Other');
+
+      // A's POST answers now, on B's page.
+      await act(async () => {
+        settle?.({ requestId: 'req-1', scheduled: ['conv-a'], failed: [] });
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole('status', { name: /ai extraction/i })).not.toBeInTheDocument();
+
+      // ...and A's completion cannot resolve anything on B either.
+      emitRunCompleted({
+        conversationId: 'conv-a',
+        runId: 'r1',
+        requestId: 'req-1',
+        outcome: 'applied',
+        wrote: 2,
+        suggested: 1,
+        notedLines: 0,
+      });
+      expect(screen.queryByRole('status', { name: /ai extraction/i })).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /more actions/i }));
+      expect(screen.getByRole('menuitem', { name: /run ai extraction/i })).toBeEnabled();
+    });
+
+    it.each([
+      ['extraction_disabled', /turned off/i],
+      ['ineligible_contact_type', /only tenants and untriaged/i],
+      ['contact_deleted', /deleted contact/i],
+      ['contact_not_found', /could not be found/i],
+      ['no_conversations', /no conversations/i],
+      ['no_eligible_conversations', /no eligible conversations/i],
+      ['schedule_failed', /could not be started/i],
+    ])('renders its own copy for %s', async (code, copy) => {
+      // A REAL ApiError: the copy helper gates on `instanceof ApiError`
+      // (dashboard/src/api/client.ts:11), so a plain Error carrying a `code`
+      // property falls through to the default and five of these six rows fail.
+      runExtraction.mockRejectedValue(new ApiError(409, code, 'refused'));
+      renderAt('k1');
+      await pressRun();
+      expect(await screen.findByRole('alert', { name: /ai extraction/i })).toHaveTextContent(copy);
     });
   });
 });

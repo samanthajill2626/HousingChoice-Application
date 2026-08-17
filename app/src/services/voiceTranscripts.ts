@@ -98,6 +98,27 @@ export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): 
   return turns.map((t) => `Speaker ${speakerOrder.get(t.channel)}: ${turnText(t)}`).join('\n');
 }
 
+/**
+ * Twilio VI statuses that mean the transcript will NEVER arrive, so the pipeline
+ * must close the lifecycle ('failed') instead of waiting. Twilio's raw enum is
+ * queued | in-progress | completed | new | failed | canceled | error
+ * (adapters/messaging.ts ViTranscriptSummary) - anything not listed here and not
+ * 'completed' is read as still in flight and rides the reconcile retry chain.
+ *
+ * PROD INCIDENT 2026-08-16: this used to test `status === 'failed'` alone. A ~1s
+ * voicemail (caller hung up right after the beep) ended at status 'error', which
+ * fell through to the in-flight branch - so a DEAD transcript was polled as
+ * though it were still working and the call bubble sat on "Transcribing..."
+ * indefinitely. 'failed' is kept because it is in the documented enum, even
+ * though the live API returned 'error'; a terminal status we have not seen yet
+ * still degrades safely (retry chain -> exhaustion -> failed) rather than hanging.
+ */
+const VI_TERMINAL_FAILURE_STATUSES: ReadonlySet<string> = new Set([
+  'failed',
+  'error',
+  'canceled',
+]);
+
 export interface PersistViTranscriptDeps {
   adapter: Pick<MessagingAdapter, 'fetchViTranscript' | 'listViSentences'>;
   messages: MessagesRepo;
@@ -174,10 +195,13 @@ export async function persistViTranscript(
     return 'masked-refused';
   }
 
-  if (summary.status === 'failed') {
+  if (VI_TERMINAL_FAILURE_STATUSES.has(summary.status)) {
     const stamped = await messages.setTranscriptFailed(callSid);
     if (stamped) emitPersisted(events, entry);
-    logger.info({ transcriptSid, callSid, stamped }, 'vi transcript: reported failed - transcript_status stamped');
+    logger.info(
+      { transcriptSid, callSid, status: summary.status, stamped },
+      'vi transcript: reported terminally failed - transcript_status stamped',
+    );
     return 'failed-stamped';
   }
   if (summary.status !== 'completed') {

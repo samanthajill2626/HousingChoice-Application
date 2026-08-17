@@ -42,6 +42,7 @@ import {
   type TourUpdatedEvent,
   type SuggestionUpdatedEvent,
   type UnmatchedEmailUpdatedEvent,
+  type AiRunCompletedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -2069,7 +2070,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   let sseConnections = 0;
   router.get('/events', (req, res) => {
     if (sseConnections >= config.sseMaxConnections) {
-      log.warn(
+      log.error(
         { sseConnections, sseMaxConnections: config.sseMaxConnections },
         'sse connection cap reached — rejecting new stream with 503',
       );
@@ -2114,6 +2115,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onUnmatchedEmailUpdated = (payload: UnmatchedEmailUpdatedEvent): void => {
       writeEvent('unmatched_email.updated', payload);
     };
+    const onAiRunCompleted = (payload: AiRunCompletedEvent): void => {
+      writeEvent('ai_run.completed', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
@@ -2122,6 +2126,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     events.on('tour.updated', onTourUpdated);
     events.on('suggestion.updated', onSuggestionUpdated);
     events.on('unmatched_email.updated', onUnmatchedEmailUpdated);
+    events.on('ai_run.completed', onAiRunCompleted);
 
     // Heartbeat as a REAL named event, not an SSE comment: the browser
     // EventSource API cannot observe comment frames (': ...') by spec, so a
@@ -2154,6 +2159,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('tour.updated', onTourUpdated);
       events.off('suggestion.updated', onSuggestionUpdated);
       events.off('unmatched_email.updated', onUnmatchedEmailUpdated);
+      events.off('ai_run.completed', onAiRunCompleted);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

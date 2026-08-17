@@ -90,6 +90,7 @@ describe('hashRenderedMessage', () => {
       perMessage: pieces,
       included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
       newestTsMsgId: EMAIL_ID,
     });
     expect(window.messages.map((message) => message.hash)).toEqual(
@@ -156,6 +157,7 @@ describe('buildFullRunWindow', () => {
       perMessage: multiMessagePieces(),
       included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window).toMatchObject({
       detail: 'full',
@@ -179,6 +181,7 @@ describe('buildFullRunWindow', () => {
       perMessage: [{ ...sms!, capChars: SEEN_MESSAGE_CHAR_CAP }, call!],
       included: new Set([SMS_ID, CALL_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window.messages.map((message) => [message.tier, message.capChars])).toEqual([
       ['seen', SEEN_MESSAGE_CHAR_CAP],
@@ -196,6 +199,7 @@ describe('buildFullRunWindow', () => {
       perMessage: [{ tsMsgId: SMS_ID, type: 'sms', direction: 'inbound', raw: [long], capped: [clipped], capChars: SEEN_MESSAGE_CHAR_CAP }],
       included: new Set([SMS_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window.messages[0]!.truncated).toBe(true);
     expect(window.messages[0]!.chars).toBe(SEEN_MESSAGE_CHAR_CAP);
@@ -210,6 +214,7 @@ describe('buildFullRunWindow', () => {
       perMessage: [sms!, call!],
       included: new Set([CALL_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window.excluded).toEqual([
       { tsMsgId: 'old#1', cause: 'age_30d' },
@@ -229,6 +234,7 @@ describe('buildFullRunWindow', () => {
       ],
       included: new Set([CALL_ID, SMS_ID]),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window.noContent).toEqual([CALL_ID]);
     expect(window.messages.map((message) => message.tsMsgId)).toEqual([SMS_ID]);
@@ -246,7 +252,26 @@ describe('buildFullRunWindow', () => {
       ],
       included: new Set(['b#1']),
       hasInferredRoleContent: false,
+      maxTranscriptAgeDays: MAX_TRANSCRIPT_AGE_DAYS,
     });
     expect(window.totalChars).toBe(2);
+  });
+
+  it('records a null age floor when the run waived it', () => {
+    // Same input as 'records the byte-affecting constants' with the one field
+    // overridden: a manual run applies NO age floor, and the record must say so
+    // rather than echoing a constant the run never used.
+    const window = buildFullRunWindow({
+      cursor: '',
+      fetchedCount: 3,
+      agedOutTsMsgIds: [],
+      perMessage: multiMessagePieces(),
+      included: new Set([SMS_ID, CALL_ID, EMAIL_ID]),
+      hasInferredRoleContent: false,
+      maxTranscriptAgeDays: null,
+    });
+    expect(window.windowParams!.maxTranscriptAgeDays).toBeNull();
+    // The other byte-affecting constants are untouched by the waiver.
+    expect(window.windowParams!.maxTranscriptMessages).toBe(MAX_TRANSCRIPT_MESSAGES);
   });
 });

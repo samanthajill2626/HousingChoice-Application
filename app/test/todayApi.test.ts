@@ -821,6 +821,70 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).toEqual(['c-behind']);
   });
 
+  it('BOUNDS the deleted-contact skip at TODAY_UNREAD_CAP distinct lookups, and says so', async () => {
+    // ADVERSARIAL r2 finding 6 / CONFORMANCE r2 finding 6. Moving the
+    // deleted-contact test ahead of the cap is right, but it made the check run
+    // on every 1:1 item the walk yields - bounded only by UNREAD_WALK_LIMIT
+    // (2000) - and `getContact` memoizes PER CONTACT ID, so distinct contacts
+    // each cost a real contacts.getById. The comment beside it claimed the move
+    // "costs no extra read". On an index head thick with deleted residue - the
+    // exact condition the fix exists for - /api/today could issue up to 2000
+    // sequential contact Gets, on a route every connected dashboard refetches.
+    //
+    // 101 DISTINCT deleted contacts: one past the bound. The pass stops there,
+    // which costs the live row behind them - the same posture the unread pass's
+    // own cap takes, announced the same way instead of silently.
+    for (let i = 0; i < 101; i += 1) {
+      const id = `c-wall-${String(i).padStart(3, '0')}`;
+      const phone = `+1555031${String(i).padStart(4, '0')}`;
+      world.contacts.push({
+        contactId: id,
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Wall',
+        lastName: id,
+        deleted_at: iso(-500_000),
+      });
+      seedConversation({
+        conversationId: `conv-wall-${String(i).padStart(3, '0')}`,
+        participant_phone: phone,
+        participant_display_name: `Wall ${id}`,
+        status: 'open',
+        last_activity_at: iso(-1_000 - i),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: iso(-900_000),
+        unread_count: 1,
+        participants: [{ contactId: id, phone }],
+      } as ConversationItem);
+    }
+    seedTenant('c-past-bound', 'Past', 'Bound');
+    seedConversation({
+      conversationId: 'conv-past-bound',
+      participant_phone: '+15550319999',
+      participant_display_name: 'Past Bound',
+      status: 'open',
+      last_activity_at: iso(-400_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-900_000),
+      unread_count: 1,
+      participants: [{ contactId: 'c-past-bound', phone: '+15550319999' }],
+    } as ConversationItem);
+
+    const unrep = (await getItems()).filter((i) => i.group === 'unreplied');
+
+    // DECLARED COST: the walk stopped, so the row behind the wall is not shown.
+    expect(unrep.map((i) => i.refId)).toEqual([]);
+    // ...and it is announced with its own label, not folded into the generic
+    // 'unread' cap line, so the operator can tell "filtered to nothing by
+    // deleted residue" from "genuinely capped".
+    const skipWarns = harness.capture
+      .atLevel(40)
+      .filter((l) => l['group'] === 'unread:deleted_skips');
+    expect(skipWarns).toHaveLength(1);
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({

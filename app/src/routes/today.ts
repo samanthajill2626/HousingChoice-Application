@@ -684,6 +684,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // independent keyspaces, so one contact legitimately appearing in both is
       // not a duplicate.
       const unreadRowKeys = new Set<string>();
+      /**
+       * DISTINCT deleted contacts this pass has skipped - one `contacts.getById`
+       * each, because `getContact` memoizes per contact ID (adversarial r2
+       * finding 6). It is both the read counter and the bound below.
+       */
+      const skippedDeletedContacts = new Set<string>();
       for await (const conv of iterateUnreadConversations(
         { conversations, logger: log },
         { budget: unreadWalkBudget },
@@ -698,10 +704,26 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // unread until someone reads them), where the newest 100 OPEN rows held
         // only a small fraction of them. A hundred at the head of the index
         // rendered Unreplied and the untriaged block EMPTY, with warnIfCapped
-        // announcing "capped" rather than "filtered to nothing". The contact
-        // lookup is request-cached, so moving it up costs no extra read.
+        // announcing "capped" rather than "filtered to nothing".
+        //
+        // IT IS NOT FREE (adversarial r2 finding 6 - the earlier claim that the
+        // request cache made it so was wrong): `getContact` memoizes per contact
+        // ID, so every DISTINCT contact costs a real `contacts.getById`, and
+        // ahead of the cap this runs over every 1:1 item walked rather than the
+        // 100 kept ones. Unbounded, an index head thick with deleted residue
+        // could issue up to UNREAD_WALK_LIMIT (2000) sequential contact Gets on
+        // a route every connected dashboard SSE-refetches. So the skip work
+        // carries its own bound, at the same TODAY_UNREAD_CAP the kept rows use:
+        // past it the pass STOPS and says so, exactly like the cap it sits
+        // beside, instead of paying an unbounded read bill for a block that is
+        // being filtered to nothing anyway. Batching the lookups is the real
+        // remedy (docs/issues/contacts-batchget-amplified-reads.md).
         const ownerId = oneToOneContactId(conv);
-        if (ownerId !== undefined && (await isDeletedContact(ownerId))) continue;
+        if (ownerId !== undefined && (await isDeletedContact(ownerId))) {
+          skippedDeletedContacts.add(ownerId);
+          if (skippedDeletedContacts.size > TODAY_UNREAD_CAP) break;
+          continue;
+        }
         const rowKey = unreadRowKeyOf(conv);
         if (unreadRowKeys.has(rowKey)) continue;
         unreadRowKeys.add(rowKey);
@@ -709,6 +731,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (unreadOneToOne.length >= TODAY_UNREAD_CAP) break;
       }
       warnIfCapped('unread', unreadOneToOne.length, TODAY_UNREAD_CAP);
+      // ITS OWN LABEL, deliberately not folded into the line above: "the block
+      // is short because the head of the index is deleted residue" and "the
+      // block is full" are different operational problems with different fixes
+      // (the delete-time reset and backfill rule 3 versus nothing at all).
+      warnIfCapped('unread:deleted_skips', skippedDeletedContacts.size, TODAY_UNREAD_CAP);
       // UNDERFILLED FOR A REASON NOBODY CAN OTHERWISE SEE. Neither capped nor
       // exhausted means the raw-scan budget ran out first, so the block is short
       // while real unread work sits behind it - the same loud-problem-turned-

@@ -984,4 +984,101 @@ describe.skipIf(!reachable)('import:apply', () => {
     );
     expect(item.Item).toBeUndefined();
   });
+
+  // -----------------------------------------------------------------------
+  // Unit property facts - canonical field names, and who owns a field
+  // -----------------------------------------------------------------------
+  describe('unit property facts', () => {
+    /** The fixture's Airtable property: Beds "3 Bed", Bathrooms "2 Bathroom". */
+    const lavenderRow = (review: ReturnType<typeof cleanReview>) =>
+      [...review.units.values()].find((r) => (r.address ?? '').includes('Lavender'))!;
+    const lavenderId = () =>
+      unitIdForAddress(normalizeAddress((lavenderRow(cleanReview()).address ?? '').trim()));
+
+    const freshTables = async (): Promise<void> => {
+      for (const t of TABLES) {
+        await deleteTableIfExists(client, table(t));
+        await ensureTable(client, getTableSpec(t), table(t));
+      }
+    };
+    const storedUnit = async () =>
+      (await doc.send(new GetCommand({ TableName: table('units'), Key: { unitId: lavenderId() } })))
+        .Item;
+
+    it('stores bed and bath counts under the names the app READS', async () => {
+      // REGRESSION (2026-08-17). These were written as `bedrooms`/`bathrooms`,
+      // which NOTHING reads - `UnitItem` (repos/unitsRepo.ts), the flyer
+      // projection (lib/unitFields.ts) and the dashboard all read `beds`/`baths`.
+      // 65 imported units on dev AND prod stored their counts where no reader
+      // would ever look and rendered blank in the property list. Same class as
+      // the v1 `display_name` bug: the producer's field name was never asserted
+      // against the consumer's resolver. `seedData.test.ts` has carried this
+      // exact guard for seed data all along; the importer had none.
+      await freshTables();
+      await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+      const item = await storedUnit();
+      expect(item).toBeDefined();
+      expect(item!.beds).toBe(3);
+      expect(item!.baths).toBe(2);
+      expect(item).not.toHaveProperty('bedrooms');
+      expect(item).not.toHaveProperty('bathrooms');
+    });
+
+    it('takes the first value of a multi-select cell instead of concatenating it', async () => {
+      // Airtable multi-selects arrive comma-joined. Stripping every non-digit
+      // turned the two apartment BUILDINGS in the real book into 123-bathroom
+      // properties.
+      await freshTables();
+      const review = cleanReview();
+      const row = lavenderRow(review);
+      row.baths = '1 Bathroom,2 Bathroom,3 Bathroom';
+
+      const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+      expect((await storedUnit())!.baths).toBe(1);
+      expect(
+        report.warnings.some((w) => w.includes('Lavender') && w.includes('more than one value')),
+      ).toBe(true);
+    });
+
+    it('never overwrites a unit a human edited, but still fills what she left empty', async () => {
+      // The whole reason a re-import is safe to run. `unitsRepo.update` stamps
+      // `updated_at` on every dashboard write and the import never does, so its
+      // presence means "a person owns this row now" - permanently, by Cameron's
+      // call on 2026-08-17. Absent fields are still filled, which is how an
+      // already-edited row picks up a corrected field name.
+      await freshTables();
+      await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+      const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+      await doc.send(
+        new UpdateCommand({
+          TableName: table('units'),
+          Key: { unitId: lavenderId() },
+          // Dashboard work, exactly as it looked on prod: a hand-corrected bath
+          // count, a unit number the workbook address does not carry, and a
+          // hand-curated multi-authority list. `beds` is cleared so there is
+          // something genuinely absent left for the import to fill.
+          UpdateExpression:
+            'SET baths = :baths, address = :address, accepted_authorities = :auth, updated_at = :now REMOVE beds',
+          ExpressionAttributeValues: {
+            ':baths': 9,
+            ':address': { line1: '1460 Lavender Dr NW', line2: 'Unit 2B', zip: '30314' },
+            ':auth': ['Atlanta (AHA)', 'DCA', 'Georgia Housing Voucher'],
+            ':now': '2026-08-17T18:00:00.000Z',
+          },
+        }),
+      );
+
+      const report = await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+      expect(report.units.humanOwned).toBeGreaterThan(0);
+
+      const item = await storedUnit();
+      expect(item!.baths).toBe(9); // hers, not the workbook's 2
+      expect(item!.address).toMatchObject({ line2: 'Unit 2B' }); // survives
+      expect(item!.accepted_authorities).toHaveLength(3); // not collapsed to one
+      expect(item!.beds).toBe(3); // absent -> filled, which is the point
+    });
+  });
 });

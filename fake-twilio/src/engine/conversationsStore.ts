@@ -135,6 +135,13 @@ export class ConversationsStore {
     return participant;
   }
 
+  /** Detach one participant by MBxx. `false` when no such participant. */
+  removeParticipant(record: ConversationRecord, participantSid: string): boolean {
+    const before = record.participants.length;
+    record.participants = record.participants.filter((p) => p.sid !== participantSid);
+    return record.participants.length < before;
+  }
+
   /** The participant carrying the business number (its PROJECTED address). */
   businessParticipant(record: ConversationRecord): ConversationParticipantRecord | undefined {
     return record.participants.find((p) => p.projectedAddress !== undefined);

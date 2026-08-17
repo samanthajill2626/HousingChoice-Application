@@ -169,6 +169,26 @@ describe('Conversations REST - create and adopt', () => {
     expect((await request(app).delete(`/v1/Conversations/${sid}`)).status).toBe(204);
     expect((await request(app).get(`/v1/Conversations/${sid}`)).status).toBe(404);
   });
+
+  it('DELETEs one Participant by MBxx - how a stale projected address is dropped', async () => {
+    const { app } = makeApp();
+    const { sid } = await createRail(app, 'conv-group-drop-participant', [ANN]);
+    const list = (await request(app).get(`/v1/Conversations/${sid}/Participants`)).body
+      .participants as { sid: string; messaging_binding: { projected_address?: string } }[];
+    const business = list.find((p) => p.messaging_binding.projected_address === BUSINESS);
+    expect(business).toBeDefined();
+
+    expect(
+      (await request(app).delete(`/v1/Conversations/${sid}/Participants/${business!.sid}`)).status,
+    ).toBe(204);
+    const after = (await request(app).get(`/v1/Conversations/${sid}/Participants`)).body
+      .participants as { sid: string }[];
+    expect(after.map((p) => p.sid)).not.toContain(business!.sid);
+    // Already gone reads as 404/20404 - the adapter treats that as the end state.
+    const again = await request(app).delete(`/v1/Conversations/${sid}/Participants/${business!.sid}`);
+    expect(again.status).toBe(404);
+    expect(again.body.code).toBe(20404);
+  });
 });
 
 describe('Conversations REST - posting a message', () => {
@@ -216,6 +236,56 @@ describe('Conversations REST - posting a message', () => {
       'sent',
       'sent',
     ]);
+  });
+
+  // THE DEFECT THIS PINS (prod incident 2026-08-17). Real Group MMS refuses a
+  // post whose Author is not a participant with 50513. This fake used to accept
+  // ANY author and fan out from whichever projected participant it found (or
+  // the author itself), so a rail with NO business participant - 132 of them in
+  // prod - or the WRONG one posted happily in every test while every real send
+  // to those rails failed.
+  it('REFUSES a post whose Author is not among the participants with 50513, and fans out nothing', async () => {
+    const { app, posted, clock } = makeApp();
+    // A rail with members but NO projected-address participant at all.
+    const created = await request(app)
+      .post('/v1/Conversations')
+      .type('form')
+      .send({ UniqueName: 'conv-group-no-author' });
+    const sid = created.body.sid as string;
+    await request(app)
+      .post(`/v1/Conversations/${sid}/Participants`)
+      .type('form')
+      .send({ 'MessagingBinding.Address': ANN });
+
+    const refused = await request(app)
+      .post(`/v1/Conversations/${sid}/Messages`)
+      .type('form')
+      .send({ Author: BUSINESS, Body: 'nobody can send this' });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe(50513);
+    clock.flush();
+    expect(posted.filter((p) => p.params['EventType'] === 'onDeliveryUpdated')).toHaveLength(0);
+
+    // A rail carrying a DIFFERENT projected number refuses the current one too.
+    const { sid: staleSid } = await createRail(app, 'conv-group-stale-author', [ANN]);
+    const staleRefusal = await request(app)
+      .post(`/v1/Conversations/${staleSid}/Messages`)
+      .type('form')
+      .send({ Author: '+19387775065', Body: 'the released temp number' });
+    expect(staleRefusal.status).toBe(400);
+    expect(staleRefusal.body.code).toBe(50513);
+
+    // Attaching the business number is the repair, and the SAME post then lands.
+    const attach = await request(app)
+      .post(`/v1/Conversations/${sid}/Participants`)
+      .type('form')
+      .send({ 'MessagingBinding.ProjectedAddress': BUSINESS });
+    expect(attach.status).toBe(201);
+    const accepted = await request(app)
+      .post(`/v1/Conversations/${sid}/Messages`)
+      .type('form')
+      .send({ Author: BUSINESS, Body: 'now it sends' });
+    expect(accepted.status).toBe(201);
   });
 
   it('fires ZERO classic status callbacks - Conversations sends do not produce them', async () => {

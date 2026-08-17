@@ -81,6 +81,7 @@ import {
   UNREAD_WALK_LIMIT,
   type UnreadWalkState,
 } from '../lib/unreadFeed.js';
+import { formatPhoneForDisplay } from '../lib/phone.js';
 import { createRateLimitedWarn } from '../lib/rateLimitedWarn.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -623,7 +624,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             if (!stillSuppressed) continue;
             if (isDeleted(memberContact)) continue;
             const memberWho =
-              nameFromContact(memberContact) ?? entry.name ?? entry.phone ?? memberContactId;
+              nameFromContact(memberContact) ??
+              entry.name ??
+              formatPhoneForDisplay(entry.phone) ??
+              memberContactId;
             needsYouNow.push({
               item: {
                 group: 'needs_you_now',
@@ -913,7 +917,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // needs_review contact with NO matching emitted conversation still
         // emits its own row.
         if (typeof contact.phone === 'string' && emittedUnknownPhones.has(contact.phone)) continue;
-        const who = nameFromContact(contact) ?? contact.phone ?? contact.contactId;
+        const who =
+          nameFromContact(contact) ?? formatPhoneForDisplay(contact.phone) ?? contact.contactId;
         needsYouNow.push({
           item: {
             group: 'needs_you_now',
@@ -987,7 +992,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         const poolNumber = conv.pool_number;
         if (typeof poolNumber !== 'string' || poolNumber.length === 0) continue; // defensive
         const memberNames = (conv.participants ?? []).map(
-          (p) => p.name ?? p.phone ?? p.contactId,
+          (p) => p.name ?? formatPhoneForDisplay(p.phone) ?? p.contactId,
         );
         relayCloseNags.push({
           conversationId: conv.conversationId,
@@ -1059,13 +1064,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   return router;
 }
 
-/** Conversation `who`: the resolved display name, else the participant phone
- *  (email-only threads carry neither a phone nor, absent triage, a name -> ''). */
+/** Conversation `who`: the resolved display name, else the participant phone in
+ *  staff-facing display form (email-only threads carry neither -> ''). */
 function whoOfConversation(conv: ConversationItem): string {
   if (typeof conv.participant_display_name === 'string' && conv.participant_display_name.length > 0) {
     return conv.participant_display_name;
   }
-  return conv.participant_phone ?? '';
+  return formatPhoneForDisplay(conv.participant_phone) ?? '';
 }
 
 /** A 1:1 thread's external contact id (its single participant), or undefined when

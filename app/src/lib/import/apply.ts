@@ -184,7 +184,16 @@ export interface ApplyReport {
   };
   messages: { written: number };
   calls: { written: number };
-  units: { written: number; skippedDropped: number };
+  units: {
+    written: number;
+    skippedDropped: number;
+    /**
+     * Units a human had already edited in the dashboard, so the import filled
+     * only the fields that were genuinely absent and left the rest alone. See
+     * `upsertUnit` - `updated_at` is the ownership line.
+     */
+    humanOwned: number;
+  };
   warnings: string[];
 }
 
@@ -235,7 +244,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     },
     messages: { written: 0 },
     calls: { written: 0 },
-    units: { written: 0, skippedDropped: 0 },
+    units: { written: 0, skippedDropped: 0, humanOwned: 0 },
     warnings,
   };
 
@@ -463,7 +472,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       continue;
     }
     if (!dryRun) {
-      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan);
+      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan, report);
     }
     report.units.written += 1;
   }
@@ -1212,6 +1221,45 @@ async function upsertConversation(
     });
 }
 
+/**
+ * The FIRST number in a founder-entered cell ("3 Bed" -> 3, "1.5 Bathroom" -> 1.5).
+ *
+ * This used to strip every non-digit and parse what was left, which is correct
+ * for a single-value cell and silently wrong for an Airtable MULTI-SELECT: the
+ * two apartment BUILDINGS in the book carry "1 Bathroom,2 Bathroom,3 Bathroom"
+ * (her way of saying the building has 1-, 2- and 3-bath units), and stripping
+ * concatenated that into 123 bathrooms. Reading the first number leaves every
+ * single-value cell byte-identical and turns a multi-select into its smallest
+ * unit instead of a nonsense one. `extra` reports that a value was dropped so
+ * the run says so out loud rather than quietly picking for her.
+ */
+function firstNumberIn(raw: string | undefined): { value: number; extra: boolean } | undefined {
+  const matches = (raw ?? '').match(/\d+(?:\.\d+)?/g);
+  if (!matches?.length) return undefined;
+  const value = Number.parseFloat(matches[0]!);
+  return Number.isFinite(value) ? { value, extra: matches.length > 1 } : undefined;
+}
+
+/**
+ * Write one reviewed unit row.
+ *
+ * OWNERSHIP (2026-08-17, Cameron's call): the import owns a unit until a human
+ * edits it in the dashboard, and from then on the human owns it PERMANENTLY.
+ * `updated_at` is the line - `unitsRepo.update` stamps it on every dashboard
+ * write and the import never does, so its presence is an exact "a person has
+ * touched this row" signal.
+ *
+ *   no `updated_at`  -> import-owned. Every property fact is written, which is
+ *                       what makes a re-import a real convergent correction.
+ *   has `updated_at` -> human-owned. Facts are written through `if_not_exists`,
+ *                       so genuinely ABSENT fields still get filled (that is how
+ *                       an edited row still picks up the `beds`/`baths` rename)
+ *                       and anything she set is left exactly as she set it.
+ *
+ * Without this the re-run needed for the field rename would have wiped a
+ * hand-added `line2: "Unit 2B"` and collapsed a hand-curated three-authority
+ * list to one, on live prod rows edited the same day.
+ */
 async function upsertUnit(
   doc: DynamoDBDocumentClient,
   table: string,
@@ -1219,6 +1267,7 @@ async function upsertUnit(
   importedAt: string,
   contactIdByPhone: ReadonlyMap<string, string>,
   plan: PlanResult,
+  report: ApplyReport,
 ): Promise<void> {
   const address = (row.address ?? '').trim();
   // IDENTITY STAYS ON THE RAW STRING. The unitId is seeded from the normalized
@@ -1230,8 +1279,10 @@ async function upsertUnit(
   // the reminder composer as a verbatim postal blob).
   const parsedAddress = parseUnitAddress(address);
 
-  const sets: string[] = [
-    'address = :address',
+  // Import PROVENANCE - never human data, so it is written on every run under
+  // both ownership modes. `status` and `created_at` were already self-protecting
+  // and stay that way.
+  const bookkeeping: string[] = [
     '#status = if_not_exists(#status, :status)',
     'created_at = if_not_exists(created_at, :createdAt)',
     'imported_from = :importSource',
@@ -1239,22 +1290,53 @@ async function upsertUnit(
   ];
   const names: Record<string, string> = { '#status': 'status' };
   const values: Record<string, unknown> = {
-    ':address': parsedAddress,
     ':status': mapUnitStatus(row.status ?? ''),
     ':createdAt': importedAt,
     ':importSource': IMPORT_SOURCE,
     ':importedAt': importedAt,
   };
 
-  const beds = Number.parseInt((row.beds ?? '').replace(/\D/g, ''), 10);
-  if (Number.isInteger(beds) && beds > 0) {
-    sets.push('bedrooms = :beds');
-    values[':beds'] = beds;
+  // PROPERTY FACTS - everything a human can also edit in the dashboard. These
+  // are the clauses the ownership mode switches on.
+  const facts: Array<{ attr: string; placeholder: string }> = [];
+  const removes: string[] = [];
+  const fact = (attr: string, placeholder: string, value: unknown): void => {
+    facts.push({ attr, placeholder });
+    values[placeholder] = value;
+  };
+
+  fact('address', ':address', parsedAddress);
+
+  // CANONICAL FIELD NAMES. These were `bedrooms`/`bathrooms` until 2026-08-17 -
+  // names NOTHING reads. `UnitItem` (repos/unitsRepo.ts), the flyer projection
+  // (lib/unitFields.ts) and the dashboard all read `beds`/`baths`, so 65 imported
+  // units stored their bed and bath counts where no reader would ever look and
+  // rendered blank in the property list. Same class as the v1 `display_name`
+  // bug: the producer's field name was never asserted against the consumer's
+  // resolver. The dead attribute is REMOVEd on the same update - but only when
+  // the canonical value is going in beside it, so nothing is ever dropped
+  // without a replacement.
+  const beds = firstNumberIn(row.beds);
+  if (beds && Number.isInteger(beds.value) && beds.value > 0) {
+    fact('beds', ':beds', beds.value);
+    removes.push('bedrooms');
+    if (beds.extra) {
+      report.warnings.push(
+        `${address}: beds cell ${JSON.stringify(row.beds ?? '')} lists more than one value - ` +
+          `imported the first (${beds.value}).`,
+      );
+    }
   }
-  const baths = Number.parseFloat((row.baths ?? '').replace(/[^\d.]/g, ''));
-  if (Number.isFinite(baths) && baths > 0) {
-    sets.push('bathrooms = :baths');
-    values[':baths'] = baths;
+  const baths = firstNumberIn(row.baths);
+  if (baths && baths.value > 0) {
+    fact('baths', ':baths', baths.value);
+    removes.push('bathrooms');
+    if (baths.extra) {
+      report.warnings.push(
+        `${address}: baths cell ${JSON.stringify(row.baths ?? '')} lists more than one value - ` +
+          `imported the first (${baths.value}).`,
+      );
+    }
   }
   // The unit's accepted authorities (spec section 8): ONE list field, canonically
   // spelled through the SAME normalizer the contact side uses. The workbook cell
@@ -1265,13 +1347,11 @@ async function upsertUnit(
   // time (authoritiesOf).
   const authority = housingAuthorityFor(row.housing_authority);
   if (authority !== undefined) {
-    sets.push('accepted_authorities = :acceptedAuthorities');
-    values[':acceptedAuthorities'] = [authority];
+    fact('accepted_authorities', ':acceptedAuthorities', [authority]);
   }
   const notes = (row.notes ?? '').trim();
   if (notes) {
-    sets.push('notes = :notes');
-    values[':notes'] = notes;
+    fact('notes', ':notes', notes);
   }
 
   // Resolve the landlord by name against the imported people, so the unit lands
@@ -1287,22 +1367,43 @@ async function upsertUnit(
         contactIdByPhone.has(p.phone),
     );
     if (matches.length === 1) {
-      sets.push('landlordId = :landlordId');
-      values[':landlordId'] = matches[0]!.contactId;
+      fact('landlordId', ':landlordId', matches[0]!.contactId);
     }
-    sets.push('imported_landlord_name = :landlordName');
-    values[':landlordName'] = landlordName;
+    fact('imported_landlord_name', ':landlordName', landlordName);
   }
 
-  await doc.send(
+  const expression = (clauses: readonly string[]): string =>
+    `SET ${[...bookkeeping, ...clauses].join(', ')}` +
+    (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : '');
+
+  const command = (updateExpression: string, guard?: string): UpdateCommand =>
     new UpdateCommand({
       TableName: table,
       Key: { unitId },
-      UpdateExpression: `SET ${sets.join(', ')}`,
+      UpdateExpression: updateExpression,
+      ...(guard && { ConditionExpression: guard }),
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
-    }),
-  );
+    });
+
+  try {
+    await doc.send(
+      command(
+        expression(facts.map((f) => `${f.attr} = ${f.placeholder}`)),
+        'attribute_not_exists(updated_at)',
+      ),
+    );
+  } catch (err) {
+    // ConditionalCheckFailed is not an error here - it IS the human-owned
+    // branch. Any other failure is a real one and must not be swallowed.
+    if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    report.units.humanOwned += 1;
+    await doc.send(
+      command(
+        expression(facts.map((f) => `${f.attr} = if_not_exists(${f.attr}, ${f.placeholder})`)),
+      ),
+    );
+  }
 }
 
 /** Airtable's "Available Status" vocabulary -> our LISTING_STATUSES. */

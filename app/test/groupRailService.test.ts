@@ -75,13 +75,20 @@ function makeRepo(initial: ConversationItem = threadRow()) {
       sid: string,
       map: Record<string, string>,
       token: string,
+      projectedAddress: string,
     ) {
       calls.finalizes += 1;
       const item = row.current;
       if (!item || item.conversationId !== id) return undefined;
       if (item.rail_creating?.token !== token) return undefined;
-      const next = { ...item, twilio_conversation_sid: sid, twilio_participant_map: map };
+      const next = {
+        ...item,
+        twilio_conversation_sid: sid,
+        twilio_participant_map: map,
+        twilio_projected_address: projectedAddress,
+      };
       delete next.rail_creating;
+      delete next.rail_failed;
       row.current = next;
       return { ...next };
     },
@@ -98,12 +105,25 @@ function makeRepo(initial: ConversationItem = threadRow()) {
   return { repo, row, calls };
 }
 
-function participantsFor(members: ConversationParticipant[]): GroupParticipantRef[] {
-  return members.map((m, i) => ({
-    participantSid: `MB${i}`,
-    address: m.phone,
-    projectedAddress: '+15550000000',
-  }));
+const BUSINESS = '+15550000000';
+
+/**
+ * The FAITHFUL rail shape: the business number is its OWN projected-address
+ * participant, and each member is an address-only participant. (An earlier
+ * version of this helper put a projected address on every member - a shape
+ * Twilio refuses with 50407 - which is how a fixture can hide the very
+ * participant the rail cannot post without.)
+ */
+function participantsFor(
+  members: ConversationParticipant[],
+  // `null` = NO projected participant at all (the 132). Not `undefined`, which
+  // would select the default.
+  projected: string | null = BUSINESS,
+): GroupParticipantRef[] {
+  return [
+    ...(projected !== null ? [{ participantSid: 'MBbiz', projectedAddress: projected }] : []),
+    ...members.map((m, i) => ({ participantSid: `MB${i}`, address: m.phone })),
+  ];
 }
 
 function makePort(over: Partial<GroupConversationsPort> = {}) {
@@ -136,6 +156,14 @@ function makePort(over: Partial<GroupConversationsPort> = {}) {
     async removeConversation() {
       throw new Error('removeConversation: override it in the test that needs it');
     },
+    // Same negative-control posture: a test that expects NO author repair fails
+    // loudly if the service reaches for one.
+    async addProjectedParticipant() {
+      throw new Error('addProjectedParticipant: override it in the test that needs it');
+    },
+    async removeParticipant() {
+      throw new Error('removeParticipant: override it in the test that needs it');
+    },
     ...over,
   };
   return { port, created };
@@ -145,7 +173,7 @@ function svc(repo: unknown, port: GroupConversationsPort, over: Partial<GroupRai
   return createGroupRailService({
     conversationsRepo: repo as GroupRailServiceDeps['conversationsRepo'],
     groupConversations: port,
-    businessNumber: '+15550000000',
+    businessNumber: BUSINESS,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
     ...over,
   });
@@ -176,6 +204,7 @@ describe('ensureGroupRail', () => {
       threadRow({
         twilio_conversation_sid: 'CHold',
         twilio_participant_map: { MB0: 'phone#+15551110001', MB1: 'phone#+15551110002' },
+        twilio_projected_address: BUSINESS,
       }),
     );
     const { port, created } = makePort();
@@ -185,6 +214,210 @@ describe('ensureGroupRail', () => {
     expect(result.twilioConversationSid).toBe('CHold');
     expect(created).toHaveLength(0);
     expect(calls.claims).toBe(0);
+  });
+
+  // THE DEFECT THESE PIN (prod incident 2026-08-17). `ensureGroupRail` proved a
+  // stored rail COVERED THE ROSTER and never that it could be POSTED TO: the
+  // business number's projected-address participant was dropped from the stored
+  // map by design, `created.failures` was never read, and the fast path trusted
+  // any stamped sid. So 132 imported rails whose business add had been refused,
+  // and 3 rails built for the pre-port number, all read as healthy - and every
+  // staff reply to them failed with Twilio 50513, forever, while inbound kept
+  // flowing through the SMS webhook. A rail is verified for ONE author, and that
+  // author is now stored and compared against the current business number.
+  describe('AUTHOR VERIFICATION - a rail is only "existing" for the business number it carries', () => {
+    const STORED_MAP = { MB0: 'phone#+15551110001', MB1: 'phone#+15551110002' };
+
+    it('a stored rail with NO verified author is re-read from Twilio, REPAIRED and re-finalized', async () => {
+      // The 132: sid + full map, no business participant, nothing recorded.
+      const { repo, row, calls } = makeRepo(
+        threadRow({ twilio_conversation_sid: 'CHold', twilio_participant_map: STORED_MAP }),
+      );
+      const attached: string[] = [];
+      let participants = participantsFor(MEMBERS, null);
+      const { port, created } = makePort({
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CHold', uniqueName, state: 'active' };
+        },
+        async fetchParticipants() {
+          return participants;
+        },
+        async addProjectedParticipant(_sid, businessNumber) {
+          attached.push(businessNumber);
+          const ref = { participantSid: 'MBbizNew', projectedAddress: businessNumber };
+          participants = [...participants, ref];
+          return ref;
+        },
+      });
+
+      const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+      expect(attached).toEqual([BUSINESS]);
+      // Same rail, same members - no second Conversation, no member churn.
+      expect(created).toEqual([]);
+      expect(result.status).toBe('created');
+      expect(result.twilioConversationSid).toBe('CHold');
+      expect(result.participantMap).toEqual(STORED_MAP);
+      expect(calls.finalizes).toBe(1);
+      expect(row.current?.twilio_projected_address).toBe(BUSINESS);
+      expect(row.current?.rail_failed).toBeUndefined();
+      expect(row.current?.rail_creating).toBeUndefined();
+    });
+
+    it('a rail whose Twilio state ALREADY carries the author is verified without a repair', async () => {
+      // Sam's thread after the hand repair: Twilio is right, the row is not
+      // stamped yet. One read, no add (the default add THROWS), then stamped.
+      const { repo, row } = makeRepo(
+        threadRow({ twilio_conversation_sid: 'CHold', twilio_participant_map: STORED_MAP }),
+      );
+      const { port } = makePort({
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CHold', uniqueName, state: 'active' };
+        },
+        async fetchParticipants() {
+          return participantsFor(MEMBERS);
+        },
+      });
+
+      const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+      expect(result.status).toBe('created');
+      expect(row.current?.twilio_projected_address).toBe(BUSINESS);
+    });
+
+    it('a rail built for a PREVIOUS business number has the stale participant removed and the current one attached', async () => {
+      // The 3: BUSINESS_PHONE_NUMBER changed under a rail that carried the old
+      // (since released) number. Posting as the old number is impossible and
+      // posting as the new one is 50513 - the rail has to be re-pointed.
+      const { repo, row } = makeRepo(
+        threadRow({
+          twilio_conversation_sid: 'CHold',
+          twilio_participant_map: STORED_MAP,
+          twilio_projected_address: '+19999999999',
+        }),
+      );
+      const removed: string[] = [];
+      const attached: string[] = [];
+      let participants: GroupParticipantRef[] = participantsFor(MEMBERS, '+19999999999');
+      const { port } = makePort({
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CHold', uniqueName, state: 'active' };
+        },
+        async fetchParticipants() {
+          return participants;
+        },
+        async removeParticipant(_sid, participantSid) {
+          removed.push(participantSid);
+          participants = participants.filter((p) => p.participantSid !== participantSid);
+          return true;
+        },
+        async addProjectedParticipant(_sid, businessNumber) {
+          attached.push(businessNumber);
+          const ref = { participantSid: 'MBbizNew', projectedAddress: businessNumber };
+          participants = [...participants, ref];
+          return ref;
+        },
+      });
+
+      const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+      expect(removed).toEqual(['MBbiz']);
+      expect(attached).toEqual([BUSINESS]);
+      expect(result.status).toBe('created');
+      expect(row.current?.twilio_projected_address).toBe(BUSINESS);
+    });
+
+    it('a REFUSED author attach is a recorded rail failure - never a stamped rail that cannot post', async () => {
+      const { repo, row, calls } = makeRepo(
+        threadRow({ twilio_conversation_sid: 'CHold', twilio_participant_map: STORED_MAP }),
+      );
+      const { port } = makePort({
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CHold', uniqueName, state: 'active' };
+        },
+        async fetchParticipants() {
+          return participantsFor(MEMBERS, null);
+        },
+        async addProjectedParticipant() {
+          throw Object.assign(new Error('not owned'), { code: 50407, status: 400 });
+        },
+      });
+
+      const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+      expect(result.status).toBe('failed');
+      expect(result.reason).toContain('50407');
+      expect(calls.finalizes).toBe(0);
+      expect(row.current?.rail_failed?.reason).toContain('50407');
+      expect(row.current?.twilio_projected_address).toBeUndefined();
+      // The claim is released so the next run can retry immediately.
+      expect(row.current?.rail_creating).toBeUndefined();
+    });
+
+    it('a FRESH create whose fallback could not attach the business number is repaired or failed, never silently stamped', async () => {
+      // The 8/15 shape exactly: bulk create refused, individual adds attached
+      // every member, the business add was refused and reported in `failures`.
+      const { repo, row, calls } = makeRepo();
+      const attached: string[] = [];
+      const { port } = makePort({
+        async createConversationWithParticipants(input) {
+          return {
+            conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
+            participants: participantsFor(MEMBERS, null),
+            failures: [{ address: input.businessNumber, message: 'not owned', errorCode: '50407' }],
+          };
+        },
+        async addProjectedParticipant(_sid, businessNumber) {
+          attached.push(businessNumber);
+          return { participantSid: 'MBbizNew', projectedAddress: businessNumber };
+        },
+      });
+
+      const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+      // The service noticed the refused business add and repaired it inline.
+      expect(attached).toEqual([BUSINESS]);
+      expect(result.status).toBe('created');
+      expect(calls.finalizes).toBe(1);
+      expect(row.current?.twilio_projected_address).toBe(BUSINESS);
+    });
+
+    it('a stored rail verified for the CURRENT number is trusted; one verified for ANOTHER number is not', async () => {
+      const verified = makeRepo(
+        threadRow({
+          twilio_conversation_sid: 'CHold',
+          twilio_participant_map: STORED_MAP,
+          twilio_projected_address: BUSINESS,
+        }),
+      );
+      const other = makeRepo(
+        threadRow({
+          twilio_conversation_sid: 'CHold',
+          twilio_participant_map: STORED_MAP,
+          twilio_projected_address: '+19999999999',
+        }),
+      );
+      const { port } = makePort({
+        async fetchByUniqueName(uniqueName) {
+          return { conversationSid: 'CHold', uniqueName, state: 'active' };
+        },
+        async fetchParticipants() {
+          return participantsFor(MEMBERS);
+        },
+      });
+
+      expect((await svc(verified.repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS })).status).toBe(
+        'existing',
+      );
+      expect(verified.calls.claims).toBe(0);
+      // Twilio turns out to already carry the current number (a hand repair);
+      // the row is re-verified and re-stamped rather than trusted.
+      expect((await svc(other.repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS })).status).toBe(
+        'created',
+      );
+      expect(other.calls.claims).toBe(1);
+      expect(other.row.current?.twilio_projected_address).toBe(BUSINESS);
+    });
   });
 
   it('CONCURRENT DOUBLE-CREATE: the claim loser never creates a second rail', async () => {
@@ -236,7 +469,7 @@ describe('ensureGroupRail', () => {
     expect(row.current?.twilio_conversation_sid).toBe('CH1');
 
     // The dead claimant wakes up and tries to finalize its own orphan rail.
-    const late = await repo.setTwilioConversation(CONV, 'CHorphan', {}, 'dead-claimant');
+    const late = await repo.setTwilioConversation(CONV, 'CHorphan', {}, 'dead-claimant', BUSINESS);
     expect(late).toBeUndefined();
     expect(row.current?.twilio_conversation_sid).toBe('CH1');
   });

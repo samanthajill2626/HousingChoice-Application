@@ -326,12 +326,15 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CH11111111111111111111111111111111',
         { MB11111111111111111111111111111111: 'phone#+15550100070' },
         'token-a',
+        '+15550000000',
       );
 
       expect(updated).toBeDefined();
       expect(updated).toMatchObject({
         twilio_conversation_sid: 'CH11111111111111111111111111111111',
         twilio_participant_map: { MB11111111111111111111111111111111: 'phone#+15550100070' },
+        // The verified author lands in the SAME write as the sid (2026-08-17).
+        twilio_projected_address: '+15550000000',
       });
       expect((updated as ConversationItem).rail_creating).toBeUndefined();
     });
@@ -349,6 +352,7 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CH22222222222222222222222222222222',
         {},
         'token-expired',
+        '+15550000000',
       );
 
       expect(updated).toBeUndefined();
@@ -369,6 +373,7 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CH33333333333333333333333333333333',
         {},
         'token-a',
+        '+15550000000',
       );
 
       expect(updated).toBeUndefined();
@@ -435,6 +440,7 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CH44444444444444444444444444444444',
         {},
         'dead',
+        '+15550000000',
       );
       expect(late).toBeUndefined();
 
@@ -443,6 +449,7 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CH55555555555555555555555555555555',
         { MB1: 'phone#+15550100081' },
         'alive',
+        '+15550000000',
       );
       expect(winner?.twilio_conversation_sid).toBe('CH55555555555555555555555555555555');
     });
@@ -517,11 +524,44 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
         'CHhealed',
         { MBhealed: 'phone#+15550100084' },
         'token-h2',
+        '+15550000000',
       );
 
       expect(finalized?.twilio_conversation_sid).toBe('CHhealed');
       expect(finalized?.rail_failed).toBeUndefined();
       expect((await conversations.getById(conversationId))?.rail_failed).toBeUndefined();
+    });
+
+    it('clearGroupRail drops the sid, the map AND the verified author together, conditional on the sid it saw', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-64c', phone: '+15550100085' }],
+      });
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-i', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      await conversations.setTwilioConversation(
+        conversationId,
+        'CHtoclear',
+        { MBclear: 'phone#+15550100085' },
+        'token-i',
+        '+15550000000',
+      );
+
+      // A healer that saw a DIFFERENT sid must not clobber this rail.
+      expect(await conversations.clearGroupRail(conversationId, 'CHsomeoneelse')).toBe(false);
+      expect((await conversations.getById(conversationId))?.twilio_conversation_sid).toBe('CHtoclear');
+
+      expect(await conversations.clearGroupRail(conversationId, 'CHtoclear')).toBe(true);
+      const cleared = await conversations.getById(conversationId);
+      expect(cleared?.twilio_conversation_sid).toBeUndefined();
+      expect(cleared?.twilio_participant_map).toBeUndefined();
+      // A verified author without a rail would let the fast path trust a rail
+      // that no longer exists on the row - it goes with the sid.
+      expect(cleared?.twilio_projected_address).toBeUndefined();
     });
 
     it('recordRailFailure by a non-owner writes nothing', async () => {

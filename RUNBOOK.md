@@ -1331,9 +1331,10 @@ do **not** apply to it.
   receives contact names and message bodies on every inbound text/email, so sign-out (which is
   global revocation by design) clears the user's push subscriptions in the same write - INCLUDING
   the voice pre-ring on the phone if you sign out on the laptop. The browser that signed out
-  forgets its own subscription; every OTHER device re-POSTs the subscription it still holds on its
-  next app open (boot reconcile), so opening the PWA on the phone after signing out elsewhere
-  re-arms push with no Settings visit. On the device that signed out, after signing back in:
+  forgets its own subscription; every OTHER device re-POSTs the subscription it still holds the
+  next time the app opens SIGNED IN (boot reconcile) - and since the sign-out revoked that device's
+  session too, that means: open the PWA, sign back in, and push is re-armed with no Settings visit.
+  On the device that signed out, after signing back in:
   **Settings -> Notifications -> enable**, then prove it with **Send test notification**. Normal
   session expiry and an admin role change do NOT drop subscriptions; only an explicit sign-out
   does.

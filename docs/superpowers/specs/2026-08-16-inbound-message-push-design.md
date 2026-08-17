@@ -110,9 +110,13 @@ Planner-settled technical decisions:
   phone when the founder signs out on the laptop) and the Settings
   toggle reads the BROWSER, so the dashboard now RECONCILES on boot:
   every device re-POSTs the browser subscription it still holds
-  (idempotent on the server - dedupe by endpoint, replace), which
-  re-arms push on the next app open with no Settings visit and makes the
-  toggle truthful by construction. The signing-out browser also
+  (idempotent on the server - dedupe by endpoint, replace) when the
+  authenticated shell mounts, which re-arms push on the next SIGNED-IN
+  app open (after the sign-out revoked its session, that means after
+  signing back in) with no Settings visit, and makes the toggle truthful
+  by construction. Both client operations are bounded end to end (the
+  registration lookup, getSubscription, AND the unsubscribe / re-POST -
+  1.5s default) so nothing can hang in front of logout(). The signing-out browser also
   best-effort unsubscribes its own copy. Both client helpers use
   serviceWorker.getRegistration() (never .ready, which hangs forever with
   no registration) under a bounded timeout, and never throw or block

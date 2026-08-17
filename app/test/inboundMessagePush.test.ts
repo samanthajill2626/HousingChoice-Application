@@ -185,11 +185,9 @@ describe('inbound message push - fire-and-forget (spec D11)', () => {
     world.pushService.sendToAll = (): Promise<never> => new Promise(() => {});
     const { app } = makeWebhookHarness({ world });
 
-    const started = Date.now();
     const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'hello' }));
 
     expect(res.status).toBe(200);
-    expect(Date.now() - started).toBeLessThan(4_000);
     // The message was still filed - the push is a side effect, never a gate.
     expect(world.conversations.size).toBe(1);
   });

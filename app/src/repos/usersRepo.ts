@@ -69,6 +69,25 @@ export interface PushSubscriptionRecord {
 /** Per-user device cap: oldest subscriptions are dropped past this (LRU by created_at). */
 export const MAX_PUSH_SUBSCRIPTIONS = 10;
 
+/**
+ * The role-change revocation UpdateExpression, exported so the ops-script
+ * mirror (scripts/lib/userRoleCore.mjs buildRoleUpdate) can be pinned EQUAL to
+ * it by test rather than to a hand-copied literal - the two were edited twice
+ * in two days and only a literal in each test file kept them in step.
+ * if_not_exists(..., 1) + 1 (NOT ADD): a legacy item lacking the attribute
+ * reads as epoch 1 (sessionEpochOf), so its first bump must land on 2.
+ * push_subscriptions are deliberately KEPT here - only the LOGOUT bump
+ * (SESSION_REVOKE_UPDATE_EXPRESSION) drops them.
+ */
+export const ROLE_REVOKE_UPDATE_EXPRESSION =
+  'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one';
+
+/** The LOGOUT revocation UpdateExpression: bump the epoch AND drop the push
+ *  subscriptions in one write (see bumpSessionEpoch). REMOVE of an absent
+ *  attribute is a no-op. */
+export const SESSION_REVOKE_UPDATE_EXPRESSION =
+  'SET session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions';
+
 export interface UserItem {
   userId: string;
   /** Normalized login email — the byEmail GSI key (normalizeEmail). */
@@ -518,8 +537,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
         new UpdateCommand({
           TableName: table,
           Key: { userId },
-          UpdateExpression:
-            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+          UpdateExpression: ROLE_REVOKE_UPDATE_EXPRESSION,
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeNames: { '#role': 'role' },
           ExpressionAttributeValues: { ':role': role, ':base': 1, ':one': 1 },
@@ -546,8 +564,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
           // attribute read as epoch 1 (sessionEpochOf), so their first bump
           // must land on 2 - ADD would mint 1 and revoke nothing. REMOVE of an
           // absent push_subscriptions attribute is a no-op (never a failure).
-          UpdateExpression:
-            'SET session_epoch = if_not_exists(session_epoch, :base) + :one REMOVE push_subscriptions',
+          UpdateExpression: SESSION_REVOKE_UPDATE_EXPRESSION,
           ConditionExpression: 'attribute_exists(userId)',
           ExpressionAttributeValues: { ':base': 1, ':one': 1 },
           ReturnValues: 'UPDATED_NEW',

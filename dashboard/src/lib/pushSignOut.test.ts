@@ -48,6 +48,11 @@ describe('forgetBrowserPushSubscription (sign-out best-effort unsubscribe)', () 
     await expect(forgetBrowserPushSubscription({ timeoutMs: 20 })).resolves.toBe(false);
   });
 
+  it('never hangs: an unsubscribe that never settles is bounded by the timeout too', async () => {
+    stubServiceWorker(async () => registrationWith({ unsubscribe: () => new Promise(() => {}) }));
+    await expect(forgetBrowserPushSubscription({ timeoutMs: 20 })).resolves.toBe(false);
+  });
+
   it('never throws: an unsubscribe failure resolves false', async () => {
     stubServiceWorker(async () =>
       registrationWith({
@@ -89,6 +94,12 @@ describe('reconcileBrowserPushSubscription (boot-time re-POST so the server matc
       throw new Error('push_not_configured');
     });
     await expect(reconcileBrowserPushSubscription(post)).resolves.toBe(false);
+  });
+
+  it('never hangs: a POST that never settles is bounded by the timeout too', async () => {
+    stubServiceWorker(async () => registrationWith({ toJSON: () => ({ endpoint: 'e', keys: {} }) }));
+    const post = vi.fn((): Promise<never> => new Promise(() => {}));
+    await expect(reconcileBrowserPushSubscription(post, { timeoutMs: 20 })).resolves.toBe(false);
   });
 
   it('never hangs: a registration lookup that never settles is bounded by the timeout', async () => {

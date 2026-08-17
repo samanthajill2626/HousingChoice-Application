@@ -11,6 +11,7 @@ import {
   STACK_ENVS,
   USER_ROLES,
 } from '../../scripts/lib/userRoleCore.mjs';
+import { ROLE_REVOKE_UPDATE_EXPRESSION } from '../src/repos/usersRepo.js';
 
 describe('constants', () => {
   it('roles are exactly admin|va (README deviations)', () => {
@@ -66,6 +67,10 @@ describe('buildRoleUpdate (one atomic write: role flip + session-epoch bump; pus
       },
     });
     expect(buildRoleUpdate('va').expressionAttributeValues[':role']).toEqual({ S: 'va' });
+  });
+
+  it('is byte-identical to the app repo expression it mirrors (pinned to the export, not a copied literal)', () => {
+    expect(buildRoleUpdate('admin').updateExpression).toBe(ROLE_REVOKE_UPDATE_EXPRESSION);
   });
 });
 

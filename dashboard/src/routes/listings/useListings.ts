@@ -12,8 +12,11 @@ import { getUnits, type UnitItem } from '../../api/index.js';
  *  scale). Hitting it WARNS — never a silent truncation. */
 const MAX_PAGES = 40;
 
-/** Fetch every page of the unit records (nextCursor walk, bounded). */
-async function getAllUnitPages(deleted: boolean, signal: AbortSignal): Promise<UnitItem[]> {
+/** Fetch every page of the unit records (nextCursor walk, bounded). Exported
+ *  because every "all the properties" consumer needs the WALK, not page one:
+ *  the server pages at 50, so a one-shot getUnits() silently hides the rest of
+ *  a real portfolio (the Matching composer's property picker did exactly that). */
+export async function getAllUnitPages(deleted: boolean, signal: AbortSignal): Promise<UnitItem[]> {
   const out: UnitItem[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_PAGES; page++) {

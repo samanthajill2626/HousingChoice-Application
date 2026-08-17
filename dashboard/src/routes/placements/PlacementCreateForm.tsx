@@ -18,7 +18,6 @@ import {
   getContacts,
   getPlacementsBy,
   getUnit,
-  getUnits,
   PLACEMENT_STAGES,
   STAGE_LABELS,
   TERMINAL_STAGES,
@@ -35,6 +34,7 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { getAllUnitPages } from '../listings/useListings.js';
 import styles from './PlacementCreateForm.module.css';
 
 export interface PlacementCreateFormProps {
@@ -133,11 +133,14 @@ export function PlacementCreateForm({
 
     void (async () => {
       try {
-        const page = await getUnits({}, ac.signal);
+        // EVERY page (the server pages /api/units at 50) - a first-page-only
+        // read left properties later in the scan unselectable, so no placement
+        // could be created against them.
+        const all = await getAllUnitPages(false, ac.signal);
         if (ac.signal.aborted) return;
-        setUnits(page.units);
+        setUnits(all);
         if (unitId !== undefined) {
-          const hit = page.units.find((u) => u.unitId === unitId);
+          const hit = all.find((u) => u.unitId === unitId);
           if (hit) setLockedUnitLabel(unitDisplayLabel(hit));
         }
       } catch {

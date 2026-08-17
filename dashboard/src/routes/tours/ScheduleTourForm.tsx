@@ -34,7 +34,6 @@ import {
   createTour,
   getContact,
   getContacts,
-  getUnits,
   TOUR_TYPE_LABELS,
   type Contact,
   type Tour,
@@ -49,6 +48,7 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, unitLabel, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { getAllUnitPages } from '../listings/useListings.js';
 import { tourTimeWarning } from './tourTime.js';
 import styles from './ScheduleTourForm.module.css';
 
@@ -186,14 +186,17 @@ export function ScheduleTourForm({
 
     void (async () => {
       try {
-        const page = await getUnits({}, ac.signal);
+        // EVERY page (the server pages /api/units at 50) - a first-page-only
+        // read made properties later in the scan unpickable, so a tour could
+        // not be scheduled on them at all.
+        const all = await getAllUnitPages(false, ac.signal);
         if (ac.signal.aborted) return;
-        setUnits(page.units);
+        setUnits(all);
         // Pre-commit the unit side to the caller's suggestion — but only while
         // the field is still untouched (the functional update guards against a
         // pick/typing that landed before this fetch resolved).
         if (initialUnitId !== undefined) {
-          const hit = page.units.find((u) => u.unitId === initialUnitId);
+          const hit = all.find((u) => u.unitId === initialUnitId);
           if (hit !== undefined) {
             setUnitPick((prev) =>
               prev.label === '' && prev.unitId === undefined

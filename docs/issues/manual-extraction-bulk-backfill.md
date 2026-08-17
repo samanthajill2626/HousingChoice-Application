@@ -23,17 +23,18 @@ each one individually reachable, but there is no way to sweep them.
 **The constraint that makes this more than a loop over the new button.** Design
 section 8 is explicit, and the code confirms it:
 
-- `MAX_TRANSCRIPT_MESSAGES = 50` (`app/src/jobs/extraction.ts:53`) - each run
-  pulls only the newest 50 messages (`:444`,
-  `listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES })`).
-- `WINDOW_CHAR_BUDGET = 60_000` (`:69`) - a whole-window char budget, filled
+- `MAX_TRANSCRIPT_MESSAGES = 50` / `MAX_TRANSCRIPT_MESSAGES_MANUAL = 200`
+  (`app/src/jobs/extraction.ts`) - each run pulls only ONE newest-first page:
+  50 messages automatic, 200 manual (the manual cap was raised from 50 on
+  2026-08-17, design section 2).
+- `WINDOW_CHAR_BUDGET = 60_000` - a whole-window char budget, filled
   newest-first, so the OLDEST messages drop out first.
 - There is no backward pagination of the transcript window. Design section 9
   lists it as out of scope in its own right.
 
-So a contact with hundreds of imported messages has its oldest history read by NO
-run, and pressing the button again does not reach further back - it re-reads the
-same newest page. Quoting design section 8: "This is a real limit of the feature,
+So a contact with more than 200 imported messages has its oldest history read by
+NO run, and pressing the button again does not reach further back - it re-reads
+the same newest page. Quoting design section 8: "This is a real limit of the feature,
 not a bug in it, and it is the strongest argument for treating a real backfill
 (section 9) as its own design rather than a loop over this button."
 

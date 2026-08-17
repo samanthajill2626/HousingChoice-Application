@@ -9,10 +9,48 @@
 // server endpoint is idempotent (it no-ops a thread that's already read), so
 // redundant calls are cheap. Gated on document.visibilityState so a contact page
 // left open in a BACKGROUND tab does NOT silently swallow incoming unreads.
-import { useCallback, useEffect, useRef } from 'react';
+//
+// Returns an AutoReadHandle. A mark-UNREAD action must await
+// `suppressAndDrain()` before its POST, or this auto-read can re-read the very
+// thread the operator just flagged.
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { markInboxRead, useEventStream } from '../../api/index.js';
 
-export function useMarkContactRead(contactId: string): void {
+/** The handle every auto-read hook hands back so a mark-UNREAD action can win a
+ *  race it would otherwise lose. `useMarkThreadRead` returns the same shape. */
+export interface AutoReadHandle {
+  /** Suppress auto-read for the CURRENT identity, then wait for any in-flight
+   *  auto-read to settle. Await BEFORE issuing a mark-unread POST. */
+  suppressAndDrain: () => Promise<void>;
+}
+
+/** Upper bound on how long a drain waits for an in-flight auto-read.
+ *
+ *  AWAIT, DO NOT ABORT: a client abort does not stop the server committing the
+ *  resetUnread, so aborting would hide the race rather than close it. But
+ *  `api/client.ts` sets no timeout and the auto-read passes no signal, so an
+ *  unbounded await makes the button look dead - worse, and likelier, than the
+ *  narrow tail race. On timeout we proceed; the latch still suppresses whatever
+ *  the late response would have re-fired. */
+export const AUTO_READ_DRAIN_TIMEOUT_MS = 2000;
+
+/** Await `promise`, giving up after AUTO_READ_DRAIN_TIMEOUT_MS. Never rejects -
+ *  a failed auto-read is a settled auto-read as far as the drain is concerned. */
+function drainWithBound(promise: Promise<unknown>): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, AUTO_READ_DRAIN_TIMEOUT_MS);
+    void promise.then(finish, finish);
+  });
+}
+
+export function useMarkContactRead(contactId: string): AutoReadHandle {
   // Coalesce overlapping calls (the fan-out does a phone->conversations lookup):
   // ONE request in flight, and a trigger that lands meanwhile schedules exactly
   // ONE trailing re-mark once it settles. Without the trailing re-fire, a second
@@ -34,6 +72,16 @@ export function useMarkContactRead(contactId: string): void {
   const generation = useRef(0);
   const mounted = useRef(true);
   const ownerContactId = useRef<string | undefined>(undefined);
+  // Mark-unread suppression (S6). Marking a thread unread races this page's OWN
+  // auto-read: all three triggers below fire uncancelled, so the operator's
+  // request could be silently re-read by one already in flight - a no-op with a
+  // success response, the worst failure shape for a to-do affordance. The latch
+  // names the contact it suppresses (never a bare boolean) so it can only ever
+  // silence the contact the operator acted on.
+  const suppressedFor = useRef<string | null>(null);
+  // The auto-read a drain must wait out, KEYED BY CONTACT so /contacts/A ->
+  // /contacts/B never leaves B's drain awaiting A's request.
+  const inFlightPromise = useRef<{ id: string; promise: Promise<unknown> } | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -47,15 +95,25 @@ export function useMarkContactRead(contactId: string): void {
   // change of contact (not on effect re-runs): React StrictMode replays effects
   // for the same contact in dev, and a blind reset there would clear the
   // in-flight guard and issue the mount read twice.
+  //
+  // The mark-unread latch is cleared HERE and nowhere else. This effect already
+  // fires on exactly an actual contact change, which is the reset semantics the
+  // latch needs; a second reset path could only disagree with this one.
   useEffect(() => {
     if (ownerContactId.current === contactId) return;
     ownerContactId.current = contactId;
     generation.current += 1;
     inFlight.current = false;
     trailing.current = false;
+    suppressedFor.current = null;
   }, [contactId]);
 
   const markRead = useCallback(() => {
+    // ONE early return at the TOP kills all three triggers below AND the
+    // trailing re-fire inside the `finally` (which re-enters markRead). Without
+    // it the coalescing machinery would re-mark the thread read at the exact
+    // moment the operator asked for unread.
+    if (suppressedFor.current === contactId) return;
     if (contactId.length === 0) return;
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     if (inFlight.current) {
@@ -64,11 +122,16 @@ export function useMarkContactRead(contactId: string): void {
     }
     inFlight.current = true;
     const myGeneration = generation.current;
-    void markInboxRead({ contactId })
+    const request: Promise<void> = markInboxRead({ contactId })
       .catch(() => {
         /* best-effort — a failed mark-read just leaves the badge until next time */
       })
       .finally(() => {
+        // Release the drain handle for THIS request only - a later contact may
+        // already own the ref. Done BEFORE the guards below: the drain must see
+        // the request settle even when the page is gone or a newer contact has
+        // taken over.
+        if (inFlightPromise.current?.promise === request) inFlightPromise.current = null;
         // A newer contact owns the flags now, or the page is gone: this
         // request's settle must not release or re-fire anything.
         if (!mounted.current || myGeneration !== generation.current) return;
@@ -78,7 +141,23 @@ export function useMarkContactRead(contactId: string): void {
           markRead();
         }
       });
+    inFlightPromise.current = { id: contactId, promise: request };
+    void request;
   }, [contactId]);
+
+  // Latch the auto-read off for THIS contact, then wait out whatever is already
+  // in flight, so the mark-unread POST the caller issues next lands last.
+  const suppressAndDrain = useCallback(async (): Promise<void> => {
+    suppressedFor.current = contactId;
+    const pending = inFlightPromise.current;
+    if (pending === null || pending.id !== contactId) return;
+    await drainWithBound(pending.promise);
+  }, [contactId]);
+
+  // Memoized: this handle flows into consumer effect deps, and a churning
+  // identity there POST-loops (the hazard UnreadContext records for
+  // noteRowsCleared/rollbackRowsCleared).
+  const handle = useMemo<AutoReadHandle>(() => ({ suppressAndDrain }), [suppressAndDrain]);
 
   // Opening the contact (or switching contacts) while visible = reading it.
   useEffect(() => {
@@ -97,4 +176,6 @@ export function useMarkContactRead(contactId: string): void {
 
   // A new message landed while we're looking → it's read.
   useEventStream({ onMessagePersisted: markRead });
+
+  return handle;
 }

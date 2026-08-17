@@ -371,7 +371,9 @@ export function groupCrossCheckPairKey(conversationSid: string, memberKey: strin
  *   balance > 0  -> that many Conversations events are awaiting their classic
  *                   filings (one `evt#` row each, plus a due row each);
  *   balance < 0  -> that many classic filings are banked as credits, the oldest
- *                   of them at `credit_since`;
+ *                   of them at `credit_since` and the newest at `credit_latest`
+ *                   (2026-08-17: so a fresh credit on top of a stale run is not
+ *                   discarded with it);
  *   balance == 0 -> the pair is square.
  *
  * Both halves move it with ONE atomic `ADD`, which is what makes the ledger a
@@ -1595,11 +1597,26 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
    * balance) the stamp is inert: both halves consult it only while the balance
    * is negative, and the next filing that opens a credit run re-stamps it.
    *
-   * REMAINING BY DESIGN (conformance 5): credits banked before the read that are
-   * individually fresh still go with the stale ones, because the ledger tracks
-   * ONE `credit_since` - the oldest - rather than a timestamp per credit. Only
-   * reachable when recovering from a dead Conversations webhook, and it only
-   * ever produces extra alarms.
+   * THE FRESH-ON-STALE CASE (prod, 2026-08-17). "Only reachable when recovering
+   * from a dead Conversations webhook" turned out to be exactly what a rail
+   * repair looks like: a rail with no business participant routes its inbound
+   * to the classic webhook ONLY, so every filing banks a credit no event ever
+   * consumes; attach the business number and the very next classic-first race
+   * (a filing ~60ms ahead of its own event) stacks ONE fresh credit on that
+   * stale run. With one `credit_since` (the oldest) the read could not tell,
+   * discarded the fresh credit with the rest, and that event went pending -
+   * every later filing then matched the PREVIOUS event and the deficit walked
+   * to the newest one, which alarmed `group_crosscheck_inbound_missing` at
+   * ERROR on traffic that was 12 for 12 healthy. So the state now also carries
+   * `credit_latest` (the NEWEST credit's time, stamped by every classic bump).
+   * When the oldest is stale but the newest is inside the window, the newest is
+   * a real filing this event can match: the stale rest is discarded and the
+   * balance lands square ('credit'), not on a pending slot. Two timestamps
+   * still cannot COUNT the fresh ones, so this consumes exactly one - the
+   * common race has exactly one - and never lets a stale credit mask a miss:
+   * anything beyond that one fresh credit is still discarded, and a run whose
+   * newest credit is itself stale (or that predates `credit_latest`) is
+   * discarded whole, as before.
    */
   async function discardStaleCredits(
     pairKey: string,
@@ -1612,16 +1629,25 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       const { Item } = await doc.send(
         new GetCommand({ TableName: table, Key: key, ConsistentRead: true }),
       );
-      const state = Item as { balance?: unknown; credit_since?: unknown } | undefined;
+      const state = Item as
+        | { balance?: unknown; credit_since?: unknown; credit_latest?: unknown }
+        | undefined;
       const observed = typeof state?.balance === 'number' ? state.balance : 0;
       const since = typeof state?.credit_since === 'string' ? state.credit_since : undefined;
+      const latest = typeof state?.credit_latest === 'string' ? state.credit_latest : undefined;
       const stale = observed < 0 && since !== undefined && since < notBeforeIso;
+      // The newest credit is inside the window: a real filing this event can
+      // match. Only ever true when `stale` is (a fresh oldest passes the ADD's
+      // condition and never reaches here).
+      const freshOnTop = stale && latest !== undefined && latest >= notBeforeIso;
       // The stale credits COUNTED AT THE READ, plus this event's own slot. Not
       // `1 - observed`: that pins the result at 1 whatever else has landed.
+      // With a fresh credit on top, one credit fewer is discarded and this
+      // event's slot is spent on it: `-observed` lands the balance on zero.
       // When `stale` is false the pair moved out of the stale-credit shape
       // between the refused ADD and this read, so a plain bump is the truthful
       // answer now.
-      const delta = stale ? -observed + 1 : 1;
+      const delta = freshOnTop ? -observed : stale ? -observed + 1 : 1;
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
@@ -1649,7 +1675,12 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             ReturnValues: 'UPDATED_NEW',
           }),
         );
-        if (stale) {
+        if (freshOnTop) {
+          log.info(
+            { pairKey, notBeforeIso, discarded: -observed - 1, creditLatest: latest },
+            'cross-check: stale credits discarded - the freshest credit matches this event',
+          );
+        } else if (stale) {
           log.info(
             { pairKey, notBeforeIso, discarded: -observed },
             'cross-check: stale credits discarded - the event takes a pending slot',
@@ -2889,15 +2920,22 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
     async bumpCrossCheckClassic(pairKey, nowIso, expiresAt) {
       const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
-      const names = { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' };
+      const names = {
+        '#b': 'balance',
+        '#e': 'expires_at',
+        '#cs': 'credit_since',
+        '#cl': 'credit_latest',
+      };
       try {
         // FIRST CREDIT of a run stamps `credit_since`, so the freshness bound
         // the event half applies is the age of the OLDEST outstanding credit.
+        // EVERY credit stamps `credit_latest` (2026-08-17), so the discard can
+        // tell a fresh credit on top of a stale run from the run itself.
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: key,
-            UpdateExpression: 'ADD #b :negOne SET #cs = :now, #e = :exp',
+            UpdateExpression: 'ADD #b :negOne SET #cs = :now, #cl = :now, #e = :exp',
             ConditionExpression: 'attribute_not_exists(#b) OR #b >= :zero',
             ExpressionAttributeNames: names,
             ExpressionAttributeValues: {
@@ -2915,14 +2953,15 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
       }
       // The pair is ALREADY in credit: stack another one and keep the existing
-      // `credit_since` (the oldest credit is the one the window is measured on).
+      // `credit_since` (the oldest credit is the one the window is measured on),
+      // but move `credit_latest` - this IS the newest credit now.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: key,
-          UpdateExpression: 'ADD #b :negOne SET #e = :exp',
-          ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at' },
-          ExpressionAttributeValues: { ':negOne': -1, ':exp': expiresAt },
+          UpdateExpression: 'ADD #b :negOne SET #cl = :now, #e = :exp',
+          ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at', '#cl': 'credit_latest' },
+          ExpressionAttributeValues: { ':negOne': -1, ':now': nowIso, ':exp': expiresAt },
           ReturnValues: 'UPDATED_NEW',
         }),
       );

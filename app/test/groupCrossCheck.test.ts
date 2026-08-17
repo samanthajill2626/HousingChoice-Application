@@ -381,6 +381,60 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
 
       expect(await h.sweep('2026-08-11T14:00:00.000Z')).toHaveLength(1);
     });
+
+    // THE PROD SHAPE OF 2026-08-17 (20:08 and 20:28 UTC), end to end. A rail
+    // that carried no business participant routed its inbound to the classic
+    // webhook ONLY for hours, banking a stale credit per message. The rail was
+    // repaired; the next reply raced classic-first by ~60ms; the event read the
+    // fresh credit as part of the stale stack, discarded it, went pending, and
+    // every later filing matched the PREVIOUS event until the newest one alarmed
+    // at its deadline - on traffic Twilio's rail showed 12 for 12 healthy.
+    it('STALE credits from a classic-only period + ONE fresh classic-first race: no false alarm, ever', async () => {
+      const h = harness();
+      // Three inbound while the rail could not carry events: credits, no events.
+      await h.classic();
+      h.setNow('2026-08-11T12:10:00.000Z');
+      await h.classic();
+      h.setNow('2026-08-11T12:20:00.000Z');
+      await h.classic();
+
+      // Repaired. Two hours later the member replies: classic FIRST, then its
+      // own event 60ms behind - both real, both for the same message.
+      h.setNow('2026-08-11T14:00:00.000Z');
+      await h.classic();
+      h.setNow('2026-08-11T14:00:00.060Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+      // Then healthy traffic: three more messages, each event first this time.
+      for (const t of ['14:01', '14:02', '14:03']) {
+        h.setNow(`2026-08-11T${t}:00.000Z`);
+        await h.crossCheck.recordConversationEvent(h.event());
+        await h.classic();
+      }
+
+      // Nothing pending anywhere: no walk-down, no alarm at any deadline.
+      expect(await h.sweep('2026-08-11T15:00:00.000Z')).toHaveLength(0);
+      expect(h.log.error).not.toHaveBeenCalled();
+    });
+
+    it('...and the stale credits it discarded do NOT go on to mask a genuine miss', async () => {
+      const h = harness();
+      await h.classic();
+      h.setNow('2026-08-11T12:10:00.000Z');
+      await h.classic();
+      // The repaired race, as above.
+      h.setNow('2026-08-11T14:00:00.000Z');
+      await h.classic();
+      h.setNow('2026-08-11T14:00:00.060Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+      // Now the classic channel really dies: an event with NO filing.
+      h.setNow('2026-08-11T14:05:00.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      // Exactly that one alarms - the two stale credits were not kept around.
+      const alarms = await h.sweep('2026-08-11T15:00:00.000Z');
+      expect(alarms).toHaveLength(1);
+      expect(alarms[0]!.deadlineAt).toBe('2026-08-11T14:10:00.000Z');
+    });
   });
 
   describe('the ledger dedupes BOTH sides (fix wave 4, X1/C1)', () => {

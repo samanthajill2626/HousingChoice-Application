@@ -1,10 +1,12 @@
 # Inbound-Message Push Notifications - Design Spec
 
-Date: 2026-08-16 (rev 6: r2-r3 = adversarial spec review rounds 1-2;
+Date: 2026-08-16 (rev 7: r2-r3 = adversarial spec review rounds 1-2;
 r4 = operator TTL-cache amendment; r5 = plan-review round 1 amendments;
 r6 = BUILD-TIME amendments from review round 2 - the bounded stale-user-list
 fallback in 3.1/D10/section 5, and the honest restatement of the sendToUser
-promise in 3.1)
+promise in 3.1 - ACCEPTED by the planner's post-merge review 2026-08-17 on
+the operator's go; r7 = post-merge review fix: revocation drops push
+subscriptions, D13 below)
 Branch: feat/inbound-message-push (worktree W:\tmp\inbound-message-push, cut
 from main @d0c28678)
 Origin issue: docs/issues/no-push-on-inbound-message.md
@@ -89,6 +91,24 @@ Planner-settled technical decisions:
   status - counted failed, subscription kept, so the oversize push
   fails silently and would fail again forever. The cap must be
   server-side at the send site.
+
+- D13 (rev 7, post-merge adversarial review MUST-FIX, operator-approved
+  2026-08-17) Revocation drops push subscriptions. A push subscription is
+  a device-scoped credential, and message pushes carry contact names +
+  bodies to every subscribed device; before this fix, sign-out (global
+  session revocation by design) and an admin role change killed the
+  cookies but left the subscriptions, so a signed-out, stolen, or
+  offboarded device kept receiving every inbound until a Gone-prune or a
+  full account delete. Now usersRepo.bumpSessionEpoch and
+  setRoleAndRevoke (and the ops-script buildRoleUpdate mirror) REMOVE
+  push_subscriptions in the SAME atomic write, and the signing-out
+  browser best-effort unsubscribes its own subscription so its Settings
+  toggle stays honest. Cost accepted: after an explicit sign-out or role
+  change, every device re-enables notifications in Settings after
+  signing back in (a device other than the signing-out one may show the
+  toggle On for a subscription the server no longer has until it is
+  re-toggled - the pushsubscriptionchange gap, already filed). Normal
+  session expiry does NOT drop subscriptions.
 
 ## 3. What gets built
 

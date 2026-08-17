@@ -48,8 +48,9 @@ Two bounds on that goal, both established by review and both real:
   group kinds.
 - **D2 - Auto-read collision: navigate away.** The thread-header action marks
   unread, then navigates to `/inbox`. (Revised by review: leaving the page is
-  NOT sufficient on its own - see 7.3. The navigation is the UX; a minimal
-  per-mount latch is the correctness mechanism.)
+  NOT sufficient on its own - see 7.3. The navigation is the UX; an
+  identity-keyed latch plus a drain of the in-flight auto-read is the
+  correctness mechanism.)
 - **D3 - One thread, count 1.** A contact inbox row aggregates unread across
   every 1:1 thread the contact owns (phone and email). Marking unread flips
   exactly ONE conversation to `unread_count = 1` - the newest ELIGIBLE thread as
@@ -124,19 +125,38 @@ beside `incrementUnread` / `resetUnread` in
 
 `eligibility` is exactly one of:
 
-- `{ bucket: 'relay_group' }` -> status must be `open` or `connecting`
-- `{ bucket: 'group_text' }`  -> status must be `group_open`
+- `{ bucket: 'relay_group' }` -> `type` must be `relay_group` AND status must be
+  `open` or `connecting`
+- `{ bucket: 'group_text' }`  -> `type` must be `group_text` AND status must be
+  `group_open`
 - `{ bucket: 'one_to_one' }`  -> status must be `open`, and the row's `type`
   must be absent or NOT one of `relay_group` / `group_text`
+
+Every bucket carries a TYPE clause, not only `one_to_one`. Without it the
+`relay_group` bucket's status predicate is satisfied by any open 1:1 thread
+(`conversationsRepo.ts:117-119`), and the only thing keeping them apart would be
+the route's own type read - the exact value the conditional write exists to
+distrust. It is safe today only because the sole type-changing writer
+(`convertRelayGroupToGroupText`, `conversationsRepo.ts:2311-2338`) also moves
+status out of the admitted set. Do not depend on that coincidence.
 
 Behavior:
 
 - ONE `UpdateCommand`: `SET unread_count = :one, unread_flag = :flag` with
   `:one = 1` and `:flag = UNREAD_FLAG_VALUE`.
-- `ConditionExpression`: `attribute_exists(conversationId)` AND the bucket's
-  type/status predicate above. This is MU-1 as a WRITE condition - the whole
-  point (section 4). A `ConditionalCheckFailedException` means "unknown or no
-  longer eligible" and the route maps it to 409.
+- `ConditionExpression`, three clauses ANDed:
+  1. `attribute_exists(conversationId)`
+  2. the bucket's type/status predicate above - MU-1 as a WRITE condition
+     (section 4)
+  3. `(attribute_not_exists(unread_count) OR unread_count = :zero)` - the
+     ALREADY-READ precondition. `setUnread` is a `SET`, so writing it over a
+     thread sitting at 5 is data loss. Section 4 says client-side hiding is
+     never the guarantee; this is the clause that makes that true for the count
+     as well as for eligibility, and it is what lets both header surfaces drop
+     a client-side "only when read" rule that neither of them can actually
+     evaluate (7.3).
+- A `ConditionalCheckFailedException` is AMBIGUOUS across those three clauses,
+  so the route CLASSIFIES it with one re-read rather than guessing - see 6.3.
 - `ReturnValues: 'ALL_NEW'`.
 - `SET`, not `ADD`: the count is deterministically 1 (D3), and the counter and
   the index hash ride ONE write so the row can never be unread-but-unindexed -
@@ -153,24 +173,48 @@ makes that choice safe against a concurrent transition.
 
 ### 6.2 Eligible-thread selection (shared by both fan-in routes)
 
-Both fan-in routes pick ONE thread. The candidate filter must be the INBOX
-READER's filter verbatim, not `conversationsForContact`'s raw union -
-`contactThreads.ts:13-15` states that callers keep their own status/type
-filters, and the contact row's set is
-`all.filter(c => c.status === 'open' && c.type !== 'relay_group')`
+Both fan-in routes pick ONE thread. The candidate filter must track the INBOX
+READER's, not `conversationsForContact`'s raw union - `contactThreads.ts:13-15`
+states that callers keep their own status/type filters, and the contact row's
+set is `all.filter(c => c.status === 'open' && c.type !== 'relay_group')`
 (`app/src/routes/inbox.ts:516-517`). Filtering on MU-1 alone would admit an OPEN
 relay group, so a contact whose record carries a pool number could click their
 CONTACT row and light up the RELAY GROUP row instead.
 
-Selection rule: filter to threads that are `status === 'open'` and in the 1:1
+Selection rule: filter to threads that are `status === 'open'` AND in the 1:1
 bucket (`isOneToOneBucket`), then take the newest by `last_activity_at`,
 mirroring `newestOf`'s strict `>` (`inbox.ts:526-532`) so ties resolve to
 first-encountered in query order - the same thread the row itself previews.
+
+This is deliberately STRICTER than the reader's literal predicate, not a
+paraphrase of it: `isOneToOneBucket` excludes `group_text` as well as
+`relay_group`. The two sets are identical today (a `group_text` carries status
+`group_open`, never `open`, and `contactThreads.ts:17-23` states a group thread
+can never be returned by `conversationsForContact` at all), so this is a
+future-proofing choice, taken because that same comment warns that "if a future
+change ever gives a group thread a participant key, EVERY caller of this
+function needs a type filter first". A negative bucket test survives that change;
+an enumerated `!== 'relay_group'` does not.
 
 ### 6.3 New endpoints
 
 Three, each mirroring an existing mark-read route so the client's kind-dispatch
 stays symmetric.
+
+**Shared: classifying a condition failure.** `setUnread`'s condition has three
+clauses (6.1) and DynamoDB does not say which one failed, so every route handles
+a `ConditionalCheckFailedException` by re-reading the item ONCE and answering:
+
+- item absent -> `404 conversation_not_found`. This keeps the routes aligned
+  with the `/read` route they mirror, which maps the same exception to 404
+  (`app/src/routes/api.ts:2041-2045`).
+- item present and `unread_count > 0` -> **`200` success, no write.** The
+  operator asked for "this thread is unread" and it already is; the goal state
+  holds. This is not a fudge - it is what makes the feature usable at all, given
+  that neither header surface can see a live unread count (7.3).
+- otherwise (ineligible type/status) -> `409 thread_not_markable_unread`.
+
+The re-read costs one extra read on the failure path only.
 
 **`POST /api/conversations/:conversationId/unread`** (`app/src/routes/api.ts`,
 beside the existing `/read`). Used by relay-group rows, group-text rows, and the
@@ -183,9 +227,8 @@ conversation page.
 3. MU-2: for a 1:1 thread, resolve the participant's contact; if soft-deleted,
    respond `409 thread_not_markable_unread`. A group thread has no single owning
    contact and skips this step.
-4. `setUnread` with the bucket derived from the item's type. A
-   `ConditionalCheckFailedException` here is the race MU-1 exists to stop ->
-   also `409 thread_not_markable_unread`.
+4. `setUnread` with the bucket derived from the item's type; classify a
+   condition failure per the shared rule above.
 5. Emit `conversation.updated` with `toConversationUpdatedEvent(conversation)`;
    respond `{ conversation }`.
 
@@ -203,7 +246,7 @@ unknown-number rows, which carry no contactId.
    (`dashboard/src/routes/inbox/useInbox.ts:336-339`).
 4. Apply 6.2's selection; `409 no_markable_thread` if nothing survives.
 5. `setUnread` on that ONE thread (NOT a fan-out - the deliberate asymmetry with
-   the read routes), map a condition failure to 409, emit
+   the read routes), classify a condition failure per the shared rule, emit
    `conversation.updated`, respond `{ ok: true }`.
 
 **`POST /api/inbox/:contactId/unread`** (same file). Used by contact rows and
@@ -213,8 +256,26 @@ the contact page.
 2. MU-2: soft-deleted contact -> `409 contact_deleted`.
 3. `conversationsForContact(contact, conversations)` for the phone+email union,
    then 6.2's selection; `409 no_markable_thread` if nothing survives.
-4. `setUnread` on that ONE thread, map a condition failure to 409, emit
-   `conversation.updated`, respond `{ ok: true }`.
+4. `setUnread` on that ONE thread, classify a condition failure per the shared
+   rule, emit `conversation.updated`, respond `{ ok: true }`.
+
+**Both fan-in routes depend on the eventually-consistent participant GSIs**
+(`byParticipantPhone` / `byParticipantEmail`), whose lag is an open filed defect
+(`docs/issues/markread-fanout-depends-on-stale-participant-gsi.md`). A fan-OUT
+degrades gracefully under it; a fan-IN "pick exactly one" does not. Two
+consequences, both accepted rather than engineered around (the inbox reader
+carries a lag discriminator and a one-shot retry for this, `inbox.ts:976-1041`;
+that machinery is not warranted for a manual, repeatable, single-row action):
+
+- In the window just after an inbound, "newest" can resolve to a thread other
+  than the one the row previews. Same contact, same row lights up; only D3's
+  choice of WHICH thread is affected.
+- The set can come back empty or all-ineligible for a row the operator is
+  looking at, producing `409 no_markable_thread`. This 409 is EXPECTED and
+  RETRYABLE, not an error state: both surfaces render "Could not mark unread -
+  try again" via the surface's existing inline error treatment, and the action
+  stays available. It must not be reported as a failure the operator has to
+  reason about.
 
 Registration order: keep `POST /unread` above `POST /:contactId/unread` for
 consistency with the existing `/read` pair. This is house-style belt-and-braces,
@@ -281,8 +342,19 @@ surface is enforced by the server.
 
 Both surfaces follow D2 - `await` the POST, then `navigate('/inbox')`; on
 failure stay put and surface the surface's existing inline error treatment.
-Both are offered ONLY when the thread is currently read: `setUnread` is a `SET`,
-so offering it at `unread_count = 5` would silently destroy a real count.
+
+**No client-side "only when read" rule.** The count guard lives in `setUnread`'s
+`ConditionExpression` (6.1 clause 3), NOT on the client, because neither header
+surface can evaluate it. On `/conversations/:id` the only unread datum is the
+header fetched once per mount (`ConversationDetail.tsx:81-87`), and it is
+deterministically PRE-auto-read: the page renders its loading branch until the
+header resolves and only then mounts the child that fires the mount mark-read
+(`:118-152`), and nothing re-reads the header afterwards (`:148-151`). A client
+rule would therefore hide the action for the whole visit on exactly the flow the
+feature exists for - arriving at an unread thread. On `/contacts/:id` there is
+no unread datum at all: `useContact.ts:23-45` fetches the contact and nothing
+else, and `useMarkContactRead` returns `void`. Server-side is the only place
+this rule can be true, which is also what section 4 requires.
 
 **The auto-read latch (D2, revised).** Navigating away is not sufficient on its
 own. `useMarkContactRead.ts:20-50` fires uncancelled on mount, on
@@ -293,12 +365,30 @@ already in flight or one that fires during the await - so the action would
 intermittently no-op with a success response, the worst failure shape for a
 to-do affordance.
 
-Mechanism: each auto-read site gains a per-mount `suppressedRef`. The mark-unread
-handler sets it BEFORE issuing the POST, and the auto-read callback returns early
-while it is set. It is never cleared within the mount (the operator's explicit
-action outranks every automatic trigger for the rest of the visit), and a fresh
-mount starts clean - which is correct, because arriving at the thread again IS
-reading it.
+Mechanism, in two parts - the second is what actually closes the race:
+
+1. **Latch.** Each auto-read site gains a `suppressed` ref; the auto-read
+   callback returns early while it is set. It is KEYED to the identity it
+   protects and reset whenever that identity changes (`contactId` on the contact
+   page, `conversationId` on the conversation page). It is NOT per-mount:
+   `/contacts/a` -> `/contacts/b` is a React Router param change, not a remount
+   (`ContactDetail.tsx:214`, and `useMarkContactRead`'s own `[contactId]`
+   dependency at `useMarkContactRead.ts:20-37` refires for the new contact). A
+   component-scoped ref would leave the NEXT contact's comms never marked read
+   for the rest of the visit - a silent regression of shipped behavior, reachable
+   from this spec's own "on failure stay put" path plus any relationship link.
+2. **Drain.** Setting a flag cannot recall a POST already on the wire, and the
+   read fan-out is the heavier write (`inbox.ts:1661-1675` does a lookup plus a
+   `resetUnread` per thread), so last-writer-wins would frequently be the
+   fan-out. The auto-read hooks therefore expose the in-flight request as a
+   settled-promise ref, and the mark-unread handler awaits it (latch first, then
+   drain, then POST). Awaiting rather than aborting is deliberate: a client-side
+   abort does not stop the server from committing the `resetUnread`, so it would
+   hide the race instead of closing it.
+
+Without part 2 the ordering bug ships, and it will surface first as an e2e flake
+(9.2 step 4 clicks within tens of milliseconds of mount) - the failure shape most
+likely to be re-run away rather than diagnosed.
 
 - **Conversation page** (`/conversations/:id`, relay groups and group texts):
   a "Mark unread" header action calling `markConversationUnread(conversationId)`.
@@ -325,9 +415,14 @@ reading it.
 
   Hidden when the contact is soft-deleted (D5).
 
-Both header actions also call `rollbackRowsCleared` for their key, for the 7.2
-reason: on the contact page the mount fan-out has ALREADY marked the row read,
-so a pending clear is typically outstanding at the moment the operator clicks.
+**Neither header action touches `UnreadContext`.** No `rollbackRowsCleared`, no
+`noteRowsCleared`. Both pages' auto-reads are DELIBERATELY unwired from the
+badge's optimistic layer - they fire blind on mount with no unread knowledge -
+and that ruling is pinned by regression spies
+(`GroupTextView.tsx:248-257` with `GroupTextView.test.tsx:27-31`, and
+`ConversationDetail.test.tsx:149-151`). So no pending clear is ever outstanding
+from them, and there is nothing to roll back. `rollbackRowsCleared` belongs to
+`useInbox` alone (7.2), which is the only surface here that records clears.
 
 ### 7.4 Nav badge and Today
 
@@ -358,14 +453,17 @@ an unanswered inbound.
 ### 9.1 Unit / integration (`npm test`)
 
 Repo:
-- `setUnread` sets `unread_count = 1` AND `unread_flag`, from a read thread and
-  from an already-unread thread (idempotent to 1, never incremented).
+- `setUnread` sets `unread_count = 1` AND `unread_flag` on a READ thread.
+- **`setUnread` REFUSES an already-unread thread** (condition clause 3): a
+  thread at `unread_count = 5` throws and is left at 5. This replaces the
+  earlier "idempotent to 1" assertion, which pinned the data loss as correct.
 - `setUnread` throws `ConditionalCheckFailedException` for an unknown id.
-- **The condition bites:** `setUnread` with `{ bucket: 'relay_group' }` against
-  a thread whose status is `closed` throws rather than writing. Same for
-  `one_to_one` against a `closed` thread, and for a `one_to_one` bucket against
-  a row whose `type` is `relay_group`. This is the MU-1 test that matters - the
-  route-level pre-check cannot be trusted to prove it.
+- **The condition bites, per bucket:** `{ bucket: 'relay_group' }` against a
+  `closed` thread throws; `{ bucket: 'one_to_one' }` against a `closed` thread
+  throws; `{ bucket: 'one_to_one' }` against a row whose `type` is
+  `relay_group` throws; and `{ bucket: 'relay_group' }` against an OPEN 1:1
+  thread throws (the type clause added in 6.1 - without it this case would
+  silently pass).
 - Legacy row with NO `type` and status `open` is accepted under
   `{ bucket: 'one_to_one' }` (matches `isOneToOneBucket`'s negative test).
 - Round trip: `setUnread` then `queryUnreadPage` returns the row; `resetUnread`
@@ -387,6 +485,10 @@ Routes:
   record carries the pool number (the 6.2 filter).
 - MU-1 as a property: for every route, a 200 response implies the written row
   passes `isUnreadVisible`.
+- **Condition-failure classification** (6.3), for every route: a conversation
+  deleted between the route's read and its write answers 404; an
+  already-unread thread answers 200 WITHOUT writing (assert the count is
+  unchanged, not reset to 1); an ineligible type/status answers 409.
 
 Dashboard:
 - `InboxRow` renders "Mark unread" iff `unreadCount === 0`, never alongside
@@ -397,13 +499,24 @@ Dashboard:
 - Mark-read-then-mark-unread: assert the pending clear is purged by driving the
   FETCH-GENERATION seam (resolve a `getUnreadCount` and assert the displayed
   count), NOT a clock. A clock-driven test passes with or without the call.
-- The auto-read latch: with the contact page mounted, invoking the header action
-  and then firing a `message.persisted` event does NOT issue `markInboxRead`.
-  Same shape for the conversation page's mount-effect read.
+- The auto-read latch, TRIGGER path: with the contact page mounted, invoking the
+  header action and then firing a `message.persisted` event does NOT issue
+  `markInboxRead`. Same shape for the conversation page's mount-effect read.
+- The auto-read latch, DRAIN path (the one that actually matters): with a mount
+  fan-out still in flight, invoking the header action does not issue its POST
+  until that request settles. Assert ORDER, not just absence - a trigger-only
+  test stays green while the in-flight ordering bug ships.
+- The latch is keyed, not per-mount: after a FAILED mark-unread on
+  `/contacts/a`, a param change to `/contacts/b` DOES mark b read.
+- Neither header surface calls `noteRowsCleared` or `rollbackRowsCleared` -
+  extend the existing regression spies rather than adding new ones.
 - Both header actions navigate to `/inbox` on success and do NOT navigate on
-  rejection; both are absent when the thread is already unread; the conversation
-  page action is absent for a closed relay group; the contact page action is
-  absent for a soft-deleted contact.
+  rejection; the conversation page action is absent for a closed relay group;
+  the contact page action is absent for a soft-deleted contact. There is NO
+  client-side already-unread guard to test - that rule moved to the write
+  condition.
+- A `409 no_markable_thread` renders the retryable inline message and leaves the
+  action available (the GSI-lag path, 6.3).
 
 ### 9.2 e2e (`npm run e2e`)
 
@@ -474,6 +587,11 @@ requires per-thread read semantics, a different feature.
   write rather than a prior read (section 4). Attack this first in review.
 - **The contact-delete race.** Section 4's residual paragraph: not closable by a
   condition on the conversation item. Probe + backfill are the mitigations.
+- **Participant-GSI lag on the fan-in routes** (6.3). An open filed defect that
+  this feature newly depends on for thread SELECTION rather than just fan-out.
+  Accepted; the 409 is specified as retryable.
+- **The auto-read drain** (7.3 part 2). The correctness of the whole
+  thread-header surface rests on it, and a trigger-only test cannot see it.
 - **`feat/call-inbox-unread` is unmerged and adjacent.** It makes inbound calls
   and voicemails mark threads unread, touching `incrementUnread` callers and
   `inbox.ts`. Different code paths, but expect a conflict window in `inbox.ts`

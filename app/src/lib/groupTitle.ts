@@ -18,7 +18,7 @@
 // PII (doc 9): the roster carries names and phones - render data for an authed
 // staff surface, never log output.
 import { formatPhoneForDisplay } from './phone.js';
-import type { ConversationParticipant } from '../repos/conversationsRepo.js';
+import type { ConversationItem, ConversationParticipant } from '../repos/conversationsRepo.js';
 
 /** How many roster names a title spells out before it summarizes. A nine-member
  *  carrier group would otherwise render an unreadable row/header. */
@@ -49,4 +49,41 @@ export function groupThreadLabel(
   const shown = parts.slice(0, GROUP_TITLE_NAMES);
   const rest = parts.length - shown.length;
   return rest > 0 ? `With ${shown.join(' & ')} +${rest} more` : `With ${shown.join(' & ')}`;
+}
+
+/**
+ * The relay-group thread label - the EXACT precedence chain the inbox
+ * row uses (member names -> operator placement_tag -> formatted pool
+ * number -> "Relay group"), extracted from routes/inbox.ts relayRowFor
+ * so the push title and the inbox row cannot drift.
+ *
+ * SCOPE GUARD: this consolidates ONLY the inbox row + push title.
+ * Other relay-label chains (notably routes/poolNumbersAdmin.ts
+ * serverLabel) are DELIBERATELY different precedences pinned by their
+ * own tests - do not re-point them here. serverLabel differs in two
+ * ways on purpose: it has NO pool-number rung (the number is the parent
+ * row's own column) and it does not trim member names.
+ *
+ * CLIENT MIRROR: dashboard/src/routes/contact/GroupTextsCard.tsx
+ * groupLabel carries the same four-step precedence client-side over its
+ * own server-computed RelayGroupRow DTO (it cannot import from app/src)
+ * - the groupThreadLabel precedent above; they change together.
+ *
+ * Unlike groupThreadLabel this takes the WHOLE ConversationItem: the tag
+ * and pool-number rungs read fields that live on the conversation, not
+ * on the roster.
+ */
+export function relayThreadLabel(conv: ConversationItem): string {
+  const memberNames = (conv.participants ?? [])
+    .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
+    .filter((n) => n.length > 0);
+  if (memberNames.length > 0) return `With ${memberNames.join(' & ')}`;
+  // GOTCHA: the operator tag rides ConversationItem's index signature
+  // under the key `placement_tag` (NOT `tag`) and is untyped.
+  const tag = typeof conv['placement_tag'] === 'string' ? conv['placement_tag'].trim() : '';
+  if (tag.length > 0) return tag;
+  const pool =
+    typeof conv.pool_number === 'string' && conv.pool_number.length > 0 ? conv.pool_number : '';
+  if (pool.length > 0) return formatPhoneForDisplay(pool) ?? pool;
+  return 'Relay group';
 }

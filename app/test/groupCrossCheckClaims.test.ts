@@ -65,7 +65,7 @@ function fakeDoc(script: Array<(input: Record<string, unknown>) => unknown>): {
  * is exactly what decides whether a fresh credit survives.
  */
 function ledgerDoc(
-  state: { balance: number; since?: string },
+  state: { balance: number; since?: string; latest?: string },
   hooks: { beforeSettle?: () => void } = {},
 ): { doc: { send: (cmd: unknown) => Promise<unknown> }; sent: Sent[] } {
   const sent: Sent[] = [];
@@ -87,6 +87,7 @@ function ledgerDoc(
             Item: {
               balance: state.balance,
               ...(state.since !== undefined && { credit_since: state.since }),
+              ...(state.latest !== undefined && { credit_latest: state.latest }),
             },
           };
         }
@@ -320,6 +321,72 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
     // MATCHES it instead of going pending and alarming.
     expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('credit');
     expect(state.balance).toBe(0);
+  });
+
+  // THE DEFECT THESE PIN (prod, 2026-08-17 20:08 and 20:28 UTC - two false
+  // `group_crosscheck_inbound_missing` ERRORs on healthy traffic). The wave-3
+  // fix above keeps a credit banked CONCURRENTLY with the discard; it says
+  // nothing about a fresh credit banked BEFORE the discard's read. The state item
+  // recorded only the OLDEST credit's time, so a classic filing that raced its
+  // own event by ~60ms onto a pair carrying stale credits (hours of classic-only
+  // inbound while the rail had no business participant) had its FRESH credit
+  // read as part of the stale stack and discarded with it - `discarded: 4`, then
+  // `discarded: 3`, in the prod log. Its event went pending, every later filing
+  // matched the PREVIOUS event, and the deficit walked to the newest event and
+  // alarmed at its deadline. Twilio's rail and our classic filings were 12 for
+  // 12; nothing was missing.
+  it('a FRESH credit banked on a STALE run BEFORE the read is MATCHED, and only the stale rest discarded', async () => {
+    // Three stale credits, then a classic filing 60ms ago (fresh) - the state
+    // now says so through `credit_latest`.
+    const state = { balance: -4, since: '2026-08-11T10:00:00.000Z', latest: '2026-08-11T11:59:59.940Z' };
+    const { doc } = ledgerDoc(state);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    // The three stale credits go; the fresh one matches THIS event. Balance
+    // lands square, not on a pending slot.
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('credit');
+    expect(state.balance).toBe(0);
+    // Re-anchored so a concurrent survivor never sits anchorless.
+    expect(state.since).toBe(NOW);
+  });
+
+  it('a run whose NEWEST credit is also stale is discarded entirely - the event goes pending', async () => {
+    const state = { balance: -4, since: '2026-08-11T10:00:00.000Z', latest: '2026-08-11T11:30:00.000Z' };
+    const { doc } = ledgerDoc(state);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    expect(state.balance).toBe(1);
+  });
+
+  it('a run with NO `credit_latest` (written by an older build) is treated as wholly stale', async () => {
+    // Nothing proves a fresh credit is in there, and the alternative - assuming
+    // one - would let a stale credit mask a genuine miss.
+    const state = { balance: -4, since: '2026-08-11T10:00:00.000Z' };
+    const { doc } = ledgerDoc(state);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    expect(state.balance).toBe(1);
+  });
+
+  it('the classic half stamps `credit_latest` on EVERY credit, opening or stacking', async () => {
+    const ccfe = new ConditionalCheckFailedException({ message: 'already in credit', $metadata: {} });
+    const opening = fakeDoc([() => ({ Attributes: { balance: -1 } })]);
+    await createMessagesRepo({ doc: opening.doc as never, env }).bumpCrossCheckClassic(PAIR, NOW, EXPIRES);
+    expect(String(opening.sent[0]!.input['UpdateExpression'])).toContain('#cl = :now');
+    expect(opening.sent[0]!.input['ExpressionAttributeNames']).toMatchObject({ '#cl': 'credit_latest' });
+
+    const stacking = fakeDoc([
+      () => {
+        throw ccfe;
+      },
+      () => ({ Attributes: { balance: -2 } }),
+    ]);
+    await createMessagesRepo({ doc: stacking.doc as never, env }).bumpCrossCheckClassic(PAIR, NOW, EXPIRES);
+    // The anchor (oldest) is untouched; the newest is re-stamped.
+    expect(String(stacking.sent[1]!.input['UpdateExpression'])).not.toContain('#cs');
+    expect(String(stacking.sent[1]!.input['UpdateExpression'])).toContain('#cl = :now');
   });
 
   it('a discard that ran under it forces a re-read rather than double-discarding', async () => {

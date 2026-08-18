@@ -207,8 +207,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'nudge.rta_window_closing': {
     id: 'nudge.rta_window_closing',
-    default:
-      'Friendly reminder - the 48-hour RTA window is closing. Have you been able to submit it?',
+    default: 'Hey, can you please share your RTA with me? sam@mail.housingchoice.org',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -393,7 +392,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'voice.greeting_no_holder': {
     id: 'voice.greeting_no_holder',
     default:
-      'Thank you for calling Housing Choice. Please send us a text message, and we will get back to you.',
+      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
     class: 'voice',
     editable: false,
     channel: 'voice',
@@ -402,7 +401,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'voice.self_call': {
     id: 'voice.self_call',
     default:
-      'Thanks for calling Housing Choice. Please reach us from a different line, or send a text message. Goodbye.',
+      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
     class: 'voice',
     editable: false,
     channel: 'voice',
@@ -448,7 +447,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'voice.missed_call_goodbye': {
     id: 'voice.missed_call_goodbye',
     default:
-      'Sorry we missed your call. Please send us a text message and we will get right back to you. Goodbye.',
+      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
     class: 'voice',
     editable: false,
     channel: 'voice',

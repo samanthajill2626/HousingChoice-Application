@@ -4,7 +4,16 @@
 // to free typing (so typing can never silently drop a selection). Free typing
 // (uncommitted only) clears unitId.
 // Candidates are rendered as JSX text nodes — never dangerouslySetInnerHTML.
-import { useId, useRef, useState } from 'react';
+//
+// POSITIONING: identical to ContactSearchField, and for the identical reason -
+// the list is a position:FIXED popover portaled to document.body, because an
+// absolutely positioned one is clipped by any ancestor scroll container and
+// `Modal`'s .body is exactly that. Two of this field's three call sites are
+// modals (PlacementCreateForm, ScheduleTourForm); the third is the broadcast
+// composer. See ContactSearchField's header for the full reasoning and the
+// StageMenu precedent. Keep the two fields' behaviour in step.
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { type UnitItem } from '../../api/index.js';
 import { formatAddress } from './format.js';
 import styles from './UnitSearchField.module.css';
@@ -59,6 +68,11 @@ export function UnitSearchField({
   // a11y: dismissed flag — Escape collapses the popup; typing clears it
   const [dismissed, setDismissed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  /** Viewport coordinates for the portaled list, measured from the input. */
+  const [pos, setPos] = useState<{ top: number; left: number; width: number; maxHeight: string } | null>(
+    null,
+  );
 
   // stable, instance-unique ids
   const uid = useId();
@@ -69,6 +83,51 @@ export function UnitSearchField({
   const isSelected = value.unitId !== undefined;
   const matches = filterCandidates(candidates, value.label);
   const isListShown = !dismissed && !isSelected && matches.length > 0;
+
+  // Measure while the list is shown; the input does not move as the user types.
+  // useLayoutEffect so it never paints at a stale position.
+  useLayoutEffect(() => {
+    if (!isListShown || !inputRef.current) {
+      setPos(null);
+      return;
+    }
+    const rect = inputRef.current.getBoundingClientRect();
+    const top = rect.bottom + 4;
+    setPos({
+      top,
+      left: rect.left,
+      width: rect.width,
+      maxHeight: `max(9rem, min(${Math.round(window.innerHeight - top - 12)}px, 60vh))`,
+    });
+  }, [isListShown, matches.length]);
+
+  // Fixed coordinates go stale on scroll/resize - dismiss rather than chase.
+  // Capture phase so an ancestor modal body's scroll counts; scrolls inside the
+  // list are ignored. Outside-click checks BOTH refs: the list is portaled out
+  // of this field's subtree, so a click on an option is otherwise "outside".
+  useEffect(() => {
+    if (!isListShown) return;
+    const onScroll = (e: Event): void => {
+      if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) return;
+      setDismissed(true);
+    };
+    const onResize = (): void => setDismissed(true);
+    const onDocMouseDown = (e: MouseEvent): void => {
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if (inputRef.current?.parentElement?.contains(t)) return;
+      if (listRef.current?.contains(t)) return;
+      setDismissed(true);
+    };
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('mousedown', onDocMouseDown);
+    };
+  }, [isListShown]);
 
   // Build a stable option id for aria-activedescendant
   const activeOptionId =
@@ -147,12 +206,19 @@ export function UnitSearchField({
           {'×'}
         </button>
       )}
-      {isListShown && (
+      {isListShown &&
+        createPortal(
         <ul
           id={listboxId}
+          ref={listRef}
           className={styles.listbox}
           role="listbox"
           aria-label={`${inputLabel} suggestions`}
+          style={
+            pos
+              ? { top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxHeight }
+              : undefined
+          }
         >
           {matches.map((u, idx) => {
             const label = unitLabel(u);
@@ -175,8 +241,9 @@ export function UnitSearchField({
               </li>
             );
           })}
-        </ul>
-      )}
+        </ul>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -1,0 +1,115 @@
+/* CreateRelayGroupModal - member rows, the tag field, the result panel. Tokens only. */
+
+.members {
+  list-style: none;
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+.memberName {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.note {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.removeBtn {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.removeBtn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.removeBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.removeBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-3);
+}
+
+.fieldLabel {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-subtle);
+}
+
+.input {
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.notice {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.goLink {
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+}
+
+.goLink:hover {
+  text-decoration: underline;
+}
+
+.goLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.error {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}

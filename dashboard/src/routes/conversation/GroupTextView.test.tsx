@@ -18,11 +18,28 @@ const getGroupMembers = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversationScheduled = vi.fn();
 const markConversationRead = vi.fn();
+const markConversationUnread = vi.fn();
 const sendMessageMock = vi.fn();
 const getContacts = vi.fn();
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
-let sse: EventStreamHandlers = {};
+// `sse` is a DISPATCHER, not a single-slot capture. Production registers every
+// useEventStream caller separately with the provider, so all of them receive a
+// given event; a `sse = handlers` capture is last-writer-wins and silently
+// stopped reaching the earlier callers the moment S7 added a second
+// conversation.updated listener (the header's live unread count, alongside
+// useGroupThread's thread filter). Handlers are useCallback-stable, so each Set
+// holds one entry per caller.
+const messagePersistedHandlers = new Set<(e: unknown) => void>();
+const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
+const sse: EventStreamHandlers = {
+  onMessagePersisted: (event) => {
+    for (const handler of [...messagePersistedHandlers]) handler(event);
+  },
+  onConversationUpdated: (event) => {
+    for (const handler of [...conversationUpdatedHandlers]) handler(event);
+  },
+};
 
 // The nav badge's optimistic layer, spied so the mount-mark below can assert it
 // stays UNWIRED (adversarial A10). If a future edit wires noteRowsCleared into
@@ -41,10 +58,16 @@ vi.mock('../../api/index.js', async () => {
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversationScheduled: (...a: unknown[]) => getConversationScheduled(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
+    markConversationUnread: (...a: unknown[]) => markConversationUnread(...a),
     sendMessage: (...a: unknown[]) => sendMessageMock(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
     useEventStream: (h: EventStreamHandlers) => {
-      sse = h;
+      if (h.onMessagePersisted !== undefined) {
+        messagePersistedHandlers.add(h.onMessagePersisted as (e: unknown) => void);
+      }
+      if (h.onConversationUpdated !== undefined) {
+        conversationUpdatedHandlers.add(h.onConversationUpdated as (e: unknown) => void);
+      }
     },
   };
 });
@@ -92,7 +115,18 @@ function renderAt(conversationId: string) {
   );
 }
 
+/** Deliver one conversation.updated to EVERY registered listener. The dispatch
+ *  originates outside React's event system, so it is act-wrapped here. */
+function emitConversationUpdated(event: Record<string, unknown>): void {
+  act(() => {
+    sse.onConversationUpdated?.(event as never);
+  });
+}
+
 beforeEach(() => {
+  messagePersistedHandlers.clear();
+  conversationUpdatedHandlers.clear();
+  markConversationUnread.mockReset().mockResolvedValue(undefined);
   getConversation.mockReset();
   getConversationMembers.mockReset();
   getGroupMembers.mockReset();
@@ -108,7 +142,6 @@ beforeEach(() => {
   getContacts.mockReset().mockResolvedValue({ nextCursor: null, contacts: [] });
   getGroupMembers.mockResolvedValue([ANN, MARCUS]);
   getConversation.mockResolvedValue(groupHeader());
-  sse = {};
 });
 afterEach(() => {
   // UNMOUNT BEFORE RESTORING (fix wave 2). The members effect now re-runs on the
@@ -982,5 +1015,126 @@ describe('GroupTextView - the composer (S5)', () => {
     renderAt('gt-1');
     await waitFor(() => expect(screen.getByText('heading over')).toBeInTheDocument());
     expect(screen.getByText(/delivered 1\/2/)).toBeInTheDocument();
+  });
+});
+
+// --- S7: the header mark-read / mark-unread toggle (D6) ---------------------
+//
+// The group-text header had NO actions container at all before this slice - only
+// a back link and the identity block - so the toggle brought one with it, using
+// the same shell.actions class the relay arm uses. A group text has no closed
+// state in v1, so unlike the relay arm the toggle is always present here.
+describe('GroupTextView - the header unread toggle (S7)', () => {
+  const MARK_UNREAD = 'Mark Group text as unread';
+  const MARK_READ = 'Mark Group text read';
+
+  async function openGroup(over: Partial<ConversationHeader> = {}): Promise<void> {
+    getConversation.mockResolvedValue(groupHeader(over));
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+  }
+
+  it('offers Mark unread - and NEVER Mark read - while the live count is 0', async () => {
+    await openGroup({ unread_count: 0 });
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('offers Mark read - and NEVER Mark unread - while the live count is above 0', async () => {
+    await openGroup({ unread_count: 2 });
+    expect(await screen.findByRole('button', { name: MARK_READ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
+  });
+
+  it('takes the count LIVE from conversation.updated, with no re-fetch of the header', async () => {
+    await openGroup({ unread_count: 0 });
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    emitConversationUpdated({
+      conversationId: 'gt-1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 3,
+    });
+    expect(await screen.findByRole('button', { name: MARK_READ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
+    expect(getConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives a mount header with NO unread_count at all (0, never NaN)', async () => {
+    await openGroup();
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('awaits the auto-read drain BEFORE issuing the mark-unread POST, then navigates', async () => {
+    let releaseAutoRead: (() => void) | undefined;
+    markConversationRead.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseAutoRead = resolve;
+        }),
+    );
+    await openGroup({ unread_count: 0 });
+    const button = await screen.findByRole('button', { name: MARK_UNREAD });
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('gt-1'));
+
+    fireEvent.click(button);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(markConversationUnread).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseAutoRead?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(markConversationUnread).toHaveBeenCalledWith('gt-1'));
+    await waitFor(() => expect(screen.getByText('INBOX')).toBeInTheDocument());
+  });
+
+  it('does NOT navigate on Mark read', async () => {
+    await openGroup({ unread_count: 2 });
+    markConversationRead.mockClear();
+    fireEvent.click(await screen.findByRole('button', { name: MARK_READ }));
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('gt-1'));
+    expect(screen.queryByText('INBOX')).toBeNull();
+  });
+
+  it('renders the RETRYABLE copy on a 409 and leaves the action available', async () => {
+    markConversationUnread.mockRejectedValue(
+      new ApiError(409, 'thread_closed', 'thread_closed', { error: 'thread_closed' }),
+    );
+    await openGroup({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('Could not mark unread - try again'),
+    );
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByRole('button', { name: MARK_UNREAD })).toBeEnabled();
+  });
+
+  it('renders a pending state while the mark-unread request is outstanding', async () => {
+    let releasePost: (() => void) | undefined;
+    markConversationUnread.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePost = resolve;
+        }),
+    );
+    await openGroup({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(screen.getByRole('button', { name: MARK_UNREAD })).toBeDisabled());
+    expect(screen.getByText('Marking unread...')).toBeInTheDocument();
+    await act(async () => {
+      releasePost?.();
+      await Promise.resolve();
+    });
+  });
+
+  it('never touches the nav badge optimistic layer', async () => {
+    await openGroup({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markConversationUnread).toHaveBeenCalled());
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 });

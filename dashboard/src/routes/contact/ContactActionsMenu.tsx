@@ -38,6 +38,16 @@ export interface ContactActionsMenuProps {
   onRunExtraction: () => void;
   /** True from the press until the run reports back (disables that item). */
   extractionBusy?: boolean;
+  /** The contact's display name - the accessible-name subject for the unread
+   *  toggle, spelled exactly as the inbox row spells it. */
+  contactName: string;
+  /** Whether this contact's comms currently carry unread (drives which HALF of
+   *  the toggle is offered - never both). Derived by the parent. */
+  hasUnread: boolean;
+  /** Flip it; the parent owns the request, the navigation and the error copy. */
+  onToggleUnread: () => void;
+  /** True while that request is in flight (disables the item). */
+  unreadBusy?: boolean;
 }
 
 export function ContactActionsMenu({
@@ -54,6 +64,10 @@ export function ContactActionsMenu({
   deleteBusy = false,
   onRunExtraction,
   extractionBusy = false,
+  contactName,
+  hasUnread,
+  onToggleUnread,
+  unreadBusy = false,
 }: ContactActionsMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -123,6 +137,32 @@ export function ContactActionsMenu({
           >
             {copied ? 'Copied ✓' : 'Copy link to contact'}
           </button>
+          {/* D6, the unread toggle: ONE item, never both halves, chosen by the
+           *  parent's derived state. HIDDEN for a soft-deleted contact - MU-2
+           *  makes the server refuse that with 409 contact_deleted, so the
+           *  action would only ever fail. The label follows the inbox row
+           *  exactly, "as" included: it keeps the two accessible names from
+           *  being substrings of each other for assistive tech and selectors.
+           *  Same contract as every sibling here - this file reports the press
+           *  and reflects a busy flag; the parent owns the request, the
+           *  navigation and the error copy. */}
+          {deleted ? null : (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              disabled={unreadBusy}
+              aria-label={
+                hasUnread ? `Mark ${contactName} read` : `Mark ${contactName} as unread`
+              }
+              onClick={() => {
+                setOpen(false);
+                onToggleUnread();
+              }}
+            >
+              {hasUnread ? 'Mark read' : 'Mark unread'}
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"

@@ -116,6 +116,7 @@ function makeFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    setUnread: async () => conversation,
     // Derived from the one stored conversation rather than stubbed to []: an
     // empty page is indistinguishable from a broken index, and this suite
     // asserts that OUTBOUND sends never touch unread state.

@@ -67,7 +67,6 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
-  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createContactsRepo,
@@ -84,6 +83,7 @@ import {
 } from '../repos/messagesRepo.js';
 import { callPreview } from '../lib/callPreview.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
+import { markUnread } from '../lib/markUnread.js';
 import {
   BADGE_COUNT_CAP,
   collectUnreadRows,
@@ -1754,35 +1754,51 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   // The row is per CONTACT (newest-conversation rule), so "mark this row
   // unread" flags the contact's NEWEST 1:1 thread - the one the row shows -
   // never a fan-out. Idempotent: an already-unread thread is left alone (no
-  // second increment), and the reply is the same 200 either way. Built on the
-  // existing primitive (incrementUnread writes the counter + byUnread flag in
-  // one expression), so the sparse-index invariant holds. Read-then-write, not
-  // conditional: the "already unread?" test reads a GSI-fed image (the
-  // participant lookups lag), so a stale 0 for an already-unread thread - or a
-  // concurrent inbound landing between the read and the increment - can leave
-  // the row at 2: the same shape as two inbounds, and the next Mark read
-  // zeroes it. Only the row-visible candidate set is flaggable: the same
-  // `status open, not relay_group` filter contactConversations applies, so a
-  // manual flag can never plant an invisible byUnread resident (a closed relay
-  // reachable through a pool number, say) - the residue class
-  // scripts/backfill-unread-flag.ts exists to repair.
+  // second write), and the reply is the same 200 either way.
+  //
+  // CONDITIONAL WRITE (H1, 2026-08-17). setUnread SETs the counter to exactly 1
+  // and stamps the byUnread flag in one expression, conditional on the LIVE row
+  // still being eligible (MU-1, transcribed from isUnreadVisible) and still
+  // read. So the pre-checks below are a fast path for specific errors, not the
+  // guarantee: a relay close or a type transition committing between the read
+  // and the write now loses the write instead of planting an invisible byUnread
+  // resident - the residue class scripts/backfill-unread-flag.ts exists to
+  // repair. Two consequences the old read-then-write comment got wrong: the
+  // count lands at exactly 1 (a SET, so a stale GSI-fed 0 can no longer leave
+  // the row at 2), and the candidate filter below is now belt-and-braces rather
+  // than the thing standing between a pool number and a closed relay group.
+  // lib/markUnread.ts owns the refusal classification and the single retry.
   const newestOf = (convs: ConversationItem[]): ConversationItem | undefined =>
     convs.reduce<ConversationItem | undefined>(
       (best, c) => (best === undefined || c.last_activity_at > best.last_activity_at ? c : best),
       undefined,
     );
-  /** Flag `conv` unread. false = refused (the unread feed would never show it). */
+  /**
+   * Flag `conv` unread. false = refused, which BOTH fan-in routes answer with
+   * 409 thread_closed: either the unread feed would never show the thread, or
+   * the row is gone - and a client that named a contact or a phone (never this
+   * conversation, and the contact demonstrably exists, the route just loaded
+   * it) has nothing to be told 404 about.
+   */
   const flagUnread = async (conv: ConversationItem): Promise<boolean> => {
     if (!isUnreadVisible({ ...conv, unread_count: 1 })) return false;
-    if (unreadOf(conv) > 0) return true; // already unread - idempotent no-op
-    const count = await conversations.incrementUnread(conv.conversationId);
-    // The event carries the post-increment image built from the write's own
-    // return (a re-read is eventually consistent and could hand back the
-    // pre-increment count); consumers refetch on it regardless.
-    events.emit(
-      'conversation.updated',
-      toConversationUpdatedEvent({ ...conv, unread_count: count, unread_flag: UNREAD_FLAG_VALUE }),
-    );
+    // NO "already unread?" PRE-CHECK HERE, DELIBERATELY (fix wave 1, 2026-08-17).
+    // `conv` came from findByParticipantPhone - a Query on the EVENTUALLY
+    // CONSISTENT byParticipantPhone GSI - so a stale POSITIVE count would have
+    // answered 200 with no write at all, and the client would have committed an
+    // optimistic unread onto a row the server left read. setUnread's own
+    // condition refuses an already-unread row and markUnread's classify re-reads
+    // it as `already-unread`, which lands on the same success below. The price is
+    // stated so it is not "optimized" back: an already-unread thread now costs
+    // one REFUSED conditional write plus one point read instead of nothing.
+    const outcome = await markUnread(conversations, conv);
+    if (outcome.kind === 'gone' || outcome.kind === 'ineligible') return false;
+    // Emit ONLY on a real write, carrying the image the write itself returned
+    // (ALL_NEW): a re-read is eventually consistent and could hand back the
+    // pre-write count. Consumers refetch on it regardless.
+    if (outcome.kind === 'wrote') {
+      events.emit('conversation.updated', toConversationUpdatedEvent(outcome.item));
+    }
     return true;
   };
 
@@ -1796,6 +1812,25 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
     }
     if (!/^\+\d+$/.test(phone)) {
       res.status(400).json({ error: 'phone must be E.164 (e.g. +15550001234)' });
+      return;
+    }
+    // MU-2 (H2): this route never resolved the contact, so a soft-deleted
+    // contact's number could be flagged unread through it - the one way around
+    // the rule /:contactId/unread enforces (a 1:1 cannot reach the conversation
+    // route at all). Their row is only ever visible while unread, so a manual
+    // flag would fake the fresh inbound the resurfacing rule means.
+    //
+    // A phone with NO contact record is NOT deleted: an untriaged unknown
+    // number is exactly what this route is for and stays markable. findByPhone
+    // deliberately ignores deleted_at (contactsRepo), which is what lets this
+    // see the deleted contact at all.
+    //
+    // Its /read twin deliberately carries NO such check - zeroing a deleted
+    // contact's unread is harmless; SETTING it is what MU-2 forbids. Do not
+    // "make them consistent".
+    const owner = await contacts.findByPhone(phone);
+    if (owner !== undefined && isDeleted(owner)) {
+      res.status(409).json({ error: 'contact_deleted' });
       return;
     }
     const newest = newestOf(await conversations.findByParticipantPhone(phone));

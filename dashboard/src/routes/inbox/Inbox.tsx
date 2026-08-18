@@ -116,11 +116,20 @@ export function Inbox(): React.JSX.Element {
         </p>
       ) : null}
 
-      {/* S8. A truncated NON-EMPTY unread page used to end SILENTLY: `hasMore`
-          is false so no "Load more" renders, and the banner below is gated on
-          the page having come back EMPTY - so a capped list looked exactly like
-          the end of the feed. A cap is acceptable only if the list says it is
-          capped.
+      {/* S8. A truncated NON-EMPTY unread page used to end SILENTLY: on the
+          CAPPED exits no cursor is minted, so no "Load more" renders, and the
+          banner below is gated on the page having come back EMPTY - so a capped
+          list looked exactly like the end of the feed. A cap is acceptable only
+          if the list says it is capped.
+
+          `!hasMore` IS PART OF THE GATE, not decoration. `truncated` is a SIGNAL
+          LAYERED ON PAGING, not a replacement for it: the server's budget exit
+          mints a cursor AND sets `truncated`, so `truncated && hasMore` is
+          genuinely reachable. A page that still has a cursor is PAGED, not
+          capped, and "There are older unread threads not shown here" sitting
+          above a "Load more" that would in fact show them is both wrong and more
+          alarming than the state warrants. The depth-cap and unresolved-drops
+          exits leave no cursor, which is where this notice belongs.
 
           Gated on `serverRowCount`, NOT `rows.length`, for the same reason that
           banner is: both `truncated` and this count describe the SERVER page,
@@ -134,7 +143,7 @@ export function Inbox(): React.JSX.Element {
           NO COUNT in the copy, for the reason the group notice above dropped
           its own: the operator clears rows while the server's flag stands, so
           any number reaches zero with the notice still up. */}
-      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 ? (
+      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 && !inbox.hasMore ? (
         <p className={styles.notice}>
           Showing the most recent unread. There are older unread threads not shown here.
         </p>

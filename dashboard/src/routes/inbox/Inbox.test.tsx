@@ -283,10 +283,12 @@ describe('Inbox - group truncation affordance', () => {
   });
 });
 
-// S8. A truncated NON-EMPTY unread page used to end SILENTLY: `hasMore` is false
-// so no "Load more" renders, and the truncation banner above is gated on the
-// page having come back EMPTY - so a capped list looked exactly like the end of
-// the feed. A cap is acceptable only if the list says it is capped.
+// S8. A truncated NON-EMPTY unread page used to end SILENTLY: on the CAPPED
+// exits the server mints no cursor, so no "Load more" renders, and the
+// truncation banner above is gated on the page having come back EMPTY - so a
+// capped list looked exactly like the end of the feed. A cap is acceptable only
+// if the list says it is capped - and a page that still has a cursor is PAGED,
+// not capped, which is why the notice is gated on `!hasMore` too.
 describe('Inbox - the Unread truncation notice', () => {
   const NOTICE =
     'Showing the most recent unread. There are older unread threads not shown here.';
@@ -311,6 +313,27 @@ describe('Inbox - the Unread truncation notice', () => {
     renderInbox('/inbox?filter=unread');
     expect(screen.getByRole('alert')).toBeInTheDocument();
     expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  // Fix wave 1. `truncated` is a SIGNAL LAYERED ON PAGING: the server's BUDGET
+  // exit mints a cursor AND sets truncated, so this state is reachable, and the
+  // notice must not sit above a "Load more" that would in fact show the threads
+  // it says are not shown. The depth-cap exit (truncated, no cursor) is the case
+  // above and still says so.
+  it('renders NO notice while paging is still available, but still renders once the cursor runs out', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1, hasMore: true });
+    const view = renderInbox('/inbox?filter=unread');
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1, hasMore: false });
+    view.rerender(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 
   it('renders no notice on the error surface', () => {

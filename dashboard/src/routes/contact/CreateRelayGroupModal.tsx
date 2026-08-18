@@ -9,8 +9,8 @@
 //   confirming   - this modal unmounts, RosterConfirmDialog mounts.
 //   connecting   - the dialog unmounts, this modal re-mounts showing the result
 //                  panel instead of the member list.
-//   maybeCreated - the create never got an answer. A terminal, ACTIONLESS
-//                  panel: see the ambiguity rule below.
+//   maybeCreated - the create got no answer, or an answer that proves nothing.
+//                  A terminal, ACTIONLESS panel: see the ambiguity rule below.
 //
 // Never two at once: `Modal` registers a DOCUMENT-level Escape handler with no
 // propagation guard, so one keypress would close both and silently discard the
@@ -34,20 +34,23 @@
 // it does not navigate: the operator was just shown that exact intro body, and
 // silence would read as "sent".
 //
-// A FAILED CREATE FAILS IN ONE OF TWO WORLDS, AND ONLY ONE MAY BE RETRIED:
+// A FAILED CREATE IS AMBIGUOUS BY DEFAULT, AND ONLY AN ALLOW-LIST MAY RETRY:
 //
-//   The SERVER ANSWERED (an ApiError with a real status) - it refused, nothing
-//     exists, and confirming again is exactly right. The rejection PROPAGATES to
-//     RosterConfirmDialog, which renders it inline and keeps its confirm armed.
-//   NOBODY ANSWERED (a dropped connection, a timeout, the transport's own
-//     `ApiError(0, 'network_error')`) - the request may well have COMMITTED
-//     before the wire died. `POST /api/relay-groups` has no idempotency key, and
-//     the 409 `relay_exists` that protects the owner-scoped opens has no
-//     standalone equivalent (there is no owner row to key it on), so a retry
-//     mints a SECOND group, buys a SECOND pool number and texts everyone a
-//     second intro. No affordance can retry that safely, so this flow offers
-//     none: it lands on `maybeCreated`, which has exactly one button and it is
-//     Close.
+//   PROVABLY UNCREATED (see safeToRetry) - the server rejected the request
+//     before it did any work, so nothing exists and confirming again is exactly
+//     right. The rejection PROPAGATES to RosterConfirmDialog, which renders it
+//     inline and keeps its confirm armed.
+//   EVERYTHING ELSE - nobody answered (a dropped connection, a timeout, the
+//     transport's own `ApiError(0, 'network_error')`) OR somebody answered with
+//     something that is no proof at all (a proxy 502/504 that lost a response
+//     the server really sent; a 500 raised after the row was written). The
+//     request may well have COMMITTED. `POST /api/relay-groups` has no
+//     idempotency key, and the 409 `relay_exists` that protects the owner-scoped
+//     opens has no standalone equivalent (there is no owner row to key it on),
+//     so a retry mints a SECOND group, buys a SECOND pool number and texts
+//     everyone a second intro. No affordance can retry that safely, so this flow
+//     offers none: it lands on `maybeCreated`, which has exactly one button and
+//     it closes.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -80,13 +83,22 @@ const NO_MOBILE = 'no mobile number - cannot start a relay group';
 const CONNECTING_NOTICE =
   'This group is still getting its number. The intro text has not been sent yet; it goes out once the number is ready.';
 
-/** The AMBIGUOUS result - extends the A11 pinned-string contract. It has three
+/** The AMBIGUOUS result - extends the A11 pinned-string contract. It has four
  *  jobs, in this order: say the outcome is UNKNOWN (never "it failed", which
- *  invites the retry), name WHERE the answer is (the card on this very page,
- *  which onAmbiguousCreate has just refreshed), and state the cost of guessing
- *  wrong. Byte-exact and ASCII, like every other pinned string here. */
+ *  invites the retry), TIME the check ("once the connection recovers"), name
+ *  WHERE the answer is (the card on this very page), and state the cost of
+ *  guessing wrong.
+ *
+ *  The timing clause is the load-bearing one. onAmbiguousCreate refetches that
+ *  card, but the same outage that made the create ambiguous can fail the refetch
+ *  too - and a card that failed to refresh shows its last committed rows ("No
+ *  relay groups yet." when it was empty), which reads exactly like proof that
+ *  nothing was created. So the sentence never points at what the card shows RIGHT
+ *  NOW; it points at what the card will show once the connection is back, and
+ *  says what to do with each answer. Byte-exact and ASCII, like every other
+ *  pinned string here. */
 const AMBIGUOUS_NOTICE =
-  'The connection dropped before the server answered, so the group may or may not have been created. Check the Relay groups card on this page before trying again - creating it again could text everyone twice.';
+  'The connection dropped before the server answered, so the group may or may not have been created. Once the connection recovers, check the Relay groups card on this page - if the group is listed there, do not create it again; a second create would text everyone twice.';
 
 /** One picked contact as the picker holds it. `name` is '' when the contact has
  *  neither a first nor a last name - see rule 2 in the header. */
@@ -102,14 +114,45 @@ type Phase =
   | { kind: 'connecting'; conversationId: string }
   | { kind: 'maybeCreated' };
 
-/** Did the SERVER answer? That - not "is this an ApiError" - is the question a
- *  retry hangs on. The transport wraps a failed fetch as
- *  `ApiError(0, 'network_error')` (api/client.ts, where status 0 is documented
- *  as exactly that), so an `instanceof` check alone would classify the single
- *  most likely commit-then-drop as a safe retry. A real status means the server
- *  received the request, decided, and said no. */
-function serverRefused(err: unknown): boolean {
-  return err instanceof ApiError && err.status > 0;
+/** Statuses that mean the request was rejected BEFORE the route did any work:
+ *  a body the route would not parse, no session, no permission, no such route. */
+const REJECTED_BEFORE_ANY_WORK = new Set([400, 401, 403, 404]);
+
+/** The create route's two TYPED 503 refusals (routes/relayGroups.ts:342-355).
+ *  Both are raised inside `provisionRelayGroup`'s FIRST call,
+ *  `poolNumbersService.provisionForGroup` (services/relayProvisioning.ts:95),
+ *  which returns or throws before either `conversationsRepo.createRelayGroup`
+ *  (:107 connecting, :164 assigned) - so when one of these lands, no
+ *  conversation exists. */
+const REFUSED_BEFORE_PROVISIONING = new Set([
+  'relay_provisioning_disabled',
+  'pool_number_unavailable',
+]);
+
+/** May this rejection be retried? AMBIGUITY IS THE DEFAULT: this is an
+ *  ALLOW-LIST of rejections that PROVABLY happened before anything was created,
+ *  and everything not on it lands on `maybeCreated`.
+ *
+ *  "The server answered" is NOT the question, because an answer is not proof:
+ *  a CloudFront/proxy 502 or 504 is precisely the commit-then-lose-the-response
+ *  case and it carries a status, and a 500 raised AFTER the conversation row is
+ *  written (the audit append and the SSE emit both run after it -
+ *  services/relayProvisioning.ts:172-206) is indistinguishable in shape from one
+ *  raised before. Nor is "is this an ApiError": the transport wraps a failed
+ *  fetch as `ApiError(0, 'network_error')` (api/client.ts, where status 0 is
+ *  documented as exactly that).
+ *
+ *  So: true for a 400/401/403/404, and for a 503 whose code is one of the route's
+ *  two typed pre-provisioning refusals. `ApiError.code` IS the parsed body's
+ *  `{ error }` value - client.ts's errorFrom falls back to a synthetic
+ *  `http_<status>` when there is no parseable JSON body - so a 503 from an
+ *  intermediary, or one carrying any other code, can never match. Everything
+ *  else (status 0, 500, 502, 504, any other status, a non-ApiError) is
+ *  ambiguous. */
+function safeToRetry(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  if (REJECTED_BEFORE_ANY_WORK.has(err.status)) return true;
+  return err.status === 503 && REFUSED_BEFORE_PROVISIONING.has(err.code);
 }
 
 /** The number we would text. `phones` is OPTIONAL on the dashboard Contact, so
@@ -265,10 +308,10 @@ export function CreateRelayGroupModal({
       });
   };
 
-  /** The dialog's confirm. A rejection the SERVER SENT propagates, so the dialog
-   *  renders it inline and stays open with its confirm re-armed - that path is
-   *  the dialog's, not ours, and it is correct: nothing was created. A rejection
-   *  with no answer behind it must NOT take that path (see the header). */
+  /** The dialog's confirm. A rejection on the retry ALLOW-LIST propagates, so the
+   *  dialog renders it inline and stays open with its confirm re-armed - that
+   *  path is the dialog's, not ours, and it is correct: nothing was created.
+   *  Every other rejection must NOT take it (see safeToRetry and the header). */
   const confirmCreate = async (): Promise<void> => {
     if (phase.kind !== 'confirming') return;
     const trimmedTag = tag.trim();
@@ -281,7 +324,7 @@ export function CreateRelayGroupModal({
           trimmedTag === '' ? undefined : trimmedTag,
         );
       } catch (err) {
-        if (serverRefused(err)) throw err;
+        if (safeToRetry(err)) throw err;
         // AMBIGUOUS. `settled` first, and before any render: resolving normally
         // makes RosterConfirmDialog call its onClose, and without this that lands
         // in leaveConfirm and drags the flow back to the picker - over the one
@@ -412,9 +455,12 @@ export function CreateRelayGroupModal({
           <div className={styles.actions}>
             {/* The ONLY action. There is deliberately no retry here and no way
                 back to the picker: the whole point of this state is that a
-                second create could be the second one. */}
+                second create could be the second one. It is NOT named "Close":
+                the Modal X already owns that accessible name, and two controls
+                answering to it forced every test into a last-match workaround.
+                This name also carries the panel's instruction into the footer. */}
             <Button variant="secondary" size="sm" type="button" onClick={onClose}>
-              Close
+              Close and check the card
             </Button>
           </div>
         }

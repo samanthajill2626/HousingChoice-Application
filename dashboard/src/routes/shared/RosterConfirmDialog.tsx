@@ -132,11 +132,15 @@ export function RosterConfirmDialog({
     <Modal
       title={title}
       // Escape, the backdrop and the header X all call Modal's onClose with no
-      // condition of their own, and the round trip THIS dialog covers is the real
-      // one: a purchased pool number, a conversation, and an intro to everyone
-      // listed. Cancel is already disabled={busy}; without this the other three
-      // doors hand the caller its picker back mid-create, where a second confirm
-      // buys a SECOND number (`POST /api/relay-groups` has no idempotency key).
+      // condition of their own, and Cancel is already disabled={busy}. THIS
+      // dialog is what renders the round trip's outcome - the inline refusal, the
+      // caller's success routing, its result panels - so a dismissal mid-flight
+      // orphans that answer: the action stays unresolved, and the caller's own
+      // start affordance comes back armed over it. On the relay-open surfaces
+      // that action is also irreversible once it lands (a claimed pool number and
+      // an intro to everyone listed), and `POST /api/relay-groups` has no
+      // idempotency key, so the re-armed retry is a SECOND number and a second
+      // text to the same people.
       // TODO(modal-onclose-refocus-trap): an inline callback re-runs Modal's
       // Escape/focus effect on every render of this component. Harmless here (no
       // text input in the dialog); the class fix belongs in Modal.

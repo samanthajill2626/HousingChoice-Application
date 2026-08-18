@@ -92,9 +92,12 @@ const CONNECTING_NOTICE =
 
 /** The AMBIGUOUS-failure panel. Byte-exact copy of the shipped string: it is the
  *  only thing standing between a dropped connection and a second purchased pool
- *  number, so a drifted sentence is a real regression. */
+ *  number, so a drifted sentence is a real regression. It survives its OWN
+ *  outage: the same drop that made the create ambiguous can also fail the card's
+ *  refresh, so the sentence times the check ("once the connection recovers")
+ *  instead of trusting whatever the card shows right now. */
 const AMBIGUOUS_NOTICE =
-  'The connection dropped before the server answered, so the group may or may not have been created. Check the Relay groups card on this page before trying again - creating it again could text everyone twice.';
+  'The connection dropped before the server answered, so the group may or may not have been created. Once the connection recovers, check the Relay groups card on this page - if the group is listed there, do not create it again; a second create would text everyone twice.';
 
 function Probe(): React.JSX.Element {
   return <output data-testid="loc">{useLocation().pathname}</output>;
@@ -709,17 +712,23 @@ describe('CreateRelayGroupModal - the create outcome', () => {
 });
 
 describe('CreateRelayGroupModal - an AMBIGUOUS create is never re-armed', () => {
-  // A create fails in TWO different worlds and the retry affordance must differ:
+  // AMBIGUITY IS THE DEFAULT. A retry is offered only for a rejection that is
+  // PROVABLY pre-commit; everything else lands on the terminal panel:
   //
-  //   THE SERVER ANSWERED (ApiError with a real status) - it refused, nothing
-  //     was created, and confirming again is exactly right. The dialog's own
-  //     inline-error path owns that, so the rejection PROPAGATES untouched.
-  //   NOBODY ANSWERED (a dropped connection, a timeout, ApiError status 0) - the
-  //     request may have COMMITTED before the wire died. `POST /api/relay-groups`
-  //     has no idempotency key and the standalone route has no owner row to 409
-  //     against, so a retry mints a SECOND group, buys a SECOND pool number and
-  //     texts everyone a second intro. There is no affordance that can retry
-  //     safely, so the flow offers none: it says what happened and stops.
+  //   PROVABLY UNCREATED - 400/401/403/404 (rejected before any work), and the
+  //     create route's two typed 503s, `relay_provisioning_disabled` and
+  //     `pool_number_unavailable`, both raised by provisionForGroup BEFORE the
+  //     conversation row is written. The rejection PROPAGATES, so the dialog's
+  //     own inline-error path renders it and keeps its confirm armed.
+  //   EVERYTHING ELSE - status 0 (nobody answered), 500 (the handler can blow up
+  //     AFTER the row is written), 502/504 (a proxy that lost a response the
+  //     server really sent), any other status, a 503 with an unrecognized or
+  //     unparseable code, a non-ApiError. "The server answered" is NOT proof
+  //     nothing was created. `POST /api/relay-groups` has no idempotency key and
+  //     the standalone route has no owner row to 409 against, so a retry mints a
+  //     SECOND group, buys a SECOND pool number and texts everyone a second
+  //     intro. There is no affordance that can retry safely, so the flow offers
+  //     none: it says what happened and stops.
 
   /** A refusal the SERVER sent: a status, and a renderable message in the body. */
   function serverRefusal(): ApiError {
@@ -773,19 +782,82 @@ describe('CreateRelayGroupModal - an AMBIGUOUS create is never re-armed', () => 
     // the time the operator looks. `onCreated` is not: it means a group exists.
     expect(onAmbiguous).toHaveBeenCalledTimes(1);
     expect(onCreated).not.toHaveBeenCalled();
-    // Close is the only action, and it really closes.
-    const closers = screen.getAllByRole('button', { name: 'Close' });
-    await user.click(closers[closers.length - 1]!);
+    // ONE action, and it no longer collides with the Modal X: the panel button is
+    // 'Close and check the card' and the X keeps the bare 'Close', so each is
+    // queryable on its own name - no last-match workaround.
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close and check the card' }));
     expect(onClosed).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  // --- The ALLOW-LIST: only a provably pre-commit refusal may be retried -----
+
+  const PROVABLY_UNCREATED: [string, ApiError][] = [
+    ['400 - the route rejected the body before touching anything', new ApiError(400, 'members (non-empty array) is required', 'members (non-empty array) is required')],
+    ['401 - no session, so the handler never ran', new ApiError(401, 'unauthorized', 'unauthorized')],
+    ['403 - refused at the gate', new ApiError(403, 'forbidden', 'forbidden')],
+    ['404 - there is no such route to have created anything', new ApiError(404, 'not_found', 'not_found')],
+    [
+      '503 pool_number_unavailable - thrown by provisionForGroup, before the row',
+      new ApiError(503, 'pool_number_unavailable', 'pool_number_unavailable', {
+        error: 'pool_number_unavailable',
+      }),
+    ],
+  ];
+
+  it.each(PROVABLY_UNCREATED)(
+    '%s keeps the confirm dialog open and re-armed',
+    async (_label, err) => {
+      const { onCreated, onAmbiguous } = await createWith(err);
+      expect(await screen.findByRole('alert')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Open the relay group?' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Open relay group' })).toBeEnabled();
+      expect(screen.queryByText(AMBIGUOUS_NOTICE)).toBeNull();
+      expect(onCreated).not.toHaveBeenCalled();
+      expect(onAmbiguous).not.toHaveBeenCalled();
+    },
+  );
+
+  // --- Everything else is AMBIGUOUS, status or no status --------------------
+
+  const NOT_PROOF_OF_ANYTHING: [string, ApiError][] = [
+    [
+      '500 - the row is written before the audit and the SSE emit, so a handler failure can be POST-commit',
+      new ApiError(500, 'http_500', 'Request failed (500)'),
+    ],
+    [
+      '502 - a proxy answering for a server that may have committed and lost its response',
+      new ApiError(502, 'http_502', 'Request failed (502)'),
+    ],
+    ['504 - a gateway timeout over a create that may still be landing', new ApiError(504, 'http_504', 'Request failed (504)')],
+    [
+      '503 with an UNRECOGNIZED code - not one of the two typed pre-commit refusals',
+      new ApiError(503, 'some_other_reason', 'some_other_reason', { error: 'some_other_reason' }),
+    ],
+    [
+      '503 with NO parseable body - an intermediary page, not our route',
+      new ApiError(503, 'http_503', 'Request failed (503)'),
+    ],
+  ];
+
+  it.each(NOT_PROOF_OF_ANYTHING)('%s lands on the maybe-created panel', async (_label, err) => {
+    const { onCreated, onAmbiguous } = await createWith(err);
+    expect(await screen.findByText(AMBIGUOUS_NOTICE)).toBeInTheDocument();
+    // Neither affordance that starts a create is on screen.
+    expect(screen.queryByRole('button', { name: 'Open relay group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create group' })).toBeNull();
+    expect(createRelayGroup).toHaveBeenCalledTimes(1);
+    expect(onAmbiguous).toHaveBeenCalledTimes(1);
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
   it('a NETWORK-ERROR ApiError is ambiguous too - status 0 means nobody answered', async () => {
     // The transport wraps a failed fetch as `ApiError(0, 'network_error')`
-    // (client.ts), so "is it an ApiError" cannot be the question - "did the
-    // SERVER answer" is, and status 0 is documented as no answer at all. A
-    // status-only check here would re-arm the create on the single most likely
-    // way a commit-then-drop actually happens.
+    // (client.ts), so "is it an ApiError" cannot be the question - and neither
+    // can "did the SERVER answer", which the 500/502/504 rows above pin. Status 0
+    // is documented as no answer at all: an `instanceof` check would re-arm the
+    // create on the single most likely way a commit-then-drop happens.
     const { onAmbiguous } = await createWith(
       new ApiError(0, 'network_error', 'Network request failed'),
     );

@@ -3,22 +3,24 @@
 Date: 2026-08-17
 Branch: `feat/relay-number-reuse` (worktree `W:\tmp\relay-number-reuse`; the branch
 name predates a change of scope and is kept deliberately)
+Revision: r2, after two independent adversarial reviews (37 findings, 13 found by
+both). Adjudications at `.superpowers/design-review/adjudications.md`.
 Status: design only. The BUILD is held until `feat/contact-create-relay-group` merges
-to `main` - see section 11.
+to `main` - see section 12.
 
 ## 1. What this is, and what it is not
 
 When an operator is about to open a relay group whose members are exactly the members
-of a relay group that is ALREADY live, warn them loudly in the confirm dialog before
-it happens, with a link to the group that already exists and a deliberate override if
+of a relay group that is ALREADY live, warn them in the confirm dialog before it
+happens, with a link to the group that already exists and a deliberate override if
 they mean it.
 
-**This spec contains no pool-number work.** An earlier version of this feature
-proposed relaxing pool-number allocation so a repeat pair could reuse their old
-number. That is cancelled. The allocation behavior we want - every duplicate gets a
-completely new number - is already what the code does, and section 2.2 verifies it.
+**This spec contains no pool-number work.** An earlier version proposed relaxing
+pool-number allocation so a repeat pair could reuse their old number. That is
+cancelled. The allocation behavior we want - every duplicate gets a completely new
+number - is already what the code does, and 2.2 verifies it.
 `app/src/services/poolNumbers.ts` and `app/src/repos/poolNumbersRepo.ts` are not
-modified by this change.
+modified.
 
 ## 2. Verified current behavior
 
@@ -36,384 +38,475 @@ invariant is violated. **A duplicate is not a correctness problem.**
 
 The harm is entirely on the human side:
 
-- The tenant or landlord now holds TWO indistinguishable masked numbers for what is,
-  to them, ONE relationship. Neither number identifies itself; both are just "the
-  number I text about this". They have no way to tell which thread staff is actually
-  watching, and a reply to the stale one is delivered perfectly correctly into a
-  thread nobody is reading.
+- The tenant or landlord holds TWO indistinguishable masked numbers for what is, to
+  them, ONE relationship. Neither number identifies itself. They cannot tell which
+  thread staff is watching, and a reply to the stale one is delivered perfectly
+  correctly into a thread nobody is reading.
 - Staff's history of that relationship is SPLIT across two threads, and outbound goes
-  from whichever thread they happen to open - so the recipient sees two different
-  senders for one conversation.
+  from whichever thread they open - so the recipient sees two senders for one
+  conversation.
 
-That is what the warning copy has to convey, and it is the whole justification for
-the feature. "A group with these people already exists" states a fact without saying
-why the operator should care.
-
-It is also why D5 warns rather than refuses and why D7 fails open: a missed detection
-costs somebody a confusing week, not a misdelivered message. A design that treated
-this as a safety fence would be mis-priced.
+That is what the warning copy must convey, and it is the whole justification for the
+feature. It is also why D5 warns rather than refuses, why D7 fails open, and why D9
+accepts a race: a missed detection costs somebody a confusing week, not a misdelivered
+message. A design that treated this as a safety fence would be mis-priced, and would
+justify machinery (conditional writes, claims) that the harm does not earn.
 
 ### 2.2 Every duplicate ALREADY gets a new number - verified, do not "fix" it
 
-`provisionForGroup`'s tier 1 skips any active number whose burn overlaps the new
-roster AT ALL:
+`provisionForGroup` tier 1 skips any active number whose burn overlaps the new roster
+AT ALL (`app/src/services/poolNumbers.ts:539-540`, via `rosterOverlapsBurn` at
+`:302-309`, true when ANY roster phone is in the set). Tier 2 (`:555-557`) only
+accepts EMPTY-burn spares. `burned_phones` is permanent
+(`app/src/repos/poolNumbersRepo.ts:15-21, :108-111`). So once A and B are burned on a
+number, no later group containing A or B can land on it. A duplicate is guaranteed a
+different number.
 
-```
-app/src/services/poolNumbers.ts:539-540
-  if (!hasBurn(candidate.burned_phones)) continue;   // empty-burn spares are tier 2
-  if (rosterOverlapsBurn(rosterPhones, candidate.burned_phones)) continue;
-```
+### 2.3 The creation surfaces
 
-and `rosterOverlapsBurn` (`:302-309`) is true when ANY roster phone is in the set.
-Tier 2 (`:555-557`) only accepts EMPTY-burn spares. `burned_phones` is permanent and
-never cleared (`app/src/repos/poolNumbersRepo.ts:15-21, :108-111`).
+- Standalone create: `POST /api/relay-groups`, `app/src/routes/relayGroups.ts:278`.
+- Tour open: `openTourGroup`, `app/src/services/rosterProvision.ts:346`. Holds an
+  ATOMIC one-thread-per-tour claim first (`tours.claimGroupThread`, `:333-341`).
+- Placement open: `openPlacementGroup`, `:646`. Its one-thread guard is a plain
+  read-then-refuse (`:601-610`), NOT a claim - `docs/issues/placement-relay-no-atomic-claim.md`.
+  There is no placement claim to release on a refusal.
+- Deferred (quiet-hours) open: `app/src/jobs/rosterActions.ts`, the poller applying a
+  confirmed open at quiet-end.
 
-So once A and B are burned on a number, no later group containing A or B can ever land
-on it - open or closed, same set or merely overlapping. A duplicate is guaranteed a
-different number. No change is needed and none is made.
+The first three funnel through `provisionRelayGroup`
+(`app/src/services/relayProvisioning.ts:69`). The deferred path reaches it too, but
+its refusal handling is structurally different - see D6.
 
-### 2.3 The three open paths, and the one choke point
+### 2.4 The preview plumbing
 
-Scope is ALL THREE (Cameron, 2026-08-17): the standalone create
-(`POST /api/relay-groups`, `app/src/routes/relayGroups.ts:278`), the tour open
-(`POST /api/tours/:tourId/relay` -> `openTourGroup`,
-`app/src/services/rosterProvision.ts:346`), and the placement open
-(`POST /api/placements/:placementId/relay` -> `openPlacementGroup`, `:646`).
+Already on `main`: `RosterPreview` (`app/src/services/rosterEdits.ts:312`),
+`buildOpenPreview` (`:371`, the OWNER-scoped preview used by `routes/tours.ts:930`
+and `routes/placements.ts:1260`), and the mirrored client-side `RosterPreview`
+(`dashboard/src/api/types.ts:1019`).
 
-All three funnel through `provisionRelayGroup`
-(`app/src/services/relayProvisioning.ts:69`). That single function is where
-enforcement goes (section 7).
+Added by `feat/contact-create-relay-group`: `buildOpenPreviewFromParts` (the
+extracted PURE core both builders funnel through), `buildStandaloneOpenPreview`,
+`POST /api/relay-groups/preview` (`routes/relayGroups.ts:264-297`), and an
+`allowDefer` prop on `RosterConfirmDialog`.
 
-### 2.4 The preview plumbing this rides on (from the dependency branch)
-
-`feat/contact-create-relay-group` introduces the shared core all three previews funnel
-through. Read from that branch:
-
-- `RosterPreview` (`app/src/services/rosterEdits.ts:317-328`): `body`, `recipients`,
-  `recipientCount`, `deferred`, `quietEndsAt?`. Small, server-composed, and its
-  header states the rule this design must obey - **previews carry names, never phones**
-  (doc section 9).
-- `buildOpenPreviewFromParts(parts, quiet)` (`:405`) - PURE, no I/O.
-- `buildOpenPreview(deps, owner, quiet)` (`:433`) - the OWNER-scoped preview, used by
-  the tour route (`routes/tours.ts:930`) and the placement route
-  (`routes/placements.ts:1260`). It resolves the roster server-side and computes the
-  deduped, phone-bearing `provisioned` list internally.
-- `buildStandaloneOpenPreview(deps, members, quiet)` (`:497`) - the client-list
-  preview behind the new `POST /api/relay-groups/preview`
-  (`routes/relayGroups.ts:264-297`). Its deps already carry the full
-  `ConversationsRepo`.
-- `RosterConfirmDialog.tsx` - the one dialog all three surfaces render.
+`RosterPreview`'s header states the rule this design must obey: **previews carry
+names, never phones** (doc section 9).
 
 ### 2.5 Detection primitive
 
 `conversations.listRelayGroups(status)` (`app/src/repos/conversationsRepo.ts:731-733`)
-is a DIRECT Query on the SPARSE `byRelayStatus` GSI - one partition per status, relay
-groups only, never a Scan. It returns `{ items, truncated }`, where `truncated` means a
-fixed page budget (`RELAY_LIST_PAGE_LIMIT` 100 x `RELAY_LIST_MAX_PAGES` 20 = 2000,
-`:384-385`) stopped the walk, and the contract says the caller MUST surface that.
+is a DIRECT Query on the SPARSE `byRelayStatus` GSI - relay groups only, never a Scan.
+It returns `{ items, truncated }`; `truncated` means a fixed page budget
+(`RELAY_LIST_PAGE_LIMIT` 100 x `RELAY_LIST_MAX_PAGES` 20 = 2000, `:384-385`) stopped
+the walk. There is NO index for "group by exact participant set", so exact-set lookup
+is this Query plus an in-code comparison.
 
-There is NO index for "group by exact participant set" - rosters live in the
-un-indexed `participants` list - so exact-set lookup is this Query plus an in-code
-comparison. This is the same primitive `GET /api/contacts/:id/relay-groups`
-(`routes/contacts.ts:1128-1184`) uses, and reading it directly is strictly cheaper
-than routing through that endpoint, which walks THREE partitions to answer a
-different question.
-
-### 2.6 The importer writes rows into the connecting partition
+### 2.6 The importer writes into the connecting partition
 
 `app/src/lib/import/apply.ts:1086, :1129-1130` writes `type: 'relay_group'` with
-`relay_status = 'relay_group#connecting'` for imported carrier group threads, and the
-comment at `:1146-1154` documents that row shape deliberately. Those are unconverted
-group texts, not relay groups we provisioned. They carry `imported_from`.
+`relay_status = 'relay_group#connecting'` for imported carrier group threads (the
+comment at `:1146-1154` documents the shape deliberately). Those are unconverted group
+texts, not relay groups we provisioned. They carry `imported_from`, which is NOT a
+declared field on `ConversationItem` - it is read through the item's
+`[key: string]: unknown` index signature, so the check must be written
+`typeof conv['imported_from'] === 'string'` rather than a property access.
 
 ## 3. Decisions
 
 **D1 - The match is EXACT SET EQUALITY of member phones. Nothing else warns.**
-`{A,B}` and `{A,B,C}` are DIFFERENT groups, existing for different reasons, and two
-masked numbers is the correct outcome there - the second conversation genuinely has a
-third party in it, so a reply to either number has an unambiguous destination. Same
-for `{A,B}` and `{A,C}`. The ambiguity of 2.1 exists only when the SAME set has two
-live threads, because then nothing distinguishes which thread a reply belongs to.
-Supersets, subsets, and partial overlaps are NOT warned about and must not be, or the
-dialog cries wolf on ordinary operation. (Ruled by Cameron, 2026-08-17, correcting an
-earlier draft of this spec that proposed warning on containment.)
+`{A,B}` and `{A,B,C}` are DIFFERENT groups existing for different reasons, and two
+masked numbers is the correct outcome there. Same for `{A,B}` and `{A,C}`. The problem
+of 2.1 - two indistinguishable numbers for ONE relationship - exists only when the
+SAME set has two live threads. Supersets, subsets and partial overlaps must NOT warn,
+or the dialog cries wolf on ordinary operation and operators learn to click through
+it. (Ruled by Cameron, 2026-08-17, correcting an earlier draft that proposed warning
+on containment.)
 
-**D2 - The compared set is the PROVISIONED phone set.** That is the deduped,
-phone-bearing member list provisioning will actually put on the thread - the same
-filter `provisionMembersOf` (`rosterProvision.ts:106-120`) and the standalone create
-route both apply. Comparing anything else would warn about a group different from the
-one that is about to exist.
+**D2 - The compared set is the PROVISIONED phone set** - the deduped, phone-bearing
+list provisioning will actually put on the thread, the same filter
+`provisionMembersOf` (`rosterProvision.ts:106-120`) and the standalone create route
+apply.
 
 **D3 - Compare E.164 PHONES, never `relayMemberKey`.** `groupMembers.ts:30-37` rules
 explicitly against the contactId-preferring key for roster identity: "ALWAYS
 `phone#<E164>`, NEVER `relayMemberKey` ... one contact owning TWO member numbers would
-collapse into a single slot", and `rosterEdits.ts:144` and `rosterResolution.ts:326`
-repeat it. Phones are also what routing keys on, which is what makes the duplicate
-harmful in the first place.
+collapse into a single slot". Phones are also what routing keys on.
 
-KNOWN LIMITATION, deliberate: the same two humans reached on DIFFERENT numbers (Alice's
-work phone in one group, her cell in the other) will not match, so that duplicate is
-not warned about. Detecting it needs contact-level identity, which is exactly the
-collapse D3 refuses. Filed as `docs/issues/relay-duplicate-across-contact-handsets.md`.
+KNOWN GAP, deliberate: the same two humans on DIFFERENT numbers will not match. To
+file as `docs/issues/relay-duplicate-across-contact-handsets.md`.
 
-**D4 - OPEN and CONNECTING both count as "already exists", except imported rows.** A
-connect-when-ready group is a real live thread pending its number, and a second one
-would buy a second number - the precise harm of 2.1. Imported rows (2.6) are skipped:
-they are unconverted carrier group texts, and warning "an open relay group already
-exists" about one would be false in every clause.
+**D4 - OPEN and CONNECTING both count, except imported rows** (2.6). A connecting
+group is a real live thread pending its number; a second one buys a second number.
 
-**D5 - Warn, do not refuse; the override is explicit.** Cameron's lean, and correct:
-the check is a heuristic about operator intent, and there are legitimate reasons to
-want a second thread that the server cannot see. The dialog names the existing group,
-links to it, and turns its confirm button into a deliberate "Create anyway". The
-server enforces the SAME rule and requires `acknowledgeDuplicate: true` to proceed,
-so the warning cannot be lost by a surface that forgets to render it.
+**D5 - Warn, do not refuse; the override is explicit; the server applies the same
+check on a BEST-EFFORT basis.** The dialog names the existing group, links to it, and
+its confirm becomes a deliberate "Create anyway". The server applies the same check so
+the warning cannot be lost by a surface that forgets to render it.
 
-**D6 - Enforcement lives in `provisionRelayGroup`, not in the routes.** It is the
-single function all three paths funnel through (2.3), so all three are covered by one
-check and a fourth creation surface added later inherits it automatically.
+It is a CHECK, not a guarantee. Detection is a read over an eventually consistent GSI
+with no conditional write and no claim, so two simultaneous opens can both pass. That
+is accepted, not overlooked: per 2.1 the outcome is a duplicate - the very thing being
+warned about, missed - and it costs a confusing week, not a misdelivery. Buying
+atomicity here would mean a claim or a conditional write on a state that has no
+natural key, which the harm does not earn. An earlier revision of this spec said the
+server "enforces" the rule; that overclaimed and is corrected.
 
-**D7 - Detection FAILS OPEN.** `listRelayGroups` can report `truncated`; when it does,
-the result is `inconclusive`, no warning renders, and the create proceeds with a WARN
-logged. Blocking an operator because a GSI walk hit its page budget is worse than
-missing a duplicate. This is an operator-assist guard, not a safety fence - nothing
+**D6 - TWO enforcement points, because the deferred path cannot use the first.**
+Interactive opens (standalone, tour, placement) are checked inside
+`provisionRelayGroup` - one function all three funnel through, so a fourth surface
+added later inherits it.
+
+The DEFERRED open cannot be. `jobs/rosterActions.ts` claims APPLY before calling
+`openGroup()` (`:497` then `:540`), `claimSkip` is reachable only pre-claim (`:483`),
+and the claim is one-way. A refusal raised from inside provisioning would land on an
+`applied` row that appears in neither `pending[]` nor `skipped[]` - the operator's
+deferred open would evaporate at quiet-end with nothing to show. The file already
+solves exactly this for two other refusals, with the reasoning written out at
+`:353-364`: `roster_too_thin` and `provisioning_unavailable` are both PRE-CLAIM skips
+in `validateAction`. The duplicate check is a third, placed beside them.
+
+So the detector has two call sites. That is not a violation of "one choke point"; it
+is what the claim protocol requires, and the precedent is two lines above.
+
+**D7 - Detection FAILS OPEN on BOTH failure modes, and never suppresses a real
+match.**
+
+- `truncated` on a partition walk -> `inconclusive`.
+- A THROWN Query error -> caught inside the detector, logged, `inconclusive`. An
+  earlier revision handled only truncation, which would have 500'd every preview and
+  every create on a transient DynamoDB error - and the standalone preview route is
+  deliberately un-caught ("the confirm dialog never opens"), so the operator would
+  have been blocked entirely. That is the opposite of failing open.
+- `inconclusive` is reported ALONGSIDE any match, never instead of it. If the OPEN
+  partition yields a match and the CONNECTING walk truncates, the match still warns.
+  Ordering the short-circuit the other way would discard a duplicate actually found.
+
+Inconclusive never blocks and never warns. This is an operator-assist guard; nothing
 routes incorrectly if it misses.
 
-**D8 - A quiet-hours DEFERRED open that has become a duplicate is SKIPPED, not
-forced.** The poller (`jobs/rosterActions.ts`) applies a confirmed open hours later,
-with no operator present to acknowledge anything. It runs the same check and, on a
-match, skips with a new `duplicate_open_group` reason that the roster-actions card
-already surfaces. Rejected: carrying the operator's acknowledgement forward on the
-pending row. It would need a new field on `PendingRosterActionItem`
-(`repos/pendingRosterActionsRepo.ts:98-120`), and the quiet-hours window is long
-enough that "they said yes hours ago" is weak evidence they still mean it. The cost is
-that a deliberately-duplicated deferred open must be re-confirmed; the skip is
-visible, not silent. FLAGGED FOR CAMERON - this is the one place D5's "warn, do not
-refuse" becomes a refusal, and it is a product call.
+**D8 - The acknowledgement RIDES the deferral. (Reversed from r1.)** r1 skipped a
+deferred open that had become a duplicate, on the reasoning that "they said yes hours
+ago" is weak evidence. Both reviewers showed that is untenable: INSIDE QUIET HOURS the
+dialog's default confirm IS a deferral, so an operator who sees the warning and
+deliberately overrides it gets a deferral - and if the acknowledgement does not
+survive, their override is unreachable every evening except by forcing an 11pm send.
+D5's "warn, do not refuse" would become a refusal on the normal path.
+
+So: `PendingRosterActionItem` gains `acknowledgedDuplicateOf?: string` (the
+conversationId the operator was shown). `validateAction` runs the detector pre-claim;
+a match whose conversationId equals the stored acknowledgement PROCEEDS, any other
+match skips with a new `duplicate_open_group` reason. The row is a flexible document
+(`repos/pendingRosterActionsRepo.ts:98-120`), so this is an additive optional field -
+no migration.
+
+**D9 - The acknowledgement is SCOPED to a conversation id, not a boolean.**
+`acknowledgeDuplicateOf: '<conversationId>'`, everywhere - the API bodies, the
+deferral row, the dialog callback. A bare boolean would let an operator's "yes I know
+about group X" silently accept a create that duplicates group Y, and would record an
+audit line naming a group they were never shown. If the duplicate found at create time
+is not the one acknowledged, the refusal fires again carrying the NEW group.
+
+**D10 - REOPEN is in scope.** Reopening a closed `{A,B}` group while another `{A,B}`
+group is live produces exactly 2.1: two live threads for one set, on two numbers. An
+earlier revision dismissed this by citing the burn rule, which was a non-sequitur -
+the burn rule guarantees the two groups are on DIFFERENT numbers, which is the
+condition, not a defence against it. `PATCH /api/conversations/:id/close` with
+`{closed:false}` (`routes/relayGroups.ts:484-527`) therefore runs the same check and
+returns the same 409 with the same scoped override.
+
+**D11 - Roster REMOVAL is a known gap, filed, not built.** Removing C from a live
+`{A,B,C}` beside a live `{A,B}` manufactures the duplicate condition without creating
+anything. It is a real hole and the r1 table dismissed it with a slogan about adds
+that did not address removes. It is NOT built here: the interaction is "you have just
+converged two conversations", not "you are about to create a second one", so it wants
+different copy and a different remedy (probably merge, not warn). To file as
+`docs/issues/relay-duplicate-via-roster-removal.md`.
+
+**D12 - Order the duplicate check AFTER the provisioning kill-switch refusal.** The
+kill-switch throws from inside `provisionForGroup` at a tier-3 miss
+(`poolNumbers.ts:577`), so a naive "check duplicates first" flips today's pre-A2P 503
+`relay_provisioning_disabled` into a 409 `duplicate_open_group` - a wire-contract
+change nobody asked for, on the path that is dormant precisely because provisioning is
+off. The duplicate check runs where it cannot do that: the environmental refusal keeps
+priority.
 
 ## 4. New module: `app/src/services/relayGroupDuplicates.ts`
 
 ```
 /** The existing group a proposed roster duplicates. Names only - NEVER phones
- *  (doc section 9: previews carry names, never phones). */
+ *  (doc section 9). */
 export interface DuplicateOpenGroup {
   conversationId: string;
-  /** 'open' | 'connecting' - the PARTITION it was found in, not the row's own
-   *  `status` field; those can skew (see section 9). */
+  /** The PARTITION it was found in, not the row's own `status` - those can skew
+   *  (section 10). */
   partition: 'open' | 'connecting';
-  /** Display names of the existing group's members, for the warning copy. */
+  /** Display names of the existing group's members. A participant with no name
+   *  contributes the literal 'Unknown' - never the phone, which section 2.4's
+   *  rule forbids on the wire. */
   memberNames: string[];
 }
 
 /**
- * The ONE detector. Scans the OPEN and CONNECTING relay partitions for a group
- * whose participant phone set equals `phones` EXACTLY (D1). Rows carrying
- * `imported_from` are skipped (D4). `inconclusive` is true when either partition
- * walk reported `truncated` (D7) - callers must then neither warn nor refuse.
+ * The ONE detector, two call sites (D6). Scans the OPEN and CONNECTING relay
+ * partitions for a group whose participant phone set equals `phones` EXACTLY
+ * (D1). Rows carrying `imported_from` are skipped (D4, read via the index
+ * signature - 2.6).
+ *
+ * MULTIPLE MATCHES: returns the one with the newest `last_activity_at`, which is
+ * the partition read's own order, and logs the count. Several exact duplicates
+ * already means something went wrong; the warning names the liveliest.
+ *
+ * `inconclusive` is true when either walk truncated OR threw (D7). It is
+ * reported ALONGSIDE `match`, never instead of it.
  */
 export function findOpenGroupWithSamePhones(
   deps: { conversations: Pick<ConversationsRepo, 'listRelayGroups'>; log: Logger },
   phones: Set<string>,
 ): Promise<{ match?: DuplicateOpenGroup; inconclusive: boolean }>;
 
-/** Exact phone-set equality helper, exported so the tests can pin D1 directly. */
+/** Exact phone-set equality, exported so tests pin D1 directly. */
 export function samePhoneSet(a: Set<string>, b: Set<string>): boolean;
 ```
 
-`excludeConversationId` is NOT a parameter: every caller is about to CREATE a group,
-so there is no self to exclude.
+## 5. Preview
 
-## 5. Preview - where the warning is composed
-
-`RosterPreview` gains one optional field:
+`RosterPreview` gains one optional field, in BOTH declarations - the server's
+(`app/src/services/rosterEdits.ts:312`) and the mirrored client one
+(`dashboard/src/api/types.ts:1019`):
 
 ```
   /** An OPEN or CONNECTING relay group with EXACTLY these members already
-   *  exists (D1). Absent when there is none, and also absent when detection was
+   *  exists (D1). Absent when there is none, and absent when detection was
    *  inconclusive (D7) - the dialog cannot distinguish those, by design. */
   duplicateOf?: DuplicateOpenGroup;
 ```
 
 `buildOpenPreviewFromParts` stays PURE: the duplicate is computed by the two async
-builders and passed in as a new optional part, which the core copies onto the result.
+builders and passed in as a new optional part.
 
-- `buildStandaloneOpenPreview` - its deps already carry the full `ConversationsRepo`,
-  and it already computes the deduped list. One call, no signature change.
-- `buildOpenPreview` - its deps are `RosterResolutionDeps`, whose `conversations` is
-  narrowed to `Pick<ConversationsRepo, 'getById'>`
-  (`app/src/lib/rosterResolution.ts:129`). Widen that to
-  `Pick<ConversationsRepo, 'getById' | 'listRelayGroups'>`. Cheap: `rosterDeps` is
-  constructed in exactly TWO places in `app/src`, both from the router's real repo
-  (`routes/tours.ts:514`, `routes/placements.ts:921`). Test doubles that supply a
-  partial `conversations` need `listRelayGroups` added - the plan enumerates them.
+`buildStandaloneOpenPreview`'s deps already carry the full `ConversationsRepo`.
+`buildOpenPreview` takes `RosterResolutionDeps`, whose `conversations` is
+`Pick<ConversationsRepo, 'getById'>` (`app/src/lib/rosterResolution.ts:129`); widen it
+to add `listRelayGroups`.
 
-All three preview routes then serve `duplicateOf` with no route-level change:
-`POST /api/relay-groups/preview`, `routes/tours.ts:930`, `routes/placements.ts:1260`.
+An earlier revision claimed `rosterDeps` is "constructed in exactly TWO places". That
+is wrong and a reviewer caught it: only two sites use the NAMED type
+(`routes/tours.ts:514`, `routes/placements.ts:921`), but the deps are also built
+INLINE and structurally elsewhere - notably `jobs/rosterActions.ts:321-323`, which is
+precisely where D6's pre-claim check must go. The plan must enumerate every
+structural construction site plus the job dep interfaces, and every test double that
+supplies a partial `conversations`, before widening the type.
 
-## 6. Dashboard
+## 6. Dashboard surfaces
 
-`RosterConfirmDialog.tsx` renders a prominent warning block when `duplicateOf` is
-present, ABOVE the recipient list:
+Enumerated, because r1 listed none:
 
-- What already exists, by name: "Dana Reed and Marcus Bell already have an open relay
-  group." (Connecting: "... already have a relay group being connected.")
-- Why it matters, in one sentence carrying 2.1: a second group gets its own masked
-  number, so these people will have two numbers for one conversation with no way to
-  tell which one staff is watching. NOT "messages may go to the wrong thread" - they
-  will not, and copy that overstates the risk will be disbelieved the first time an
-  operator checks (2.1).
+- `dashboard/src/api/types.ts:1019` - the mirrored `RosterPreview` gains
+  `duplicateOf`, and a mirrored `DuplicateOpenGroup`.
+- `dashboard/src/api/types.ts:933` - the roster-action skip-reason union gains
+  `duplicate_open_group`.
+- `dashboard/src/routes/shared/rosterWrites.ts:162` - the EXHAUSTIVE switch that
+  renders skip reasons gains a case. Without it the new reason renders as the vague
+  fallback, so r1's claim that the card "already surfaces it" was false.
+- `dashboard/src/routes/shared/RosterConfirmDialog.tsx` - renders the warning block,
+  and its callback changes shape.
+- The three call sites that pass `onConfirm`: `routes/tours/TourDetail.tsx`,
+  `routes/placements/PlacementDetail.tsx`, `routes/shared/PeopleCard.tsx`, plus the
+  dependency branch's `CreateRelayGroupModal.tsx`.
+- `dashboard/src/api/endpoints.ts` - the open/create functions gain the
+  acknowledgement argument.
+
+### 6.1 The confirm callback must carry TWO independent decisions
+
+Today `onConfirm: (force: boolean) => Promise<void>`
+(`RosterConfirmDialog.tsx:55`), where `force` means "send now, ignoring quiet hours".
+The duplicate acknowledgement is an ORTHOGONAL decision - overloading `force` would
+tie "I know about the duplicate" to "send at 11pm", which is the trap D8 describes.
+The callback becomes:
+
+```
+onConfirm: (opts: { force: boolean; acknowledgeDuplicateOf?: string }) => Promise<void>
+```
+
+Inside quiet hours the dialog therefore keeps BOTH of its existing buttons - defer
+(the default) and send-now - and the duplicate warning changes their LABELS and adds
+the acknowledgement to whichever is pressed. It does not add a third button and does
+not disable the deferral. Deferring with an acknowledgement is the normal evening
+path, which is exactly what D8 makes work.
+
+### 6.2 Copy
+
+- What exists, by name: "Dana Reed and Marcus Bell already have an open relay group."
+  (connecting: "... a relay group being connected.")
+- Why it matters, in one sentence from 2.1: a second group gets its own masked number,
+  so these people will have two numbers for one conversation with no way to tell which
+  one staff is watching. NOT "messages may go to the wrong thread" - they will not,
+  and copy that overstates the risk will be disbelieved the first time an operator
+  checks.
 - A link to the existing conversation.
-- The confirm button becomes "Create anyway"; the dialog's primary action visually
-  de-emphasises relative to the link.
+- Confirm reads "Create anyway"; the link is visually the primary action.
 
-This is in-dashboard UI text, not automated outbound copy, so it does NOT go through
-the message catalog.
-
-The submit sends `acknowledgeDuplicate: true` whenever `duplicateOf` was rendered.
+In-dashboard UI text, not automated outbound copy, so it does NOT go through the
+message catalog.
 
 ## 7. Enforcement
 
-`app/src/services/relayProvisioning.ts` gains:
+`app/src/services/relayProvisioning.ts` gains
+`DuplicateOpenRelayGroupError` carrying the `DuplicateOpenGroup`.
+`ProvisionRelayInput` gains `acknowledgeDuplicateOf?: string` (D9).
 
-```
-export class DuplicateOpenRelayGroupError extends Error {
-  readonly duplicate: DuplicateOpenGroup;
-}
-```
+In `provisionRelayGroup`, positioned per D12 so the kill-switch refusal keeps
+priority, and before any conversation is created:
 
-`ProvisionRelayInput` gains `acknowledgeDuplicate?: boolean` (default false). At the
-top of `provisionRelayGroup`, BEFORE `provisionForGroup` and before any conversation
-is created - the position the kill-switch refusal already occupies, so no partial
-state can exist:
+- Run the detector ALWAYS (never skipped by the acknowledgement, so an override is
+  always audited with the id it overrode).
+- `inconclusive` and no match -> log WARN, proceed (D7).
+- match, and `acknowledgeDuplicateOf` equals its conversationId -> log
+  `relay_duplicate_open_group_overridden` and proceed.
+- match otherwise -> throw.
 
-- Run `findOpenGroupWithSamePhones` over `members`' phones ALWAYS (never skipped by the
-  acknowledgement, so an override is always audited with the id it overrode).
-- `inconclusive` -> log WARN, proceed (D7).
-- match and NOT acknowledged -> throw.
-- match and acknowledged -> log `relay_duplicate_open_group_overridden` and record
-  `duplicateAcknowledged: true` plus `duplicateOfConversationId` on the existing
-  `relay_group_created` audit entry.
+The override is audited on the `relay_group_created` entry. NOTE there are TWO such
+appends - `relayProvisioning.ts:107` (connect-when-ready) and `:161` (assigned) - and
+BOTH must carry `duplicateAcknowledgedOf`, or an override on the connecting path goes
+unaudited.
 
-Route mapping, one arm each, beside the existing `RelayProvisioningDisabledError` arm:
+Route mapping, one arm each beside the existing `RelayProvisioningDisabledError` arm:
 
 - `routes/relayGroups.ts:282` catch -> 409 `{ error: 'duplicate_open_group',
-  conversationId, message }`, audited as `relay_duplicate_open_group_refused`.
-- `rosterProvision.ts` `openTourGroup` (`:361`) and `openPlacementGroup` -> the same
-  409 in their existing `{ ok:false, refusal:{ status, body } }` shape, which the tour
-  and placement routes already render verbatim. NOTE both must add the arm INSIDE the
-  existing catch, AFTER the claim release (`releaseGroupThreadClaim`), or a refused
-  tour open strands its `groupThreadId` sentinel - the failure mode
-  `docs/issues/relay-provisioning-sentinel-leak.md` already records.
-- `openTourGroup` / `openPlacementGroup` gain `acknowledgeDuplicate` on their `opts`,
-  threaded from the route bodies.
-- `jobs/rosterActions.ts` maps the refusal to the new `duplicate_open_group` skip
-  reason (D8) - it never sets `acknowledgeDuplicate`.
+  duplicate: {...} }`, audited `relay_duplicate_open_group_refused`.
+- `rosterProvision.ts` `openTourGroup` (`:361`) -> the same 409 in the existing
+  `{ ok:false, refusal:{status,body} }` shape. The arm goes INSIDE the existing catch,
+  AFTER `releaseGroupThreadClaim`, or a refused tour open strands its sentinel
+  (`docs/issues/relay-provisioning-sentinel-leak.md`). `openPlacementGroup` gets the
+  same arm but has NO claim to release (2.3) - r1 said "both", which was wrong.
+- `PATCH /api/conversations/:id/close` reopen branch -> the same 409 (D10).
+- `jobs/rosterActions.ts` `validateAction` -> pre-claim skip (D6/D8).
+
+### 7.1 When the preview and the create disagree
+
+The preview is a read; a duplicate can appear between it and the confirm. The 409 body
+therefore carries the FULL `DuplicateOpenGroup`, not just an id, and the client renders
+it as the SAME warning block the dialog would have shown, with the same "Create
+anyway" that retries carrying `acknowledgeDuplicateOf`. Without that, the operator
+gets the generic "Couldn't save that change - please try again" from
+`rosterWrites.ts`, which is unactionable and turns D5's warning into a bare refusal on
+the ordinary race.
 
 ## 8. Cost
 
-One extra bounded Query per relay-group preview and one per relay-group open, on a
-relays-only sparse GSI partition. Group opens are a rare, human-initiated action.
-Nothing is added to any message, webhook, or job hot path.
+Honest numbers, because r1 said "one extra bounded Query" and that was wrong by more
+than an order of magnitude.
+
+Each detector call walks TWO partitions to exhaustion: up to 20 Queries x 100 items
+each, per partition - so up to 40 Queries and 4,000 items. The NO-DUPLICATE case, which
+is the common one, always pays the maximum, because a full walk is what proves absence.
+An operator open pays this TWICE: once for the preview, once for the create.
+
+Acceptable because relay-group opens are a rare, human-initiated action, and the walk
+is on sparse relays-only partitions. Not acceptable to leave unstated: the performance
+seed already builds up to 1,000 relay groups, so the ceiling is reachable in a test
+lane today, and this cost grows with the org's lifetime group count. If it becomes hot
+the answer is an index on a participant-set hash, which is schema work deliberately
+excluded here. To file as `docs/issues/relay-duplicate-detection-scan-cost.md`.
 
 ## 9. Surfaces swept
 
 | Surface | File | Effect |
 |---|---|---|
-| Standalone preview | `routes/relayGroups.ts:264-297` (dep branch) | serves `duplicateOf` via `buildStandaloneOpenPreview` |
-| Tour preview | `routes/tours.ts:930` | serves `duplicateOf` via `buildOpenPreview` |
-| Placement preview | `routes/placements.ts:1260` | serves `duplicateOf` via `buildOpenPreview` |
-| Standalone create | `routes/relayGroups.ts:278` | enforced; 409 arm added |
-| Tour open | `rosterProvision.ts:346` | enforced; refusal arm added inside the existing catch, after the claim release |
-| Placement open | `rosterProvision.ts:646` | enforced; refusal arm added |
-| Quiet-hours deferred open | `jobs/rosterActions.ts` | new `duplicate_open_group` skip reason (D8) |
-| Connect-when-ready open | `jobs/relayNumberReady.ts` | UNCHANGED - it opens a group that already exists; there is nothing to duplicate |
-| Reopen | `routes/relayGroups.ts:484-527` | UNCHANGED - reopening creates no group and no number. The burn rule (2.2) means no other group sharing a member can be on that number, so reopening cannot create the 2.1 ambiguity |
-| Add member | `services/relayMembers.ts` | UNCHANGED - an add changes a set, it does not create a second thread for the same set |
-| Importer | `lib/import/apply.ts:1086, :1129-1130` | WRITER into the connecting partition; skipped by `imported_from` (D4) |
-| Pool numbers | `services/poolNumbers.ts`, `repos/poolNumbersRepo.ts` | UNCHANGED, deliberately (section 1, 2.2) |
-| Contact relay-groups card | `routes/contacts.ts:1128` | READER, unchanged |
+| Standalone preview | `routes/relayGroups.ts:264-297` (dep branch) | serves `duplicateOf` |
+| Tour preview | `routes/tours.ts:930` | serves `duplicateOf` |
+| Placement preview | `routes/placements.ts:1260` | serves `duplicateOf` |
+| Standalone create | `routes/relayGroups.ts:278` | enforced; 409 arm |
+| Tour open | `rosterProvision.ts:346` | enforced; arm inside the catch, AFTER the claim release |
+| Placement open | `rosterProvision.ts:646` | enforced; arm added - no claim to release |
+| Deferred open | `jobs/rosterActions.ts` `validateAction` | PRE-CLAIM check + `duplicate_open_group` skip (D6, D8) |
+| Reopen | `routes/relayGroups.ts:484-527` | NEW - enforced (D10) |
+| Connect-when-ready open | `jobs/relayNumberReady.ts` | UNCHANGED - opens a group that already exists; nothing is created |
+| Add member | `services/relayMembers.ts` | UNCHANGED - an add moves a set AWAY from an existing set, it cannot land on one |
+| Remove member | `services/relayMembers.ts` | KNOWN GAP - a remove CAN land on an existing set (D11). Filed, not built |
+| Seeds | `lib/seed/{cast,lean,live,matrix,performance}.ts` | WRITERS into both scanned partitions, carrying NO `imported_from`. They are read by the detector like any other row - deliberate, since a seeded duplicate SHOULD warn. `performance.ts` builds up to 1,000 groups, which is what makes section 8's ceiling reachable in a lane |
+| Importer | `lib/import/apply.ts:1086, :1129-1130` | WRITER into the connecting partition; skipped via `imported_from` (D4, 2.6) |
+| Pool numbers | `services/poolNumbers.ts`, `repos/poolNumbersRepo.ts` | UNCHANGED, deliberately (1, 2.2) |
 
-One reader-level caveat worth stating: `touchLastActivity`
-(`conversationsRepo.ts:1449-1507`) writes `status = 'open'` onto any non-`group_text`
-thread, leaving a re-flagged closed group at `status: 'open'` with
+## 10. A reader-level caveat
+
+`touchLastActivity` (`conversationsRepo.ts:1449-1507`) writes `status = 'open'` onto
+any non-`group_text` thread, leaving a re-flagged closed group at `status: 'open'` with
 `relay_status: 'relay_group#closed'`. Detection scans by `relay_status`, so such a
-group is invisible to it and a duplicate of one would not be warned about. That is a
-pre-existing bug (`docs/issues/inbound-reflags-closed-relay-group.md`), it only
-weakens an advisory warning that already fails open (D7), and it is out of scope here.
-It is why `DuplicateOpenGroup.partition` records the partition scanned rather than the
-row's own `status`.
+group is invisible to it. Pre-existing
+(`docs/issues/inbound-reflags-closed-relay-group.md`), it only weakens an advisory
+warning that already fails open (D7), and it is out of scope. It is why
+`DuplicateOpenGroup.partition` records the partition scanned rather than the row's own
+`status`.
 
-## 10. Test plan
+## 11. Test plan
 
 Unit (`app/test/`):
 
-- `relayGroupDuplicates.test.ts` (new) - exact equality only: `{A,B}` matches `{A,B}`;
-  `{A,B}` does NOT match `{A,B,C}`, `{A,B,C}` does NOT match `{A,B}`, `{A,B}` does NOT
-  match `{A,C}` (D1 - these three are the spec's whole product rule, pin them
-  explicitly); order-independent; matches across OPEN and CONNECTING (D4); SKIPS a
-  connecting row carrying `imported_from` (fixture ready - the lean seed's only
-  connecting row carries it, `lib/seed/lean.ts:262`); reports `inconclusive` when
-  either walk reports `truncated`, and reports NO match in that case.
-- `rosterEdits.test.ts` / `relayGroupPreview.test.ts` - `duplicateOf` present on the
-  standalone and owner previews when a duplicate exists, absent when none does, absent
-  when inconclusive; the preview payload contains NO phone numbers (doc section 9 -
-  assert on the serialized JSON, not on the object).
-- `relayProvisioning.test.ts` - throws for a duplicate on ALL THREE owner shapes
-  (unowned, tour, placement - D6 is the point, so an owner-scoped test is not
-  optional); proceeds with `acknowledgeDuplicate`, and the scan still runs so the audit
-  records `duplicateAcknowledged` and the id; proceeds when inconclusive.
-- `relayApi.test.ts` - `POST /api/relay-groups` 409 `duplicate_open_group`; the same
-  POST with `acknowledgeDuplicate: true` returns 201.
-- Tour and placement route tests - the 409 renders, AND the `groupThreadId` claim is
-  RELEASED on the refusal (the sentinel-leak regression).
-- `rosterActions` job test - a deferred open whose roster became a duplicate is skipped
-  with `duplicate_open_group`, not applied (D8).
+- `relayGroupDuplicates.test.ts` (new) - THE PRODUCT RULE, pinned explicitly: `{A,B}`
+  matches `{A,B}`; `{A,B}` does NOT match `{A,B,C}`; `{A,B,C}` does NOT match `{A,B}`;
+  `{A,B}` does NOT match `{A,C}` (D1 - these three negatives are the whole rule).
+  Order-independent. Matches across OPEN and CONNECTING (D4). SKIPS a connecting row
+  carrying `imported_from` (fixture: the lean seed's only connecting row carries it,
+  `lib/seed/lean.ts:262`). `inconclusive` on truncation AND on a thrown Query, with NO
+  500 escaping. A match in OPEN is still returned when the CONNECTING walk truncates
+  (D7's ordering rule). Multiple exact matches return the newest.
+- Preview tests - `duplicateOf` present/absent/absent-when-inconclusive on both
+  builders; the serialized payload contains NO phone numbers (assert on the JSON).
+- `relayProvisioning.test.ts` - throws on ALL THREE owner shapes (unowned, tour,
+  placement); proceeds when `acknowledgeDuplicateOf` matches; STILL THROWS when it
+  names a DIFFERENT group (D9); proceeds when inconclusive; BOTH audit appends carry
+  the override.
+- Route tests - the 409 body carries the full duplicate; the tour refusal RELEASES the
+  claim; reopen 409s (D10) and still reopens with a matching acknowledgement.
+- `rosterActions` job test - a deferred open that became a duplicate is skipped
+  PRE-CLAIM with `duplicate_open_group` and the row lands in `skipped[]` (not
+  `applied[]`); a deferral carrying a matching `acknowledgedDuplicateOf` APPLIES (D8 -
+  this is the quiet-hours override, the case r1 got wrong).
 
 Dashboard (`dashboard/src/`):
 
-- `RosterConfirmDialog.test.tsx` - the warning block renders with the existing group's
-  member names and a link when `duplicateOf` is present; absent otherwise; confirm
-  reads "Create anyway" and submits `acknowledgeDuplicate: true`.
+- `RosterConfirmDialog.test.tsx` - the warning renders with names and a link; absent
+  otherwise; inside quiet hours BOTH buttons remain and each carries the
+  acknowledgement (6.1); confirm submits `acknowledgeDuplicateOf`.
+- `rosterWrites` - `duplicate_open_group` renders its own text, not the fallback.
 
 E2E (`e2e/tests/dashboard-next/`):
 
-- Open a relay group for a pair, then start a second one for the SAME pair and assert
-  the dialog shows the duplicate warning naming the first group; override and assert
-  the second group is created with a DIFFERENT pool number (which also pins 2.2 - the
-  behavior this feature deliberately does not change).
-- Start a group for the same pair PLUS a third person and assert NO warning renders
-  (D1's negative case; without it a regression to containment-matching would pass).
+- Open a group for a pair, start a second for the SAME pair, assert the dialog warns
+  and names the first; override and assert the second is created on a DIFFERENT pool
+  number (which also pins 2.2, the behavior this feature deliberately does not change).
+- Start a group for the same pair PLUS a third person and assert NO warning renders -
+  D1's negative case. Without it a regression to containment-matching passes silently.
 
-## 11. Sequencing and coordination
+## 12. Sequencing
 
-The BUILD is held until `feat/contact-create-relay-group` merges to `main`. That
-branch is fully built and unmerged (25 files, ~3,600 insertions) and owns
-`rosterEdits.ts`, `routes/relayGroups.ts`, `RosterConfirmDialog.tsx`,
-`dashboard/src/api/endpoints.ts`, and `dashboard/src/api/types.ts` - every one of
-which this change also touches. Building alongside it means conflicts in all five.
-Confirmed with Cameron 2026-08-17: design now, merge that branch, then rebase this
-onto the merged `main` and build.
+The BUILD is held until `feat/contact-create-relay-group` merges to `main`. It is
+fully built and unmerged (25 files, ~3,600 insertions) and owns `rosterEdits.ts`,
+`routes/relayGroups.ts`, `RosterConfirmDialog.tsx`, `dashboard/src/api/endpoints.ts`
+and `dashboard/src/api/types.ts` - all of which this change also touches. Confirmed
+with Cameron 2026-08-17: design now, merge that branch, rebase, then build. Never edit
+`W:\tmp\contact-create-relay-group`.
 
-Never edit `W:\tmp\contact-create-relay-group`.
+## 13. Follow-ups TO FILE (none exist yet)
 
-Files this change touches that are NOT on that branch, and so carry no conflict risk:
-`services/relayProvisioning.ts`, `services/rosterProvision.ts`, `lib/rosterResolution.ts`,
-`routes/tours.ts`, `routes/placements.ts`, `jobs/rosterActions.ts`, and the new
-`services/relayGroupDuplicates.ts`.
-
-## 12. Follow-ups filed
+r1 claimed these were "filed" when no file existed. They are written as part of the
+build, not before it.
 
 - `docs/issues/relay-single-live-conversation-per-pair.md` - the larger product
-  question: if a pair should only ever have one live conversation, the eventual right
-  behavior is to route new context INTO the existing group rather than warn about a
-  second one. Deliberately NOT built here.
-- `docs/issues/relay-duplicate-across-contact-handsets.md` - D3's limitation.
+  question: route new context INTO the existing group rather than warn about a second
+  one. Deliberately not built.
+- `docs/issues/relay-duplicate-across-contact-handsets.md` - D3's gap.
+- `docs/issues/relay-duplicate-via-roster-removal.md` - D11's gap.
+- `docs/issues/relay-duplicate-detection-scan-cost.md` - section 8.
 
-## 13. Out of scope
+## 14. Out of scope
 
-- Any pool-number change (section 1, 2.2).
+- Any pool-number change (1, 2.2).
 - Warning on supersets, subsets, or partial overlaps (D1).
-- Routing new context into an existing group (section 12).
-- Fixing `touchLastActivity`'s unguarded reopen (section 9) - pre-existing, filed.
-- Any infrastructure, schema migration, or backfill. This design adds no table, no
-  index, and no persisted field, so nothing is owed at deploy beyond the app release.
+- Roster removal (D11), routing context into an existing group (13).
+- Atomicity for the check (D5).
+- Fixing `touchLastActivity`'s unguarded reopen (10) or the placement atomic-claim gap
+  (2.3) - both pre-existing, both filed.
+- Any infrastructure, schema migration, or backfill. No table, no index; the one new
+  persisted field is an optional attribute on a flexible document (D8).

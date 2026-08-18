@@ -690,6 +690,37 @@ describe('Mark UNREAD - the conditional write, its one retry, and its classifica
     };
   }
 
+  /**
+   * Hand the ROUTE a stale image carrying a POSITIVE `unread_count` while the
+   * stored row stays where it really is (read). This is the eventually
+   * consistent read every one of these routes lives on: the fan-in routes Query
+   * the `byParticipantPhone` GSI (a lagging projection) and the conversation
+   * route does a base-table GetItem with no ConsistentRead. Scoped to the FIRST
+   * call of each finder, so markUnread's own re-read still sees the truth.
+   *
+   * Fix wave 1: a route that pre-checks this count answers 200 with NO write at
+   * all, and the client then commits an optimistic unread onto a row the server
+   * left read - the silent no-op a to-do affordance must never produce.
+   */
+  function stalePositiveOnFirstRead(world: World, staleCount: number): void {
+    const baseFind = world.conversationsRepo.findByParticipantPhone;
+    let findFired = false;
+    world.conversationsRepo.findByParticipantPhone = async (phone) => {
+      const items = await baseFind(phone);
+      if (findFired) return items;
+      findFired = true;
+      return items.map((c) => ({ ...c, unread_count: staleCount }));
+    };
+    const baseGet = world.conversationsRepo.getById;
+    let getFired = false;
+    world.conversationsRepo.getById = async (conversationId) => {
+      const item = await baseGet(conversationId);
+      if (getFired || item === undefined) return item;
+      getFired = true;
+      return { ...item, unread_count: staleCount };
+    };
+  }
+
   const seedRelayOpen = (world: World, id: string): void => {
     seedConversation(world, id, {
       participant_phone: '+15550009101',
@@ -926,6 +957,97 @@ describe('Mark UNREAD - the conditional write, its one retry, and its classifica
     const res = await auth(request(app).post('/api/inbox/c-h1-gone/unread'));
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ error: 'thread_closed' });
+  });
+
+  it('by-contact route: a STALE POSITIVE count from the GSI does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContactThread(world, 'c-h1-stale', 'conv-h1-stale', '+15550000735');
+    // The stored row is READ; the participant Query still projects the count it
+    // held before the mark-read fan-out landed. The operator's request must be
+    // decided by the conditional write, not by that lagging image.
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/inbox/c-h1-stale/unread'));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    // The write was ATTEMPTED - a pre-check on the stale count skips it entirely.
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-stale', bucket: 'one_to_one' },
+    ]);
+    // And it LANDED: the row the operator flagged is really unread and really
+    // in the byUnread index, so the optimistic row the client keeps is true.
+    expect(world.conversations.get('conv-h1-stale')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-stale')!.unread_flag).toBe('unread');
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  it('by-phone route: a STALE POSITIVE count from the GSI does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedConversation(world, 'conv-h1-phone-stale', {
+      participant_phone: '+14049820805',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820805' }));
+    expect(res.status).toBe(200);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-phone-stale', bucket: 'one_to_one' },
+    ]);
+    expect(world.conversations.get('conv-h1-phone-stale')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-phone-stale')!.unread_flag).toBe('unread');
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  it('conversation route: a STALE POSITIVE count from the base-table read does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-stale-conv');
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/conversations/conv-h1-stale-conv/unread'));
+    expect(res.status).toBe(200);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-stale-conv', bucket: 'relay_group' },
+    ]);
+    expect(world.conversations.get('conv-h1-stale-conv')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-stale-conv')!.unread_flag).toBe('unread');
+    // The body carries the WRITE's own image, never the stale one it replaced.
+    expect(res.body.conversation.unread_count).toBe(1);
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  // D3 (conformance). The fan-in already-unread no-op is pinned by the delivered
+  // matrix; this is the conversation route's twin, and after fix wave 1 it runs
+  // through markUnread's CLASSIFIED path rather than a pre-check.
+  it('conversation route: an ALREADY-unread thread answers 200, writes nothing, and emits no second event', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-already');
+
+    const first = await auth(request(app).post('/api/conversations/conv-h1-already/unread'));
+    expect(first.status).toBe(200);
+    const before = world.emitted.length;
+    world.unreadSetAttempts.length = 0;
+
+    const again = await auth(request(app).post('/api/conversations/conv-h1-already/unread'));
+    expect(again.status).toBe(200);
+    expect(again.body.conversation.conversationId).toBe('conv-h1-already');
+    expect(again.body.conversation.unread_count).toBe(1);
+    // The write is attempted and REFUSED by its own condition - that refusal is
+    // what makes this arm correct rather than a guess off a lagging read.
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-already', bucket: 'relay_group' },
+    ]);
+    // Nothing changed, so nothing is announced: no double-count, no second event.
+    expect(world.conversations.get('conv-h1-already')!.unread_count).toBe(1);
+    expect(world.emitted.slice(before)).toHaveLength(0);
   });
 
   it('by-contact route: ELIGIBILITY BEFORE COUNT - a thread that closes AND gains unread mid-flight is refused', async () => {

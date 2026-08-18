@@ -1782,7 +1782,15 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
    */
   const flagUnread = async (conv: ConversationItem): Promise<boolean> => {
     if (!isUnreadVisible({ ...conv, unread_count: 1 })) return false;
-    if (unreadOf(conv) > 0) return true; // already unread - idempotent no-op
+    // NO "already unread?" PRE-CHECK HERE, DELIBERATELY (fix wave 1, 2026-08-17).
+    // `conv` came from findByParticipantPhone - a Query on the EVENTUALLY
+    // CONSISTENT byParticipantPhone GSI - so a stale POSITIVE count would have
+    // answered 200 with no write at all, and the client would have committed an
+    // optimistic unread onto a row the server left read. setUnread's own
+    // condition refuses an already-unread row and markUnread's classify re-reads
+    // it as `already-unread`, which lands on the same success below. The price is
+    // stated so it is not "optimized" back: an already-unread thread now costs
+    // one REFUSED conditional write plus one point read instead of nothing.
     const outcome = await markUnread(conversations, conv);
     if (outcome.kind === 'gone' || outcome.kind === 'ineligible') return false;
     // Emit ONLY on a real write, carrying the image the write itself returned

@@ -2079,15 +2079,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(409).json({ error: 'thread_closed' });
       return;
     }
-    if ((conversation.unread_count ?? 0) > 0) {
-      // Already unread - idempotent no-op. NO write, so NO event: H1 aligns
-      // this arm with inbox.ts's flagUnread, which has always been silent here.
-      // The delivered code emitted unconditionally, announcing a write that did
-      // not happen; no test pinned that, and every client handler is a refetch
-      // trigger, so the only change is one fewer redundant event.
-      res.json({ conversation });
-      return;
-    }
+    // NO "already unread?" PRE-CHECK HERE, DELIBERATELY (fix wave 1,
+    // 2026-08-17). getById is an eventually consistent base-table read (no
+    // ConsistentRead), so a stale POSITIVE count would have answered 200 with no
+    // write at all - the silent no-op a to-do affordance must never produce.
+    // setUnread's own condition refuses an already-unread row and markUnread's
+    // classify returns `already-unread`, which lands on the same 200 with no
+    // emit below. The price is stated so it is not "optimized" back: an
+    // already-unread thread now costs one REFUSED conditional write plus one
+    // point read instead of nothing.
     const outcome = await markUnread(conversations, conversation);
     if (outcome.kind === 'gone') {
       // This route was named BY conversationId, so "gone" is genuinely a 404 -

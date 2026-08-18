@@ -119,7 +119,10 @@ test.describe('Tours page', () => {
     // Pick the seeded unit (unit-0001 / 1450 Joseph E. Boone Blvd NW).
     const propertyField = dialog.getByRole('combobox', { name: 'Unit' });
     await propertyField.fill('Joseph');
-    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Unit suggestions' })
+      .getByRole('option', { name: /Joseph E\. Boone/ })
+      .click();
 
     // Tour type should now be prefilled — unit-0001 has tour_process containing
     // "landlord" → deriveTourType → 'landlord_led'.
@@ -205,7 +208,10 @@ test.describe('Tours page', () => {
     // Pick the unit.
     const propertyField = dialog.getByRole('combobox', { name: 'Unit' });
     await propertyField.fill('Joseph');
-    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Unit suggestions' })
+      .getByRole('option', { name: /Joseph E\. Boone/ })
+      .click();
 
     // Leave Date and time EMPTY — the "book it later" hint should be visible.
     await expect(
@@ -344,7 +350,10 @@ test.describe('Tours page', () => {
         await clearUnit.click();
       }
       await unitBox.fill(addressLine1, { timeout: 2_000 });
-      await dialog.getByRole('option', { name: addressLine1 }).click({ timeout: 2_000 });
+      await page
+        .getByRole('listbox', { name: 'Unit suggestions' })
+        .getByRole('option', { name: addressLine1 })
+        .click({ timeout: 2_000 });
     }).toPass({ timeout: 15_000 });
 
     // 1. "From the property": the structured value prefills + the honest caption.
@@ -456,9 +465,15 @@ test.describe('Tours page', () => {
 
     // Both sides are free typeaheads on this entry - pick tenant + unit.
     await dialog.getByRole('combobox', { name: 'Tenant' }).fill('Tasha');
-    await dialog.getByRole('option', { name: /Tasha Nguyen/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Tenant suggestions' })
+      .getByRole('option', { name: /Tasha Nguyen/ })
+      .click();
     await dialog.getByRole('combobox', { name: 'Unit' }).fill('Joseph');
-    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Unit suggestions' })
+      .getByRole('option', { name: /Joseph E\. Boone/ })
+      .click();
 
     // Timeless create -> lands on the new tour (requested, not booked).
     await dialog.getByRole('button', { name: 'Schedule', exact: true }).click();

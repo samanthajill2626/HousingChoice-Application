@@ -72,6 +72,15 @@ function classify(item: ConversationItem | undefined): Classification {
   if (item === undefined) return { kind: 'gone' };
   if (!isUnreadVisible({ ...item, unread_count: 1 })) return { kind: 'ineligible', item };
   if ((item.unread_count ?? 0) > 0) return { kind: 'already-unread', item };
+  // ACCEPTED RESIDUAL (adversarial round 2, N7). `getById` is an eventually
+  // consistent GetItem, so a doubly-stale image - one reporting BOTH an eligible
+  // status and a positive count for a row that is really closed and read - is
+  // reported here as `already-unread` when the write was in fact refused on
+  // ELIGIBILITY. The END STATE is still correct: nothing was written, so the
+  // ineligible thread is not flagged, and the row cannot become a hidden
+  // byUnread resident. Only the reported OUTCOME is optimistic (a success where
+  // a 409 was due). Settled, if it ever matters, by passing ConsistentRead on
+  // this re-read alone - it runs at most twice per refused request.
   // Eligible and read: the condition should have held, so something committed
   // and moved on between the write and this re-read.
   return { kind: 'raced', item };
@@ -111,6 +120,18 @@ export async function markUnread(
   // ONE retry, with the bucket RECOMPUTED from the re-read. A stale bucket
   // wastes the retry in the single case where a fresh one succeeds: a type
   // transition (convertRelayGroupToGroupText is the only writer that does one).
+  //
+  // CONSTRAINT FOR WHOEVER ADDS THE NEXT TYPE TRANSITION (adversarial round 2,
+  // N6). A recomputed bucket can only ever be as wide as the type transitions
+  // the system permits, and the fan-in routes narrow their candidates to
+  // `type !== 'relay_group'` (a contact who owns a pool number must not flag a
+  // relay thread through there) in the ROUTE, not in the write. So a transition
+  // that turned a row the fan-in filter admitted INTO a relay_group would let
+  // this retry flag exactly the thread the route excluded. Unreachable today:
+  // convertRelayGroupToGroupText is the only type-changing writer and it goes
+  // relay_group -> group_text, never the other way. Add a transition into
+  // relay_group and this retry must be given the route's admissible bucket set
+  // so it can only narrow.
   const second = await attempt(firstLook.item);
   if (second !== undefined) return second;
 

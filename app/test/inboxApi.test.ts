@@ -695,8 +695,19 @@ describe('Mark UNREAD - the conditional write, its one retry, and its classifica
    * stored row stays where it really is (read). This is the eventually
    * consistent read every one of these routes lives on: the fan-in routes Query
    * the `byParticipantPhone` GSI (a lagging projection) and the conversation
-   * route does a base-table GetItem with no ConsistentRead. Scoped to the FIRST
-   * call of each finder, so markUnread's own re-read still sees the truth.
+   * route does a base-table GetItem with no ConsistentRead.
+   *
+   * WHAT THE SCOPING ACTUALLY IS: each of the two wrapped reads hands out ONE
+   * stale image, and the two counters are INDEPENDENT. On the conversation route
+   * that means markUnread's own re-read sees the truth, because the route itself
+   * spent the single stale `getById`. On the FAN-IN routes it does not: they
+   * reach the row through `findByParticipantPhone` and never call
+   * `conversationsRepo.getById` (the contact lookup is `contactsRepo`), so the
+   * stale `getById` answer is still loaded - and `markUnread.classify` would be
+   * the one to consume it. That is harmless in the cases below, where every
+   * write succeeds and `classify` never runs. A future fan-in case that stages a
+   * REFUSED write must spend or disable the `getById` half first, or it will be
+   * classifying from a stale image and reading a mystifying result.
    *
    * Fix wave 1: a route that pre-checks this count answers 200 with NO write at
    * all, and the client then commits an optimistic unread onto a row the server

@@ -120,6 +120,10 @@ export function ThreadUnreadToggle({
       await autoRead.suppressAndDrain();
       await markConversationUnread(conversationId);
     } catch {
+      // The attempt ended WITHOUT navigating, so hand the auto-read back: a
+      // latch that outlives a failed attempt silences this thread's auto-read
+      // for the rest of the visit.
+      autoRead.release();
       setError(MARK_UNREAD_ERROR);
       setBusy(false);
       return;

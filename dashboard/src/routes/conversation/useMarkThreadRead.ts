@@ -70,8 +70,19 @@ export function useMarkThreadRead(conversationId: string): AutoReadHandle {
     await drainWithBound(pending.promise);
   }, [conversationId]);
 
+  // Undo the latch for THIS thread. Belt-and-braces here (this hook is
+  // MOUNT-ONLY, so there is no later trigger a stuck latch could silence) but
+  // the two auto-read hooks implement ONE contract and a half-implemented handle
+  // is exactly how they drift apart.
+  const release = useCallback((): void => {
+    if (suppressedFor.current === conversationId) suppressedFor.current = null;
+  }, [conversationId]);
+
   // Memoized: this handle flows into consumer effect deps, and a churning
   // identity there POST-loops (the hazard UnreadContext records for
   // noteRowsCleared/rollbackRowsCleared).
-  return useMemo<AutoReadHandle>(() => ({ suppressAndDrain }), [suppressAndDrain]);
+  return useMemo<AutoReadHandle>(
+    () => ({ suppressAndDrain, release }),
+    [suppressAndDrain, release],
+  );
 }

@@ -317,6 +317,51 @@ describe('useMarkContactRead - suppressAndDrain (S6)', () => {
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
   });
 
+  // Fix wave 1. The latch used to clear ONLY on an actual contact change, but
+  // ContactDetail deliberately STAYS on the page when the mark-unread POST
+  // fails - so one failure killed this contact's auto-read for the rest of the
+  // visit. release() is the caller's way to hand it back.
+  it('release() un-latches the auto-read, so a later trigger marks read again', async () => {
+    render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+    act(() => capturedOnMessage?.());
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+
+    act(() => currentHandle().release());
+    act(() => capturedOnMessage?.());
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(2));
+  });
+
+  it('release() clears the latch of the contact it was MINTED for, never a newer one', async () => {
+    const view = render(<HandleProbe id="A" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' }));
+    await act(async () => {});
+    // A's handle, captured the way ContactDetail's onToggleUnread closes over it
+    // - an action started on A can still be in flight after the operator moves.
+    const staleHandle = currentHandle();
+
+    view.rerender(<HandleProbe id="B" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
+    await act(async () => {});
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+
+    // A's action now fails and releases. An unconditional release would hand
+    // B's auto-read back while B's own mark-unread is still the live intent.
+    act(() => staleHandle.release());
+    markInboxRead.mockClear();
+    act(() => capturedOnMessage?.());
+    await act(async () => {});
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
   it('returns a STABLE handle across re-renders (a churning identity POST-loops consumers)', async () => {
     const view = render(<HandleProbe id="k1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));

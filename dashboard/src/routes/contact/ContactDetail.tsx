@@ -98,6 +98,16 @@ export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
 export const MARK_UNREAD_ERROR = 'Could not mark unread - try again';
 /** The same treatment for the other direction. */
 export const MARK_READ_ERROR = 'Could not mark read - try again';
+/** A 404 is PERMANENT, so this copy asks for nothing.
+ *
+ *  The kebab offers "Mark unread" on every non-deleted contact and the route
+ *  answers 404 `no_conversation_for_contact` whenever the contact has no
+ *  eligible thread - an imported landlord, a contact with no messages, a contact
+ *  whose only threads are closed or relay-only. That is a large, ordinary class,
+ *  and telling those operators to retry a condition that can never clear is the
+ *  bug. The item is NOT hidden for them: this page has no reliable way to know,
+ *  and a hidden-but-actually-available action is worse than an honest refusal. */
+export const MARK_UNREAD_NO_THREAD = 'No thread to mark unread yet.';
 
 /** The manual-run indicator's three states. `running` accumulates across the
  *  press's scheduled threads: it resolves only once EVERY one has reported, so
@@ -263,7 +273,16 @@ export function ContactDetail(): React.JSX.Element {
     return ids;
   }, [timeline.items]);
   const timelineIdsRef = useRef(timelineConversationIds);
-  timelineIdsRef.current = timelineConversationIds;
+  // Written in a PASSIVE EFFECT, not during render (useEventStream carries the
+  // same rule for the same reason): a ref written in render holds a value from a
+  // render React may throw away under concurrent rendering. Nothing is lost by
+  // waiting for the commit - the SSE handler reads the ref lazily, and an event
+  // that arrives in the gap sees the PREVIOUS id set, whose only effect is to
+  // drop an event for a conversation the timeline has only just learned about.
+  // That is the handler's documented "no information" case, not a wrong answer.
+  useEffect(() => {
+    timelineIdsRef.current = timelineConversationIds;
+  }, [timelineConversationIds]);
 
   const onConversationUpdated = useCallback((event: ConversationUpdatedEvent) => {
     // FILTERED to this contact's own threads: /api/events is one org-wide
@@ -303,8 +322,18 @@ export function ContactDetail(): React.JSX.Element {
       // already in flight - a no-op with a success response.
       await autoRead.suppressAndDrain();
       await markInboxUnread({ contactId });
-    } catch {
-      setUnreadError(MARK_UNREAD_ERROR);
+    } catch (err) {
+      // We are STAYING on the page, so hand the auto-read back. Without this the
+      // latch outlives the failed attempt and this contact's auto-read is dead
+      // for the rest of the visit: message.persisted and visibilitychange stop
+      // marking read, and a new inbound stays unread while the operator is
+      // looking straight at it.
+      autoRead.release();
+      // Branch on the STATUS, never on message text (ApiError.message is the raw
+      // code). 404 = this contact has no eligible thread, which no retry fixes.
+      setUnreadError(
+        err instanceof ApiError && err.status === 404 ? MARK_UNREAD_NO_THREAD : MARK_UNREAD_ERROR,
+      );
       setUnreadAction('idle');
       return;
     }
@@ -788,14 +817,19 @@ export function ContactDetail(): React.JSX.Element {
           every item in it, so neither state can live in the menu - and this is
           the page's one banner region, which the operator already reads. On a
           failure the action itself stays available in the menu: a 409 here is
-          the expected, retryable participant-GSI-lag path. */}
+          the expected, retryable participant-GSI-lag path.
+
+          NO aria-label on either region, deliberately: an accessible NAME on a
+          live region REPLACES the announced content for some screen readers, so
+          a label here makes the operator hear "Unread status" instead of the
+          message that is the entire point of the announcement. */}
       {unreadAction !== 'idle' ? (
-        <div className={styles.extractionBanner} role="status" aria-label="Unread status">
+        <div className={styles.extractionBanner} role="status">
           <span>{unreadAction === 'unread' ? 'Marking unread...' : 'Marking read...'}</span>
         </div>
       ) : null}
       {unreadError !== null ? (
-        <div className={styles.extractionBanner} role="alert" aria-label="Unread status">
+        <div className={styles.extractionBanner} role="alert">
           <span>{unreadError}</span>
           <Button
             variant="secondary"

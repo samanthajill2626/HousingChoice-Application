@@ -60,7 +60,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { ConversationDetail } from './ConversationDetail.js';
-import { seedUnreadCount } from './ThreadUnreadToggle.js';
+import { seedUnreadCount, ThreadUnreadToggle } from './ThreadUnreadToggle.js';
 
 const KEISHA: ConversationParticipant = {
   contactId: 'c1',
@@ -675,6 +675,56 @@ describe('ConversationDetail - the relay header unread toggle (S7)', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
     expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  // Fix wave 1. The toggle STAYS on the page when the mark-unread POST fails, so
+  // it must hand the auto-read back or the latch outlives the attempt. Driven
+  // against the component directly with a stub handle: the real auto-read hook
+  // is MOUNT-ONLY, so a stuck latch has no later trigger to silence here and no
+  // integration assertion could see it - but the two hooks share one contract
+  // and this is the half that has a live trigger on the contact page.
+  describe('the auto-read handle on the failure path', () => {
+    const stubHandle = (): { suppressAndDrain: () => Promise<void>; release: () => void } => ({
+      suppressAndDrain: vi.fn(() => Promise.resolve()),
+      release: vi.fn(),
+    });
+
+    const renderToggle = (autoRead: ReturnType<typeof stubHandle>) =>
+      render(
+        <MemoryRouter initialEntries={['/conversations/conv-g1']}>
+          <Routes>
+            <Route
+              path="/conversations/:conversationId"
+              element={
+                <ThreadUnreadToggle
+                  conversationId="conv-g1"
+                  header={relayHeader({ unread_count: 0 })}
+                  name="Relay group"
+                  autoRead={autoRead}
+                />
+              }
+            />
+            <Route path="/inbox" element={<div>INBOX</div>} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+    it('RELEASES the auto-read when the mark-unread POST rejects', async () => {
+      markConversationUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+      const autoRead = stubHandle();
+      renderToggle(autoRead);
+      fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+      expect(autoRead.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT release on the success path - navigating away unmounts the hook', async () => {
+      const autoRead = stubHandle();
+      renderToggle(autoRead);
+      fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
+      await waitFor(() => expect(screen.getByText('INBOX')).toBeInTheDocument());
+      expect(autoRead.release).not.toHaveBeenCalled();
+    });
   });
 
   it('never touches the nav badge optimistic layer, in either direction', async () => {

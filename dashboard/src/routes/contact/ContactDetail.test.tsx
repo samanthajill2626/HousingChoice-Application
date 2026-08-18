@@ -1985,15 +1985,88 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     renderAt('k1');
     await openKebab();
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    // Queried by ROLE + TEXT, never by an accessible name: an aria-label on a
+    // live region REPLACES the announced content, so the banner carries none and
+    // the MESSAGE is what a screen reader speaks.
     await waitFor(() =>
-      expect(screen.getByRole('alert', { name: 'Unread status' })).toHaveTextContent(
-        'Could not mark unread - try again',
-      ),
+      expect(screen.getByRole('alert')).toHaveTextContent('Could not mark unread - try again'),
     );
     await openKebab();
     const item = screen.getByRole('menuitem', { name: MARK_UNREAD });
     expect(item).toBeInTheDocument();
     expect(item).toBeEnabled();
+  });
+
+  // Fix wave 1. The kebab offers "Mark unread" on every non-deleted contact, and
+  // the route 404s `no_conversation_for_contact` for a large ordinary class - an
+  // imported landlord, a contact with no messages, a contact whose only threads
+  // are closed or relay-only. Telling those operators to retry a condition that
+  // can never clear is the bug. The item is NOT hidden: this page cannot know,
+  // and a hidden-but-available action is worse than an honest refusal.
+  it('renders TERMINAL copy on a 404 - the contact has no thread to mark unread', async () => {
+    markInboxUnread.mockRejectedValue(
+      new ApiError(404, 'no_conversation_for_contact', 'no_conversation_for_contact', {
+        error: 'no_conversation_for_contact',
+      }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('No thread to mark unread yet.'),
+    );
+    // And it does NOT ask for a retry it can never honour. (The 409 arm above
+    // keeps the retryable copy, because that condition really does clear.)
+    expect(screen.queryByText(/try again/)).toBeNull();
+  });
+
+  // Fix wave 1. An aria-label on a live region REPLACES the announced content,
+  // so the shipped `aria-label="Unread status"` made a screen-reader user hear
+  // "Unread status" instead of the message that is the entire point of the
+  // announcement. Neither region carries one, and the test queries by role +
+  // TEXT rather than by that name.
+  it('announces the MESSAGE, not a region label, on both unread banners', async () => {
+    let rejectPost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPost = () => reject(new ApiError(500, 'server_error', 'boom'));
+        }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+
+    const pending = await screen.findByRole('status');
+    expect(pending).toHaveTextContent('Marking unread...');
+    expect(pending).not.toHaveAttribute('aria-label');
+
+    await act(async () => {
+      rejectPost?.();
+      await Promise.resolve();
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not mark unread - try again');
+    expect(alert).not.toHaveAttribute('aria-label');
+  });
+
+  // Fix wave 1. ContactDetail deliberately STAYS on the page when mark-unread
+  // fails, but suppressAndDrain's latch used to clear ONLY on an actual contact
+  // change - so one failure killed this page's auto-read for the rest of the
+  // visit and a new inbound stayed unread while the operator watched it land.
+  it('a FAILED mark-unread does not latch the auto-read off for the rest of the visit', async () => {
+    markInboxUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    renderAt('k1');
+    await openKebab();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    // Still on the contact page, still looking at it: a new inbound must be
+    // marked read exactly as it was before the failed attempt.
+    markInboxRead.mockClear();
+    act(() => capturedHandlers['onMessagePersisted']?.({}));
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
   });
 
   it('hides the toggle ENTIRELY for a soft-deleted contact (MU-2)', async () => {

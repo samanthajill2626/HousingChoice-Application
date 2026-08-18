@@ -134,6 +134,28 @@ describe('useMarkThreadRead', () => {
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g2'));
   });
 
+  // Fix wave 1. Belt-and-braces on THIS hook (it is mount-only, so a stuck latch
+  // has no later trigger to silence) but the shared AutoReadHandle contract must
+  // not drift: the contact page's copy is where a missing release() is fatal.
+  it('release() un-latches the thread, so a later read for it is not swallowed', async () => {
+    const view = render(<Probe id="conv-g1" />);
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+    await act(async () => {});
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+    act(() => currentHandle().release());
+
+    // Drive the mount effect back onto conv-g1 through a LIVE re-render (never a
+    // fresh mount, which would hand it fresh refs and prove nothing). Still
+    // latched, this second read is swallowed and the waitFor below times out.
+    view.rerender(<Probe id="conv-g2" />);
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g2'));
+    markConversationRead.mockClear();
+    view.rerender(<Probe id="conv-g1" />);
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+  });
+
   it('returns a STABLE handle across re-renders (a churning identity POST-loops consumers)', async () => {
     const view = render(<Probe id="conv-g1" />);
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledTimes(1));

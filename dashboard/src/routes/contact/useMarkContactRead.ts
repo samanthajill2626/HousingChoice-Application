@@ -22,6 +22,15 @@ export interface AutoReadHandle {
   /** Suppress auto-read for the CURRENT identity, then wait for any in-flight
    *  auto-read to settle. Await BEFORE issuing a mark-unread POST. */
   suppressAndDrain: () => Promise<void>;
+  /** Undo `suppressAndDrain`'s latch for the CURRENT identity.
+   *
+   *  Call it whenever a mark-unread attempt terminates WITHOUT navigating away.
+   *  The latch is a one-way door otherwise: both surfaces deliberately STAY on
+   *  the page when the mark-unread POST fails, and a page that keeps its
+   *  auto-read latched off stops marking read for the rest of the visit - a new
+   *  inbound stays unread while the operator is looking straight at it, which is
+   *  the exact regression the auto-read exists to prevent. */
+  release: () => void;
 }
 
 /** Upper bound on how long a drain waits for an in-flight auto-read.
@@ -100,9 +109,10 @@ export function useMarkContactRead(contactId: string): AutoReadHandle {
   // for the same contact in dev, and a blind reset there would clear the
   // in-flight guard and issue the mount read twice.
   //
-  // The mark-unread latch is cleared HERE and nowhere else. This effect already
-  // fires on exactly an actual contact change, which is the reset semantics the
-  // latch needs; a second reset path could only disagree with this one.
+  // This is the latch's IDENTITY-CHANGE reset: a new contact starts unlatched.
+  // The only other clear is the handle's explicit `release()`, which the caller
+  // invokes when a mark-unread attempt ends without navigating away - the case
+  // this effect cannot see, because the contact never changes.
   useEffect(() => {
     if (ownerContactId.current === contactId) return;
     ownerContactId.current = contactId;
@@ -158,10 +168,20 @@ export function useMarkContactRead(contactId: string): AutoReadHandle {
     await drainWithBound(pending.promise);
   }, [contactId]);
 
+  // Release the latch for THIS contact only: a later contact may already own
+  // the ref, and clearing that would un-suppress an action the operator took on
+  // a page they have since left.
+  const release = useCallback((): void => {
+    if (suppressedFor.current === contactId) suppressedFor.current = null;
+  }, [contactId]);
+
   // Memoized: this handle flows into consumer effect deps, and a churning
   // identity there POST-loops (the hazard UnreadContext records for
   // noteRowsCleared/rollbackRowsCleared).
-  const handle = useMemo<AutoReadHandle>(() => ({ suppressAndDrain }), [suppressAndDrain]);
+  const handle = useMemo<AutoReadHandle>(
+    () => ({ suppressAndDrain, release }),
+    [suppressAndDrain, release],
+  );
 
   // Opening the contact (or switching contacts) while visible = reading it.
   useEffect(() => {

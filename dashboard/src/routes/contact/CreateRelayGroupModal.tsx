@@ -31,12 +31,13 @@
 // A create that answers `connecting` has NO number and sent NO intro yet, so
 // it does not navigate: the operator was just shown that exact intro body, and
 // silence would read as "sent".
-import { useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   createRelayGroup,
   previewRelayGroup,
   type Contact,
+  type ConversationHeader,
   type RelayGroupMemberInput,
   type RosterPreview,
 } from '../../api/index.js';
@@ -103,12 +104,20 @@ export interface CreateRelayGroupModalProps {
   candidates: Contact[];
   /** Cancel, dismiss, or a finished create - the caller clears its state. */
   onClose: () => void;
+  /** A group now EXISTS. Fired once per successful create, before the
+   *  connecting/open branch, so the page can refresh what it already fetched:
+   *  the `connecting` branch deliberately does not navigate, and the Relay
+   *  groups card behind this modal read its rows once, on mount. Without a
+   *  refresh the operator closes the panel onto "No relay groups yet." and a
+   *  retry buys a second pool number. Optional - the flow works without it. */
+  onCreated?: (conversation: ConversationHeader) => void;
 }
 
 export function CreateRelayGroupModal({
   contact,
   candidates,
   onClose,
+  onCreated,
 }: CreateRelayGroupModalProps): React.JSX.Element {
   const navigate = useNavigate();
   const tagId = useId();
@@ -122,6 +131,10 @@ export function CreateRelayGroupModal({
   // panel). RosterConfirmDialog calls its onClose after a resolved confirm, and
   // that must not drag the flow back to the picker over the result.
   const settled = useRef(false);
+  // The in-flight preview, so an abandoned flow does not keep a request running
+  // against a component that is gone.
+  const previewAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => previewAbort.current?.abort(), []);
 
   const seedPhone = primaryPhone(contact);
   const seedName = builtName(contact);
@@ -176,13 +189,18 @@ export function CreateRelayGroupModal({
     if (members.length < 2) return;
     setBusy(true);
     setError(null);
-    void previewRelayGroup(members)
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    void previewRelayGroup(members, controller.signal)
       .then((preview) => {
         setBusy(false);
         // THIS array value is carried into the create untouched.
         setPhase({ kind: 'confirming', members, preview });
       })
       .catch((err: unknown) => {
+        // An abandoned flow is not a failure to report - there is no picker
+        // left to render the message into.
+        if (controller.signal.aborted) return;
         // The picker keeps the error: an operator must never confirm a send
         // whose content could not be shown.
         setBusy(false);
@@ -200,6 +218,10 @@ export function CreateRelayGroupModal({
       trimmedTag === '' ? undefined : trimmedTag,
     );
     settled.current = true;
+    // BEFORE the branch: both outcomes leave a group behind. The connecting one
+    // stays on the page whose card must now list it; the open one navigates,
+    // but the page it leaves is the one an operator navigates back to.
+    onCreated?.(conversation);
     if (conversation.status === 'connecting') {
       setPhase({ kind: 'connecting', conversationId: conversation.conversationId });
       return;
@@ -214,6 +236,23 @@ export function CreateRelayGroupModal({
     if (settled.current) return;
     setPhase({ kind: 'picking' });
   };
+
+  /** Escape, the backdrop and the header X all call Modal's onClose with no
+   *  condition of their own, so the busy guard has to live here - the page's own
+   *  delete dialog does exactly this. Cancel is already disabled={busy}; without
+   *  this the other three paths still discard the assembled member list while
+   *  its preview is in flight.
+   *
+   *  MEMOIZED ON PURPOSE. Modal keys its Escape-handler effect on `onClose`, and
+   *  that effect's cleanup returns focus to the previously focused element while
+   *  the fresh run re-focuses the dialog. A callback rebuilt on every render
+   *  therefore steals focus out of the search field on EVERY KEYSTROKE - typing
+   *  lands one character and stops. Identity may change when `busy` flips (twice
+   *  a flow, while the field is disabled anyway); never per render. */
+  const closeIfIdle = useCallback((): void => {
+    if (busy) return;
+    onClose();
+  }, [busy, onClose]);
 
   if (phase.kind === 'confirming') {
     return (
@@ -250,7 +289,7 @@ export function CreateRelayGroupModal({
   return (
     <Modal
       title="Create a relay group"
-      onClose={onClose}
+      onClose={closeIfIdle}
       footer={
         <div className={styles.actions}>
           <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
@@ -292,6 +331,11 @@ export function CreateRelayGroupModal({
         onChange={onSearchChange}
         candidates={pickCandidates}
         inputLabel="Add member"
+        // The members array is snapshotted into the preview and installed on
+        // resolve, so a member added mid-flight would show on screen and be
+        // absent from the created group. Remove was already frozen; this is the
+        // other half.
+        disabled={busy}
       />
 
       <div className={styles.field}>

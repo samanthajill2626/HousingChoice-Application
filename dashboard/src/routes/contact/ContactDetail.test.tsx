@@ -33,6 +33,11 @@ const acceptSuggestion = vi.fn();
 const dismissSuggestion = vi.fn();
 // Manual extraction trigger (Task 6): the press endpoint.
 const runExtraction = vi.fn();
+// The contact file's "Relay groups" card slice + the standalone create flow it
+// launches (CreateRelayGroupModal).
+const getContactRelayGroups = vi.fn();
+const previewRelayGroup = vi.fn();
+const createRelayGroup = vi.fn();
 
 // The handlers every useEventStream caller in this tree registers, MERGED.
 // ContactDetail's subtree has five callers (useContact, useSuggestions,
@@ -72,6 +77,9 @@ vi.mock('../../api/index.js', async () => {
     acceptSuggestion: (...a: unknown[]) => acceptSuggestion(...a),
     dismissSuggestion: (...a: unknown[]) => dismissSuggestion(...a),
     runExtraction: (...a: unknown[]) => runExtraction(...a),
+    getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
+    previewRelayGroup: (...a: unknown[]) => previewRelayGroup(...a),
+    createRelayGroup: (...a: unknown[]) => createRelayGroup(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -216,6 +224,12 @@ beforeEach(() => {
   getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+  // Same degrade-on-404 default as the sibling slices: the "Relay groups" card
+  // renders its pending panel, exactly as it did before this slice was mocked.
+  getContactRelayGroups.mockReset();
+  getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+  previewRelayGroup.mockReset();
+  createRelayGroup.mockReset();
   // Default: return a roster containing the current contact + OTHER so tests
   // that don't override still work (useContacts fans out to
   // tenant/landlord/partner/unknown).
@@ -891,6 +905,70 @@ describe('ContactDetail', () => {
 
       // No option for Tasha (the contact herself) must appear — self-link guard.
       expect(screen.queryByRole('option', { name: /Tasha Williams/i })).not.toBeInTheDocument();
+    });
+  });
+
+  // ── The standalone relay-group create, from the Relay groups card ──────────
+  describe('creating a relay group from the Relay groups card', () => {
+    const NEW_GROUP = {
+      conversationId: 'conv-new',
+      status: 'open' as const,
+      poolNumber: '+15550190002',
+      memberCount: 2,
+      lastActivityAt: '2026-08-17T10:00:00.000Z',
+      owner: { type: null },
+      otherMemberNames: ['Bob Other'],
+    };
+
+    it('a CONNECTING create refreshes the card behind the panel', async () => {
+      // The connecting branch deliberately does not navigate, so the operator is
+      // left on this page. The card fetched its rows once, on mount, and no SSE
+      // handler here listens for conversation.updated - so without the refetch
+      // it still reads "No relay groups yet." over a group that exists, and a
+      // retry buys a second pool number.
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      // What the SERVER holds right now. The card's own fetch runs more than
+      // once on mount anyway (contactType arrives after the contact does), so a
+      // call COUNT proves nothing on its own - the row is added to the server's
+      // answer only when the create lands, and the card can then show it only
+      // if something asks again.
+      let serverGroups: (typeof NEW_GROUP)[] = [];
+      getContactRelayGroups.mockImplementation(() => Promise.resolve(serverGroups));
+      previewRelayGroup.mockResolvedValue({
+        body: 'You are connected on this number. Reply STOP to opt out.',
+        recipients: [
+          { name: 'Tasha Williams', reachability: 'reachable' },
+          { name: 'Bob Other', reachability: 'reachable' },
+        ],
+        recipientCount: 2,
+        deferred: false,
+      });
+      createRelayGroup.mockResolvedValue({
+        conversation: { conversationId: 'conv-new', type: 'relay_group', status: 'connecting' },
+      });
+
+      renderAt('k1');
+      await screen.findByText('Tasha Williams');
+      await screen.findByText('No relay groups yet.');
+
+      await user.click(screen.getByRole('button', { name: 'Create a relay group' }));
+      await user.type(screen.getByRole('combobox', { name: 'Add member' }), 'Bob');
+      await user.click(screen.getByRole('option', { name: /Bob Other/i }));
+      await user.click(screen.getByRole('button', { name: 'Create group' }));
+
+      // The create is about to succeed: from here the server has the row.
+      serverGroups = [NEW_GROUP];
+      const callsBeforeCreate = getContactRelayGroups.mock.calls.length;
+      await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+
+      // The panel says the intro has not gone out...
+      expect(await screen.findByText(/The intro text has not been sent yet/)).toBeInTheDocument();
+      // ...and the card BEHIND it now lists the group instead of denying it.
+      expect(await screen.findByText('With Bob Other')).toBeInTheDocument();
+      expect(screen.queryByText('No relay groups yet.')).not.toBeInTheDocument();
+      expect(getContactRelayGroups.mock.calls.length).toBeGreaterThan(callsBeforeCreate);
     });
   });
 

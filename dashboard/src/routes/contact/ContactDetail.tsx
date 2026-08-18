@@ -888,6 +888,14 @@ export function ContactDetail(): React.JSX.Element {
           contact={contact}
           candidates={editCandidates}
           onClose={() => setCreatingRelayGroup(false)}
+          onCreated={() => {
+            // The Relay groups card read its rows once, on mount, and this page
+            // listens for no conversation event. A `connecting` create does not
+            // navigate, so without this the operator closes the panel onto "No
+            // relay groups yet." over a group that exists - and a retry buys a
+            // second pool number.
+            file.refetch();
+          }}
         />
       ) : null}
 

@@ -22,6 +22,11 @@ export interface ContactSearchFieldProps {
   candidates: Contact[];
   /** Accessible label for the underlying text input. */
   inputLabel?: string;
+  /** Freeze the field while the CALLER is mid-flight: the input is disabled and
+   *  the candidate list never renders, so no pick can land on a list the caller
+   *  has already snapshotted. Defaults to false - every existing call site is
+   *  unaffected. */
+  disabled?: boolean;
 }
 
 /** Filter candidates whose display name or primary phone contains the query
@@ -46,6 +51,7 @@ export function ContactSearchField({
   onChange,
   candidates,
   inputLabel = 'Contact search',
+  disabled = false,
 }: ContactSearchFieldProps): React.JSX.Element {
   // Fix 3: keyboard navigation state
   const [activeIndex, setActiveIndex] = useState<number>(-1);
@@ -61,7 +67,9 @@ export function ContactSearchField({
   // own candidate, so the list must be gated on this, not just on matches.
   const isSelected = value.contactId !== undefined;
   const matches = filterCandidates(candidates, value.name);
-  const isListShown = !dismissed && !isSelected && matches.length > 0;
+  // A disabled field shows NO list: a frozen input can still hold a query that
+  // matches, and an option is clickable even when the input beside it is not.
+  const isListShown = !disabled && !dismissed && !isSelected && matches.length > 0;
 
   // Build a stable option id for aria-activedescendant
   const activeOptionId =
@@ -126,6 +134,7 @@ export function ContactSearchField({
         aria-activedescendant={activeOptionId}
         value={value.name}
         readOnly={isSelected}
+        disabled={disabled}
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
         placeholder="Search contacts…"

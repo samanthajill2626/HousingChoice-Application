@@ -100,10 +100,12 @@ function Host({
   contact,
   candidates,
   onClosed,
+  onCreated,
 }: {
   contact: Contact;
   candidates: Contact[];
   onClosed: () => void;
+  onCreated: (c: unknown) => void;
 }): React.JSX.Element | null {
   const [open, setOpen] = useState(true);
   if (!open) return null;
@@ -115,19 +117,38 @@ function Host({
         onClosed();
         setOpen(false);
       }}
+      onCreated={onCreated}
     />
   );
 }
 
 function renderIt(opts: { contact?: Contact; candidates?: Contact[] } = {}) {
   const onClosed = vi.fn();
-  render(
+  const onCreated = vi.fn();
+  const { unmount } = render(
     <MemoryRouter initialEntries={['/contacts/T1']}>
-      <Host contact={opts.contact ?? TENANT} candidates={opts.candidates ?? ALL} onClosed={onClosed} />
+      <Host
+        contact={opts.contact ?? TENANT}
+        candidates={opts.candidates ?? ALL}
+        onClosed={onClosed}
+        onCreated={onCreated}
+      />
       <Probe />
     </MemoryRouter>,
   );
-  return { onClosed, user: userEvent.setup() };
+  return { onClosed, onCreated, unmount, user: userEvent.setup() };
+}
+
+/** Arm a preview that never settles on its own, so the flow stays `busy` for as
+ *  long as the test needs. Returns the resolver. */
+function pendingPreview(): (p: RosterPreview) => void {
+  let resolve!: (p: RosterPreview) => void;
+  previewRelayGroup.mockReturnValue(
+    new Promise<RosterPreview>((r) => {
+      resolve = r;
+    }),
+  );
+  return resolve;
 }
 
 /** Type a query and COMMIT the matching candidate (the only way to add). */
@@ -256,6 +277,70 @@ describe('CreateRelayGroupModal - the picker', () => {
   });
 });
 
+describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
+  // The members array is snapshotted into startPreview's closure and installed
+  // on resolve, so anything the operator does to the list mid-flight is either
+  // silently dropped (an add) or silently discarded (a dismissal). The list is
+  // therefore FROZEN for the duration: Remove was already disabled={busy}, and
+  // these pin the three paths that were not.
+
+  it('freezes the member search while the preview is in flight', async () => {
+    pendingPreview();
+    const { user } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    expect(screen.getByRole('combobox', { name: 'Add member' })).toBeDisabled();
+    // The matching affordance was already frozen - this is the pair.
+    expect(screen.getByRole('button', { name: 'Remove Marcus Bell' })).toBeDisabled();
+  });
+
+  it('an add attempted mid-preview cannot change the member list', async () => {
+    const resolve = pendingPreview();
+    const { user } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add member' }), 'Renee');
+    expect(screen.queryByRole('option')).toBeNull();
+    expect(
+      within(screen.getByRole('list', { name: 'Members' })).getAllByRole('listitem'),
+    ).toHaveLength(2);
+    // ...and the confirm dialog therefore lists exactly what was posted.
+    resolve(PREVIEW);
+    await screen.findByRole('button', { name: 'Open relay group' });
+    expect(sentMembers(previewRelayGroup)).toHaveLength(2);
+  });
+
+  it('Escape mid-preview neither closes the flow nor discards the list', async () => {
+    // Modal's Escape / backdrop / X all call onClose unconditionally, so the
+    // busy guard lives in this component (the page's own delete dialog is the
+    // precedent). Cancel was already disabled={busy}; these were not.
+    pendingPreview();
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.keyboard('{Escape}');
+    expect(onClosed).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(within(screen.getByRole('list', { name: 'Members' })).getByText('Marcus Bell'))
+      .toBeInTheDocument();
+    // The X in the header is the same path.
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClosed).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('aborts an in-flight preview when the flow unmounts', async () => {
+    pendingPreview();
+    const { user, unmount } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    const signal = previewRelayGroup.mock.calls[0]![1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    unmount();
+    expect(signal.aborted).toBe(true);
+  });
+});
+
 describe('CreateRelayGroupModal - the confirm step', () => {
   it('previews first, then mounts the shared dialog with the standalone props', async () => {
     const { user } = renderIt();
@@ -284,9 +369,11 @@ describe('CreateRelayGroupModal - the confirm step', () => {
     await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
     await vi.waitFor(() => expect(createRelayGroup).toHaveBeenCalled());
     expect(createRelayGroup.mock.calls[0]![0]).toBe(previewRelayGroup.mock.calls[0]![0]);
-    // The tag rides the CREATE only, trimmed; the preview never carries one.
+    // The tag rides the CREATE only, trimmed; the preview never carries one -
+    // its second argument is the abort signal, nothing else.
     expect(createRelayGroup.mock.calls[0]![1]).toBe('Maple St');
-    expect(previewRelayGroup.mock.calls[0]!).toHaveLength(1);
+    expect(previewRelayGroup.mock.calls[0]!).toHaveLength(2);
+    expect(previewRelayGroup.mock.calls[0]![1]).toBeInstanceOf(AbortSignal);
   });
 
   it('omits an empty tag entirely', async () => {
@@ -368,6 +455,46 @@ describe('CreateRelayGroupModal - the create outcome', () => {
     );
     expect(screen.queryByText(CONNECTING_NOTICE)).toBeNull();
     expect(onClosed).toHaveBeenCalled();
+  });
+
+  it('reports a CONNECTING create through onCreated, before the panel renders', async () => {
+    // The connecting branch deliberately does NOT navigate, so the page it
+    // leaves the operator standing on is the one holding a Relay groups card
+    // that fetched once, on mount. Without this callback the card still reads
+    // "No relay groups yet." and a retry buys a second Twilio number.
+    createRelayGroup.mockResolvedValue({
+      conversation: { conversationId: 'conv-9', type: 'relay_group', status: 'connecting' },
+    });
+    const { user, onCreated } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    await screen.findByText(CONNECTING_NOTICE);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conv-9', status: 'connecting' }),
+    );
+  });
+
+  it('reports an OPEN create through onCreated too - the branch is downstream', async () => {
+    const { user, onCreated } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conv-9', status: 'open' }),
+    );
+  });
+
+  it('a FAILED create reports nothing - onCreated means a group exists', async () => {
+    createRelayGroup.mockRejectedValue(new Error('nope'));
+    const { user, onCreated } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/please try again/);
+    expect(onCreated).not.toHaveBeenCalled();
   });
 
   it('the connecting panel still closes on its own Close affordance', async () => {

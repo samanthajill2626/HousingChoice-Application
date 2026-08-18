@@ -105,7 +105,11 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { ContactDetail, RUN_INDICATOR_TIMEOUT_MS } from './ContactDetail.js';
+import {
+  ContactDetail,
+  MARK_UNREAD_NO_THREAD,
+  RUN_INDICATOR_TIMEOUT_MS,
+} from './ContactDetail.js';
 
 function renderAt(contactId: string) {
   return render(
@@ -2015,11 +2019,14 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     await openKebab();
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
     await waitFor(() =>
-      expect(screen.getByText('No thread to mark unread yet.')).toBeInTheDocument(),
+      expect(screen.getByText(MARK_UNREAD_NO_THREAD)).toBeInTheDocument(),
     );
-    // And it does NOT ask for a retry it can never honour. (The 409 arm above
-    // keeps the retryable copy, because that condition really does clear.)
-    expect(screen.queryByText(/try again/)).toBeNull();
+    // The copy carries BOTH causes (human ruling 2026-08-18): this 404 is
+    // usually permanent - no eligible thread - but the SAME status covers the
+    // participant-GSI lag, where a retry does clear it. So it names the common
+    // cause AND leaves the retry door open, rather than asserting either alone.
+    expect(screen.getByText(/no thread to mark unread yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/try again/i)).toBeInTheDocument();
   });
 
   // Fix wave 1. An aria-label on a live region REPLACES the announced content,
@@ -2161,7 +2168,7 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
       await Promise.resolve();
     });
     // Neither failure copy: Tasha's 404 says nothing about Bob's threads.
-    expect(screen.queryByText('No thread to mark unread yet.')).toBeNull();
+    expect(screen.queryByText(MARK_UNREAD_NO_THREAD)).toBeNull();
     expect(screen.queryByText('Could not mark unread - try again')).toBeNull();
   });
 

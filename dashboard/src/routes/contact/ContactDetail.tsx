@@ -98,16 +98,29 @@ export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
 export const MARK_UNREAD_ERROR = 'Could not mark unread - try again';
 /** The same treatment for the other direction. */
 export const MARK_READ_ERROR = 'Could not mark read - try again';
-/** A 404 is PERMANENT, so this copy asks for nothing.
+/** ONE 404, TWO causes - so the copy has to carry both (human ruling,
+ *  2026-08-18, after planner review found the earlier terminal-only wording).
  *
  *  The kebab offers "Mark unread" on every non-deleted contact and the route
- *  answers 404 `no_conversation_for_contact` whenever the contact has no
- *  eligible thread - an imported landlord, a contact with no messages, a contact
- *  whose only threads are closed or relay-only. That is a large, ordinary class,
- *  and telling those operators to retry a condition that can never clear is the
- *  bug. The item is NOT hidden for them: this page has no reliable way to know,
- *  and a hidden-but-actually-available action is worse than an honest refusal. */
-export const MARK_UNREAD_NO_THREAD = 'No thread to mark unread yet.';
+ *  answers 404 `no_conversation_for_contact` in two situations that are
+ *  indistinguishable from here:
+ *
+ *  1. PERMANENT and ordinary - the contact has no eligible thread at all (an
+ *     imported landlord, nobody has messaged them, their only threads are closed
+ *     or relay-only). Large class. "Try again" is nonsense advice for it.
+ *  2. TRANSIENT - the participant-GSI lookup lagged and returned nothing for a
+ *     contact who does have a thread. Narrow window, right after an inbound, and
+ *     a second press succeeds. Telling this operator nothing can be done is
+ *     equally wrong, in the other direction.
+ *
+ *  The server cannot separate them either: under lag the index returns the same
+ *  empty set as a genuinely thread-less contact, so a distinct status code would
+ *  be a guess wearing a number. The copy therefore states the common cause and
+ *  leaves the retry door open, and the action stays enabled either way. The item
+ *  is NOT hidden: this page has no reliable way to know which case it is, and a
+ *  hidden-but-actually-available action is worse than an honest refusal. */
+export const MARK_UNREAD_NO_THREAD =
+  'No thread to mark unread yet - if this contact has messages, try again.';
 
 /** The manual-run indicator's three states. `running` accumulates across the
  *  press's scheduled threads: it resolves only once EVERY one has reported, so

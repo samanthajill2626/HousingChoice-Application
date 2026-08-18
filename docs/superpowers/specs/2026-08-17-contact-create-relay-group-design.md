@@ -611,11 +611,31 @@ Copy `docs/issues/_TEMPLATE.md` for each:
    be on the thread and will not be texted, unannotated. The standalone path
    declines to reproduce this (6.2 step 4); the two shipped surfaces still do.
 
-6. `lean-seed-ha-staffer-typed-team-member.md` (LOW) - the lean seed's Renee
-   Carter is an "HCV Program Specialist" at a housing authority typed
-   `team_member`, while the glossary defines an outside agency contact as
-   `partner`. Needs a human product call; retyping her churns the byte-stable
-   seed world, so it is deliberately not done here.
+6. `lean-seed-ha-staffer-should-be-partner.md` (MEDIUM) - CONFIRMED MISTYPE with
+   a traceable cause, agreed with the human 2026-08-17. The lean seed's Renee
+   Carter ("HCV Program Specialist", `housingAuthority: 'atlanta_housing'`) is
+   typed `team_member`. She is an OUTSIDE agency contact, which the glossary
+   defines as `partner`; `team_member` is the internal-staff bucket - it has no
+   1:1 conversation type to propagate (`routes/contacts.ts:420-426`), no
+   lifecycle, and is deliberately excluded from the audience fan-out.
+
+   CAUSE: she was originally typed `housing_authority_staff`, not a valid
+   `ContactType` at all, which made her unreachable through every list and
+   triage surface. `docs/superpowers/plans/2026-06-18-extensible-contact-creation-review-fixes.md:121-124`
+   triaged that to `team_member` as the least-wrong bucket AVAILABLE AT THE
+   TIME. `partner` did not exist until 2026-07-21, and nobody revisited her.
+
+   WHY NOT FIXED HERE, and it is not squeamishness: Renee is one of the "pinned
+   trio" that `docs/superpowers/specs/2026-07-02-seed-data-clean-slate-design.md:28-31`
+   and its plan declare UNTOUCHABLE and byte-identical in the lean profile, with
+   `app/test/seedData.test.ts`, the fake-twilio persona registry
+   (`seed-hastaff`), and e2e specs depending on her. More importantly, THIS
+   branch widens `TYPES_FOR.all` to include partner. Retyping her in the same
+   change would make her newly visible across eight surfaces at the same moment
+   the filter changed, so any red test could not be attributed to one or the
+   other. Sequence it AFTER this merges: the widening proves itself against a
+   world with no partner contacts, then the retype is an unambiguous test of one
+   thing.
 
 Items 2-6 are pre-existing defects this review surfaced, NOT regressions from
 this change.

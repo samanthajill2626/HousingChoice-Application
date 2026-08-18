@@ -3,9 +3,11 @@
 Date: 2026-08-17
 Branch: `feat/relay-number-reuse` (worktree `W:\tmp\relay-number-reuse`, cut from
 `main` @263cc789)
-Revision: r4, after four rounds of adversarial review (two independent reviewers in
-round 1, one continued reviewer in rounds 2, 3 and 4). Adjudications at
-`.superpowers/design-review/adjudications.md`.
+Revision: r5, FINAL. Four rounds of adversarial review (two independent reviewers in
+round 1, one continued reviewer in rounds 2-4); round 4 was terminal - it changed no
+decision, only the expression of one already-decided mechanism, and the reviewer
+returned a ready-to-build verdict on that correction. Adjudications, including every
+rejection with its reasoning, at `.superpowers/design-review/adjudications.md`.
 
 ## 1. What this changes, in one paragraph
 
@@ -244,9 +246,17 @@ per group the pair has ever had. Tier 0 therefore evaluates EVERY candidate and 
 deterministically:
 
 > the eligible number whose newest qualifying CLOSED group - the one matching (ii) -
-> has the latest `created_at`; ties broken by ascending `poolNumber` string.
+> has the latest `created_at`; ties broken by ascending `poolNumber`, compared with
+> plain `<` / `>` (a codepoint total order, exactly as `byNewestCreated` does), NOT
+> `localeCompare`, which is locale-dependent and not a total order.
 
-That is "the number their last group used", which is the promise in section 1. An
+That is "the number of the pair's most recently STARTED group", which is the promise
+in section 1. Deliberately keyed on `created_at` (group start) rather than a close
+instant: the only per-group close timestamp is `close_announced_at`, which is a
+close-announce DEDUP CLAIM (`conversationsRepo.ts:249`, `poolNumbersAdmin.ts:110-122`)
+and is absent on any group closed without an announce and on every legacy row. For
+two groups of the SAME pair, start order and close order agree in every ordinary
+case, so the weaker key buys determinism without a presence risk. An
 earlier revision short-circuited on the first eligible candidate in `listActive()`
 order, which a reviewer showed is arbitrary GSI order - so "a pair keeps their
 number" would have been nondeterministic, handing back a different one of their old
@@ -315,14 +325,31 @@ targets precisely the long-closed numbers that are release-eligible. Two changes
 
 - `reuseClaim` SETs a new optional scalar `last_reused_at = now` in the same
   conditional write.
-- `repo.beginRelease` gains an OPTIONAL `expectedReusedAt?: string` argument. When
-  given it adds `AND (attribute_not_exists(last_reused_at) OR last_reused_at =
-  :expectedReused)` to its existing condition; when omitted its condition is
-  byte-identical to today's. `retireEligible` passes the value from the
-  `listActive()` snapshot it already holds, so the CAS costs no extra read. The
-  parameter is optional specifically so the four existing `PoolNumbersRepo` test
-  doubles and every other `beginRelease` call site keep typechecking untouched - a
-  function taking fewer parameters remains assignable.
+- `repo.beginRelease` gains an OPTIONAL SECOND ARGUMENT, an OBJECT:
+  `cas?: { expectedReusedAt?: string }`.
+
+  The wrapper object is load-bearing and is not decoration. The CAS must distinguish
+  "no CAS requested" from "CAS requested, and the expected value is ABSENT", and in
+  JavaScript a bare optional string collapses those two into the same `undefined`.
+  A reviewer caught the consequence: `last_reused_at` is absent on EVERY pool record
+  that exists today, so a bare parameter would make `retireEligible` forward
+  `undefined`, the clause would never be emitted, and the race would be reopened for
+  precisely the FIRST reuse of any number - the common case, and the only case that
+  matters until a number has been reused once.
+
+  So the condition is built from the OBJECT's presence:
+
+  | call | added condition clause |
+  |---|---|
+  | `beginRelease(n)` | none - byte-identical to today |
+  | `beginRelease(n, { expectedReusedAt: undefined })` | `AND attribute_not_exists(last_reused_at)` |
+  | `beginRelease(n, { expectedReusedAt: t })` | `AND last_reused_at = :expectedReused` |
+
+  `retireEligible` ALWAYS passes the object, with the value from the `listActive()`
+  snapshot it already holds, so the CAS costs no extra read. The argument stays
+  optional so the four existing `PoolNumbersRepo` test doubles and every other
+  `beginRelease` call site keep typechecking untouched - a function taking fewer
+  parameters remains assignable.
 
 That is sufficient. If `reuseClaim` lands AFTER the sweep's snapshot, the CAS fails
 and the release is skipped. If it lands BEFORE, the CAS passes but the group now
@@ -349,12 +376,9 @@ Scope note: `relayNumberReleaseEnabled` is `RELAY_NUMBER_RELEASE_ENABLED === 'tr
 entire retirement path is dormant in every environment today. D10 is correctness for
 when it is switched on, not a live defect.
 
-Scope note: `relayNumberReleaseEnabled` is `RELAY_NUMBER_RELEASE_ENABLED === 'true'`
-(`config.ts:719`) and that variable is COMMENTED OUT in `.env.example:204`, so the
-entire retirement path is dormant in every environment today. D10 is correctness for
-when it is switched on, not a live defect.
-
-**D11 - No new pool-record attribute, and no atomicity for the tier-0 claim.** An
+**D11 - No new pool-record attribute FOR MUTUAL EXCLUSION, and no atomicity for the
+tier-0 claim.** (D10's `last_reused_at` is a plain optional scalar race token with no
+lifecycle and no maintenance surface; it is not what this decision refuses.) An
 `open_phones` string set maintained at every open/close/reopen/add/remove would give a
 conditional-write mutex. It is not worth its cost here: under D1 and D4, two racing
 tier-0 creates can only produce two open groups with IDENTICAL phone sets, so delivery
@@ -403,9 +427,16 @@ export function findLiveMemberConflict(
 
 /**
  * Tier 0 (D4)(ii) AND its selection key: the `created_at` of the NEWEST CLOSED group
- * on this number whose memberPhoneSet equals `roster` exactly, or undefined when
- * none does. Returning the timestamp rather than a boolean is what lets tier 0 rank
- * several eligible numbers deterministically (D4 SELECTION).
+ * on this number whose memberPhoneSet equals `roster` exactly. Returning the
+ * timestamp rather than a boolean is what lets tier 0 rank several eligible numbers
+ * deterministically (D4 SELECTION).
+ *
+ * `undefined` means NO qualifying group - it must never also mean "qualifying group
+ * with an unusable created_at", which would silently drop an eligible legacy
+ * candidate. A qualifying group whose `created_at` is missing or unparseable
+ * contributes the EMPTY STRING instead: the candidate stays eligible and sorts last,
+ * which is the right bias (a dated group is better evidence of "most recent" than an
+ * undated one).
  */
 export function newestClosedGroupWithExactPhones(
   groups: ConversationItem[],
@@ -464,11 +495,13 @@ for (const rec of roster.size >= 2 ? actives : []) {
 
 // PASS 2 - deterministic pick: latest qualifying close first, then poolNumber
 // ascending as a total tie-break (D4 SELECTION).
-eligible.sort((a, b) =>
-  a.newestMatchCreatedAt === b.newestMatchCreatedAt
-    ? a.rec.poolNumber.localeCompare(b.rec.poolNumber)
-    : a.newestMatchCreatedAt < b.newestMatchCreatedAt ? 1 : -1,
-);
+eligible.sort((a, b) => {
+  if (a.newestMatchCreatedAt !== b.newestMatchCreatedAt) {
+    return a.newestMatchCreatedAt < b.newestMatchCreatedAt ? 1 : -1;
+  }
+  if (a.rec.poolNumber === b.rec.poolNumber) return 0;
+  return a.rec.poolNumber < b.rec.poolNumber ? -1 : 1;   // codepoint total order
+});
 for (const { rec } of eligible) {
   const claimed = await repo.reuseClaim(rec.poolNumber, rosterPhones, tag);
   if (claimed) {
@@ -531,9 +564,11 @@ ReturnValues: 'ALL_NEW'
 no GSI, no migration (absent on every existing row, which the CAS reads as
 `attribute_not_exists`).
 
-`repo.beginRelease` gains an OPTIONAL `expectedReusedAt?: string` second argument
-(D10). Omitted, its condition is byte-identical to today's, so no existing call site
-or test double changes.
+`repo.beginRelease` gains an OPTIONAL `cas?: { expectedReusedAt?: string }` second
+argument (D10). Omitted entirely, its condition is byte-identical to today's, so no
+existing call site or test double changes. Passed with an absent value it asserts
+`attribute_not_exists(last_reused_at)` - see D10's table for why that distinction
+carries the whole fix.
 
 Empty `phones` returns `undefined` without a write, mirroring `burnClaim`. The
 `lifecycle_state = :active` clause preserves the W2 retirement fence exactly as
@@ -783,9 +818,13 @@ Unit (`app/test/`):
   burned; stamps `last_reused_at` and leaves `last_group_closed_at` UNTOUCHED (D10 -
   pin this, the attribute is rendered as "Last closed" on the admin page); returns
   undefined when not active, when any phone is not burned, and on an empty roster;
-  stamps `placement_tag`. `beginRelease` refuses when `expectedReusedAt` no longer
-  matches, succeeds when it does, and - called with NO second argument - behaves
-  exactly as today (the back-compatibility pin).
+  stamps `placement_tag`. `beginRelease`, across all THREE shapes of D10's table:
+  with NO second argument it behaves exactly as today (the back-compatibility pin);
+  with `{ expectedReusedAt: undefined }` it SUCCEEDS on a record that has never been
+  reused and REFUSES once `reuseClaim` has stamped one - that is the case covering
+  every pool record in existence today, so it is the one that must not be missed;
+  with `{ expectedReusedAt: t }` it succeeds on a match and refuses on a changed
+  value.
 - `poolNumbers.test.ts` - tier 0 reuses the pair's number; SKIPPED when a live group
   on it overlaps by provenance; SKIPPED when no closed group has the exact set;
   SKIPPED when the record is earmarked, not active, or another driver; NOT skipped

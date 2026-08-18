@@ -116,6 +116,30 @@ export function Inbox(): React.JSX.Element {
         </p>
       ) : null}
 
+      {/* S8. A truncated NON-EMPTY unread page used to end SILENTLY: `hasMore`
+          is false so no "Load more" renders, and the banner below is gated on
+          the page having come back EMPTY - so a capped list looked exactly like
+          the end of the feed. A cap is acceptable only if the list says it is
+          capped.
+
+          Gated on `serverRowCount`, NOT `rows.length`, for the same reason that
+          banner is: both `truncated` and this count describe the SERVER page,
+          while `rows` is the client-filtered list the Unread tab EMPTIES as the
+          operator marks rows read. Keyed on `rows` the notice would vanish
+          mid-triage, exactly when the operator most needs to know older unread
+          threads are still out there. The condition is the exact complement of
+          `serverEndedEarlyEmpty`, so this notice and that banner can never
+          render together.
+
+          NO COUNT in the copy, for the reason the group notice above dropped
+          its own: the operator clears rows while the server's flag stands, so
+          any number reaches zero with the notice still up. */}
+      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 ? (
+        <p className={styles.notice}>
+          Showing the most recent unread. There are older unread threads not shown here.
+        </p>
+      ) : null}
+
       {inbox.status === 'loading' ? <Spinner center /> : null}
 
       {/* An empty page that the server TRUNCATED is not "all caught up" - the

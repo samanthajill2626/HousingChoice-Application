@@ -16,7 +16,12 @@
   flex-direction: column;
   width: 100%;
   max-width: 26rem;
+  /* dvh, not vh: on mobile browsers 100vh includes the retracted URL bar, so a
+     vh-sized dialog runs BELOW the visible viewport and its footer buttons
+     become unreachable. Every modal in the app shares this shell, so every one
+     of them had that bug. vh first as the fallback for anything without dvh. */
   max-height: calc(100vh - var(--sp-7));
+  max-height: calc(100dvh - var(--sp-7));
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-lg);

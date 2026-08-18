@@ -331,6 +331,25 @@ describe('Inbox - the Unread truncation notice', () => {
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 
+  // PLANNER REVIEW 2026-08-18. The copy is unread-specific, but the notice was
+  // gated only on `truncated` - correct today purely because the server sets
+  // that flag in the filter=unread branch alone, a dependency nothing on the
+  // client encoded. And `useInbox` clears `truncated` in an EFFECT, so an
+  // Unread -> All switch has one committed render where the filter is already
+  // `all` while `truncated`/`serverRowCount` still describe the unread page.
+  // Without the filter in the gate, the unread copy renders on the All tab.
+  it('renders no notice on a NON-unread filter, even while truncated still describes the old page', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1 });
+    renderInbox('/inbox');
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  it('renders no notice on the groups filter under the same stale flag', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1 });
+    renderInbox('/inbox?filter=groups');
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
   it('renders no notice on the error surface', () => {
     state = baseState({ status: 'error', truncated: true, serverRowCount: 3 });
     renderInbox('/inbox?filter=unread');

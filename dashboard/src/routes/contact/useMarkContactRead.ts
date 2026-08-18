@@ -39,8 +39,16 @@ export interface AutoReadHandle {
  *  resetUnread, so aborting would hide the race rather than close it. But
  *  `api/client.ts` sets no timeout and the auto-read passes no signal, so an
  *  unbounded await makes the button look dead - worse, and likelier, than the
- *  narrow tail race. On timeout we proceed; the latch still suppresses whatever
- *  the late response would have re-fired. */
+ *  narrow tail race.
+ *
+ *  WHAT THE TIMEOUT ACTUALLY COSTS, stated plainly because an earlier revision
+ *  of this comment overclaimed: on timeout we proceed, and the latch suppresses
+ *  the late response's CLIENT-SIDE follow-on (the trailing re-fire, and any
+ *  further trigger for this identity). It does NOT and cannot stop the
+ *  already-dispatched server-side `resetUnread` from committing after our
+ *  mark-unread - no client-side state reaches that write. So a drain that times
+ *  out leaves exactly the ordering hazard the drain exists to close, for the
+ *  tail beyond 2s. That is the accepted trade, not an eliminated risk. */
 export const AUTO_READ_DRAIN_TIMEOUT_MS = 2000;
 
 /** Await `promise`, giving up after AUTO_READ_DRAIN_TIMEOUT_MS. Never rejects -

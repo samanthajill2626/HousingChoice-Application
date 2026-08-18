@@ -148,7 +148,19 @@ export function Inbox(): React.JSX.Element {
           NO COUNT in the copy, for the reason the group notice above dropped
           its own: the operator clears rows while the server's flag stands, so
           any number reaches zero with the notice still up. */}
-      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 ? (
+      {/* GATED ON THE FILTER, and not only because the copy is unread-specific.
+          The server sets `truncated` in the filter=unread branch alone today, so
+          the flag is "correct" here by a dependency nothing in this file
+          encodes. Worse, `useInbox` clears `truncated` in an EFFECT, so on an
+          Unread -> All switch there is one committed render where the filter is
+          already `all` while `truncated` and `serverRowCount` still describe the
+          unread page - and this notice would render its unread copy on the All
+          tab for that commit. Same one-commit shape the error banner above
+          already defends against. */}
+      {filter === 'unread' &&
+      inbox.status === 'ready' &&
+      inbox.truncated &&
+      inbox.serverRowCount > 0 ? (
         <p className={styles.notice}>
           Showing the most recent unread. There are older unread threads not shown here.
         </p>

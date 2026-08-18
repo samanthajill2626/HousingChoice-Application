@@ -766,6 +766,60 @@ describe('ConversationDetail - the relay header unread toggle (S7)', () => {
       expect(screen.getByText('THREAD LOADING')).toBeInTheDocument();
     });
 
+    // PLANNER REVIEW 2026-08-18. The test above swaps the route element for the
+    // spinner, i.e. the unmount that eventually happens. But ConversationDetail
+    // sets status 'loading' in a PASSIVE effect, so React commits the render for
+    // the NEW conversationId first and unmounts on the following flush: there is
+    // one committed render where this toggle is still mounted under the new id,
+    // and a microtask continuation lands in exactly that gap. The mounted ref is
+    // blind to it, so a press made on conv-g1 could still yank the operator off
+    // conv-g2. This drives that window directly - mounted throughout, id changed.
+    const toggleTreeFor = (
+      autoRead: ReturnType<typeof stubHandle>,
+      conversationId: string,
+    ) => (
+      <MemoryRouter initialEntries={['/conversations/conv-g1']}>
+        <Routes>
+          <Route
+            path="/conversations/:conversationId"
+            element={
+              <ThreadUnreadToggle
+                conversationId={conversationId}
+                header={relayHeader({ unread_count: 0 })}
+                name="Relay group"
+                autoRead={autoRead}
+              />
+            }
+          />
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    it('does NOT navigate when the operator switched threads while the press was outstanding', async () => {
+      let releasePost: (() => void) | undefined;
+      markConversationUnread.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releasePost = resolve;
+          }),
+      );
+      const autoRead = stubHandle();
+      const view = render(toggleTreeFor(autoRead, 'conv-g1'));
+      fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
+      // The write targets the thread the press was made on, always.
+      await waitFor(() => expect(markConversationUnread).toHaveBeenCalledWith('conv-g1'));
+
+      // STILL MOUNTED, new identity - the one-commit window.
+      view.rerender(toggleTreeFor(autoRead, 'conv-g2'));
+
+      await act(async () => {
+        releasePost?.();
+        await Promise.resolve();
+      });
+      expect(screen.queryByText('INBOX')).toBeNull();
+    });
+
     it('does NOT hand back the auto-read when the rejection lands after the unmount', async () => {
       let rejectPost: (() => void) | undefined;
       markConversationUnread.mockImplementation(

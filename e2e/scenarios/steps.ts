@@ -1674,7 +1674,10 @@ export class Scenario {
           await clearUnit.click();
         }
         await unitBox.fill(unit.addressLine1, { timeout: 2_000 });
-        await dialog
+        // Portaled to document.body - a sibling of the dialog, not a descendant
+        // (the same scoping fix 92dcba1a applied to the spec-local pickers).
+        await this.page
+          .getByRole('listbox', { name: 'Unit suggestions' })
           .getByRole('option', { name: new RegExp(escapeRegExp(unit.addressLine1)) })
           .click({ timeout: 2_000 });
       }).toPass({ timeout: 15_000 });

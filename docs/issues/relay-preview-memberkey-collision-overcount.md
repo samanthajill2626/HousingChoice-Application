@@ -34,10 +34,31 @@ reachable from `POST /api/relay-groups/preview` directly (a first-class
 authenticated API) and from any future caller, and multi-number contacts are a
 modelled concept (`Contact.phones[]`).
 
-**Suggested fix.** Count distinct PHONES in the SHARED core rather than joining
-on `memberKey`. The correct rule already exists in the same file:
-`buildAddPreview` counts `reachablePhones.size` (`rosterEdits.ts:575-580,591`),
-which is what the field means and what is immune to the collision. Because the
-core is shared, that change moves the owner path too - do it deliberately, in
-one change, with the tour and placement preview tests updated alongside rather
-than incidentally.
+**Suggested fix.** Make REACHABILITY phone-keyed on BOTH sides of the join, not
+just the count.
+
+Counting distinct phones is NOT sufficient on its own, and the obvious model for
+it does not work: `buildAddPreview` already counts `reachablePhones.size`
+(`rosterEdits.ts:575-580,591`) and still reproduces the over-count, because the
+membership test that fills that set is itself key-based -
+
+```ts
+const reachableKeys = new Set(view.members.filter(reachable).map((m) => m.memberKey));
+for (const member of resolved.members) {
+  if (reachableKeys.has(resolvedMemberKey(member))) reachablePhones.add(member.phone);
+}
+```
+
+Feed it the same input (one contactId, two phones, one leg opted out) and the
+contactId is in `reachableKeys`, so BOTH phones enter `reachablePhones` and the
+answer is 2 again. Switching the count to phones only removes the double-count of
+the SAME phone, which the open path's phone de-dupe already handles upstream.
+
+The shape that IS correct already exists in `describeRoster`, which decides
+reachability per resolved member and adds the PHONE to its set at the point of
+that decision (`rosterResolution.ts:504,555`), then answers `canOpenGroup` off
+`reachablePhones.size` (`:596`). Build the reachable-PHONE set from the recipient
+rows the same way here - the phone a leg belongs to, never the key it collides on
+- and the collision cannot inflate anything. Because the core is shared, the
+change moves the owner path too: do it deliberately, in one change, with the tour
+and placement preview tests updated alongside rather than incidentally.

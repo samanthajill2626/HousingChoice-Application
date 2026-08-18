@@ -220,6 +220,22 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   // Nothing navigated: we are still on the contact file behind the modal.
   await expect(page).toHaveURL(new RegExp(`/contacts/${TENANT_ID}$`));
 
+  // ...and the Relay groups card BEHIND the panel now lists the group. The
+  // create fires onCreated -> the page refetches the file -> the card re-reads
+  // GET /api/contacts/:id/relay-groups. This is the ONLY place that read is
+  // exercised after a create against the real server (every unit test mocks the
+  // slice), so it is also the only place the byRelayStatus GSI's eventual
+  // consistency could ever surface. Scope to the CARD: the panel in front of it
+  // is a different part of the page, and the card's row label is built from the
+  // OTHER members' names (GroupTextsCard.groupLabel).
+  const relayCard = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Relay groups' }) });
+  await expect(relayCard.getByRole('link', { name: `With ${LANDLORD_NAME}` })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(relayCard.getByText('No relay groups yet.')).toHaveCount(0);
+
   // --- The id, from the link's href (a real react-router <Link>) -------------
   const goLink = picker.getByRole('link', { name: 'Go to the group' });
   await expect(goLink).toBeVisible();

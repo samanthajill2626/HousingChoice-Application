@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { StrictMode, useEffect, useRef, useState } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { vi } from 'vitest';
 import { Modal } from './Modal.js';
@@ -46,7 +46,11 @@ describe('Modal focus lifecycle', () => {
       );
     }
 
-    render(<Host />);
+    render(
+      <StrictMode>
+        <Host />
+      </StrictMode>,
+    );
     const input = screen.getByRole('textbox', { name: 'Name' });
     input.focus();
     fireEvent.change(input, { target: { value: 'Tasha' } });
@@ -100,6 +104,115 @@ describe('Modal focus lifecycle', () => {
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search' }), { key: 'Escape' });
 
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes only the topmost dialog when more than one is mounted', () => {
+    const underlyingClose = vi.fn();
+
+    function Host(): React.JSX.Element {
+      const [topOpen, setTopOpen] = useState(false);
+      return (
+        <>
+          <Modal title="Underlying" onClose={underlyingClose}>
+            <button type="button" onClick={() => setTopOpen(true)}>
+              Open top dialog
+            </button>
+          </Modal>
+          {topOpen ? (
+            <Modal title="Top" onClose={() => setTopOpen(false)}>
+              <p>Top dialog body</p>
+            </Modal>
+          ) : null}
+        </>
+      );
+    }
+
+    render(
+      <StrictMode>
+        <Host />
+      </StrictMode>,
+    );
+    const openTop = screen.getByRole('button', { name: 'Open top dialog' });
+    openTop.focus();
+    fireEvent.click(openTop);
+    expect(screen.getByRole('dialog', { name: 'Top' })).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Top' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Underlying' })).toBeInTheDocument();
+    expect(underlyingClose).not.toHaveBeenCalled();
+    expect(openTop).toHaveFocus();
+  });
+
+  it('does not restore underlying focus while a later dialog remains mounted', () => {
+    function Host(): React.JSX.Element {
+      const [underlyingOpen, setUnderlyingOpen] = useState(true);
+      const [topOpen, setTopOpen] = useState(false);
+      return (
+        <>
+          {underlyingOpen ? (
+            <Modal title="Underlying" onClose={() => undefined}>
+              <button type="button" onClick={() => setTopOpen(true)}>
+                Open top dialog
+              </button>
+            </Modal>
+          ) : null}
+          {topOpen ? (
+            <Modal title="Top" onClose={() => undefined}>
+              <button type="button" onClick={() => setUnderlyingOpen(false)}>
+                Remove underlying dialog
+              </button>
+            </Modal>
+          ) : null}
+        </>
+      );
+    }
+
+    render(<Host />);
+    const openTop = screen.getByRole('button', { name: 'Open top dialog' });
+    openTop.focus();
+    fireEvent.click(openTop);
+    const removeUnderlying = screen.getByRole('button', { name: 'Remove underlying dialog' });
+    removeUnderlying.focus();
+    fireEvent.click(removeUnderlying);
+
+    expect(screen.queryByRole('dialog', { name: 'Underlying' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Top' })).toBeInTheDocument();
+    expect(removeUnderlying).toHaveFocus();
+  });
+
+  it("focuses the remaining dialog when the top dialog's prior target is outside it", () => {
+    const pageTrigger = document.createElement('button');
+    document.body.append(pageTrigger);
+    pageTrigger.focus();
+
+    function Host(): React.JSX.Element {
+      const [topOpen, setTopOpen] = useState(true);
+      return (
+        <>
+          <Modal title="Underlying" onClose={() => undefined}>
+            <p>Underlying body</p>
+          </Modal>
+          {topOpen ? (
+            <Modal title="Top" onClose={() => setTopOpen(false)}>
+              <p>Top body</p>
+            </Modal>
+          ) : null}
+        </>
+      );
+    }
+
+    render(
+      <StrictMode>
+        <Host />
+      </StrictMode>,
+    );
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Top' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Underlying' })).toHaveFocus();
+    pageTrigger.remove();
   });
 
   it('restores the element focused before mount when the dialog unmounts', () => {

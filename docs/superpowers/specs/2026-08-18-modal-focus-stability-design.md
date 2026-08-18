@@ -96,16 +96,18 @@ page-level listbox locator in that file must remain unchanged.
 3. A re-render, including one with a new `onClose` identity, never changes the
    operator's current focus.
 4. Escape and all other close paths use the latest close behavior.
-5. Closing the dialog returns focus to the element that was active when the dialog
-   first mounted, exactly once.
+5. Closing the final dialog returns focus to the element that was active when it
+   first mounted. Closing the top of a stack keeps focus within the next dialog.
 6. When a contact or property typeahead list is open, the first Escape dismisses
    the list and leaves the dialog open. A later unhandled Escape closes the dialog.
-7. Portaled contact and property results remain visible, selectable, viewport
+7. If more than one dialog is temporarily mounted, Escape closes only the most
+   recently mounted dialog and leaves every underlying dialog alone.
+8. Portaled contact and property results remain visible, selectable, viewport
    bounded, and outside modal scroll clipping.
-8. Playwright coverage catches the original character-by-character focus failure
+9. Playwright coverage catches the original character-by-character focus failure
    without changing the independently repaired portal selectors.
-9. Caller-specific focus workarounds and stale issue comments are removed or
-   rewritten after the shared fix makes them unnecessary.
+10. Caller-specific focus workarounds and stale issue comments are removed or
+    rewritten after the shared fix makes them unnecessary.
 
 ## Non-goals
 
@@ -142,7 +144,8 @@ A second effect, keyed on `[]`, owns the mount lifecycle:
   descendant focus during mount. The dialog container is the fallback target, not
   an override for valid child focus.
 - Register one document-level keydown listener.
-- Remove that listener and restore the captured focus only on unmount.
+- Remove that listener and apply the captured-focus restoration policy only on
+  unmount, subject to the stacked-dialog rule in section 2.
 
 The keydown listener reads `onCloseRef.current`, so Escape invokes the newest
 callback without restarting the focus lifecycle. The backdrop and header X may
@@ -175,6 +178,17 @@ This check applies to any present or future modal child that owns Escape. It doe
 not add component-specific knowledge to `Modal`. Unit coverage must exercise a
 real descendant React key handler so changing the document listener to capture
 phase makes the regression test fail.
+
+Each mounted dialog also registers its element in a module-local stack. A document
+listener may consume Escape only when its dialog is the most recently mounted
+entry. This matters while the separate Tab-containment gap still permits keyboard
+access to page controls behind an open dialog: a second independent dialog can be
+mounted before the first is dismissed. Listener registration order must never let
+an underlying dialog consume Escape before the visible top dialog sees it.
+
+When the top dialog unmounts, focus returns to its captured target when that target
+is inside the next dialog. Otherwise the next dialog becomes the fallback focus
+target. Unmounting an underlying dialog does not steal focus from the top dialog.
 
 ### 3. Preserve the merged portal behavior
 
@@ -232,6 +246,11 @@ active callback to a no-op guard while an operation is in flight, Escape must re
 the guarded callback. A mount-only closure over the first callback would be stale
 and could allow dismissal during an irreversible operation.
 
+The modal stack is mount-local UI state only. It owns no asynchronous work and is
+updated in the same effect that registers and removes each document listener.
+Underlying listeners neither prevent Escape nor restore focus while a later modal
+remains mounted.
+
 Portaled listboxes keep their existing scroll, resize, and outside-click behavior.
 The modal change must not remount the typeahead or change its `dismissed`, active
 option, or committed-pick state.
@@ -253,6 +272,9 @@ Add `dashboard/src/routes/contact/Modal.test.tsx` with a stateful host that prov
 - A descendant React key handler that calls `preventDefault()` consumes Escape
   before the document bubble listener; the modal stays open. This test must fail
   if the document listener is registered in the capture phase.
+- With two dialogs mounted, Escape closes only the top dialog even when the
+  underlying close callback is a no-op guard, then restores focus inside the
+  remaining dialog.
 - Unmount restores the trigger that was focused before mount.
 
 Update `CreateRelayGroupModal.test.tsx` so the existing page-behind re-render test
@@ -326,9 +348,12 @@ is shared.
 - The callback ref is initialized with the mounted `onClose`; correctness does not
   depend on effect declaration order.
 - An open typeahead consumes the first Escape without closing its modal.
+- With multiple mounted dialogs, only the top dialog handles Escape; an underlying
+  busy guard cannot consume the key first.
 - The document key listener is explicitly bubble-phase, and the descendant-handler
   regression test fails if it is changed to capture phase.
-- Closing a modal restores the original trigger focus exactly once.
+- Closing the final modal restores its original trigger; closing a stacked modal
+  restores within the remaining dialog or focuses that dialog as a fallback.
 - Contact and property suggestions remain portaled, visible, and selectable.
 - The 12 independently repaired page-level listbox locators are not re-edited.
 - The Email Playwright regression types `Tasha` sequentially, retains focus, and

@@ -5,6 +5,10 @@
 import { useEffect, useId, useRef } from 'react';
 import styles from './Modal.module.css';
 
+// A page can temporarily mount more than one modal. Escape belongs to the most
+// recently mounted one; every older document listener must leave it alone.
+const mountedDialogs: HTMLDivElement[] = [];
+
 export interface ModalProps {
   /** Accessible title; also the visible heading. */
   title: string;
@@ -32,9 +36,12 @@ export function Modal({ title, onClose, children, footer }: ModalProps): React.J
     // A child mount effect may already have focused the first form field. Keep
     // that valid descendant focus; the dialog itself is the fallback target.
     const dialog = dialogRef.current;
-    if (dialog !== null && !dialog.contains(document.activeElement)) dialog.focus();
+    if (dialog === null) return;
+    mountedDialogs.push(dialog);
+    if (!dialog.contains(document.activeElement)) dialog.focus();
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
+      const topmostDialog = mountedDialogs[mountedDialogs.length - 1];
+      if (e.key === 'Escape' && !e.defaultPrevented && topmostDialog === dialog) {
         e.preventDefault();
         onCloseRef.current();
       }
@@ -42,7 +49,21 @@ export function Modal({ title, onClose, children, footer }: ModalProps): React.J
     document.addEventListener('keydown', onKey, false);
     return () => {
       document.removeEventListener('keydown', onKey, false);
-      previouslyFocusedRef.current?.focus?.();
+      const wasTopmost = mountedDialogs[mountedDialogs.length - 1] === dialog;
+      const index = mountedDialogs.lastIndexOf(dialog);
+      if (index !== -1) mountedDialogs.splice(index, 1);
+      if (!wasTopmost) return;
+
+      const nextTopmost = mountedDialogs[mountedDialogs.length - 1];
+      const previouslyFocused = previouslyFocusedRef.current;
+      if (nextTopmost !== undefined) {
+        if (previouslyFocused !== null && nextTopmost.contains(previouslyFocused)) {
+          previouslyFocused.focus?.();
+        }
+        if (!nextTopmost.contains(document.activeElement)) nextTopmost.focus();
+      } else {
+        previouslyFocused?.focus?.();
+      }
     };
   }, []);
 

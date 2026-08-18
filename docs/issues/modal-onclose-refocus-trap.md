@@ -27,15 +27,19 @@ mount lifecycle state. Its document listener reads the latest `onClose` from a r
 while dialog focus, listener registration, and trigger restoration run only for the
 mount lifecycle. Initial dialog focus is a fallback: if a child has already focused
 one of its fields during mount, that focus is preserved. The original trigger is
-captured before child effects can claim focus, so it is still restored on unmount.
+captured before child effects can claim focus. The final dialog restores that
+trigger on unmount; when another dialog remains, focus instead stays within that
+next dialog.
 
 The Escape listener also respects a descendant that has already called
 `preventDefault()`, allowing an open typeahead to consume the first Escape without
-closing its dialog. Caller-side callback memoization used only as a focus workaround
-was removed. Unit coverage pins mount-time child focus, fresh callbacks, current
-Escape callbacks, descendant Escape handling, and trigger restoration. The focused
-Email Playwright regression types sequentially and asserts both retained focus and
-the complete value.
+closing its dialog. A mount-order stack ensures that, if more than one dialog is
+temporarily mounted, only the top dialog consumes Escape and underlying busy guards
+cannot intercept it. Caller-side callback memoization used only as a focus
+workaround was removed. Unit coverage pins mount-time child focus, fresh callbacks,
+current Escape callbacks, descendant and stacked-dialog Escape handling, and
+trigger restoration. The focused Email Playwright regression types sequentially
+and asserts both retained focus and the complete value.
 
 Two separate concerns remain intentionally open: the busy-state close affordance in
 [modal-busy-close-affordance](./modal-busy-close-affordance.md) and missing Tab-key

@@ -3515,6 +3515,11 @@ export interface HarnessOptions {
    */
   placementsNow?: () => string;
   /**
+   * Injected clock for the RELAY-GROUP router's standalone-preview quiet-hours
+   * evaluation (POST /api/relay-groups/preview). Omit to use the wall clock.
+   */
+  relayGroupsNow?: () => string;
+  /**
    * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
    * endpoints against the world fakes pass one in; mounted exactly like the
    * composition root mounts it (before the origin-secret gate).
@@ -3664,6 +3669,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       }),
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
+      ...(opts.relayGroupsNow !== undefined && { relayGroupsNow: opts.relayGroupsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

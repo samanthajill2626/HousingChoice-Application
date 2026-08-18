@@ -317,6 +317,9 @@ export interface ApiRouterDeps {
   toursNow?: () => string;
   /** Injected clock for the placement router's quiet-hours evaluation (tests only). */
   placementsNow?: () => string;
+  /** Injected clock for the relay-group router's standalone-preview quiet-hours
+   *  evaluation (tests only). */
+  relayGroupsNow?: () => string;
   /** Quiet-hours roster deferrals (contact-rosters Task 13) - injected in tests. */
   pendingRosterActionsRepo?: PendingRosterActionsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
@@ -913,6 +916,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       unitsRepo: units,
+      ...(deps.relayGroupsNow !== undefined && { now: deps.relayGroupsNow }),
       events,
     }),
   );

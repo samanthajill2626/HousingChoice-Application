@@ -68,6 +68,10 @@ import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { Address } from '../lib/address.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import {
+  buildStandaloneOpenPreview,
+  type QuietHoursState,
+} from '../services/rosterEdits.js';
+import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
   type PoolNumbersService,
@@ -100,6 +104,12 @@ export interface RelayGroupsRouterDeps {
   /** The owner tour's unit address, for the SAME composed reminder copy the
    *  send path and the other preview surfaces build. */
   unitsRepo?: UnitsRepo;
+  /**
+   * Injected clock for the standalone preview's quiet-hours evaluation
+   * (POST /relay-groups/preview) - defaults to the wall clock. Tests inject it
+   * to pin deferred / quietEndsAt; production omits it.
+   */
+  now?: () => string;
   events?: EventBus;
 }
 
@@ -125,6 +135,12 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const getNow = deps.now ?? (() => new Date().toISOString());
+
+  /** The clock + org window a preview evaluates quiet hours against. */
+  async function quietHoursState(): Promise<QuietHoursState> {
+    return { nowIso: getNow(), window: await readQuietHoursWindow(settings, log) };
+  }
   // Everything the shared member add/remove implementation touches
   // (services/relayMembers) - built once from this router's resolved repos.
   const memberDeps: RelayMemberDeps = {
@@ -243,6 +259,41 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     // contact timeline. The two EMPTY-bucket early returns above omit it: they
     // have no window in hand and no row to render a time for.
     res.json({ scheduled, timezone: window.timezone });
+  });
+
+  // POST /api/relay-groups/preview - what creating this group WOULD send: the
+  // server-composed relay.intro body, per-member deliverability, the distinct
+  // reachable count, and the quiet state. Pure read: it provisions nothing,
+  // touches no pool number, and never checks the provisioning kill-switch - a
+  // preview must not be what discovers provisioning is disabled. The create
+  // call surfaces that refusal, as it does today.
+  router.post('/relay-groups/preview', async (req, res) => {
+    const body = (req.body ?? {}) as { members?: unknown };
+    if (!Array.isArray(body.members) || body.members.length === 0) {
+      res.status(400).json({ error: 'members (non-empty array) is required' });
+      return;
+    }
+    const members: ConversationParticipant[] = [];
+    for (const raw of body.members) {
+      const parsed = parseRelayMember(raw);
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      members.push(parsed);
+    }
+    // NOT wrapped in try/catch on purpose: isMemberSuppressed throws on a repo
+    // failure so callers fail CLOSED, and a preview that cannot determine who
+    // is suppressed must not render as though it could. Express 5 forwards the
+    // rejection to the error middleware (500), the picker shows the error, and
+    // the confirm dialog never opens.
+    res.json(
+      await buildStandaloneOpenPreview(
+        { contacts, conversations },
+        members,
+        await quietHoursState(),
+      ),
+    );
   });
 
   // POST /api/relay-groups — create a relay group + provision a pool number +

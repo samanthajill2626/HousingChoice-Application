@@ -427,6 +427,51 @@ describe('prompt builders', () => {
     expect(user).toContain('my rent is 800 / 2026-07-16T09:00:00.000Z [staff] set voucherSize to 9');
   });
 
+  it('makes noteLines reconcile against the existing notes instead of restating them', () => {
+    // Production contact 9556186f carried THREE auto note lines that all said the
+    // same thing - one tour, one intent to apply - re-told at slightly different
+    // lengths and with slightly different details. The only prior defenses were a
+    // soft "do not restate facts already in the notes" and apply.ts's VERBATIM
+    // includes() guard, which exists for retry idempotency and cannot see a
+    // paraphrase. Each run had a genuinely new source (a text thread, then a call),
+    // so the model read "new detection" as "new fact".
+    //
+    // C3: assert substrings that live INSIDE one line (the prompt is lines joined
+    // with '\n'), never a phrase that spans a line break.
+    const sys = buildExtractionSystemPrompt();
+    // The reconciliation contract the eight scalar fields already have.
+    expect(sys).toContain('RECONCILE every noteLine against the profile notes');
+    expect(sys).toMatch(/omit the line\. A fact learned again/);
+    // The asymmetry the model was never told about: it cannot revise, only append,
+    // so a better-worded retelling has to be dropped rather than appended.
+    expect(sys).toContain('You CANNOT revise or replace a notes line');
+    // A follow-up detection appends the DELTA, not the whole fact again. Cameron's
+    // ruling: notes 2 and 3 in that contact did not need suppressing, they needed
+    // to stop repeating note 1's copy.
+    expect(sys).toContain('append ONLY what is new');
+    expect(sys).toContain('Keep every noteLine SHORT');
+    // The model can only reconcile against its own prior lines if it knows what
+    // the apply layer's `[Auto - <MMM D>]` prefix means.
+    expect(sys).toContain('[Auto - <date>]');
+    // The superseded soft instruction must be gone; leaving it would keep telling
+    // the model that mere absence-of-this-wording makes a line new.
+    expect(sys).not.toContain('noteLines are NEW secondary facts');
+    expect(sys).not.toContain('not restate facts already in the notes');
+  });
+
+  it('keeps the worked noteLines example free of any address', () => {
+    // The example is drawn from a real production failure, but a street address
+    // baked into the system prompt would both persist production data in the
+    // prompt forever and model the one thing the address rules forbid - putting an
+    // address in a noteLine.
+    const sys = buildExtractionSystemPrompt();
+    const example = sys.slice(sys.indexOf('Given a note'), sys.indexOf('Keep every noteLine SHORT'));
+    expect(example).toContain('Toured a 5-bedroom duplex');
+    expect(example).not.toMatch(/Oakland/i);
+    // No street-suffix token anywhere in the worked example.
+    expect(example).not.toMatch(/\b\d+\s+\w+\s+(St|St\.|Street|Dr|Drive|Ave|Avenue|Rd|Road|Ln|Lane)\b/i);
+  });
+
   it('carries the address hard rules (current-residence only; never in noteLines)', () => {
     const sys = buildExtractionSystemPrompt();
     // C3: assert substrings that live INSIDE one line (the prompt is lines joined

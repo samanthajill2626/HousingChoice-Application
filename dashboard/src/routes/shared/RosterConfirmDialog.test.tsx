@@ -177,6 +177,59 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
   });
 });
 
+describe('RosterConfirmDialog - allowDefer={false} (an endpoint that CANNOT defer)', () => {
+  /** The same quiet-end instant the three-button suite above defers to. */
+  const QUIET = { deferred: true, quietEndsAt: '2026-08-05T12:00:00.000Z' } as const;
+
+  const CLOCK = new Date(QUIET.quietEndsAt).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+
+  it('drops BOTH deferral affordances but KEEPS the quiet-hours warning', () => {
+    // POST /api/relay-groups has no pending-action row to hold a deferral, so a
+    // "Open at 8:00 AM" button would be the exact lie this dialog exists to
+    // prevent. The warning still renders: the operator is told it is quiet
+    // hours, they just cannot schedule around it here.
+    renderDialog({ preview: preview(QUIET), allowDefer: false });
+    expect(
+      screen.getByText(`Quiet hours until ${CLOCK} - this goes out then unless you send it now.`),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send now anyway' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: `Open at ${CLOCK}` })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open when quiet hours end/ })).not.toBeInTheDocument();
+  });
+
+  it('offers exactly Cancel and the confirmLabel in the footer', () => {
+    renderDialog({ preview: preview(QUIET), allowDefer: false });
+    const footer = screen.getByRole('button', { name: 'Open relay group' }).parentElement!;
+    expect(footer.className).toContain('actions');
+    const inFooter = screen
+      .getAllByRole('button')
+      .filter((b) => b.parentElement === footer && b.textContent !== '');
+    expect(inFooter).toHaveLength(2);
+    expect(inFooter[0]).toHaveAccessibleName('Cancel');
+    expect(inFooter[1]).toHaveAccessibleName('Open relay group');
+  });
+
+  it('confirms WITHOUT force - the endpoint has no force parameter', async () => {
+    const { onConfirm, onClose } = renderDialog({ preview: preview(QUIET), allowDefer: false });
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith(false);
+  });
+
+  it('DEFAULTS to true: an unset prop still renders the three-button quiet layout', () => {
+    // Tour, placement, and PeopleCard pass no allowDefer at all. If the default
+    // ever flipped, all three would silently lose their deferral.
+    renderDialog({ preview: preview(QUIET) });
+    expect(screen.getByRole('button', { name: 'Send now anyway' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: `Open at ${CLOCK}` })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open relay group' })).not.toBeInTheDocument();
+  });
+});
+
 describe('RosterConfirmDialog - actions', () => {
   it('confirms once, then closes', async () => {
     const { onConfirm, onClose } = renderDialog();

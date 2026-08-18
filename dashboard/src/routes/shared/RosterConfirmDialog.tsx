@@ -55,6 +55,12 @@ export interface RosterConfirmDialogProps {
   onConfirm: (force: boolean) => Promise<void>;
   /** Cancel, dismiss, or a successful confirm - the caller clears its state. */
   onClose: () => void;
+  /** False when the confirming endpoint CANNOT defer (a standalone relay create
+   *  has no owner row to hold a pending action). The quiet-hours warning still
+   *  renders; the deferral button does not, because no backend row can keep
+   *  that promise. Defaults to true - tour and placement are unaffected.
+   *  TODO(standalone-relay-group-quiet-hours-deferral): */
+  allowDefer?: boolean;
 }
 
 export function RosterConfirmDialog({
@@ -64,6 +70,7 @@ export function RosterConfirmDialog({
   deferLabel,
   onConfirm,
   onClose,
+  allowDefer = true,
 }: RosterConfirmDialogProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,8 +95,13 @@ export function RosterConfirmDialog({
   // Inside quiet hours the DEFAULT is the deferral, and it names the instant it
   // will happen. A server that reports `deferred` without an instant still gets
   // a truthful (time-less) label rather than "at Invalid Date".
+  // ...unless the caller's endpoint cannot defer at all. Then the deferral
+  // affordances go away (both of them) and the plain confirm is the only
+  // action, while the WARNING below stays on `preview.deferred` so the operator
+  // still learns it is quiet hours.
   const clock = preview.quietEndsAt !== undefined ? quietClockLabel(preview.quietEndsAt) : '';
-  const defaultLabel = !preview.deferred
+  const canDefer = preview.deferred && allowDefer;
+  const defaultLabel = !canDefer
     ? confirmLabel
     : clock === ''
       ? `${deferLabel} when quiet hours end`
@@ -111,7 +123,7 @@ export function RosterConfirmDialog({
           <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          {preview.deferred ? (
+          {canDefer ? (
             <Button
               variant="secondary"
               size="sm"

@@ -383,6 +383,24 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // default pair, so the tenant's row carries a role AND a live remove.
     await page.setViewportSize(NARROW_360);
     await page.getByRole('button', { name: 'Edit people' }).click();
+    const peopleHeading = page.getByRole('heading', { name: /People on this tour/i });
+    const qualifierBox = await peopleHeading.evaluate((heading) => {
+      const aside = heading.querySelector(':scope > span');
+      if (aside === null) throw new Error('People heading has no aside');
+      const qualifier = [...aside.childNodes].find(
+        (node) => node.nodeType === Node.TEXT_NODE && node.textContent?.includes('on this tour'),
+      );
+      if (qualifier === undefined) throw new Error('People heading has no tour qualifier');
+      const range = document.createRange();
+      range.selectNodeContents(qualifier);
+      const box = range.getBoundingClientRect();
+      return { right: box.right };
+    });
+    const doneBox = (await page.getByRole('button', { name: 'Done editing people' }).boundingBox())!;
+    expect(
+      doneBox.x - qualifierBox.right,
+      'the People heading qualifier runs into the Done action',
+    ).toBeGreaterThanOrEqual(8);
     const tenantRow = roster.getByRole('listitem').filter({ hasText: tenant.name });
     const tenantRemove = page.getByRole('button', {
       name: `Remove ${tenant.name} from this tour`,

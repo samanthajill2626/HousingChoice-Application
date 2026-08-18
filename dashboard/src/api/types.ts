@@ -496,12 +496,16 @@ export type RelayOwner = { type: 'tour' | 'placement'; id: string } | { type: nu
  *
  *  GOTCHA: the operator tag rides ConversationItem's index signature under the
  *  key `placement_tag` (NOT `tag`) and is untyped on the server — read it here.
- *  `status` is `'open' | 'closed'` for a relay_group; a 1:1 only ever writes
- *  `'open'`. The index signature carries anything extra the server projects. */
+ *  `status` is `'open' | 'connecting' | 'closed'` for a relay_group; a 1:1 only
+ *  ever writes `'open'`. `'connecting'` is the tier-3 landing: the group exists
+ *  with NO pool number and NO intro sent, and the intro goes out from the
+ *  relay.numberReady handler once a warmed number registers. The field is typed
+ *  `string`, not a union, so it needs no widening - only this doc did.
+ *  The index signature carries anything extra the server projects. */
 export interface ConversationHeader {
   conversationId: string;
   type: ConversationType;
-  /** relay_group: 'open' | 'closed'; 1:1: 'open'. */
+  /** relay_group: 'open' | 'connecting' | 'closed'; 1:1: 'open'. */
   status: string;
   /** External participant's phone / synthetic pool placeholder (E.164). Optional
    *  (email-channel v1): an email-only thread carries participant_email instead. */

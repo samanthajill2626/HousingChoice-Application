@@ -2433,6 +2433,49 @@ export async function createTourRelay(
   return { deferred: false, tour: (res.body as { tour: Tour }).tour };
 }
 
+/** A relay-group member as POST /api/relay-groups and its preview accept it. */
+export interface RelayGroupMemberInput {
+  phone: string;
+  contactId?: string;
+  name?: string;
+}
+
+/** POST /api/relay-groups/preview - what creating this group WOULD send: the
+ *  server-composed relay.intro body, per-member deliverability, the distinct
+ *  reachable count, and the quiet state. Returns the RosterPreview AS THE BODY,
+ *  like the owner-scoped previews. Pure read: it provisions nothing and never
+ *  checks the provisioning kill-switch, so a 503 relay_provisioning_disabled can
+ *  only come from `createRelayGroup`. A 5xx here means suppression could not be
+ *  determined - fail CLOSED and do NOT open the confirm dialog. */
+export async function previewRelayGroup(
+  members: RelayGroupMemberInput[],
+  signal?: AbortSignal,
+): Promise<RosterPreview> {
+  return request<RosterPreview>('/api/relay-groups/preview', {
+    method: 'POST',
+    body: { members },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/relay-groups - create the group. Pass the IDENTICAL `members`
+ *  array that was previewed (spec 6.2): there is no server-resolved roster to
+ *  reconcile against, so the client's list IS the input to both calls and a
+ *  rebuilt array would make the confirm dialog a preview of a different send.
+ *  The returned conversation's `status` may be 'connecting' - the group exists
+ *  with no pool number and NO intro was sent yet. */
+export async function createRelayGroup(
+  members: RelayGroupMemberInput[],
+  tag?: string,
+): Promise<{ conversation: ConversationHeader }> {
+  return request<{ conversation: ConversationHeader }>('/api/relay-groups', {
+    method: 'POST',
+    // Omit the tag key entirely when there is nothing to stamp - never send
+    // tag: undefined, and never an empty string.
+    body: { members, ...(tag !== undefined && tag.length > 0 && { tag }) },
+  });
+}
+
 /** GET /api/ai-runs - one page of the admin AI run log. */
 export function listAiRuns(
   params: { scope?: AiRunScope; before?: string; from?: string; to?: string; limit?: number } = {},

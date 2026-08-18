@@ -1,12 +1,18 @@
-// BE5/C5 route tests — GET /api/contacts/:contactId/media → { media: ContactMediaItem[] }.
-// Runs on the shared in-memory world (the harness fakes), authed via the real
-// sealed session cookie next to the origin secret. Covers:
-//   - media aggregated across TWO of the contact's numbers, newest-first;
+// GET /api/contacts/:contactId/media -> { media: ContactMediaItem[], nextCursor? }
+// (2026-08-18: index-backed and cursor-paged). Runs on the shared in-memory
+// world (the harness fakes, whose media index is DERIVED from the stored
+// messages exactly as the real pointer partition is written from them), authed
+// via the real sealed session cookie next to the origin secret. Covers:
+//   - media aggregated across TWO of the contact's numbers, newest-first, each
+//     item ADDRESSED as {providerSid, index} (the serve endpoint's shape);
 //   - a relay_group thread's media is NOT included (PII / pool number);
 //   - a message with MULTIPLE attachments yields multiple items;
 //   - legacy `media_s3_keys`-only messages are included (via mediaAttachmentsOf);
 //   - 404 unknown contact + 404 a phone-pointer id;
-//   - { media: [] } for a contact with no media.
+//   - { media: [] } for a contact with no media;
+//   - NO SCAN CAP: an attachment buried under hundreds of later messages is
+//     still served (the old shape scanned the newest 200 rows and dropped it),
+//     and the page is walked by cursor across conversations.
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
@@ -167,10 +173,16 @@ describe('GET /api/contacts/:id/media (BE5/C5)', () => {
     const res = await authedGet('/api/contacts/c-tenant/media');
     expect(res.status).toBe(200);
     expect(res.body.media).toEqual([
-      { s3Key: 'media/a2.gif', contentType: 'image/gif', at: '2026-06-16T13:00:00.000Z', conversationId: 'conv-a' },
-      { s3Key: 'media/b1.png', contentType: 'image/png', at: '2026-06-16T11:00:00.000Z', conversationId: 'conv-b' },
-      { s3Key: 'media/a1.jpg', contentType: 'image/jpeg', at: '2026-06-16T10:00:00.000Z', conversationId: 'conv-a' },
+      { providerSid: 'MM-a2', index: 0, contentType: 'image/gif', at: '2026-06-16T13:00:00.000Z', conversationId: 'conv-a' },
+      { providerSid: 'MM-b1', index: 0, contentType: 'image/png', at: '2026-06-16T11:00:00.000Z', conversationId: 'conv-b' },
+      { providerSid: 'MM-a1', index: 0, contentType: 'image/jpeg', at: '2026-06-16T10:00:00.000Z', conversationId: 'conv-a' },
     ]);
+    // Never an S3 key or a provider URL on the wire.
+    for (const item of res.body.media) {
+      expect(item).not.toHaveProperty('s3Key');
+      expect(item).not.toHaveProperty('url');
+    }
+    expect(res.body.nextCursor).toBeUndefined();
   });
 
   it('a message with MULTIPLE attachments yields multiple items', async () => {
@@ -184,10 +196,12 @@ describe('GET /api/contacts/:id/media (BE5/C5)', () => {
     const res = await authedGet('/api/contacts/c-tenant/media');
     expect(res.status).toBe(200);
     expect(res.body.media).toHaveLength(3);
-    expect(res.body.media.map((m: { s3Key: string }) => m.s3Key).sort()).toEqual([
-      'media/one.jpg',
-      'media/three.png',
-      'media/two.jpg',
+    // One item per stored position, addressed by (sid, index) - newest position
+    // first within a message is fine; what matters is every position is there.
+    expect(res.body.media.map((m: { providerSid: string; index: number }) => `${m.providerSid}:${m.index}`).sort()).toEqual([
+      'MM-multi:0',
+      'MM-multi:1',
+      'MM-multi:2',
     ]);
     // All carry the same at + conversationId from the source message.
     for (const item of res.body.media) {
@@ -218,7 +232,8 @@ describe('GET /api/contacts/:id/media (BE5/C5)', () => {
     expect(res.status).toBe(200);
     expect(res.body.media).toEqual([
       {
-        s3Key: 'legacy/old.bin',
+        providerSid: 'MM-legacy',
+        index: 0,
         contentType: 'application/octet-stream',
         at: '2026-06-16T10:00:00.000Z',
         conversationId: 'conv-a',
@@ -246,25 +261,66 @@ describe('GET /api/contacts/:id/media (BE5/C5)', () => {
     expect(res.body.media).toEqual([]);
   });
 
-  it('does NOT warn on a thread of EXACTLY the scan cap (200) — complete, not truncated', async () => {
+  // THE DEFECT THESE PIN (prod, 2026-08-18: 25 WARNs in 24h, and a gallery
+  // that could not show a document once 200 newer messages had arrived). The
+  // old route scanned the newest 200 messages of each thread and dropped the
+  // rest, WARNing on every long imported thread. The gallery now reads its own
+  // index, so a thread's length is irrelevant.
+  it('NO SCAN CAP: an attachment buried under 250 later messages is still served, and nothing WARNs', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);
-    await seedTextMessages('conv-a', 200); // exactly the cap
+    await seedMediaMessage('conv-a', '2026-06-15T09:00:00.000Z', 'MM-old', [
+      { s3Key: 'media/buried.pdf', contentType: 'application/pdf' },
+    ]);
+    await seedTextMessages('conv-a', 250); // all newer than the attachment
+
     const res = await authedGet('/api/contacts/c-tenant/media');
     expect(res.status).toBe(200);
-    const warns = capture.atLevel(40).filter((l) => l['conversationId'] === 'conv-a');
-    expect(warns).toHaveLength(0); // off-by-one fix: exactly-cap is not overflow
+    expect(res.body.media).toEqual([
+      { providerSid: 'MM-old', index: 0, contentType: 'application/pdf', at: '2026-06-15T09:00:00.000Z', conversationId: 'conv-a' },
+    ]);
+    expect(capture.atLevel(40).filter((l) => String(l['msg'] ?? '').includes('scan cap'))).toEqual([]);
   });
 
-  it('warns only on REAL overflow (>200 messages in a thread)', async () => {
+  it('PAGES by cursor, newest-first, ACROSS the contact conversations, until nextCursor is absent', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);
-    await seedTextMessages('conv-a', 201); // one past the cap → real overflow
-    const res = await authedGet('/api/contacts/c-tenant/media');
-    expect(res.status).toBe(200);
-    const warns = capture.atLevel(40).filter((l) => l['conversationId'] === 'conv-a');
-    expect(warns).toHaveLength(1);
-    expect(warns[0]!['cap']).toBe(200);
-    expect(warns[0]!['scanned']).toBe(200); // processed at most the newest 200
+    seedConversation('conv-b', PHONE_B);
+    // 5 attachments interleaved across the two threads by time.
+    await seedMediaMessage('conv-a', '2026-06-16T10:00:00.000Z', 'MM-1', [{ s3Key: 'k1', contentType: 'image/jpeg' }]);
+    await seedMediaMessage('conv-b', '2026-06-16T11:00:00.000Z', 'MM-2', [{ s3Key: 'k2', contentType: 'image/jpeg' }]);
+    await seedMediaMessage('conv-a', '2026-06-16T12:00:00.000Z', 'MM-3', [{ s3Key: 'k3', contentType: 'image/jpeg' }]);
+    await seedMediaMessage('conv-b', '2026-06-16T13:00:00.000Z', 'MM-4', [{ s3Key: 'k4', contentType: 'image/jpeg' }]);
+    await seedMediaMessage('conv-a', '2026-06-16T14:00:00.000Z', 'MM-5', [{ s3Key: 'k5', contentType: 'image/jpeg' }]);
+
+    const p1 = await authedGet('/api/contacts/c-tenant/media?limit=2');
+    expect(p1.status).toBe(200);
+    expect(p1.body.media.map((m: { providerSid: string }) => m.providerSid)).toEqual(['MM-5', 'MM-4']);
+    expect(typeof p1.body.nextCursor).toBe('string');
+
+    const p2 = await authedGet(`/api/contacts/c-tenant/media?limit=2&cursor=${encodeURIComponent(p1.body.nextCursor)}`);
+    expect(p2.body.media.map((m: { providerSid: string }) => m.providerSid)).toEqual(['MM-3', 'MM-2']);
+    expect(typeof p2.body.nextCursor).toBe('string');
+
+    const p3 = await authedGet(`/api/contacts/c-tenant/media?limit=2&cursor=${encodeURIComponent(p2.body.nextCursor)}`);
+    expect(p3.body.media.map((m: { providerSid: string }) => m.providerSid)).toEqual(['MM-1']);
+    expect(p3.body.nextCursor).toBeUndefined();
+  });
+
+  it('a page that is EXACTLY full carries no nextCursor when nothing older exists', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await seedMediaMessage('conv-a', '2026-06-16T10:00:00.000Z', 'MM-1', [{ s3Key: 'k1', contentType: 'image/jpeg' }]);
+    await seedMediaMessage('conv-a', '2026-06-16T11:00:00.000Z', 'MM-2', [{ s3Key: 'k2', contentType: 'image/jpeg' }]);
+    const res = await authedGet('/api/contacts/c-tenant/media?limit=2');
+    expect(res.body.media).toHaveLength(2);
+    expect(res.body.nextCursor).toBeUndefined();
+  });
+
+  it('400s a malformed cursor or limit rather than passing them to the store', async () => {
+    seedContact();
+    expect((await authedGet('/api/contacts/c-tenant/media?cursor=nope')).status).toBe(400);
+    expect((await authedGet('/api/contacts/c-tenant/media?limit=0')).status).toBe(400);
+    expect((await authedGet('/api/contacts/c-tenant/media?limit=9999')).status).toBe(400);
   });
 });

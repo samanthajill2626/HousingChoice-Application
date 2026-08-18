@@ -10,7 +10,7 @@
 import type { Contact, ContactPhone, GroupThreadRow } from '../../api/index.js';
 import { BLANK, Card, CardAction, CardInlineAction, KV, NotesText, PendingPanel } from './Card.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
-import { MediaGallery } from './MediaGallery.js';
+import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { contactStatusLabel, formatPhone } from './format.js';
 
@@ -20,6 +20,8 @@ export interface PartnerFileProps {
   /** "Media from comms" - derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** "Load older media" for the gallery (useContactMedia's paging), when the caller pages. */
+  mediaPaging?: MediaGalleryPaging | undefined;
   /** NATIVE group texts this partner is a member of (C13 - see the card below).
    *  REQUIRED, not optional: the props are what make the wiring in
    *  ContactDetail a typecheck error to forget, which is how this card came to
@@ -38,6 +40,7 @@ export function PartnerFile({
   phones,
   media,
   mediaLoading,
+  mediaPaging,
   groupThreadsPending,
   groupThreads,
   groupThreadsTruncated,
@@ -112,7 +115,7 @@ export function PartnerFile({
       />
 
       <Card title="Media from comms">
-        <MediaGallery media={media} loading={mediaLoading ?? false} />
+        <MediaGallery media={media} loading={mediaLoading ?? false} paging={mediaPaging} />
       </Card>
     </>
   );

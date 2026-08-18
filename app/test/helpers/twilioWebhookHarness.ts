@@ -80,6 +80,9 @@ import {
   allowedPriorCallStatuses,
   allowedPriorStatuses,
   buildTsMsgId,
+  mediaAttachmentsOf,
+  mediaPointerSk,
+  type MediaPointer,
   type MessageItem,
   type MessagesRepo,
   type ParkedEmailEvent,
@@ -1209,6 +1212,36 @@ export function createFakeWorld(): FakeWorld {
       if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
       if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
       if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
+    },
+    async putMediaPointers() {
+      // The fake DERIVES the media index from the stored messages (below), so
+      // there is nothing to write - the real repo keeps two structures in step,
+      // this one keeps one and reads it two ways.
+    },
+    async listMediaPointers(conversationId, { limit, before }) {
+      // Models the media#<conversationId> partition: one pointer per stored
+      // attachment, sorted by (message SK, position) newest-first, paged by
+      // an exclusive `before` sort key.
+      const out: MediaPointer[] = [];
+      for (const m of messages) {
+        if (m.conversationId !== conversationId) continue;
+        mediaAttachmentsOf(m).forEach((a, index) => {
+          const sortKey = mediaPointerSk(m.tsMsgId, index);
+          if (before !== undefined && !(sortKey < before)) return;
+          out.push({
+            conversationId,
+            tsMsgId: m.tsMsgId,
+            providerSid: m.provider_sid,
+            index,
+            s3Key: a.s3Key,
+            contentType: a.contentType,
+            at: m.provider_ts,
+            sortKey,
+          });
+        });
+      }
+      out.sort((x, y) => (x.sortKey < y.sortKey ? 1 : x.sortKey > y.sortKey ? -1 : 0));
+      return out.slice(0, limit);
     },
     async putJobExecutionMarker(jobId, conversationId) {
       // Mirrors the conditional put: true only on the FIRST write per jobId.

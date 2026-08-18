@@ -71,7 +71,7 @@ import {
 import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   createMessagesRepo,
-  mediaAttachmentsOf,
+  type MediaPointer,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import {
@@ -148,16 +148,18 @@ export interface ContactsRouterDeps {
 }
 
 /**
- * BE5/C5 wire shape (VERBATIM — the frontend imports identical field names).
- * One mirrored media attachment surfaced on the contact's Media panel: its S3
- * key + normalized content-type, the source message's provider_ts, and the 1:1
- * conversation it lives on. NO URL is generated — the frontend fetches bytes via
- * the existing GET /api/messages/:sid/media/:idx endpoint using s3Key.
+ * Wire shape of one attachment on the contact's "Media from comms" gallery
+ * (2026-08-18; the frontend imports identical field names). It ADDRESSES the
+ * attachment the way the serve endpoint does - GET /api/messages/:providerSid/
+ * media/:index - so the client builds the authed URL and never sees an S3 key
+ * or a provider URL. `at` is the carrying message's provider_ts (the gallery
+ * order); `conversationId` is the 1:1 thread it lives on.
  */
 interface ContactMediaItem {
-  s3Key: string;
+  providerSid: string;
+  index: number;
   contentType: string;
-  /** ISO 8601 — the source message's provider_ts (the sort key). */
+  /** ISO 8601 - the carrying message's provider_ts. */
   at: string;
   conversationId: string;
 }
@@ -224,13 +226,14 @@ interface RelayGroupRow {
 }
 
 /**
- * Bound on messages pulled per conversation when aggregating media. The contact
- * media panel is a recent-media view, not an archive; a single page per
- * conversation at this scale covers the working set. If a conversation has more
- * than this, the older media is dropped — and that drop is LOGGED (no silent
- * truncation). Generous (a thread rarely has hundreds of MMS).
+ * Page size of the contact media gallery (2026-08-18). ONE page of the merged,
+ * newest-first index across the contact's 1:1 threads; older media is reached
+ * by cursor, never dropped. (This replaced a 200-message SCAN per thread that
+ * silently omitted any attachment older than the scan - and WARNed on every
+ * long imported thread while doing so.)
  */
-const MEDIA_SCAN_PAGE_LIMIT = 200;
+const MEDIA_PAGE_LIMIT = 60;
+const MEDIA_PAGE_MAX = 200;
 
 /** The contact types triage may set (the full union incl. 'unknown'). */
 const CONTACT_TYPES: readonly ContactType[] = [
@@ -376,6 +379,27 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
     const entries = Object.entries(key);
     if (entries.length < 1 || entries.length > 3) return undefined;
     for (const [, v] of entries) if (typeof v !== 'string') return undefined;
+    return key;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Media gallery cursor: an opaque wrapper over the last pointer sort key. */
+function encodeMediaCursor(sortKey: string): string {
+  return Buffer.from(sortKey, 'utf8').toString('base64url');
+}
+
+/**
+ * Decode a media cursor. The sort key is `<ISO ts>#<sid>#<nnn>`; validate the
+ * SHAPE (an ISO-looking prefix, then two `#` seams) so a tampered cursor never
+ * reaches DynamoDB as an arbitrary key range - it decodes to undefined and the
+ * route answers 400.
+ */
+function decodeMediaCursor(cursor: string): string | undefined {
+  try {
+    const key = Buffer.from(cursor, 'base64url').toString('utf8');
+    if (!/^\d{4}-\d{2}-\d{2}T[^#]*#[^#]+#\d{3}$/.test(key)) return undefined;
     return key;
   } catch {
     return undefined;
@@ -1252,16 +1276,25 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ groups, truncated: withheld });
   });
 
-  // GET /api/contacts/:contactId/media → { media: ContactMediaItem[] } (BE5/C5).
-  // The tenant/landlord page's Media panel: every mirrored MMS attachment across
-  // the contact's 1:1 conversations (ALL their numbers), newest-first. Reuses the
-  // timeline's cross-phone resolution (contactPhones → findByParticipantPhone →
-  // dedupe conversationIds) and EXCLUDES relay_group threads (those front a pool
-  // number, never the contact's real 1:1 - relay-group media is never inlined).
-  // 404 unknown contact / phone-pointer id (mirrors BE1's GET). Returns [] for a
-  // contact with no media (never a 404 for "no media"). NO URL is generated —
-  // the frontend fetches bytes via GET /api/messages/:sid/media/:idx using s3Key.
-  // Auth-gated (this router sits behind requireAuth via the /api mount).
+  // GET /api/contacts/:contactId/media?limit=&cursor= (2026-08-18)
+  //   -> { media: ContactMediaItem[], nextCursor?: string }
+  // The tenant/landlord page's "Media from comms" gallery: every indexed
+  // attachment across the contact's 1:1 conversations (ALL their numbers and
+  // email addresses), newest-first, PAGED by cursor. Reads the media pointer
+  // index (messagesRepo MEDIA POINTERS) - one bounded Query per conversation,
+  // merged - never the messages themselves, so a thread of any length costs the
+  // same and nothing older than a page/scan is ever silently missing (the
+  // previous shape scanned the newest 200 messages per thread and dropped the
+  // rest, WARNing on every long imported thread). relay_group and group_text
+  // threads are excluded (they front a pool number / the business number, never
+  // the contact's own 1:1). 404 unknown contact / phone-pointer id. Returns []
+  // for a contact with no media. Auth-gated (this router sits behind
+  // requireAuth via the /api mount).
+  //
+  // The cursor is the pointer sort key of the last item served: it begins with
+  // the carrying message's ISO provider_ts, so it is comparable ACROSS the
+  // contact's conversations - the next page asks every conversation for its
+  // pointers strictly before it. Opaque to the client (base64url).
   router.get('/:contactId/media', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
@@ -1270,62 +1303,62 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
+    const rawLimit = req.query['limit'];
+    let limit = MEDIA_PAGE_LIMIT;
+    if (rawLimit !== undefined) {
+      const n = Number(rawLimit);
+      if (!Number.isInteger(n) || n < 1 || n > MEDIA_PAGE_MAX) {
+        res.status(400).json({ error: 'invalid_limit' });
+        return;
+      }
+      limit = n;
+    }
+    const rawCursor = req.query['cursor'];
+    let before: string | undefined;
+    if (rawCursor !== undefined) {
+      before = decodeMediaCursor(String(rawCursor));
+      if (before === undefined) {
+        res.status(400).json({ error: 'invalid_cursor' });
+        return;
+      }
+    }
 
     // Resolve the contact's 1:1 conversations across ALL their numbers AND email
     // addresses (email channel v1, ADJ-1c) - exactly like the merged timeline, so
     // inbound EMAIL attachments (the document-exchange core use case) appear in
-    // the Media panel too. relay_group threads front a pool number (never the
-    // contact's real phone/email), so they are excluded purely on type.
-    const convById = new Map<string, string>(); // conversationId → (presence)
+    // the gallery too.
+    const conversationIds: string[] = [];
     for (const conv of await conversationsForContact(contact, conversations)) {
       // Multi-party threads are excluded by NAME, never by "not relay_group"
       // (invariant 13.6). A native group_text carries no participant_phone or
       // participant_email, so conversationsForContact cannot return one today -
       // the explicit case keeps that true if it ever can.
       if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
-      convById.set(conv.conversationId, conv.conversationId);
+      if (!conversationIds.includes(conv.conversationId)) conversationIds.push(conv.conversationId);
     }
 
-    // Single pass: collect every attachment of every media-bearing message.
-    const media: ContactMediaItem[] = [];
-    for (const conversationId of convById.keys()) {
-      // Probe one PAST the cap (limit = cap + 1): if MORE than the cap came back
-      // the thread is genuinely truncated; a thread of EXACTLY the cap is
-      // complete (no false-positive warn). Process at most the newest `cap`.
-      const fetched = await messages.listByConversation(conversationId, {
-        limit: MEDIA_SCAN_PAGE_LIMIT + 1,
-      });
-      const truncated = fetched.length > MEDIA_SCAN_PAGE_LIMIT;
-      const page = truncated ? fetched.slice(0, MEDIA_SCAN_PAGE_LIMIT) : fetched;
-      if (truncated) {
-        // No silent truncation — record that older media for this thread was not
-        // scanned (the page is newest-first, so the dropped media is the oldest).
-        log.warn(
-          { contactId, conversationId, scanned: page.length, cap: MEDIA_SCAN_PAGE_LIMIT },
-          'contact media: conversation hit the scan cap — older media not aggregated',
-        );
-      }
-      for (const m of page) {
-        const attachments = mediaAttachmentsOf(m);
-        for (const a of attachments) {
-          media.push({
-            s3Key: a.s3Key,
-            contentType: a.contentType,
-            at: m.provider_ts,
-            conversationId,
-          });
-        }
-      }
+    // One page from EACH conversation (limit + 1, so a full merged page can
+    // tell whether anything older exists), then a newest-first merge.
+    const merged: MediaPointer[] = [];
+    for (const conversationId of conversationIds) {
+      merged.push(...(await messages.listMediaPointers(conversationId, { limit: limit + 1, before })));
     }
+    merged.sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
+    const page = merged.slice(0, limit);
+    const media: ContactMediaItem[] = page.map((p) => ({
+      providerSid: p.providerSid,
+      index: p.index,
+      contentType: p.contentType,
+      at: p.at,
+      conversationId: p.conversationId,
+    }));
+    const nextCursor = merged.length > limit ? encodeMediaCursor(page[page.length - 1]!.sortKey) : undefined;
 
-    // Newest-first by `at`; stable tie-break by s3Key so equal-timestamp items
-    // (and multiple attachments on one message) order deterministically.
-    media.sort((a, b) =>
-      a.at < b.at ? 1 : a.at > b.at ? -1 : a.s3Key < b.s3Key ? -1 : a.s3Key > b.s3Key ? 1 : 0,
+    log.info(
+      { contactId, conversationCount: conversationIds.length, mediaCount: media.length, more: nextCursor !== undefined },
+      'contact media served',
     );
-
-    log.info({ contactId, conversationCount: convById.size, mediaCount: media.length }, 'contact media served');
-    res.json({ media });
+    res.json({ media, ...(nextCursor !== undefined && { nextCursor }) });
   });
 
   // PATCH /api/contacts/:contactId — triage an existing contact.

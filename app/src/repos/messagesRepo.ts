@@ -165,6 +165,87 @@ export function buildTsMsgId(providerTs: string, providerSid: string): string {
 }
 
 /**
+ * Split a message SK back into its two halves. The provider timestamp is ISO
+ * 8601 (no `#`), so the FIRST `#` is the seam whatever the SID's shape.
+ */
+export function splitTsMsgId(tsMsgId: string): { providerTs: string; providerSid: string } {
+  const at = tsMsgId.indexOf('#');
+  return at < 0
+    ? { providerTs: tsMsgId, providerSid: '' }
+    : { providerTs: tsMsgId.slice(0, at), providerSid: tsMsgId.slice(at + 1) };
+}
+
+// ---------------------------------------------------------------------------
+// MEDIA POINTERS (2026-08-18): the "Media from comms" gallery's own index.
+//
+// The gallery used to be assembled by READING MESSAGES - the contact-file slice
+// scanned the newest 200 rows of each 1:1 thread (and WARNed when a thread was
+// longer), and the live gallery derived from the loaded timeline page - so an
+// attachment older than the scan/page was not in the gallery at all. A media
+// attachment is now ALSO indexed at write time: one pointer row per attachment
+// in the conversation's own media partition, `media#<conversationId>`, sorted
+// by the message SK plus the attachment's position (so a Query walks a thread's
+// media newest-first, paged, with no cap and no scan). Written by `append` in
+// the SAME transaction as the message and by `annotateMessage` whenever it sets
+// `media_attachments` (the inbound mirror and the media.mirror job), so the
+// index and the message can never disagree about what is servable.
+//
+// The pointer carries {providerSid, index} because that is how the dashboard
+// ADDRESSES media - GET /api/messages/:sid/media/:idx reads
+// media_attachments[idx] - and index = the attachment's POSITION in that
+// stored array. Positions never change once assigned (the job only appends),
+// so a pointer stays valid for the life of the message. Own partition, so
+// listByConversation (a whole-partition Query) is untouched.
+// ---------------------------------------------------------------------------
+
+/** Partition key of a conversation's media pointers. */
+export function mediaPointerPk(conversationId: string): string {
+  return `media#${conversationId}`;
+}
+
+/** Sort key of one pointer: the message SK, then the attachment position (zero-padded so 10 sorts after 9). */
+export function mediaPointerSk(tsMsgId: string, index: number): string {
+  return `${tsMsgId}#${String(index).padStart(3, '0')}`;
+}
+
+/** One indexed attachment - everything the gallery needs without reading the message. */
+export interface MediaPointer {
+  conversationId: string;
+  /** The carrying message's SK. */
+  tsMsgId: string;
+  providerSid: string;
+  /** Position in the message's stored media_attachments - the serve endpoint's :idx. */
+  index: number;
+  s3Key: string;
+  contentType: string;
+  /** The carrying message's provider timestamp (ISO). */
+  at: string;
+  /** Pointer SK - the paging cursor. */
+  sortKey: string;
+}
+
+/** The pointer items for one message's attachments (pure; used by append/annotate/backfill). */
+export function mediaPointerItems(
+  conversationId: string,
+  tsMsgId: string,
+  attachments: readonly MediaAttachment[],
+): Record<string, unknown>[] {
+  const { providerTs, providerSid } = splitTsMsgId(tsMsgId);
+  return attachments.map((a, index) => ({
+    conversationId: mediaPointerPk(conversationId),
+    tsMsgId: mediaPointerSk(tsMsgId, index),
+    ref_conversationId: conversationId,
+    ref_tsMsgId: tsMsgId,
+    provider_sid: providerSid,
+    provider_ts: providerTs,
+    media_index: index,
+    s3_key: a.s3Key,
+    content_type: a.contentType,
+    ...(a.filename !== undefined && { filename: a.filename }),
+  }));
+}
+
+/**
  * The rail a group send went out on, snapshotted onto the message row.
  * `participantMap` is MBxx -> member key (`phone#<E164>`, spec 15.6).
  */
@@ -1088,6 +1169,22 @@ export interface MessagesRepo {
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
   /**
+   * Newest-first page of ONE conversation's media pointers (2026-08-18) - the
+   * gallery's index, see the MEDIA POINTERS block above. `before` is a pointer
+   * `sortKey` from a previous page (exclusive), so the caller pages a thread's
+   * media without a cap and without reading messages.
+   */
+  listMediaPointers(
+    conversationId: string,
+    opts: { limit: number; before?: string | undefined },
+  ): Promise<MediaPointer[]>;
+  /**
+   * Write (or rewrite - idempotent puts) the pointer rows for a message's
+   * current attachments. Used by the backfill; the runtime paths write them
+   * inside `append` and `annotateMessage`.
+   */
+  putMediaPointers(conversationId: string, tsMsgId: string, attachments: readonly MediaAttachment[]): Promise<void>;
+  /**
    * Execution guard for duplicate-sensitive jobs (M1.2): conditionally
    * record that the job with this envelope jobId ran — `{ PK: job#<jobId>,
    * SK: ran }`, the same pointer-partition trick as the SID items. True =
@@ -1876,6 +1973,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                     },
                   ]
                 : []),
+              // MEDIA POINTERS (2026-08-18): the gallery index rows for an
+              // outbound MMS's attachments ride the SAME transaction as the
+              // message, so a servable attachment is never absent from the
+              // gallery. LAST in the list, so the SID pointer stays at index 1
+              // (the dedupe attribution below depends on that). No condition:
+              // a redelivery cancels on the SID pointer before these matter.
+              ...(item.media_attachments !== undefined
+                ? mediaPointerItems(message.conversationId, tsMsgId, item.media_attachments).map((ptr) => ({
+                    Put: { TableName: table, Item: ptr },
+                  }))
+                : []),
             ],
           }),
         );
@@ -2360,6 +2468,51 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         },
         'message annotated',
       );
+      // MEDIA POINTERS (2026-08-18): the attachments just recorded become
+      // gallery index rows. Positions are the array positions just written, so
+      // every pointer addresses a servable /media/:idx. Best-effort AFTER the
+      // message write: the message is the truth and the backfill re-derives
+      // pointers from it, so a failed pointer put costs one gallery entry until
+      // the next annotate/backfill, never the attachment itself.
+      if (annotations.mediaAttachments !== undefined && annotations.mediaAttachments.length > 0) {
+        try {
+          await this.putMediaPointers(conversationId, tsMsgId, annotations.mediaAttachments);
+        } catch (err) {
+          log.error({ err, conversationId, tsMsgId }, 'media pointers not written for annotated attachments');
+        }
+      }
+    },
+
+    async putMediaPointers(conversationId, tsMsgId, attachments) {
+      for (const item of mediaPointerItems(conversationId, tsMsgId, attachments)) {
+        await doc.send(new PutCommand({ TableName: table, Item: item }));
+      }
+    },
+
+    async listMediaPointers(conversationId, { limit, before }) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression:
+            before !== undefined ? 'conversationId = :p AND tsMsgId < :before' : 'conversationId = :p',
+          ExpressionAttributeValues: {
+            ':p': mediaPointerPk(conversationId),
+            ...(before !== undefined && { ':before': before }),
+          },
+          ScanIndexForward: false, // newest message first
+          Limit: limit,
+        }),
+      );
+      return ((Items ?? []) as Record<string, unknown>[]).map((raw) => ({
+        conversationId,
+        tsMsgId: String(raw['ref_tsMsgId'] ?? ''),
+        providerSid: String(raw['provider_sid'] ?? ''),
+        index: Number(raw['media_index'] ?? 0),
+        s3Key: String(raw['s3_key'] ?? ''),
+        contentType: String(raw['content_type'] ?? 'application/octet-stream'),
+        at: String(raw['provider_ts'] ?? ''),
+        sortKey: String(raw['tsMsgId'] ?? ''),
+      }));
     },
 
     async putJobExecutionMarker(jobId, conversationId) {

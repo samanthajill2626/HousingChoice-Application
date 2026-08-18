@@ -243,6 +243,8 @@ function makeSendFakes(
     getByTsMsgId: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
+    putMediaPointers: async () => {},
+    listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,
     getJobExecutionMarker: async () => false,
     putParkedEmailEvent: async () => {},

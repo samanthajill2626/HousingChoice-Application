@@ -257,6 +257,8 @@ Already in the regenerated `tables.auto.tfvars.json` files on the branch. **Onli
 
 The founder's LOCAL imported dataset needs `npm run db:update-gsis` (never `db:create --reset`), a dev-stack restart, then the same dry-run-first backfill. Disposable e2e lanes bootstrap their own tables and need nothing.
 
+**Media pointer index (2026-08-18, same branch) - NO schema change, ONE backfill.** The contact file's "Media from comms" gallery now reads pointer rows in the messages table (`media#<conversationId>` partitions, written by every new attachment) instead of scanning the newest 200 messages of each thread - so a document buried under newer texts is reachable through "Load older media", and the `contact media: conversation hit the scan cap` WARN is gone. Attachments stored BEFORE the deploy have no pointer until backfilled, so per env, AFTER the deploy: `npx tsx app/scripts/backfill-media-pointers.ts --dry-run`, then the same command live. Idempotent (deterministic keys, plain puts); re-running rewrites the same rows. Prod had 11 media-bearing messages on 2026-08-18; dev similar. Order matters only in that the deploy must come first (the new code writes pointers for new media; the backfill covers old media; a backfill before the deploy just misses whatever lands in between and needs a re-run).
+
 ### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
 
 **Infra change - `feat/unit-photos` MERGED to main (@05aba86). DEV: CORS APPLIED 2026-07-16 (upload path live on dev). PROD: rides the M1.11 cutover (still to apply).**

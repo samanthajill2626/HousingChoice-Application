@@ -68,7 +68,7 @@ import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
-import { commsMedia } from './media.js';
+import { useContactMedia } from './useContactMedia.js';
 import { useContact } from './useContact.js';
 import { SUGGESTION_NOT_PENDING, useSuggestions } from './useSuggestions.js';
 import { SuggestionChip } from './SuggestionChip.js';
@@ -522,11 +522,16 @@ export function ContactDetail(): React.JSX.Element {
     [allContacts, contactId],
   );
 
-  // "Media from comms" is derived from the LIVE timeline (not the one-shot C5
-  // media slice), so it updates as soon as a new attachment message arrives — the
-  // timeline refetches on SSE message.persisted. Memoized on items identity.
-  const media = useMemo(() => commsMedia(timeline.items), [timeline.items]);
-  const mediaLoading = timeline.status === 'loading';
+  // "Media from comms" reads the media pointer INDEX (useContactMedia, paged
+  // by cursor, refetched on SSE message.persisted) - not the loaded timeline
+  // page, which silently hid any attachment older than that page (2026-08-18).
+  const mediaFeed = useContactMedia(contactId);
+  const media = mediaFeed.items;
+  const mediaLoading = mediaFeed.status === 'loading';
+  const mediaPaging = useMemo(
+    () => ({ hasMore: mediaFeed.hasMore, loadingMore: mediaFeed.loadingMore, onLoadMore: mediaFeed.loadMore }),
+    [mediaFeed.hasMore, mediaFeed.loadingMore, mediaFeed.loadMore],
+  );
 
   if (contactStatus === 'loading') {
     return (
@@ -1006,6 +1011,7 @@ export function ContactDetail(): React.JSX.Element {
                 groupThreadsTruncated={file.groupThreadsTruncated}
                 media={media}
                 mediaLoading={mediaLoading}
+                mediaPaging={mediaPaging}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
@@ -1021,6 +1027,7 @@ export function ContactDetail(): React.JSX.Element {
                 phones={phones}
                 media={media}
                 mediaLoading={mediaLoading}
+                mediaPaging={mediaPaging}
                 groupThreadsPending={file.groupThreads.status !== 'ready'}
                 groupThreads={file.groupThreads.status === 'ready' ? file.groupThreads.rows : []}
                 groupThreadsTruncated={file.groupThreadsTruncated}
@@ -1039,6 +1046,7 @@ export function ContactDetail(): React.JSX.Element {
                 units={file.units}
                 media={media}
                 mediaLoading={mediaLoading}
+                mediaPaging={mediaPaging}
                 groupThreadsPending={file.groupThreads.status !== 'ready'}
                 groupThreads={file.groupThreads.status === 'ready' ? file.groupThreads.rows : []}
                 groupThreadsTruncated={file.groupThreadsTruncated}
@@ -1068,6 +1076,7 @@ export function ContactDetail(): React.JSX.Element {
                 groupThreadsTruncated={file.groupThreadsTruncated}
                 media={media}
                 mediaLoading={mediaLoading}
+                mediaPaging={mediaPaging}
                 suggestions={suggestions.suggestions}
                 onAcceptSuggestion={onAcceptSuggestion}
                 onDismissSuggestion={onDismissSuggestion}

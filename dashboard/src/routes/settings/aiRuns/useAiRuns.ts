@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getAiRun,
   listAiRuns,
+  type AiRunContactDisplay,
   type AiRunDetailResponse,
   type AiRunListRow,
   type AiRunScope,
@@ -11,6 +12,7 @@ export type AiRunFetchStatus = 'loading' | 'ready' | 'error';
 
 export interface AiRunListState {
   rows: AiRunListRow[];
+  scopeContact: AiRunContactDisplay | undefined;
   status: AiRunFetchStatus;
   hasMore: boolean;
   loadingMore: boolean;
@@ -34,7 +36,7 @@ export interface AiRunState {
 export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: string }): AiRunListState {
   const { scope, from, to } = params;
   const [state, setState] = useState<Omit<AiRunListState, 'loadMore' | 'retry'>>({
-    rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false,
+    rows: [], scopeContact: undefined, status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false,
   });
   const abortRef = useRef<AbortController | null>(null);
   const nextBeforeRef = useRef<string | undefined>(undefined);
@@ -48,19 +50,19 @@ export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: st
       if (controller.signal.aborted) return;
       nextBeforeRef.current = page.nextBefore;
       setState({
-        rows: page.runs, status: 'ready', hasMore: page.nextBefore !== undefined, loadingMore: false, loadMoreFailed: false,
+        rows: page.runs, scopeContact: page.scopeContact, status: 'ready', hasMore: page.nextBefore !== undefined, loadingMore: false, loadMoreFailed: false,
       });
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
       nextBeforeRef.current = undefined;
-      setState({ rows: [], status: 'error', hasMore: false, loadingMore: false, loadMoreFailed: false });
+      setState({ rows: [], scopeContact: undefined, status: 'error', hasMore: false, loadingMore: false, loadMoreFailed: false });
     }
   }, [from, scope, to]);
 
   useEffect(() => {
     nextBeforeRef.current = undefined;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
+    setState({ rows: [], scopeContact: undefined, status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
     void loadFirst();
     return () => abortRef.current?.abort();
   }, [loadFirst]);
@@ -91,7 +93,7 @@ export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: st
   }, [from, scope, state.loadingMore, state.status, to]);
 
   const retry = useCallback(() => {
-    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
+    setState({ rows: [], scopeContact: undefined, status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
     void loadFirst();
   }, [loadFirst]);
 

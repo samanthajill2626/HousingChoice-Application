@@ -9,6 +9,11 @@ import {
   type AiRunRecord,
   type AiRunsRepo,
 } from '../repos/aiRunsRepo.js';
+import {
+  createContactsRepo,
+  type ContactDisplayItem,
+  type ContactsRepo,
+} from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
 import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
 import { capUtterances, toUtterances } from '../jobs/extraction.js';
@@ -18,6 +23,7 @@ export interface AiRunsRouterDeps {
   logger?: Logger;
   aiRunsRepo?: AiRunsRepo;
   messagesRepo?: Pick<MessagesRepo, 'getManyByTsMsgIds'>;
+  contactsRepo?: Pick<ContactsRepo, 'getDisplayById' | 'getDisplaysByIds'>;
 }
 
 const MAX_PAGE_SIZE = 100;
@@ -33,6 +39,20 @@ function decisionCounts(run: AiRunRecord): Record<string, number> {
     if (decision.verdict === 'pending') counts.pending += 1;
   }
   return counts;
+}
+
+interface AiRunContactDisplay {
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+}
+
+function contactDisplay(contact: ContactDisplayItem): AiRunContactDisplay {
+  return {
+    ...(typeof contact.firstName === 'string' && contact.firstName.trim() !== '' && { firstName: contact.firstName }),
+    ...(typeof contact.lastName === 'string' && contact.lastName.trim() !== '' && { lastName: contact.lastName }),
+    ...(typeof contact.phone === 'string' && contact.phone !== '' && { phone: contact.phone }),
+  };
 }
 
 /**
@@ -112,6 +132,7 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const router = Router();
 
   router.use(requireRole('admin'));
@@ -157,6 +178,20 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
       ...(from !== undefined && { from }),
       ...(to !== undefined && { to }),
     });
+    const contactIds = new Set<string>();
+    for (const entry of page.entries) {
+      if (!entry.expired && entry.run.contactId !== undefined) contactIds.add(entry.run.contactId);
+    }
+    const scopeContactId = scope.startsWith('contacts#') ? scope.slice('contacts#'.length) : undefined;
+    if (scopeContactId !== undefined) contactIds.add(scopeContactId);
+    let contactsById = new Map<string, ContactDisplayItem>();
+    if (contactIds.size > 0) {
+      try {
+        contactsById = await contacts.getDisplaysByIds([...contactIds]);
+      } catch (err) {
+        log.warn({ count: contactIds.size, err }, 'ai run log contact display batch failed');
+      }
+    }
     const runs = page.entries.map((entry) =>
       entry.expired
         ? { runId: entry.runId, sortKey: entry.sortKey, expired: true as const }
@@ -168,6 +203,9 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
             durationMs: entry.run.durationMs,
             conversationId: entry.run.conversationId,
             ...(entry.run.contactId !== undefined && { contactId: entry.run.contactId }),
+            ...(entry.run.contactId !== undefined && contactsById.has(entry.run.contactId) && {
+              contact: contactDisplay(contactsById.get(entry.run.contactId)!),
+            }),
             trigger: entry.run.trigger,
             outcome: entry.run.outcome,
             ...(entry.run.skipReason !== undefined && { skipReason: entry.run.skipReason }),
@@ -179,7 +217,12 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
           },
     );
     log.debug({ scope, count: runs.length }, 'ai run log listed');
-    res.json({ runs, ...(page.nextBefore !== undefined && { nextBefore: page.nextBefore }) });
+    const scopeContact = scopeContactId === undefined ? undefined : contactsById.get(scopeContactId);
+    res.json({
+      runs,
+      ...(scopeContact !== undefined && { scopeContact: contactDisplay(scopeContact) }),
+      ...(page.nextBefore !== undefined && { nextBefore: page.nextBefore }),
+    });
   });
 
   router.get('/:runId', async (req, res) => {
@@ -188,6 +231,15 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
     if (run === undefined) {
       res.status(404).json({ error: 'run_not_found' });
       return;
+    }
+    let contact: AiRunContactDisplay | undefined;
+    if (run.contactId !== undefined) {
+      try {
+        const storedContact = await contacts.getDisplayById(run.contactId);
+        if (storedContact !== undefined) contact = contactDisplay(storedContact);
+      } catch (err) {
+        log.warn({ runId, err }, 'ai run log contact display read failed');
+      }
     }
     const stored = run.window?.messages ?? [];
     let byId = new Map<string, MessageItem>();
@@ -217,7 +269,7 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
         ...(hashStatus !== undefined && { hashStatus }),
       };
     });
-    res.json({ run, window: { messages: rehydrated } });
+    res.json({ run, ...(contact !== undefined && { contact }), window: { messages: rehydrated } });
   });
 
   return router;

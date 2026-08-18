@@ -29,6 +29,15 @@ function uniquePhone(): string {
   return `+1555${`${Date.now()}`.slice(-5)}${String(sequence).padStart(2, "0")}`;
 }
 
+function formatPhoneDisplay(e164: string): string {
+  const digits = e164.replace(/\D/g, "");
+  const local = digits.length === 11 && digits.startsWith("1")
+    ? digits.slice(1)
+    : digits;
+  if (local.length !== 10) return e164;
+  return `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`;
+}
+
 async function createContact(
   request: APIRequestContext,
   input: { firstName: string; type: "tenant" | "unknown" },
@@ -185,6 +194,15 @@ async function openRunFor(
   contactId: string,
   outcome: RegExp,
 ): Promise<void> {
+  const contactResponse = await page.request.get(`${NEXT}/api/contacts/${contactId}`);
+  expect(contactResponse.ok(), "load contact display identity").toBeTruthy();
+  const contact = (await contactResponse.json()).contact as {
+    firstName?: string;
+    lastName?: string;
+    phone?: string;
+  };
+  const name = [contact.firstName?.trim(), contact.lastName?.trim()].filter(Boolean).join(" ");
+  const displayEvidence = name || (contact.phone ? formatPhoneDisplay(contact.phone) : contactId);
   await page.goto(
     `${NEXT}/settings/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`,
   );
@@ -194,10 +212,13 @@ async function openRunFor(
   const row = page.getByRole("list", { name: "AI runs" }).getByRole("button");
   await expect(row).toHaveCount(1);
   await expect(row).toContainText(outcome);
+  await expect(row).toContainText(displayEvidence);
+  if (displayEvidence !== contactId) await expect(row).not.toContainText(contactId);
   await row.click();
-  await expect(
-    page.getByRole("region", { name: "AI run detail" }),
-  ).toBeVisible();
+  const detail = page.getByRole("region", { name: "AI run detail" });
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText(displayEvidence);
+  if (displayEvidence !== contactId) await expect(detail).not.toContainText(contactId);
 }
 
 function decisionRow(page: Page, target: string) {

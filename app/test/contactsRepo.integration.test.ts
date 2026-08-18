@@ -87,6 +87,31 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect(owner?.contactId).toBe(created.contactId);
   });
 
+  it('display reads return only label fields and omit missing ids', async () => {
+    const first = await contacts.create({
+      type: 'tenant',
+      firstName: 'Ada',
+      email: 'ada.display-projection@example.com',
+    });
+    const second = await contacts.create({ type: 'tenant', firstName: 'Grace' });
+
+    expect(await contacts.getDisplayById(first.contactId)).toEqual({
+      contactId: first.contactId,
+      firstName: 'Ada',
+    });
+
+    const found = await contacts.getDisplaysByIds([
+      first.contactId,
+      'contact-missing',
+      first.contactId,
+      second.contactId,
+    ]);
+
+    expect([...found.keys()].sort()).toEqual([first.contactId, second.contactId].sort());
+    expect(found.get(first.contactId)).toEqual({ contactId: first.contactId, firstName: 'Ada' });
+    expect(found.get(second.contactId)).toEqual({ contactId: second.contactId, firstName: 'Grace' });
+  });
+
   it('addPhone seeds phones[] from the scalar, attaches a second number via a pointer, and findByPhone resolves the owner', async () => {
     const A = nextPhone();
     const B = nextPhone();

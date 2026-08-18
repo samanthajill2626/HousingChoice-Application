@@ -1,6 +1,7 @@
-import type { AiRunListRow, AiRunScope } from '../../../api/index.js';
+import type { AiRunContactDisplay, AiRunListRow, AiRunScope } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
 import { humanizeEnum } from './AiRunDetail.js';
+import { aiRunContactLabel } from './contactLabel.js';
 import styles from './AiRunsSection.module.css';
 
 const SCOPES: Array<{ value: AiRunScope; label: string }> = [
@@ -11,24 +12,29 @@ const SCOPES: Array<{ value: AiRunScope; label: string }> = [
   { value: 'outcome#failed', label: 'Failed' },
 ];
 
-function scopedOption(scope: AiRunScope): { value: AiRunScope; label: string } | undefined {
-  if (scope.startsWith('contacts#')) return { value: scope, label: `Contact: ${scope.slice('contacts#'.length)}` };
+function scopedOption(scope: AiRunScope, contact: AiRunContactDisplay | undefined): { value: AiRunScope; label: string } | undefined {
+  if (scope.startsWith('contacts#')) {
+    const contactId = scope.slice('contacts#'.length);
+    return { value: scope, label: `Contact: ${aiRunContactLabel(contact, contactId)}` };
+  }
   if (scope.startsWith('conversations#')) return { value: scope, label: `Conversation: ${scope.slice('conversations#'.length)}` };
   return undefined;
 }
 
 export function AiRunList({
-  rows, status, scope, from, to, onScopeChange, onFromChange, onToChange, onOpen, hasMore, loadingMore, loadMoreFailed, onLoadMore, onRetry,
+  rows, status, scope, scopeContact, from, to, onScopeChange, onFromChange, onToChange, onOpen, hasMore, loadingMore, loadMoreFailed, onLoadMore, onRetry,
 }: {
   rows: AiRunListRow[]; status: 'loading' | 'ready' | 'error'; scope: AiRunScope;
+  scopeContact: AiRunContactDisplay | undefined;
   from: string; to: string; onScopeChange: (scope: AiRunScope) => void; onFromChange: (value: string) => void; onToChange: (value: string) => void; onOpen: (runId: string) => void;
   hasMore: boolean; loadingMore: boolean; loadMoreFailed: boolean; onLoadMore: () => void; onRetry: () => void;
 }): React.JSX.Element {
+  const scoped = scopedOption(scope, scopeContact);
   return <section className={styles.listPane} aria-label="AI run list">
     <fieldset className={styles.scope}>
       <legend>Scope</legend>
       <div role="radiogroup" aria-label="AI run scope" className={styles.scopeOptions}>
-        {[...SCOPES, ...(scopedOption(scope) ? [scopedOption(scope)!] : [])].map((option) => <label key={option.value} className={styles.radioLabel}>
+        {[...SCOPES, ...(scoped ? [scoped] : [])].map((option) => <label key={option.value} className={styles.radioLabel}>
           <input type="radio" name="ai-run-scope" value={option.value} checked={scope === option.value} onChange={() => onScopeChange(option.value)} />
           {option.label}
         </label>)}
@@ -53,7 +59,7 @@ export function AiRunList({
             <span className={styles.runTime}>{new Date(row.startedAt).toLocaleString()}</span>
             <span className={styles.outcome}>{humanizeEnum(row.outcome)}</span>
             <span>{row.trigger} via {row.driver}</span>
-            <span>{row.contactId ?? row.conversationId}</span>
+            <span>{aiRunContactLabel(row.contact, row.contactId ?? row.conversationId)}</span>
             {/* NOT a total of `decisionCounts`: `pending` is a VERDICT cross-tab
                 over the same targets the five outcome buckets already partition
                 (app/src/routes/aiRuns.ts:27-36), so summing them double-counts

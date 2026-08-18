@@ -717,6 +717,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       messagesRepo: messages,
       aiRunsRepo: aiRuns,
+      contactsRepo: contacts,
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation

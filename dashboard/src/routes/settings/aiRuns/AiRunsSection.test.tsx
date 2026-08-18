@@ -17,20 +17,20 @@ const flags: SystemFlags = {
   env: 'local', smsSendingEnabled: true, relayLiveProvisioning: true, pushConfigured: true, messagingDriver: 'mock',
   aiExtractionEnabled: true, aiExtractionDriver: 'fake', aiExtractionModel: 'fake-v1', aiExtractionPromptFingerprint: '123456789abc',
 };
-const row: AiRunListRow = { runId: 'run-1', sortKey: 's1', expired: false, startedAt: '2026-08-07T10:00:00.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', trigger: 'sms', outcome: 'applied', driver: 'fake', decisionCounts: { wrote: 1 }, notedLines: 0 };
+const row: AiRunListRow = { runId: 'run-1', sortKey: 's1', expired: false, startedAt: '2026-08-07T10:00:00.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', contact: { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' }, trigger: 'sms', outcome: 'applied', driver: 'fake', decisionCounts: { wrote: 1 }, notedLines: 0 };
 // Deliberately ALPHABETICAL, which is the order the decisions map comes back in:
 // it round-trips through an unordered DynamoDB map attribute, so the writer's
 // DECISION_TARGETS order is gone by the time the dashboard sees it. Building the
 // fixture in display order would make the ordering test unable to fail.
 const decisions: Record<string, AiRunDecision> = Object.fromEntries(['address','evictions','firstName','housingAuthority','lastName','pets','phone','porting','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
-const detail: AiRunDetailResponse = { run: { runId: 'run-1', startedAt: '2026-08-07T10:00:00.000Z', finishedAt: '2026-08-07T10:00:01.000Z', durationMs: 4, conversationId: 'c1', trigger: 'sms', outcome: 'applied', driver: 'fake', model: 'fake-v1', promptFingerprint: 'abcdef123456', usage: { inputTokens: 12, outputTokens: 4 }, decisions, notedLines: 0, window: { detail: 'full', cursor: 'x', windowCappedAtLimit: false, messages: [], excluded: [{ tsMsgId: 'old', cause: 'age_30d' }, { tsMsgId: 'budget', cause: 'char_budget' }], noContent: ['empty-call'] } }, window: { messages: [{ tsMsgId: 'm1', type: 'sms', direction: 'inbound', tier: 'new', truncated: true, chars: 12, hash: 'abc', hashStatus: 'mismatch', available: true, text: 'hello' }] } };
+const detail: AiRunDetailResponse = { run: { runId: 'run-1', startedAt: '2026-08-07T10:00:00.000Z', finishedAt: '2026-08-07T10:00:01.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', trigger: 'sms', outcome: 'applied', driver: 'fake', model: 'fake-v1', promptFingerprint: 'abcdef123456', usage: { inputTokens: 12, outputTokens: 4 }, decisions, notedLines: 0, window: { detail: 'full', cursor: 'x', windowCappedAtLimit: false, messages: [], excluded: [{ tsMsgId: 'old', cause: 'age_30d' }, { tsMsgId: 'budget', cause: 'char_budget' }], noContent: ['empty-call'] } }, contact: { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' }, window: { messages: [{ tsMsgId: 'm1', type: 'sms', direction: 'inbound', tier: 'new', truncated: true, chars: 12, hash: 'abc', hashStatus: 'mismatch', available: true, text: 'hello' }] } };
 
 function Location(): React.JSX.Element { return <output data-testid="location">{useLocation().search}</output>; }
 function renderSection(path = '/settings/ai-runs'): void { render(<MemoryRouter initialEntries={[path]}><AiRunsSection /><Location /></MemoryRouter>); }
 
 beforeEach(() => {
   useSystemFlags.mockReturnValue({ status: 'ready', flags, retry: vi.fn() });
-  useAiRunList.mockReturnValue({ rows: [row], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+  useAiRunList.mockReturnValue({ rows: [row], scopeContact: row.contact, status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
   useAiRun.mockReturnValue({ detail, status: 'ready', retry: vi.fn() });
 });
 
@@ -39,15 +39,28 @@ describe('AiRunsSection', () => {
   // is honoured by Testing Library and Playwright but DROPPED by assistive tech,
   // so a label-text assertion here proves something a screen reader never hears.
   it('renders the config strip so an empty log is never misread', () => { renderSection(); const strip = within(screen.getByRole('list', { name: 'Extraction configuration' })); expect(strip.getByRole('listitem', { name: 'Extraction driver: fake' })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^Extraction model: / })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^Prompt fingerprint: [0-9a-f]{12}$/ })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^AI extraction: (on|off)$/ })).toBeInTheDocument(); });
-  it('names a run row by what the run DID, never by a bare id', () => {
+  it('names a run row with the contact name instead of its bare id', () => {
     renderSection();
     const row = within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button');
     // The runId is not rendered anywhere a sighted operator can see it, so an
     // `aria-label` of it hides the whole row from assistive tech.
     expect(row).toHaveAccessibleName(/applied/i);
     expect(row).toHaveAccessibleName(/sms via fake/i);
-    expect(row).toHaveAccessibleName(/contact-1/);
+    expect(row).toHaveAccessibleName(/Ada Lovelace/);
+    expect(row).not.toHaveAccessibleName(/contact-1/);
     expect(row.getAttribute('aria-label')).not.toBe('Run run-1');
+  });
+  it('falls back to a formatted phone when the contact has no name', () => {
+    useAiRunList.mockReturnValueOnce({ rows: [{ ...row, contact: { phone: '+14040100007' } }], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+    renderSection();
+    const run = within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button');
+    expect(run).toHaveAccessibleName(/\(404\) 010-0007/);
+    expect(run).not.toHaveAccessibleName(/contact-1/);
+  });
+  it('keeps the raw contact id as the last-resort fallback', () => {
+    useAiRunList.mockReturnValueOnce({ rows: [{ ...row, contact: undefined }], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+    renderSection();
+    expect(within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button')).toHaveAccessibleName(/contact-1/);
   });
   it('lists runs newest-first and opens one into the detail pane', async () => { renderSection(); await userEvent.click(within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button')); expect(screen.getByTestId('location')).toHaveTextContent('run=run-1'); expect(screen.getByRole('heading', { name: /run run-1/i })).toBeInTheDocument(); });
   it('offers scope as a SINGLE choice, never a checkbox matrix', () => { renderSection(); expect(screen.queryAllByRole('checkbox')).toHaveLength(0); expect(screen.getByRole('radiogroup', { name: /scope/i })).toBeInTheDocument(); });
@@ -62,8 +75,13 @@ describe('AiRunsSection', () => {
   });
   it('keeps a deep-linked contact scope as the selected single radio option', () => {
     renderSection('/settings/ai-runs?scope=contacts%23contact-1');
-    expect(screen.getByRole('radio', { name: 'Contact: contact-1' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Contact: Ada Lovelace' })).toBeChecked();
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  });
+  it('names an empty contact scope from its separately resolved contact', () => {
+    useAiRunList.mockReturnValueOnce({ rows: [], scopeContact: { firstName: 'Empty', lastName: 'Scope', phone: '+14040100009' }, status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+    renderSection('/settings/ai-runs?scope=contacts%23contact-empty');
+    expect(screen.getByRole('radio', { name: 'Contact: Empty Scope' })).toBeChecked();
   });
   it('shows the window with excluded causes and the no-content list', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toBeInTheDocument(); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('age_30d'); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('char_budget'); expect(screen.getByRole('region', { name: 'No content' })).toHaveTextContent('empty-call'); });
   it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
@@ -80,6 +98,12 @@ describe('AiRunsSection', () => {
     const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
     // Computed the same way the pane renders it, so the assertion is host-timezone-safe.
     expect(header).toHaveTextContent(new Date('2026-08-07T10:00:00.000Z').toLocaleString());
+  });
+  it('shows the contact name in the detail header instead of its bare id', () => {
+    renderSection();
+    const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
+    expect(header).toHaveTextContent('Ada Lovelace');
+    expect(header).not.toHaveTextContent('contact-1');
   });
   it('counts what an operator scanning the log cares about, not a pending cross-tab', () => {
     // `pending` is a VERDICT cross-tab over the same twelve targets the five

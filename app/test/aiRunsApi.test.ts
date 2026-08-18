@@ -93,7 +93,7 @@ function makeWorld(options: {
   );
   vi.spyOn(world.messagesRepo, 'getManyByTsMsgIds').mockImplementation(messages);
   const { app } = makeWebhookHarness({ world });
-  return { app, repo, messages };
+  return { app, repo, messages, world };
 }
 
 describe('GET /api/ai-runs', () => {
@@ -271,6 +271,74 @@ describe('GET /api/ai-runs', () => {
     });
   });
 
+  it('adds the current contact display fields to every matching run in one de-duplicated batch', async () => {
+    const { app, world } = makeWorld({
+      runs: [
+        fullRun({ runId: 'run-1' }),
+        fullRun({ runId: 'run-2', itemId: 'run#run-2' }),
+      ],
+    });
+    world.contacts.push({
+      contactId: 'contact-1',
+      type: 'tenant',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      phone: '+14040100007',
+      phones: [
+        { phone: '+14040100008', primary: false },
+        { phone: '+14040100007', primary: true },
+      ],
+    });
+    const getDisplaysByIds = vi.fn(async (contactIds: string[]) =>
+      new Map(contactIds.flatMap((contactId) => {
+        const contact = world.contacts.find((candidate) => candidate.contactId === contactId);
+        return contact === undefined ? [] : [[contactId, contact] as const];
+      })),
+    );
+    Object.assign(world.contactsRepo, { getDisplaysByIds });
+
+    const res = await admin(app, '/api/ai-runs').expect(200);
+
+    expect(getDisplaysByIds).toHaveBeenCalledOnce();
+    expect(getDisplaysByIds).toHaveBeenCalledWith(['contact-1']);
+    expect(res.body.runs.map((run: Record<string, unknown>) => run['contact'])).toEqual([
+      { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' },
+      { firstName: 'Ada', lastName: 'Lovelace', phone: '+14040100007' },
+    ]);
+  });
+
+  it('resolves a contact scope label even when that scope has no runs', async () => {
+    const { app, world } = makeWorld({ runs: [] });
+    world.contacts.push({
+      contactId: 'contact-empty',
+      type: 'tenant',
+      phone: '+14040100009',
+    });
+    Object.assign(world.contactsRepo, {
+      getDisplaysByIds: async (contactIds: string[]) => new Map(contactIds.flatMap((contactId) => {
+        const contact = world.contacts.find((candidate) => candidate.contactId === contactId);
+        return contact === undefined ? [] : [[contactId, contact] as const];
+      })),
+    });
+
+    const res = await admin(app, '/api/ai-runs?scope=contacts%23contact-empty').expect(200);
+
+    expect(res.body.runs).toEqual([]);
+    expect(res.body.scopeContact).toEqual({ phone: '+14040100009' });
+  });
+
+  it('keeps the run list usable when contact display enrichment fails', async () => {
+    const { app, world } = makeWorld();
+    Object.assign(world.contactsRepo, {
+      getDisplaysByIds: async () => { throw new Error('contacts unavailable'); },
+    });
+
+    const res = await admin(app, '/api/ai-runs').expect(200);
+
+    expect(res.body.runs[0]).toMatchObject({ contactId: 'contact-1' });
+    expect(res.body.runs[0].contact).toBeUndefined();
+  });
+
   it('renders a TTLd pointer as an expired row rather than erroring', async () => {
     const { app } = makeWorld({ expiredRunIds: ['run-1'] });
     const res = await admin(app, '/api/ai-runs').expect(200);
@@ -289,18 +357,40 @@ describe('GET /api/ai-runs/:runId', () => {
     await admin(app, '/api/ai-runs/nope').expect(404);
   });
 
-  it('returns exactly the two-key envelope and does not mutate the stored run', async () => {
-    const { app } = makeWorld({
+  it('returns contact display fields alongside the run without mutating the stored record', async () => {
+    const { app, world } = makeWorld({
       runs: [fullRun({ rawText: '{"fields":{}}', windowMessages: [{ tsMsgId: 'a#1' }] })],
       storedMessages: { 'a#1': { type: 'sms', body: 'the real message' } },
     });
+    world.contacts.push({
+      contactId: 'contact-1',
+      type: 'tenant',
+      firstName: 'Grace',
+      lastName: 'Hopper',
+      phone: '+14040100010',
+    });
     const res = await admin(app, '/api/ai-runs/run-1').expect(200);
-    expect(Object.keys(res.body).sort()).toEqual(['run', 'window']);
+    expect(Object.keys(res.body).sort()).toEqual(['contact', 'run', 'window']);
+    expect(res.body.contact).toEqual({
+      firstName: 'Grace',
+      lastName: 'Hopper',
+      phone: '+14040100010',
+    });
     expect(Object.keys(res.body.window)).toEqual(['messages']);
     expect(res.body.run.window.messages[0].text).toBeUndefined();
     expect(res.body.run.window.messages[0].available).toBeUndefined();
     expect(res.body.window.messages[0]).toMatchObject({ tsMsgId: 'a#1', available: true, text: 'the real message' });
     expect(res.body.window.messages[0].hash).toBe(res.body.run.window.messages[0].hash);
+  });
+
+  it('keeps run detail usable when its contact display read fails', async () => {
+    const { app, world } = makeWorld();
+    vi.spyOn(world.contactsRepo, 'getDisplayById').mockRejectedValueOnce(new Error('contacts unavailable'));
+
+    const res = await admin(app, '/api/ai-runs/run-1').expect(200);
+
+    expect(res.body.run.runId).toBe('run-1');
+    expect(res.body.contact).toBeUndefined();
   });
 
   it('returns the complete record including raw text and decision values to an admin', async () => {

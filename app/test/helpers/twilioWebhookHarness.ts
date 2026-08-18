@@ -1482,6 +1482,17 @@ export function createFakeWorld(): FakeWorld {
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
     },
+    async getDisplayById(contactId) {
+      return contacts.find((c) => c.contactId === contactId);
+    },
+    async getDisplaysByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts
+          .filter((contact) => wanted.has(contact.contactId))
+          .map((contact) => [contact.contactId, contact] as const),
+      );
+    },
     async listByType(type, opts = {}) {
       const partition = contacts
         // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.

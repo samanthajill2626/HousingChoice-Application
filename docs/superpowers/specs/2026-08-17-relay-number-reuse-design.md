@@ -3,8 +3,8 @@
 Date: 2026-08-17
 Branch: `feat/relay-number-reuse` (worktree `W:\tmp\relay-number-reuse`, cut from
 `main` @263cc789)
-Revision: r3, after three rounds of adversarial review (two independent reviewers in
-round 1, one continued reviewer in rounds 2 and 3). Adjudications at
+Revision: r4, after four rounds of adversarial review (two independent reviewers in
+round 1, one continued reviewer in rounds 2, 3 and 4). Adjudications at
 `.superpowers/design-review/adjudications.md`.
 
 ## 1. What this changes, in one paragraph
@@ -215,15 +215,14 @@ explicitly against it for roster identity - "ALWAYS `phone#<E164>`, NEVER
 single slot" - and `rosterEdits.ts:144` and `rosterResolution.ts:326` repeat it. It
 would have refused a legitimate "add Alice's second handset" group as a duplicate.
 
-**D4 - Tier-0 eligibility is per-phone and set-based, with no notion of "newest".**
-Tier 0 requires a roster of AT LEAST TWO phones - it is a rule about a pair keeping
-their number, and `POST /api/relay-groups` accepts a one-member roster
-(`relayGroups.ts:239-242` floors at non-empty, not at two). A single-phone roster
-would make the burn-superset filter (D2) match every number that person was ever on,
-turning a bounded candidate set into an unbounded one. Below two phones tier 0 is
-skipped and today's ladder runs.
+**D4 - Tier-0 ELIGIBILITY is per-phone and set-based; SELECTION among eligible
+numbers is by most-recent use.** Tier 0 requires a roster of AT LEAST TWO phones - it
+is a rule about a pair keeping their number, and `POST /api/relay-groups` accepts a
+one-member roster (`relayGroups.ts:252-256` floors at non-empty, not at two). A
+single-phone roster would make the burn-superset filter (D2) match every number that
+person was ever on.
 
-Against ONE `getAllByPoolNumber(N)` snapshot:
+Eligibility, against ONE `getAllByPoolNumber(N)` snapshot per candidate:
 
 - (i) NO group on N with `status !== 'closed'` may have a `memberPhoneSet`
   OVERLAPPING the new roster; AND (in practice that means OPEN groups plus any group
@@ -236,6 +235,29 @@ Against ONE `getAllByPoolNumber(N)` snapshot:
 
 (i) is the safety condition - it is what keeps 2.2's invariant. (ii) is Cameron's
 product rule: this number is demonstrably this pair's.
+
+SELECTION. A pair can have MORE THAN ONE eligible number, and on existing data they
+usually will - that is precisely the bug being fixed, since today every new group for
+a pair is forced onto a fresh number, and every one of those numbers now carries both
+phones in its permanent burn. So the candidate set is not "zero or one": it is one
+per group the pair has ever had. Tier 0 therefore evaluates EVERY candidate and picks
+deterministically:
+
+> the eligible number whose newest qualifying CLOSED group - the one matching (ii) -
+> has the latest `created_at`; ties broken by ascending `poolNumber` string.
+
+That is "the number their last group used", which is the promise in section 1. An
+earlier revision short-circuited on the first eligible candidate in `listActive()`
+order, which a reviewer showed is arbitrary GSI order - so "a pair keeps their
+number" would have been nondeterministic, handing back a different one of their old
+numbers per call. Note this ordering is about WHICH NUMBER to pick among several that
+are already eligible; it is not a revival of the deleted rule about which GROUP on a
+number must match, which is what broke under multiplexing.
+
+COST, stated honestly: K bounded partition Queries per relay open, where K is the
+number of numbers this exact phone set has previously shared - normally 0, and equal
+to the pair's group count when they are a repeat pair. Candidate DISCOVERY is still
+free (D2).
 
 An earlier revision instead required the NEWEST closed group on N to match. That was
 deleted for two reasons a reviewer proved. It defeated the feature: tier 1's
@@ -285,32 +307,47 @@ exclusions, both reviewer-found:
   re-create escape hatch blocked. The override is that case's recovery, so the 409
   copy names the connecting group and says so.
 
-**D10 - `reuseClaim` RESTARTS the retirement clock, and `beginRelease` becomes a
-compare-and-swap.** The sweep's re-verify keys on OPEN groups
+**D10 - `reuseClaim` stamps a NEW `last_reused_at`, and `beginRelease` becomes a
+compare-and-swap on it.** The sweep's re-verify keys on OPEN groups
 (`poolNumbers.ts:397-401`) and tier 0's group does not exist yet when the claim
 returns, so a concurrent sweep could release a number tier 0 just took - and tier 0
 targets precisely the long-closed numbers that are release-eligible. Two changes:
 
-- `reuseClaim` SETs `last_group_closed_at` to NOW in the same conditional write. The
-  number gets a fresh 180-day grace, so the sweep will not consider it. An earlier
-  revision REMOVEd the attribute instead; a reviewer showed that strands the number
-  permanently un-retirable if `reuseClaim` succeeds and `createRelayGroup` then
-  fails, because nothing re-stamps a clock that no longer exists. Advancing has no
-  such failure mode - a number whose create failed simply becomes retirable again
-  after the normal grace.
-- `repo.beginRelease` gains an `expectedClosedAt` argument and conditions on
-  `last_group_closed_at = :expected`. `retireEligible` already read that value from
-  its `listActive()` snapshot (`poolNumbers.ts:362-378`), so this costs nothing and
-  closes the remaining hole the reviewer identified: without it the sweep decides
-  eligibility from a PRE-claim snapshot, so advancing the stamp afterwards does not
-  stop it.
+- `reuseClaim` SETs a new optional scalar `last_reused_at = now` in the same
+  conditional write.
+- `repo.beginRelease` gains an OPTIONAL `expectedReusedAt?: string` argument. When
+  given it adds `AND (attribute_not_exists(last_reused_at) OR last_reused_at =
+  :expectedReused)` to its existing condition; when omitted its condition is
+  byte-identical to today's. `retireEligible` passes the value from the
+  `listActive()` snapshot it already holds, so the CAS costs no extra read. The
+  parameter is optional specifically so the four existing `PoolNumbersRepo` test
+  doubles and every other `beginRelease` call site keep typechecking untouched - a
+  function taking fewer parameters remains assignable.
 
-Semantics check: `last_group_closed_at` has exactly two readers - `retireEligible`
-(`poolNumbers.ts:364`) and the admin retire mirror (`poolNumbersAdmin.ts:167, :249`).
-It is the retirement clock and nothing else, so restarting it when a number returns
-to service is correct, and the admin countdown resetting is the right display.
-`noteGroupClosed` is a monotonic max (`poolNumbersRepo.ts:557-599`), so a later close
-still advances it normally.
+That is sufficient. If `reuseClaim` lands AFTER the sweep's snapshot, the CAS fails
+and the release is skipped. If it lands BEFORE, the CAS passes but the group now
+exists and the sweep's own open-group re-verify aborts the release. If the create
+then failed, releasing the number is the correct outcome anyway.
+
+**Two earlier attempts at this were wrong and are recorded so they are not retried.**
+REMOVING `last_group_closed_at` stranded a number permanently un-retirable whenever
+`reuseClaim` succeeded and `createRelayGroup` then failed, because nothing re-stamps
+a clock that no longer exists. ADVANCING it instead avoided the strand but wrote a
+close timestamp at the moment a group was being OPENED: I claimed the attribute had
+"exactly two readers", and a reviewer proved that false - `poolNumbersAdmin.ts:250`
+serializes it as `lastGroupClosedAt` and the admin page renders it under a column
+headed "Last closed" (`NumbersSection.tsx:300-303, :336`), which my `dashboard/src`
+grep missed because the UI uses the camelCase name. With retirement dormant, that
+misleading display would have been the write's ONLY live effect. It also falsified
+the attribute's own documented contract, "Monotonic max of group-close times"
+(`poolNumbersRepo.ts:112-113`). A separate `last_reused_at` leaves both the contract
+and the column honest, and is a plain scalar with no lifecycle - not the `open_phones`
+set D11 rejects.
+
+Scope note: `relayNumberReleaseEnabled` is `RELAY_NUMBER_RELEASE_ENABLED === 'true'`
+(`config.ts:719`) and that variable is COMMENTED OUT in `.env.example:204`, so the
+entire retirement path is dormant in every environment today. D10 is correctness for
+when it is switched on, not a live defect.
 
 Scope note: `relayNumberReleaseEnabled` is `RELAY_NUMBER_RELEASE_ENABLED === 'true'`
 (`config.ts:719`) and that variable is COMMENTED OUT in `.env.example:204`, so the
@@ -364,11 +401,16 @@ export function findLiveMemberConflict(
   selfConversationId?: string,
 ): ConversationItem | undefined
 
-/** Tier 0 (D4)(ii): some CLOSED group on the number owned exactly this phone set. */
-export function hasClosedGroupWithExactPhones(
+/**
+ * Tier 0 (D4)(ii) AND its selection key: the `created_at` of the NEWEST CLOSED group
+ * on this number whose memberPhoneSet equals `roster` exactly, or undefined when
+ * none does. Returning the timestamp rather than a boolean is what lets tier 0 rank
+ * several eligible numbers deterministically (D4 SELECTION).
+ */
+export function newestClosedGroupWithExactPhones(
   groups: ConversationItem[],
   roster: Set<string>,
-): boolean
+): string | undefined
 ```
 
 Part B's scan is a thin async helper in the same module:
@@ -399,6 +441,10 @@ const roster = new Set(rosterPhones);
 // would match every number that person was ever on.
 // Candidates cost ZERO extra reads (D2): `actives` is already fetched and already
 // filtered to the current driver, so source isolation is preserved unchanged.
+// PASS 1 - collect EVERY eligible candidate (never short-circuit: a repeat pair
+// commonly has several old numbers, and picking the first in listActive() order
+// would be arbitrary GSI order, D4 SELECTION).
+const eligible: { rec: PoolNumberItem; newestMatchCreatedAt: string }[] = [];
 for (const rec of roster.size >= 2 ? actives : []) {
   if (rec.pending_conversation_id !== undefined) continue;   // earmarked - hands off
   // burnHasAll is the superset test, written in the same Set-or-string[]-safe
@@ -410,8 +456,20 @@ for (const rec of roster.size >= 2 ? actives : []) {
   // ONE snapshot; both predicates are evaluated against it (never two reads).
   const groups = await conversations.getAllByPoolNumber(rec.poolNumber);
   if (findLiveMemberConflict(groups, roster) !== undefined) continue;   // D4(i)
-  if (!hasClosedGroupWithExactPhones(groups, roster)) continue;         // D4(ii)
+  // D4(ii) returns the newest matching CLOSED group's created_at, or undefined.
+  const newestMatchCreatedAt = newestClosedGroupWithExactPhones(groups, roster);
+  if (newestMatchCreatedAt === undefined) continue;
+  eligible.push({ rec, newestMatchCreatedAt });
+}
 
+// PASS 2 - deterministic pick: latest qualifying close first, then poolNumber
+// ascending as a total tie-break (D4 SELECTION).
+eligible.sort((a, b) =>
+  a.newestMatchCreatedAt === b.newestMatchCreatedAt
+    ? a.rec.poolNumber.localeCompare(b.rec.poolNumber)
+    : a.newestMatchCreatedAt < b.newestMatchCreatedAt ? 1 : -1,
+);
+for (const { rec } of eligible) {
   const claimed = await repo.reuseClaim(rec.poolNumber, rosterPhones, tag);
   if (claimed) {
     await refillBufferIfNeeded();
@@ -421,6 +479,7 @@ for (const rec of roster.size >= 2 ? actives : []) {
     );
     return { kind: 'assigned', poolNumber: claimed.poolNumber, record: claimed, provisioned: false };
   }
+  // A lost claim falls to the next-best eligible number, then to TIER 1.
 }
 // fall through to TIER 1, unchanged
 ```
@@ -428,7 +487,9 @@ for (const rec of roster.size >= 2 ? actives : []) {
 D4(i) uses `status !== 'closed'` rather than `status === 'open'` so a CONNECTING
 group and a `touchLastActivity`-re-flagged group (2.5) both veto. Cost: zero reads
 when no candidate matches (the overwhelmingly common case), one bounded partition
-Query per matching candidate - normally zero or one.
+Query per ELIGIBLE candidate, and every candidate is evaluated rather than
+short-circuited so the selection is deterministic (D4). A repeat pair has one
+candidate per group they have previously had; everyone else has none.
 
 ### 5.1 New repo primitive: `reuseClaim`
 
@@ -439,11 +500,13 @@ Query per matching candidate - normally zero or one.
  * The tier-0 SAME-PAIR claim. Unlike burnClaim, the phones are ALREADY burned here
  * - that is the precondition, not the obstacle - so the ADD is a no-op set union
  * and the CONDITION asserts the opposite of burnClaim's: the number is `active` AND
- * every phone is already in burned_phones. Also RESTARTS the retirement clock
- * (SET last_group_closed_at = now, D10) so a concurrent sweep does not release a
- * number just taken back into service. Returns the post-update item, or undefined
- * on condition failure (not active, or any phone not burned here) or an empty
- * roster.
+ * every phone is already in burned_phones. Also stamps last_reused_at (D10), the
+ * token beginRelease compare-and-swaps on so a concurrent retirement sweep cannot
+ * release a number just taken back into service. It does NOT touch
+ * last_group_closed_at - that attribute is a monotonic max of GROUP-CLOSE times and
+ * the admin page renders it as "Last closed". Returns the post-update item, or
+ * undefined on condition failure (not active, or any phone not burned here) or an
+ * empty roster.
  *
  * NOT a mutex: two concurrent identical reuseClaims can both succeed. Accepted by
  * design (spec D11) - both callers are creating groups with the SAME phone set, so
@@ -457,16 +520,20 @@ Mirrors `burnClaim`, condition inverted:
 
 ```
 UpdateExpression:
-  'SET last_group_closed_at = :now' + (tag !== undefined ? ', placement_tag = :tag' : '') +
+  'SET last_reused_at = :now' + (tag !== undefined ? ', placement_tag = :tag' : '') +
   ' ADD #bp :phones'
 ConditionExpression:
   'lifecycle_state = :active AND contains(#bp, :p0) AND contains(#bp, :p1) ...'
 ReturnValues: 'ALL_NEW'
 ```
 
-`repo.beginRelease` also gains a required `expectedClosedAt: string` argument and
-adds `AND last_group_closed_at = :expected` to its condition (D10). Its only caller
-is `retireEligible`, which already holds that value.
+`PoolNumberItem` gains `last_reused_at?: string` - a plain optional scalar, no key,
+no GSI, no migration (absent on every existing row, which the CAS reads as
+`attribute_not_exists`).
+
+`repo.beginRelease` gains an OPTIONAL `expectedReusedAt?: string` second argument
+(D10). Omitted, its condition is byte-identical to today's, so no existing call site
+or test double changes.
 
 Empty `phones` returns `undefined` without a write, mirroring `burnClaim`. The
 `lifecycle_state = :active` clause preserves the W2 retirement fence exactly as
@@ -627,15 +694,19 @@ not an observable dashboard behavior.
 
 ## 8. Residual risk, stated plainly
 
-**The guarantee this design actually makes.** Composing every accepted best-effort
-below: tier 0 and the reopen guard DETERMINISTICALLY prevent two open groups with
-DIFFERENT phone sets on one number along every SEQUENTIAL operator path through the
-API, including the roster-mutation evasions of 2.6. They do NOT prevent it under
-concurrency, under GSI staleness, or via `touchLastActivity`'s unguarded reopen. The
-irreducible worst case is two open groups on one number whose phone sets differ,
-reached only by racing or by the pre-existing re-flag bug; its consequence is that an
-inbound from a shared member fans out to one roster rather than the other, and it is
-logged at ERROR when it happens on an inbound.
+**The guarantee this design actually makes.** The bad state is two open groups on one
+number whose rosters OVERLAP - they share at least one phone, so an inbound from that
+person matches both. Two open groups with DISJOINT rosters on one number is not the
+bad state; it is multiplexing working as designed (2.3, D5).
+
+Composing every accepted best-effort below: tier 0 and the reopen guard
+DETERMINISTICALLY prevent two OVERLAPPING open groups on one number along every
+SEQUENTIAL operator path through the API, including the roster-mutation evasions of
+2.6. They do NOT prevent it under concurrency, under GSI staleness, or via
+`touchLastActivity`'s unguarded reopen. The irreducible worst case is reached only by
+racing or by that pre-existing re-flag bug; its consequence is that an inbound from
+the shared member fans out to one roster rather than the other, and it is logged at
+ERROR when it happens on an inbound.
 
 **Concurrent creates.** Two concurrent creates of the same roster can both pass Part
 B's read check and both pass tier 0's checks, producing two OPEN groups with
@@ -709,10 +780,12 @@ it. Left to `docs/issues/inbound-reflags-closed-relay-group.md` by Cameron's rul
 Unit (`app/test/`):
 
 - `poolNumbersRepo.test.ts` - `reuseClaim` succeeds when active and all phones
-  burned; ADVANCES `last_group_closed_at` to now (D10); returns undefined when not
-  active, when any phone is not burned, and on an empty roster; stamps
-  `placement_tag`. `beginRelease` refuses when `expectedClosedAt` no longer matches
-  (the D10 compare-and-swap) and still succeeds when it does.
+  burned; stamps `last_reused_at` and leaves `last_group_closed_at` UNTOUCHED (D10 -
+  pin this, the attribute is rendered as "Last closed" on the admin page); returns
+  undefined when not active, when any phone is not burned, and on an empty roster;
+  stamps `placement_tag`. `beginRelease` refuses when `expectedReusedAt` no longer
+  matches, succeeds when it does, and - called with NO second argument - behaves
+  exactly as today (the back-compatibility pin).
 - `poolNumbers.test.ts` - tier 0 reuses the pair's number; SKIPPED when a live group
   on it overlaps by provenance; SKIPPED when no closed group has the exact set;
   SKIPPED when the record is earmarked, not active, or another driver; NOT skipped
@@ -721,7 +794,10 @@ Unit (`app/test/`):
   the multiplexing case that made the old rule useless); a group whose `participants`
   were drained still vetoes via `ever_member_phones` (2.6); a
   `touchLastActivity`-re-flagged closed group (status open, relay_status closed)
-  vetoes (2.5); a ONE-phone roster skips tier 0 entirely (D4). Every existing
+  vetoes (2.5); a ONE-phone roster skips tier 0 entirely (D4). DETERMINISM: with
+  THREE eligible numbers for the same pair, tier 0 picks the one whose newest
+  qualifying closed group is newest, and picks the SAME one when the fake repo yields
+  `listActive()` in a different order (D4 selection - the r3 finding). Every existing
   tier-1/2/3 test must stay green untouched - that is the regression proof that D1
   held.
 - `relayGroupIdentity.test.ts` (new) - `memberPhoneSet` unions provenance and roster
@@ -729,10 +805,15 @@ Unit (`app/test/`):
   `rosterPhoneSet` ignores `ever_member_phones` entirely (D3 - the two comparators
   must be provably different, since a single shared one is the defect r2 found);
   `burnHasAll` is Set-or-array safe; `findLiveMemberConflict` excludes self and
-  ignores closed groups; `hasClosedGroupWithExactPhones` requires exact equality, not
-  superset; `findOpenGroupWithSamePhones` matches across OPEN and CONNECTING, SKIPS a
+  ignores closed groups; `newestClosedGroupWithExactPhones` requires exact equality
+  rather than superset, returns the NEWEST match when several qualify, and returns
+  undefined rather than a falsy timestamp when none does; `findOpenGroupWithSamePhones` matches across OPEN and CONNECTING, SKIPS a
   connecting row carrying `imported_from` (D9), and reports `inconclusive` on
-  truncation.
+  truncation. The `imported_from` skip has a ready fixture: the LEAN seed's only
+  connecting row carries it (`lib/seed/lean.ts:262`). It also has no false-negative
+  risk from later conversion - `convertRelayGroupToGroupText` REMOVEs `relay_status`
+  (`conversationsRepo.ts:2348-2352`), so a converted row leaves the partition
+  entirely rather than lingering as a skipped match.
 - `relayProvisioning.test.ts` - throws for an unowned duplicate; does NOT throw for a
   tour- or placement-owned create with the same roster (D6); with
   `acknowledgeDuplicate` the scan STILL runs and the audit records

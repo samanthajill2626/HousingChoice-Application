@@ -357,6 +357,62 @@ function toRecipient(member: { name?: string; reachability: RosterReachability }
   };
 }
 
+/** One member as the INTRO BODY composer sees them: phone-bearing and
+ *  phone-de-duplicated, carrying the name the send path will actually use. */
+export interface PreviewBodyMember {
+  name?: string;
+  memberKey: string;
+}
+
+/** One row the confirm dialog lists, with the DISPLAY name (which may be
+ *  backfilled from the contact and so differ from the body name). */
+export interface PreviewRecipientRow {
+  name?: string;
+  memberKey: string;
+  reachability: RosterReachability;
+}
+
+/**
+ * The two lists a caller resolves; see spec 6.1. They are separate because the
+ * owner path composes the body from `resolveRoster` (stored names) and the
+ * recipient list from `describeRoster` (backfilled names) - one field cannot
+ * carry both.
+ */
+export interface OpenPreviewParts {
+  bodyMembers: PreviewBodyMember[];
+  recipients: PreviewRecipientRow[];
+}
+
+/**
+ * THE ONE implementation of "what an open sends". The tour, placement, and
+ * standalone preview routes all funnel through here so the body composition,
+ * the recipient shape, the count rule, and the quiet-hours math cannot drift.
+ *
+ * COUNT RULE, preserved verbatim from the pre-refactor code: de-dupe by phone
+ * FIRST (the caller does that when building `bodyMembers`), THEN keep the ones
+ * whose key is reachable. A phone does not become reachable because a LATER
+ * member on the same number is.
+ *
+ * `memberKey` is an INPUT-ONLY join key. `toRecipient` copies name and
+ * reachability only, which is what keeps a bare-phone member's key - the full
+ * E.164 - off the wire (doc section 9: previews carry names, never phones).
+ */
+export function buildOpenPreviewFromParts(
+  parts: OpenPreviewParts,
+  quiet: QuietHoursState,
+): RosterPreview {
+  const reachableKeys = new Set(
+    parts.recipients.filter((r) => r.reachability === 'reachable').map((r) => r.memberKey),
+  );
+  const recipientCount = parts.bodyMembers.filter((m) => reachableKeys.has(m.memberKey)).length;
+  return withQuietHours(
+    composeIntroBody(parts.bodyMembers.map((m) => m.name)),
+    parts.recipients.map(toRecipient),
+    recipientCount,
+    quiet,
+  );
+}
+
 /**
  * Preview OPENING the group: the relay.intro body, per-member deliverability,
  * and the true recipient count.
@@ -387,16 +443,20 @@ export async function buildOpenPreview(
     seenPhones.add(phone);
     provisioned.push(member);
   }
-  const reachableKeys = new Set(
-    view.members.filter((m) => m.reachability === 'reachable').map((m) => m.memberKey),
-  );
-  const recipientCount = provisioned.filter((m) => reachableKeys.has(resolvedMemberKey(m))).length;
   return {
     ok: true,
-    preview: withQuietHours(
-      composeIntroBody(provisioned.map((m) => m.name)),
-      view.members.map(toRecipient),
-      recipientCount,
+    preview: buildOpenPreviewFromParts(
+      {
+        bodyMembers: provisioned.map((m) => ({
+          ...(m.name !== undefined && { name: m.name }),
+          memberKey: resolvedMemberKey(m),
+        })),
+        recipients: view.members.map((m) => ({
+          ...(m.name !== undefined && { name: m.name }),
+          memberKey: m.memberKey,
+          reachability: m.reachability,
+        })),
+      },
       quiet,
     ),
   };

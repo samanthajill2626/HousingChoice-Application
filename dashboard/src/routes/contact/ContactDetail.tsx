@@ -25,6 +25,8 @@ import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
   deleteContact,
+  markInboxRead,
+  markInboxUnread,
   restoreContact,
   runExtraction,
   setContactOptOut,
@@ -39,6 +41,7 @@ import {
   TENANT_STATUS_LABELS,
   type AiRunCompletedEvent,
   type ContactType,
+  type ConversationUpdatedEvent,
   type LandlordStatus,
   type TenantStatus,
 } from '../../api/index.js';
@@ -87,6 +90,14 @@ type Pane = 'comms' | 'profile';
  *  (a 30s worker poll plus the run itself), because the poll can be delayed by a
  *  long-running row ahead of this one in the same pass. Exported for the test. */
 export const RUN_INDICATOR_TIMEOUT_MS = 180_000;
+
+/** Retryable, not diagnostic. A 409 on this route is the expected
+ *  participant-GSI-lag path, so the copy asks for a retry and the kebab item
+ *  stays available. Every other failure gets the same treatment - there is
+ *  nothing an operator can do with a status code. */
+export const MARK_UNREAD_ERROR = 'Could not mark unread - try again';
+/** The same treatment for the other direction. */
+export const MARK_READ_ERROR = 'Could not mark read - try again';
 
 /** The manual-run indicator's three states. `running` accumulates across the
  *  press's scheduled threads: it resolves only once EVERY one has reported, so
@@ -182,6 +193,17 @@ export function ContactDetail(): React.JSX.Element {
   // per-press server-minted UUID, not by the size cap; the cap only bounds a
   // same-window org-wide burst, since every client receives every run event.
   const recentRunEventsRef = useRef<AiRunCompletedEvent[]>([]);
+  // D6's derived unread state. THERE IS NO UNREAD DATUM ON THIS PAGE and none is
+  // added: the mount fan-out marks EVERY thread of this contact read, so "read"
+  // is the state the page starts in, and only a conversation.updated carrying a
+  // POSITIVE count for one of this contact's own threads can move it. A SKIPPED
+  // (background tab) or FAILED fan-out therefore leaves this false, i.e. UNKNOWN
+  // rendered as "Mark unread" - the safe default, since the server refuses if
+  // that turns out to be wrong. Those two cases are indistinguishable from
+  // "read" on screen ON PURPOSE: both offer the same action.
+  const [hasUnread, setHasUnread] = useState(false);
+  const [unreadAction, setUnreadAction] = useState<'idle' | 'read' | 'unread'>('idle');
+  const [unreadError, setUnreadError] = useState<string | null>(null);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -203,6 +225,11 @@ export function ContactDetail(): React.JSX.Element {
     // the press generation is bumped too, which invalidates that response.
     setExtraction({ phase: 'idle' });
     pressGenerationRef.current += 1;
+    // Same reason again: contact A's unread state, pending action and error copy
+    // must not be read as contact B's.
+    setHasUnread(false);
+    setUnreadAction('idle');
+    setUnreadError(null);
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -211,7 +238,78 @@ export function ContactDetail(): React.JSX.Element {
   const file = useContactFile(contactId, { contactType: contact?.type });
   // Viewing the contact page (while the tab is visible) marks its comms read —
   // so the Inbox unread badge clears once you've actually seen the messages here.
-  useMarkContactRead(contactId);
+  // The returned handle is what the kebab's mark-UNREAD action awaits, so this
+  // auto-read cannot silently re-read the thread the operator just flagged.
+  const autoRead = useMarkContactRead(contactId);
+
+  // --- D6: the derived unread state -----------------------------------------
+  // These hooks MUST stay above the loading/error early returns below, for the
+  // same reason the extraction ones do.
+  //
+  // WHICH conversations count as this contact's. `timeline.items` is the only
+  // place the page holds conversation ids at all (`useContact` returns a bare
+  // Contact). Held in a REF so the SSE handler below keeps ONE stable identity:
+  // an identity that churned with every timeline page would re-register on the
+  // event stream on every render. Milestone items carry no conversationId;
+  // call/scheduled items carry an optional one.
+  const timelineConversationIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of timeline.items) {
+      if (item.kind === 'milestone') continue;
+      if (typeof item.conversationId === 'string' && item.conversationId.length > 0) {
+        ids.add(item.conversationId);
+      }
+    }
+    return ids;
+  }, [timeline.items]);
+  const timelineIdsRef = useRef(timelineConversationIds);
+  timelineIdsRef.current = timelineConversationIds;
+
+  const onConversationUpdated = useCallback((event: ConversationUpdatedEvent) => {
+    // FILTERED to this contact's own threads: /api/events is one org-wide
+    // firehose. An id we cannot match is NO INFORMATION (the timeline may still
+    // be loading), never evidence that this contact is read.
+    if (!timelineIdsRef.current.has(event.conversationId)) return;
+    const count = event.unread_count;
+    if (typeof count !== 'number' || !Number.isFinite(count)) return;
+    setHasUnread(count > 0);
+  }, []);
+  useEventStream({ onConversationUpdated });
+
+  const onToggleUnread = useCallback(async (): Promise<void> => {
+    if (unreadAction !== 'idle') return;
+    setUnreadError(null);
+    if (hasUnread) {
+      // NO NAVIGATION. Marking the comms read while reading them is not a
+      // departure - the operator is still here.
+      setUnreadAction('read');
+      try {
+        await markInboxRead({ contactId });
+        // The fan-out just read every thread of this contact, which is exactly
+        // the signal this derived state is built on.
+        setHasUnread(false);
+      } catch {
+        setUnreadError(MARK_READ_ERROR);
+      } finally {
+        setUnreadAction('idle');
+      }
+      return;
+    }
+    setUnreadAction('unread');
+    try {
+      // BEFORE the POST, always. The page's own auto-read fires uncancelled on
+      // mount, on visibilitychange and on every org-wide message.persisted, so
+      // without the drain the operator's request can be silently re-read by one
+      // already in flight - a no-op with a success response.
+      await autoRead.suppressAndDrain();
+      await markInboxUnread({ contactId });
+    } catch {
+      setUnreadError(MARK_UNREAD_ERROR);
+      setUnreadAction('idle');
+      return;
+    }
+    navigate('/inbox');
+  }, [autoRead, contactId, hasUnread, navigate, unreadAction]);
 
   // --- Manual AI extraction (manual-extraction-trigger 4.6) ------------------
   // These three hooks MUST stay above the loading/error early returns below, or
@@ -665,6 +763,10 @@ export function ContactDetail(): React.JSX.Element {
             deleteBusy={deleteBusy}
             onRunExtraction={() => void onRunExtraction()}
             extractionBusy={extraction.phase === 'running'}
+            contactName={name}
+            hasUnread={hasUnread}
+            onToggleUnread={() => void onToggleUnread()}
+            unreadBusy={unreadAction !== 'idle'}
           />
         </div>
       </header>
@@ -678,6 +780,30 @@ export function ContactDetail(): React.JSX.Element {
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
+          </Button>
+        </div>
+      ) : null}
+
+      {/* D6's pending + failure surface. The kebab CLOSES on the press, like
+          every item in it, so neither state can live in the menu - and this is
+          the page's one banner region, which the operator already reads. On a
+          failure the action itself stays available in the menu: a 409 here is
+          the expected, retryable participant-GSI-lag path. */}
+      {unreadAction !== 'idle' ? (
+        <div className={styles.extractionBanner} role="status" aria-label="Unread status">
+          <span>{unreadAction === 'unread' ? 'Marking unread...' : 'Marking read...'}</span>
+        </div>
+      ) : null}
+      {unreadError !== null ? (
+        <div className={styles.extractionBanner} role="alert" aria-label="Unread status">
+          <span>{unreadError}</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            onClick={() => setUnreadError(null)}
+          >
+            Dismiss
           </Button>
         </div>
       ) : null}

@@ -10,6 +10,7 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
   const onDelete = props.onDelete ?? vi.fn();
   const onRestore = props.onRestore ?? vi.fn();
   const onRunExtraction = props.onRunExtraction ?? vi.fn();
+  const onToggleUnread = props.onToggleUnread ?? vi.fn();
   render(
     <ContactActionsMenu
       onEdit={onEdit}
@@ -21,13 +22,25 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
       onDelete={onDelete}
       onRestore={onRestore}
       onRunExtraction={onRunExtraction}
+      contactName={props.contactName ?? 'Tasha Williams'}
+      hasUnread={props.hasUnread ?? false}
+      onToggleUnread={onToggleUnread}
       {...(props.optOutBusy !== undefined && { optOutBusy: props.optOutBusy })}
       {...(props.voiceOptOutBusy !== undefined && { voiceOptOutBusy: props.voiceOptOutBusy })}
       {...(props.deleteBusy !== undefined && { deleteBusy: props.deleteBusy })}
       {...(props.extractionBusy !== undefined && { extractionBusy: props.extractionBusy })}
+      {...(props.unreadBusy !== undefined && { unreadBusy: props.unreadBusy })}
     />,
   );
-  return { onEdit, onToggleOptOut, onToggleVoiceOptOut, onDelete, onRestore, onRunExtraction };
+  return {
+    onEdit,
+    onToggleOptOut,
+    onToggleVoiceOptOut,
+    onDelete,
+    onRestore,
+    onRunExtraction,
+    onToggleUnread,
+  };
 }
 
 describe('ContactActionsMenu', () => {
@@ -127,6 +140,60 @@ describe('ContactActionsMenu', () => {
     setup({ extractionBusy: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
     expect(screen.getByRole('menuitem', { name: /Run AI extraction/i })).toBeDisabled();
+  });
+
+  // --- S7: the mark-read / mark-unread toggle (D6) -------------------------
+  //
+  // It lives HERE and specifically NOT in ContactCommsPane: that pane is shared
+  // with the tour and placement 1:1 tabs, so an action added there leaks onto
+  // surfaces the spec's non-goal 5 excludes. This menu has exactly one
+  // production render site.
+  it('offers Mark unread - and NEVER Mark read - on a read contact', async () => {
+    const user = userEvent.setup();
+    setup({ hasUnread: false });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    // The "as" is deliberate - it keeps the two accessible names from being
+    // substrings of each other for assistive tech and for selectors.
+    expect(
+      screen.getByRole('menuitem', { name: 'Mark Tasha Williams as unread' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Mark Tasha Williams read' })).toBeNull();
+  });
+
+  it('offers Mark read - and NEVER Mark unread - on an unread contact', async () => {
+    const user = userEvent.setup();
+    setup({ hasUnread: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(screen.getByRole('menuitem', { name: 'Mark Tasha Williams read' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Mark Tasha Williams as unread' })).toBeNull();
+  });
+
+  it('fires onToggleUnread and closes the menu', async () => {
+    const user = userEvent.setup();
+    const { onToggleUnread } = setup();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: 'Mark Tasha Williams as unread' }));
+    expect(onToggleUnread).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menuitem', { name: 'Mark Tasha Williams as unread' })).toBeNull();
+  });
+
+  it('disables the unread item while the request is in flight', async () => {
+    const user = userEvent.setup();
+    setup({ unreadBusy: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(screen.getByRole('menuitem', { name: 'Mark Tasha Williams as unread' })).toBeDisabled();
+  });
+
+  it('hides the toggle ENTIRELY for a soft-deleted contact (MU-2)', async () => {
+    const user = userEvent.setup();
+    setup({ deleted: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    // The server refuses a deleted contact with 409 contact_deleted, so the
+    // action would only ever fail. Restore is still offered, which proves the
+    // menu rendered at all.
+    expect(screen.getByRole('menuitem', { name: /Restore contact/i })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Mark Tasha Williams as unread' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Mark Tasha Williams read' })).toBeNull();
   });
 
   it('closes on Escape', async () => {

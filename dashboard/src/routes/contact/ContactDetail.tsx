@@ -395,16 +395,6 @@ export function ContactDetail(): React.JSX.Element {
     navigate('/inbox');
   }, [autoRead, contactId, hasUnread, navigate, unreadAction]);
 
-  // STABLE ON PURPOSE (and above the early returns, like the extraction hooks
-  // below). CreateRelayGroupModal memoizes the busy-guarded dismissal it hands
-  // to Modal against this callback, and Modal keys its Escape/focus effect on
-  // the callback it receives: an inline arrow here would change identity on
-  // every render of THIS page - which an SSE tick, a timeline refetch or the
-  // file refetch causes routinely - re-running that effect, pulling focus onto
-  // the dialog and dropping whatever the operator was typing into the member
-  // search. The modal cannot fix that from its side.
-  const closeRelayGroupModal = useCallback(() => setCreatingRelayGroup(false), []);
-
   // --- Manual AI extraction (manual-extraction-trigger 4.6) ------------------
   // These three hooks MUST stay above the loading/error early returns below, or
   // the page renders a different number of hooks per pass and crashes.
@@ -1118,7 +1108,7 @@ export function ContactDetail(): React.JSX.Element {
         <CreateRelayGroupModal
           contact={contact}
           candidates={editCandidates}
-          onClose={closeRelayGroupModal}
+          onClose={() => setCreatingRelayGroup(false)}
           onCreated={() => {
             // The Relay groups card read its rows once, on mount, and this page
             // listens for no conversation event. A `connecting` create does not

@@ -7,7 +7,7 @@
 // that says the intro has NOT gone out instead of navigating away.
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ApiError, type Contact, type RosterPreview } from '../../api/index.js';
@@ -332,32 +332,28 @@ describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
   });
 
   it('a re-render of the PAGE BEHIND the modal does not interrupt typing', async () => {
-    // Modal keys its Escape/focus effect on the callback it receives: a fresh
-    // identity tears the effect down (returning focus to the previously focused
-    // element) and re-runs it (focusing the dialog), so everything typed after
-    // that goes nowhere. The dismissal guard this modal builds is memoized for
-    // that reason - and that only holds if the CALLER's onClose is stable too,
-    // which is why ContactDetail memoizes the one it passes. The page re-renders
-    // on every message.persisted / conversation.updated / scheduled.updated tick,
-    // and the operator is on it because the contact is texting them.
-    // TODO(modal-onclose-refocus-trap): the class fix belongs in Modal itself.
-    function StableHost(): React.JSX.Element {
+    // Supply a fresh callback on every page render. Modal must treat that as a
+    // callback update, not as a dialog teardown/remount that steals focus.
+    function FreshCallbackHost(): React.JSX.Element {
       const [tick, setTick] = useState(0);
-      const onClose = useCallback(() => undefined, []);
       return (
         <>
           <button type="button" onClick={() => setTick((n) => n + 1)}>
             bump the page
           </button>
           <output data-testid="tick">{tick}</output>
-          <CreateRelayGroupModal contact={TENANT} candidates={ALL} onClose={onClose} />
+          <CreateRelayGroupModal
+            contact={TENANT}
+            candidates={ALL}
+            onClose={() => undefined}
+          />
         </>
       );
     }
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={['/contacts/T1']}>
-        <StableHost />
+        <FreshCallbackHost />
       </MemoryRouter>,
     );
     const search = screen.getByRole('combobox', { name: 'Add member' });
@@ -502,9 +498,8 @@ describe('CreateRelayGroupModal - the confirm step', () => {
   });
 
   it('Escape from the confirm step returns to the picker, not out of the flow', async () => {
-    // Modal registers a DOCUMENT-level Escape handler with no propagation
-    // guard, so two stacked modals would both close on one keypress and discard
-    // the member list. Only ever one is mounted.
+    // Only one phase dialog is mounted, so Escape returns to the preserved
+    // picker state without also closing the overall flow.
     const { user, onClosed } = renderIt();
     await pick(user, 'Marcus', /Marcus Bell/);
     await user.click(screen.getByRole('button', { name: 'Create group' }));

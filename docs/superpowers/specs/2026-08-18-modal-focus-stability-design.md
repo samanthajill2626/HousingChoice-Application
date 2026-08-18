@@ -1,6 +1,6 @@
 # Modal focus stability after portaled typeaheads - design
 
-**Status:** proposed; awaiting Cameron's review.
+**Status:** approved for small-fix implementation.
 **Date:** 2026-08-18.
 **Lane:** small bug fix with a written review gate.
 **Branch:** `codex/modal-focus-stability`.
@@ -91,19 +91,19 @@ page-level listbox locator in that file must remain unchanged.
 ## Goals
 
 1. A mounted dialog moves focus into itself only once.
-2. A re-render, including one with a new `onClose` identity, never changes the
+2. If a child establishes focus inside the dialog during mount, the dialog
+   preserves that descendant focus instead of moving focus to its container.
+3. A re-render, including one with a new `onClose` identity, never changes the
    operator's current focus.
-3. Escape and all other close paths use the latest close behavior.
-4. Closing the dialog returns focus to the element that was active when the dialog
+4. Escape and all other close paths use the latest close behavior.
+5. Closing the dialog returns focus to the element that was active when the dialog
    first mounted, exactly once.
-5. When a contact or property typeahead list is open, the first Escape dismisses
+6. When a contact or property typeahead list is open, the first Escape dismisses
    the list and leaves the dialog open. A later unhandled Escape closes the dialog.
-6. Portaled contact and property results remain visible, selectable, viewport
+7. Portaled contact and property results remain visible, selectable, viewport
    bounded, and outside modal scroll clipping.
-7. Playwright coverage catches the original character-by-character focus failure
+8. Playwright coverage catches the original character-by-character focus failure
    without changing the independently repaired portal selectors.
-8. The complete Playwright suite passes before handback because `Modal` is a
-   shared primitive with 33 call sites.
 9. Caller-specific focus workarounds and stale issue comments are removed or
    rewritten after the shared fix makes them unnecessary.
 
@@ -118,7 +118,7 @@ page-level listbox locator in that file must remain unchanged.
   missing containment behavior receives its own linked issue record.
 - No edits to the 12 page-level listbox selector repairs in `92dcba1a`.
 - No change to the header X busy-state leg recorded in
-  `modal-onclose-refocus-trap`; that is a separate legibility improvement.
+  `modal-busy-close-affordance`; that is a separate legibility improvement.
 - No backend, API, persistence, infrastructure, dependency, or message-catalog
   changes.
 - No broad typeahead deduplication between `ContactSearchField` and
@@ -135,8 +135,12 @@ focus, register listeners, or perform focus restoration.
 
 A second effect, keyed on `[]`, owns the mount lifecycle:
 
-- Capture `document.activeElement` once.
-- Focus the dialog once.
+- Restore the `document.activeElement` captured once when `Modal` begins its
+  initial render, before descendant effects can move focus into the dialog.
+- Focus the dialog once only when focus is not already inside it. React runs child
+  effects before parent effects, so a present or future form field may establish
+  descendant focus during mount. The dialog container is the fallback target, not
+  an override for valid child focus.
 - Register one document-level keydown listener.
 - Remove that listener and restore the captured focus only on unmount.
 
@@ -241,6 +245,8 @@ Implementation follows test-first order.
 Add `dashboard/src/routes/contact/Modal.test.tsx` with a stateful host that proves:
 
 - Initial mount focuses the dialog.
+- A child that focuses its input in a mount effect keeps that focus; the parent
+  modal effect does not replace it with dialog-container focus.
 - Focusing and typing in a child input keeps that input focused after a host
   re-render supplies a new `onClose` identity.
 - Escape calls the newest `onClose`, not the callback from the first render.
@@ -306,22 +312,15 @@ browser checks.
 
 At the final pre-handback step, rebase onto the latest `main` if it has advanced,
 preserve both sides' intent, and rerun the affected focused checks after any
-conflict resolution. Then run the complete Playwright suite once from the final
-reviewed and synchronized tree:
-
-```powershell
-npm run e2e
-```
-
-This is an explicit cross-cutting exception to the normal small-fix rule: `Modal`
-has 33 call sites, the original portal regression showed that focused proof can
-miss shared DOM consequences, and the human has required the full suite before
-handback. Report the bare command's real exit code. Apply the repository's
-documented one-time rerun rule if a known flake occurs.
+conflict resolution. This remains the repository's small-fix lane: do not run
+aggregate `npm test` or the complete Playwright suite merely because the primitive
+is shared.
 
 ## Acceptance criteria
 
 - Character-by-character typing works in all three directly exposed dialogs.
+- A mount-time child autofocus keeps focus inside that child; dialog-container
+  focus is only the fallback when no descendant is already focused.
 - Parent page re-renders do not move focus within any mounted modal.
 - Escape invokes the latest close callback.
 - The callback ref is initialized with the mounted `onClose`; correctness does not
@@ -335,7 +334,8 @@ documented one-time rerun rule if a known flake occurs.
 - The Email Playwright regression types `Tasha` sequentially, retains focus, and
   accumulates the full value before selection.
 - Focused dashboard tests and dashboard typecheck pass with real exit code 0.
-- The complete `npm run e2e` suite passes with real exit code 0 before handback.
+- The focused Email Playwright regression and hermetic live QA pass before
+  handback.
 - Merged 30rem width, `100dvh` sizing, pinned footer, modal scrolling, and relay
   member-list sizing remain unchanged.
 - No caller needs memoization solely to avoid modal focus theft.

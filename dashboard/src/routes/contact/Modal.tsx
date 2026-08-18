@@ -17,23 +17,34 @@ export interface ModalProps {
 export function Modal({ title, onClose, children, footer }: ModalProps): React.JSX.Element {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  // Capture before descendant effects can move focus into the dialog. This is
+  // the element unmount must restore even when a child claims initial focus.
+  const previouslyFocusedRef = useRef(
+    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null),
+  );
 
   useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    // Move focus into the dialog so keyboard + screen-reader users land inside it.
-    dialogRef.current?.focus();
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    // A child mount effect may already have focused the first form field. Keep
+    // that valid descendant focus; the dialog itself is the fallback target.
+    const dialog = dialogRef.current;
+    if (dialog !== null && !dialog.contains(document.activeElement)) dialog.focus();
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
       }
     };
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, false);
     return () => {
-      document.removeEventListener('keydown', onKey);
-      previouslyFocused?.focus?.();
+      document.removeEventListener('keydown', onKey, false);
+      previouslyFocusedRef.current?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div

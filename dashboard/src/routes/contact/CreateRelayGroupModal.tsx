@@ -12,10 +12,8 @@
 //   maybeCreated - the create got no answer, or an answer that proves nothing.
 //                  A terminal, ACTIONLESS panel: see the ambiguity rule below.
 //
-// Never two at once: `Modal` registers a DOCUMENT-level Escape handler with no
-// propagation guard, so one keypress would close both and silently discard the
-// assembled member list. Member state lives HERE, so Cancel from the confirm
-// step restores the picker intact.
+// Never two at once: each dialog owns a distinct phase of the flow. Member state
+// lives HERE, so Cancel from the confirm step restores the picker intact.
 //
 // TWO RULES THAT LOOK COSMETIC AND ARE NOT:
 //
@@ -60,7 +58,7 @@
 //     everyone a second intro. No affordance can retry that safely, so this flow
 //     offers none: it lands on `maybeCreated`, which has exactly one button and
 //     it closes.
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
@@ -418,24 +416,11 @@ export function CreateRelayGroupModal({
    *  previewed group. Leaving and editing are independent, and only editing is
    *  refused. The CONFIRM dialog's own busy-guard is untouched - that one covers
    *  a round trip that buys a pool number.
-   *
-   *  MEMOIZED ON PURPOSE. Modal keys its Escape-handler effect on `onClose`, and
-   *  that effect's cleanup returns focus to the previously focused element while
-   *  the fresh run re-focuses the dialog. A callback rebuilt on every render
-   *  therefore steals focus out of the search field on EVERY KEYSTROKE - typing
-   *  lands one character and stops. This one never changes identity at all: it
-   *  reads no state, only refs, and the `onClose` it closes over is itself
-   *  stable (ContactDetail memoizes the handler it passes here for exactly this
-   *  reason - an inline arrow there would make this callback change on every
-   *  PARENT render, which on this page means every SSE tick).
-   *  TODO(modal-onclose-refocus-trap): the residual trap is Modal's - it keys the
-   *  effect on `onClose` at all. Fixing it there (the callback in a ref, the
-   *  effect keyed []) retires this whole class and covers ContactEditForm and
-   *  PhoneManager, which share the wiring and also hold text inputs. */
-  const closePicker = useCallback((): void => {
+   */
+  const closePicker = (): void => {
     previewAbort.current?.abort();
     onClose();
-  }, [onClose]);
+  };
 
   if (phase.kind === 'confirming') {
     return (

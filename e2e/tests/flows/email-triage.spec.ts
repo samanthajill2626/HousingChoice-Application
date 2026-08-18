@@ -76,7 +76,10 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
     await strangerRow.getByRole('button', { name: 'Link to contact' }).click();
     const dialog = page.getByRole('dialog', { name: 'Link to contact' });
     await expect(dialog).toBeVisible();
-    await dialog.getByRole('combobox', { name: 'Search contacts' }).fill('Tasha');
+    const contactSearch = dialog.getByRole('combobox', { name: 'Search contacts' });
+    await contactSearch.pressSequentially('Tasha');
+    await expect(contactSearch).toBeFocused();
+    await expect(contactSearch).toHaveValue('Tasha');
     // The suggestion list is PORTALED to document.body (a fixed-position popover,
     // so a modal's scrolling body cannot clip it), which makes it a SIBLING of
     // the dialog rather than a descendant. Scope options through the page-level

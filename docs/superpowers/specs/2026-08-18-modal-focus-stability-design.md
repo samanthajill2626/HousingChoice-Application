@@ -4,8 +4,8 @@
 **Date:** 2026-08-18.
 **Lane:** small bug fix with a written review gate.
 **Branch:** `codex/modal-focus-stability`.
-**Baseline:** `main` at `a393e4eb` (the second merge of
-`feat/contact-create-relay-group`).
+**Baseline:** `main` at `78cc053d`, including the independently shipped portal
+selector repair in `92dcba1a`.
 
 ## Summary
 
@@ -34,8 +34,11 @@ The separate clipped-results defect was fixed on `main` before this design was
 written. Commit `db5989b6` portals `ContactSearchField` and `UnitSearchField`
 listboxes to `document.body` as fixed-position popovers, outside the modal body's
 scroll clipping. Commit `837b5161` also widens the shared dialog to 30rem and
-adjusts relay-member-list sizing. This design preserves those merged decisions. It
-does not replace the portal with an in-flow list or modify modal sizing.
+adjusts relay-member-list sizing. Commit `92dcba1a` independently repairs the 12
+Playwright locators invalidated by that portal and reports all five affected specs
+passing. This branch is rebased on that repair. The focus implementation will not
+re-edit those selectors, replace the portal with an in-flow list, or modify modal
+sizing.
 
 ## Evidence and current failure
 
@@ -57,20 +60,18 @@ link dialog. It stopped at `T`, `document.activeElement` became the dialog, and 
 remaining characters were lost.
 
 The portaled-list merge did not change `Modal.tsx` or the inline close callback in
-`EmailTriage.tsx`. A focused Playwright run on current `main` also captured the
-dialog as the active accessibility node after `.fill('Tasha')`, confirming that
-the focus defect remains.
+`EmailTriage.tsx`. The focused Playwright run used during diagnosis also captured
+the dialog as the active accessibility node after `.fill('Tasha')`. The later
+selector-only repair did not touch either source component, so the focus defect
+remains on this baseline.
 
-### Portal test topology
+### Resolved portal test regression
 
 The portal successfully makes the filtered result visible outside the modal's
 scroll container. It also deliberately changes the DOM relationship: the listbox
 is now a sibling of the dialog under `document.body`, not a descendant of the
-dialog.
-
-Twelve existing Playwright selectors across five specs still search for an option
-through a dialog-scoped locator. A focused run of `email-triage.spec.ts` on current
-`main` produced:
+dialog. Before the independent repair, a focused run of `email-triage.spec.ts`
+produced:
 
 ```text
 3 passed, 1 failed, exit code 1
@@ -79,8 +80,13 @@ waiting for getByRole('dialog', { name: 'Link to contact' })
 ```
 
 The failure snapshot showed the option rendered and visible in the page-level
-listbox. The test could not find it only because its locator still assumed the old
-DOM nesting.
+listbox. Commit `92dcba1a` fixed all 12 invalid locators across five specs by
+scoping each option through its page-level, accessibly named listbox. That commit
+is now on `main` and is a prerequisite baseline, not work owned by this focus fix.
+
+`email-triage.spec.ts` remains an implementation target only because its existing
+`.fill('Tasha')` action cannot reproduce per-keystroke focus loss. The corrected
+page-level listbox locator in that file must remain unchanged.
 
 ## Goals
 
@@ -94,9 +100,11 @@ DOM nesting.
    the list and leaves the dialog open. A later unhandled Escape closes the dialog.
 6. Portaled contact and property results remain visible, selectable, viewport
    bounded, and outside modal scroll clipping.
-7. Playwright coverage reflects the portal's real DOM and catches the original
-   character-by-character focus failure.
-8. Caller-specific focus workarounds and stale issue comments are removed or
+7. Playwright coverage catches the original character-by-character focus failure
+   without changing the independently repaired portal selectors.
+8. The complete Playwright suite passes before handback because `Modal` is a
+   shared primitive with 33 call sites.
+9. Caller-specific focus workarounds and stale issue comments are removed or
    rewritten after the shared fix makes them unnecessary.
 
 ## Non-goals
@@ -106,7 +114,9 @@ DOM nesting.
   keyboard navigation, result limits, or selection data.
 - No modal visual redesign. Preserve the 30rem desktop width, `100dvh` maximum
   height, pinned footer, and existing scroll behavior.
-- No new focus-trap library and no expansion into Tab-key focus containment.
+- No new focus-trap library and no expansion into Tab-key focus containment. The
+  missing containment behavior receives its own linked issue record.
+- No edits to the 12 page-level listbox selector repairs in `92dcba1a`.
 - No change to the header X busy-state leg recorded in
   `modal-onclose-refocus-trap`; that is a separate legibility improvement.
 - No backend, API, persistence, infrastructure, dependency, or message-catalog
@@ -118,9 +128,10 @@ DOM nesting.
 
 ### 1. Separate current callback state from the modal mount lifecycle
 
-`Modal` will keep the latest `onClose` in a ref. A small effect keyed on
-`[onClose]` updates only that ref. It does not move focus, register listeners, or
-perform focus restoration.
+`Modal` will initialize the callback ref at creation with `useRef(onClose)`, so the
+mounted callback is available before any effect runs. A small effect keyed on
+`[onClose]` updates only that ref after later callback changes. It does not move
+focus, register listeners, or perform focus restoration.
 
 A second effect, keyed on `[]`, owns the mount lifecycle:
 
@@ -134,9 +145,9 @@ callback without restarting the focus lifecycle. The backdrop and header X may
 continue using the current `onClose` prop directly because they do not own a
 long-lived listener.
 
-The effects must be declared in ref-update then lifecycle order so the ref holds
-the mounted callback before the key listener can run. The implementation will not
-write the ref during render.
+There is no effect-declaration-order requirement. The ref initializer handles the
+first callback, and the update effect handles subsequent identities. The
+implementation will not assign a new value to the ref during render.
 
 ### 2. Respect a child that handles Escape
 
@@ -144,13 +155,22 @@ Both shared typeaheads call `preventDefault()` when Escape dismisses an open
 listbox. `Modal`'s document listener will close only when the key is Escape and
 `event.defaultPrevented` is false.
 
+The document listener must be registered explicitly in the bubble phase, with a
+matching bubble-phase removal. React 19 runs a descendant's synthetic key handler
+before the event bubbles to `document`, so the child's `preventDefault()` is
+observable there. A capture-phase document listener would run first and close the
+dialog before the child could consume Escape, silently inverting the intended
+layering.
+
 This produces a deterministic two-level interaction:
 
 1. With suggestions open, Escape dismisses suggestions and keeps the dialog open.
 2. With no suggestions open, Escape reaches `Modal` unhandled and closes it.
 
 This check applies to any present or future modal child that owns Escape. It does
-not add component-specific knowledge to `Modal`.
+not add component-specific knowledge to `Modal`. Unit coverage must exercise a
+real descendant React key handler so changing the document listener to capture
+phase makes the regression test fail.
 
 ### 3. Preserve the merged portal behavior
 
@@ -159,26 +179,10 @@ targets for this fix. Their fixed-position body portals, scroll/resize dismissal
 outside-click handling, internal list scrolling, and viewport max-height remain
 unchanged.
 
-Playwright must query a portaled option through its page-level listbox, for example:
-
-```ts
-const suggestions = page.getByRole('listbox', {
-  name: 'Search contacts suggestions',
-});
-await suggestions.getByRole('option', { name: /Tasha/ }).click();
-```
-
-Inputs and authored dialog buttons remain scoped to the dialog. Only the portaled
-listbox and its options move to page-level scope. The affected selectors are in:
-
-- `e2e/tests/flows/email-triage.spec.ts`
-- `e2e/tests/dashboard-next/contact-create.spec.ts`
-- `e2e/tests/dashboard-next/contact-create-relay-group.spec.ts`
-- `e2e/tests/dashboard-next/placement-create.spec.ts`
-- `e2e/tests/dashboard-next/tours-page.spec.ts`
-
-There are 12 dialog-, picker-, or edit-dialog-scoped option locators across those
-files on the design baseline.
+The page-level listbox selectors in `92dcba1a` remain the canonical portal testing
+pattern. This implementation must preserve them byte-for-byte except for unrelated
+main synchronization. The Email regression changes only how text is entered and
+what focus is asserted before selecting through the already-correct listbox.
 
 ### 4. Remove caller-side focus discipline
 
@@ -209,6 +213,11 @@ concern into a new `docs/issues/modal-busy-close-affordance.md` record and link 
 two records. This keeps the completed focus work and the still-open affordance work
 independently reviewable.
 
+The non-goal of trapping Tab focus also becomes an explicit
+`docs/issues/modal-tab-focus-containment.md` record linked from the resolved focus
+issue. This fix must not imply that `aria-modal="true"` currently provides full
+keyboard focus containment.
+
 ## Error and concurrency behavior
 
 There is no new asynchronous operation or error path. The behavioral invariant is
@@ -235,7 +244,9 @@ Add `dashboard/src/routes/contact/Modal.test.tsx` with a stateful host that prov
 - Focusing and typing in a child input keeps that input focused after a host
   re-render supplies a new `onClose` identity.
 - Escape calls the newest `onClose`, not the callback from the first render.
-- An already-prevented Escape does not close the modal.
+- A descendant React key handler that calls `preventDefault()` consumes Escape
+  before the document bubble listener; the modal stays open. This test must fail
+  if the document listener is registered in the capture phase.
 - Unmount restores the trigger that was focused before mount.
 
 Update `CreateRelayGroupModal.test.tsx` so the existing page-behind re-render test
@@ -256,17 +267,17 @@ npm run typecheck -w @housingchoice/dashboard
 
 ### Playwright coverage
 
-Update all 12 affected option selectors to scope through the page-level named
-listbox. In the Email link flow, replace `.fill('Tasha')` with
-`pressSequentially('Tasha')` and assert the combobox remains focused before
-selecting the visible result. This is the regression for the user's exact failure;
-`.fill()` is insufficient because it can set the complete value in one operation
-after focus has already moved.
+Do not edit the 12 repaired option locators. In the Email link flow, replace only
+`.fill('Tasha')` with `pressSequentially('Tasha')`, assert the combobox remains
+focused and contains the full value, then select through the existing page-level
+listbox locator. This is the regression for the user's exact failure; `.fill()` is
+insufficient because it can set the complete value in one operation after focus
+has already moved.
 
-Run only the five affected specs through the e2e workspace:
+Run the directly affected spec during the implementation loop:
 
 ```powershell
-npm run e2e -w @housingchoice/e2e -- tests/flows/email-triage.spec.ts tests/dashboard-next/contact-create.spec.ts tests/dashboard-next/contact-create-relay-group.spec.ts tests/dashboard-next/placement-create.spec.ts tests/dashboard-next/tours-page.spec.ts
+npm run e2e -w @housingchoice/e2e -- tests/flows/email-triage.spec.ts
 ```
 
 ### Focused live QA
@@ -291,27 +302,46 @@ Stop the hermetic session after QA.
 
 After focused implementation proof, perform an adversarial review of the diff,
 apply any must-fixes, and rerun the affected typecheck, unit tests, and targeted
-browser checks. Do not run aggregate `npm test` or the full `npm run e2e` suite
-for this small fix unless a newly discovered cross-cutting risk justifies asking
-for broader verification.
+browser checks.
+
+At the final pre-handback step, rebase onto the latest `main` if it has advanced,
+preserve both sides' intent, and rerun the affected focused checks after any
+conflict resolution. Then run the complete Playwright suite once from the final
+reviewed and synchronized tree:
+
+```powershell
+npm run e2e
+```
+
+This is an explicit cross-cutting exception to the normal small-fix rule: `Modal`
+has 33 call sites, the original portal regression showed that focused proof can
+miss shared DOM consequences, and the human has required the full suite before
+handback. Report the bare command's real exit code. Apply the repository's
+documented one-time rerun rule if a known flake occurs.
 
 ## Acceptance criteria
 
 - Character-by-character typing works in all three directly exposed dialogs.
 - Parent page re-renders do not move focus within any mounted modal.
 - Escape invokes the latest close callback.
+- The callback ref is initialized with the mounted `onClose`; correctness does not
+  depend on effect declaration order.
 - An open typeahead consumes the first Escape without closing its modal.
+- The document key listener is explicitly bubble-phase, and the descendant-handler
+  regression test fails if it is changed to capture phase.
 - Closing a modal restores the original trigger focus exactly once.
 - Contact and property suggestions remain portaled, visible, and selectable.
-- All 12 portal-invalid Playwright locators use the real page-level listbox
-  topology.
-- The five affected Playwright specs pass with real exit code 0.
+- The 12 independently repaired page-level listbox locators are not re-edited.
+- The Email Playwright regression types `Tasha` sequentially, retains focus, and
+  accumulates the full value before selection.
 - Focused dashboard tests and dashboard typecheck pass with real exit code 0.
+- The complete `npm run e2e` suite passes with real exit code 0 before handback.
 - Merged 30rem width, `100dvh` sizing, pinned footer, modal scrolling, and relay
   member-list sizing remain unchanged.
 - No caller needs memoization solely to avoid modal focus theft.
 - The focus issue record is resolved, and the separate busy-X legibility concern
   remains open in its own linked issue record.
+- Missing Tab focus containment remains open in its own linked issue record.
 
 ## Expected implementation files
 
@@ -322,15 +352,14 @@ for broader verification.
 - `dashboard/src/routes/contact/CreateRelayGroupModal.test.tsx`
 - `dashboard/src/routes/shared/RosterConfirmDialog.tsx`
 - `e2e/tests/flows/email-triage.spec.ts`
-- `e2e/tests/dashboard-next/contact-create.spec.ts`
-- `e2e/tests/dashboard-next/contact-create-relay-group.spec.ts`
-- `e2e/tests/dashboard-next/placement-create.spec.ts`
-- `e2e/tests/dashboard-next/tours-page.spec.ts`
 - `docs/issues/modal-onclose-refocus-trap.md`
 - `docs/issues/modal-busy-close-affordance.md` (new)
+- `docs/issues/modal-tab-focus-containment.md` (new)
 
 No implementation change is expected in `ContactSearchField`, `UnitSearchField`,
-their CSS modules, or `Modal.module.css`.
+their CSS modules, `Modal.module.css`, or the four other selector-repair Playwright
+specs. `email-triage.spec.ts` changes only its input action and focus/value
+assertions; its repaired listbox locator remains unchanged.
 
 ## Rollout
 

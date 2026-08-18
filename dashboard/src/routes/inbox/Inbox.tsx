@@ -116,6 +116,56 @@ export function Inbox(): React.JSX.Element {
         </p>
       ) : null}
 
+      {/* S8. A truncated NON-EMPTY unread page used to end SILENTLY: on the
+          CAPPED exits no cursor is minted, so no "Load more" renders, and the
+          banner below is gated on the page having come back EMPTY - so a capped
+          list looked exactly like the end of the feed. A cap is acceptable only
+          if the list says it is capped.
+
+          `hasMore` IS DELIBERATELY NOT IN THE GATE, and the plan's claim that it
+          could be ("hasMore is false so no Load more renders") is FALSE: the
+          server's budget exit mints a cursor AND sets `truncated`, so
+          `truncated && hasMore` is genuinely reachable and this notice can
+          appear above a working "Load more". That is the ACCEPTED trade.
+          `truncated` carries TWO meanings on one wire flag - the pageable budget
+          exit, and `unresolvedDrops > 0`, which is set after the whole cursor
+          chain and names rows NO page in this session can reach. No CLIENT-side
+          gate can separate them, so gating on `!hasMore` would silence the
+          notice in the LEAST recoverable state, which is the state the rule "a
+          cap is acceptable only if the list says it is capped" exists to cover.
+          An imprecise notice beats silence. Splitting the signal on the wire is
+          the real fix: docs/issues/inbox-truncated-flag-two-meanings.md.
+
+          Gated on `serverRowCount`, NOT `rows.length`, for the same reason that
+          banner is: both `truncated` and this count describe the SERVER page,
+          while `rows` is the client-filtered list the Unread tab EMPTIES as the
+          operator marks rows read. Keyed on `rows` the notice would vanish
+          mid-triage, exactly when the operator most needs to know older unread
+          threads are still out there. The condition is the exact complement of
+          `serverEndedEarlyEmpty`, so this notice and that banner can never
+          render together.
+
+          NO COUNT in the copy, for the reason the group notice above dropped
+          its own: the operator clears rows while the server's flag stands, so
+          any number reaches zero with the notice still up. */}
+      {/* GATED ON THE FILTER, and not only because the copy is unread-specific.
+          The server sets `truncated` in the filter=unread branch alone today, so
+          the flag is "correct" here by a dependency nothing in this file
+          encodes. Worse, `useInbox` clears `truncated` in an EFFECT, so on an
+          Unread -> All switch there is one committed render where the filter is
+          already `all` while `truncated` and `serverRowCount` still describe the
+          unread page - and this notice would render its unread copy on the All
+          tab for that commit. Same one-commit shape the error banner above
+          already defends against. */}
+      {filter === 'unread' &&
+      inbox.status === 'ready' &&
+      inbox.truncated &&
+      inbox.serverRowCount > 0 ? (
+        <p className={styles.notice}>
+          Showing the most recent unread. There are older unread threads not shown here.
+        </p>
+      ) : null}
+
       {inbox.status === 'loading' ? <Spinner center /> : null}
 
       {/* An empty page that the server TRUNCATED is not "all caught up" - the

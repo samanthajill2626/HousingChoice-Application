@@ -4,7 +4,7 @@
 // always load; the C4/C5 calls resolve to a 'pending' marker on a 404 so their
 // panels render an honest "arrives with the backend" state rather than an error.
 // The page derives the per-pane lists with buildContactFile's pure helpers.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   getPlacements,
@@ -98,7 +98,23 @@ export interface UseContactFileOpts {
   contactType?: 'tenant' | 'landlord' | 'unknown' | string;
 }
 
-export function useContactFile(contactId: string, opts: UseContactFileOpts = {}): ContactFileState {
+/** The file, plus the one imperative affordance it exposes. */
+export type ContactFile = ContactFileState & {
+  /** Read every slice again for the SAME contact. The committed state stays on
+   *  screen while the new fetch is in flight (no loading flash), so a pane that
+   *  already has rows keeps showing them. For a write made ELSEWHERE on the page
+   *  that no SSE event covers - the standalone relay-group create, whose
+   *  `connecting` outcome deliberately does not navigate away - the same gap
+   *  `useContactTimeline.refetch` fills for the timeline.
+   *
+   *  A refetch that FAILS keeps the committed state too (`status` stays
+   *  `'ready'`): the pane goes stale rather than collapsing to "We couldn't load
+   *  this file." over rows that are still good. Only a load with nothing
+   *  committed for this contact reports `'error'`. */
+  refetch: () => void;
+};
+
+export function useContactFile(contactId: string, opts: UseContactFileOpts = {}): ContactFile {
   // `forId` records which contactId the committed state describes. On an id
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
@@ -107,6 +123,11 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
     ...FILE_LOADING,
     forId: contactId,
   });
+  // Bumping this re-runs the fetch effect for the SAME contactId - a nonce
+  // rather than an extracted async function because the whole fetch body is the
+  // effect, and pulling it out would change the abort/ordering shape.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const refetch = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -182,15 +203,27 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState((prev) => ({ ...prev, status: 'error', forId: contactId }));
+        // A RELOAD is not a LOAD. `status: 'error'` replaces every card in the
+        // right pane (placements, tours, properties, relay groups, group
+        // threads, media) with one sentence and no retry affordance. That is the
+        // honest answer when nothing has ever loaded - and a wipe of good rows
+        // when a refetch over committed state fails. Keep what is on screen: the
+        // pane is then STALE, which is exactly what it was before refetch
+        // existed. Only a first load for THIS contact (or a contact switch,
+        // whose committed state describes someone else) still errors.
+        setState((prev) =>
+          prev.status === 'ready' && prev.forId === contactId
+            ? prev
+            : { ...prev, status: 'error', forId: contactId },
+        );
       }
     })();
 
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contactId, opts.contactType]);
+  }, [contactId, opts.contactType, reloadNonce]);
 
   // Committed state is for the previous contactId → the new fetch is in flight.
-  if (state.forId !== contactId) return FILE_LOADING;
-  return state;
+  if (state.forId !== contactId) return { ...FILE_LOADING, refetch };
+  return { ...state, refetch };
 }

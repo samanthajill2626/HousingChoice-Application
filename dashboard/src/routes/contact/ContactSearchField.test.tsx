@@ -106,6 +106,36 @@ describe('ContactSearchField', () => {
     expect(screen.queryByRole('button', { name: /clear contact search/i })).toBeNull();
   });
 
+  // `disabled` is how a caller freezes the field during its own round trip
+  // (CreateRelayGroupModal, whose Remove buttons were already disabled={busy}
+  // while this field stayed live - so an operator could ADD to a list that had
+  // already been snapshotted into the preview).
+  it('disabled: the input is disabled and the candidate list never renders', () => {
+    render(
+      <ContactSearchField
+        value={{ name: 'Ali' }}
+        onChange={vi.fn()}
+        candidates={CANDIDATES}
+        disabled
+      />,
+    );
+    const input = screen.getByRole('combobox');
+    expect(input).toBeDisabled();
+    // 'Ali' matches Alice Smith - the list is suppressed by `disabled`, not by
+    // an absence of matches.
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.queryAllByRole('option')).toHaveLength(0);
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('disabled defaults to false - an unset prop leaves every caller untouched', () => {
+    render(
+      <ContactSearchField value={{ name: 'Ali' }} onChange={vi.fn()} candidates={CANDIDATES} />,
+    );
+    expect(screen.getByRole('combobox')).toBeEnabled();
+    expect(screen.getByRole('option', { name: /Alice Smith/i })).toBeInTheDocument();
+  });
+
   it('shows no more than 8 candidates even when more match', () => {
     const manyContacts: Contact[] = Array.from({ length: 12 }, (_, i) => ({
       contactId: `c${i}`,

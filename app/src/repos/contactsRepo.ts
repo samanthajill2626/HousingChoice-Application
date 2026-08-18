@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DeleteCommand,
   GetCommand,
   PutCommand,
@@ -289,6 +290,14 @@ export interface ContactItem {
   [key: string]: unknown;
 }
 
+/** The only contact fields needed to label another record in staff UI. */
+export interface ContactDisplayItem {
+  contactId: string;
+  firstName?: unknown;
+  lastName?: unknown;
+  phone?: string;
+}
+
 /**
  * A contact is soft-deleted when it carries a non-empty `deleted_at` stamp.
  * Shared by the repo (query filters) and the inbox/today routes (hydration
@@ -461,6 +470,10 @@ export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
   getById(contactId: string, opts?: { consistentRead?: boolean }): Promise<ContactItem | undefined>;
+  /** Read only the fields needed for a staff-facing contact label. */
+  getDisplayById(contactId: string): Promise<ContactDisplayItem | undefined>;
+  /** Batch-read display fields by primary key. Missing ids are absent from the map. */
+  getDisplaysByIds(contactIds: string[]): Promise<Map<string, ContactDisplayItem>>;
   /**
    * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
    * optionally narrowed by status (the (type=unknown, status=needs_review)
@@ -833,6 +846,62 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
     async getById(contactId, opts) {
       return getByIdImpl(contactId, opts?.consistentRead);
+    },
+
+    async getDisplayById(contactId) {
+      const response = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { contactId },
+          ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
+          ExpressionAttributeNames: {
+            '#contactId': 'contactId',
+            '#firstName': 'firstName',
+            '#lastName': 'lastName',
+            '#phone': 'phone',
+          },
+        }),
+      );
+      return response.Item as ContactDisplayItem | undefined;
+    },
+
+    async getDisplaysByIds(contactIds) {
+      const found = new Map<string, ContactDisplayItem>();
+      const uniqueIds = [...new Set(contactIds)];
+      let unprocessed = 0;
+      for (let i = 0; i < uniqueIds.length; i += 100) {
+        let keys = uniqueIds.slice(i, i + 100).map((contactId) => ({ contactId }));
+        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+          }
+          const response = await doc.send(
+            new BatchGetCommand({
+              RequestItems: {
+                [table]: {
+                  Keys: keys,
+                  ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
+                  ExpressionAttributeNames: {
+                    '#contactId': 'contactId',
+                    '#firstName': 'firstName',
+                    '#lastName': 'lastName',
+                    '#phone': 'phone',
+                  },
+                },
+              },
+            }),
+          );
+          for (const item of (response.Responses?.[table] ?? []) as ContactDisplayItem[]) {
+            found.set(item.contactId, item);
+          }
+          keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ contactId: string }>;
+        }
+        unprocessed += keys.length;
+      }
+      if (unprocessed > 0) {
+        log.warn({ unprocessed }, 'contacts: BatchGet left keys unprocessed after retries');
+      }
+      return found;
     },
 
     async listByType(type, opts = {}) {

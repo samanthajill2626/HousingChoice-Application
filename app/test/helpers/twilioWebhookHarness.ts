@@ -73,6 +73,7 @@ import {
   type ConversationItem,
   type ConversationsRepo,
   type ConversationType,
+  type UnreadBucket,
 } from '../../src/repos/conversationsRepo.js';
 import {
   allowedPriorCallStatuses,
@@ -225,6 +226,21 @@ export interface FakeWorld {
    * 0 cannot distinguish from "never called".
    */
   unreadResets: string[];
+  /**
+   * Every setUnread ATTEMPT, in order, refused ones included - the bucket the
+   * caller chose is recorded, which is what lets a raced test prove the retry
+   * recomputed it from the re-read rather than reusing the stale one, and lets
+   * the twice-raced test prove there was no third write.
+   */
+  unreadSetAttempts: { conversationId: string; bucket: UnreadBucket }[];
+  /**
+   * TEST-ONLY: force the next N setUnread calls to throw
+   * ConditionalCheckFailedException regardless of state. A correct
+   * ConditionExpression can never produce the `raced` classification on its
+   * own; a COUNTER rather than a self-clearing one-shot because the
+   * twice-raced case needs two consecutive failures from one seam.
+   */
+  failNextSetUnread: number;
   sent: SendMessageParams[];
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
@@ -383,6 +399,10 @@ export function createFakeWorld(): FakeWorld {
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const unreadResets: string[] = [];
+  const unreadSetAttempts: FakeWorld['unreadSetAttempts'] = [];
+  // TEST-ONLY throw counter for setUnread; the return literal exposes it via
+  // get/set so a test's `world.failNextSetUnread = 2` reaches this closure.
+  let failNextSetUnread = 0;
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
   // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
@@ -420,6 +440,24 @@ export function createFakeWorld(): FakeWorld {
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
     new ConditionalCheckFailedException({ message, $metadata: {} });
+
+  /**
+   * setUnread's three ConditionExpression bucket predicates, modelled. Kept in
+   * lockstep with conversationsRepo.setUnread: EVERY bucket carries a type
+   * clause, and one_to_one is the NEGATIVE test so a legacy row with no `type`
+   * is admitted.
+   */
+  const bucketAdmits = (conv: ConversationItem, bucket: UnreadBucket): boolean => {
+    if (bucket === 'relay_group') {
+      return (
+        conv.type === 'relay_group' && (conv.status === 'open' || conv.status === 'connecting')
+      );
+    }
+    if (bucket === 'group_text') {
+      return conv.type === 'group_text' && conv.status === GROUP_TEXT_STATUS;
+    }
+    return conv.type !== 'relay_group' && conv.type !== 'group_text' && conv.status === 'open';
+  };
 
   // Email channel v1 fake state: the email#<addr> claim arbiter + token pointers.
   const emailClaims = new Map<string, string>(); // normalized address -> conversationId
@@ -489,6 +527,31 @@ export function createFakeWorld(): FakeWorld {
       // the row out of byUnread.
       delete conv.unread_flag;
       unreadResets.push(conversationId);
+      return conv;
+    },
+    async setUnread(conversationId, { bucket }) {
+      unreadSetAttempts.push({ conversationId, bucket });
+      // TEST-ONLY seam, no production analogue: N forced failures, decremented
+      // per throw, so a test can stage the `raced` and twice-raced arms that a
+      // correct condition can never produce on its own.
+      if (failNextSetUnread > 0) {
+        failNextSetUnread -= 1;
+        throw conditionalCheckFailed(`setUnread: forced failure for ${conversationId}`);
+      }
+      const conv = conversations.get(conversationId);
+      // REFUSAL half - all three condition clauses. A fake that always
+      // succeeded would make every route classification test vacuous.
+      if (!conv) throw conditionalCheckFailed(`setUnread: no conversation ${conversationId}`);
+      if (!bucketAdmits(conv, bucket)) {
+        throw conditionalCheckFailed(`setUnread: ${conversationId} is outside the ${bucket} bucket`);
+      }
+      if ((conv.unread_count ?? 0) > 0) {
+        throw conditionalCheckFailed(`setUnread: ${conversationId} is already unread`);
+      }
+      // WRITE half - counter AND sparse flag together. Setting only the count
+      // would leave the modelled index wrong: it filters on unread_flag alone.
+      conv.unread_count = 1;
+      conv.unread_flag = 'unread';
       return conv;
     },
     async queryUnreadPage({ limit, exclusiveStartKey }) {
@@ -1481,6 +1544,17 @@ export function createFakeWorld(): FakeWorld {
     },
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
+    },
+    async getDisplayById(contactId) {
+      return contacts.find((c) => c.contactId === contactId);
+    },
+    async getDisplaysByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts
+          .filter((contact) => wanted.has(contact.contactId))
+          .map((contact) => [contact.contactId, contact] as const),
+      );
     },
     async listByType(type, opts = {}) {
       const partition = contacts
@@ -3370,6 +3444,16 @@ export function createFakeWorld(): FakeWorld {
     contactCreates,
     unreadIncrements,
     unreadResets,
+    unreadSetAttempts,
+    // get/set bridges a test's `world.failNextSetUnread = N` reassignment to
+    // the local `let` the repo fake reads (arrays share a reference; a number
+    // does not).
+    get failNextSetUnread(): number {
+      return failNextSetUnread;
+    },
+    set failNextSetUnread(n: number) {
+      failNextSetUnread = n;
+    },
     sent,
     initiatedCalls,
     mediaPuts,
@@ -3517,6 +3601,11 @@ export interface HarnessOptions {
    * (contact-rosters Task 13). Omit to use the wall clock.
    */
   placementsNow?: () => string;
+  /**
+   * Injected clock for the RELAY-GROUP router's standalone-preview quiet-hours
+   * evaluation (POST /api/relay-groups/preview). Omit to use the wall clock.
+   */
+  relayGroupsNow?: () => string;
   /**
    * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
    * endpoints against the world fakes pass one in; mounted exactly like the
@@ -3667,6 +3756,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       }),
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
+      ...(opts.relayGroupsNow !== undefined && { relayGroupsNow: opts.relayGroupsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

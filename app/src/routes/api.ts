@@ -52,7 +52,6 @@ import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
-  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
@@ -146,6 +145,7 @@ import {
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
+import { markUnread } from '../lib/markUnread.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -319,6 +319,9 @@ export interface ApiRouterDeps {
   toursNow?: () => string;
   /** Injected clock for the placement router's quiet-hours evaluation (tests only). */
   placementsNow?: () => string;
+  /** Injected clock for the relay-group router's standalone-preview quiet-hours
+   *  evaluation (tests only). */
+  relayGroupsNow?: () => string;
   /** Quiet-hours roster deferrals (contact-rosters Task 13) - injected in tests. */
   pendingRosterActionsRepo?: PendingRosterActionsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
@@ -717,6 +720,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       messagesRepo: messages,
       aiRunsRepo: aiRuns,
+      contactsRepo: contacts,
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation
@@ -915,6 +919,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       unitsRepo: units,
+      ...(deps.relayGroupsNow !== undefined && { now: deps.relayGroupsNow }),
       events,
     }),
   );
@@ -2055,6 +2060,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // thread the unread feed would not show anyway - a closed relay thread or a
   // group thread outside group_open (isUnreadVisible) - so a manual flag can
   // never plant an invisible byUnread resident (backfill rule 3 territory).
+  //
+  // H1: that refusal is a GUARANTEE, not a pre-check. The reads below stay
+  // because they answer with specific errors, but the write itself is
+  // conditional (conversationsRepo.setUnread) and lib/markUnread.ts classifies
+  // a refusal, so a close committing between this read and that write loses.
   router.post('/conversations/:conversationId/unread', async (req, res) => {
     const { conversationId } = req.params;
     mergeContext({ conversationId });
@@ -2074,15 +2084,32 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(409).json({ error: 'thread_closed' });
       return;
     }
-    let updated = conversation;
-    if ((conversation.unread_count ?? 0) === 0) {
-      // Build the returned/emitted image from the write's own return (a
-      // re-read is eventually consistent and could hand back the old count).
-      const count = await conversations.incrementUnread(conversationId);
-      updated = { ...conversation, unread_count: count, unread_flag: UNREAD_FLAG_VALUE };
+    // NO "already unread?" PRE-CHECK HERE, DELIBERATELY (fix wave 1,
+    // 2026-08-17). getById is an eventually consistent base-table read (no
+    // ConsistentRead), so a stale POSITIVE count would have answered 200 with no
+    // write at all - the silent no-op a to-do affordance must never produce.
+    // setUnread's own condition refuses an already-unread row and markUnread's
+    // classify returns `already-unread`, which lands on the same 200 with no
+    // emit below. The price is stated so it is not "optimized" back: an
+    // already-unread thread now costs one REFUSED conditional write plus one
+    // point read instead of nothing.
+    const outcome = await markUnread(conversations, conversation);
+    if (outcome.kind === 'gone') {
+      // This route was named BY conversationId, so "gone" is genuinely a 404 -
+      // unlike the fan-in routes, where the client named a contact or a phone.
+      res.status(404).json({ error: 'conversation_not_found' });
+      return;
     }
-    events.emit('conversation.updated', toConversationUpdatedEvent(updated));
-    res.json({ conversation: updated });
+    if (outcome.kind === 'ineligible') {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
+    // Emit ONLY on a real write, from the write's own return (ALL_NEW) - a
+    // re-read is eventually consistent and could hand back the old count.
+    if (outcome.kind === 'wrote') {
+      events.emit('conversation.updated', toConversationUpdatedEvent(outcome.item));
+    }
+    res.json({ conversation: outcome.item });
   });
 
   // GET /api/events — the live-update SSE stream (M1.2).

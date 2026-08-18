@@ -15,6 +15,7 @@ import {
   cancelTourRosterAction,
   createContact,
   createPlacementFromTour,
+  createRelayGroup,
   createTour,
   createTourRelay,
   dismissPlacementRosterAction,
@@ -26,6 +27,7 @@ import {
   getPlacementHistory,
   getPlacementNudges,
   patchPlacementNudge,
+  previewRelayGroup,
   provisionPlacementRelay,
   setPlacementFollowUp,
   clearPlacementFollowUp,
@@ -422,6 +424,99 @@ it('createTourRelay WITH explicit members posts them unchanged', async () => {
     method: 'POST',
     body: { members },
   });
+});
+
+it('previewRelayGroup posts the members to the preview route and returns the RosterPreview', async () => {
+  const preview = {
+    body: 'Hi Tasha and Alicia - this is Housing Choice connecting you.',
+    recipients: [
+      { name: 'Tasha Nguyen', reachability: 'reachable' },
+      { name: 'Alicia Grant', reachability: 'reachable' },
+    ],
+    recipientCount: 2,
+    deferred: false,
+  };
+  vi.mocked(request).mockResolvedValueOnce(preview);
+  const members = [
+    { phone: '+15550001111', contactId: 'c1', name: 'Tasha Nguyen' },
+    { phone: '+15550002222', contactId: 'c2', name: 'Alicia Grant' },
+  ];
+  const res = await previewRelayGroup(members);
+  expect(request).toHaveBeenCalledWith('/api/relay-groups/preview', {
+    method: 'POST',
+    body: { members },
+  });
+  // `tag` does not affect the intro body, so the preview route never sees it.
+  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  expect('tag' in sent.body).toBe(false);
+  // The route answers with the RosterPreview AS THE BODY - nothing to unwrap.
+  expect(res).toEqual(preview);
+});
+
+it('previewRelayGroup forwards an AbortSignal when one is given', async () => {
+  vi.mocked(request).mockResolvedValueOnce({});
+  const controller = new AbortController();
+  await previewRelayGroup([{ phone: '+15550001111' }], controller.signal);
+  expect(request).toHaveBeenCalledWith('/api/relay-groups/preview', {
+    method: 'POST',
+    body: { members: [{ phone: '+15550001111' }] },
+    signal: controller.signal,
+  });
+});
+
+it('createRelayGroup posts members plus the tag and unwraps { conversation }', async () => {
+  const conversation = { conversationId: 'conv-9', type: 'relay_group', status: 'connecting' };
+  vi.mocked(request).mockResolvedValueOnce({ conversation });
+  const members = [
+    { phone: '+15550001111', contactId: 'c1', name: 'Tasha Nguyen' },
+    { phone: '+15550002222', contactId: 'c2', name: 'Alicia Grant' },
+  ];
+  const res = await createRelayGroup(members, 'Oak St intro');
+  expect(request).toHaveBeenCalledWith('/api/relay-groups', {
+    method: 'POST',
+    body: { members, tag: 'Oak St intro' },
+  });
+  expect(res).toEqual({ conversation });
+});
+
+it('createRelayGroup OMITS the tag key entirely when no tag was given', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ conversation: { conversationId: 'conv-9' } });
+  const members = [{ phone: '+15550001111', contactId: 'c1' }];
+  await createRelayGroup(members);
+  expect(request).toHaveBeenCalledWith('/api/relay-groups', {
+    method: 'POST',
+    body: { members },
+  });
+  // The tag key must be OMITTED entirely, never sent as undefined.
+  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  expect('tag' in sent.body).toBe(false);
+});
+
+it('createRelayGroup treats an EMPTY tag as no tag', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ conversation: { conversationId: 'conv-9' } });
+  await createRelayGroup([{ phone: '+15550001111' }], '');
+  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  expect('tag' in sent.body).toBe(false);
+});
+
+it('preview and create receive the IDENTICAL members array (the spec 6.2 contract)', async () => {
+  // There is no server-resolved roster to reconcile against, so the client's
+  // list IS the input to both calls. If create posted a rebuilt array, the
+  // dialog would be a preview of a different send.
+  vi.mocked(request).mockResolvedValueOnce({ recipients: [], recipientCount: 0, deferred: false });
+  vi.mocked(request).mockResolvedValueOnce({ conversation: { conversationId: 'conv-9' } });
+  const members = [
+    { phone: '+15550001111', contactId: 'c1', name: 'Tasha Nguyen' },
+    { phone: '+15550002222', contactId: 'c2' },
+  ];
+  await previewRelayGroup(members);
+  await createRelayGroup(members, 'tag');
+  const previewed = (vi.mocked(request).mock.calls[0]![1] as { body: { members: unknown } }).body
+    .members;
+  const created = (vi.mocked(request).mock.calls[1]![1] as { body: { members: unknown } }).body
+    .members;
+  expect(previewed).toBe(members);
+  expect(created).toBe(members);
 });
 
 it('getTours forwards status as a sole query filter and unwraps { tours }', async () => {

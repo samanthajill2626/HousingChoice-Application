@@ -55,6 +55,16 @@ export interface RosterConfirmDialogProps {
   onConfirm: (force: boolean) => Promise<void>;
   /** Cancel, dismiss, or a successful confirm - the caller clears its state. */
   onClose: () => void;
+  /** False when the confirming endpoint CANNOT defer (a standalone relay create
+   *  has no owner row to hold a pending action). The quiet-hours warning still
+   *  renders - the operator must learn it is quiet hours - but it SWITCHES to
+   *  the not-held sentence, because neither the deferral button nor the
+   *  "send it now" escape it would name exists on this path. Defaults to true -
+   *  tour and placement are unaffected.
+   *  TODO(standalone-relay-group-quiet-hours-deferral): full deferral parity
+   *  needs a pending row that carries its own member list, since a standalone
+   *  group has no roster stored anywhere until it is created. */
+  allowDefer?: boolean;
 }
 
 export function RosterConfirmDialog({
@@ -64,6 +74,7 @@ export function RosterConfirmDialog({
   deferLabel,
   onConfirm,
   onClose,
+  allowDefer = true,
 }: RosterConfirmDialogProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,21 +99,54 @@ export function RosterConfirmDialog({
   // Inside quiet hours the DEFAULT is the deferral, and it names the instant it
   // will happen. A server that reports `deferred` without an instant still gets
   // a truthful (time-less) label rather than "at Invalid Date".
+  // ...unless the caller's endpoint cannot defer at all. Then the deferral
+  // affordances go away (both of them) and the plain confirm is the only
+  // action. The WARNING still renders on `preview.deferred` so the operator
+  // learns it is quiet hours - but it CHANGES SENTENCE, because the deferring
+  // copy names two things that no longer exist here: the wait ("this goes out
+  // then") and the escape from it ("unless you send it now", which is the
+  // button `canDefer` just removed). Promising a deferral this endpoint cannot
+  // perform is the same class of lie as a count over a suppressed leg.
+  //
+  // The replacement says exactly ONE thing: quiet hours do not hold this send.
+  // It deliberately does NOT promise an immediate send - a standalone create
+  // that answers `connecting` has no number yet and sends its intro only once a
+  // warmed number registers, which can be minutes later or (a group that never
+  // gets one) never. "This does not wait for them" is true on BOTH tiers.
   const clock = preview.quietEndsAt !== undefined ? quietClockLabel(preview.quietEndsAt) : '';
-  const defaultLabel = !preview.deferred
+  const canDefer = preview.deferred && allowDefer;
+  const defaultLabel = !canDefer
     ? confirmLabel
     : clock === ''
       ? `${deferLabel} when quiet hours end`
       : `${deferLabel} at ${clock}`;
-  const quietLine =
-    clock === ''
+  const quietLine = canDefer
+    ? clock === ''
       ? 'Quiet hours - this goes out when they end unless you send it now.'
-      : `Quiet hours until ${clock} - this goes out then unless you send it now.`;
+      : `Quiet hours until ${clock} - this goes out then unless you send it now.`
+    : clock === ''
+      ? 'Quiet hours - this does not wait for them.'
+      : `Quiet hours until ${clock} - this does not wait for them.`;
 
   return (
     <Modal
       title={title}
-      onClose={onClose}
+      // Escape, the backdrop and the header X all call Modal's onClose with no
+      // condition of their own, and Cancel is already disabled={busy}. THIS
+      // dialog is what renders the round trip's outcome - the inline refusal, the
+      // caller's success routing, its result panels - so a dismissal mid-flight
+      // orphans that answer: the action stays unresolved, and the caller's own
+      // start affordance comes back armed over it. On the relay-open surfaces
+      // that action is also irreversible once it lands (a claimed pool number and
+      // an intro to everyone listed), and `POST /api/relay-groups` has no
+      // idempotency key, so the re-armed retry is a SECOND number and a second
+      // text to the same people.
+      // TODO(modal-onclose-refocus-trap): an inline callback re-runs Modal's
+      // Escape/focus effect on every render of this component. Harmless here (no
+      // text input in the dialog); the class fix belongs in Modal.
+      onClose={() => {
+        if (!busy) onClose();
+      }}
       footer={
         <div className={styles.actions}>
           {/* Authored Cancel -> (Send now anyway) -> default: desktop puts the
@@ -111,7 +155,7 @@ export function RosterConfirmDialog({
           <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          {preview.deferred ? (
+          {canDefer ? (
             <Button
               variant="secondary"
               size="sm"

@@ -13,7 +13,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   getGroupMembers,
-  markConversationRead,
   sendMessage,
   type ConversationHeader,
   type ConversationParticipant,
@@ -24,6 +23,8 @@ import { Card } from '../contact/Card.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { groupMemberLabel, groupThreadLabel } from '../../lib/groupThread.js';
 import { useGroupThread } from './useGroupThread.js';
+import { useMarkThreadRead } from './useMarkThreadRead.js';
+import { ThreadUnreadToggle } from './ThreadUnreadToggle.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
 
@@ -244,22 +245,12 @@ export function GroupTextView({
   // the effect was reaching for. Dead code that looks like a safety net is worse
   // than no safety net: the next reader trusts it.
 
-  // Viewing the thread marks it read - the inbox unread badge clears once seen.
-  // DELIBERATELY UNWIRED from the badge's optimistic layer (the same ruling
-  // useMarkContactRead carries, and its regression test): this fires BLIND on
-  // mount, with no unread knowledge, so an optimistic decrement here could
-  // subtract a row the badge never counted. It reconciles through the cheap
-  // count refetch this mark-read's own SSE event triggers. The visible
-  // asymmetry is intended - opening a thread from an Inbox ROW decrements
-  // instantly (useInbox knows that row's unread), opening it from Today or a
-  // deep link does not. Wiring it later is safe (the clear key would be
-  // `cv:<conversationId>`, the vocabulary useInbox already mints, so the two
-  // would dedupe rather than double-decrement) but it needs the unread count.
-  useEffect(() => {
-    void markConversationRead(conversationId).catch(() => {
-      /* best-effort - a failed mark-read must not break the view */
-    });
-  }, [conversationId]);
+  // Viewing the thread marks it read. The effect that used to live inline here
+  // is now useMarkThreadRead, shared with the relay-group view - it carries the
+  // unchanged reasoning for why this read stays UNWIRED from the badge's
+  // optimistic layer, and it returns the handle a mark-unread action awaits so
+  // this read cannot overtake it.
+  const autoRead = useMarkThreadRead(conversationId);
 
   // A13 (dashboard half), as corrected by adversarial 17. ONE naming rule
   // (`groupThreadLabel`, mirrored server-side in app/src/lib/groupTitle.ts for
@@ -365,6 +356,19 @@ export function GroupTextView({
               ) : null}
             </p>
           ) : null}
+        </div>
+        {/* D6. This header had NO actions container at all - a back link and the
+            identity block only - so the toggle brings one, using the SAME
+            shell.actions class the relay arm uses so the two headers stay
+            visually identical. No visibility gate here: a group text has no
+            closed state in v1 (InboxRow records the same fact). */}
+        <div className={shell.actions}>
+          <ThreadUnreadToggle
+            conversationId={conversationId}
+            header={header}
+            name="Group text"
+            autoRead={autoRead}
+          />
         </div>
       </header>
 

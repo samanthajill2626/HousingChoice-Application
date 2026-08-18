@@ -138,6 +138,7 @@ function makeSendFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    setUnread: async () => conversation,
     // Derived from the one stored conversation, not stubbed to [] - a silent
     // empty page would be indistinguishable from a broken index.
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
@@ -195,6 +196,10 @@ function makeSendFakes(
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
     getById: async (id) => (contact?.contactId === id ? contact : undefined),
+    getDisplayById: async (id) => (contact?.contactId === id ? contact : undefined),
+    getDisplaysByIds: async (ids) => new Map(
+      contact !== undefined && ids.includes(contact.contactId) ? [[contact.contactId, contact]] : [],
+    ),
     listByType: async () => ({ items: [] }),
     listByHousingAuthority: async () => ({ items: [] }),
     create: async (input) => ({ ...input, contactId: input.contactId ?? 'contact-sm-1' }),

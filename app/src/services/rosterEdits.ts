@@ -47,7 +47,12 @@ import {
   type RosterResolutionDeps,
 } from '../lib/rosterResolution.js';
 import { isDeleted, type ContactsRepo } from '../repos/contactsRepo.js';
-import { LAST_MEMBER_REFUSAL, nameFromContact } from './relayMembers.js';
+import type {
+  ConversationParticipant,
+  ConversationsRepo,
+} from '../repos/conversationsRepo.js';
+import { isMemberSuppressed } from './relayAnnouncements.js';
+import { LAST_MEMBER_REFUSAL, nameFromContact, resolveMemberName } from './relayMembers.js';
 
 /** A refusal the route renders verbatim. */
 export interface RosterEditRefusal {
@@ -357,6 +362,62 @@ function toRecipient(member: { name?: string; reachability: RosterReachability }
   };
 }
 
+/** One member as the INTRO BODY composer sees them: phone-bearing and
+ *  phone-de-duplicated, carrying the name the send path will actually use. */
+export interface PreviewBodyMember {
+  name?: string;
+  memberKey: string;
+}
+
+/** One row the confirm dialog lists, with the DISPLAY name (which may be
+ *  backfilled from the contact and so differ from the body name). */
+export interface PreviewRecipientRow {
+  name?: string;
+  memberKey: string;
+  reachability: RosterReachability;
+}
+
+/**
+ * The two lists a caller resolves; see spec 6.1. They are separate because the
+ * owner path composes the body from `resolveRoster` (stored names) and the
+ * recipient list from `describeRoster` (backfilled names) - one field cannot
+ * carry both.
+ */
+export interface OpenPreviewParts {
+  bodyMembers: PreviewBodyMember[];
+  recipients: PreviewRecipientRow[];
+}
+
+/**
+ * THE ONE implementation of "what an open sends". The tour, placement, and
+ * standalone preview routes all funnel through here so the body composition,
+ * the recipient shape, the count rule, and the quiet-hours math cannot drift.
+ *
+ * COUNT RULE, preserved verbatim from the pre-refactor code: de-dupe by phone
+ * FIRST (the caller does that when building `bodyMembers`), THEN keep the ones
+ * whose key is reachable. A phone does not become reachable because a LATER
+ * member on the same number is.
+ *
+ * `memberKey` is an INPUT-ONLY join key. `toRecipient` copies name and
+ * reachability only, which is what keeps a bare-phone member's key - the full
+ * E.164 - off the wire (doc section 9: previews carry names, never phones).
+ */
+export function buildOpenPreviewFromParts(
+  parts: OpenPreviewParts,
+  quiet: QuietHoursState,
+): RosterPreview {
+  const reachableKeys = new Set(
+    parts.recipients.filter((r) => r.reachability === 'reachable').map((r) => r.memberKey),
+  );
+  const recipientCount = parts.bodyMembers.filter((m) => reachableKeys.has(m.memberKey)).length;
+  return withQuietHours(
+    composeIntroBody(parts.bodyMembers.map((m) => m.name)),
+    parts.recipients.map(toRecipient),
+    recipientCount,
+    quiet,
+  );
+}
+
 /**
  * Preview OPENING the group: the relay.intro body, per-member deliverability,
  * and the true recipient count.
@@ -387,19 +448,87 @@ export async function buildOpenPreview(
     seenPhones.add(phone);
     provisioned.push(member);
   }
-  const reachableKeys = new Set(
-    view.members.filter((m) => m.reachability === 'reachable').map((m) => m.memberKey),
-  );
-  const recipientCount = provisioned.filter((m) => reachableKeys.has(resolvedMemberKey(m))).length;
   return {
     ok: true,
-    preview: withQuietHours(
-      composeIntroBody(provisioned.map((m) => m.name)),
-      view.members.map(toRecipient),
-      recipientCount,
+    preview: buildOpenPreviewFromParts(
+      {
+        bodyMembers: provisioned.map((m) => ({
+          ...(m.name !== undefined && { name: m.name }),
+          memberKey: resolvedMemberKey(m),
+        })),
+        recipients: view.members.map((m) => ({
+          ...(m.name !== undefined && { name: m.name }),
+          memberKey: m.memberKey,
+          reachability: m.reachability,
+        })),
+      },
       quiet,
     ),
   };
+}
+
+/**
+ * Preview a STANDALONE relay-group open from an explicit member list.
+ *
+ * INPUT IS THE CLIENT'S LIST, deliberately - and this does NOT break the
+ * "input is the owner only" rule the owner-scoped previews follow (see this
+ * file's header). That rule exists so a client list can never disagree with a
+ * SERVER-RESOLVED roster; a standalone group has no stored roster before it
+ * exists, so there is nothing to disagree with. The caller MUST post the
+ * identical array to this preview and to POST /api/relay-groups.
+ *
+ * REACHABILITY ASYMMETRY, intentional: this uses `isMemberSuppressed`, the real
+ * send-time gate (contact flag + per-phone STOP record), while the owner path
+ * keeps `describeRoster`'s narrower rule. The owner path is not changed here,
+ * and that divergence is already filed
+ * (docs/issues/relay-member-suppression-diverges-from-number-seam.md). Matching
+ * the SEND is the entire point of a preview.
+ *
+ * Names come from `resolveMemberName` - the SAME resolver the create route
+ * uses, short-circuit included - so a client-supplied name renders identically
+ * in the dialog and in the intro that actually goes out. Suppression is a
+ * DIFFERENT question with different resolution rules, so it gets its own read;
+ * do not try to serve both from one.
+ *
+ * There is no `no_phone` case: `parseRelayMember` guarantees a phone or 400s.
+ */
+export async function buildStandaloneOpenPreview(
+  deps: {
+    contacts: ContactsRepo;
+    conversations: ConversationsRepo;
+  },
+  members: ConversationParticipant[],
+  quiet: QuietHoursState,
+): Promise<RosterPreview> {
+  // De-dupe by phone, FIRST WINS - exactly what POST /api/relay-groups does, so
+  // the dialog lists only people who will really be on the thread.
+  const deduped: ConversationParticipant[] = [];
+  const seenPhones = new Set<string>();
+  for (const m of members) {
+    if (seenPhones.has(m.phone)) continue;
+    seenPhones.add(m.phone);
+    deduped.push(m);
+  }
+
+  const rows: PreviewRecipientRow[] = [];
+  const bodyMembers: PreviewBodyMember[] = [];
+  for (const member of deduped) {
+    const named = await resolveMemberName(deps.contacts, member);
+    const suppressed = await isMemberSuppressed(deps.contacts, deps.conversations, member);
+    const memberKey =
+      member.contactId && member.contactId.length > 0 ? member.contactId : `phone:${member.phone}`;
+    rows.push({
+      ...(named.name !== undefined && { name: named.name }),
+      memberKey,
+      reachability: suppressed ? 'opted_out' : 'reachable',
+    });
+    bodyMembers.push({
+      ...(named.name !== undefined && { name: named.name }),
+      memberKey,
+    });
+  }
+
+  return buildOpenPreviewFromParts({ bodyMembers, recipients: rows }, quiet);
 }
 
 /** The person an add-preview / live add is about, already resolved + validated. */

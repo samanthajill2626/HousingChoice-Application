@@ -1,5 +1,6 @@
 import type { AiRunDetailResponse, AiRunWindowMessage } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
+import { aiRunContactLabel } from './contactLabel.js';
 import styles from './AiRunsSection.module.css';
 
 function value(value: unknown): string {
@@ -38,7 +39,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
   if (status === 'loading') return <Spinner center />;
   if (status === 'error') return <div className={styles.error} role="alert"><p>We could not load this AI run.</p><button type="button" onClick={onRetry}>Retry</button></div>;
   if (status === 'idle' || detail === undefined) return <p className={styles.empty}>Select a run to inspect its extraction record.</p>;
-  const { run, window } = detail;
+  const { run, contact, window } = detail;
   const storedWindow = run.window;
   const full = storedWindow?.detail === 'full';
   const decisions = Object.entries(run.decisions)
@@ -47,7 +48,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
     // and `sort` is stable, so those keep their arrival order among themselves.
     .sort(([a], [b]) => targetRank(a) - targetRank(b));
   return <section className={styles.detailPane} aria-label="AI run detail">
-    <header className={styles.detailHeader}><h3>Run {run.runId}</h3><p>{run.trigger} - {run.outcome} - {run.driver}{run.model ? ` / ${run.model}` : ''}</p><p>{new Date(run.startedAt).toLocaleString()} - {run.contactId ?? run.conversationId} - {run.durationMs} ms</p>{run.promptFingerprint ? <p>Prompt fingerprint: {run.promptFingerprint}</p> : null}{run.usage ? <p>{run.usage.inputTokens} input tokens - {run.usage.outputTokens} output tokens</p> : null}</header>
+    <header className={styles.detailHeader}><h3>Run {run.runId}</h3><p>{run.trigger} - {run.outcome} - {run.driver}{run.model ? ` / ${run.model}` : ''}</p><p>{new Date(run.startedAt).toLocaleString()} - {aiRunContactLabel(contact, run.contactId ?? run.conversationId)} - {run.durationMs} ms</p>{run.promptFingerprint ? <p>Prompt fingerprint: {run.promptFingerprint}</p> : null}{run.usage ? <p>{run.usage.inputTokens} input tokens - {run.usage.outputTokens} output tokens</p> : null}</header>
     {run.error ? <section className={styles.failure} aria-label="Run failure">
       <h4>Failed: {humanizeEnum(run.error.kind)}</h4>
       <p>{run.error.message}</p>

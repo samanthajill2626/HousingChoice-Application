@@ -55,8 +55,8 @@ function mkRow(over: Partial<InboxRowData> = {}): InboxRowData {
     ...over,
   };
 }
-function renderInbox(entry = '/inbox'): void {
-  render(
+function renderInbox(entry = '/inbox'): ReturnType<typeof render> {
+  return render(
     <MemoryRouter initialEntries={[entry]}>
       <Inbox />
     </MemoryRouter>,
@@ -280,5 +280,109 @@ describe('Inbox - group truncation affordance', () => {
       'href',
       '/inbox?filter=groups',
     );
+  });
+});
+
+// S8. A truncated NON-EMPTY unread page used to end SILENTLY: on the CAPPED
+// exits the server mints no cursor, so no "Load more" renders, and the
+// truncation banner above is gated on the page having come back EMPTY - so a
+// capped list looked exactly like the end of the feed. A cap is acceptable only
+// if the list says it is capped. `hasMore` is deliberately NOT part of the gate:
+// `truncated` also names rows that no page can reach, and those exits can mint a
+// cursor too, so a `!hasMore` gate would go SILENT exactly there.
+describe('Inbox - the Unread truncation notice', () => {
+  const NOTICE =
+    'Showing the most recent unread. There are older unread threads not shown here.';
+
+  it('renders on a NON-EMPTY truncated unread page', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+
+  it('renders no notice when the server did not truncate', () => {
+    state = baseState({ rows: [mkRow()], truncated: false, serverRowCount: 1 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  // The exact complement of `serverEndedEarlyEmpty`: an EMPTY server page that
+  // says truncated keeps the shipped failure surface, and the two can never
+  // render together.
+  it('never renders alongside the empty-page truncation banner', () => {
+    state = baseState({ status: 'ready', rows: [], truncated: true, serverRowCount: 0 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  // Fix wave 2, REVERTING fix wave 1's `!hasMore` gate. `truncated` carries TWO
+  // meanings on one wire flag: the pageable budget exit, and `unresolvedDrops`,
+  // which is set AFTER the whole cursor chain and names rows no page in this
+  // session can reach. Both can co-occur with a cursor, so `hasMore` cannot
+  // separate them - and gating on it silenced the notice in the LEAST
+  // recoverable state. The notice STAYS while paging is still available: an
+  // imprecise notice beats silence about a badge disagreement.
+  // Follow-up: docs/issues/inbox-truncated-flag-two-meanings.md.
+  it('still renders while paging is available - a cursor does not mean the withheld rows are reachable', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1, hasMore: true });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+
+  // PLANNER REVIEW 2026-08-18. The copy is unread-specific, but the notice was
+  // gated only on `truncated` - correct today purely because the server sets
+  // that flag in the filter=unread branch alone, a dependency nothing on the
+  // client encoded. And `useInbox` clears `truncated` in an EFFECT, so an
+  // Unread -> All switch has one committed render where the filter is already
+  // `all` while `truncated`/`serverRowCount` still describe the unread page.
+  // Without the filter in the gate, the unread copy renders on the All tab.
+  it('renders no notice on a NON-unread filter, even while truncated still describes the old page', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1 });
+    renderInbox('/inbox');
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  it('renders no notice on the groups filter under the same stale flag', () => {
+    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1 });
+    renderInbox('/inbox?filter=groups');
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  it('renders no notice on the error surface', () => {
+    state = baseState({ status: 'error', truncated: true, serverRowCount: 3 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
+  });
+
+  // THE test that matters. `truncated` and `serverRowCount` describe the SERVER
+  // page; `rows` is the client-filtered list the Unread tab EMPTIES as the
+  // operator marks rows read. Keyed on `rows` the notice vanishes mid-triage -
+  // exactly when the operator most needs to know older unread threads are still
+  // out there - and the first three cases above all stay green while that ships.
+  it('STAYS rendered after every visible row is marked read', () => {
+    const rowA = mkRow({ contactId: 'c-a', name: 'Alma Reed' });
+    const rowB = mkRow({ contactId: 'c-b', name: 'Bo Nunez' });
+    state = baseState({ rows: [rowA, rowB], truncated: true, serverRowCount: 2 });
+    const view = renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Alma Reed read' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Bo Nunez read' }));
+    expect(markRead).toHaveBeenCalledTimes(2);
+
+    // What useInbox produces next: the Unread tab drops both rows, while the
+    // SERVER statements it read - the truncation flag and the server row count -
+    // are untouched (mark-read only patches `unreadCount`).
+    state = baseState({ rows: [], truncated: true, serverRowCount: 2 });
+    view.rerender(
+      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
+        <Inbox />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('list', { name: 'Conversations' })).toBeNull();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 });

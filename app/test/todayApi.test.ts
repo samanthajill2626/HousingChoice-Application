@@ -223,8 +223,8 @@ describe('today action-queue API (BE6/C7)', () => {
       expect(nag.tag).toBe('Maple St tour');
       expect(nag.ownerType).toBe('tour');
       expect(nag.ownerId).toBe('tour-77');
-      // memberNames: prefer name, else the phone (display DATA precedent).
-      expect([...nag.memberNames].sort()).toEqual(['Alice', NAG_BOB].sort());
+      // memberNames: prefer name, else the phone in staff-facing display form.
+      expect([...nag.memberNames].sort()).toEqual(['Alice', '(555) 010-0202'].sort());
     });
 
     it('an open relay group with NO close_nag_next_at never appears', async () => {
@@ -331,8 +331,8 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(needs.every((i) => i.refType === 'contact')).toBe(true);
     const fromConv = needs.find((i) => i.refId === 'contact-from-conv');
     const fromContact = needs.find((i) => i.refId === 'contact-unknown');
-    expect(fromConv).toMatchObject({ who: '+15550109999', attention: true });
-    expect(fromContact).toMatchObject({ who: '+15550108888', attention: true });
+    expect(fromConv).toMatchObject({ who: '(555) 010-9999', attention: true });
+    expect(fromContact).toMatchObject({ who: '(555) 010-8888', attention: true });
   });
 
   it('only due/overdue deadlines (<= now) enter needs_you_now; a future deadline does not', async () => {
@@ -1033,6 +1033,38 @@ describe('today action-queue API (BE6/C7)', () => {
     });
   });
 
+  it('formats a phone-only opted-out relay member for staff display', async () => {
+    const memberContactId = 'c-optout-phone-only';
+    const memberPhone = '+15550102222';
+    world.contacts.push({
+      contactId: memberContactId,
+      type: 'tenant',
+      status: 'active',
+      phone: memberPhone,
+      sms_opt_out: true,
+    });
+    seedConversation({
+      conversationId: 'conv-relay-optout-phone-only',
+      participant_phone: '+15550103333',
+      status: 'open',
+      last_activity_at: iso(-40_000),
+      type: 'relay_group',
+      ai_mode: 'manual',
+      created_at: iso(-200_000),
+      participants: [{ contactId: memberContactId, phone: memberPhone }],
+      relay_opted_out_members: {
+        [memberContactId]: { contactId: memberContactId, phone: memberPhone, at: iso(-20_000) },
+      },
+    } as ConversationItem);
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const item = needs.find((i) => i.refType === 'contact' && i.refId === memberContactId);
+    expect(item).toMatchObject({
+      who: '(555) 010-2222',
+      why: 'Opted out of a relay group - not receiving messages',
+    });
+  });
+
   it('does NOT surface the item once the member has opted back in (sms_opt_out cleared) — live-confirmed', async () => {
     world.contacts.push({
       contactId: 'c-backin',
@@ -1188,7 +1220,11 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
     const contact = needs.find((i) => i.refType === 'contact' && i.refId === 'contact-only');
-    expect(contact).toMatchObject({ refId: 'contact-only', who: '+15550104444', attention: true });
+    expect(contact).toMatchObject({
+      refId: 'contact-only',
+      who: '(555) 010-4444',
+      attention: true,
+    });
   });
 
   // --- conversation-fact-extraction (T9): ai_suggestions group ------------------

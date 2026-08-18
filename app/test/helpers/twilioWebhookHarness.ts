@@ -844,15 +844,18 @@ export function createFakeWorld(): FakeWorld {
       if (!conv || conv.twilio_conversation_sid !== expectedSid) return false;
       delete conv.twilio_conversation_sid;
       delete conv.twilio_participant_map;
+      delete conv.twilio_projected_address;
       return true;
     },
 
-    async setTwilioConversation(conversationId, sid, participantMap, claimToken) {
+    async setTwilioConversation(conversationId, sid, participantMap, claimToken, projectedAddress) {
       const conv = conversations.get(conversationId);
       if (!conv || conv.rail_creating?.token !== claimToken) return undefined;
       conv.twilio_conversation_sid = sid;
       conv.twilio_participant_map = participantMap;
+      conv.twilio_projected_address = projectedAddress;
       delete conv.rail_creating;
+      delete conv.rail_failed;
       return conv;
     },
 

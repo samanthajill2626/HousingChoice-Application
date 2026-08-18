@@ -190,6 +190,13 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
         transcriptChannelRoles: { '1': 'staff', '2': 'client' },
       });
       if (!appended.deduped) {
+        // INBOX (inbound-calls-invisible-in-inbox): deliberately NO conversation
+        // stamp here. The navigator's own leg has no status callback and a
+        // never-accepted originate (unanswered cell, whisper timeout, DNC
+        // re-check) emits no <Dial>, so nothing would ever close out an
+        // "Outgoing call" stamped now - it would pin the thread at the top of
+        // the inbox forever. The <Dial action> summary (/voice/status) stamps
+        // the outbound outcome once the target was actually dialed.
         events.emit('message.persisted', {
           conversationId: conversation.conversationId,
           tsMsgId: appended.tsMsgId,

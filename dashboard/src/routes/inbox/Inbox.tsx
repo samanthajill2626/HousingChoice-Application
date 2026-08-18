@@ -162,6 +162,7 @@ export function Inbox(): React.JSX.Element {
                 row={row}
                 onOpen={inbox.markRead}
                 onMarkRead={inbox.markRead}
+                onMarkUnread={inbox.markUnread}
               />
             ))}
           </ul>

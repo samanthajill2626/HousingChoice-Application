@@ -864,6 +864,16 @@ export function markConversationRead(conversationId: string, signal?: AbortSigna
   });
 }
 
+/** POST /api/conversations/:id/unread - the inbox row's Mark-unread toggle for
+ *  a multi-party row (relay_group / group_text). Idempotent; 409 on a closed
+ *  thread. */
+export function markConversationUnread(conversationId: string, signal?: AbortSignal): Promise<void> {
+  return request<void>(`/api/conversations/${encodeURIComponent(conversationId)}/unread`, {
+    method: 'POST',
+    ...(signal !== undefined && { signal }),
+  });
+}
+
 /** POST /api/units - create a unit (property) under a landlord. The body carries
  *  the owning landlordId plus the writable unit fields; the server validates them
  *  against a strict allowlist + types and stamps the initial status ('setup').
@@ -1586,6 +1596,26 @@ export function markInboxRead(
     });
   }
   return request<void>('/api/inbox/read', {
+    method: 'POST',
+    body: { phone: target.phone },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/inbox/:contactId/unread (contact rows) - or POST /api/inbox/unread
+ *  { phone } (unknown rows) - the row's Mark-unread toggle: flags the row's
+ *  newest thread unread (idempotent). */
+export function markInboxUnread(
+  target: { contactId: string } | { phone: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  if ('contactId' in target) {
+    return request<void>(`/api/inbox/${encodeURIComponent(target.contactId)}/unread`, {
+      method: 'POST',
+      ...(signal !== undefined && { signal }),
+    });
+  }
+  return request<void>('/api/inbox/unread', {
     method: 'POST',
     body: { phone: target.phone },
     ...(signal !== undefined && { signal }),

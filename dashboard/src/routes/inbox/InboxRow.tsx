@@ -15,6 +15,10 @@ export interface InboxRowProps {
   row: InboxRowData;
   onOpen: (row: InboxRowData) => void;
   onMarkRead: (row: InboxRowData) => void;
+  /** The toggle's other half: shown INSTEAD of Mark read when the row is read.
+   *  Optional so existing callers (and tests) that only mark read keep working;
+   *  when absent a read row simply shows no action. */
+  onMarkUnread?: (row: InboxRowData) => void;
 }
 
 const CHANNEL_LABEL: Record<InboxChannel, string> = {
@@ -47,6 +51,7 @@ export function InboxRow({
   row,
   onOpen,
   onMarkRead,
+  onMarkUnread,
 }: InboxRowProps): React.JSX.Element {
   const unread = row.unreadCount > 0;
   const isRelay = row.kind === 'relay_group';
@@ -102,7 +107,10 @@ export function InboxRow({
             {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>
           <span className={`${styles.preview} ${unread ? styles.bold : ''}`}>
-            {row.direction === 'outbound' ? `You: ${row.preview}` : row.preview}
+            {/* "You:" disambiguates an outbound message BODY. A call preview
+                already names its direction ("Outgoing call - 42s"), so the
+                prefix would double-encode it. */}
+            {row.direction === 'outbound' && row.channel !== 'call' ? `You: ${row.preview}` : row.preview}
           </span>
           {unread ? (
             <span className={styles.count} aria-label={`${row.unreadCount} unread`}>
@@ -112,6 +120,9 @@ export function InboxRow({
         </Link>
 
         <div className={styles.actions}>
+          {/* ONE toggle, never both: Mark read while unread, Mark unread while
+              read. The affordance always describes the state change it makes,
+              so there is no "click Mark read on an already-read row" case. */}
           {unread ? (
             <button
               type="button"
@@ -120,6 +131,20 @@ export function InboxRow({
               aria-label={`Mark ${row.name} read`}
             >
               Mark read
+            </button>
+          ) : onMarkUnread !== undefined && !row.deleted && row.status !== 'closed' ? (
+            // Not offered where the server would refuse it: a soft-deleted
+            // contact's (resurfaced) row that was just marked read on the All
+            // tab (409 contact_deleted), or a relay row that closed under us
+            // (409 thread_closed). "as unread" keeps the two labels from being
+            // substrings of each other for assistive tech and selectors.
+            <button
+              type="button"
+              className={styles.action}
+              onClick={() => onMarkUnread(row)}
+              aria-label={`Mark ${row.name} as unread`}
+            >
+              Mark unread
             </button>
           ) : null}
         </div>

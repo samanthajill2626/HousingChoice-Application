@@ -530,6 +530,138 @@ describe('deleted-contact resurfacing x the contact fan-out', () => {
   });
 });
 
+describe('Mark UNREAD - the row toggle (POST /api/inbox/:contactId/unread, /api/inbox/unread, /api/conversations/:id/unread)', () => {
+  it('flags the contact\'s NEWEST 1:1 thread (never a fan-out), sets the byUnread flag, emits once, and is idempotent', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-mu', type: 'tenant', phone: '+15550000701', firstName: 'Mia', lastName: 'U' } as ContactItem);
+    seedConversation(world, 'conv-mu-old', { participant_phone: '+15550000701', last_activity_at: '2026-06-01T10:00:00.000Z' });
+    seedConversation(world, 'conv-mu-new', {
+      participant_phone: '+15550000701',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+    // Two threads on one phone would not happen for a 1:1 (findByParticipantPhone
+    // is keyed by phone), so give the newer one an email identity instead: the
+    // contact fan-out gathers phone AND email threads.
+    world.conversations.get('conv-mu-new')!.participant_phone = undefined as never;
+    (world.conversations.get('conv-mu-new') as ConversationItem & { participant_email?: string }).participant_email = 'mia@example.com';
+    (world.contacts.find((c) => c.contactId === 'c-mu') as ContactItem & { email?: string }).email = 'mia@example.com';
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/inbox/c-mu/unread'));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    const newest = world.conversations.get('conv-mu-new')!;
+    expect(newest.unread_count).toBe(1);
+    expect(newest.unread_flag).toBe('unread');
+    expect(world.conversations.get('conv-mu-old')!.unread_count ?? 0).toBe(0);
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+
+    // Idempotent: a second flag does not double-count or re-emit.
+    const again = await auth(request(app).post('/api/inbox/c-mu/unread'));
+    expect(again.status).toBe(200);
+    expect(world.conversations.get('conv-mu-new')!.unread_count).toBe(1);
+    expect(world.emitted.slice(before)).toHaveLength(1);
+
+    // And it shows in the unread feed + badge like any inbound would.
+    const unread = await auth(request(app).get('/api/inbox?filter=unread'));
+    expect(unread.body.rows.map((r: { contactId?: string }) => r.contactId)).toContain('c-mu');
+    const count = await auth(request(app).get('/api/inbox/unread-count'));
+    expect(count.body.unreadCount).toBe(1);
+
+    // Round-trip: Mark read clears it again.
+    await auth(request(app).post('/api/inbox/c-mu/read'));
+    expect(world.conversations.get('conv-mu-new')!.unread_count).toBe(0);
+    expect(world.conversations.get('conv-mu-new')!.unread_flag).toBeUndefined();
+  });
+
+  it('404 unknown contact; 409 for a soft-deleted contact (never fakes a fresh inbound); 404 when the contact has no thread', async () => {
+    const { app, world } = makeWebhookHarness();
+    expect((await auth(request(app).post('/api/inbox/nope/unread'))).status).toBe(404);
+    seedContact(world, { contactId: 'c-del', type: 'tenant', phone: '+15550000702', deleted_at: '2026-06-01T00:00:00.000Z' } as ContactItem);
+    seedConversation(world, 'conv-del', { participant_phone: '+15550000702', last_activity_at: '2026-06-01T10:00:00.000Z' });
+    const del = await auth(request(app).post('/api/inbox/c-del/unread'));
+    expect(del.status).toBe(409);
+    expect(del.body).toEqual({ error: 'contact_deleted' });
+    expect(world.conversations.get('conv-del')!.unread_count ?? 0).toBe(0);
+    seedContact(world, { contactId: 'c-bare', type: 'tenant', phone: '+15550000703' } as ContactItem);
+    expect((await auth(request(app).post('/api/inbox/c-bare/unread'))).status).toBe(404);
+  });
+
+  it('POST /api/inbox/unread { phone } flags an unknown number\'s thread; 400 / 404 like its read twin', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-unk-mu', {
+      participant_phone: '+14049820701',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    const res = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820701' }));
+    expect(res.status).toBe(200);
+    expect(world.conversations.get('conv-unk-mu')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-unk-mu')!.unread_flag).toBe('unread');
+    expect((await auth(request(app).post('/api/inbox/unread').send({ phone: 'nope' }))).status).toBe(400);
+    expect((await auth(request(app).post('/api/inbox/unread').send({}))).status).toBe(400);
+    expect((await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820799' }))).status).toBe(404);
+  });
+
+  it('POST /api/conversations/:id/unread flags an OPEN relay / group thread, refuses a CLOSED relay (409), 404 unknown', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-relay-open', {
+      participant_phone: '+15550009001',
+      pool_number: '+15550009001',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'relay_group',
+      status: 'open',
+      participants: [{ contactId: 'c-a', phone: '+15550000711', name: 'A' }],
+    });
+    seedConversation(world, 'conv-relay-closed', {
+      participant_phone: '+15550009002',
+      pool_number: '+15550009002',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'relay_group',
+      status: 'closed',
+      participants: [{ contactId: 'c-b', phone: '+15550000712', name: 'B' }],
+    });
+    seedConversation(world, 'conv-gt', {
+      participant_phone: '',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'group_text',
+      status: GROUP_TEXT_STATUS,
+    });
+
+    const open = await auth(request(app).post('/api/conversations/conv-relay-open/unread'));
+    expect(open.status).toBe(200);
+    expect(world.conversations.get('conv-relay-open')!.unread_count).toBe(1);
+    expect(open.body.conversation.unread_count).toBe(1);
+
+    const closed = await auth(request(app).post('/api/conversations/conv-relay-closed/unread'));
+    expect(closed.status).toBe(409);
+    expect(closed.body).toEqual({ error: 'thread_closed' });
+    expect(world.conversations.get('conv-relay-closed')!.unread_count ?? 0).toBe(0);
+
+    const gt = await auth(request(app).post('/api/conversations/conv-gt/unread'));
+    expect(gt.status).toBe(200);
+    expect(world.conversations.get('conv-gt')!.unread_count).toBe(1);
+    // group_text keeps its partition status through the flag.
+    expect(world.conversations.get('conv-gt')!.status).toBe(GROUP_TEXT_STATUS);
+
+    expect((await auth(request(app).post('/api/conversations/nope/unread'))).status).toBe(404);
+
+    // Each route owns its kind: a 1:1 is refused here (it would route around the
+    // contact-level rules), and the inbox routes refuse a thread the unread feed
+    // would never show (a closed relay reachable through its pool number).
+    seedConversation(world, 'conv-1to1', { participant_phone: '+15550000713', last_activity_at: '2026-06-10T10:00:00.000Z' });
+    const oneToOne = await auth(request(app).post('/api/conversations/conv-1to1/unread'));
+    expect(oneToOne.status).toBe(409);
+    expect(oneToOne.body).toEqual({ error: 'not_a_group_thread' });
+    expect(world.conversations.get('conv-1to1')!.unread_count ?? 0).toBe(0);
+    const viaPhone = await auth(request(app).post('/api/inbox/unread').send({ phone: '+15550009002' }));
+    expect(viaPhone.status).toBe(409);
+    expect(viaPhone.body).toEqual({ error: 'thread_closed' });
+    expect(world.conversations.get('conv-relay-closed')!.unread_flag).toBeUndefined();
+  });
+});
+
 describe('POST /api/inbox/read { phone } — unknown number (C8)', () => {
   it('resets unread on the unknown number\'s conversation and emits conversation.updated', async () => {
     const { app, world } = makeWebhookHarness();

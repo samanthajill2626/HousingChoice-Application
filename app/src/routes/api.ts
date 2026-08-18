@@ -52,6 +52,7 @@ import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
+  UNREAD_FLAG_VALUE,
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
@@ -144,6 +145,7 @@ import {
 } from '../repos/pendingRosterActionsRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
+import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -2049,6 +2051,42 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       }
       throw err;
     }
+  });
+
+  // POST /api/conversations/:conversationId/unread - the inbox row's Mark-unread
+  // toggle for a MULTI-PARTY row (relay_group / group_text), the counterpart of
+  // /read above. Idempotent (an unread thread is left alone). Refused for a
+  // thread the unread feed would not show anyway - a closed relay thread or a
+  // group thread outside group_open (isUnreadVisible) - so a manual flag can
+  // never plant an invisible byUnread resident (backfill rule 3 territory).
+  router.post('/conversations/:conversationId/unread', async (req, res) => {
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: 'conversation_not_found' });
+      return;
+    }
+    // Multi-party rows only: a 1:1 goes through /api/inbox/:contactId/unread,
+    // which owns the contact-level rules (soft-deleted contacts are refused
+    // there); accepting a 1:1 here would route around them.
+    if (isOneToOneBucket(conversation)) {
+      res.status(409).json({ error: 'not_a_group_thread' });
+      return;
+    }
+    if (!isUnreadVisible({ ...conversation, unread_count: 1 })) {
+      res.status(409).json({ error: 'thread_closed' });
+      return;
+    }
+    let updated = conversation;
+    if ((conversation.unread_count ?? 0) === 0) {
+      // Build the returned/emitted image from the write's own return (a
+      // re-read is eventually consistent and could hand back the old count).
+      const count = await conversations.incrementUnread(conversationId);
+      updated = { ...conversation, unread_count: count, unread_flag: UNREAD_FLAG_VALUE };
+    }
+    events.emit('conversation.updated', toConversationUpdatedEvent(updated));
+    res.json({ conversation: updated });
   });
 
   // GET /api/events — the live-update SSE stream (M1.2).

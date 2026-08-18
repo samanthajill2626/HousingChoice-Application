@@ -103,8 +103,8 @@ export type ContactFile = ContactFileState & {
   /** Read every slice again for the SAME contact. The committed state stays on
    *  screen while the new fetch is in flight (no loading flash), so a pane that
    *  already has rows keeps showing them. For a write made ELSEWHERE on the page
-   *  that no SSE event covers — the standalone relay-group create, whose
-   *  `connecting` outcome deliberately does not navigate away — the same gap
+   *  that no SSE event covers - the standalone relay-group create, whose
+   *  `connecting` outcome deliberately does not navigate away - the same gap
    *  `useContactTimeline.refetch` fills for the timeline.
    *
    *  A refetch that FAILS keeps the committed state too (`status` stays
@@ -123,7 +123,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
     ...FILE_LOADING,
     forId: contactId,
   });
-  // Bumping this re-runs the fetch effect for the SAME contactId — a nonce
+  // Bumping this re-runs the fetch effect for the SAME contactId - a nonce
   // rather than an extracted async function because the whole fetch body is the
   // effect, and pulling it out would change the abort/ordering shape.
   const [reloadNonce, setReloadNonce] = useState(0);

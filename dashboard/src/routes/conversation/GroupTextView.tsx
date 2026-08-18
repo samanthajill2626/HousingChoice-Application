@@ -24,6 +24,7 @@ import { formatPhoneDisplay } from '../../lib/phone.js';
 import { groupMemberLabel, groupThreadLabel } from '../../lib/groupThread.js';
 import { useGroupThread } from './useGroupThread.js';
 import { useMarkThreadRead } from './useMarkThreadRead.js';
+import { ThreadUnreadToggle } from './ThreadUnreadToggle.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
 
@@ -249,7 +250,7 @@ export function GroupTextView({
   // unchanged reasoning for why this read stays UNWIRED from the badge's
   // optimistic layer, and it returns the handle a mark-unread action awaits so
   // this read cannot overtake it.
-  useMarkThreadRead(conversationId);
+  const autoRead = useMarkThreadRead(conversationId);
 
   // A13 (dashboard half), as corrected by adversarial 17. ONE naming rule
   // (`groupThreadLabel`, mirrored server-side in app/src/lib/groupTitle.ts for
@@ -355,6 +356,19 @@ export function GroupTextView({
               ) : null}
             </p>
           ) : null}
+        </div>
+        {/* D6. This header had NO actions container at all - a back link and the
+            identity block only - so the toggle brings one, using the SAME
+            shell.actions class the relay arm uses so the two headers stay
+            visually identical. No visibility gate here: a group text has no
+            closed state in v1 (InboxRow records the same fact). */}
+        <div className={shell.actions}>
+          <ThreadUnreadToggle
+            conversationId={conversationId}
+            header={header}
+            name="Group text"
+            autoRead={autoRead}
+          />
         </div>
       </header>
 

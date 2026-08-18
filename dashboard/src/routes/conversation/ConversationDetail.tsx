@@ -38,6 +38,7 @@ import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import { groupMemberLabel } from '../../lib/groupThread.js';
 import { useRelayThread } from './useRelayThread.js';
 import { useMarkThreadRead } from './useMarkThreadRead.js';
+import { ThreadUnreadToggle } from './ThreadUnreadToggle.js';
 import { GroupTextView } from './GroupTextView.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
@@ -229,7 +230,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   // unchanged reasoning for why this read stays UNWIRED from the badge's
   // optimistic layer, and it returns the handle a mark-unread action awaits so
   // this read cannot overtake it.
-  useMarkThreadRead(conversationId);
+  const autoRead = useMarkThreadRead(conversationId);
 
   // Refetch the authoritative roster (used on a 409 roster_conflict).
   const refetchMembers = (): void => {
@@ -434,6 +435,20 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             >
               Close
             </button>
+          )}
+          {/* D6. HIDDEN ENTIRELY on a CLOSED relay group - unlike the inbox row,
+              where the guard is defensive, this page is reachable by deep link
+              and from the contact's relay-groups card, so the state is live
+              here. The server refuses a closed thread with 409 thread_closed;
+              offering the action anyway would be an affordance that only ever
+              fails. */}
+          {closed ? null : (
+            <ThreadUnreadToggle
+              conversationId={conversationId}
+              header={header}
+              name="Relay group"
+              autoRead={autoRead}
+            />
           )}
         </div>
       </header>

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
@@ -17,9 +17,19 @@ const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
 const closeConversation = vi.fn();
 const markConversationRead = vi.fn();
+const markConversationUnread = vi.fn();
 const getContacts = vi.fn();
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
+
+// EVERY useEventStream caller in this subtree, fanned out per event name rather
+// than captured last-writer-wins. Production registers each caller separately
+// with the provider, so both useRelayThread's thread filter AND the header's
+// live unread count really do receive conversation.updated. A single-slot
+// capture would hand the event to whichever registered last and quietly turn
+// the other one's assertions vacuous. Handlers are useCallback-stable, so the
+// Set holds one entry per caller.
+const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
 
 // The nav badge's optimistic layer, spied so the mount-mark below can assert it
 // stays UNWIRED (adversarial A10). If a future edit wires noteRowsCleared into
@@ -41,12 +51,16 @@ vi.mock('../../api/index.js', async () => {
     removeConversationMember: (...a: unknown[]) => removeConversationMember(...a),
     closeConversation: (...a: unknown[]) => closeConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
+    markConversationUnread: (...a: unknown[]) => markConversationUnread(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
-    useEventStream: () => {},
+    useEventStream: (h: { onConversationUpdated?: (e: unknown) => void }) => {
+      if (h.onConversationUpdated !== undefined) conversationUpdatedHandlers.add(h.onConversationUpdated);
+    },
   };
 });
 
 import { ConversationDetail } from './ConversationDetail.js';
+import { seedUnreadCount } from './ThreadUnreadToggle.js';
 
 const KEISHA: ConversationParticipant = {
   contactId: 'c1',
@@ -93,7 +107,17 @@ function renderAt(conversationId: string) {
   );
 }
 
+/** Deliver one conversation.updated to EVERY registered listener. The dispatch
+ *  originates outside React's event system, so it is act-wrapped here. */
+function emitConversationUpdated(event: Record<string, unknown>): void {
+  act(() => {
+    for (const handler of [...conversationUpdatedHandlers]) handler(event);
+  });
+}
+
 beforeEach(() => {
+  conversationUpdatedHandlers.clear();
+  markConversationUnread.mockReset().mockResolvedValue(undefined);
   getConversation.mockReset();
   getConversationMembers.mockReset();
   getConversationMessages.mockReset();
@@ -472,5 +496,199 @@ describe('ConversationDetail close / reopen', () => {
 
     // The actionable server copy renders (not the generic "Couldn't reopen the group.").
     await waitFor(() => expect(screen.getByText(serverMessage)).toBeInTheDocument());
+  });
+});
+
+// --- S7: the header mark-read / mark-unread toggle (D6) ---------------------
+//
+// ONE affordance, never both halves at once, chosen by a LIVE count. The count
+// is seeded from the mount header and thereafter owned by conversation.updated:
+// the header is fetched once per conversationId and NOTHING re-reads it, so a
+// seed-only toggle would be frozen on a pre-auto-read number forever.
+describe('ConversationDetail - the relay header unread toggle (S7)', () => {
+  const MARK_UNREAD = 'Mark Relay group as unread';
+  const MARK_READ = 'Mark Relay group read';
+
+  async function openRelay(over: Partial<ConversationHeader> = {}): Promise<void> {
+    getConversation.mockResolvedValue(relayHeader(over));
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
+  }
+
+  it('offers Mark unread - and NEVER Mark read - while the live count is 0', async () => {
+    await openRelay({ unread_count: 0 });
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('offers Mark read - and NEVER Mark unread - while the live count is above 0', async () => {
+    await openRelay({ unread_count: 3 });
+    expect(await screen.findByRole('button', { name: MARK_READ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
+  });
+
+  it('takes the count LIVE from conversation.updated, with no re-fetch of the header', async () => {
+    await openRelay({ unread_count: 0 });
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+
+    emitConversationUpdated({
+      conversationId: 'conv-g1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 3,
+    });
+
+    // The seed said 0 and nothing re-read the header - only the event can have
+    // flipped this.
+    expect(await screen.findByRole('button', { name: MARK_READ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
+    expect(getConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a conversation.updated for a DIFFERENT thread', async () => {
+    await openRelay({ unread_count: 0 });
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    emitConversationUpdated({
+      conversationId: 'some-other-thread',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 9,
+    });
+    expect(screen.getByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('survives a mount header with NO unread_count at all (0, never NaN)', async () => {
+    // relayHeader() carries no unread_count - the attribute is genuinely sparse
+    // server-side, so this is the common case, not an edge one.
+    await openRelay();
+    expect(await screen.findByRole('button', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('seeds an absent or non-numeric unread_count as 0, never NaN', () => {
+    // Asserted on the seed DIRECTLY, because the rendered toggle cannot tell the
+    // two apart: `NaN > 0` and `0 > 0` are both false, so a NaN seed renders the
+    // exact same label a real 0 does and the bug ships invisibly.
+    const base = relayHeader();
+    expect(seedUnreadCount(base)).toBe(0);
+    expect(Number.isNaN(seedUnreadCount(base))).toBe(false);
+    expect(seedUnreadCount(relayHeader({ unread_count: '3' }))).toBe(0);
+    expect(seedUnreadCount(relayHeader({ unread_count: Number.NaN }))).toBe(0);
+    expect(seedUnreadCount(relayHeader({ unread_count: 4 }))).toBe(4);
+  });
+
+  it('awaits the auto-read drain BEFORE issuing the mark-unread POST', async () => {
+    // THE ordering test. The mount auto-read is held open, so a toggle that
+    // POSTs without awaiting suppressAndDrain() is caught here and nowhere
+    // else: S6 can be perfect and S7 can still fail to call it.
+    let releaseAutoRead: (() => void) | undefined;
+    markConversationRead.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseAutoRead = resolve;
+        }),
+    );
+    await openRelay({ unread_count: 0 });
+    const button = await screen.findByRole('button', { name: MARK_UNREAD });
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+
+    fireEvent.click(button);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The drain is still waiting on the in-flight auto-read.
+    expect(markConversationUnread).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseAutoRead?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(markConversationUnread).toHaveBeenCalledWith('conv-g1'));
+  });
+
+  it('navigates to /inbox once the mark-unread POST succeeds', async () => {
+    await openRelay({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(screen.getByText('INBOX')).toBeInTheDocument());
+  });
+
+  it('does NOT navigate on Mark read - reading a thread is not a departure', async () => {
+    await openRelay({ unread_count: 3 });
+    markConversationRead.mockClear();
+    fireEvent.click(await screen.findByRole('button', { name: MARK_READ }));
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+    expect(screen.queryByText('INBOX')).toBeNull();
+  });
+
+  it('stays put when the mark-unread POST rejects', async () => {
+    markConversationUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    await openRelay({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markConversationUnread).toHaveBeenCalled());
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByText('Relay group')).toBeInTheDocument();
+  });
+
+  it('stays put when Mark read rejects', async () => {
+    await openRelay({ unread_count: 3 });
+    markConversationRead.mockClear().mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    fireEvent.click(await screen.findByRole('button', { name: MARK_READ }));
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+    expect(screen.queryByText('INBOX')).toBeNull();
+  });
+
+  it('renders a pending state while the mark-unread request is outstanding', async () => {
+    let releasePost: (() => void) | undefined;
+    markConversationUnread.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePost = resolve;
+        }),
+    );
+    await openRelay({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(screen.getByRole('button', { name: MARK_UNREAD })).toBeDisabled());
+    expect(screen.getByText('Marking unread...')).toBeInTheDocument();
+    await act(async () => {
+      releasePost?.();
+      await Promise.resolve();
+    });
+  });
+
+  it('renders the RETRYABLE copy on a 409 and leaves the action available', async () => {
+    // The participant-GSI-lag path is expected and retryable, not an error the
+    // operator has to reason about - so the button stays live.
+    markConversationUnread.mockRejectedValue(
+      new ApiError(409, 'thread_closed', 'thread_closed', { error: 'thread_closed' }),
+    );
+    await openRelay({ unread_count: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('Could not mark unread - try again'),
+    );
+    const button = screen.getByRole('button', { name: MARK_UNREAD });
+    expect(button).toBeInTheDocument();
+    expect(button).toBeEnabled();
+  });
+
+  it('hides the toggle ENTIRELY on a closed relay group', async () => {
+    await openRelay({ status: 'closed', unread_count: 0 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: MARK_UNREAD })).toBeNull();
+    expect(screen.queryByRole('button', { name: MARK_READ })).toBeNull();
+  });
+
+  it('never touches the nav badge optimistic layer, in either direction', async () => {
+    await openRelay({ unread_count: 3 });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_READ }));
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledTimes(2));
+    emitConversationUpdated({
+      conversationId: 'conv-g1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 0,
+    });
+    fireEvent.click(await screen.findByRole('button', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markConversationUnread).toHaveBeenCalled());
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 });

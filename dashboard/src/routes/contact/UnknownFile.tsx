@@ -18,7 +18,7 @@ import type {
 import { Button } from '../../ui/index.js';
 import { Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, Row } from './Card.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
-import { MediaGallery } from './MediaGallery.js';
+import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
 import { suggestionFor } from './suggestionTargets.js';
@@ -38,6 +38,8 @@ export interface UnknownFileProps {
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** "Load older media" for the gallery (useContactMedia's paging), when the caller pages. */
+  mediaPaging?: MediaGalleryPaging | undefined;
   /** NATIVE group texts this contact is a member of (C13 - see the card below).
    *  REQUIRED, not optional: the props are what make the wiring in ContactDetail
    *  a typecheck error to forget, which is how this card came to be absent from
@@ -65,6 +67,7 @@ export function UnknownFile({
   units,
   media,
   mediaLoading,
+  mediaPaging,
   groupThreadsPending,
   groupThreads,
   groupThreadsTruncated,
@@ -192,7 +195,7 @@ export function UnknownFile({
       />
 
       <Card title="Media from comms">
-        <MediaGallery media={media} loading={mediaLoading ?? false} />
+        <MediaGallery media={media} loading={mediaLoading ?? false} paging={mediaPaging} />
       </Card>
     </>
   );

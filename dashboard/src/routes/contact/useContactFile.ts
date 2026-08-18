@@ -1,6 +1,6 @@
 // useContactFile — fetches the data the contact detail right pane needs from
 // EXISTING endpoints (/api/placements, /api/units, /api/tours) plus the C4/C5
-// slices that may not be live yet (listings-sent, media). Placements/units/tours
+// slice that may not be live yet (listings-sent). Placements/units/tours
 // always load; the C4/C5 calls resolve to a 'pending' marker on a 404 so their
 // panels render an honest "arrives with the backend" state rather than an error.
 // The page derives the per-pane lists with buildContactFile's pure helpers.
@@ -9,11 +9,9 @@ import {
   ApiError,
   getPlacements,
   getContactListingsSent,
-  getContactMedia,
   getContactGroupThreads,
   getContactRelayGroups,
   getTours,
-  type ContactMediaItem,
   type ListingSendRow,
   type PlacementItem,
   type GroupThreadRow,
@@ -39,13 +37,6 @@ export interface ContactFileState {
    *  or when there are no tours. */
   tours: Tour[];
   listingsSent: Slice<ListingSendRow>;
-  // TODO(contact-file-dead-media-slice): `media` is no longer read by any consumer. The contact
-  // file's "Media from comms" gallery now derives from the LIVE timeline
-  // (commsMedia in media.ts → MediaGallery) so it updates on send; this C5 slice
-  // (GET /api/contacts/:id/media) is a redundant once-on-mount fetch. Safe to
-  // delete this field + its fetch below + getContactMedia usage + the media
-  // assertions in useContactFile.test.tsx. Left in deliberately for now.
-  media: Slice<ContactMediaItem>;
   /** The contact's relay-group memberships - the "Relay groups" card.
    *  404 (a backend without the route) → 'pending', mirroring the C4/C5 slices. */
   relayGroups: Slice<RelayGroupRow>;
@@ -79,7 +70,6 @@ const FILE_LOADING: ContactFileState = {
   units: [],
   tours: [],
   listingsSent: { status: 'loading' },
-  media: { status: 'loading' },
   relayGroups: { status: 'loading' },
   groupThreads: { status: 'loading' },
   groupThreadsTruncated: false,
@@ -141,7 +131,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         // loadSlice carries rows only, so the flag is captured here (assigned
         // before Promise.all resolves).
         let groupThreadsTruncated = false;
-        const [placements, units, listingsSent, media, relayGroups, groupThreads] =
+        const [placements, units, listingsSent, relayGroups, groupThreads] =
           await Promise.all([
           getPlacements(signal),
           // EVERY page (the server pages /api/units at 50): these units back the
@@ -150,9 +140,6 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           // properties sat later in the scan.
           getAllUnitPages(false, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
-          // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
-          // now derives from the live timeline; this fetch can be removed.
-          loadSlice((s) => getContactMedia(contactId, s), signal),
           loadSlice((s) => getContactRelayGroups(contactId, s), signal),
           loadSlice(async (s) => {
             const page = await getContactGroupThreads(contactId, s);
@@ -195,7 +182,6 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           units,
           tours,
           listingsSent,
-          media,
           relayGroups,
           groupThreads,
           groupThreadsTruncated,
@@ -205,7 +191,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
         // A RELOAD is not a LOAD. `status: 'error'` replaces every card in the
         // right pane (placements, tours, properties, relay groups, group
-        // threads, media) with one sentence and no retry affordance. That is the
+        // threads) with one sentence and no retry affordance. That is the
         // honest answer when nothing has ever loaded - and a wipe of good rows
         // when a refetch over committed state fails. Keep what is on screen: the
         // pane is then STALE, which is exactly what it was before refetch

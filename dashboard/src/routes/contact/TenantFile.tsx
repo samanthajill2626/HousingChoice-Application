@@ -40,7 +40,7 @@ import { SUGGESTION_TARGET_LABEL, aiSourceOf, suggestionFor } from './suggestion
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
-import { MediaGallery } from './MediaGallery.js';
+import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
 import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
@@ -81,6 +81,8 @@ export interface TenantFileProps {
    *  arrive); `mediaLoading` covers the brief window before the timeline lands. */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** "Load older media" for the gallery (useContactMedia's paging), when the caller pages. */
+  mediaPaging?: MediaGalleryPaging | undefined;
   /** Open the edit dialog (Details "Edit" + Preferences "+ Add"). */
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
@@ -119,6 +121,7 @@ export function TenantFile({
   groupThreadsTruncated,
   media,
   mediaLoading,
+  mediaPaging,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
@@ -356,7 +359,7 @@ export function TenantFile({
       />
 
       <Card title="Media from comms">
-        <MediaGallery media={media} loading={mediaLoading ?? false} />
+        <MediaGallery media={media} loading={mediaLoading ?? false} paging={mediaPaging} />
       </Card>
     </>
   );

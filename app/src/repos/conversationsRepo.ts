@@ -68,6 +68,17 @@ export const GROUP_TEXT_STATUS = 'group_open';
 export const UNREAD_FLAG_VALUE = 'unread';
 
 /**
+ * The ONE value the sparse byRelayOptOut GSI's HASH attribute ever carries
+ * (2026-08-18). Same discipline as UNREAD_FLAG_VALUE: a constant, maintained
+ * only by the opt-out primitives (setRelayMemberOptedOut /
+ * clearRelayMemberOptedOut) and dropped by the relay-close write, so the index
+ * holds exactly the relay groups with a non-empty `relay_opted_out_members` map
+ * - the "someone opted out and is still on the roster" attention set Today
+ * surfaces - and nothing else.
+ */
+export const RELAY_OPTOUT_FLAG_VALUE = 'attention';
+
+/**
  * The three kinds `setUnread` conditions on - MU-1 ("unread the human should
  * see", lib/unreadFeed.ts isUnreadVisible) expressed as a WRITE precondition
  * rather than a prior read. The caller names the bucket from the item it read;
@@ -228,6 +239,15 @@ export interface ConversationItem {
     string,
     { contactId?: string; phone?: string; name?: string; at: string }
   >;
+  /**
+   * Sparse byRelayOptOut GSI HASH (2026-08-18) - present IFF
+   * `relay_opted_out_members` is non-empty (the constant 'attention').
+   * Maintained ONLY by setRelayMemberOptedOut / clearRelayMemberOptedOut and
+   * dropped by the relay-close write; status/type transitions otherwise leave it
+   * alone. Today's relay opt-out attention pass reads this index instead of
+   * walking the open partition. Never exposed on a constructed wire shape.
+   */
+  relay_optout_flag?: 'attention';
   /**
    * byRelayStatus GSI HASH: `relay_group#<status>` (`relay_group#connecting` /
    * `relay_group#open` / `relay_group#closed`). Written ONLY on relay_group
@@ -758,6 +778,16 @@ export interface ConversationsRepo {
   listRelayGroups(
     status: 'open' | 'closed' | 'connecting',
   ): Promise<{ items: ConversationItem[]; truncated: boolean }>;
+  /**
+   * The relay groups that currently carry at least one opted-out member (the
+   * `relay_opted_out_members` map is non-empty) - the Today "opted out of a
+   * relay group" attention set - newest-activity-first. ONE Query on the sparse
+   * byRelayOptOut GSI, so it costs O(attention items) and nothing else: it used
+   * to be found by walking the whole open 1:1+relay partition, hard-capped at
+   * 100 rows, which in prod (649 open threads) truncated on every Today load.
+   * `limit` bounds ONE page; the caller treats a full page as its tripwire.
+   */
+  listRelayOptOutAttention(opts: { limit: number }): Promise<{ items: ConversationItem[] }>;
   /**
    * Idempotent member add (relay groups): appends the member unless an entry
    * with the same phone already exists. OPTIMISTIC CONCURRENCY: the write is
@@ -1928,6 +1958,23 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       return { items, truncated: true };
     },
 
+    async listRelayOptOutAttention({ limit }) {
+      // ONE Query on the sparse byRelayOptOut partition (2026-08-18): the rows
+      // ARE the attention set, so there is nothing to filter and nothing to walk
+      // past. Newest activity first, like every other Today read.
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byRelayOptOut',
+          KeyConditionExpression: 'relay_optout_flag = :flag',
+          ExpressionAttributeValues: { ':flag': RELAY_OPTOUT_FLAG_VALUE },
+          ScanIndexForward: false,
+          Limit: limit,
+        }),
+      );
+      return { items: (Items ?? []) as ConversationItem[] };
+    },
+
     async addMember(conversationId, member) {
       // FIX 3 — optimistic concurrency. Read-modify-write the roster, but
       // condition the write on `participants_version` being unchanged since the
@@ -1978,13 +2025,18 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // DynamoDB rejects an UpdateExpression carrying a value placeholder it
       // never references, so a shared literal would make every reopen throw
       // ValidationException.
+      // RELAY OPT-OUT ATTENTION (2026-08-18): a CLOSE also drops
+      // relay_optout_flag - a closed group's opted-out members are no longer
+      // anyone's to-do (the old open-partition walk never showed them either),
+      // so the row leaves byRelayOptOut in this same write. The map itself is
+      // kept (history); a reopen re-flags only through the next set/clear.
       const isClose = status === 'closed';
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
           UpdateExpression: isClose
-            ? 'SET #s = :status, relay_status = :rs, unread_count = :zero REMOVE unread_flag'
+            ? 'SET #s = :status, relay_status = :rs, unread_count = :zero REMOVE unread_flag, relay_optout_flag'
             : 'SET #s = :status, relay_status = :rs REMOVE close_announced_at',
           ConditionExpression: 'attribute_exists(conversationId) AND #s = :expected',
           ExpressionAttributeNames: { '#s': 'status' },
@@ -2100,16 +2152,21 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // implicit parent-exists precondition, so we seed the whole (merged) map in
       // a second write. Best-effort caller — a failure never breaks the fan-out.
       // memberKey may carry `#` (phone keys) → aliased name. PII: log keys only.
+      //
+      // THE byRelayOptOut FLAG RIDES BOTH WRITES (2026-08-18): the map going
+      // non-empty is exactly the moment this thread becomes a Today attention
+      // item, and stamping the flag in the same UpdateExpression is what keeps
+      // the sparse index the truth (no second write to crash between).
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
-            UpdateExpression: 'SET relay_opted_out_members.#mk = :entry',
+            UpdateExpression: 'SET relay_opted_out_members.#mk = :entry, relay_optout_flag = :flag',
             ConditionExpression:
               'attribute_exists(conversationId) AND attribute_exists(relay_opted_out_members)',
             ExpressionAttributeNames: { '#mk': memberKey },
-            ExpressionAttributeValues: { ':entry': entry },
+            ExpressionAttributeValues: { ':entry': entry, ':flag': RELAY_OPTOUT_FLAG_VALUE },
           }),
         );
       } catch (err) {
@@ -2120,9 +2177,9 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
-            UpdateExpression: 'SET relay_opted_out_members = :map',
+            UpdateExpression: 'SET relay_opted_out_members = :map, relay_optout_flag = :flag',
             ConditionExpression: 'attribute_exists(conversationId)',
-            ExpressionAttributeValues: { ':map': { [memberKey]: entry } },
+            ExpressionAttributeValues: { ':map': { [memberKey]: entry }, ':flag': RELAY_OPTOUT_FLAG_VALUE },
           }),
         );
       }
@@ -2153,6 +2210,32 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
         // No opt-out map on this conversation → nothing to clear (no-op).
         return;
+      }
+      // RETIRE THE ROW FROM byRelayOptOut when that was the last entry
+      // (2026-08-18). A second, CONDITIONAL write rather than one combined
+      // REMOVE: DynamoDB evaluates `size(map)` against the row as it stands, so
+      // "was this the last one" can only be asked AFTER the slot is gone. The
+      // condition makes it safe under concurrent clears (whichever runs after
+      // the map empties wins; the others no-op) and under a concurrent set
+      // (a map that just gained an entry keeps its flag). Best-effort like the
+      // rest of this path: a lost race leaves a flag on an empty map, which the
+      // Today reader tolerates (it iterates the entries and emits nothing) and
+      // the next set/clear corrects.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'REMOVE relay_optout_flag',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND attribute_exists(relay_opted_out_members) AND size(relay_opted_out_members) = :zero',
+            ExpressionAttributeValues: { ':zero': 0 },
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Other members are still opted out (or a concurrent set landed): the
+        // thread stays an attention item.
       }
       log.info({ conversationId, memberKey }, 'relay member opt-out cleared on conversation');
     },

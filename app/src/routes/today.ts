@@ -30,7 +30,8 @@
 // Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
 // listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
 // non-terminal stage — attention + derived-stuck), tours listByScheduledRange,
-// listByLastActivity({status:'open'}) (the relay opt-out attention scan),
+// listRelayOptOutAttention over the sparse byRelayOptOut index (the relay
+// opt-out attention items - 2026-08-18, it used to walk the open partition),
 // queryUnreadPage over the sparse byUnread index (the unread sections -
 // inbox-unread-index), listByType (the unknown/needs_review triage partition),
 // and listRelayGroups('open') (byRelayStatus - the D5 relay close-nags). Each
@@ -565,14 +566,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // (follow_ups is assembled above: due `follow_up` deadlines from the byDueAt
     // query + DERIVED stuck rows from the byStage scan.)
 
-    // --- conversations: ONE bounded inbox Query (byLastActivity, open) --------
-    // THIS PASS IS THE RELAY OPT-OUT ATTENTION SCAN ONLY (inbox-unread-index).
-    // The unread half - untriaged inbounds -> needs_you_now, every other unread
-    // 1:1 -> unreplied - moved to the byUnread index pass immediately below.
-    // Riding this hard-capped 100-row read meant an unread thread ranking past
-    // row 100 was silently missing from Today, however long it sat unanswered.
-    // The opt-out scan STAYS here: it is independent of unread (a relay thread's
-    // unread is pool-number noise) and the open partition IS its source.
+    // --- relay opt-out attention: ONE Query on the sparse byRelayOptOut index --
+    // (2026-08-18) This pass used to ride the byLastActivity `open` read,
+    // hard-capped at 100 rows, from the days it ALSO fed the unread items. When
+    // inbox-unread-index moved unread onto the sparse byUnread GSI, this scan
+    // was left behind on the wide read - and once prod held 649 open threads it
+    // truncated (and WARNed) on every Today load to find the ~1 relay group
+    // that mattered. The truth it needs is written at the moment of STOP /
+    // START / removal (relay_opted_out_members, and now the relay_optout_flag
+    // that rides those same writes), so this reads exactly the attention set:
+    // the relay groups whose map is non-empty, newest activity first. The cap
+    // check stays as a tripwire - a full page here means 100 relay groups with
+    // an opted-out member, which IS worth a WARN.
     //
     // `emittedUnknownPhones` is written by the unread pass and read by the
     // contacts-triage pass after it, so it stays declared out here, ahead of
@@ -581,15 +586,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
     {
-      // NATIVE GROUP TEXTS ARE STRUCTURALLY ABSENT from this read: they live in
-      // the `group_open` partition, and this Query asks for `open`. That is the
-      // whole point of the separate partition - 132 group threads would have
-      // blown this hard-capped 100-row read and pushed real work off Today.
-      // Spec 11 also keeps them out of Today deliberately (inbox + thread view
-      // only in v1), so there is nothing to add here.
-      const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
-      warnIfCapped('conversations', page.items.length, GROUP_FETCH_LIMIT);
+      const page = await conversations.listRelayOptOutAttention({ limit: GROUP_FETCH_LIMIT });
+      warnIfCapped('relay_optout', page.items.length, GROUP_FETCH_LIMIT);
       for (const conv of page.items) {
+        // The index is the truth; the type check is defense in depth (the flag
+        // is written by relay-only primitives), and a closed group's flag is
+        // dropped by the close write, so an `open` check here is a tripwire too.
+        if (conv.status !== 'open') continue;
         // A2P — relay opt-out attention: a relay_group carrying opted-out members
         // surfaces ONE needs_you_now item PER still-opted-out member, linking to
         // that member's contact page (where staff investigate/remove them). This

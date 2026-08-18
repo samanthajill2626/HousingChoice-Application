@@ -8,7 +8,6 @@
 // PII (doc §9): message bodies and media URLs are NEVER logged — log lines
 // carry SIDs/IDs/lengths only, correlated via the pino mixin.
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Readable } from 'node:stream';
 import { Router } from 'express';
 import type { MediaStore } from '../../adapters/mediaStore.js';
 import { createMediaStore } from '../../adapters/mediaStore.js';
@@ -18,7 +17,6 @@ import {
   type MessagingAdapter,
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
-import { normalizeStoredMediaType } from '../../lib/mediaTypes.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import {
   appEvents,
@@ -82,6 +80,11 @@ import {
   type GroupRailEnqueuer,
 } from '../../services/groupRail.js';
 import { createGroupRailEnqueuer } from '../../jobs/groupRail.js';
+import {
+  INLINE_MIRROR_DELAYS_MS,
+  mirrorMediaSet,
+  type MediaMirrorTarget,
+} from '../../services/mediaMirror.js';
 import { createGroupCrossCheck, type GroupCrossCheck } from '../../services/groupCrossCheck.js';
 import { convertConnectingRelayGroupToGroupText } from '../../services/groupConvert.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNumbersRepo.js';
@@ -98,6 +101,11 @@ import {
   MAX_SEND_RETRY_ATTEMPTS,
 } from '../../jobs/retrySend.js';
 import { enqueueImmediate } from '../../jobs/jobs.js';
+import {
+  enqueueMediaMirror,
+  mediaMirrorBackoffMs,
+  type MediaMirrorPayload,
+} from '../../jobs/mediaMirror.js';
 import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
 
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
@@ -456,10 +464,21 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    * (streams only) and record the resulting {s3Key, contentType} attachments on
    * the message (media_attachments), which the authed
    * GET /api/messages/:sid/media/:idx endpoint serves. SHARED by
-   * the 1:1 and relay inbound paths. Best-effort: MEDIA_BUCKET unset → log + skip;
+   * the 1:1 and relay inbound paths. Best-effort: MEDIA_BUCKET unset -> log + skip;
    * a per-attachment failure leaves a usable message (provider URLs stay on the
-   * item) + a correlated ERROR — never a crash. PII (doc §9): SIDs/indexes/counts
-   * only, never the URL or the bytes.
+   * item) - never a crash. PII (doc 9): SIDs/indexes/counts only, never the URL
+   * or the bytes.
+   *
+   * RETRIED, THEN DEFERRED (prod incident 2026-08-17/18). Twilio serves an
+   * inbound MMS's media a beat AFTER it fires this webhook: a single fetch here
+   * 404'd on 2 of the day's 6 inbound MMS (~140ms after the message existed,
+   * media present on re-read) and the photo was lost from the thread for good,
+   * because the dashboard never renders the provider URL. The shared mirror
+   * (services/mediaMirror.ts) now retries a TRANSIENT failure a few times
+   * inline - fast, inside the 15s Twilio waits for this ack - and anything
+   * still failing is handed to the media.mirror job, which retries for minutes
+   * (+5s, +15s, +45s, +2min) and appends what lands. Only a PERMANENT refusal,
+   * or the job's last rung, is an ERROR.
    */
   async function mirrorInboundMedia(input: {
     mediaUrls: string[];
@@ -471,41 +490,64 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const { mediaUrls, messageSid, conversationId, tsMsgId, params } = input;
     if (mediaUrls.length === 0) return;
     if (!mediaStore) {
-      const line = 'inbound MMS media NOT mirrored — MEDIA_BUCKET is not configured';
+      const line = 'inbound MMS media NOT mirrored - MEDIA_BUCKET is not configured';
       if (config.nodeEnv === 'production') log.error({ providerSid: messageSid, mediaCount: mediaUrls.length }, line);
       else log.warn({ providerSid: messageSid, mediaCount: mediaUrls.length }, line);
       return;
     }
-    const attachments: MediaAttachment[] = [];
-    for (const [i, url] of mediaUrls.entries()) {
-      const key = `media/${conversationId}/${messageSid}/${i}`;
-      let stream: Readable | undefined;
-      try {
-        stream = await adapter.getMediaStream(url);
-        // Normalize the SENDER-supplied MediaContentType before storing: keep it
-        // only if it's an allowlisted inline type, else store octet-stream — so
-        // a dangerous type (text/html, image/svg+xml) never enters S3 metadata
-        // (defense-in-depth with the serve-time allowlist). Stored-XSS guard.
-        // The same normalized type is recorded on the message (key+type together).
-        const contentType = normalizeStoredMediaType(params[`MediaContentType${i}`]);
-        await mediaStore.put(key, stream, contentType);
-        attachments.push({ s3Key: key, contentType });
-      } catch (err) {
-        // Destroy the source stream so a failed put (S3 5xx, network drop) doesn't
-        // leak the upstream socket/handle — lib-storage won't on a caller stream.
-        if (stream !== undefined && !stream.destroyed) stream.destroy();
-        log.error(
-          { err, providerSid: messageSid, mediaIndex: i },
-          'media mirror failed — message record keeps the provider URL',
-        );
-      }
-    }
-    if (attachments.length > 0) {
+    const targets: MediaMirrorTarget[] = mediaUrls.map((url, index) => ({
+      index,
+      url,
+      contentType: params[`MediaContentType${index}`],
+    }));
+    const outcome = await mirrorMediaSet(
+      { adapter, mediaStore, logger: log },
+      { conversationId, messageSid, targets, delaysMs: INLINE_MIRROR_DELAYS_MS },
+    );
+
+    if (outcome.attachments.length > 0) {
+      const attachments: MediaAttachment[] = outcome.attachments.map((a) => a.attachment);
       try {
         await messages.annotateMessage(conversationId, tsMsgId, { mediaAttachments: attachments });
       } catch (err) {
         log.error({ err, providerSid: messageSid }, 'failed to record mirrored media keys on the message');
       }
+    }
+
+    for (const f of outcome.failed.filter((x) => !x.retryable)) {
+      log.error(
+        { providerSid: messageSid, mediaIndex: f.index, event: 'media_mirror_refused' },
+        'media mirror refused permanently - message record keeps the provider URL',
+      );
+    }
+    const transient = outcome.failed.filter((x) => x.retryable);
+    if (transient.length === 0) return;
+    const payload: MediaMirrorPayload = {
+      conversationId,
+      tsMsgId,
+      messageSid,
+      media: targets.filter((t) => transient.some((f) => f.index === t.index)),
+      attempt: 1,
+    };
+    const runAt = new Date(Date.now() + mediaMirrorBackoffMs(1));
+    try {
+      await enqueueMediaMirror(payload, runAt);
+      log.warn(
+        {
+          providerSid: messageSid,
+          mediaIndexes: payload.media.map((m) => m.index),
+          runAt: runAt.toISOString(),
+          event: 'media_mirror_deferred',
+        },
+        'media mirror: attachments not fetchable yet - deferred to the media.mirror job',
+      );
+    } catch (err) {
+      // The deferral itself failed (no queue wired, a producer fault): this is
+      // the one case left where the photo is lost, so it keeps the ERROR.
+      log.error(
+        { err, providerSid: messageSid, mediaIndexes: payload.media.map((m) => m.index) },
+        'media mirror failed and could not be deferred - message record keeps the provider URL',
+      );
     }
   }
 

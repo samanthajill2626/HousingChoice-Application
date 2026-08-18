@@ -1,10 +1,13 @@
-// media — deriving the contact's "Media from comms" gallery from the SAME
-// timeline the comms pane renders. Sourcing it here (not the one-shot
-// /api/contacts/:id/media slice) means it updates LIVE as messages arrive: the
-// timeline refetches on SSE message.persisted, so a just-sent MMS shows up in the
-// gallery without a reload. Reuses the bubbles' authed media URL so there's one
-// way to address a mirrored attachment.
-import type { TimelineItem, TimelineMessage } from '../../api/index.js';
+// media - the contact file's "Media from comms" gallery items.
+//
+// 2026-08-18: the gallery is fed by GET /api/contacts/:id/media (the media
+// pointer index, paged by cursor - see useContactMedia), no longer derived from
+// the loaded timeline page. Deriving it from the timeline meant an attachment
+// older than the loaded page (50 items) was simply not in the gallery; the
+// index has no such horizon. The two URL helpers stay here because the
+// timeline bubbles use them too - there is ONE way to address a mirrored
+// attachment: the authed, same-origin GET /api/messages/:sid/media/:index.
+import type { ContactMediaItem, TimelineMessage } from '../../api/index.js';
 
 /** The provider SID is the suffix of tsMsgId (`<provider_ts>#<sid>`). Empty when
  *  it can't be derived — then there's no servable media URL for that message. */
@@ -28,26 +31,13 @@ export interface CommsMediaItem {
   at: string;
 }
 
-/** Flatten every message attachment in the timeline into a newest-first media
- *  list for the "Media from comms" gallery. Skips messages whose SID can't be
- *  derived (no servable URL). */
-export function commsMedia(items: TimelineItem[]): CommsMediaItem[] {
-  const out: CommsMediaItem[] = [];
-  for (const item of items) {
-    if (item.kind !== 'message') continue;
-    const attachments = item.media_attachments ?? [];
-    if (attachments.length === 0) continue;
-    const sid = messageSid(item);
-    if (sid.length === 0) continue;
-    attachments.forEach((att, i) => {
-      out.push({
-        key: `${sid}:${i}`,
-        src: messageMediaSrc(sid, i),
-        contentType: att.contentType,
-        at: item.at,
-      });
-    });
-  }
-  // Newest first (the gallery leads with the most recent media).
-  return out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+/** One gallery item from one indexed attachment: the same key/src shape the
+ *  bubbles use, so a thumbnail and its bubble address the same bytes. */
+export function toCommsMediaItem(item: ContactMediaItem): CommsMediaItem {
+  return {
+    key: `${item.providerSid}:${item.index}`,
+    src: messageMediaSrc(item.providerSid, item.index),
+    contentType: item.contentType,
+    at: item.at,
+  };
 }

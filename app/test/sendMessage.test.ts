@@ -123,6 +123,7 @@ function makeFakes(
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
+    listRelayOptOutAttention: async () => ({ items: [] }),
     setMode: async (_id, mode) => {
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;
@@ -223,6 +224,8 @@ function makeFakes(
     getByTsMsgId: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
+    putMediaPointers: async () => {},
+    listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,
     getJobExecutionMarker: async () => false,
     // Email orphan-event parking lot (B5) - unused by the SMS send service:

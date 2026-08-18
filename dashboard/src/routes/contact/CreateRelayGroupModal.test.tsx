@@ -10,7 +10,7 @@ import userEvent from '@testing-library/user-event';
 import { useCallback, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import type { Contact, RosterPreview } from '../../api/index.js';
+import { ApiError, type Contact, type RosterPreview } from '../../api/index.js';
 
 const previewRelayGroup = vi.fn();
 const createRelayGroup = vi.fn();
@@ -90,6 +90,12 @@ const PREVIEW: RosterPreview = {
 const CONNECTING_NOTICE =
   'This group is still getting its number. The intro text has not been sent yet; it goes out once the number is ready.';
 
+/** The AMBIGUOUS-failure panel. Byte-exact copy of the shipped string: it is the
+ *  only thing standing between a dropped connection and a second purchased pool
+ *  number, so a drifted sentence is a real regression. */
+const AMBIGUOUS_NOTICE =
+  'The connection dropped before the server answered, so the group may or may not have been created. Check the Relay groups card on this page before trying again - creating it again could text everyone twice.';
+
 function Probe(): React.JSX.Element {
   return <output data-testid="loc">{useLocation().pathname}</output>;
 }
@@ -101,11 +107,13 @@ function Host({
   candidates,
   onClosed,
   onCreated,
+  onAmbiguous,
 }: {
   contact: Contact;
   candidates: Contact[];
   onClosed: () => void;
   onCreated: (c: unknown) => void;
+  onAmbiguous: () => void;
 }): React.JSX.Element | null {
   const [open, setOpen] = useState(true);
   if (!open) return null;
@@ -118,6 +126,7 @@ function Host({
         setOpen(false);
       }}
       onCreated={onCreated}
+      onAmbiguousCreate={onAmbiguous}
     />
   );
 }
@@ -125,6 +134,7 @@ function Host({
 function renderIt(opts: { contact?: Contact; candidates?: Contact[] } = {}) {
   const onClosed = vi.fn();
   const onCreated = vi.fn();
+  const onAmbiguous = vi.fn();
   const { unmount } = render(
     <MemoryRouter initialEntries={['/contacts/T1']}>
       <Host
@@ -132,11 +142,12 @@ function renderIt(opts: { contact?: Contact; candidates?: Contact[] } = {}) {
         candidates={opts.candidates ?? ALL}
         onClosed={onClosed}
         onCreated={onCreated}
+        onAmbiguous={onAmbiguous}
       />
       <Probe />
     </MemoryRouter>,
   );
-  return { onClosed, onCreated, unmount, user: userEvent.setup() };
+  return { onClosed, onCreated, onAmbiguous, unmount, user: userEvent.setup() };
 }
 
 /** Arm a preview that never settles on its own, so the flow stays `busy` for as
@@ -279,10 +290,12 @@ describe('CreateRelayGroupModal - the picker', () => {
 
 describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
   // The members array is snapshotted into startPreview's closure and installed
-  // on resolve, so anything the operator does to the list mid-flight is either
-  // silently dropped (an add) or silently discarded (a dismissal). The list is
-  // therefore FROZEN for the duration: Remove was already disabled={busy}, and
-  // these pin the three paths that were not.
+  // on resolve, so an ADD made mid-flight would show on screen and be absent
+  // from the previewed group. The LIST is therefore frozen for the duration.
+  //
+  // The FLOW is not. The preview provisions nothing, so an operator who no
+  // longer wants this group must be able to leave while it is in flight - see
+  // the "can always be abandoned" block below.
 
   it('freezes the member search while the preview is in flight', async () => {
     pendingPreview();
@@ -308,25 +321,6 @@ describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
     resolve(PREVIEW);
     await screen.findByRole('button', { name: 'Open relay group' });
     expect(sentMembers(previewRelayGroup)).toHaveLength(2);
-  });
-
-  it('Escape mid-preview neither closes the flow nor discards the list', async () => {
-    // Modal's Escape / backdrop / X all call onClose unconditionally, so the
-    // busy guard lives in this component (the page's own delete dialog is the
-    // precedent). Cancel was already disabled={busy}; these were not.
-    pendingPreview();
-    const { user, onClosed } = renderIt();
-    await pick(user, 'Marcus', /Marcus Bell/);
-    await user.click(screen.getByRole('button', { name: 'Create group' }));
-    await user.keyboard('{Escape}');
-    expect(onClosed).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
-    expect(within(screen.getByRole('list', { name: 'Members' })).getByText('Marcus Bell'))
-      .toBeInTheDocument();
-    // The X in the header is the same path.
-    await user.click(screen.getByRole('button', { name: 'Close' }));
-    expect(onClosed).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
   it('a re-render of the PAGE BEHIND the modal does not interrupt typing', async () => {
@@ -382,6 +376,65 @@ describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
     expect(signal.aborted).toBe(false);
     unmount();
     expect(signal.aborted).toBe(true);
+  });
+});
+
+describe('CreateRelayGroupModal - the PICKER can always be abandoned', () => {
+  // DELIBERATE REVERSAL of the earlier busy-guard on this modal. The preview is
+  // a PURE READ: it provisions nothing, buys nothing and texts nobody, so a slow
+  // or hung one must never trap the operator in a dialog they have to reload the
+  // page to leave. Every dismissal path works while it is in flight, and each
+  // one ABORTS the request on its way out.
+  //
+  // The CONFIRM dialog's own guard is untouched and stays untouched - that one
+  // covers a round trip that buys a pool number.
+
+  it('Escape mid-preview leaves the flow and aborts the request', async () => {
+    pendingPreview();
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    const signal = previewRelayGroup.mock.calls[0]![1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    await user.keyboard('{Escape}');
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(true);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('Cancel is live mid-preview - it closes the flow and aborts the request', async () => {
+    pendingPreview();
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBeEnabled();
+    const signal = previewRelayGroup.mock.calls[0]![1] as AbortSignal;
+    await user.click(cancel);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(true);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('the header X is the same door', async () => {
+    pendingPreview();
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    const signal = previewRelayGroup.mock.calls[0]![1] as AbortSignal;
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('the member LIST is still frozen while the preview is in flight', async () => {
+    // Leaving is allowed; EDITING is not. The two halves are independent.
+    pendingPreview();
+    const { user } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    expect(screen.getByRole('combobox', { name: 'Add member' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove Marcus Bell' })).toBeDisabled();
   });
 });
 
@@ -455,8 +508,11 @@ describe('CreateRelayGroupModal - the confirm step', () => {
     expect(onClosed).not.toHaveBeenCalled();
   });
 
-  it('keeps the confirm dialog OPEN when the create fails', async () => {
-    createRelayGroup.mockRejectedValue(new Error('nope'));
+  it('keeps the confirm dialog OPEN when the SERVER refuses the create', async () => {
+    // A refusal the server SENT: it has a status, so nothing was created and the
+    // dialog's re-armed confirm is the right affordance. A rejection with no
+    // answer behind it is a different story - see the AMBIGUOUS block below.
+    createRelayGroup.mockRejectedValue(new ApiError(400, 'roster_too_thin', 'roster_too_thin'));
     const { user } = renderIt();
     await pick(user, 'Marcus', /Marcus Bell/);
     await user.click(screen.getByRole('button', { name: 'Create group' }));
@@ -627,8 +683,8 @@ describe('CreateRelayGroupModal - the create outcome', () => {
     );
   });
 
-  it('a FAILED create reports nothing - onCreated means a group exists', async () => {
-    createRelayGroup.mockRejectedValue(new Error('nope'));
+  it('a REFUSED create reports nothing - onCreated means a group exists', async () => {
+    createRelayGroup.mockRejectedValue(new ApiError(400, 'roster_too_thin', 'roster_too_thin'));
     const { user, onCreated } = renderIt();
     await pick(user, 'Marcus', /Marcus Bell/);
     await user.click(screen.getByRole('button', { name: 'Create group' }));
@@ -649,5 +705,134 @@ describe('CreateRelayGroupModal - the create outcome', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClosed).toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('CreateRelayGroupModal - an AMBIGUOUS create is never re-armed', () => {
+  // A create fails in TWO different worlds and the retry affordance must differ:
+  //
+  //   THE SERVER ANSWERED (ApiError with a real status) - it refused, nothing
+  //     was created, and confirming again is exactly right. The dialog's own
+  //     inline-error path owns that, so the rejection PROPAGATES untouched.
+  //   NOBODY ANSWERED (a dropped connection, a timeout, ApiError status 0) - the
+  //     request may have COMMITTED before the wire died. `POST /api/relay-groups`
+  //     has no idempotency key and the standalone route has no owner row to 409
+  //     against, so a retry mints a SECOND group, buys a SECOND pool number and
+  //     texts everyone a second intro. There is no affordance that can retry
+  //     safely, so the flow offers none: it says what happened and stops.
+
+  /** A refusal the SERVER sent: a status, and a renderable message in the body. */
+  function serverRefusal(): ApiError {
+    return new ApiError(503, 'relay_provisioning_disabled', 'relay_provisioning_disabled', {
+      error: 'relay_provisioning_disabled',
+      message: 'Live number provisioning is off - no number could be bought.',
+    });
+  }
+
+  async function createWith(
+    reason: unknown,
+  ): Promise<ReturnType<typeof renderIt>> {
+    createRelayGroup.mockRejectedValue(reason);
+    const handles = renderIt();
+    await pick(handles.user, 'Marcus', /Marcus Bell/);
+    await handles.user.click(screen.getByRole('button', { name: 'Create group' }));
+    await handles.user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    return handles;
+  }
+
+  it('a SERVER refusal keeps the confirm dialog open and re-armed - nothing was created', async () => {
+    const { onCreated, onAmbiguous } = await createWith(serverRefusal());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Live number provisioning is off - no number could be bought.',
+    );
+    // Still the confirm dialog, still confirming: this retry is the safe one.
+    expect(screen.getByRole('heading', { name: 'Open the relay group?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open relay group' })).toBeEnabled();
+    expect(screen.queryByText(AMBIGUOUS_NOTICE)).toBeNull();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onAmbiguous).not.toHaveBeenCalled();
+  });
+
+  it('a DROPPED CONNECTION lands on the maybe-created panel with no way to retry', async () => {
+    const { user, onClosed, onCreated, onAmbiguous } = await createWith(
+      new TypeError('Failed to fetch'),
+    );
+    expect(await screen.findByText(AMBIGUOUS_NOTICE)).toBeInTheDocument();
+    // The confirm dialog is GONE and the picker did not come back, so neither
+    // affordance that starts a create exists on screen.
+    expect(screen.queryByRole('heading', { name: 'Open the relay group?' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open relay group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create group' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Add member' })).toBeNull();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    // The one create that was started is the only one there ever was, and the
+    // flow stayed on the page whose card the operator has to go and read.
+    expect(createRelayGroup).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('loc')).toHaveTextContent('/contacts/T1');
+    // The page is told to refresh - a group that DID land must be on the card by
+    // the time the operator looks. `onCreated` is not: it means a group exists.
+    expect(onAmbiguous).toHaveBeenCalledTimes(1);
+    expect(onCreated).not.toHaveBeenCalled();
+    // Close is the only action, and it really closes.
+    const closers = screen.getAllByRole('button', { name: 'Close' });
+    await user.click(closers[closers.length - 1]!);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('a NETWORK-ERROR ApiError is ambiguous too - status 0 means nobody answered', async () => {
+    // The transport wraps a failed fetch as `ApiError(0, 'network_error')`
+    // (client.ts), so "is it an ApiError" cannot be the question - "did the
+    // SERVER answer" is, and status 0 is documented as no answer at all. A
+    // status-only check here would re-arm the create on the single most likely
+    // way a commit-then-drop actually happens.
+    const { onAmbiguous } = await createWith(
+      new ApiError(0, 'network_error', 'Network request failed'),
+    );
+    expect(await screen.findByText(AMBIGUOUS_NOTICE)).toBeInTheDocument();
+    expect(onAmbiguous).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Open relay group' })).toBeNull();
+  });
+
+  it('works with NO onAmbiguousCreate wired at all', async () => {
+    createRelayGroup.mockRejectedValue(new TypeError('Failed to fetch'));
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/contacts/T1']}>
+        <CreateRelayGroupModal contact={TENANT} candidates={ALL} onClose={() => undefined} />
+      </MemoryRouter>,
+    );
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    expect(await screen.findByText(AMBIGUOUS_NOTICE)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('an onAmbiguousCreate that THROWS still lands on the panel', async () => {
+    // Same reasoning as onCreated: this call sits inside the promise the confirm
+    // dialog awaits, so a throwing page callback would be rendered as "please
+    // try again" over a group that may well exist.
+    createRelayGroup.mockRejectedValue(new TypeError('Failed to fetch'));
+    const onAmbiguousCreate = vi.fn(() => {
+      throw new Error('the page blew up refreshing its card');
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/contacts/T1']}>
+        <CreateRelayGroupModal
+          contact={TENANT}
+          candidates={ALL}
+          onClose={() => undefined}
+          onAmbiguousCreate={onAmbiguousCreate}
+        />
+      </MemoryRouter>,
+    );
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    expect(await screen.findByText(AMBIGUOUS_NOTICE)).toBeInTheDocument();
+    expect(onAmbiguousCreate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

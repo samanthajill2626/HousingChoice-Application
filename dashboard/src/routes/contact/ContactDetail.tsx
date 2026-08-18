@@ -916,6 +916,14 @@ export function ContactDetail(): React.JSX.Element {
             // second pool number.
             file.refetch();
           }}
+          onAmbiguousCreate={() => {
+            // Same refresh, harder-earned: the create got NO answer, so whether a
+            // group exists is a question only this card can settle - and its
+            // panel sends the operator straight here to read it. A stale "No
+            // relay groups yet." under that sentence is the retry it exists to
+            // prevent.
+            file.refetch();
+          }}
         />
       ) : null}
 

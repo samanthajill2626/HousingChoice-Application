@@ -3,12 +3,14 @@
 // contact whose page this is, plus anyone the operator picks, then confirmed
 // against the SERVER-composed intro before anything is created.
 //
-// THREE STATES, EXACTLY ONE MODAL MOUNTED AT A TIME:
+// FOUR STATES, EXACTLY ONE MODAL MOUNTED AT A TIME:
 //
-//   picking    - this modal, the member list + search + tag.
-//   confirming - this modal unmounts, RosterConfirmDialog mounts.
-//   connecting - the dialog unmounts, this modal re-mounts showing the result
-//                panel instead of the member list.
+//   picking      - this modal, the member list + search + tag.
+//   confirming   - this modal unmounts, RosterConfirmDialog mounts.
+//   connecting   - the dialog unmounts, this modal re-mounts showing the result
+//                  panel instead of the member list.
+//   maybeCreated - the create never got an answer. A terminal, ACTIONLESS
+//                  panel: see the ambiguity rule below.
 //
 // Never two at once: `Modal` registers a DOCUMENT-level Escape handler with no
 // propagation guard, so one keypress would close both and silently discard the
@@ -31,9 +33,25 @@
 // A create that answers `connecting` has NO number and sent NO intro yet, so
 // it does not navigate: the operator was just shown that exact intro body, and
 // silence would read as "sent".
+//
+// A FAILED CREATE FAILS IN ONE OF TWO WORLDS, AND ONLY ONE MAY BE RETRIED:
+//
+//   The SERVER ANSWERED (an ApiError with a real status) - it refused, nothing
+//     exists, and confirming again is exactly right. The rejection PROPAGATES to
+//     RosterConfirmDialog, which renders it inline and keeps its confirm armed.
+//   NOBODY ANSWERED (a dropped connection, a timeout, the transport's own
+//     `ApiError(0, 'network_error')`) - the request may well have COMMITTED
+//     before the wire died. `POST /api/relay-groups` has no idempotency key, and
+//     the 409 `relay_exists` that protects the owner-scoped opens has no
+//     standalone equivalent (there is no owner row to key it on), so a retry
+//     mints a SECOND group, buys a SECOND pool number and texts everyone a
+//     second intro. No affordance can retry that safely, so this flow offers
+//     none: it lands on `maybeCreated`, which has exactly one button and it is
+//     Close.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
+  ApiError,
   createRelayGroup,
   previewRelayGroup,
   type Contact,
@@ -62,6 +80,14 @@ const NO_MOBILE = 'no mobile number - cannot start a relay group';
 const CONNECTING_NOTICE =
   'This group is still getting its number. The intro text has not been sent yet; it goes out once the number is ready.';
 
+/** The AMBIGUOUS result - extends the A11 pinned-string contract. It has three
+ *  jobs, in this order: say the outcome is UNKNOWN (never "it failed", which
+ *  invites the retry), name WHERE the answer is (the card on this very page,
+ *  which onAmbiguousCreate has just refreshed), and state the cost of guessing
+ *  wrong. Byte-exact and ASCII, like every other pinned string here. */
+const AMBIGUOUS_NOTICE =
+  'The connection dropped before the server answered, so the group may or may not have been created. Check the Relay groups card on this page before trying again - creating it again could text everyone twice.';
+
 /** One picked contact as the picker holds it. `name` is '' when the contact has
  *  neither a first nor a last name - see rule 2 in the header. */
 interface PickedRow {
@@ -73,7 +99,18 @@ interface PickedRow {
 type Phase =
   | { kind: 'picking' }
   | { kind: 'confirming'; members: RelayGroupMemberInput[]; preview: RosterPreview }
-  | { kind: 'connecting'; conversationId: string };
+  | { kind: 'connecting'; conversationId: string }
+  | { kind: 'maybeCreated' };
+
+/** Did the SERVER answer? That - not "is this an ApiError" - is the question a
+ *  retry hangs on. The transport wraps a failed fetch as
+ *  `ApiError(0, 'network_error')` (api/client.ts, where status 0 is documented
+ *  as exactly that), so an `instanceof` check alone would classify the single
+ *  most likely commit-then-drop as a safe retry. A real status means the server
+ *  received the request, decided, and said no. */
+function serverRefused(err: unknown): boolean {
+  return err instanceof ApiError && err.status > 0;
+}
 
 /** The number we would text. `phones` is OPTIONAL on the dashboard Contact, so
  *  the optional chain is required to typecheck. */
@@ -111,6 +148,12 @@ export interface CreateRelayGroupModalProps {
    *  refresh the operator closes the panel onto "No relay groups yet." and a
    *  retry buys a second pool number. Optional - the flow works without it. */
   onCreated?: (conversation: ConversationHeader) => void;
+  /** A group MAY exist: the create got no answer, so we cannot say. Same job as
+   *  `onCreated` and fired for the same reason - the panel tells the operator to
+   *  go and read the Relay groups card, so that card must already be showing
+   *  what really happened by the time they look. No conversation is passed
+   *  because none is known. Optional - the flow works without it. */
+  onAmbiguousCreate?: () => void;
 }
 
 export function CreateRelayGroupModal({
@@ -118,6 +161,7 @@ export function CreateRelayGroupModal({
   candidates,
   onClose,
   onCreated,
+  onAmbiguousCreate,
 }: CreateRelayGroupModalProps): React.JSX.Element {
   const navigate = useNavigate();
   const tagId = useId();
@@ -221,17 +265,42 @@ export function CreateRelayGroupModal({
       });
   };
 
-  /** The dialog's confirm. A rejection PROPAGATES so the dialog renders it
-   *  inline and stays open - that path is the dialog's, not ours. */
+  /** The dialog's confirm. A rejection the SERVER SENT propagates, so the dialog
+   *  renders it inline and stays open with its confirm re-armed - that path is
+   *  the dialog's, not ours, and it is correct: nothing was created. A rejection
+   *  with no answer behind it must NOT take that path (see the header). */
   const confirmCreate = async (): Promise<void> => {
     if (phase.kind !== 'confirming') return;
     const trimmedTag = tag.trim();
     creating.current = true;
     try {
-      const { conversation } = await createRelayGroup(
-        phase.members,
-        trimmedTag === '' ? undefined : trimmedTag,
-      );
+      let created: { conversation: ConversationHeader };
+      try {
+        created = await createRelayGroup(
+          phase.members,
+          trimmedTag === '' ? undefined : trimmedTag,
+        );
+      } catch (err) {
+        if (serverRefused(err)) throw err;
+        // AMBIGUOUS. `settled` first, and before any render: resolving normally
+        // makes RosterConfirmDialog call its onClose, and without this that lands
+        // in leaveConfirm and drags the flow back to the picker - over the one
+        // panel that exists to stop a second create - with "Create group" armed
+        // and the member list intact.
+        settled.current = true;
+        // SWALLOWED for the same reason as onCreated: this call sits inside the
+        // promise the dialog awaits, so a throwing page callback would be caught
+        // by the dialog's .catch and rendered as "please try again" over a group
+        // that may well exist.
+        try {
+          onAmbiguousCreate?.();
+        } catch {
+          /* a group may exist; refreshing the page behind it is not our failure */
+        }
+        setPhase({ kind: 'maybeCreated' });
+        return;
+      }
+      const { conversation } = created;
       settled.current = true;
       // BEFORE the branch: both outcomes leave a group behind. The connecting one
       // stays on the page whose card must now list it; the open one navigates,
@@ -269,30 +338,38 @@ export function CreateRelayGroupModal({
     setPhase({ kind: 'picking' });
   };
 
-  /** Escape, the backdrop and the header X all call Modal's onClose with no
-   *  condition of their own, so the busy guard has to live here - the page's own
-   *  delete dialog does exactly this. Cancel is already disabled={busy}; without
-   *  this the other three paths still discard the assembled member list while
-   *  its preview is in flight.
+  /** Leave the PICKER - Escape, the backdrop, the header X and Cancel, which all
+   *  arrive here and all work WHILE A PREVIEW IS IN FLIGHT. That is deliberate
+   *  and it is the opposite of the rule the confirm step follows: the preview is
+   *  a pure read (it provisions nothing, buys nothing, texts nobody), so the only
+   *  thing a dismissal can cost is a member list the operator is choosing to
+   *  abandon - while a preview that hangs behind a busy-guard traps them in a
+   *  dialog they have to reload the page to leave. The request is aborted on the
+   *  way out so an abandoned flow does not keep a fetch alive.
+   *
+   *  The list is still FROZEN mid-flight (the search field and every Remove stay
+   *  disabled={busy}): an ADD would show on screen and be absent from the
+   *  previewed group. Leaving and editing are independent, and only editing is
+   *  refused. The CONFIRM dialog's own busy-guard is untouched - that one covers
+   *  a round trip that buys a pool number.
    *
    *  MEMOIZED ON PURPOSE. Modal keys its Escape-handler effect on `onClose`, and
    *  that effect's cleanup returns focus to the previously focused element while
    *  the fresh run re-focuses the dialog. A callback rebuilt on every render
    *  therefore steals focus out of the search field on EVERY KEYSTROKE - typing
-   *  lands one character and stops. Identity changes only when `busy` flips
-   *  (twice a flow, while the field is disabled anyway) - and only because the
-   *  `onClose` this closes over is itself stable: ContactDetail memoizes the
-   *  handler it passes here for exactly this reason. An inline arrow there would
-   *  make this callback change on every PARENT render, which on this page means
-   *  every SSE tick.
+   *  lands one character and stops. This one never changes identity at all: it
+   *  reads no state, only refs, and the `onClose` it closes over is itself
+   *  stable (ContactDetail memoizes the handler it passes here for exactly this
+   *  reason - an inline arrow there would make this callback change on every
+   *  PARENT render, which on this page means every SSE tick).
    *  TODO(modal-onclose-refocus-trap): the residual trap is Modal's - it keys the
    *  effect on `onClose` at all. Fixing it there (the callback in a ref, the
    *  effect keyed []) retires this whole class and covers ContactEditForm and
    *  PhoneManager, which share the wiring and also hold text inputs. */
-  const closeIfIdle = useCallback((): void => {
-    if (busy) return;
+  const closePicker = useCallback((): void => {
+    previewAbort.current?.abort();
     onClose();
-  }, [busy, onClose]);
+  }, [onClose]);
 
   if (phase.kind === 'confirming') {
     return (
@@ -326,13 +403,36 @@ export function CreateRelayGroupModal({
     );
   }
 
+  if (phase.kind === 'maybeCreated') {
+    return (
+      <Modal
+        title="Create a relay group"
+        onClose={onClose}
+        footer={
+          <div className={styles.actions}>
+            {/* The ONLY action. There is deliberately no retry here and no way
+                back to the picker: the whole point of this state is that a
+                second create could be the second one. */}
+            <Button variant="secondary" size="sm" type="button" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        }
+      >
+        <p className={styles.notice}>{AMBIGUOUS_NOTICE}</p>
+      </Modal>
+    );
+  }
+
   return (
     <Modal
       title="Create a relay group"
-      onClose={closeIfIdle}
+      onClose={closePicker}
       footer={
         <div className={styles.actions}>
-          <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
+          {/* NOT disabled={busy}: a pure-read preview must never trap the
+              operator - see closePicker. */}
+          <Button variant="secondary" size="sm" type="button" onClick={closePicker}>
             Cancel
           </Button>
           <Button size="sm" type="button" onClick={startPreview} disabled={!canCreate || busy}>

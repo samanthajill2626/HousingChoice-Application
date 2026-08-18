@@ -15,7 +15,12 @@
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 26rem;
+  /* Only ever bites on screens WIDER than this: the dialog is width:100% inside
+     a padded backdrop, so a phone is already full-bleed-minus-padding and a
+     bump here cannot make it wider there. That makes this purely a desktop /
+     large-tablet change. 26rem was tight for any dialog with a list in it -
+     member rows, roster rows, recipient rows all wrapped early. */
+  max-width: 30rem;
   /* dvh, not vh: on mobile browsers 100vh includes the retracted URL bar, so a
      vh-sized dialog runs BELOW the visible viewport and its footer buttons
      become unreachable. Every modal in the app shares this shell, so every one

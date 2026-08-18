@@ -118,6 +118,18 @@ an honest outcome.
 - **D10 - Imported-call normalization is folded in.** Historical Quo calls are a
   large share of what this panel renders; shipping a first-class call card that
   prints "Completed" in miss-red with no duration is not shipping the feature.
+- **D11 - Follow handset convention where one exists, depart from it only where
+  it has nothing to say.** An inbound call that rang briefly and was abandoned
+  reads "Missed", with no minimum ring duration - which is exactly what a
+  handset call log does for a one-ring abandon, and the reason 7.1 clause 3's
+  inbound arm is preserved rather than given a softer phrase of its own.
+  The convention runs out on the outbound side: a handset shows an unanswered
+  outgoing call as an outgoing entry with no duration and no explanatory label,
+  because the only person reading that log is the person who placed the call.
+  A shared staff inbox has the opposite property - a teammate opening a
+  tenant's timeline did not place the call and cannot infer what happened - so
+  "No answer" (D3) and "No team answer" (D8) are a deliberate departure,
+  covering a need the handset precedent never had.
 
 ## 4. The load-bearing invariants
 
@@ -266,7 +278,17 @@ Resolution order:
 
 Clause 2 uses the viewer's clock against the row's `at` (which is `provider_ts`,
 the ring start). Clause 3's inbound arm is the pre-existing behavior for an
-inbound row that never resolved, preserved deliberately.
+inbound row that never resolved, preserved deliberately per D11: a caller who
+abandoned during the ring produced a missed call, and a handset would say so
+regardless of how briefly it rang.
+
+Clause 3's outbound arm covers two sub-cases that are not distinguished, on
+purpose: the navigator's cell was never answered, and the navigator answered but
+never pressed 1 (a timeout or any non-accept key, `voice.ts:1252`). "No team
+answer" is true of both. Stamping a terminal status from the gate's decline
+branch would resolve the second durably, but it would need an outcome value that
+does not read as "the target did not answer" - the same fourth-value problem D6
+declined - so both stay derived.
 
 ### 7.2 CallCard
 

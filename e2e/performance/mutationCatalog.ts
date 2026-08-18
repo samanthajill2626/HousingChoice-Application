@@ -146,5 +146,7 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'postReminderSendNow', 'request:POST', '/api/tours/:tourId/reminders/:reminderId/send-now'),
   entry(ENDPOINTS, 'patchTour', 'request:PATCH', '/api/tours/:tourId'),
   entry(ENDPOINTS, 'createTourRelay', 'requestWithStatus:POST', '/api/tours/:tourId/relay'),
+  entry(ENDPOINTS, 'previewRelayGroup', 'request:POST', '/api/relay-groups/preview'),
+  entry(ENDPOINTS, 'createRelayGroup', 'request:POST', '/api/relay-groups'),
   entry('dashboard/src/routes/public/publicApi.ts', 'submitHousingFair', 'request:POST', '/public/housing-fair', 'workflow_only', 'outside_interception'),
 ]);

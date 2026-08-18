@@ -1223,7 +1223,10 @@ describe('ListingDetail - Contacts card edit mode', () => {
     // Committed-pick typeahead (the UnitSearchField contract): typing alone can
     // never add anybody - only a PICKED candidate carries a contactId.
     await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
-    await user.click(screen.getByRole('option', { name: 'Renata Vale' }));
+    // Substring, not exact: a chooser option's accessible name is the contact's
+    // name PLUS their kind (ContactSearchField renders it so a first-name-only
+    // roster is navigable), so an exact name never matches.
+    await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
     await user.selectOptions(
       screen.getByRole('combobox', { name: 'Role for the new contact' }),
       'pm',

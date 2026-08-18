@@ -75,6 +75,42 @@ describe('ContactSearchField', () => {
     expect(screen.getByRole('combobox')).toHaveAttribute('aria-expanded', 'false');
   });
 
+  // The kind suffix exists so a first-name-only roster is navigable. The
+  // invariant underneath it is that the suffix is DISPLAY ONLY: `value.name` is
+  // what RelationshipsEditor stores, so a kind folded into it would be written
+  // to a relationship row.
+  it('shows each candidate KIND after the name, using the role when there is one', () => {
+    const candidates: Contact[] = [
+      { contactId: 'r1', type: 'tenant', firstName: 'Renee', phone: '+14040100011' },
+      { contactId: 'r2', type: 'partner', firstName: 'Renee', phone: '+14040100012' },
+      {
+        contactId: 'r3',
+        type: 'landlord',
+        firstName: 'Renee',
+        role: 'Property Manager',
+        phone: '+14040100013',
+      },
+    ];
+    render(<ContactSearchField value={{ name: 'Renee' }} onChange={vi.fn()} candidates={candidates} />);
+    // Three same-named people, told apart only by the kind - the whole point.
+    expect(screen.getByRole('option', { name: /Renee\s+Tenant/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Renee\s+Partner/i })).toBeInTheDocument();
+    // The contact's own role beats the bare type label.
+    expect(screen.getByRole('option', { name: /Renee\s+Property Manager/i })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Renee\s+Landlord/i })).toBeNull();
+  });
+
+  it('does NOT commit the kind into value.name when a candidate is picked', () => {
+    const onChange = vi.fn();
+    render(
+      <ContactSearchField value={{ name: 'Ali' }} onChange={onChange} candidates={CANDIDATES} />,
+    );
+    fireEvent.click(screen.getByRole('option', { name: /Alice Smith/i }));
+    // RelationshipsEditor STORES value.name. "Alice Smith Tenant" in a
+    // relationship row would be this suffix leaking into persisted data.
+    expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
+  });
+
   it('a selected value renders the input read-only (typing cannot break the link)', () => {
     render(
       <ContactSearchField

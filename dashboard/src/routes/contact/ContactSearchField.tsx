@@ -4,8 +4,19 @@
 // to free typing (so typing can never silently drop a selection). Free typing
 // (uncommitted only) clears contactId.
 // Candidates are rendered as JSX text nodes — never dangerouslySetInnerHTML.
+//
+// EACH OPTION SHOWS THE CONTACT'S KIND AFTER THEIR NAME, and it is a SIBLING
+// node, never part of `displayName`. A roster full of first-name-only contacts
+// is otherwise unpickable - several rows read "Renee" with nothing to tell the
+// tenant from the caseworker. It must stay out of `displayName` because
+// handlePick commits that string as `value.name`, and RelationshipsEditor
+// STORES that value: folding the kind in would write "Renee Partner" into a
+// relationship. It DOES join the option's accessible name, deliberately - a
+// screen-reader user needs the differentiator too - so query options by
+// substring/regex, not by an exact accessible name.
 import { useId, useRef, useState } from 'react';
 import { type Contact } from '../../api/index.js';
+import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 import { contactDisplayName } from './format.js';
 import styles from './ContactSearchField.module.css';
 
@@ -177,6 +188,17 @@ export function ContactSearchField({
                 onClick={() => handlePick(c)}
               >
                 {displayName}
+                {/* The kind trails the name because a first-name-only roster is
+                    otherwise unpickable - several contacts read "Renee" and
+                    nothing on the row says which one is the tenant. `displayKind`
+                    prefers the contact's own ROLE ("Property Manager", "Case
+                    worker") over the bare type label, so it is the most specific
+                    true thing we hold. DISPLAY ONLY: it is a sibling node, never
+                    folded into `displayName`, because handlePick commits that
+                    string as `value.name` and RelationshipsEditor STORES it. */}
+                <span className={styles.optionKind}>
+                  {displayKind(c, (t) => CONTACT_TYPE_LABEL[t])}
+                </span>
               </li>
             );
           })}

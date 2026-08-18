@@ -83,3 +83,13 @@
   background: var(--c-brand-soft);
   outline: none;
 }
+
+/* The contact's kind, trailing its name in every option row. Subdued so the
+   name still leads the scan, but part of the option's accessible name on
+   purpose: a list of five people called "Renee" is only navigable if the
+   differentiator is announced too. */
+.optionKind {
+  margin-left: var(--sp-2);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}

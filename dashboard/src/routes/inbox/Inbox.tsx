@@ -122,14 +122,19 @@ export function Inbox(): React.JSX.Element {
           list looked exactly like the end of the feed. A cap is acceptable only
           if the list says it is capped.
 
-          `!hasMore` IS PART OF THE GATE, not decoration. `truncated` is a SIGNAL
-          LAYERED ON PAGING, not a replacement for it: the server's budget exit
-          mints a cursor AND sets `truncated`, so `truncated && hasMore` is
-          genuinely reachable. A page that still has a cursor is PAGED, not
-          capped, and "There are older unread threads not shown here" sitting
-          above a "Load more" that would in fact show them is both wrong and more
-          alarming than the state warrants. The depth-cap and unresolved-drops
-          exits leave no cursor, which is where this notice belongs.
+          `hasMore` IS DELIBERATELY NOT IN THE GATE, and the plan's claim that it
+          could be ("hasMore is false so no Load more renders") is FALSE: the
+          server's budget exit mints a cursor AND sets `truncated`, so
+          `truncated && hasMore` is genuinely reachable and this notice can
+          appear above a working "Load more". That is the ACCEPTED trade.
+          `truncated` carries TWO meanings on one wire flag - the pageable budget
+          exit, and `unresolvedDrops > 0`, which is set after the whole cursor
+          chain and names rows NO page in this session can reach. No CLIENT-side
+          gate can separate them, so gating on `!hasMore` would silence the
+          notice in the LEAST recoverable state, which is the state the rule "a
+          cap is acceptable only if the list says it is capped" exists to cover.
+          An imprecise notice beats silence. Splitting the signal on the wire is
+          the real fix: docs/issues/inbox-truncated-flag-two-meanings.md.
 
           Gated on `serverRowCount`, NOT `rows.length`, for the same reason that
           banner is: both `truncated` and this count describe the SERVER page,
@@ -143,7 +148,7 @@ export function Inbox(): React.JSX.Element {
           NO COUNT in the copy, for the reason the group notice above dropped
           its own: the operator clears rows while the server's flag stands, so
           any number reaches zero with the notice still up. */}
-      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 && !inbox.hasMore ? (
+      {inbox.status === 'ready' && inbox.truncated && inbox.serverRowCount > 0 ? (
         <p className={styles.notice}>
           Showing the most recent unread. There are older unread threads not shown here.
         </p>

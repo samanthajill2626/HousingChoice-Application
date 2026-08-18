@@ -287,8 +287,9 @@ describe('Inbox - group truncation affordance', () => {
 // exits the server mints no cursor, so no "Load more" renders, and the
 // truncation banner above is gated on the page having come back EMPTY - so a
 // capped list looked exactly like the end of the feed. A cap is acceptable only
-// if the list says it is capped - and a page that still has a cursor is PAGED,
-// not capped, which is why the notice is gated on `!hasMore` too.
+// if the list says it is capped. `hasMore` is deliberately NOT part of the gate:
+// `truncated` also names rows that no page can reach, and those exits can mint a
+// cursor too, so a `!hasMore` gate would go SILENT exactly there.
 describe('Inbox - the Unread truncation notice', () => {
   const NOTICE =
     'Showing the most recent unread. There are older unread threads not shown here.';
@@ -315,24 +316,18 @@ describe('Inbox - the Unread truncation notice', () => {
     expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
   });
 
-  // Fix wave 1. `truncated` is a SIGNAL LAYERED ON PAGING: the server's BUDGET
-  // exit mints a cursor AND sets truncated, so this state is reachable, and the
-  // notice must not sit above a "Load more" that would in fact show the threads
-  // it says are not shown. The depth-cap exit (truncated, no cursor) is the case
-  // above and still says so.
-  it('renders NO notice while paging is still available, but still renders once the cursor runs out', () => {
+  // Fix wave 2, REVERTING fix wave 1's `!hasMore` gate. `truncated` carries TWO
+  // meanings on one wire flag: the pageable budget exit, and `unresolvedDrops`,
+  // which is set AFTER the whole cursor chain and names rows no page in this
+  // session can reach. Both can co-occur with a cursor, so `hasMore` cannot
+  // separate them - and gating on it silenced the notice in the LEAST
+  // recoverable state. The notice STAYS while paging is still available: an
+  // imprecise notice beats silence about a badge disagreement.
+  // Follow-up: docs/issues/inbox-truncated-flag-two-meanings.md.
+  it('still renders while paging is available - a cursor does not mean the withheld rows are reachable', () => {
     state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1, hasMore: true });
-    const view = renderInbox('/inbox?filter=unread');
+    renderInbox('/inbox?filter=unread');
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
-    expect(screen.queryByText(/Showing the most recent unread/)).toBeNull();
-
-    state = baseState({ rows: [mkRow()], truncated: true, serverRowCount: 1, hasMore: false });
-    view.rerender(
-      <MemoryRouter initialEntries={['/inbox?filter=unread']}>
-        <Inbox />
-      </MemoryRouter>,
-    );
-    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 

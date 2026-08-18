@@ -214,6 +214,20 @@ export function ContactDetail(): React.JSX.Element {
   const [hasUnread, setHasUnread] = useState(false);
   const [unreadAction, setUnreadAction] = useState<'idle' | 'read' | 'unread'>('idle');
   const [unreadError, setUnreadError] = useState<string | null>(null);
+  // Which contact the in-flight unread toggle still belongs to - the same
+  // generation guard pressGenerationRef gives the extraction action, for the
+  // same hazard: this component is RE-RENDERED, not remounted, across a
+  // contactId change, and the toggle awaits a drain (up to 2s) plus a round
+  // trip, so its resolution can land after the operator has clicked through to
+  // another contact. Unguarded that resolution yanks them to /inbox or writes
+  // A's error banner onto B's page.
+  //
+  // A SEPARATE counter from pressGenerationRef on purpose: that one is bumped by
+  // every extraction press and by the 180s run timeout, so sharing it would make
+  // the two independent actions cancel each other (running an extraction would
+  // silently swallow the mark-unread's navigation). Only the contact change
+  // below bumps this one, which is the only event that invalidates a press.
+  const unreadGenerationRef = useRef(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -236,10 +250,13 @@ export function ContactDetail(): React.JSX.Element {
     setExtraction({ phase: 'idle' });
     pressGenerationRef.current += 1;
     // Same reason again: contact A's unread state, pending action and error copy
-    // must not be read as contact B's.
+    // must not be read as contact B's. Resetting the state is not enough on its
+    // own here either - A's drain and POST are still in flight - so the unread
+    // generation is bumped too, which invalidates that resolution.
     setHasUnread(false);
     setUnreadAction('idle');
     setUnreadError(null);
+    unreadGenerationRef.current += 1;
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -298,19 +315,27 @@ export function ContactDetail(): React.JSX.Element {
   const onToggleUnread = useCallback(async (): Promise<void> => {
     if (unreadAction !== 'idle') return;
     setUnreadError(null);
+    // The contact this press is for. EVERY resolution below is gated on it still
+    // being the current one; see unreadGenerationRef.
+    const press = unreadGenerationRef.current;
     if (hasUnread) {
       // NO NAVIGATION. Marking the comms read while reading them is not a
       // departure - the operator is still here.
       setUnreadAction('read');
       try {
         await markInboxRead({ contactId });
+        if (unreadGenerationRef.current !== press) return;
         // The fan-out just read every thread of this contact, which is exactly
         // the signal this derived state is built on.
         setHasUnread(false);
       } catch {
+        if (unreadGenerationRef.current !== press) return;
         setUnreadError(MARK_READ_ERROR);
       } finally {
-        setUnreadAction('idle');
+        // The contact-change reset already put this back to 'idle' for the
+        // contact now on screen; writing it again would be harmless but the
+        // rule is one rule.
+        if (unreadGenerationRef.current === press) setUnreadAction('idle');
       }
       return;
     }
@@ -323,6 +348,14 @@ export function ContactDetail(): React.JSX.Element {
       await autoRead.suppressAndDrain();
       await markInboxUnread({ contactId });
     } catch (err) {
+      // The operator has LEFT this contact: nothing below may run, because all
+      // of it speaks about contact A on contact B's page. `autoRead.release()`
+      // is skipped with the rest, and that is safe rather than merely tolerable
+      // - the handle is keyed to the contact it was minted for (`release` only
+      // clears the latch while `suppressedFor` still names that contact), and
+      // the hook's own contact-change effect has already cleared it. There is
+      // nothing left for the skipped call to do.
+      if (unreadGenerationRef.current !== press) return;
       // We are STAYING on the page, so hand the auto-read back. Without this the
       // latch outlives the failed attempt and this contact's auto-read is dead
       // for the rest of the visit: message.persisted and visibilitychange stop
@@ -337,6 +370,11 @@ export function ContactDetail(): React.JSX.Element {
       setUnreadAction('idle');
       return;
     }
+    // Same guard on the success path: a POST that resolves after the operator
+    // moved on must not yank them off the contact they are now reading. The
+    // server write stands - it was correct for contact A - and A's inbox row is
+    // unread, which is where the navigation would have taken them anyway.
+    if (unreadGenerationRef.current !== press) return;
     navigate('/inbox');
   }, [autoRead, contactId, hasUnread, navigate, unreadAction]);
 

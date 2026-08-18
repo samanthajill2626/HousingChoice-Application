@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { PlacementsPage, Contact, UnitsPage } from '../../api/index.js';
 
 const getContact = vi.fn();
@@ -1985,11 +1985,13 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     renderAt('k1');
     await openKebab();
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
-    // Queried by ROLE + TEXT, never by an accessible name: an aria-label on a
-    // live region REPLACES the announced content, so the banner carries none and
-    // the MESSAGE is what a screen reader speaks.
+    // Queried by TEXT, never by role alone and never by an accessible name: an
+    // aria-label on a live region REPLACES the announced content, so the banner
+    // carries none - and this page renders several other role="status" nodes
+    // (the deleted banner, the extraction banner, every Spinner), so a bare role
+    // query is a strict-mode multiple-match waiting to happen.
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('Could not mark unread - try again'),
+      expect(screen.getByText('Could not mark unread - try again')).toBeInTheDocument(),
     );
     await openKebab();
     const item = screen.getByRole('menuitem', { name: MARK_UNREAD });
@@ -2013,7 +2015,7 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     await openKebab();
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('No thread to mark unread yet.'),
+      expect(screen.getByText('No thread to mark unread yet.')).toBeInTheDocument(),
     );
     // And it does NOT ask for a retry it can never honour. (The 409 arm above
     // keeps the retryable copy, because that condition really does clear.)
@@ -2023,8 +2025,13 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
   // Fix wave 1. An aria-label on a live region REPLACES the announced content,
   // so the shipped `aria-label="Unread status"` made a screen-reader user hear
   // "Unread status" instead of the message that is the entire point of the
-  // announcement. Neither region carries one, and the test queries by role +
-  // TEXT rather than by that name.
+  // announcement. Neither region carries one.
+  //
+  // Fix wave 2: the banners are reached by their TEXT and the live region is
+  // then read off that node. A bare getByRole('status') would be ambiguous by
+  // construction - Spinner, the deleted banner and the extraction banner all
+  // carry role="status" on this page - so it would fail as "found multiple
+  // elements" rather than as the assertion it is making.
   it('announces the MESSAGE, not a region label, on both unread banners', async () => {
     let rejectPost: (() => void) | undefined;
     markInboxUnread.mockImplementation(
@@ -2037,16 +2044,18 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     await openKebab();
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
 
-    const pending = await screen.findByRole('status');
-    expect(pending).toHaveTextContent('Marking unread...');
+    const pending = (await screen.findByText('Marking unread...')).closest('[role="status"]');
+    expect(pending).not.toBeNull();
     expect(pending).not.toHaveAttribute('aria-label');
 
     await act(async () => {
       rejectPost?.();
       await Promise.resolve();
     });
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Could not mark unread - try again');
+    const alert = (await screen.findByText('Could not mark unread - try again')).closest(
+      '[role="alert"]',
+    );
+    expect(alert).not.toBeNull();
     expect(alert).not.toHaveAttribute('aria-label');
   });
 
@@ -2060,13 +2069,100 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     await openKebab();
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText('Could not mark unread - try again')).toBeInTheDocument(),
+    );
 
     // Still on the contact page, still looking at it: a new inbound must be
     // marked read exactly as it was before the failed attempt.
     markInboxRead.mockClear();
     act(() => capturedHandlers['onMessagePersisted']?.({}));
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+  });
+
+  // --- Fix wave 2: the in-flight toggle belongs to ONE contact ---------------
+  //
+  // ContactDetail is RE-RENDERED, not remounted, when the route param changes
+  // (the composer-isolation describe above drives exactly that navigation and
+  // proves the instance survives). The toggle awaits a drain bounded at 2s plus
+  // a round trip, so contact A's resolution can land while contact B is on
+  // screen. Every write it makes then speaks about the wrong contact.
+  //
+  // Both cases render a <Link> to a second contact alongside the page, which is
+  // how the operator really leaves: the relay-groups card, a timeline link, the
+  // Back button.
+  function renderWithNavToOther() {
+    getContact.mockImplementation((id: unknown) =>
+      id === 'z99' ? Promise.resolve(OTHER) : Promise.resolve(TENANT),
+    );
+    return render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <Routes>
+          <Route
+            path="/contacts/:contactId"
+            element={
+              <>
+                <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                <ContactDetail />
+              </>
+            }
+          />
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('does NOT navigate to /inbox when the mark-unread resolves after the operator left the contact', async () => {
+    let releasePost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePost = resolve;
+        }),
+    );
+    renderWithNavToOther();
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    fireEvent.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+
+    await act(async () => {
+      releasePost?.();
+      await Promise.resolve();
+    });
+    // The write stands - it was right for Tasha - but the operator is reading
+    // Bob, and yanking them to the inbox for a press they made on another page
+    // is the defect.
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByText('Bob Other')).toBeInTheDocument();
+  });
+
+  it('does NOT write the failed press banner onto the contact the operator moved to', async () => {
+    let rejectPost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPost = () => reject(new ApiError(404, 'no_conversation_for_contact', 'nope'));
+        }),
+    );
+    renderWithNavToOther();
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    fireEvent.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+
+    await act(async () => {
+      rejectPost?.();
+      await Promise.resolve();
+    });
+    // Neither failure copy: Tasha's 404 says nothing about Bob's threads.
+    expect(screen.queryByText('No thread to mark unread yet.')).toBeNull();
+    expect(screen.queryByText('Could not mark unread - try again')).toBeNull();
   });
 
   it('hides the toggle ENTIRELY for a soft-deleted contact (MU-2)', async () => {

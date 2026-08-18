@@ -25,11 +25,29 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useMarkContactRead } from './useMarkContactRead.js';
+import {
+  AUTO_READ_DRAIN_TIMEOUT_MS,
+  useMarkContactRead,
+  type AutoReadHandle,
+} from './useMarkContactRead.js';
 
 function Probe({ id }: { id: string }): null {
   useMarkContactRead(id);
   return null;
+}
+
+// Same probe, but it keeps the returned handle reachable so the S6 suppression
+// tests can drive suppressAndDrain the way the header action will.
+let handle: AutoReadHandle | undefined;
+
+function HandleProbe({ id }: { id: string }): null {
+  handle = useMarkContactRead(id);
+  return null;
+}
+
+function currentHandle(): AutoReadHandle {
+  if (handle === undefined) throw new Error('the hook returned no handle');
+  return handle;
 }
 
 function setVisibility(state: 'visible' | 'hidden'): void {
@@ -39,6 +57,7 @@ function setVisibility(state: 'visible' | 'hidden'): void {
 afterEach(() => {
   vi.clearAllMocks();
   capturedOnMessage = undefined;
+  handle = undefined;
   setVisibility('visible');
 });
 
@@ -152,5 +171,203 @@ describe('useMarkContactRead', () => {
     act(() => capturedOnMessage?.());
     expect(noteRowsCleared).not.toHaveBeenCalled();
     expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+});
+
+// S6. Marking a thread UNREAD races this page's own auto-read: the three
+// triggers above fire uncancelled, so an operator's mark-unread could be
+// silently re-read by a request that was already in flight (or by the trailing
+// re-mark). suppressAndDrain latches the auto-read off for this contact and
+// then waits out whatever is in flight, so the POST that follows it lands last.
+describe('useMarkContactRead - suppressAndDrain (S6)', () => {
+  it('suppresses the message.persisted trigger once suppressAndDrain has run', async () => {
+    render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+
+    act(() => capturedOnMessage?.());
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses the TRAILING re-mark once suppressAndDrain has run', async () => {
+    let release: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    // Arms the trailing re-mark inside the in-flight request's window.
+    act(() => capturedOnMessage?.());
+
+    const drain = currentHandle().suppressAndDrain();
+    await act(async () => {
+      release?.();
+    });
+    await act(async () => {
+      await drain;
+    });
+
+    // The coalescing machinery must NOT re-mark read at the exact moment the
+    // operator asked for unread.
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resolve suppressAndDrain until the in-flight mark-read has settled', async () => {
+    let release: (() => void) | undefined;
+    markInboxRead.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+
+    // ORDER is the whole point: a trigger-only test stays green while the
+    // ordering bug ships (the mark-unread POST overtaken by the read it raced).
+    const order: string[] = [];
+    const drain = currentHandle()
+      .suppressAndDrain()
+      .then(() => {
+        order.push('drained');
+      });
+
+    await act(async () => {});
+    expect(order).toEqual([]);
+
+    await act(async () => {
+      order.push('auto-read settled');
+      release?.();
+    });
+    await act(async () => {
+      await drain;
+    });
+    expect(order).toEqual(['auto-read settled', 'drained']);
+  });
+
+  it('resolves suppressAndDrain after the drain timeout when the auto-read never settles', async () => {
+    // src/test/setup.ts pins Date globally; release that pin before taking FULL
+    // fake timers, per the convention documented there.
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    try {
+      markInboxRead.mockImplementationOnce(() => new Promise<void>(() => {}));
+      render(<HandleProbe id="k1" />);
+      expect(markInboxRead).toHaveBeenCalledTimes(1);
+
+      let resolved = false;
+      const drain = currentHandle()
+        .suppressAndDrain()
+        .then(() => {
+          resolved = true;
+        });
+      await act(async () => {});
+      expect(resolved).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AUTO_READ_DRAIN_TIMEOUT_MS);
+      });
+      await drain;
+      expect(resolved).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never waits on a PREVIOUS contact request (the in-flight handle is keyed by contact)', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    try {
+      // A's auto-read never settles; B's resolves normally.
+      markInboxRead.mockImplementationOnce(() => new Promise<void>(() => {}));
+      const view = render(<HandleProbe id="A" />);
+      expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' });
+      view.rerender(<HandleProbe id="B" />);
+      expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' });
+      await act(async () => {});
+
+      let resolved = false;
+      await act(async () => {
+        await currentHandle().suppressAndDrain();
+        resolved = true;
+      });
+      // No timer advanced: a drain that awaited A's request would still be
+      // pending here rather than resolved.
+      expect(resolved).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a contact switch clears the latch, so the new contact is still auto-read', async () => {
+    const view = render(<HandleProbe id="A" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' }));
+    await act(async () => {});
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+
+    view.rerender(<HandleProbe id="B" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
+  });
+
+  // Fix wave 1. The latch used to clear ONLY on an actual contact change, but
+  // ContactDetail deliberately STAYS on the page when the mark-unread POST
+  // fails - so one failure killed this contact's auto-read for the rest of the
+  // visit. release() is the caller's way to hand it back.
+  it('release() un-latches the auto-read, so a later trigger marks read again', async () => {
+    render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+    act(() => capturedOnMessage?.());
+    await act(async () => {});
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+
+    act(() => currentHandle().release());
+    act(() => capturedOnMessage?.());
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(2));
+  });
+
+  it('release() clears the latch of the contact it was MINTED for, never a newer one', async () => {
+    const view = render(<HandleProbe id="A" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'A' }));
+    await act(async () => {});
+    // A's handle, captured the way ContactDetail's onToggleUnread closes over it
+    // - an action started on A can still be in flight after the operator moves.
+    const staleHandle = currentHandle();
+
+    view.rerender(<HandleProbe id="B" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'B' }));
+    await act(async () => {});
+    await act(async () => {
+      await currentHandle().suppressAndDrain();
+    });
+
+    // A's action now fails and releases. An unconditional release would hand
+    // B's auto-read back while B's own mark-unread is still the live intent.
+    act(() => staleHandle.release());
+    markInboxRead.mockClear();
+    act(() => capturedOnMessage?.());
+    await act(async () => {});
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
+  it('returns a STABLE handle across re-renders (a churning identity POST-loops consumers)', async () => {
+    const view = render(<HandleProbe id="k1" />);
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    const first = currentHandle();
+
+    view.rerender(<HandleProbe id="k1" />);
+    expect(currentHandle()).toBe(first);
   });
 });

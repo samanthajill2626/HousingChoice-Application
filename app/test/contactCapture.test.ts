@@ -66,6 +66,15 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
     },
+    async getDisplayById(contactId) {
+      return contacts.find((c) => c.contactId === contactId);
+    },
+    async getDisplaysByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts.filter((contact) => wanted.has(contact.contactId)).map((contact) => [contact.contactId, contact]),
+      );
+    },
     async createIfAbsent(item) {
       if (contacts.some((c) => c.contactId === item.contactId)) return false;
       contacts.push({ ...item });
@@ -173,6 +182,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     touchLastActivity: async () => conversation,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
+    setUnread: async () => conversation,
     // Flag-derived over the one stored conversation rather than a bare []: a
     // silent empty page reads exactly like a broken index.
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),

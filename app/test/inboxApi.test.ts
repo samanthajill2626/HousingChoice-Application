@@ -662,6 +662,496 @@ describe('Mark UNREAD - the row toggle (POST /api/inbox/:contactId/unread, /api/
   });
 });
 
+// H1.5 - the CONDITIONAL write behind the three routes above. The matrix in the
+// previous describe pins WHAT the routes do; these pin HOW they do it, which is
+// the whole point of H1: the MU-1 precondition rides the write's own
+// ConditionExpression, so a status/type transition committing between the
+// route's read and its write LOSES instead of planting an invisible byUnread
+// resident. Every arm here is unreachable through the fake's own state machine
+// (a correct condition never fails on a row the route just read as eligible),
+// so each is staged either with the harness's test-only failure counter or with
+// raceOnFirstSetUnread below.
+describe('Mark UNREAD - the conditional write, its one retry, and its classification (H1)', () => {
+  /**
+   * Commit `mutate` on the FIRST setUnread call, then let the real fake decide.
+   * This is the concurrent write landing between the route's read and its
+   * write - the TOCTOU H1 closes. The in-memory fake cannot produce it on its
+   * own, and neither can a correct ConditionExpression.
+   */
+  function raceOnFirstSetUnread(world: World, mutate: () => void): void {
+    const base = world.conversationsRepo.setUnread;
+    let fired = false;
+    world.conversationsRepo.setUnread = async (conversationId, eligibility) => {
+      if (!fired) {
+        fired = true;
+        mutate();
+      }
+      return base(conversationId, eligibility);
+    };
+  }
+
+  /**
+   * Hand the ROUTE a stale image carrying a POSITIVE `unread_count` while the
+   * stored row stays where it really is (read). This is the eventually
+   * consistent read every one of these routes lives on: the fan-in routes Query
+   * the `byParticipantPhone` GSI (a lagging projection) and the conversation
+   * route does a base-table GetItem with no ConsistentRead.
+   *
+   * WHAT THE SCOPING ACTUALLY IS: each of the two wrapped reads hands out ONE
+   * stale image, and the two counters are INDEPENDENT. On the conversation route
+   * that means markUnread's own re-read sees the truth, because the route itself
+   * spent the single stale `getById`. On the FAN-IN routes it does not: they
+   * reach the row through `findByParticipantPhone` and never call
+   * `conversationsRepo.getById` (the contact lookup is `contactsRepo`), so the
+   * stale `getById` answer is still loaded - and `markUnread.classify` would be
+   * the one to consume it. That is harmless in the cases below, where every
+   * write succeeds and `classify` never runs. A future fan-in case that stages a
+   * REFUSED write must spend or disable the `getById` half first, or it will be
+   * classifying from a stale image and reading a mystifying result.
+   *
+   * Fix wave 1: a route that pre-checks this count answers 200 with NO write at
+   * all, and the client then commits an optimistic unread onto a row the server
+   * left read - the silent no-op a to-do affordance must never produce.
+   */
+  function stalePositiveOnFirstRead(world: World, staleCount: number): void {
+    const baseFind = world.conversationsRepo.findByParticipantPhone;
+    let findFired = false;
+    world.conversationsRepo.findByParticipantPhone = async (phone) => {
+      const items = await baseFind(phone);
+      if (findFired) return items;
+      findFired = true;
+      return items.map((c) => ({ ...c, unread_count: staleCount }));
+    };
+    const baseGet = world.conversationsRepo.getById;
+    let getFired = false;
+    world.conversationsRepo.getById = async (conversationId) => {
+      const item = await baseGet(conversationId);
+      if (getFired || item === undefined) return item;
+      getFired = true;
+      return { ...item, unread_count: staleCount };
+    };
+  }
+
+  const seedRelayOpen = (world: World, id: string): void => {
+    seedConversation(world, id, {
+      participant_phone: '+15550009101',
+      pool_number: '+15550009101',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'relay_group',
+      status: 'open',
+      participants: [{ contactId: 'c-h1', phone: '+15550000721', name: 'A' }],
+    });
+  };
+
+  /** A contact plus the single open 1:1 thread their inbox row shows. */
+  const seedContactThread = (world: World, contactId: string, id: string, phone: string): void => {
+    seedContact(world, { contactId, type: 'tenant', phone, firstName: 'Rae', lastName: 'H' } as ContactItem);
+    seedConversation(world, id, {
+      participant_phone: phone,
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+  };
+
+  it('conversation route: a raced condition failure is retried ONCE and succeeds, emitting exactly once', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-relay');
+    world.failNextSetUnread = 1;
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/conversations/conv-h1-relay/unread'));
+    expect(res.status).toBe(200);
+    expect(res.body.conversation.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-relay')!.unread_flag).toBe('unread');
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-relay', bucket: 'relay_group' },
+      { conversationId: 'conv-h1-relay', bucket: 'relay_group' },
+    ]);
+    // ONE write happened, so exactly ONE event describes it.
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  it('conversation route: the retry recomputes the bucket from the RE-READ, not from the stale image', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    // A connecting relay group - eligible in the relay_group bucket.
+    seedConversation(world, 'conv-h1-convert', {
+      participant_phone: '+15550009102',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'relay_group',
+      status: 'connecting',
+      participants: [{ contactId: 'c-h1b', phone: '+15550000722', name: 'B' }],
+    });
+    // convertRelayGroupToGroupText commits mid-flight: the SAME row is now a
+    // group text in the group_open partition. This is the one case where a
+    // stale bucket wastes the retry and a recomputed one succeeds.
+    raceOnFirstSetUnread(world, () => {
+      const conv = world.conversations.get('conv-h1-convert')!;
+      conv.type = 'group_text';
+      conv.status = GROUP_TEXT_STATUS;
+    });
+
+    const res = await auth(request(app).post('/api/conversations/conv-h1-convert/unread'));
+    expect(res.status).toBe(200);
+    expect(world.conversations.get('conv-h1-convert')!.unread_count).toBe(1);
+    expect(world.unreadSetAttempts.map((a) => a.bucket)).toEqual(['relay_group', 'group_text']);
+  });
+
+  it('conversation route: a TWICE-raced write is terminal - 409 thread_closed, no third attempt, no emit', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-twice');
+    world.failNextSetUnread = 2;
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/conversations/conv-h1-twice/unread'));
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'thread_closed' });
+    expect(world.unreadSetAttempts).toHaveLength(2);
+    expect(world.conversations.get('conv-h1-twice')!.unread_count ?? 0).toBe(0);
+    expect(world.emitted.slice(before)).toHaveLength(0);
+  });
+
+  it('conversation route: a row that VANISHES between the read and the write -> 404 conversation_not_found', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-gone');
+    raceOnFirstSetUnread(world, () => world.conversations.delete('conv-h1-gone'));
+
+    const res = await auth(request(app).post('/api/conversations/conv-h1-gone/unread'));
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'conversation_not_found' });
+  });
+
+  it('conversation route: ELIGIBILITY BEFORE COUNT - an ineligible AND unread thread is refused, never reported as success', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    // Arm 1: the route's own pre-check. A closed relay carrying unread residue
+    // (the inbound-reflags-closed-relay-group issue) must 409, not 200.
+    seedConversation(world, 'conv-h1-residue', {
+      participant_phone: '+15550009103',
+      pool_number: '+15550009103',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'relay_group',
+      status: 'closed',
+      unread_count: 3,
+      participants: [{ contactId: 'c-h1c', phone: '+15550000723', name: 'C' }],
+    });
+    const residue = await auth(request(app).post('/api/conversations/conv-h1-residue/unread'));
+    expect(residue.status).toBe(409);
+    expect(residue.body).toEqual({ error: 'thread_closed' });
+    expect(world.conversations.get('conv-h1-residue')!.unread_count).toBe(3);
+
+    // Arm 2: the CLASSIFY path, which is where the ordering can actually be got
+    // wrong. The route read an eligible, read thread; a close plus an inbound
+    // commit before the write. Count-first would classify this as
+    // already-unread and answer 200 for a row the unread feed will never show.
+    seedRelayOpen(world, 'conv-h1-raceclose');
+    raceOnFirstSetUnread(world, () => {
+      const conv = world.conversations.get('conv-h1-raceclose')!;
+      conv.status = 'closed';
+      conv.unread_count = 5;
+      conv.unread_flag = 'unread';
+    });
+    const raced = await auth(request(app).post('/api/conversations/conv-h1-raceclose/unread'));
+    expect(raced.status).toBe(409);
+    expect(raced.body).toEqual({ error: 'thread_closed' });
+    // One attempt only: the classification is terminal, there is no retry.
+    expect(world.unreadSetAttempts.filter((a) => a.conversationId === 'conv-h1-raceclose')).toHaveLength(1);
+  });
+
+  it('by-phone route: raced once -> retried and 200; raced twice -> 409 thread_closed with no third attempt', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedConversation(world, 'conv-h1-phone', {
+      participant_phone: '+14049820801',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    world.failNextSetUnread = 1;
+    const before = world.emitted.length;
+    const once = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820801' }));
+    expect(once.status).toBe(200);
+    expect(once.body).toEqual({ ok: true });
+    expect(world.conversations.get('conv-h1-phone')!.unread_count).toBe(1);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-phone', bucket: 'one_to_one' },
+      { conversationId: 'conv-h1-phone', bucket: 'one_to_one' },
+    ]);
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+
+    // A second row, twice-raced: terminal, and the fan-in vocabulary is
+    // thread_closed (these routes named a phone, never this conversation).
+    seedConversation(world, 'conv-h1-phone2', {
+      participant_phone: '+14049820802',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    world.unreadSetAttempts.length = 0;
+    world.failNextSetUnread = 2;
+    const twice = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820802' }));
+    expect(twice.status).toBe(409);
+    expect(twice.body).toEqual({ error: 'thread_closed' });
+    expect(world.unreadSetAttempts).toHaveLength(2);
+    expect(world.conversations.get('conv-h1-phone2')!.unread_count ?? 0).toBe(0);
+  });
+
+  it('by-phone route: a vanished row -> 409 thread_closed (the client named a phone, never a conversation)', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedConversation(world, 'conv-h1-phone-gone', {
+      participant_phone: '+14049820803',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    raceOnFirstSetUnread(world, () => world.conversations.delete('conv-h1-phone-gone'));
+
+    const res = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820803' }));
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'thread_closed' });
+  });
+
+  it('by-phone route: ELIGIBILITY BEFORE COUNT - a thread that closes AND gains unread mid-flight is refused', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedConversation(world, 'conv-h1-phone-order', {
+      participant_phone: '+14049820804',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    raceOnFirstSetUnread(world, () => {
+      const conv = world.conversations.get('conv-h1-phone-order')!;
+      conv.status = 'closed';
+      conv.unread_count = 4;
+      conv.unread_flag = 'unread';
+    });
+
+    const res = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820804' }));
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'thread_closed' });
+    expect(world.unreadSetAttempts).toHaveLength(1);
+  });
+
+  it('by-contact route: raced once -> retried and 200; raced twice -> 409 thread_closed with no third attempt', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContactThread(world, 'c-h1-one', 'conv-h1-contact', '+15550000731');
+    world.failNextSetUnread = 1;
+    const before = world.emitted.length;
+    const once = await auth(request(app).post('/api/inbox/c-h1-one/unread'));
+    expect(once.status).toBe(200);
+    expect(once.body).toEqual({ ok: true });
+    expect(world.conversations.get('conv-h1-contact')!.unread_count).toBe(1);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-contact', bucket: 'one_to_one' },
+      { conversationId: 'conv-h1-contact', bucket: 'one_to_one' },
+    ]);
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+
+    seedContactThread(world, 'c-h1-two', 'conv-h1-contact2', '+15550000732');
+    world.unreadSetAttempts.length = 0;
+    world.failNextSetUnread = 2;
+    const twice = await auth(request(app).post('/api/inbox/c-h1-two/unread'));
+    expect(twice.status).toBe(409);
+    expect(twice.body).toEqual({ error: 'thread_closed' });
+    expect(world.unreadSetAttempts).toHaveLength(2);
+    expect(world.conversations.get('conv-h1-contact2')!.unread_count ?? 0).toBe(0);
+  });
+
+  it('by-contact route: a vanished row -> 409 thread_closed (the client named a contact, never a conversation)', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContactThread(world, 'c-h1-gone', 'conv-h1-contact-gone', '+15550000733');
+    raceOnFirstSetUnread(world, () => world.conversations.delete('conv-h1-contact-gone'));
+
+    const res = await auth(request(app).post('/api/inbox/c-h1-gone/unread'));
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'thread_closed' });
+  });
+
+  it('by-contact route: a STALE POSITIVE count from the GSI does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContactThread(world, 'c-h1-stale', 'conv-h1-stale', '+15550000735');
+    // The stored row is READ; the participant Query still projects the count it
+    // held before the mark-read fan-out landed. The operator's request must be
+    // decided by the conditional write, not by that lagging image.
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/inbox/c-h1-stale/unread'));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    // The write was ATTEMPTED - a pre-check on the stale count skips it entirely.
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-stale', bucket: 'one_to_one' },
+    ]);
+    // And it LANDED: the row the operator flagged is really unread and really
+    // in the byUnread index, so the optimistic row the client keeps is true.
+    expect(world.conversations.get('conv-h1-stale')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-stale')!.unread_flag).toBe('unread');
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  it('by-phone route: a STALE POSITIVE count from the GSI does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedConversation(world, 'conv-h1-phone-stale', {
+      participant_phone: '+14049820805',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820805' }));
+    expect(res.status).toBe(200);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-phone-stale', bucket: 'one_to_one' },
+    ]);
+    expect(world.conversations.get('conv-h1-phone-stale')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-phone-stale')!.unread_flag).toBe('unread');
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  it('conversation route: a STALE POSITIVE count from the base-table read does NOT short-circuit the write', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-stale-conv');
+    stalePositiveOnFirstRead(world, 3);
+
+    const before = world.emitted.length;
+    const res = await auth(request(app).post('/api/conversations/conv-h1-stale-conv/unread'));
+    expect(res.status).toBe(200);
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-stale-conv', bucket: 'relay_group' },
+    ]);
+    expect(world.conversations.get('conv-h1-stale-conv')!.unread_count).toBe(1);
+    expect(world.conversations.get('conv-h1-stale-conv')!.unread_flag).toBe('unread');
+    // The body carries the WRITE's own image, never the stale one it replaced.
+    expect(res.body.conversation.unread_count).toBe(1);
+    expect(world.emitted.slice(before).map((e) => e.event)).toEqual(['conversation.updated']);
+  });
+
+  // D3 (conformance). The fan-in already-unread no-op is pinned by the delivered
+  // matrix; this is the conversation route's twin, and after fix wave 1 it runs
+  // through markUnread's CLASSIFIED path rather than a pre-check.
+  it('conversation route: an ALREADY-unread thread answers 200, writes nothing, and emits no second event', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedRelayOpen(world, 'conv-h1-already');
+
+    const first = await auth(request(app).post('/api/conversations/conv-h1-already/unread'));
+    expect(first.status).toBe(200);
+    const before = world.emitted.length;
+    world.unreadSetAttempts.length = 0;
+
+    const again = await auth(request(app).post('/api/conversations/conv-h1-already/unread'));
+    expect(again.status).toBe(200);
+    expect(again.body.conversation.conversationId).toBe('conv-h1-already');
+    expect(again.body.conversation.unread_count).toBe(1);
+    // The write is attempted and REFUSED by its own condition - that refusal is
+    // what makes this arm correct rather than a guess off a lagging read.
+    expect(world.unreadSetAttempts).toEqual([
+      { conversationId: 'conv-h1-already', bucket: 'relay_group' },
+    ]);
+    // Nothing changed, so nothing is announced: no double-count, no second event.
+    expect(world.conversations.get('conv-h1-already')!.unread_count).toBe(1);
+    expect(world.emitted.slice(before)).toHaveLength(0);
+  });
+
+  it('by-contact route: ELIGIBILITY BEFORE COUNT - a thread that closes AND gains unread mid-flight is refused', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    seedContactThread(world, 'c-h1-order', 'conv-h1-contact-order', '+15550000734');
+    raceOnFirstSetUnread(world, () => {
+      const conv = world.conversations.get('conv-h1-contact-order')!;
+      conv.status = 'closed';
+      conv.unread_count = 6;
+      conv.unread_flag = 'unread';
+    });
+
+    const res = await auth(request(app).post('/api/inbox/c-h1-order/unread'));
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'thread_closed' });
+    expect(world.unreadSetAttempts).toHaveLength(1);
+  });
+});
+
+// H2 - MU-2 on the by-phone route. The other two routes already refuse a
+// soft-deleted contact (/:contactId/unread via isDeleted; a 1:1 cannot reach
+// the conversation route at all), so this was the one way in.
+describe('POST /api/inbox/unread { phone } - MU-2, a soft-deleted contact (H2)', () => {
+  it('409 contact_deleted for a deleted contact\'s number, 200 for a live one, 200 for a number with no contact at all', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-h2-del',
+      type: 'tenant',
+      phone: '+14049820901',
+      deleted_at: '2026-06-01T00:00:00.000Z',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-del', {
+      participant_phone: '+14049820901',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+    const del = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820901' }));
+    expect(del.status).toBe(409);
+    expect(del.body).toEqual({ error: 'contact_deleted' });
+    // The refusal is a REFUSAL: their row is only ever visible while unread
+    // (the resurfacing rule), and a manual flag must not fake a fresh inbound.
+    expect(world.conversations.get('conv-h2-del')!.unread_count ?? 0).toBe(0);
+    expect(world.conversations.get('conv-h2-del')!.unread_flag).toBeUndefined();
+
+    // A live contact's number is untouched by the new check.
+    seedContact(world, {
+      contactId: 'c-h2-live',
+      type: 'tenant',
+      phone: '+14049820902',
+      firstName: 'Liv',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-live', {
+      participant_phone: '+14049820902',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+    });
+    const live = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820902' }));
+    expect(live.status).toBe(200);
+    expect(world.conversations.get('conv-h2-live')!.unread_count).toBe(1);
+
+    // A phone with NO contact record is NOT deleted - an untriaged unknown
+    // number is exactly what this route exists for and stays markable.
+    seedConversation(world, 'conv-h2-unknown', {
+      participant_phone: '+14049820903',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'unknown_1to1',
+    });
+    const unknown = await auth(request(app).post('/api/inbox/unread').send({ phone: '+14049820903' }));
+    expect(unknown.status).toBe(200);
+    expect(world.conversations.get('conv-h2-unknown')!.unread_count).toBe(1);
+  });
+
+  it('the /read twin deliberately keeps NO such check - zeroing a deleted contact\'s unread is harmless', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-h2-read',
+      type: 'tenant',
+      phone: '+14049820904',
+      deleted_at: '2026-06-01T00:00:00.000Z',
+    } as ContactItem);
+    seedConversation(world, 'conv-h2-read', {
+      participant_phone: '+14049820904',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      type: 'tenant_1to1',
+      unread_count: 2,
+    });
+    const res = await auth(request(app).post('/api/inbox/read').send({ phone: '+14049820904' }));
+    expect(res.status).toBe(200);
+    expect(world.conversations.get('conv-h2-read')!.unread_count).toBe(0);
+  });
+});
+
 describe('POST /api/inbox/read { phone } — unknown number (C8)', () => {
   it('resets unread on the unknown number\'s conversation and emits conversation.updated', async () => {
     const { app, world } = makeWebhookHarness();

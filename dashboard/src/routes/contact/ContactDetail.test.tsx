@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { PlacementsPage, Contact, UnitsPage } from '../../api/index.js';
 
 const getContact = vi.fn();
@@ -38,6 +38,20 @@ const runExtraction = vi.fn();
 const getContactRelayGroups = vi.fn();
 const previewRelayGroup = vi.fn();
 const createRelayGroup = vi.fn();
+// The contact fan-out pair. `markInboxRead` used to be an anonymous vi.fn minted
+// inside the mock factory, so no test could assert on it - S7's ordering test
+// needs it hoisted, and `markInboxUnread` is its new sibling.
+const markInboxRead = vi.fn();
+const markInboxUnread = vi.fn();
+// The nav badge's optimistic layer, spied so S7 can pin that NEITHER direction
+// of the header toggle touches it: neither auto-read records a clear, so there
+// is nothing to roll back. This file had no UnreadContext mock at all before.
+const noteRowsCleared = vi.fn();
+const rollbackRowsCleared = vi.fn();
+
+vi.mock('../../app/UnreadContext.js', () => ({
+  useUnread: () => ({ unread: null, unmatchedUnread: null, noteRowsCleared, rollbackRowsCleared }),
+}));
 
 // The handlers every useEventStream caller in this tree registers, MERGED.
 // ContactDetail's subtree has five callers (useContact, useSuggestions,
@@ -47,6 +61,12 @@ const createRelayGroup = vi.fn();
 // rather than fail loudly. Merging keeps one live handler per event name, each
 // refreshed on every render.
 let capturedHandlers: Record<string, ((e: unknown) => void) | undefined> = {};
+// conversation.updated has TWO listeners here now (useContactTimeline's refetch
+// tick and S7's derived unread state), and the merge above is still one slot per
+// event NAME. Production registers each caller separately with the provider, so
+// the fan-out below is what actually models it; handlers are useCallback-stable,
+// so this Set holds one entry per caller.
+const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -82,23 +102,40 @@ vi.mock('../../api/index.js', async () => {
     createRelayGroup: (...a: unknown[]) => createRelayGroup(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
-    markInboxRead: vi.fn(() => Promise.resolve()),
+    markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    markInboxUnread: (...a: unknown[]) => markInboxUnread(...a),
     useEventStream: (handlers: Record<string, ((e: unknown) => void) | undefined>) => {
       Object.assign(capturedHandlers, handlers);
+      if (handlers['onConversationUpdated'] !== undefined) {
+        conversationUpdatedHandlers.add(handlers['onConversationUpdated']);
+      }
     },
   };
 });
 
-import { ContactDetail, RUN_INDICATOR_TIMEOUT_MS } from './ContactDetail.js';
+import {
+  ContactDetail,
+  MARK_UNREAD_NO_THREAD,
+  RUN_INDICATOR_TIMEOUT_MS,
+} from './ContactDetail.js';
 
 function renderAt(contactId: string) {
   return render(
     <MemoryRouter initialEntries={[`/contacts/${contactId}`]}>
       <Routes>
         <Route path="/contacts/:contactId" element={<ContactDetail />} />
+        {/* D2's destination - "Mark unread" leaves for the inbox. */}
+        <Route path="/inbox" element={<div>INBOX</div>} />
       </Routes>
     </MemoryRouter>,
   );
+}
+
+/** Deliver one conversation.updated to EVERY registered listener. */
+function emitConversationUpdated(event: Record<string, unknown>): void {
+  act(() => {
+    for (const handler of [...conversationUpdatedHandlers]) handler(event);
+  });
 }
 
 /** Deliver one ai_run.completed to the page. The dispatch originates outside
@@ -194,6 +231,11 @@ const OTHER: Contact = {
 };
 
 beforeEach(() => {
+  conversationUpdatedHandlers.clear();
+  noteRowsCleared.mockReset();
+  rollbackRowsCleared.mockReset();
+  markInboxRead.mockReset().mockResolvedValue(undefined);
+  markInboxUnread.mockReset().mockResolvedValue(undefined);
   getContact.mockReset();
   getContactTimeline.mockReset();
   getConversations.mockReset();
@@ -908,7 +950,7 @@ describe('ContactDetail', () => {
     });
   });
 
-  // ── The standalone relay-group create, from the Relay groups card ──────────
+  // --- The standalone relay-group create, from the Relay groups card --------
   describe('creating a relay group from the Relay groups card', () => {
     const NEW_GROUP = {
       conversationId: 'conv-new',
@@ -1857,5 +1899,410 @@ describe('composer isolation across contact-to-contact navigation', () => {
     // (and any attachment chips, which ride the same local state) can never be
     // sent into contact B's conversation.
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+  });
+});
+
+// --- S7: the contact page mark-read / mark-unread toggle (D6) ---------------
+//
+// NO UNREAD DATUM EXISTS ON THIS PAGE AND NONE IS ADDED, so the state is
+// DERIVED. The mount fan-out marks EVERY thread of the contact read, so it
+// starts from "read" and only a conversation.updated carrying a positive count
+// for one of THIS contact's timeline threads can flip it. A skipped (background
+// tab) or failed fan-out therefore leaves it showing "Mark unread", which is the
+// safe default: the server refuses if that turns out to be wrong.
+describe('ContactDetail - the kebab unread toggle (S7)', () => {
+  const MARK_UNREAD = 'Mark Tasha Williams as unread';
+  const MARK_READ = 'Mark Tasha Williams read';
+
+  /** One 1:1 message on `conv-1`, so the contact's timeline owns that thread. */
+  const TIMELINE_PAGE = {
+    nextCursor: null,
+    items: [
+      {
+        kind: 'message',
+        id: 'm1',
+        at: '2026-08-17T10:00:00.000Z',
+        conversationId: 'conv-1',
+        tsMsgId: '2026-08-17T10:00:00.000Z#SM1',
+        direction: 'inbound',
+        author: 'contact',
+        type: 'sms',
+        body: 'is the place still open',
+        delivery_status: 'received',
+      },
+    ],
+  };
+
+  function setVisibility(state: 'visible' | 'hidden'): void {
+    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+  }
+
+  async function openKebab(): Promise<void> {
+    await screen.findByText('Tasha Williams');
+    fireEvent.click(screen.getByRole('button', { name: /more actions/i }));
+  }
+
+  beforeEach(() => {
+    getContact.mockResolvedValue(TENANT);
+    getContactTimeline.mockReset().mockResolvedValue(TIMELINE_PAGE);
+  });
+  afterEach(() => setVisibility('visible'));
+
+  it('offers Mark unread after a successful mount fan-out', async () => {
+    renderAt('k1');
+    await openKebab();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+    expect(screen.getByRole('menuitem', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: MARK_READ })).toBeNull();
+  });
+
+  it('offers Mark unread when the fan-out was SKIPPED (background tab)', async () => {
+    setVisibility('hidden');
+    renderAt('k1');
+    await openKebab();
+    expect(markInboxRead).not.toHaveBeenCalled();
+    // UNKNOWN, not read - and unknown shows the safe default.
+    expect(screen.getByRole('menuitem', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: MARK_READ })).toBeNull();
+  });
+
+  it('offers Mark unread when the fan-out FAILED', async () => {
+    markInboxRead.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    renderAt('k1');
+    await openKebab();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalled());
+    expect(screen.getByRole('menuitem', { name: MARK_UNREAD })).toBeInTheDocument();
+  });
+
+  it('flips to Mark read on a conversation.updated with a POSITIVE count for a timeline thread', async () => {
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalled());
+    emitConversationUpdated({
+      conversationId: 'conv-1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 2,
+    });
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: MARK_READ })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: MARK_UNREAD })).toBeNull();
+  });
+
+  it('ignores a conversation.updated for a thread that is NOT in this contact timeline', async () => {
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalled());
+    emitConversationUpdated({
+      conversationId: 'someone-elses-thread',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 5,
+    });
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: MARK_UNREAD })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: MARK_READ })).toBeNull();
+  });
+
+  it('awaits the auto-read drain BEFORE issuing the mark-unread POST', async () => {
+    // THE ordering test. The page's own fan-out is held open, so a toggle that
+    // POSTs without awaiting suppressAndDrain() is caught here and nowhere else.
+    let releaseAutoRead: (() => void) | undefined;
+    markInboxRead.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseAutoRead = resolve;
+        }),
+    );
+    renderAt('k1');
+    await openKebab();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(markInboxUnread).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseAutoRead?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'k1' }));
+  });
+
+  it('navigates to /inbox once the mark-unread POST succeeds', async () => {
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(screen.getByText('INBOX')).toBeInTheDocument());
+  });
+
+  it('does NOT navigate on Mark read - reading is not a departure', async () => {
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalled());
+    emitConversationUpdated({
+      conversationId: 'conv-1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 2,
+    });
+    await openKebab();
+    markInboxRead.mockClear();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_READ }));
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByText('Tasha Williams')).toBeInTheDocument();
+  });
+
+  it('stays put when the mark-unread POST rejects', async () => {
+    markInboxUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalled());
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByText('Tasha Williams')).toBeInTheDocument();
+  });
+
+  it('renders a pending state while the mark-unread request is outstanding', async () => {
+    let releasePost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePost = resolve;
+        }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    // The menu closes on the press (every item does), so the pending state has
+    // to live on the page, not in the menu.
+    await waitFor(() => expect(screen.getByText('Marking unread...')).toBeInTheDocument());
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: MARK_UNREAD })).toBeDisabled();
+    await act(async () => {
+      releasePost?.();
+      await Promise.resolve();
+    });
+  });
+
+  it('renders the RETRYABLE copy on a 409 and leaves the action available', async () => {
+    markInboxUnread.mockRejectedValue(
+      new ApiError(409, 'thread_closed', 'thread_closed', { error: 'thread_closed' }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    // Queried by TEXT, never by role alone and never by an accessible name: an
+    // aria-label on a live region REPLACES the announced content, so the banner
+    // carries none - and this page renders several other role="status" nodes
+    // (the deleted banner, the extraction banner, every Spinner), so a bare role
+    // query is a strict-mode multiple-match waiting to happen.
+    await waitFor(() =>
+      expect(screen.getByText('Could not mark unread - try again')).toBeInTheDocument(),
+    );
+    await openKebab();
+    const item = screen.getByRole('menuitem', { name: MARK_UNREAD });
+    expect(item).toBeInTheDocument();
+    expect(item).toBeEnabled();
+  });
+
+  // Fix wave 1. The kebab offers "Mark unread" on every non-deleted contact, and
+  // the route 404s `no_conversation_for_contact` for a large ordinary class - an
+  // imported landlord, a contact with no messages, a contact whose only threads
+  // are closed or relay-only. Telling those operators to retry a condition that
+  // can never clear is the bug. The item is NOT hidden: this page cannot know,
+  // and a hidden-but-available action is worse than an honest refusal.
+  it('renders TERMINAL copy on a 404 - the contact has no thread to mark unread', async () => {
+    markInboxUnread.mockRejectedValue(
+      new ApiError(404, 'no_conversation_for_contact', 'no_conversation_for_contact', {
+        error: 'no_conversation_for_contact',
+      }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() =>
+      expect(screen.getByText(MARK_UNREAD_NO_THREAD)).toBeInTheDocument(),
+    );
+    // The copy carries BOTH causes (human ruling 2026-08-18): this 404 is
+    // usually permanent - no eligible thread - but the SAME status covers the
+    // participant-GSI lag, where a retry does clear it. So it names the common
+    // cause AND leaves the retry door open, rather than asserting either alone.
+    expect(screen.getByText(/no thread to mark unread yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/try again/i)).toBeInTheDocument();
+  });
+
+  // Fix wave 1. An aria-label on a live region REPLACES the announced content,
+  // so the shipped `aria-label="Unread status"` made a screen-reader user hear
+  // "Unread status" instead of the message that is the entire point of the
+  // announcement. Neither region carries one.
+  //
+  // Fix wave 2: the banners are reached by their TEXT and the live region is
+  // then read off that node. A bare getByRole('status') would be ambiguous by
+  // construction - Spinner, the deleted banner and the extraction banner all
+  // carry role="status" on this page - so it would fail as "found multiple
+  // elements" rather than as the assertion it is making.
+  it('announces the MESSAGE, not a region label, on both unread banners', async () => {
+    let rejectPost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPost = () => reject(new ApiError(500, 'server_error', 'boom'));
+        }),
+    );
+    renderAt('k1');
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+
+    const pending = (await screen.findByText('Marking unread...')).closest('[role="status"]');
+    expect(pending).not.toBeNull();
+    expect(pending).not.toHaveAttribute('aria-label');
+
+    await act(async () => {
+      rejectPost?.();
+      await Promise.resolve();
+    });
+    const alert = (await screen.findByText('Could not mark unread - try again')).closest(
+      '[role="alert"]',
+    );
+    expect(alert).not.toBeNull();
+    expect(alert).not.toHaveAttribute('aria-label');
+  });
+
+  // Fix wave 1. ContactDetail deliberately STAYS on the page when mark-unread
+  // fails, but suppressAndDrain's latch used to clear ONLY on an actual contact
+  // change - so one failure killed this page's auto-read for the rest of the
+  // visit and a new inbound stayed unread while the operator watched it land.
+  it('a FAILED mark-unread does not latch the auto-read off for the rest of the visit', async () => {
+    markInboxUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    renderAt('k1');
+    await openKebab();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() =>
+      expect(screen.getByText('Could not mark unread - try again')).toBeInTheDocument(),
+    );
+
+    // Still on the contact page, still looking at it: a new inbound must be
+    // marked read exactly as it was before the failed attempt.
+    markInboxRead.mockClear();
+    act(() => capturedHandlers['onMessagePersisted']?.({}));
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+  });
+
+  // --- Fix wave 2: the in-flight toggle belongs to ONE contact ---------------
+  //
+  // ContactDetail is RE-RENDERED, not remounted, when the route param changes
+  // (the composer-isolation describe above drives exactly that navigation and
+  // proves the instance survives). The toggle awaits a drain bounded at 2s plus
+  // a round trip, so contact A's resolution can land while contact B is on
+  // screen. Every write it makes then speaks about the wrong contact.
+  //
+  // Both cases render a <Link> to a second contact alongside the page, which is
+  // how the operator really leaves: the relay-groups card, a timeline link, the
+  // Back button.
+  function renderWithNavToOther() {
+    getContact.mockImplementation((id: unknown) =>
+      id === 'z99' ? Promise.resolve(OTHER) : Promise.resolve(TENANT),
+    );
+    return render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <Routes>
+          <Route
+            path="/contacts/:contactId"
+            element={
+              <>
+                <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                <ContactDetail />
+              </>
+            }
+          />
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('does NOT navigate to /inbox when the mark-unread resolves after the operator left the contact', async () => {
+    let releasePost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePost = resolve;
+        }),
+    );
+    renderWithNavToOther();
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    fireEvent.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+
+    await act(async () => {
+      releasePost?.();
+      await Promise.resolve();
+    });
+    // The write stands - it was right for Tasha - but the operator is reading
+    // Bob, and yanking them to the inbox for a press they made on another page
+    // is the defect.
+    expect(screen.queryByText('INBOX')).toBeNull();
+    expect(screen.getByText('Bob Other')).toBeInTheDocument();
+  });
+
+  it('does NOT write the failed press banner onto the contact the operator moved to', async () => {
+    let rejectPost: (() => void) | undefined;
+    markInboxUnread.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPost = () => reject(new ApiError(404, 'no_conversation_for_contact', 'nope'));
+        }),
+    );
+    renderWithNavToOther();
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    fireEvent.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+
+    await act(async () => {
+      rejectPost?.();
+      await Promise.resolve();
+    });
+    // Neither failure copy: Tasha's 404 says nothing about Bob's threads.
+    expect(screen.queryByText(MARK_UNREAD_NO_THREAD)).toBeNull();
+    expect(screen.queryByText('Could not mark unread - try again')).toBeNull();
+  });
+
+  it('hides the toggle ENTIRELY for a soft-deleted contact (MU-2)', async () => {
+    getContact.mockResolvedValue({ ...TENANT, deleted_at: '2026-08-10T00:00:00.000Z' });
+    renderAt('k1');
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: /Restore contact/i })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: MARK_UNREAD })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: MARK_READ })).toBeNull();
+  });
+
+  it('never touches the nav badge optimistic layer, in either direction', async () => {
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalled());
+    emitConversationUpdated({
+      conversationId: 'conv-1',
+      last_activity_at: '2026-08-17T11:00:00.000Z',
+      unread_count: 2,
+    });
+    await openKebab();
+    markInboxRead.mockClear();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_READ }));
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
+
+    await openKebab();
+    fireEvent.click(screen.getByRole('menuitem', { name: MARK_UNREAD }));
+    await waitFor(() => expect(markInboxUnread).toHaveBeenCalled());
+
+    expect(noteRowsCleared).not.toHaveBeenCalled();
+    expect(rollbackRowsCleared).not.toHaveBeenCalled();
   });
 });

@@ -214,6 +214,12 @@ export type AiRunVerdict =
   | 'auto_applied' | 'pending' | 'accepted' | 'dismissed' | 'superseded'
   | 'superseded_by_human_edit' | 'not_presented';
 
+export interface AiRunContactDisplay {
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+}
+
 export interface AiRunListRowLive {
   runId: string;
   sortKey: string;
@@ -222,6 +228,7 @@ export interface AiRunListRowLive {
   durationMs: number;
   conversationId: string;
   contactId?: string;
+  contact?: AiRunContactDisplay;
   trigger: AiRunTrigger;
   outcome: AiRunOutcome;
   skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
@@ -236,6 +243,7 @@ export type AiRunListRow = AiRunListRowLive | { runId: string; sortKey: string; 
 
 export interface AiRunListPage {
   runs: AiRunListRow[];
+  scopeContact?: AiRunContactDisplay;
   nextBefore?: string;
 }
 
@@ -308,6 +316,7 @@ export interface AiRunRecordView {
 /** GET /api/ai-runs/:runId - the rehydrated window rides alongside the stored run. */
 export interface AiRunDetailResponse {
   run: AiRunRecordView;
+  contact?: AiRunContactDisplay;
   window: { messages: AiRunWindowMessage[] };
 }
 

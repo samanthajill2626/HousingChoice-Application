@@ -22,7 +22,6 @@ import {
   closeConversation,
   getConversation,
   getConversationMembers,
-  markConversationRead,
   removeConversationMember,
   sendMessage,
   type ConversationHeader,
@@ -38,6 +37,8 @@ import { useContacts } from '../contacts/useContacts.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import { groupMemberLabel } from '../../lib/groupThread.js';
 import { useRelayThread } from './useRelayThread.js';
+import { useMarkThreadRead } from './useMarkThreadRead.js';
+import { ThreadUnreadToggle } from './ThreadUnreadToggle.js';
 import { GroupTextView } from './GroupTextView.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
@@ -224,22 +225,12 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
     };
   }, [conversationId]);
 
-  // Viewing the group marks it read — the Inbox unread badge clears once seen.
-  // DELIBERATELY UNWIRED from the badge's optimistic layer (the same ruling
-  // useMarkContactRead carries, and its regression test): this fires BLIND on
-  // mount, with no unread knowledge, so an optimistic decrement here could
-  // subtract a row the badge never counted. It reconciles through the cheap
-  // count refetch this mark-read's own SSE event triggers. The visible
-  // asymmetry is intended - opening a thread from an Inbox ROW decrements
-  // instantly (useInbox knows that row's unread), opening it from Today or a
-  // deep link does not. Wiring it later is safe (the clear key would be
-  // `cv:<conversationId>`, the vocabulary useInbox already mints, so the two
-  // would dedupe rather than double-decrement) but it needs the unread count.
-  useEffect(() => {
-    void markConversationRead(conversationId).catch(() => {
-      /* best-effort — a failed mark-read must not break the view */
-    });
-  }, [conversationId]);
+  // Viewing the group marks it read. The effect that used to live inline here
+  // is now useMarkThreadRead, shared with GroupTextView - it carries the
+  // unchanged reasoning for why this read stays UNWIRED from the badge's
+  // optimistic layer, and it returns the handle a mark-unread action awaits so
+  // this read cannot overtake it.
+  const autoRead = useMarkThreadRead(conversationId);
 
   // Refetch the authoritative roster (used on a 409 roster_conflict).
   const refetchMembers = (): void => {
@@ -444,6 +435,20 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             >
               Close
             </button>
+          )}
+          {/* D6. HIDDEN ENTIRELY on a CLOSED relay group - unlike the inbox row,
+              where the guard is defensive, this page is reachable by deep link
+              and from the contact's relay-groups card, so the state is live
+              here. The server refuses a closed thread with 409 thread_closed;
+              offering the action anyway would be an affordance that only ever
+              fails. */}
+          {closed ? null : (
+            <ThreadUnreadToggle
+              conversationId={conversationId}
+              header={header}
+              name="Relay group"
+              autoRead={autoRead}
+            />
           )}
         </div>
       </header>

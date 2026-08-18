@@ -22,18 +22,36 @@ modified by this change.
 
 ## 2. Verified current behavior
 
-### 2.1 Why a duplicate is harmful
+### 2.1 Why a duplicate is harmful - and what it does NOT break
+
+State the routing correctly first, because the warning copy is built from it and an
+overstated version of this was the first draft's error.
 
 Inbound SMS resolves on `(To, From)` - `app/src/routes/webhooks/twilio.ts:1911-1952`.
-Because a duplicate group necessarily gets a SECOND pool number (2.2), the same set of
-people now has TWO masked numbers between them, and which thread a reply lands in
-depends on which of the two numbers the person happens to text back. Neither number
-identifies itself, and to a tenant or landlord both are just "the number I text about
-this". The cost is a conversation history split across two threads at random, plus a
-recipient who cannot tell the two apart - not merely a redundant row in a list.
+A duplicate group necessarily gets a SECOND pool number (2.2), so the two groups sit
+on two different numbers. Routing is therefore FULLY DETERMINISTIC: a reply sent to
+number 1 resolves to group 1 and a reply to number 2 resolves to group 2, every time.
+Nothing is delivered to the wrong party, nothing lands in an arbitrary thread, and no
+invariant is violated. **A duplicate is not a correctness problem.**
 
-This is what the warning copy has to convey. "A group with these people already
-exists" states a fact; it does not explain why the operator should care.
+The harm is entirely on the human side:
+
+- The tenant or landlord now holds TWO indistinguishable masked numbers for what is,
+  to them, ONE relationship. Neither number identifies itself; both are just "the
+  number I text about this". They have no way to tell which thread staff is actually
+  watching, and a reply to the stale one is delivered perfectly correctly into a
+  thread nobody is reading.
+- Staff's history of that relationship is SPLIT across two threads, and outbound goes
+  from whichever thread they happen to open - so the recipient sees two different
+  senders for one conversation.
+
+That is what the warning copy has to convey, and it is the whole justification for
+the feature. "A group with these people already exists" states a fact without saying
+why the operator should care.
+
+It is also why D5 warns rather than refuses and why D7 fails open: a missed detection
+costs somebody a confusing week, not a misdelivered message. A design that treated
+this as a safety fence would be mis-priced.
 
 ### 2.2 Every duplicate ALREADY gets a new number - verified, do not "fix" it
 
@@ -240,8 +258,10 @@ present, ABOVE the recipient list:
 - What already exists, by name: "Dana Reed and Marcus Bell already have an open relay
   group." (Connecting: "... already have a relay group being connected.")
 - Why it matters, in one sentence carrying 2.1: a second group gets its own masked
-  number, so replies will split between the two threads at random and neither party
-  can tell the numbers apart.
+  number, so these people will have two numbers for one conversation with no way to
+  tell which one staff is watching. NOT "messages may go to the wrong thread" - they
+  will not, and copy that overstates the risk will be disbelieved the first time an
+  operator checks (2.1).
 - A link to the existing conversation.
 - The confirm button becomes "Create anyway"; the dialog's primary action visually
   de-emphasises relative to the link.

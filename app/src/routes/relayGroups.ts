@@ -320,10 +320,15 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       members.push(await resolveMemberName(contacts, parsed));
     }
 
-    // Provision via the shared primitive (provision pool → create relay → assign
-    // → audit → intro → emit). A standalone (no-placement) relay — the test scaffold;
-    // the product path is POST /api/placements/:placementId/relay. Typed refusals map to
-    // 503 here with the create-reason refusal audit.
+    // Provision via the shared primitive (provision pool -> create relay ->
+    // assign -> audit -> intro -> emit). A STANDALONE relay: no tour, no
+    // placement, no owner row. This is a product path, not a scaffold - it is
+    // what the contact file's "Create group" button posts to, after its own
+    // preview at POST /api/relay-groups/preview. The owner-scoped opens (POST
+    // /api/tours/:tourId/relay, POST /api/placements/:placementId/relay) are the
+    // other product paths and go through services/rosterProvision.ts instead,
+    // which resolves the owner's roster and holds the group-thread claim.
+    // Typed refusals map to 503 here with the create-reason refusal audit.
     let conversation;
     try {
       conversation = await provisionRelayGroup(

@@ -1,10 +1,17 @@
 // Relay-group provisioning (M1.7 primitive, shared in M1.10) — the one chain
 // that stands up a masked relay thread: provision a pool number → create the
 // relay_group conversation → assign the number → audit → enqueue the intro →
-// emit conversation.updated. Both entry points use it so the kill-switch /
-// voice-capability handling and the intro/audit/SSE tail never drift:
-//   • the standalone POST /api/relay-groups (test scaffold; routes/relayGroups.ts)
-//   • the placement-scoped POST /api/placements/:placementId/relay (the product trigger; routes/placements.ts)
+// emit conversation.updated. Every entry point uses it so the kill-switch /
+// voice-capability handling and the intro/audit/SSE tail never drift. All three
+// are product paths; what differs is whether the group has an OWNER:
+//   - STANDALONE, no owner row: POST /api/relay-groups (routes/relayGroups.ts),
+//     which is what the dashboard contact file's "Create group" button posts to
+//     with a client-supplied member list, previewed first at
+//     POST /api/relay-groups/preview.
+//   - OWNER-SCOPED: POST /api/tours/:tourId/relay and
+//     POST /api/placements/:placementId/relay, both via
+//     services/rosterProvision.ts (also the quiet-hours poller's path), which
+//     resolves the owner's roster and claims the group-thread slot first.
 //
 // It does NOT catch RelayProvisioningDisabledError / VoiceCapabilityError —
 // those propagate so each route maps them to its own 503 + refusal audit (the

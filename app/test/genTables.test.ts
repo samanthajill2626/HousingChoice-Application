@@ -186,6 +186,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'byPoolNumber',
       'byRelayStatus',
       'byUnread',
+      'byRelayOptOut',
     ]);
     expect(gsiNames('messages')).toEqual([]);
     expect(gsiNames('matches')).toEqual(['byUnit']);

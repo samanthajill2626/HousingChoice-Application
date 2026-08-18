@@ -1231,19 +1231,16 @@ export async function getContactListingsSent(
 /** GET /api/contacts/:id/media?limit=&cursor= - one newest-first page of the
  *  contact's indexed comms media across their 1:1 threads (2026-08-18). Pass the
  *  previous page's `nextCursor` to walk older media; no cap on how far back. */
-export async function getContactMedia(
+export function getContactMedia(
   contactId: string,
   opts: { cursor?: string | undefined; limit?: number | undefined } = {},
   signal?: AbortSignal,
 ): Promise<ContactMediaPage> {
-  const params = new URLSearchParams();
-  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-  if (opts.cursor !== undefined) params.set('cursor', opts.cursor);
-  const qs = params.toString();
-  return request<ContactMediaPage>(
-    `/api/contacts/${encodeURIComponent(contactId)}/media${qs.length > 0 ? `?${qs}` : ''}`,
-    { ...(signal !== undefined && { signal }) },
-  );
+  return request<ContactMediaPage>(`/api/contacts/${encodeURIComponent(contactId)}/media`, {
+    // request() drops undefined query values: no cursor = the newest page.
+    query: { limit: opts.limit, cursor: opts.cursor },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/contacts/:id/relay-groups - the contact's relay-group

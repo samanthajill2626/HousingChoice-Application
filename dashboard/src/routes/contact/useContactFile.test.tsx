@@ -160,6 +160,43 @@ describe('useContactFile', () => {
     expect(getContactRelayGroups).toHaveBeenCalledTimes(2);
   });
 
+  it('a FAILED refetch keeps the committed rows on screen instead of wiping the pane', async () => {
+    // A reload is not a load. The pane's only error copy replaces EVERY card
+    // (placements, tours, properties, relay groups, group threads, media) with
+    // one sentence and no retry affordance - an honest answer on mount, and a
+    // wipe of good rows when the refetch fired by a SUCCESSFUL create happens to
+    // fail. Its failure surface is wide (placements + every /api/units page +,
+    // on a landlord file, one getTours per owned unit), so this is not exotic.
+    // A stale card is what the card was before the refetch existed.
+    getPlacements.mockResolvedValueOnce(CASES).mockRejectedValue(new ApiError(500, 'boom', 'x'));
+    getUnits.mockResolvedValue(UNITS);
+    getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactRelayGroups.mockResolvedValue([
+      {
+        conversationId: 'conv-g1',
+        status: 'open',
+        poolNumber: '+15550190001',
+        memberCount: 2,
+        lastActivityAt: '2026-07-01T10:00:00Z',
+        owner: { type: null },
+        otherMemberNames: ['Marcus Bell'],
+      },
+    ]);
+
+    render(<Probe contactId="k1" />);
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'refetch file' }));
+    await waitFor(() => expect(getPlacements).toHaveBeenCalledTimes(2));
+
+    // The refetch failed and the file is merely STALE: same status, same rows.
+    expect(screen.getByTestId('status').textContent).toBe('ready');
+    expect(screen.getByTestId('placements').textContent).toBe('1');
+    expect(screen.getByTestId('groups').textContent).toBe('ready');
+    expect(screen.getByTestId('groupCount').textContent).toBe('1');
+  });
+
   it('surfaces an error when placements fail', async () => {
     getPlacements.mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getUnits.mockResolvedValue(UNITS);

@@ -105,7 +105,12 @@ export type ContactFile = ContactFileState & {
    *  already has rows keeps showing them. For a write made ELSEWHERE on the page
    *  that no SSE event covers — the standalone relay-group create, whose
    *  `connecting` outcome deliberately does not navigate away — the same gap
-   *  `useContactTimeline.refetch` fills for the timeline. */
+   *  `useContactTimeline.refetch` fills for the timeline.
+   *
+   *  A refetch that FAILS keeps the committed state too (`status` stays
+   *  `'ready'`): the pane goes stale rather than collapsing to "We couldn't load
+   *  this file." over rows that are still good. Only a load with nothing
+   *  committed for this contact reports `'error'`. */
   refetch: () => void;
 };
 
@@ -198,7 +203,19 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState((prev) => ({ ...prev, status: 'error', forId: contactId }));
+        // A RELOAD is not a LOAD. `status: 'error'` replaces every card in the
+        // right pane (placements, tours, properties, relay groups, group
+        // threads, media) with one sentence and no retry affordance. That is the
+        // honest answer when nothing has ever loaded - and a wipe of good rows
+        // when a refetch over committed state fails. Keep what is on screen: the
+        // pane is then STALE, which is exactly what it was before refetch
+        // existed. Only a first load for THIS contact (or a contact switch,
+        // whose committed state describes someone else) still errors.
+        setState((prev) =>
+          prev.status === 'ready' && prev.forId === contactId
+            ? prev
+            : { ...prev, status: 'error', forId: contactId },
+        );
       }
     })();
 

@@ -970,6 +970,30 @@ describe('ContactDetail', () => {
       expect(screen.queryByText('No relay groups yet.')).not.toBeInTheDocument();
       expect(getContactRelayGroups.mock.calls.length).toBeGreaterThan(callsBeforeCreate);
     });
+
+    it('offers the Create action on a live contact and NOT on a soft-deleted one', async () => {
+      // The comms pane deliberately locks its composer for a deleted contact
+      // (the server refuses with 409 contact_deleted), so a card action that
+      // texts them anyway is the same page contradicting itself - and the relay
+      // send path has no deleted-contact gate of its own: `isMemberSuppressed`
+      // tests sms_opt_out and per-phone STOP only. Native group sends refuse for
+      // exactly this reason.
+      getContact.mockResolvedValue(TENANT);
+      getContactRelayGroups.mockResolvedValue([]);
+      const { unmount } = renderAt('k1');
+      await screen.findByText('Tasha Williams');
+      expect(
+        await screen.findByRole('button', { name: 'Create a relay group' }),
+      ).toBeInTheDocument();
+      unmount();
+
+      getContact.mockResolvedValue({ ...TENANT, deleted_at: '2026-06-19T00:00:00.000Z' });
+      renderAt('k1');
+      await screen.findByText('Tasha Williams');
+      // The card itself still renders - only the action is withheld.
+      await screen.findByText('No relay groups yet.');
+      expect(screen.queryByRole('button', { name: 'Create a relay group' })).toBeNull();
+    });
   });
 
   // ── Texting a brand-new contact (no conversation yet) ───────────────────────

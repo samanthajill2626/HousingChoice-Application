@@ -217,6 +217,16 @@ export function ContactDetail(): React.JSX.Element {
   // so the Inbox unread badge clears once you've actually seen the messages here.
   useMarkContactRead(contactId);
 
+  // STABLE ON PURPOSE (and above the early returns, like the extraction hooks
+  // below). CreateRelayGroupModal memoizes the busy-guarded dismissal it hands
+  // to Modal against this callback, and Modal keys its Escape/focus effect on
+  // the callback it receives: an inline arrow here would change identity on
+  // every render of THIS page - which an SSE tick, a timeline refetch or the
+  // file refetch causes routinely - re-running that effect, pulling focus onto
+  // the dialog and dropping whatever the operator was typing into the member
+  // search. The modal cannot fix that from its side.
+  const closeRelayGroupModal = useCallback(() => setCreatingRelayGroup(false), []);
+
   // --- Manual AI extraction (manual-extraction-trigger 4.6) ------------------
   // These three hooks MUST stay above the loading/error early returns below, or
   // the page renders a different number of hooks per pass and crashes.
@@ -408,6 +418,16 @@ export function ContactDetail(): React.JSX.Element {
   // server also refuses with 409 contact_deleted). The pane re-derives this from
   // the contact it holds; this copy serves the page chrome.
   const deleted = typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
+
+  // ...and the same lock applies to the Relay groups card's "+ Create group":
+  // the action's whole point is to text this contact (they are the LOCKED first
+  // member of the group it creates), and the relay send path has no
+  // deleted-contact gate of its own - `isMemberSuppressed` tests sms_opt_out and
+  // per-phone STOP only. Withheld rather than disabled: the sibling card actions
+  // carry no disabled state either, and a deleted file is a restore-first page.
+  const relayCreateAction = deleted
+    ? {}
+    : { onCreateRelayGroup: (): void => setCreatingRelayGroup(true) };
 
   // Header ⋯ menu + UnknownFile triage. Each endpoint RETURNS the updated contact,
   // so we apply it in place (setContact) — the header, file pane, facts, and reply
@@ -778,7 +798,7 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
-                onCreateRelayGroup={() => setCreatingRelayGroup(true)}
+                {...relayCreateAction}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -849,7 +869,7 @@ export function ContactDetail(): React.JSX.Element {
                 onSendProperty={() =>
                   navigate(`/broadcasts/new?contactId=${encodeURIComponent(contact.contactId)}`)
                 }
-                onCreateRelayGroup={() => setCreatingRelayGroup(true)}
+                {...relayCreateAction}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -887,7 +907,7 @@ export function ContactDetail(): React.JSX.Element {
         <CreateRelayGroupModal
           contact={contact}
           candidates={editCandidates}
-          onClose={() => setCreatingRelayGroup(false)}
+          onClose={closeRelayGroupModal}
           onCreated={() => {
             // The Relay groups card read its rows once, on mount, and this page
             // listens for no conversation event. A `connecting` create does not

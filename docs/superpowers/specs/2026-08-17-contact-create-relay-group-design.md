@@ -318,13 +318,26 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
   partners are invisible everywhere `'all'` is used. ADD `'partner'` to
   `TYPES_FOR.all`. Team members stay excluded - they are staff, not an audience.
 
+  WIDEN `TYPES_FOR.deleted` TOO, to the same set. It is currently the same
+  triple. If the Deleted view cannot list a soft-deleted partner, that contact
+  is invisible in the UI and therefore unrestorable - `restoreContact` is only
+  reachable from the contact page, which is only reachable from that list. A
+  first-class type that can be deleted but not recovered is a data-recovery
+  hole, so both filters move together.
+
   BLAST RADIUS, deliberately accepted: `useContacts('all')` has EIGHT call sites
   - `contacts/ContactsList.tsx` (the "All" tab), `email/EmailTriage.tsx`,
   `shared/PeopleCard.tsx`, `conversation/ConversationDetail.tsx`,
   `tours/ToursPage.tsx`, `listing/ListingDetail.tsx`, and
   `contact/ContactDetail.tsx`. All of them gain partner contacts. That is the
-  intended correction, not a side effect. Any test asserting the narrower set
-  must be updated to assert the new one, and the stale comment corrected.
+  intended correction, not a side effect.
+
+  TWO PINNED ASSERTIONS WILL GO RED, and both must be updated DELIBERATELY, not
+  worked around: `routes/contacts/useContacts.test.tsx:56-68` (the `all` case)
+  asserts `toHaveBeenCalledTimes(3)` and
+  `types).toEqual(['landlord','tenant','unknown'])`, and `:70-82` pins the same
+  triple for `deleted`. Both become 4 calls including `partner`. Correct the
+  stale "every audience type" comment in the same edit.
 - `ContactSearchField` yields only `{ name, contactId }` and emits on EVERY
   keystroke with `contactId` undefined for uncommitted free text. A member may
   be added ONLY from a committed pick (`contactId` set); free text is never
@@ -502,6 +515,30 @@ Unit (Vitest):
   two-button footer with `confirmLabel`, still shows the warning, and calls
   `onConfirm(false)`; the default is unchanged.
 
+NO PARTNER CONTACT IS ADDED TO THE LEAN SEED, and the partner widening gets NO
+e2e coverage. This was an open question; it is decided, with reasons, so nobody
+re-opens it by reflex:
+
+1. The integration risk an e2e would uniquely catch DOES NOT EXIST. The API
+   already serves `type=partner` - `CONTACT_TYPES` includes it and
+   `isContactType` validates against the full union
+   (`app/src/routes/contacts.ts:236-246`). There is no server-side list to
+   forget to update.
+2. The change is a one-line filter widening whose entire observable behavior is
+   "does the fan-out request partner". `useContacts.test.tsx` proves that
+   deterministically against a mocked client; an e2e would prove nothing more.
+3. The picker's handling of a partner CANDIDATE is proven by the
+   `CreateRelayGroupModal` test with a partner in the candidates array. No seed
+   contact is required to exercise it.
+4. `lean` is the BYTE-STABLE e2e world. Adding a fourth contact is churn across
+   a shared fixture in exchange for zero additional information.
+
+OBSERVED, NOT CHANGED: the lean seed's `IDS.haStaffer` (Renee Carter, "HCV
+Program Specialist" at a housing authority) is typed `team_member`, but the
+glossary defines exactly that person - an outside agency contact - as
+`partner`. Retyping her would alter the byte-stable world and is a product call,
+not a mechanical fix. Filed at 9.6; do NOT change her in this mission.
+
 E2E (Playwright, accessibility-first selectors): one spec driving contact file
 -> `+ Create group` -> add a member -> confirm -> THE CONNECTING RESULT PANEL.
 In the hermetic lane every fresh pair lands connecting (section 2.9) and
@@ -574,7 +611,13 @@ Copy `docs/issues/_TEMPLATE.md` for each:
    be on the thread and will not be texted, unannotated. The standalone path
    declines to reproduce this (6.2 step 4); the two shipped surfaces still do.
 
-Items 2-5 are pre-existing defects this review surfaced, NOT regressions from
+6. `lean-seed-ha-staffer-typed-team-member.md` (LOW) - the lean seed's Renee
+   Carter is an "HCV Program Specialist" at a housing authority typed
+   `team_member`, while the glossary defines an outside agency contact as
+   `partner`. Needs a human product call; retyping her churns the byte-stable
+   seed world, so it is deliberately not done here.
+
+Items 2-6 are pre-existing defects this review surfaced, NOT regressions from
 this change.
 
 ## 10. Post-merge obligations

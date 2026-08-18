@@ -1,11 +1,12 @@
 # Warn when an open relay group already exists with the same contacts
 
-Date: 2026-08-17 (r4: 2026-08-18)
+Date: 2026-08-17 (r5: 2026-08-18)
 Branch: `feat/relay-number-reuse` (the name predates a scope change and is kept
 deliberately); worktree `W:\tmp\relay-number-reuse`, synced with `main` @014b93a6.
-Revision: r4. Three rounds of adversarial review. r3 DELETED the layer the first two
-rounds kept finding blockers in (see 1.1); r4 folds in the round-3 findings against
-that deletion, including one BLOCKING self-contradiction in D6. Adjudications at
+Revision: r5. Four rounds of adversarial review. An earlier revision DELETED the
+server-refusal layer the first two rounds kept finding blockers in (see 1.1); r4 and
+r5 fold in the findings against that deletion, including two BLOCKING ones - a
+self-contradiction in D6, and a preview parameter shape that could not be supplied. Adjudications at
 `.superpowers/design-review/adjudications.md`.
 
 ## 1. The feature, in one paragraph
@@ -55,11 +56,15 @@ correctness problem.**
 
 CONNECTING GROUPS ARE THE EXCEPTION TO THE TENSE, NOT TO THE HARM. A connecting group
 has NO `pool_number` yet (`conversationsRepo.ts:696`, `:1803`) - it is waiting on a
-number being bought for it. So when either side of the pair is connecting there is not
-yet a second number; there is a second number ON ITS WAY, and a purchase about to
-happen that need not. D4 makes connecting groups first-class matches, so the copy must
-not assert a present-tense second number that does not exist yet (see 5). The
-underlying harm is identical once it lands.
+number being provisioned for it. So when either side of the pair is connecting there
+is not yet a second number; there is a second number ON ITS WAY. D4 makes connecting
+groups first-class matches, so the copy must not assert a present-tense second number
+that does not exist yet (see 5). The underlying harm is identical once it lands.
+
+A connecting match can also flip to OPEN between the preview and the confirm, which
+makes the rendered variant one tense stale. Harmless - both variants describe the same
+outcome and neither gates anything - but do not build a check that assumes the status
+held.
 
 The harm is entirely on the human side:
 
@@ -159,7 +164,7 @@ already deduped, so the preview compares exactly the roster it is previewing.
 **D2a - The EXISTING side is `participants[].phone`, and NOTHING else.** Say it
 explicitly, because `ever_member_phones` sits directly beside `participants` on
 `ConversationItem` with OPPOSITE semantics: it is add-only burn provenance that a
-member REMOVE never clears (`conversationsRepo.ts:238-247`), so it answers "who was
+member REMOVE never clears (`conversationsRepo.ts:250-258`), so it answers "who was
 ever here", not "who is on this thread". Comparing it would warn about groups whose
 current roster does not match at all. The live roster is the only correct input, and a
 builder reaching for the adjacent field is the likeliest way this feature goes wrong.
@@ -205,9 +210,15 @@ delivery. So the detector swallows its own errors rather than inheriting that
 posture - but it must swallow them itself, or an uncaught throw takes the whole
 dialog down.
 
-**D7 - Detection runs in the PREVIEW ONLY, one call site per builder.** No check at
-create, at reopen, in `validateAction`, or in the quiet-hours poller. r2 had five call
-sites; r3 has two, both inside `rosterEdits.ts`.
+**D7 - Detection runs in the PREVIEW ONLY.** No check at create, at reopen, in
+`validateAction`, or in the quiet-hours poller - an earlier revision had five call
+sites across all of those.
+
+Precisely, because the injected-callback shape (section 5) splits the two halves: the
+detector is CONSTRUCTED in the three preview ROUTES, which hold the repo and the
+logger, and INVOKED from the two open preview BUILDERS in `rosterEdits.ts`, which hold
+the phone set. Neither builder imports the detector and neither route computes a
+duplicate.
 
 ## 4. New module: `app/src/services/relayGroupDuplicates.ts`
 
@@ -232,9 +243,11 @@ export interface DuplicateOpenGroup {
  * RETURNED; `undefined` means "no match was found", and when the search was also
  * incomplete that fact is logged as a WARN rather than changing the answer (D6).
  *
- * MULTIPLE MATCHES: returns the one with the newest `last_activity_at` and logs
- * the count. Several exact duplicates already means something went wrong; the
- * warning names the liveliest.
+ * MULTIPLE MATCHES: prefer an OPEN match over a CONNECTING one, and only then
+ * take the newest `last_activity_at`; log the count. Ranking purely by activity
+ * hands the warning to a just-created CONNECTING shell - whose stamp is `now` and
+ * which nobody has ever texted - over a real OPEN thread that happens to be quiet,
+ * which is the opposite of naming the liveliest.
  */
 export function findOpenGroupWithSamePhones(
   deps: { conversations: Pick<ConversationsRepo, 'listRelayGroups'>; log: Logger },
@@ -260,33 +273,56 @@ duplicate" from "could not tell". A preview treats both as "say nothing".
   duplicateOf?: DuplicateOpenGroup;
 ```
 
-`buildOpenPreviewFromParts` stays PURE: the duplicate is computed by the two async
-builders and passed in as a new optional part.
+`buildOpenPreviewFromParts` stays PURE: the two async builders resolve the duplicate
+through the injected callback below and pass the result into the core as a new
+optional part. They do not compute it themselves and do not know how it is found.
 
-- `buildStandaloneOpenPreview` - its deps already carry the full `ConversationsRepo`,
-  so it calls the detector directly.
-- `buildOpenPreview` - takes `RosterResolutionDeps`, whose `conversations` is narrowed
-  to `Pick<ConversationsRepo, 'getById'>` (`app/src/lib/rosterResolution.ts:129`).
-  **Do NOT widen that type.** Add an OPTIONAL fourth parameter to `buildOpenPreview`
-  carrying the duplicate lookup - either the already-resolved `DuplicateOpenGroup` or
-  a `() => Promise<DuplicateOpenGroup | undefined>` - and have the two OPEN preview
-  routes (`routes/tours.ts:930`, `routes/placements.ts:1260`) supply it from the full
-  repo they already hold.
+BOTH open builders take the SAME new optional parameter, and it is a function that
+RECEIVES the phone set:
 
-  r3 said to widen the shared type. That is the larger blast radius for no benefit:
-  `RosterResolutionDeps` is the deps of the whole roster RESOLVER, threaded through
-  `describeRoster`, `resolveRoster`, `applyRosterPlanEdit` and the roster-actions job -
-  none of which has any business knowing about duplicate detection. Widening it also
-  forces every structural construction site to supply `listRelayGroups`, and a grep for
-  the NAMED type finds only two (`routes/tours.ts:514`, `routes/placements.ts:921`)
-  while the deps are also built INLINE elsewhere, e.g. `jobs/rosterActions.ts:321-323`,
-  plus every test double with a partial `conversations`. A parameter on the ONE
-  function that needs it touches exactly the two call sites that want the behavior and
-  breaks no double.
+```
+findDuplicate?: (phones: Set<string>) => Promise<DuplicateOpenGroup | undefined>
+```
+
+Each builder derives its deduped phone set (D2), and if `findDuplicate` was supplied,
+awaits it and puts the result on the preview. Omitted, the preview simply carries no
+`duplicateOf` and nothing warns - which is the correct degradation for a feature that
+never refuses.
+
+The THREE preview routes supply it, one line each, closing over the full repo and
+logger they already hold:
+
+```
+findDuplicate: (phones) => findOpenGroupWithSamePhones({ conversations, log }, phones)
+```
+
+Why this shape and not the two earlier ones, both of which were wrong:
+
+- r3 said to WIDEN `RosterResolutionDeps.conversations` to add `listRelayGroups`. That
+  type is the deps of the whole roster RESOLVER, threaded through `describeRoster`,
+  `resolveRoster`, `applyRosterPlanEdit` and the roster-actions job, none of which has
+  any business knowing about duplicate detection - and widening forces every
+  structural construction site plus every partial test double to supply the method.
+  A grep for the NAMED type finds only two sites (`routes/tours.ts:514`,
+  `routes/placements.ts:921`) while the deps are also built INLINE elsewhere, e.g.
+  `jobs/rosterActions.ts:321-323`.
+- r4 first offered a parameter carrying EITHER a resolved `DuplicateOpenGroup` or a
+  ZERO-ARGUMENT closure. Neither is suppliable: the phone set does not exist until
+  `buildOpenPreview` has resolved the roster and deduped it INTERNALLY, so a caller
+  has nothing to compute the duplicate from and a zero-argument closure has nothing to
+  close over. That is the same zero-argument-closure mistake 1.1 records as a deleted
+  blocker, made a second time in a different place. Passing the phones INTO the
+  callback is what makes it constructible.
+
+This shape also settles where the logger comes from.
+`buildStandaloneOpenPreview`'s deps are `{ contacts, conversations }`
+(`rosterEdits.ts:495-499`) with NO `Logger`, so it could not have emitted D6's
+mandated WARN itself. The closure carries its route's logger, so neither builder needs
+one and neither needs `listRelayGroups`.
 
 `RosterConfirmDialog` renders a warning block above the recipient list when
 `duplicateOf` is present. **`onConfirm` does not change** - there is no
-acknowledgement to carry, which is the single largest simplification r3 buys.
+acknowledgement to carry, which is the single largest simplification this design buys.
 
 THE ADD PATH MUST NOT WARN, AND THE GUARANTEE BELONGS ON THE PRODUCER. `RosterPreview`
 is also the shape returned by the ADD preview, which `PeopleCard.tsx:443` renders
@@ -304,9 +340,11 @@ Copy - two variants, because the connecting case has no second number YET (2.1):
   have two numbers for one conversation with no way to tell which one staff is
   watching.
 - CONNECTING match. "Dana Reed and Marcus Bell already have a relay group being
-  connected." Why: that group is still waiting on a number, and this one will buy a
-  second - same two-numbers-one-conversation outcome, plus a purchase that need not
-  happen.
+  connected." Why: that group is still waiting on a number, and this one will take a
+  second - same two-numbers-one-conversation outcome, and it consumes another number
+  from the pool. Do NOT say "buys": `provisionForGroup` never purchases (2.2); a
+  duplicate takes a warm spare and only the buffer refill behind it may eventually
+  buy.
 - Neither variant may say "messages may go to the wrong thread". They will not (2.1),
   and an operator who checks and finds it false will discount the next warning too.
 - A link to the existing conversation, opening in a NEW TAB. It is deliberately not
@@ -325,7 +363,8 @@ One detector call per PREVIEW. It walks two partitions to exhaustion - up to 20 
 x 100 items each, so up to 40 Queries and 4,000 items - and the NO-DUPLICATE case, the
 common one, always pays the maximum, because a full walk is what proves absence.
 
-r2 paid this TWICE per open (preview + create); r3 pays it once, on a screen the
+An earlier revision paid this TWICE per open (preview + create); this one pays it
+once, on a screen the
 operator is already waiting on. Acceptable because relay-group opens are a rare,
 human-initiated action on sparse relays-only partitions. Stated because it is not
 "one bounded query", and because the performance seed already builds up to 1,000 relay

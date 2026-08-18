@@ -13,11 +13,12 @@ import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
 import { RangeNotSatisfiableError } from '../../src/adapters/mediaStore.js';
 import type { Semaphore } from '../../src/lib/semaphore.js';
-import type {
-  InitiateCallParams,
-  MessagingAdapter,
-  SendMessageParams,
-  SendMessageResult,
+import {
+  MediaFetchHttpError,
+  type InitiateCallParams,
+  type MessagingAdapter,
+  type SendMessageParams,
+  type SendMessageResult,
 } from '../../src/adapters/messaging.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
@@ -253,6 +254,12 @@ export interface FakeWorld {
   failMediaDeletes: Set<string>;
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
+  /**
+   * Media URLs that getMediaStream should fail for ONLY the next N calls, then
+   * serve - the "Twilio has not served this media yet" beat the mirror's retry
+   * exists for (prod 2026-08-17/18). Consumed per call; an entry at 0 serves.
+   */
+  failMediaUrlsFor: Map<string, number>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
   failRecordingUrls: Set<string>;
   /** What mediaStore.put stored, by S3 key — read back by getStream (M1.9c). */
@@ -417,6 +424,7 @@ export function createFakeWorld(): FakeWorld {
   const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
   const failMediaDeletes = new Set<string>();
   const failMediaUrls = new Set<string>();
+  const failMediaUrlsFor = new Map<string, number>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
   // M1.9c recording round-trip).
@@ -3201,7 +3209,15 @@ export function createFakeWorld(): FakeWorld {
       };
     },
     async getMediaStream(mediaUrl) {
-      if (failMediaUrls.has(mediaUrl)) throw new Error(`fake media fetch failed: 404`);
+      // The failure shape Twilio really returns for media it has not served
+      // yet (prod 2026-08-17/18): a typed 404, which the mirror treats as
+      // TRANSIENT (retried inline, then deferred to media.mirror).
+      if (failMediaUrls.has(mediaUrl)) throw new MediaFetchHttpError('fake media fetch failed: 404', 404);
+      const remaining = failMediaUrlsFor.get(mediaUrl) ?? 0;
+      if (remaining > 0) {
+        failMediaUrlsFor.set(mediaUrl, remaining - 1);
+        throw new MediaFetchHttpError('fake media fetch failed: 404 (not served yet)', 404);
+      }
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
     },
     async getRecordingStream(recordingUrl) {
@@ -3461,6 +3477,7 @@ export function createFakeWorld(): FakeWorld {
     deletedMediaKeys,
     failMediaDeletes,
     failMediaUrls,
+    failMediaUrlsFor,
     failRecordingUrls,
     mediaObjects,
     events,

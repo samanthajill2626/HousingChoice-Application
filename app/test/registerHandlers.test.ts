@@ -21,6 +21,7 @@ describe('registerAllJobHandlers', () => {
         'broadcast.send',
         'call.missedAutoText',
         'groupRail.ensure',
+        'media.mirror',
         'messaging.retrySend',
         'relay.fanOut',
         'relay.intro',

@@ -20,6 +20,7 @@ import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
 import { registerRelayWarmJobHandler } from './relayWarm.js';
 import { registerRelayNumberReadyJobHandler } from './relayNumberReady.js';
 import { registerGroupRailJobHandler } from './groupRail.js';
+import { registerMediaMirrorJobHandler } from './mediaMirror.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
@@ -30,7 +31,7 @@ export interface RegisterJobHandlersDeps {
  * Register every job handler. Job names produced: `messaging.retrySend`,
  * `relay.fanOut` + `relay.intro` (both from the relay registrar), `broadcast.send`,
  * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
- * `relay.warmNumber`, `relay.numberReady`.
+ * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`.
  * retrySend is a single low-volume send and is intentionally not throttled; the
  * SMS handlers share `tokenBucket` so the COMBINED outbound rate stays under the
  * registered A2P tier. The voice-transcript jobs make VI API calls (no outbound
@@ -53,4 +54,7 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   // draws no A2P token - the outbound post that follows is metered by the send
   // path, not by this handler.
   registerGroupRailJobHandler();
+  // Deferred inbound-media mirror (a Twilio media fetch + an S3 put; no
+  // outbound traffic, no token).
+  registerMediaMirrorJobHandler();
 }

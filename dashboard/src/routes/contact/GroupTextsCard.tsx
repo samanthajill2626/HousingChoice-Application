@@ -8,13 +8,17 @@
 // > the (formatted) pool number > a plain "Relay group". A closed group shows
 // "Closed" instead of the member count.
 import type { RelayGroupRow } from '../../api/index.js';
-import { Card, EmptyRow, PendingPanel, Row, responseClass } from './Card.js';
+import { Card, CardAction, EmptyRow, PendingPanel, Row, responseClass } from './Card.js';
 import { formatPhone } from './format.js';
 
 export interface GroupTextsCardProps {
   /** True while the slice is loading or the backend route isn't live yet. */
   pending: boolean;
   groups: RelayGroupRow[];
+  /** When set, the card heading offers "+ Create group" (start a standalone
+   *  relay group seeded with this contact). Optional so every other render of
+   *  this card is unaffected. */
+  onCreate?: () => void;
 }
 
 /** The conversation-view route for a group — its OWN conversationId (the relay
@@ -32,9 +36,22 @@ export function groupLabel(g: RelayGroupRow): string {
   return 'Relay group';
 }
 
-export function GroupTextsCard({ pending, groups }: GroupTextsCardProps): React.JSX.Element {
+export function GroupTextsCard({
+  pending,
+  groups,
+  onCreate,
+}: GroupTextsCardProps): React.JSX.Element {
   return (
-    <Card title="Relay groups">
+    <Card
+      title="Relay groups"
+      {...(onCreate !== undefined && {
+        aside: (
+          <CardAction onClick={onCreate} label="Create a relay group">
+            + Create group
+          </CardAction>
+        ),
+      })}
+    >
       {pending ? (
         <PendingPanel />
       ) : groups.length === 0 ? (

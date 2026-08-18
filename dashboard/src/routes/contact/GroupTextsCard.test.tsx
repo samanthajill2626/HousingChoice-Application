@@ -2,7 +2,8 @@
 // (other members' names > tag > pool number > "Relay group"), conversation links
 // (every row → /conversations/:conversationId), and the Closed right-hand label.
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { GroupTextsCard, groupLabel, groupLink } from './GroupTextsCard.js';
 import type { RelayGroupRow } from '../../api/index.js';
@@ -20,7 +21,10 @@ function makeGroup(overrides: Partial<RelayGroupRow> = {}): RelayGroupRow {
   };
 }
 
-function renderIt(props: { pending: boolean; groups: RelayGroupRow[] }) {
+// `onCreate` is deliberately NOT defaulted here: CardAction's aria-label lands
+// inside the heading's accessible name, so passing it by default would break the
+// bare-heading assertion below. Only the two dedicated cases pass it.
+function renderIt(props: { pending: boolean; groups: RelayGroupRow[]; onCreate?: () => void }) {
   return render(
     <MemoryRouter>
       <GroupTextsCard {...props} />
@@ -96,6 +100,20 @@ describe('GroupTextsCard', () => {
     const bare = makeGroup({ status: 'closed' });
     delete bare.poolNumber;
     expect(groupLabel(bare)).toBe('Relay group');
+  });
+
+  // The create action. CardAction's `label` REPLACES the visible "+ Create
+  // group" text as the accessible name, so the query is the aria-label.
+  it('renders the create action when onCreate is set, and fires it on click', async () => {
+    const onCreate = vi.fn();
+    renderIt({ pending: false, groups: [], onCreate });
+    await userEvent.click(screen.getByRole('button', { name: 'Create a relay group' }));
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders NO create action when onCreate is absent', () => {
+    renderIt({ pending: false, groups: [makeGroup({ otherMemberNames: ['Lars Landlord'] })] });
+    expect(screen.queryByRole('button', { name: 'Create a relay group' })).toBeNull();
   });
 
   it('groupLink: always the row\'s own conversation view', () => {

@@ -66,9 +66,9 @@ an operator checks.
 
 `provisionForGroup` tier 1 skips any active number whose burn overlaps the new roster
 AT ALL (`app/src/services/poolNumbers.ts:539-540`, via `rosterOverlapsBurn` at
-`:302-309`, true when ANY roster phone is in the set). Tier 2 (`:555-557`) only
+`:302-309`, true when ANY roster phone is in the set). Tier 2 (`:556`) only
 accepts EMPTY-burn spares. `burned_phones` is permanent and never cleared
-(`app/src/repos/poolNumbersRepo.ts:15-21, :108-111`). So once A and B are burned on a
+(`app/src/repos/poolNumbersRepo.ts:15-21, :100-111`). So once A and B are burned on a
 number, no later group containing A or B can land on it - open or closed, same set or
 merely overlapping.
 
@@ -104,10 +104,10 @@ never phones (doc section 9).
 
 ### 2.5 Detection primitive
 
-`conversations.listRelayGroups(status)` (`app/src/repos/conversationsRepo.ts:731-733`)
+`conversations.listRelayGroups(status)` (`app/src/repos/conversationsRepo.ts:758`)
 is a DIRECT Query on the SPARSE `byRelayStatus` GSI - relay groups only, never a Scan.
 Returns `{ items, truncated }`; `truncated` means a fixed page budget
-(100 x 20 = 2000, `:384-385`) stopped the walk. There is NO index for "group by exact
+(100 x 20 = 2000, `:395-396`) stopped the walk. There is NO index for "group by exact
 participant set", so exact-set lookup is this Query plus an in-code comparison. Going
 via `GET /api/contacts/:id/relay-groups` would be strictly more work - it walks THREE
 partitions to answer a different question.
@@ -135,7 +135,7 @@ proposed warning on containment.)
 list provisioning will actually put on the thread (`provisionMembersOf`,
 `rosterProvision.ts:106-120`).
 
-**D3 - Compare E.164 PHONES, never `relayMemberKey`.** `groupMembers.ts:30-37` rules
+**D3 - Compare E.164 PHONES, never `relayMemberKey`.** `groupMembers.ts:32` rules
 against the contactId-preferring key for roster identity: one contact owning TWO
 numbers would collapse into a single slot. Phones are also what routing keys on.
 KNOWN GAP: the same humans on different numbers will not match (section 8).
@@ -257,8 +257,8 @@ groups, so the ceiling is reachable in a lane today.
 | Standalone preview | `routes/relayGroups.ts` (`/relay-groups/preview`) | serves `duplicateOf` |
 | Tour preview | `routes/tours.ts:930` | serves `duplicateOf` |
 | Placement preview | `routes/placements.ts:1260` | serves `duplicateOf` |
-| Standalone / tour / placement CREATE | `relayGroups.ts:278`, `rosterProvision.ts:346`, `:646` | UNCHANGED - nothing refuses (D5) |
-| Reopen | `routes/relayGroups.ts:484-527` | UNCHANGED - known gap, section 8 |
+| Standalone / tour / placement CREATE | `relayGroups.ts:301`, `rosterProvision.ts:346`, `:646` | UNCHANGED - nothing refuses (D5) |
+| Reopen | `routes/relayGroups.ts:541` | UNCHANGED - known gap, section 8 |
 | Quiet-hours deferred open | `jobs/rosterActions.ts` | UNCHANGED - no check, nothing to refuse |
 | Apply-now | `routes/tours.ts:872`, `placements.ts:1587` | UNCHANGED |
 | Add member | `services/relayMembers.ts`; `PeopleCard.tsx:443` | UNCHANGED, and the ADD dialog must not render this warning (2.4) |
@@ -268,7 +268,7 @@ groups, so the ceiling is reachable in a lane today.
 | Importer | `lib/import/apply.ts:1086, :1129-1130` | WRITER into the connecting partition; skipped via `imported_from` (D4) |
 | Pool numbers | `services/poolNumbers.ts`, `repos/poolNumbersRepo.ts` | UNCHANGED, deliberately (1.1, 2.2) |
 
-Reader caveat: `touchLastActivity` (`conversationsRepo.ts:1449-1507`) writes
+Reader caveat: `touchLastActivity` (`conversationsRepo.ts:1476`) writes
 `status = 'open'` onto any non-`group_text` thread, leaving a re-flagged closed group
 at `status: 'open'` with `relay_status: 'relay_group#closed'`. Detection scans by
 `relay_status`, so such a group is invisible to it. Pre-existing
@@ -302,7 +302,7 @@ Unit (`app/test/`):
   `{A,B}` does NOT match `{A,C}` (D1 - these three negatives ARE the rule).
   Order-independent. Matches across OPEN and CONNECTING (D4). SKIPS a connecting row
   carrying `imported_from` (fixture: the lean seed's only connecting row carries it,
-  `lib/seed/lean.ts:262` - which is also the one exception to the table's "seeds carry
+  `lib/seed/lean.ts:263` - which is also the one exception to the table's "seeds carry
   no `imported_from`"). Returns undefined and does NOT throw on a truncated walk and on
   a thrown Query (D6). A match in OPEN survives a truncated CONNECTING walk. Multiple
   matches return the newest.

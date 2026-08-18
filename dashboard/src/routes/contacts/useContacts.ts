@@ -54,15 +54,20 @@ export interface ContactsState {
 
 /** The contact `type`s to fetch for a given filter. Property managers are
  *  `landlord`-typed (role "Property Manager"), so the Landlords filter covers
- *  them; 'all' fans out across every audience type (team members excluded). */
+ *  them; 'all' fans out across every audience type - tenant, landlord, partner
+ *  (a caseworker or agency contact) and unknown. `team_member` is the ONLY
+ *  excluded type: staff are not an audience. */
 const TYPES_FOR: Record<ContactsFilter, ContactType[]> = {
-  all: ['tenant', 'landlord', 'unknown'],
+  all: ['tenant', 'landlord', 'partner', 'unknown'],
   tenant: ['tenant'],
   landlord: ['landlord'],
   unknown: ['unknown'],
   // The Deleted view fans out across the same audience types, asking for ONLY
-  // soft-deleted records (deleted=true below).
-  deleted: ['tenant', 'landlord', 'unknown'],
+  // soft-deleted records (deleted=true below). It MUST stay identical to `all`:
+  // a soft-deleted contact this view cannot list is unrestorable, because
+  // restoreContact is only reachable from the contact page and that page only
+  // from this list.
+  deleted: ['tenant', 'landlord', 'partner', 'unknown'],
 };
 
 export function useContacts(filter: ContactsFilter): ContactsState {

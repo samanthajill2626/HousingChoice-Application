@@ -322,8 +322,8 @@ export function ContactDetail(): React.JSX.Element {
 
   // Load the full contact roster so the edit dialog can link relationships to
   // existing contacts (finding #1). Called unconditionally (hooks rules); the
-  // 'all' filter fans out across tenant/landlord/unknown. The current contact is
-  // filtered out to prevent self-links (finding #5).
+  // 'all' filter fans out across tenant/landlord/partner/unknown. The current
+  // contact is filtered out to prevent self-links (finding #5).
   const { contacts: allContacts } = useContacts('all');
   const editCandidates = useMemo(
     () => allContacts.filter((c) => c.contactId !== contactId),

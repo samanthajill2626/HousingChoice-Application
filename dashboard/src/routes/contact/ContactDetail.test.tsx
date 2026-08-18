@@ -217,7 +217,8 @@ beforeEach(() => {
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   // Default: return a roster containing the current contact + OTHER so tests
-  // that don't override still work (useContacts fans out to tenant/landlord/unknown).
+  // that don't override still work (useContacts fans out to
+  // tenant/landlord/partner/unknown).
   getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
 });
 afterEach(() => vi.restoreAllMocks());

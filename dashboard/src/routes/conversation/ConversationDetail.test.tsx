@@ -689,25 +689,36 @@ describe('ConversationDetail - the relay header unread toggle (S7)', () => {
       release: vi.fn(),
     });
 
-    const renderToggle = (autoRead: ReturnType<typeof stubHandle>) =>
-      render(
-        <MemoryRouter initialEntries={['/conversations/conv-g1']}>
-          <Routes>
-            <Route
-              path="/conversations/:conversationId"
-              element={
+    /** `mounted: false` is what ConversationDetail really renders the instant the
+     *  operator switches threads: its header effect sets status 'loading' on
+     *  every conversationId change and the spinner branch replaces the group
+     *  view, so this toggle leaves the tree (useMarkThreadRead.ts:27-35 records
+     *  that property and relies on it). The router keeps running around it. */
+    const toggleTree = (autoRead: ReturnType<typeof stubHandle>, mounted = true) => (
+      <MemoryRouter initialEntries={['/conversations/conv-g1']}>
+        <Routes>
+          <Route
+            path="/conversations/:conversationId"
+            element={
+              mounted ? (
                 <ThreadUnreadToggle
                   conversationId="conv-g1"
                   header={relayHeader({ unread_count: 0 })}
                   name="Relay group"
                   autoRead={autoRead}
                 />
-              }
-            />
-            <Route path="/inbox" element={<div>INBOX</div>} />
-          </Routes>
-        </MemoryRouter>,
-      );
+              ) : (
+                <div>THREAD LOADING</div>
+              )
+            }
+          />
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    const renderToggle = (autoRead: ReturnType<typeof stubHandle>) =>
+      render(toggleTree(autoRead));
 
     it('RELEASES the auto-read when the mark-unread POST rejects', async () => {
       markConversationUnread.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
@@ -724,6 +735,59 @@ describe('ConversationDetail - the relay header unread toggle (S7)', () => {
       fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
       await waitFor(() => expect(screen.getByText('INBOX')).toBeInTheDocument());
       expect(autoRead.release).not.toHaveBeenCalled();
+    });
+
+    // Fix wave 2 (FIX 14), the same class as the contact page's FIX 8, one
+    // surface over. The unmount silences this component's setStates but NOT its
+    // navigate: react-router's useNavigate sets `activeRef` in a layout effect
+    // and never clears it on unmount, so an unguarded resolution still moves a
+    // page the operator has already left.
+    it('does NOT navigate when the mark-unread resolves after the thread view unmounted', async () => {
+      let releasePost: (() => void) | undefined;
+      markConversationUnread.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releasePost = resolve;
+          }),
+      );
+      const autoRead = stubHandle();
+      const view = renderToggle(autoRead);
+      fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
+      await waitFor(() => expect(markConversationUnread).toHaveBeenCalledWith('conv-g1'));
+
+      view.rerender(toggleTree(autoRead, false));
+      expect(screen.getByText('THREAD LOADING')).toBeInTheDocument();
+
+      await act(async () => {
+        releasePost?.();
+        await Promise.resolve();
+      });
+      expect(screen.queryByText('INBOX')).toBeNull();
+      expect(screen.getByText('THREAD LOADING')).toBeInTheDocument();
+    });
+
+    it('does NOT hand back the auto-read when the rejection lands after the unmount', async () => {
+      let rejectPost: (() => void) | undefined;
+      markConversationUnread.mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPost = () => reject(new ApiError(500, 'server_error', 'boom'));
+          }),
+      );
+      const autoRead = stubHandle();
+      const view = renderToggle(autoRead);
+      fireEvent.click(screen.getByRole('button', { name: MARK_UNREAD }));
+      await waitFor(() => expect(markConversationUnread).toHaveBeenCalledWith('conv-g1'));
+
+      view.rerender(toggleTree(autoRead, false));
+      await act(async () => {
+        rejectPost?.();
+        await Promise.resolve();
+      });
+      // The handle belongs to a hook that unmounted with the view; there is no
+      // latch left to release, and no banner to raise on a thread nobody is on.
+      expect(autoRead.release).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
     });
   });
 

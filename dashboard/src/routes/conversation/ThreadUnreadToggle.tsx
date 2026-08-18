@@ -11,7 +11,7 @@
 // ONE copy on purpose. The two headers must behave identically down to the
 // ordering of suppressAndDrain -> POST -> navigate, and a second copy of that
 // order is exactly the drift lib/groupThread.ts records for the naming rule.
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   markConversationRead,
@@ -102,6 +102,33 @@ export function ThreadUnreadToggle({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const unread = unreadCount > 0;
+  // Does this press still own the page? The mark-unread await chain runs for up
+  // to the 2s drain bound plus a round trip, and `navigate` OUTLIVES this
+  // component: react-router's useNavigate sets its `activeRef` in a layout
+  // effect and never clears it on unmount, so a resolution that lands after the
+  // operator has moved on still moves the page - yanking them to /inbox for a
+  // press they made on a thread they have left.
+  //
+  // MOUNTED, NOT A conversationId GENERATION - deliberately, and the identity
+  // counter the contact page uses would be the WRONG instrument here.
+  // ConversationDetail calls setStatus('loading') on every conversationId change
+  // and its loading branch renders a spinner INSTEAD of the group view, so a
+  // thread switch UNMOUNTS this component rather than re-rendering it
+  // (useMarkThreadRead.ts:27-35 records that same property, and depends on it).
+  // An identity counter therefore could only ever fire in the single commit
+  // before that unmount, and only by relying on React running child effects
+  // before parent ones - while missing every OTHER departure, where the operator
+  // leaves for a contact page or the inbox and conversationId never changes at
+  // all. "The instance that made the press is gone" is the fact that actually
+  // distinguishes them; useMarkContactRead carries the same ref for the same
+  // hazard.
+  const stillMounted = useRef(true);
+  useEffect(() => {
+    stillMounted.current = true;
+    return () => {
+      stillMounted.current = false;
+    };
+  }, []);
 
   const onMarkRead = (): void => {
     // NO NAVIGATION. Marking a thread read while reading it is not a departure -
@@ -120,6 +147,13 @@ export function ThreadUnreadToggle({
       await autoRead.suppressAndDrain();
       await markConversationUnread(conversationId);
     } catch {
+      // The view is GONE: nothing below may run. The two setStates are inert on
+      // an unmounted component anyway; `release()` is the load-bearing half, and
+      // skipping it is right rather than merely harmless - the auto-read hook
+      // lives in the group view that just unmounted with us, so its latch died
+      // with its refs, and the handle is keyed to the thread it was minted for
+      // either way (useMarkThreadRead.ts:77-79).
+      if (!stillMounted.current) return;
       // The attempt ended WITHOUT navigating, so hand the auto-read back: a
       // latch that outlives a failed attempt silences this thread's auto-read
       // for the rest of the visit.
@@ -128,6 +162,11 @@ export function ThreadUnreadToggle({
       setBusy(false);
       return;
     }
+    // The write STANDS - it was correct for the thread the operator pressed on,
+    // and that thread's inbox row is unread, which is where this navigation
+    // would have taken them anyway. What must not happen is moving a page they
+    // have already moved on from.
+    if (!stillMounted.current) return;
     // Deliberately no busy reset on the success path: navigating unmounts this
     // component, and a setState into the gap is a warning with no purpose.
     navigate('/inbox');

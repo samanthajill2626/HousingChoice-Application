@@ -325,8 +325,10 @@ New `dashboard/src/routes/contact/CreateRelayGroupModal.tsx` (+ `.module.css`
   first-class type that can be deleted but not recovered is a data-recovery
   hole, so both filters move together.
 
-  BLAST RADIUS, deliberately accepted: `useContacts('all')` has EIGHT call sites
-  - `contacts/ContactsList.tsx` (the "All" tab), `email/EmailTriage.tsx`,
+  BLAST RADIUS, deliberately accepted: SEVEN surfaces consume this hook - six
+  literal `useContacts('all')` call sites plus `contacts/ContactsList.tsx`,
+  which passes the filter through as a parameter:
+  `contacts/ContactsList.tsx` (the "All" tab), `email/EmailTriage.tsx`,
   `shared/PeopleCard.tsx`, `conversation/ConversationDetail.tsx`,
   `tours/ToursPage.tsx`, `listing/ListingDetail.tsx`, and
   `contact/ContactDetail.tsx`. All of them gain partner contacts. That is the

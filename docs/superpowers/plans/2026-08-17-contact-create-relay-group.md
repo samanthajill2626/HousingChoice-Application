@@ -225,8 +225,10 @@ Leave the `provisioned` / `seenPhones` loop above it EXACTLY as it is.
 
 - [ ] **Step 4: Run the new test AND the existing preview tests**
 
-Run: `cd W:/tmp/contact-create-relay-group && npx vitest run app/test/rosterEdits.test.ts app/test/relayApi.test.ts app/test/toursApi.test.ts`
-Expected: ALL PASS. If a tour/placement preview test fails, the refactor is
+Run: `cd W:/tmp/contact-create-relay-group && npx vitest run app/test/rosterEdits.test.ts app/test/relayApi.test.ts app/test/toursApi.test.ts app/test/placementsApi.test.ts`
+Expected: ALL PASS. `placementsApi.test.ts` is NOT optional - it holds the three
+`preview-open` tests for the placement half, and omitting it would verify only
+half the refactor. If any tour/placement preview test fails, the refactor is
 wrong - fix the refactor, never the test.
 
 - [ ] **Step 5: Commit**
@@ -267,10 +269,40 @@ Create `app/test/relayGroupPreview.test.ts` covering, at minimum:
   `recipients` with `reachability: 'opted_out'`, and `recipientCount` is 1
 - two members SHARING a phone -> `recipients` has ONE row (create collapses
   them, so the dialog must not name someone who will never be a participant)
-- a fixed clock inside quiet hours -> `deferred: true` with `quietEndsAt`
+- a fixed clock inside quiet hours -> `deferred: true` with `quietEndsAt`,
+  AND a fixed clock outside them -> `deferred: false` with NO `quietEndsAt`
 - a `contacts.getById` that rejects -> the request 5xxs and NO preview body is
   returned (fail closed; spec 6.2)
 - the route provisions nothing: assert the pool-numbers fake was never called
+
+THIS TEST IS MANDATORY AND IS THE POINT OF STEP 3 - without it, an
+implementation that recomputes the name from the contact passes every other
+assertion here and silently reships the dialog-vs-intro name divergence the
+spec exists to prevent:
+
+```ts
+it('uses a client-supplied name VERBATIM, never a recomputed one', async () => {
+  // resolveMemberName short-circuits on a supplied name and never reads the
+  // contact (spec 2.12), and POST /api/relay-groups does the same. If the
+  // preview recomputed from the contact, the confirm dialog would show one
+  // name and the intro that actually goes out would show another.
+  const contacts = fakeContacts([
+    { contactId: 'c-1', firstName: 'Contact', lastName: 'Record', phone: '+15550100001' },
+  ]);
+  const res = await request(app)
+    .post('/api/relay-groups/preview')
+    .send({
+      members: [
+        { phone: '+15550100001', contactId: 'c-1', name: 'Client Supplied' },
+        { phone: '+15550100002', contactId: 'c-2' },
+      ],
+    });
+  expect(res.status).toBe(200);
+  expect(res.body.recipients[0].name).toBe('Client Supplied');
+  expect(res.body.body).toContain('Client Supplied');
+  expect(res.body.body).not.toContain('Contact Record');
+});
+```
 
 Follow the existing harness style in `app/test/relayApi.test.ts` for building
 the router with fakes.
@@ -361,9 +393,16 @@ mirroring the one in `routes/placements.ts:997-1002`:
 
 ```ts
   async function quietHoursState(): Promise<QuietHoursState> {
-    return { nowIso: getNow(), window: await readQuietHoursWindow(settingsRepo, log) };
+    return { nowIso: getNow(), window: await readQuietHoursWindow(settings, log) };
   }
 ```
+
+The router's resolved local is `settings`, NOT `settingsRepo` - check its name
+at `relayGroups.ts:124` before writing this and use whatever is actually there.
+Add the imports this needs: `QuietHoursState` and `buildStandaloneOpenPreview`
+from `../services/rosterEdits.js`. `readQuietHoursWindow` and
+`parseRelayMember` are already imported; `ConversationParticipant` already is
+too.
 
 Register the route IMMEDIATELY BEFORE the existing `POST /relay-groups` handler:
 
@@ -430,10 +469,27 @@ reachability), and no shared phones (only the standalone side de-duplicates).
 - [ ] **Step 1: Write the parity test**
 
 Add a `describe('owner vs standalone parity')` block that runs the SAME member
-set through `buildOpenPreview` (with a fake owner roster) and
-`buildStandaloneOpenPreview`, using a fixture with NO suppressed members and NO
-shared phones, and asserts `body`, `recipients`, `recipientCount`, `deferred`
-and `quietEndsAt` are all equal.
+set through `buildOpenPreview` and `buildStandaloneOpenPreview`, using a fixture
+with NO suppressed members and NO shared phones, and asserts `body`,
+`recipients`, `recipientCount`, `deferred` and `quietEndsAt` are all equal.
+
+HOW TO MAKE `buildOpenPreview` RESOLVE THE FIXTURE - this is the hardest setup
+in the plan, so do not improvise it. It takes `(deps: RosterResolutionDeps,
+owner: RosterOwner, quiet)`. The cheapest honest route is the `participants`
+source: give the owner a `groupThreadId` and have the fake
+`deps.conversations.getById` return a `relay_group` conversation whose
+`participants` ARE your fixture members. `resolveRoster` then returns
+`source: 'participants'` straight from that array
+(`lib/rosterResolution.ts:193-229`), and `describeRoster` derives the view from
+it - no unit, plan, or default roster needed. Supply `deps.units.getById`
+returning `undefined` (roles degrade to `added`, which the preview ignores) and
+`deps.contacts.getById` returning contacts with `sms_opt_out: false`. Copy the
+fake-repo shapes from `app/test/relayApi.test.ts` rather than inventing new
+ones.
+
+Because that owner has a thread, call `buildOpenPreview` DIRECTLY - do not route
+through `GET /roster/preview-open`, which refuses with
+`relay_already_provisioned` once `groupThreadId` is set.
 
 Add TWO separate tests for the excluded cases, each asserting the difference is
 the INTENDED one:
@@ -495,10 +551,19 @@ reachable from the contact page and that page only from this list.
 - [ ] **Step 4: Run the whole dashboard suite**
 
 Run: `cd W:/tmp/contact-create-relay-group && npx vitest run dashboard/src`
-Expected: PASS. Eight surfaces consume this hook; if another test asserts the
-narrower set, update it deliberately and note it in the commit body.
+Expected: PASS. SEVEN surfaces consume this hook - six literal `useContacts('all')`
+call sites (`email/EmailTriage.tsx`, `shared/PeopleCard.tsx`,
+`conversation/ConversationDetail.tsx`, `tours/ToursPage.tsx`,
+`listing/ListingDetail.tsx`, `contact/ContactDetail.tsx`) plus
+`contacts/ContactsList.tsx`, which passes the filter through as a parameter. If
+another test asserts the narrower set, update it deliberately and note it in the
+commit body.
 
 - [ ] **Step 5: Commit**
+
+Stage EVERY file you actually edited, not just the two below - if Step 4 made
+you update another surface's test, it belongs in THIS commit or the tree is left
+red. Re-read `git status` and extend the path list accordingly.
 
 ```bash
 git -C W:/tmp/contact-create-relay-group status
@@ -629,6 +694,12 @@ export async function createRelayGroup(
 
 Export both from `dashboard/src/api/index.ts` if that barrel exists.
 
+NO CHANGE IS NEEDED to `refusalMessage` in `routes/shared/rosterWrites.ts`.
+Spec 6.6 asks that `relay_provisioning_disabled` read as a sentence; it already
+does, because the server sends an actionable `message` and `refusalMessage`
+prefers it. VERIFY that in the code, and if it holds, do nothing - this line
+exists so the check is not silently skipped.
+
 - [ ] **Step 3: Commit**
 
 ```bash
@@ -739,6 +810,21 @@ posts identical arrays to both calls; Cancel from confirm restores the picker
 with the selection; a connecting create shows the unsent-intro notice and does
 NOT navigate; an open create navigates; a failed preview keeps the picker open.
 
+TWO OF THESE ARE MANDATORY AND EASY TO SKIP:
+
+(a) A PARTNER contact in `candidates` is pickable and lands in the posted
+    members array. This is the ONLY test covering the partner widening's effect
+    on this feature - spec section 7's decision to give the widening no e2e
+    coverage explicitly rests on this test existing. Without it, the widening is
+    verified only as a fan-out count in Task 4 and never as behavior.
+
+(b) A seeded contact with NO resolvable phone renders the
+    "no mobile number - cannot start a relay group" row copy and leaves
+    `Create group` DISABLED (spec 6.5). This is the resolution of a round-1
+    review finding: the card action deliberately still renders, so the modal is
+    the ONLY place that explains why the flow cannot proceed. Untested, that
+    explanation can silently disappear.
+
 - [ ] **Step 2: Run FAIL, implement, run PASS**
 
 Run: `cd W:/tmp/contact-create-relay-group && npx vitest run dashboard/src/routes/contact/CreateRelayGroupModal.test.tsx`
@@ -806,10 +892,27 @@ NOT navigate. Asserting a conversation page right after confirm WILL fail.
 - [ ] **Step 1: Write the spec**
 
 Dev-login, open the seeded tenant's contact page, click `+ Create group`, add
-the seeded landlord, confirm, then assert the MODAL's unsent-intro notice. Then
-import `driveConnectingGroupToOpen` from `../../fixtures/relayConnect.js`, drive
-the group open, follow `Go to the group`, and assert the conversation renders.
-Use `getByRole` / `getByLabel` selectors per `e2e/support/selectors.md`.
+the seeded landlord, confirm, then assert the MODAL's unsent-intro notice.
+
+ORDERING TRAP: `driveConnectingGroupToOpen(request, conversationId)` needs the
+conversationId, and the modal is still open at this point - the id only becomes
+visible in the URL AFTER the `Go to the group` click. Do not schedule the drive
+after the click; get the id first, from the `Go to the group` link's `href`:
+
+```ts
+const href = await page.getByRole('link', { name: 'Go to the group' }).getAttribute('href');
+const conversationId = href!.split('/').pop()!;
+await driveConnectingGroupToOpen(page.request, conversationId);
+await page.getByRole('link', { name: 'Go to the group' }).click();
+```
+
+If `Go to the group` is implemented as a BUTTON rather than a link, capture the
+id from the create response instead via `page.waitForResponse` on
+`POST /api/relay-groups` before asserting the notice. Either way the id must be
+in hand before the drive.
+
+Import `driveConnectingGroupToOpen` from `../../fixtures/relayConnect.js`. Use
+`getByRole` / `getByLabel` selectors per `e2e/support/selectors.md`.
 
 - [ ] **Step 2: Run it**
 

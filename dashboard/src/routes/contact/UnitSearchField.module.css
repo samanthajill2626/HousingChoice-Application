@@ -56,12 +56,14 @@
   outline-offset: 1px;
 }
 
+/* FIXED, not absolute, and portaled to <body> - see the component header. An
+   absolutely positioned list is clipped by any ancestor scroll container, and
+   Modal's .body is one; two of this field's three call sites are modals.
+   top/left/width come inline from the input's measured rect. */
 .listbox {
-  position: absolute;
-  top: calc(100% + var(--sp-1));
-  left: 0;
-  right: 0;
+  position: fixed;
   z-index: 100;
+  overflow-y: auto;
   list-style: none;
   margin: 0;
   padding: var(--sp-1) 0;

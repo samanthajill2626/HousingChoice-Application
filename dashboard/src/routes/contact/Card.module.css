@@ -24,6 +24,9 @@
  * MUTED, never brand-blue: blue is reserved for things you can click (the .asideBtn
  * action below / links). A blue count reads as a link that goes nowhere. */
 .aside {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   margin-left: auto;
   color: var(--c-text-subtle);
   font-size: var(--fs-xs);

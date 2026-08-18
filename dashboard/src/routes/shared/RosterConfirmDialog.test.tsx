@@ -14,7 +14,7 @@
 //   - a failed confirm keeps the dialog open with the server's own copy
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type RosterPreview } from '../../api/index.js';
@@ -186,17 +186,23 @@ describe('RosterConfirmDialog - allowDefer={false} (an endpoint that CANNOT defe
     minute: '2-digit',
   });
 
-  it('drops BOTH deferral affordances and warns that the send is IMMEDIATE', () => {
+  it('drops BOTH deferral affordances and warns that the send is NOT HELD', () => {
     // POST /api/relay-groups has no pending-action row to hold a deferral, so a
     // "Open at 8:00 AM" button would be the exact lie this dialog exists to
     // prevent. The warning still renders - the operator is told it is quiet
     // hours - but it must not promise the deferral the buttons just lost: this
-    // endpoint enqueues the intro NOW, and there is no "send it now" affordance
-    // left to point at.
+    // endpoint does not hold the send for the window, and there is no "send it
+    // now" affordance left to point at.
+    //
+    // Nor does it promise the opposite. A create that answers `connecting` has
+    // no number yet and sends its intro only when a warmed one registers, so
+    // "still sends immediately" was false on that tier. The line claims exactly
+    // one thing, true on both: quiet hours do not hold it.
     renderDialog({ preview: preview(QUIET), allowDefer: false });
     expect(
-      screen.getByText(`Quiet hours until ${CLOCK} - this still sends immediately.`),
+      screen.getByText(`Quiet hours until ${CLOCK} - this does not wait for them.`),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/sends immediately/)).not.toBeInTheDocument();
     expect(
       screen.queryByText(`Quiet hours until ${CLOCK} - this goes out then unless you send it now.`),
     ).not.toBeInTheDocument();
@@ -209,7 +215,7 @@ describe('RosterConfirmDialog - allowDefer={false} (an endpoint that CANNOT defe
     // Same honesty, one fewer fact: a server that reports `deferred` with no
     // instant still must not have its warning read as a promise to wait.
     renderDialog({ preview: preview({ deferred: true }), allowDefer: false });
-    expect(screen.getByText('Quiet hours - this still sends immediately.')).toBeInTheDocument();
+    expect(screen.getByText('Quiet hours - this does not wait for them.')).toBeInTheDocument();
     expect(
       screen.queryByText('Quiet hours - this goes out when they end unless you send it now.'),
     ).not.toBeInTheDocument();
@@ -288,6 +294,60 @@ describe('RosterConfirmDialog - actions', () => {
     ).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+});
+
+describe('RosterConfirmDialog - the confirm round trip is HELD', () => {
+  // Cancel was already disabled={busy}; Escape, the header X and the backdrop
+  // were not. The round trip this dialog covers is a REAL one - a purchased pool
+  // number, a conversation and an intro to everyone listed - so a dismissal
+  // mid-flight hands the operator back an affordance that starts a SECOND one.
+  // The standalone create is the caller with no server-side refusal to catch it
+  // (the tour/placement pre-open 409s `relay_already_provisioned` on the second
+  // preview), so the guard lives here, for all three surfaces at once.
+  it('ignores Escape, the X and the backdrop while the confirm is in flight', async () => {
+    let settle!: () => void;
+    const onConfirm = vi.fn().mockReturnValue(
+      new Promise<void>((r) => {
+        settle = r;
+      }),
+    );
+    const onClose = vi.fn();
+    render(
+      <RosterConfirmDialog
+        title="Open the relay group?"
+        preview={preview()}
+        confirmLabel="Open relay group"
+        deferLabel="Open"
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    // The backdrop dismisses on mousedown (Modal.tsx) - the dialog's own parent.
+    fireEvent.mouseDown(screen.getByRole('dialog').parentElement!);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // No second round trip was startable, either.
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    // ...and the dialog still closes itself the moment the round trip lands.
+    settle();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('still dismisses on Escape while IDLE - the guard is the round trip, not the dialog', async () => {
+    const { onConfirm, onClose } = renderDialog();
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });
 

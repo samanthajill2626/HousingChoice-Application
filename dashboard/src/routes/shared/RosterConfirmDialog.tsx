@@ -58,7 +58,7 @@ export interface RosterConfirmDialogProps {
   /** False when the confirming endpoint CANNOT defer (a standalone relay create
    *  has no owner row to hold a pending action). The quiet-hours warning still
    *  renders - the operator must learn it is quiet hours - but it SWITCHES to
-   *  the immediate-send sentence, because neither the deferral button nor the
+   *  the not-held sentence, because neither the deferral button nor the
    *  "send it now" escape it would name exists on this path. Defaults to true -
    *  tour and placement are unaffected.
    *  TODO(standalone-relay-group-quiet-hours-deferral): full deferral parity
@@ -107,6 +107,12 @@ export function RosterConfirmDialog({
   // then") and the escape from it ("unless you send it now", which is the
   // button `canDefer` just removed). Promising a deferral this endpoint cannot
   // perform is the same class of lie as a count over a suppressed leg.
+  //
+  // The replacement says exactly ONE thing: quiet hours do not hold this send.
+  // It deliberately does NOT promise an immediate send - a standalone create
+  // that answers `connecting` has no number yet and sends its intro only once a
+  // warmed number registers, which can be minutes later or (a group that never
+  // gets one) never. "This does not wait for them" is true on BOTH tiers.
   const clock = preview.quietEndsAt !== undefined ? quietClockLabel(preview.quietEndsAt) : '';
   const canDefer = preview.deferred && allowDefer;
   const defaultLabel = !canDefer
@@ -119,13 +125,24 @@ export function RosterConfirmDialog({
       ? 'Quiet hours - this goes out when they end unless you send it now.'
       : `Quiet hours until ${clock} - this goes out then unless you send it now.`
     : clock === ''
-      ? 'Quiet hours - this still sends immediately.'
-      : `Quiet hours until ${clock} - this still sends immediately.`;
+      ? 'Quiet hours - this does not wait for them.'
+      : `Quiet hours until ${clock} - this does not wait for them.`;
 
   return (
     <Modal
       title={title}
-      onClose={onClose}
+      // Escape, the backdrop and the header X all call Modal's onClose with no
+      // condition of their own, and the round trip THIS dialog covers is the real
+      // one: a purchased pool number, a conversation, and an intro to everyone
+      // listed. Cancel is already disabled={busy}; without this the other three
+      // doors hand the caller its picker back mid-create, where a second confirm
+      // buys a SECOND number (`POST /api/relay-groups` has no idempotency key).
+      // TODO(modal-onclose-refocus-trap): an inline callback re-runs Modal's
+      // Escape/focus effect on every render of this component. Harmless here (no
+      // text input in the dialog); the class fix belongs in Modal.
+      onClose={() => {
+        if (!busy) onClose();
+      }}
       footer={
         <div className={styles.actions}>
           {/* Authored Cancel -> (Send now anyway) -> default: desktop puts the

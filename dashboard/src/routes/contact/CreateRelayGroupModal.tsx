@@ -131,8 +131,16 @@ export function CreateRelayGroupModal({
   // panel). RosterConfirmDialog calls its onClose after a resolved confirm, and
   // that must not drag the flow back to the picker over the result.
   const settled = useRef(false);
+  // The create is ON THE WIRE. `settled` is only true AFTER it resolves, so it
+  // says nothing about the round trip itself - and that round trip buys a pool
+  // number and texts everyone on the list. RosterConfirmDialog now refuses its
+  // own dismissals while busy (the first line of defence); this ref is the
+  // second, so a future dialog rewrite cannot silently restore a flow that
+  // hands the picker - and its "Create group" button - back mid-create.
+  const creating = useRef(false);
   // The in-flight preview, so an abandoned flow does not keep a request running
-  // against a component that is gone.
+  // against a component that is gone. Cleared when the preview settles, so the
+  // ref means "in flight" and nothing else.
   const previewAbort = useRef<AbortController | null>(null);
   useEffect(() => () => previewAbort.current?.abort(), []);
 
@@ -193,11 +201,16 @@ export function CreateRelayGroupModal({
     previewAbort.current = controller;
     void previewRelayGroup(members, controller.signal)
       .then((preview) => {
+        // Settled: the ref means "a preview is in flight", so it must stop
+        // pointing at a finished controller (the unmount cleanup would
+        // otherwise abort one nobody is waiting on).
+        previewAbort.current = null;
         setBusy(false);
         // THIS array value is carried into the create untouched.
         setPhase({ kind: 'confirming', members, preview });
       })
       .catch((err: unknown) => {
+        previewAbort.current = null;
         // An abandoned flow is not a failure to report - there is no picker
         // left to render the message into.
         if (controller.signal.aborted) return;
@@ -213,27 +226,46 @@ export function CreateRelayGroupModal({
   const confirmCreate = async (): Promise<void> => {
     if (phase.kind !== 'confirming') return;
     const trimmedTag = tag.trim();
-    const { conversation } = await createRelayGroup(
-      phase.members,
-      trimmedTag === '' ? undefined : trimmedTag,
-    );
-    settled.current = true;
-    // BEFORE the branch: both outcomes leave a group behind. The connecting one
-    // stays on the page whose card must now list it; the open one navigates,
-    // but the page it leaves is the one an operator navigates back to.
-    onCreated?.(conversation);
-    if (conversation.status === 'connecting') {
-      setPhase({ kind: 'connecting', conversationId: conversation.conversationId });
-      return;
+    creating.current = true;
+    try {
+      const { conversation } = await createRelayGroup(
+        phase.members,
+        trimmedTag === '' ? undefined : trimmedTag,
+      );
+      settled.current = true;
+      // BEFORE the branch: both outcomes leave a group behind. The connecting one
+      // stays on the page whose card must now list it; the open one navigates,
+      // but the page it leaves is the one an operator navigates back to.
+      //
+      // SWALLOWED, not deferred past the branch: this call sits inside the
+      // promise RosterConfirmDialog awaits, so a callback that throws would be
+      // caught by the dialog's own .catch and rendered as "please try again"
+      // over a group that WAS created - the exact invitation to a second
+      // purchased number this flow exists to avoid. Ordering is a contract of
+      // its own ("before the panel renders"), so the guard is the try, not a
+      // move. Today's only caller is a setState bump that cannot throw.
+      try {
+        onCreated?.(conversation);
+      } catch {
+        /* the group exists; refreshing the page behind it is not our failure */
+      }
+      if (conversation.status === 'connecting') {
+        setPhase({ kind: 'connecting', conversationId: conversation.conversationId });
+        return;
+      }
+      void navigate('/conversations/' + conversation.conversationId);
+      onClose();
+    } finally {
+      creating.current = false;
     }
-    void navigate('/conversations/' + conversation.conversationId);
-    onClose();
   };
 
   /** Cancel / Escape / backdrop on the confirm dialog. After a SUCCESSFUL
-   *  create the dialog calls this too, and then it must do nothing. */
+   *  create the dialog calls this too, and then it must do nothing - and while
+   *  one is still ON THE WIRE it must do nothing either, or the picker comes
+   *  back with the list intact and a second create is one click away. */
   const leaveConfirm = (): void => {
-    if (settled.current) return;
+    if (settled.current || creating.current) return;
     setPhase({ kind: 'picking' });
   };
 
@@ -247,8 +279,16 @@ export function CreateRelayGroupModal({
    *  that effect's cleanup returns focus to the previously focused element while
    *  the fresh run re-focuses the dialog. A callback rebuilt on every render
    *  therefore steals focus out of the search field on EVERY KEYSTROKE - typing
-   *  lands one character and stops. Identity may change when `busy` flips (twice
-   *  a flow, while the field is disabled anyway); never per render. */
+   *  lands one character and stops. Identity changes only when `busy` flips
+   *  (twice a flow, while the field is disabled anyway) - and only because the
+   *  `onClose` this closes over is itself stable: ContactDetail memoizes the
+   *  handler it passes here for exactly this reason. An inline arrow there would
+   *  make this callback change on every PARENT render, which on this page means
+   *  every SSE tick.
+   *  TODO(modal-onclose-refocus-trap): the residual trap is Modal's - it keys the
+   *  effect on `onClose` at all. Fixing it there (the callback in a ref, the
+   *  effect keyed []) retires this whole class and covers ContactEditForm and
+   *  PhoneManager, which share the wiring and also hold text inputs. */
   const closeIfIdle = useCallback((): void => {
     if (busy) return;
     onClose();

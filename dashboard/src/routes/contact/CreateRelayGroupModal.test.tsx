@@ -423,6 +423,102 @@ describe('CreateRelayGroupModal - the confirm step', () => {
   });
 });
 
+describe('CreateRelayGroupModal - the CREATE round trip is HELD too', () => {
+  // The preview round trip above loses only a list. THIS one buys a pool number,
+  // opens a conversation and texts everyone on it, and `POST /api/relay-groups`
+  // has no idempotency key - so a dismissal that hands the picker back mid-flight
+  // is a second purchased number for the same pair, not a lost list.
+
+  /** Arm a create that never settles on its own. Returns the resolver. */
+  function pendingCreate(): (v: unknown) => void {
+    let resolve!: (v: unknown) => void;
+    createRelayGroup.mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    return resolve;
+  }
+
+  it('Escape and the X cannot dismiss the confirm dialog while the create is on the wire', async () => {
+    const resolve = pendingCreate();
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    expect(createRelayGroup).toHaveBeenCalledTimes(1);
+
+    await user.keyboard('{Escape}');
+    // The confirm dialog is still the one thing on screen: there is no picker to
+    // press "Create group" in, so a second create is not even offered.
+    expect(screen.getByRole('heading', { name: 'Open the relay group?' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Create a relay group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create group' })).toBeNull();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    // The header X is the same door (as is the backdrop - one guard covers all).
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.getByRole('heading', { name: 'Open the relay group?' })).toBeInTheDocument();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    // The one create that was started is the only one there ever was.
+    resolve({
+      conversation: { conversationId: 'conv-9', type: 'relay_group', status: 'connecting' },
+    });
+    expect(await screen.findByText(CONNECTING_NOTICE)).toBeInTheDocument();
+    expect(createRelayGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape closes the flow again once the create has SETTLED', async () => {
+    // The guard is the round trip, not the flow: the connecting panel is a
+    // result an operator must be able to dismiss.
+    createRelayGroup.mockResolvedValue({
+      conversation: { conversationId: 'conv-9', type: 'relay_group', status: 'connecting' },
+    });
+    const { user, onClosed } = renderIt();
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+    await screen.findByText(CONNECTING_NOTICE);
+
+    await user.keyboard('{Escape}');
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('a create whose onCreated callback THROWS still lands on the result panel', async () => {
+    // onCreated fires inside the promise RosterConfirmDialog awaits, so a
+    // throwing page callback would be caught by the dialog's own .catch and
+    // rendered as "please try again" over a group that WAS created - inviting
+    // exactly the second create this flow must never make. The group exists
+    // either way; refreshing the page behind it is not this flow's contract.
+    createRelayGroup.mockResolvedValue({
+      conversation: { conversationId: 'conv-9', type: 'relay_group', status: 'connecting' },
+    });
+    const onCreated = vi.fn(() => {
+      throw new Error('the page blew up refreshing its card');
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/contacts/T1']}>
+        <CreateRelayGroupModal
+          contact={TENANT}
+          candidates={ALL}
+          onClose={() => undefined}
+          onCreated={onCreated}
+        />
+      </MemoryRouter>,
+    );
+    await pick(user, 'Marcus', /Marcus Bell/);
+    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(await screen.findByRole('button', { name: 'Open relay group' }));
+
+    expect(await screen.findByText(CONNECTING_NOTICE)).toBeInTheDocument();
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
 describe('CreateRelayGroupModal - the create outcome', () => {
   it('a CONNECTING create says the intro has not been sent and does NOT navigate', async () => {
     createRelayGroup.mockResolvedValue({

@@ -3,7 +3,8 @@
 Date: 2026-08-17
 Branch: `feat/relay-number-reuse` (worktree `W:\tmp\relay-number-reuse`, cut from
 `main` @263cc789)
-Revision: r2, after two independent adversarial reviews. Adjudications at
+Revision: r3, after three rounds of adversarial review (two independent reviewers in
+round 1, one continued reviewer in rounds 2 and 3). Adjudications at
 `.superpowers/design-review/adjudications.md`.
 
 ## 1. What this changes, in one paragraph
@@ -134,7 +135,7 @@ this group has burned on its number - "Member REMOVE never touches it - a burn i
 forever". It is seeded at `createRelayGroup` (`:1744`) and ADDed on every add
 (`:1099-1104`).
 
-**Every membership test in this design therefore uses provenance, never the live
+**Every SAFETY test in this design therefore uses provenance, never the live
 roster:**
 
 ```
@@ -142,6 +143,14 @@ memberPhoneSet(g) = union( g.ever_member_phones , g.participants[].phone )
 ```
 
 The union covers legacy pre-W1 groups that carry no `ever_member_phones` at all.
+
+SAFETY tests means tier 0's eligibility (D4) and the reopen guard - the two places
+where being wrong mis-routes a message. Part B is NOT a safety test and does NOT use
+provenance: it answers "do these same people already have an open group", which is a
+question about the CURRENT roster. Using provenance there would both miss real
+duplicates (a group that dropped a member still reads as the wider set) and refuse
+legitimate creates (a group that once contained this exact set but no longer does).
+D3 records the split.
 
 ### 2.7 Reverse-lookup primitives
 
@@ -183,7 +192,7 @@ roster phone. `provisionForGroup` already holds the driver-filtered `actives` li
 so candidate discovery is an in-memory filter costing ZERO additional reads:
 
 ```
-candidates = actives.filter(rec => roster.every(p => burnSetOf(rec).has(p)))
+candidates = actives.filter(rec => burnHasAll(rec.burned_phones, roster))
 ```
 
 An earlier revision scanned `listRelayGroups('closed')` instead. That was the wrong
@@ -193,8 +202,13 @@ feature once an org crossed 2000 closed relay groups (the page budget), signalle
 by a WARN. The burn-set filter has neither property, is strictly more precise, and
 removes any dependence on ordering.
 
-**D3 - ONE comparator: the E.164 phone set.** Part A, Part B, and the reopen guard
-all compare `memberPhoneSet` values (2.6). Rejected: `relayMemberKey`
+**D3 - ONE unit of comparison (the E.164 phone set), TWO scopes.** Everything
+compares sets of E.164 phones - never a contactId-derived key. The scopes differ
+because the questions differ (2.6): the SAFETY tests (tier 0's D4, the reopen guard)
+compare `memberPhoneSet`, the add-only provenance, because they must not be evadable
+by roster edits; Part B compares the CURRENT roster's phones, because "do these
+people already have an open group" is a question about who is on it now. Rejected:
+`relayMemberKey`
 (contactId-preferring) for Part B's "same people" test. `groupMembers.ts:30-37` rules
 explicitly against it for roster identity - "ALWAYS `phone#<E164>`, NEVER
 `relayMemberKey` ... one contact owning TWO member numbers would collapse into a
@@ -202,10 +216,21 @@ single slot" - and `rosterEdits.ts:144` and `rosterResolution.ts:326` repeat it.
 would have refused a legitimate "add Alice's second handset" group as a duplicate.
 
 **D4 - Tier-0 eligibility is per-phone and set-based, with no notion of "newest".**
+Tier 0 requires a roster of AT LEAST TWO phones - it is a rule about a pair keeping
+their number, and `POST /api/relay-groups` accepts a one-member roster
+(`relayGroups.ts:239-242` floors at non-empty, not at two). A single-phone roster
+would make the burn-superset filter (D2) match every number that person was ever on,
+turning a bounded candidate set into an unbounded one. Below two phones tier 0 is
+skipped and today's ladder runs.
+
 Against ONE `getAllByPoolNumber(N)` snapshot:
 
 - (i) NO group on N with `status !== 'closed'` may have a `memberPhoneSet`
-  OVERLAPPING the new roster; AND
+  OVERLAPPING the new roster; AND (in practice that means OPEN groups plus any group
+  a `touchLastActivity` re-flag left reading as open - 2.5. It is written
+  `!== 'closed'` rather than `=== 'open'` so an unexpected status can only make the
+  test STRICTER. It does not reach connecting groups: a connecting group carries no
+  `pool_number`, so the `byPoolNumber` GSI cannot return one.) AND
 - (ii) SOME group on N with `status === 'closed'` must have a `memberPhoneSet`
   EXACTLY EQUAL to the new roster.
 
@@ -245,21 +270,52 @@ operator-assist guard, not a safety fence, and blocking an operator because a GS
 walk hit its page budget is worse than missing a duplicate. Part A never reads that
 primitive at all (D2), so it has no truncation surface.
 
-**D9 - Part B's scan includes CONNECTING groups.** A connect-when-ready group is a
-real pending group; a second group for the same people would buy a SECOND number,
-the exact waste this feature exists to stop. A reviewer correctly noted this blocks
-the escape hatch for a STUCK connecting group (`poolNumbers.ts:485-499`); the
-override is that case's recovery, so the 409 copy names the connecting group and says
-so.
+**D9 - Part B's scan includes CONNECTING groups, EXCEPT imported ones.** A
+connect-when-ready group is a real pending group; a second group for the same people
+would buy a SECOND number, the exact waste this feature exists to stop. Two
+exclusions, both reviewer-found:
 
-**D10 - `reuseClaim` clears the retirement clock.** The sweep's re-verify keys on
-OPEN groups (`poolNumbers.ts:397-401`) and tier 0's group does not exist yet when the
-claim returns, so a concurrent sweep could release a number tier 0 just took - and
-tier 0 targets precisely the long-closed numbers that are release-eligible.
-`reuseClaim` therefore REMOVEs `last_group_closed_at` in the same conditional write;
-`retireEligible` skips any record whose `closedAt === undefined` (`:378`). This is the
-correct semantics regardless of the race: the number is back in service and its clock
-restarts when its next group closes.
+- The IMPORTER writes `type: 'relay_group'` with
+  `relay_status = 'relay_group#connecting'` for imported carrier group threads
+  (`app/src/lib/import/apply.ts:1086, :1129-1130`, and see the comment at `:1146-1154`
+  which documents this row shape). Those are unconverted group texts, not relay
+  groups we provisioned, and matching one would produce a 409 whose every clause is
+  false. Part B's connecting scan therefore SKIPS any row carrying `imported_from`.
+- A STUCK connecting group (`poolNumbers.ts:485-499`) would otherwise have its
+  re-create escape hatch blocked. The override is that case's recovery, so the 409
+  copy names the connecting group and says so.
+
+**D10 - `reuseClaim` RESTARTS the retirement clock, and `beginRelease` becomes a
+compare-and-swap.** The sweep's re-verify keys on OPEN groups
+(`poolNumbers.ts:397-401`) and tier 0's group does not exist yet when the claim
+returns, so a concurrent sweep could release a number tier 0 just took - and tier 0
+targets precisely the long-closed numbers that are release-eligible. Two changes:
+
+- `reuseClaim` SETs `last_group_closed_at` to NOW in the same conditional write. The
+  number gets a fresh 180-day grace, so the sweep will not consider it. An earlier
+  revision REMOVEd the attribute instead; a reviewer showed that strands the number
+  permanently un-retirable if `reuseClaim` succeeds and `createRelayGroup` then
+  fails, because nothing re-stamps a clock that no longer exists. Advancing has no
+  such failure mode - a number whose create failed simply becomes retirable again
+  after the normal grace.
+- `repo.beginRelease` gains an `expectedClosedAt` argument and conditions on
+  `last_group_closed_at = :expected`. `retireEligible` already read that value from
+  its `listActive()` snapshot (`poolNumbers.ts:362-378`), so this costs nothing and
+  closes the remaining hole the reviewer identified: without it the sweep decides
+  eligibility from a PRE-claim snapshot, so advancing the stamp afterwards does not
+  stop it.
+
+Semantics check: `last_group_closed_at` has exactly two readers - `retireEligible`
+(`poolNumbers.ts:364`) and the admin retire mirror (`poolNumbersAdmin.ts:167, :249`).
+It is the retirement clock and nothing else, so restarting it when a number returns
+to service is correct, and the admin countdown resetting is the right display.
+`noteGroupClosed` is a monotonic max (`poolNumbersRepo.ts:557-599`), so a later close
+still advances it normally.
+
+Scope note: `relayNumberReleaseEnabled` is `RELAY_NUMBER_RELEASE_ENABLED === 'true'`
+(`config.ts:719`) and that variable is COMMENTED OUT in `.env.example:204`, so the
+entire retirement path is dormant in every environment today. D10 is correctness for
+when it is switched on, not a live defect.
 
 **D11 - No new pool-record attribute, and no atomicity for the tier-0 claim.** An
 `open_phones` string set maintained at every open/close/reopen/add/remove would give a
@@ -273,14 +329,29 @@ disclosure. Section 8 states this in full.
 Pure predicates, no I/O, so every caller controls its own reads and snapshots.
 
 ```
-/** Provenance phone set of a group: ever_member_phones UNION current roster (2.6). */
+/**
+ * Provenance phone set of a group: ever_member_phones UNION current roster (2.6).
+ * Tolerates the Set-or-string[] duality and a missing ever_member_phones (legacy
+ * pre-W1 rows), so it never reaches for `.size` on a value that may be an array.
+ * SAFETY tests only - Part B uses rosterPhoneSet (D3).
+ */
 export function memberPhoneSet(conv: ConversationItem): Set<string>
+
+/** CURRENT roster phones only - Part B's comparator (D3). */
+export function rosterPhoneSet(conv: ConversationItem): Set<string>
 
 /** Sorted, de-duplicated E.164 key for exact-set comparison. */
 export function phoneSetKey(phones: Iterable<string>): string
 
 /** True when the two sets share at least one phone. */
 export function phonesOverlap(a: Set<string>, b: Set<string>): boolean
+
+/**
+ * Set-or-string[]-safe superset test for a pool record's burn (D2's candidate
+ * filter). Lives beside poolNumbers.ts's existing hasBurn / rosterOverlapsBurn
+ * (`poolNumbers.ts:302-321`) and follows the same shape-branching rule.
+ */
+export function burnHasAll(burned: Set<string> | string[] | undefined, phones: Set<string>): boolean
 
 /**
  * Tier 0 (D4) and the reopen guard, over ONE getAllByPoolNumber snapshot.
@@ -305,8 +376,10 @@ Part B's scan is a thin async helper in the same module:
 ```
 /**
  * Part B. Scan the OPEN and CONNECTING relay partitions for a group whose
- * memberPhoneSet equals `roster`. `inconclusive` is true when either partition
- * walk reported `truncated` (D8).
+ * rosterPhoneSet (CURRENT members, D3) equals `roster`. Rows carrying
+ * `imported_from` are SKIPPED in the connecting partition - the importer writes
+ * unconverted carrier group texts there (D9). `inconclusive` is true when either
+ * partition walk reported `truncated` (D8).
  */
 export function findOpenGroupWithSamePhones(
   deps: { conversations: ConversationsRepo; log: Logger },
@@ -322,13 +395,17 @@ unchanged.
 ```
 const roster = new Set(rosterPhones);
 
-// TIER 0 - SAME-PAIR REUSE. Candidates cost ZERO extra reads (D2): `actives` is
-// already fetched and already filtered to the current driver, so source isolation
-// is preserved unchanged.
-for (const rec of actives) {
+// TIER 0 - SAME-PAIR REUSE. Skipped below two phones (D4): a one-member roster
+// would match every number that person was ever on.
+// Candidates cost ZERO extra reads (D2): `actives` is already fetched and already
+// filtered to the current driver, so source isolation is preserved unchanged.
+for (const rec of roster.size >= 2 ? actives : []) {
   if (rec.pending_conversation_id !== undefined) continue;   // earmarked - hands off
-  const burn = burnSetOf(rec.burned_phones);
-  if (![...roster].every((p) => burn.has(p))) continue;      // not this pair's number
+  // burnHasAll is the superset test, written in the same Set-or-string[]-safe
+  // style as this file's existing hasBurn / rosterOverlapsBurn helpers
+  // (poolNumbers.ts:302-321). `burned_phones` reads back as a Set but the type
+  // admits string[], so NEVER reach for `.size` or `.includes` directly (D7 trap).
+  if (!burnHasAll(rec.burned_phones, roster)) continue;      // not this pair's number
 
   // ONE snapshot; both predicates are evaluated against it (never two reads).
   const groups = await conversations.getAllByPoolNumber(rec.poolNumber);
@@ -362,10 +439,11 @@ Query per matching candidate - normally zero or one.
  * The tier-0 SAME-PAIR claim. Unlike burnClaim, the phones are ALREADY burned here
  * - that is the precondition, not the obstacle - so the ADD is a no-op set union
  * and the CONDITION asserts the opposite of burnClaim's: the number is `active` AND
- * every phone is already in burned_phones. Also REMOVEs last_group_closed_at (D10)
- * so a concurrent retirement sweep cannot release a number just taken back into
- * service. Returns the post-update item, or undefined on condition failure (not
- * active, or any phone not burned here) or an empty roster.
+ * every phone is already in burned_phones. Also RESTARTS the retirement clock
+ * (SET last_group_closed_at = now, D10) so a concurrent sweep does not release a
+ * number just taken back into service. Returns the post-update item, or undefined
+ * on condition failure (not active, or any phone not burned here) or an empty
+ * roster.
  *
  * NOT a mutex: two concurrent identical reuseClaims can both succeed. Accepted by
  * design (spec D11) - both callers are creating groups with the SAME phone set, so
@@ -379,12 +457,16 @@ Mirrors `burnClaim`, condition inverted:
 
 ```
 UpdateExpression:
-  (tag !== undefined ? 'SET placement_tag = :tag ' : '') +
-  'REMOVE last_group_closed_at ADD #bp :phones'
+  'SET last_group_closed_at = :now' + (tag !== undefined ? ', placement_tag = :tag' : '') +
+  ' ADD #bp :phones'
 ConditionExpression:
   'lifecycle_state = :active AND contains(#bp, :p0) AND contains(#bp, :p1) ...'
 ReturnValues: 'ALL_NEW'
 ```
+
+`repo.beginRelease` also gains a required `expectedClosedAt: string` argument and
+adds `AND last_group_closed_at = :expected` to its condition (D10). Its only caller
+is `retireEligible`, which already holds that value.
 
 Empty `phones` returns `undefined` without a write, mirroring `burnClaim`. The
 `lifecycle_state = :active` clause preserves the W2 retirement fence exactly as
@@ -468,7 +550,14 @@ invariant violation now fails closed at reopen instead of silently routing.
 ```
 export class DuplicateOpenRelayGroupError extends Error {
   readonly conversationId: string;
-  readonly status: 'open' | 'connecting';
+  /**
+   * Which partition the match came from - the LOOP VARIABLE of the scan, never the
+   * matched row's own `status` field. Those two can skew: `touchLastActivity`
+   * leaves a re-flagged group at status 'open' with relay_status
+   * 'relay_group#closed' (2.5), so the row's `status` is not a reliable label for
+   * where it was found.
+   */
+  readonly partition: 'open' | 'connecting';
 }
 ```
 
@@ -503,8 +592,8 @@ if (err instanceof DuplicateOpenRelayGroupError) {
   res.status(409).json({
     error: 'duplicate_open_group',
     conversationId: err.conversationId,
-    groupStatus: err.status,
-    message: err.status === 'connecting'
+    groupStatus: err.partition,
+    message: err.partition === 'connecting'
       ? 'A relay group with these same people is already being connected. Open it ' +
         'instead, or - if it is stuck - resubmit with acknowledgeDuplicate to create ' +
         'a new one.'
@@ -538,14 +627,43 @@ not an observable dashboard behavior.
 
 ## 8. Residual risk, stated plainly
 
+**The guarantee this design actually makes.** Composing every accepted best-effort
+below: tier 0 and the reopen guard DETERMINISTICALLY prevent two open groups with
+DIFFERENT phone sets on one number along every SEQUENTIAL operator path through the
+API, including the roster-mutation evasions of 2.6. They do NOT prevent it under
+concurrency, under GSI staleness, or via `touchLastActivity`'s unguarded reopen. The
+irreducible worst case is two open groups on one number whose phone sets differ,
+reached only by racing or by the pre-existing re-flag bug; its consequence is that an
+inbound from a shared member fans out to one roster rather than the other, and it is
+logged at ERROR when it happens on an inbound.
+
 **Concurrent creates.** Two concurrent creates of the same roster can both pass Part
 B's read check and both pass tier 0's checks, producing two OPEN groups with
 IDENTICAL phone sets on one number. Inbound from a member matches both;
 `twilio.ts:1918-1927` logs at ERROR and routes to the newest. Delivery reaches the
-same humans either way. The visible harm is a split transcript. Accepted (D11). Note
-this is reachable on the placement surface too, whose one-thread guard is
-check-then-act (2.4) - and tier 0 makes that pre-existing race land both groups on
-the SAME number rather than two different ones.
+same humans either way. The visible harm is a split transcript. Accepted (D11).
+
+This is also reachable on the placement surface, whose one-thread guard is
+check-then-act (2.4), and tier 0 makes that pre-existing race land both groups on the
+SAME number rather than two different ones. There is a second-order cost a reviewer
+identified: the losing group is an ORPHAN - an open group on the pair's number that
+no placement points at - and because tier 0's D4(i) vetoes on any live group sharing
+a phone, that orphan permanently disqualifies the pair from ever reusing their number
+again until someone finds and closes it. Recorded in
+`docs/issues/relay-duplicate-open-group-create-race.md`.
+
+**Part B is blind to a re-flagged group.** Part B scans the `byRelayStatus`
+partitions, which key on `relay_status`. A group `touchLastActivity` re-flagged (2.5)
+has `status: 'open'` but `relay_status: 'relay_group#closed'`, so it takes fan-out
+while being invisible to Part B's duplicate scan. Part B is advisory and fail-open by
+D8, so this widens an already-accepted gap rather than opening a new class. The
+SAFETY tests are unaffected: tier 0 and the reopen guard read `getAllByPoolNumber`
+and branch on `status`, where a re-flagged group correctly reads as live.
+
+**Tier-0 eligibility decays, by design.** `ever_member_phones` is add-only, so a
+number whose group ever contained a third person can never again satisfy D4(ii) for
+the original pair. Section 1's promise is therefore "a pair keeps their number across
+groups whose membership never changed", not unconditionally.
 
 **Detection is not guaranteed.** That ERROR fires only on inbound SMS. A duplicated
 pair whose thread is staff-outbound-only never trips it. Filed as
@@ -580,6 +698,7 @@ it. Left to `docs/issues/inbound-reflags-closed-relay-group.md` by Cameron's rul
 | Reopen (implicit) | `conversationsRepo.ts:1449-1507` | UNGUARDED, pre-existing, out of scope (2.5, section 8) |
 | Retirement sweep | `poolNumbers.ts:358-438` | unchanged; `reuseClaim` clears the clock so the sweep cannot release a just-reused number (D10) |
 | Seeds | `lib/seed/matrix.ts:1135` | one relay group, and it is OPEN - no seeded CLOSED group exists, so tier 0 has nothing seeded to match |
+| Importer | `lib/import/apply.ts:1086, :1129-1130` | WRITER of `relay_group` rows in `relay_group#connecting` for imported carrier group threads. Part B's connecting scan skips rows carrying `imported_from` (D9). Tier 0 is unaffected - those rows carry no `pool_number`, so `getAllByPoolNumber` never returns them |
 | Inbound routing | `webhooks/twilio.ts:1911-1972` | READER, unchanged - already handles many groups per number |
 | Voice masked inbound | `webhooks/voice.ts` via `getByPoolNumber` | READER, pre-existing lossy one-group view (`docs/issues/voice-relay-multiplexing-ambiguity.md`). Not widened: `getByPoolNumber` prefers the OPEN match (`conversationsRepo.ts:1782`) and tier 0's groups have identical phone sets |
 | Contact relay-groups card | `routes/contacts.ts:1128` | READER, unchanged |
@@ -590,8 +709,10 @@ it. Left to `docs/issues/inbound-reflags-closed-relay-group.md` by Cameron's rul
 Unit (`app/test/`):
 
 - `poolNumbersRepo.test.ts` - `reuseClaim` succeeds when active and all phones
-  burned; REMOVEs `last_group_closed_at` (D10); returns undefined when not active,
-  when any phone is not burned, and on an empty roster; stamps `placement_tag`.
+  burned; ADVANCES `last_group_closed_at` to now (D10); returns undefined when not
+  active, when any phone is not burned, and on an empty roster; stamps
+  `placement_tag`. `beginRelease` refuses when `expectedClosedAt` no longer matches
+  (the D10 compare-and-swap) and still succeeds when it does.
 - `poolNumbers.test.ts` - tier 0 reuses the pair's number; SKIPPED when a live group
   on it overlaps by provenance; SKIPPED when no closed group has the exact set;
   SKIPPED when the record is earmarked, not active, or another driver; NOT skipped
@@ -599,14 +720,19 @@ Unit (`app/test/`):
   closed group on the number belongs to a DIFFERENT pair (the D4 deletion - this is
   the multiplexing case that made the old rule useless); a group whose `participants`
   were drained still vetoes via `ever_member_phones` (2.6); a
-  `touchLastActivity`-re-flagged closed group vetoes (2.5). Every existing tier-1/2/3
-  test must stay green untouched - that is the regression proof that D1 held.
+  `touchLastActivity`-re-flagged closed group (status open, relay_status closed)
+  vetoes (2.5); a ONE-phone roster skips tier 0 entirely (D4). Every existing
+  tier-1/2/3 test must stay green untouched - that is the regression proof that D1
+  held.
 - `relayGroupIdentity.test.ts` (new) - `memberPhoneSet` unions provenance and roster
   and tolerates both the `Set` and `string[]` shapes and a missing field;
-  `findLiveMemberConflict` excludes self, ignores closed groups, catches connecting;
-  `hasClosedGroupWithExactPhones` requires exact equality, not superset;
-  `findOpenGroupWithSamePhones` matches across OPEN and CONNECTING (D9) and reports
-  `inconclusive` on truncation.
+  `rosterPhoneSet` ignores `ever_member_phones` entirely (D3 - the two comparators
+  must be provably different, since a single shared one is the defect r2 found);
+  `burnHasAll` is Set-or-array safe; `findLiveMemberConflict` excludes self and
+  ignores closed groups; `hasClosedGroupWithExactPhones` requires exact equality, not
+  superset; `findOpenGroupWithSamePhones` matches across OPEN and CONNECTING, SKIPS a
+  connecting row carrying `imported_from` (D9), and reports `inconclusive` on
+  truncation.
 - `relayProvisioning.test.ts` - throws for an unowned duplicate; does NOT throw for a
   tour- or placement-owned create with the same roster (D6); with
   `acknowledgeDuplicate` the scan STILL runs and the audit records

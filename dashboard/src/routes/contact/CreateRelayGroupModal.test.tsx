@@ -5,9 +5,9 @@
 // first/last ONLY (never the search field's phone-fallback display name), a
 // failed preview that never opens the confirm dialog, and a `connecting` create
 // that says the intro has NOT gone out instead of navigating away.
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { Contact, RosterPreview } from '../../api/index.js';
@@ -327,6 +327,50 @@ describe('CreateRelayGroupModal - the preview round trip is HELD', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClosed).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('a re-render of the PAGE BEHIND the modal does not interrupt typing', async () => {
+    // Modal keys its Escape/focus effect on the callback it receives: a fresh
+    // identity tears the effect down (returning focus to the previously focused
+    // element) and re-runs it (focusing the dialog), so everything typed after
+    // that goes nowhere. The dismissal guard this modal builds is memoized for
+    // that reason - and that only holds if the CALLER's onClose is stable too,
+    // which is why ContactDetail memoizes the one it passes. The page re-renders
+    // on every message.persisted / conversation.updated / scheduled.updated tick,
+    // and the operator is on it because the contact is texting them.
+    // TODO(modal-onclose-refocus-trap): the class fix belongs in Modal itself.
+    function StableHost(): React.JSX.Element {
+      const [tick, setTick] = useState(0);
+      const onClose = useCallback(() => undefined, []);
+      return (
+        <>
+          <button type="button" onClick={() => setTick((n) => n + 1)}>
+            bump the page
+          </button>
+          <output data-testid="tick">{tick}</output>
+          <CreateRelayGroupModal contact={TENANT} candidates={ALL} onClose={onClose} />
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/contacts/T1']}>
+        <StableHost />
+      </MemoryRouter>,
+    );
+    const search = screen.getByRole('combobox', { name: 'Add member' });
+    await user.type(search, 'Mar');
+    expect(document.activeElement).toBe(search);
+
+    // fireEvent, not user.click: a real click would move focus to the button and
+    // the follow-up typing would re-focus the field, hiding the very thing this
+    // test is about. This is a re-render arriving from OUTSIDE the dialog.
+    fireEvent.click(screen.getByRole('button', { name: 'bump the page' }));
+    expect(screen.getByTestId('tick')).toHaveTextContent('1');
+
+    await user.keyboard('cus');
+    expect(search).toHaveValue('Marcus');
+    expect(document.activeElement).toBe(search);
   });
 
   it('aborts an in-flight preview when the flow unmounts', async () => {

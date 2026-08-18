@@ -186,18 +186,33 @@ describe('RosterConfirmDialog - allowDefer={false} (an endpoint that CANNOT defe
     minute: '2-digit',
   });
 
-  it('drops BOTH deferral affordances but KEEPS the quiet-hours warning', () => {
+  it('drops BOTH deferral affordances and warns that the send is IMMEDIATE', () => {
     // POST /api/relay-groups has no pending-action row to hold a deferral, so a
     // "Open at 8:00 AM" button would be the exact lie this dialog exists to
-    // prevent. The warning still renders: the operator is told it is quiet
-    // hours, they just cannot schedule around it here.
+    // prevent. The warning still renders - the operator is told it is quiet
+    // hours - but it must not promise the deferral the buttons just lost: this
+    // endpoint enqueues the intro NOW, and there is no "send it now" affordance
+    // left to point at.
     renderDialog({ preview: preview(QUIET), allowDefer: false });
     expect(
-      screen.getByText(`Quiet hours until ${CLOCK} - this goes out then unless you send it now.`),
+      screen.getByText(`Quiet hours until ${CLOCK} - this still sends immediately.`),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(`Quiet hours until ${CLOCK} - this goes out then unless you send it now.`),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send now anyway' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: `Open at ${CLOCK}` })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Open when quiet hours end/ })).not.toBeInTheDocument();
+  });
+
+  it('warns immediately WITHOUT a clock when the server sent no quietEndsAt', () => {
+    // Same honesty, one fewer fact: a server that reports `deferred` with no
+    // instant still must not have its warning read as a promise to wait.
+    renderDialog({ preview: preview({ deferred: true }), allowDefer: false });
+    expect(screen.getByText('Quiet hours - this still sends immediately.')).toBeInTheDocument();
+    expect(
+      screen.queryByText('Quiet hours - this goes out when they end unless you send it now.'),
+    ).not.toBeInTheDocument();
   });
 
   it('offers exactly Cancel and the confirmLabel in the footer', () => {

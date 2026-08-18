@@ -57,9 +57,13 @@ export interface RosterConfirmDialogProps {
   onClose: () => void;
   /** False when the confirming endpoint CANNOT defer (a standalone relay create
    *  has no owner row to hold a pending action). The quiet-hours warning still
-   *  renders; the deferral button does not, because no backend row can keep
-   *  that promise. Defaults to true - tour and placement are unaffected.
-   *  TODO(standalone-relay-group-quiet-hours-deferral): */
+   *  renders - the operator must learn it is quiet hours - but it SWITCHES to
+   *  the immediate-send sentence, because neither the deferral button nor the
+   *  "send it now" escape it would name exists on this path. Defaults to true -
+   *  tour and placement are unaffected.
+   *  TODO(standalone-relay-group-quiet-hours-deferral): full deferral parity
+   *  needs a pending row that carries its own member list, since a standalone
+   *  group has no roster stored anywhere until it is created. */
   allowDefer?: boolean;
 }
 
@@ -97,8 +101,12 @@ export function RosterConfirmDialog({
   // a truthful (time-less) label rather than "at Invalid Date".
   // ...unless the caller's endpoint cannot defer at all. Then the deferral
   // affordances go away (both of them) and the plain confirm is the only
-  // action, while the WARNING below stays on `preview.deferred` so the operator
-  // still learns it is quiet hours.
+  // action. The WARNING still renders on `preview.deferred` so the operator
+  // learns it is quiet hours - but it CHANGES SENTENCE, because the deferring
+  // copy names two things that no longer exist here: the wait ("this goes out
+  // then") and the escape from it ("unless you send it now", which is the
+  // button `canDefer` just removed). Promising a deferral this endpoint cannot
+  // perform is the same class of lie as a count over a suppressed leg.
   const clock = preview.quietEndsAt !== undefined ? quietClockLabel(preview.quietEndsAt) : '';
   const canDefer = preview.deferred && allowDefer;
   const defaultLabel = !canDefer
@@ -106,10 +114,13 @@ export function RosterConfirmDialog({
     : clock === ''
       ? `${deferLabel} when quiet hours end`
       : `${deferLabel} at ${clock}`;
-  const quietLine =
-    clock === ''
+  const quietLine = canDefer
+    ? clock === ''
       ? 'Quiet hours - this goes out when they end unless you send it now.'
-      : `Quiet hours until ${clock} - this goes out then unless you send it now.`;
+      : `Quiet hours until ${clock} - this goes out then unless you send it now.`
+    : clock === ''
+      ? 'Quiet hours - this still sends immediately.'
+      : `Quiet hours until ${clock} - this still sends immediately.`;
 
   return (
     <Modal

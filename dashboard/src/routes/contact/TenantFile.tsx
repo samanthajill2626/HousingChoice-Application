@@ -92,6 +92,9 @@ export interface TenantFileProps {
   onScheduleTour?: () => void;
   /** Open the seeded composer for this tenant (Properties sent card "+ Send"). */
   onSendProperty?: () => void;
+  /** Open the "Create a relay group" dialog seeded with this contact (Relay
+   *  groups card "+ Create group"). */
+  onCreateRelayGroup?: () => void;
 }
 
 /** A unit's address line (or its id as a last resort), for a row label. */
@@ -126,6 +129,7 @@ export function TenantFile({
   onStartPlacement,
   onScheduleTour,
   onSendProperty,
+  onCreateRelayGroup,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   // A pending suggestion for `target` rendered as a review chip (or null). Shared
@@ -339,7 +343,11 @@ export function TenantFile({
         )}
       </Card>
 
-      <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
+      <GroupTextsCard
+        pending={relayGroupsPending}
+        groups={relayGroups}
+        onCreate={onCreateRelayGroup}
+      />
 
       <GroupThreadsCard
         pending={groupThreadsPending}

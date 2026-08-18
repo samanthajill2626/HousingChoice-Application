@@ -57,6 +57,7 @@ import { UnknownFile } from './UnknownFile.js';
 import { PartnerFile } from './PartnerFile.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
+import { CreateRelayGroupModal } from './CreateRelayGroupModal.js';
 import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
@@ -148,6 +149,9 @@ export function ContactDetail(): React.JSX.Element {
   const [schedulingTour, setSchedulingTour] = useState(false);
   // The "New property" dialog, pre-filled+locked to this (landlord) contact.
   const [addingProperty, setAddingProperty] = useState(false);
+  // The "Create a relay group" dialog, seeded with this contact as a locked
+  // member (tenant + landlord files; the other kinds have no relay card).
+  const [creatingRelayGroup, setCreatingRelayGroup] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
@@ -774,6 +778,7 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
+                onCreateRelayGroup={() => setCreatingRelayGroup(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -844,6 +849,7 @@ export function ContactDetail(): React.JSX.Element {
                 onSendProperty={() =>
                   navigate(`/broadcasts/new?contactId=${encodeURIComponent(contact.contactId)}`)
                 }
+                onCreateRelayGroup={() => setCreatingRelayGroup(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -874,6 +880,14 @@ export function ContactDetail(): React.JSX.Element {
             setContact(updated);
             timeline.refetch(); // number_added milestone — same no-SSE gap
           }}
+        />
+      ) : null}
+
+      {creatingRelayGroup ? (
+        <CreateRelayGroupModal
+          contact={contact}
+          candidates={editCandidates}
+          onClose={() => setCreatingRelayGroup(false)}
         />
       ) : null}
 

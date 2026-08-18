@@ -66,6 +66,9 @@ export interface LandlordFileProps {
   onManagePhones?: () => void;
   /** Open the "New property" dialog pre-filled + locked to this landlord (Properties card). */
   onAddProperty?: () => void;
+  /** Open the "Create a relay group" dialog seeded with this contact (Relay
+   *  groups card "+ Create group"). */
+  onCreateRelayGroup?: () => void;
 }
 
 /** The landlord lead status as its display LABEL — delegates to the shared
@@ -97,6 +100,7 @@ export function LandlordFile({
   onEdit,
   onManagePhones,
   onAddProperty,
+  onCreateRelayGroup,
 }: LandlordFileProps): React.JSX.Element {
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
@@ -243,7 +247,11 @@ export function LandlordFile({
         )}
       </Card>
 
-      <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
+      <GroupTextsCard
+        pending={relayGroupsPending}
+        groups={relayGroups}
+        onCreate={onCreateRelayGroup}
+      />
 
       <GroupThreadsCard
         pending={groupThreadsPending}

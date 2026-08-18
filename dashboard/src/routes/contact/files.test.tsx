@@ -63,6 +63,7 @@ describe('TenantFile', () => {
       groupThreads?: GroupThreadRow[];
       groupThreadsTruncated?: boolean;
       onSendProperty?: () => void;
+      onCreateRelayGroup?: () => void;
       // Per-test fixture override (the LandlordFile helper below does the same).
       // Never mutate the shared `contact` - other assertions depend on it.
       contact?: Contact;
@@ -85,6 +86,7 @@ describe('TenantFile', () => {
           groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={opts.media ?? []}
           onSendProperty={opts.onSendProperty}
+          onCreateRelayGroup={opts.onCreateRelayGroup}
         />
       </MemoryRouter>,
     );
@@ -300,6 +302,20 @@ describe('TenantFile', () => {
     expect(link).toHaveTextContent('2 members');
   });
 
+  // The create-group action. CardAction's aria-label REPLACES the visible
+  // "+ Create group" text as the accessible name, so this is the only query.
+  it('Relay groups card offers the create action and fires onCreateRelayGroup', async () => {
+    const onCreateRelayGroup = vi.fn();
+    renderIt({ relayGroupsPending: false, onCreateRelayGroup });
+    await userEvent.click(screen.getByRole('button', { name: 'Create a relay group' }));
+    expect(onCreateRelayGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('Relay groups card offers NO create action when the callback is absent', () => {
+    renderIt({ relayGroupsPending: false });
+    expect(screen.queryByRole('button', { name: 'Create a relay group' })).toBeNull();
+  });
+
   it('shows "No media yet" when there is no comms media', () => {
     renderIt({ media: [] });
     expect(screen.getByText(/No media yet/i)).toBeInTheDocument();
@@ -330,6 +346,7 @@ describe('LandlordFile', () => {
       relayGroups?: RelayGroupRow[];
       groupThreads?: GroupThreadRow[];
       groupThreadsTruncated?: boolean;
+      onCreateRelayGroup?: () => void;
       contact?: Contact;
     } = {},
   ) {
@@ -347,6 +364,7 @@ describe('LandlordFile', () => {
           groupThreads={opts.groupThreads ?? []}
           groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={[]}
+          onCreateRelayGroup={opts.onCreateRelayGroup}
         />
       </MemoryRouter>,
     );
@@ -455,6 +473,18 @@ describe('LandlordFile', () => {
       .find((a) => a.getAttribute('href') === '/conversations/conv-g2' && /With Tina Tenant/.test(a.textContent ?? ''));
     expect(link).toBeDefined();
     expect(link).toHaveTextContent('Closed');
+  });
+
+  it('Relay groups card offers the create action and fires onCreateRelayGroup', async () => {
+    const onCreateRelayGroup = vi.fn();
+    renderIt({ relayGroups: [], onCreateRelayGroup });
+    await userEvent.click(screen.getByRole('button', { name: 'Create a relay group' }));
+    expect(onCreateRelayGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('Relay groups card offers NO create action when the callback is absent', () => {
+    renderIt({ relayGroups: [] });
+    expect(screen.queryByRole('button', { name: 'Create a relay group' })).toBeNull();
   });
 });
 

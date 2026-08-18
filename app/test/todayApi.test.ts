@@ -1004,6 +1004,9 @@ describe('today action-queue API (BE6/C7)', () => {
       relay_opted_out_members: {
         [memberContactId]: { contactId: memberContactId, phone: memberPhone, name: 'Opted Member', at: iso(-20_000) },
       },
+      // What setRelayMemberOptedOut stamps in the same write: the row's ticket
+      // into the sparse byRelayOptOut index Today reads (2026-08-18).
+      relay_optout_flag: 'attention',
     } as ConversationItem);
   };
 
@@ -1055,6 +1058,7 @@ describe('today action-queue API (BE6/C7)', () => {
       relay_opted_out_members: {
         [memberContactId]: { contactId: memberContactId, phone: memberPhone, at: iso(-20_000) },
       },
+      relay_optout_flag: 'attention',
     } as ConversationItem);
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
@@ -1103,11 +1107,137 @@ describe('today action-queue API (BE6/C7)', () => {
       relay_opted_out_members: {
         'phone#+15550100000': { phone: '+15550100000', name: 'No Contact', at: iso(-20_000) },
       },
+      relay_optout_flag: 'attention',
     } as ConversationItem);
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
     expect(needs.some((i) => i.refId === 'c-del')).toBe(false);
     expect(needs.some((i) => i.refId === 'phone#+15550100000')).toBe(false);
+  });
+
+  // THE DEFECT THESE PIN (prod, 2026-08-17/18: 233 WARNs in 24h). This pass
+  // rode the byLastActivity `open` read, hard-capped at 100 rows, from the days
+  // it also fed the unread items; once prod held 649 open threads it truncated
+  // and WARNed on EVERY Today load to find the ~1 relay group that mattered.
+  // It now reads the sparse byRelayOptOut index, which holds exactly the relay
+  // groups whose opt-out map is non-empty.
+  describe('the relay opt-out attention pass reads the sparse byRelayOptOut index (2026-08-18)', () => {
+    it('does NOT touch the open partition, so 649 open 1:1 threads cost nothing and trip no cap WARN', async () => {
+      for (let n = 0; n < 150; n += 1) {
+        seedConversation({
+          conversationId: `conv-open-${String(n).padStart(4, '0')}`,
+          participant_phone: `+1555030${String(n).padStart(4, '0')}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'tenant_1to1',
+          ai_mode: 'manual',
+          created_at: iso(-200_000),
+        } as ConversationItem);
+      }
+      world.contacts.push({
+        contactId: 'c-optout-idx',
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Opted',
+        lastName: 'Indexed',
+        phone: '+15550102222',
+        sms_opt_out: true,
+      });
+      seedRelayWithOptOut('c-optout-idx', '+15550102222');
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      expect(needs.some((i) => i.refType === 'contact' && i.refId === 'c-optout-idx')).toBe(true);
+      // The old read logged group=conversations at the cap on every load with a
+      // partition this size; the index read has nothing to truncate.
+      const capWarns = harness.capture
+        .atLevel(40)
+        .filter((l) => String(l['msg'] ?? '').includes('hit the cap'));
+      expect(capWarns.filter((l) => l['group'] === 'conversations')).toEqual([]);
+      expect(capWarns.filter((l) => l['group'] === 'relay_optout')).toEqual([]);
+    });
+
+    it('a relay group whose map is non-empty but that carries NO flag (pre-backfill row) is invisible - the backfill is required', async () => {
+      world.contacts.push({
+        contactId: 'c-legacy',
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Legacy',
+        lastName: 'Row',
+        phone: '+15550102223',
+        sms_opt_out: true,
+      });
+      seedConversation({
+        conversationId: 'conv-relay-legacy',
+        participant_phone: '+15550103334',
+        status: 'open',
+        last_activity_at: iso(-40_000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-200_000),
+        participants: [{ contactId: 'c-legacy', phone: '+15550102223', name: 'Legacy Row' }],
+        relay_opted_out_members: {
+          'c-legacy': { contactId: 'c-legacy', phone: '+15550102223', name: 'Legacy Row', at: iso(-20_000) },
+        },
+        // No relay_optout_flag: written by a build before the index existed.
+      } as ConversationItem);
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      expect(needs.some((i) => i.refId === 'c-legacy')).toBe(false);
+    });
+
+    it('a CLOSED relay group is off the index (the close write drops the flag) - even if the fake still shows it, the pass skips it', async () => {
+      world.contacts.push({
+        contactId: 'c-closedgrp',
+        type: 'tenant',
+        status: 'active',
+        firstName: 'Closed',
+        lastName: 'Group',
+        phone: '+15550102224',
+        sms_opt_out: true,
+      });
+      seedConversation({
+        conversationId: 'conv-relay-closed-optout',
+        participant_phone: '+15550103335',
+        status: 'closed',
+        last_activity_at: iso(-40_000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-200_000),
+        participants: [{ contactId: 'c-closedgrp', phone: '+15550102224' }],
+        relay_opted_out_members: {
+          'c-closedgrp': { contactId: 'c-closedgrp', phone: '+15550102224', at: iso(-20_000) },
+        },
+        relay_optout_flag: 'attention', // a lost race left it; the reader tolerates it
+      } as ConversationItem);
+
+      const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+      expect(needs.some((i) => i.refId === 'c-closedgrp')).toBe(false);
+    });
+
+    it('a FULL page of attention rows is the tripwire: WARNs with group=relay_optout at the cap', async () => {
+      for (let n = 0; n < 100; n += 1) {
+        const cid = `c-many-${String(n).padStart(3, '0')}`;
+        world.contacts.push({ contactId: cid, type: 'tenant', status: 'active', firstName: 'M', lastName: String(n), phone: `+1555040${String(n).padStart(4, '0')}`, sms_opt_out: true });
+        seedConversation({
+          conversationId: `conv-relay-many-${String(n).padStart(3, '0')}`,
+          participant_phone: `+1555041${String(n).padStart(4, '0')}`,
+          status: 'open',
+          last_activity_at: iso(-1_000 - n * 1_000),
+          type: 'relay_group',
+          ai_mode: 'manual',
+          created_at: iso(-200_000),
+          participants: [{ contactId: cid, phone: `+1555040${String(n).padStart(4, '0')}` }],
+          relay_opted_out_members: { [cid]: { contactId: cid, at: iso(-20_000) } },
+          relay_optout_flag: 'attention',
+        } as ConversationItem);
+      }
+      await getItems();
+      const warned = harness.capture
+        .atLevel(40)
+        .filter((l) => l['group'] === 'relay_optout' && String(l['msg'] ?? '').includes('hit the cap'));
+      expect(warned).toHaveLength(1);
+      expect(warned[0]!['count']).toBe(100);
+    });
   });
 
   it('surfaces the item when suppression lives ONLY on the member phone 1:1 flag (secondary-number STOP, contact flag never set)', async () => {
@@ -1465,6 +1595,7 @@ describe('today action-queue API (BE6/C7)', () => {
             at: iso(-20_000),
           },
         },
+        relay_optout_flag: 'attention',
       } as ConversationItem);
       expect(world.conversations.get('conv-relay-loopintact')?.unread_flag).toBeUndefined();
 

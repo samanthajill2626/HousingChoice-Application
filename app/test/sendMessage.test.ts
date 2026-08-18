@@ -123,6 +123,7 @@ function makeFakes(
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
+    listRelayOptOutAttention: async () => ({ items: [] }),
     setMode: async (_id, mode) => {
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;

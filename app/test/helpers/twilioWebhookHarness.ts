@@ -787,6 +787,8 @@ export function createFakeWorld(): FakeWorld {
       if (status === 'closed') {
         conv.unread_count = 0;
         delete conv.unread_flag;
+        // ...and leaves byRelayOptOut in the same write (2026-08-18).
+        delete conv.relay_optout_flag;
       }
       return conv;
     },
@@ -822,8 +824,10 @@ export function createFakeWorld(): FakeWorld {
     async setRelayMemberOptedOut(conversationId, memberKey, entry) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setRelayMemberOptedOut: no conversation ${conversationId}`);
-      // Merge one slot without clobbering the others (mirrors the targeted SET).
+      // Merge one slot without clobbering the others (mirrors the targeted SET),
+      // and stamp the sparse byRelayOptOut flag in the same write (2026-08-18).
       conv.relay_opted_out_members = { ...(conv.relay_opted_out_members ?? {}), [memberKey]: entry };
+      conv.relay_optout_flag = 'attention';
     },
     async clearRelayMemberOptedOut(conversationId, memberKey) {
       const conv = conversations.get(conversationId);
@@ -831,7 +835,20 @@ export function createFakeWorld(): FakeWorld {
       if (conv.relay_opted_out_members !== undefined) {
         const { [memberKey]: _removed, ...rest } = conv.relay_opted_out_members;
         conv.relay_opted_out_members = rest;
+        // Models the real conditional second write: the flag goes when the
+        // map is empty.
+        if (Object.keys(rest).length === 0) delete conv.relay_optout_flag;
       }
+    },
+    async listRelayOptOutAttention({ limit }) {
+      // Models the sparse byRelayOptOut GSI: rows carrying the flag ONLY, newest
+      // activity first, one page. A seeded row without the flag is invisible
+      // here exactly as it would be to the real index (hence the backfill).
+      const items = [...conversations.values()]
+        .filter((c) => c.relay_optout_flag === 'attention')
+        .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
+        .slice(0, limit);
+      return { items };
     },
     async rebindOwner(conversationId, newOwner) {
       const conv = conversations.get(conversationId);

@@ -333,6 +333,70 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect(after?.relay_opted_out_members?.['c1']).toBeDefined(); // c1 untouched
   });
 
+  // --- byRelayOptOut: the sparse ATTENTION index (2026-08-18) ------------------
+  // Today's "opted out of a relay group" pass used to walk the whole open
+  // partition (hard-capped at 100) to find relay groups with a non-empty
+  // relay_opted_out_members map - and WARNed on every load once prod held 649
+  // open threads. The map's writers now stamp/drop a sparse flag in the SAME
+  // writes, and Today queries the index. These prove the flag's lifecycle
+  // against real DynamoDB conditions (`size(map) = 0` in particular).
+  it('byRelayOptOut: setRelayMemberOptedOut puts the group on the index; clearing the LAST member takes it off', async () => {
+    const pool = `+1555053${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [
+        { contactId: 'c1', phone: '+15550100203' },
+        { contactId: 'c2', phone: '+15550100204' },
+      ],
+    });
+    const listed = async () =>
+      (await conversations.listRelayOptOutAttention({ limit: 500 })).items.some(
+        (c) => c.conversationId === created.conversationId,
+      );
+    // Never opted out: not on the index (sparse).
+    expect(await listed()).toBe(false);
+    expect((await conversations.getById(created.conversationId))?.relay_optout_flag).toBeUndefined();
+
+    // First opt-out seeds the map AND the flag in one write.
+    await conversations.setRelayMemberOptedOut(created.conversationId, 'c1', { contactId: 'c1', at: new Date().toISOString() });
+    expect((await conversations.getById(created.conversationId))?.relay_optout_flag).toBe('attention');
+    expect(await listed()).toBe(true);
+    // Second opt-out merges into the existing map; still flagged.
+    await conversations.setRelayMemberOptedOut(created.conversationId, 'c2', { contactId: 'c2', at: new Date().toISOString() });
+    expect(await listed()).toBe(true);
+
+    // Clearing ONE of two keeps the group an attention item...
+    await conversations.clearRelayMemberOptedOut(created.conversationId, 'c1');
+    const mid = await conversations.getById(created.conversationId);
+    expect(mid?.relay_opted_out_members?.['c2']).toBeDefined();
+    expect(mid?.relay_optout_flag).toBe('attention');
+    expect(await listed()).toBe(true);
+    // ...clearing the LAST one retires the row from the index.
+    await conversations.clearRelayMemberOptedOut(created.conversationId, 'c2');
+    const after = await conversations.getById(created.conversationId);
+    expect(after?.relay_opted_out_members).toEqual({});
+    expect(after?.relay_optout_flag).toBeUndefined();
+    expect(await listed()).toBe(false);
+  });
+
+  it('byRelayOptOut: a relay CLOSE drops the flag in the status write, so a closed group is never an attention item', async () => {
+    const pool = `+1555054${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: '+15550100205' }],
+    });
+    await conversations.setRelayMemberOptedOut(created.conversationId, 'c1', { contactId: 'c1', at: new Date().toISOString() });
+    await conversations.setRelayStatus(created.conversationId, 'closed', 'open');
+    const after = await conversations.getById(created.conversationId);
+    // History kept, attention gone.
+    expect(after?.relay_opted_out_members?.['c1']).toBeDefined();
+    expect(after?.relay_optout_flag).toBeUndefined();
+    const onIndex = (await conversations.listRelayOptOutAttention({ limit: 500 })).items.some(
+      (c) => c.conversationId === created.conversationId,
+    );
+    expect(onIndex).toBe(false);
+  });
+
   // --- BUG 2: open relay groups are NOT diluted out by open 1:1 volume --------
   // The pre-fix listRelayGroups walked the byLastActivity 'open' partition (EVERY
   // open conversation) with a `type = relay_group` FilterExpression. DynamoDB

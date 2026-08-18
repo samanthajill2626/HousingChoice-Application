@@ -188,6 +188,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
+    listRelayOptOutAttention: async () => ({ items: [] }),
     setMode: async () => {},
     setSmsOptOut: async () => {},
     incrementAutomatedSendCount: async () => 1,

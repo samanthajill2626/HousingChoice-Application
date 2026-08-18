@@ -23,12 +23,21 @@
 //      A standalone group has no stored roster before it exists, so the
 //      client's list IS the input to both calls (spec 6.2); a rebuilt array
 //      would make the confirm dialog a preview of a different send.
-//   2. A member's `name` is built from firstName/lastName ONLY. Never
-//      `contactDisplayName` and never ContactSearchField's `value.name` (which
-//      IS that helper's output): its fallback is a FORMATTED PHONE NUMBER,
-//      which would print a phone in the preview AND embed one in the outbound
-//      intro. A nameless member is sent with no name and reads as
-//      "Unnamed number" - the confirm dialog's own string for the same person.
+//   2. THE WIRE NAME AND THE DISPLAY LABEL ARE DIFFERENT VALUES.
+//      A member's `name` (the wire) is built from firstName/lastName ONLY -
+//      never `contactDisplayName`, never ContactSearchField's `value.name`
+//      (which IS that helper's output). Its fallback is a FORMATTED PHONE
+//      NUMBER, which would print a phone in the preview AND embed one in the
+//      outbound intro. A nameless member is sent with NO name.
+//      The member row's LABEL is the opposite call: it uses that same helper on
+//      purpose, so a row reads exactly like the dropdown option that produced
+//      it. Labelling a nameless pick "Unnamed number" - the confirm dialog's
+//      string - was the original rule and it was WRONG: the chooser had just
+//      shown the number, so the row denied the operator the one identifying
+//      thing on screen. The dialog still says "Unnamed number" (it is shared
+//      with tour/placement and prints no phone numbers); that difference is
+//      visible in the same glance and is accepted.
+//      builtName() and rowLabel() are the two functions. Never swap them.
 //
 // A create that answers `connecting` has NO number and sent NO intro yet, so
 // it does not navigate: the operator was just shown that exact intro body, and
@@ -66,12 +75,9 @@ import { Button } from '../../ui/index.js';
 import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { refusalMessage } from '../shared/rosterWrites.js';
 import { ContactSearchField, type ContactSearchValue } from './ContactSearchField.js';
+import { contactDisplayName } from './format.js';
 import { Modal } from './Modal.js';
 import styles from './CreateRelayGroupModal.module.css';
-
-/** RosterConfirmDialog's own label for a member with no name. Reused verbatim
- *  so one person never reads as two different things across the two steps. */
-const UNNAMED = 'Unnamed number';
 
 /** Why the flow cannot start from this contact. Lower-case to match the
  *  dialog's "not receiving - ..." annotations. */
@@ -162,9 +168,26 @@ function primaryPhone(c: Contact): string | undefined {
   return phone !== undefined && phone.length > 0 ? phone : undefined;
 }
 
-/** A member name from the contact RECORD, never from a display helper. */
+/** THE WIRE NAME. From the contact RECORD only, never from a display helper -
+ *  `contactDisplayName` falls back to a FORMATTED PHONE NUMBER, and this value
+ *  travels to the server, into the preview, and into the outbound intro body.
+ *  '' means "no real name", which sends no `name` at all and lets the server
+ *  resolve it (to undefined, for a nameless contact).
+ *
+ *  DO NOT use this for a label, and do not use `rowLabel` for the wire. Two
+ *  functions, two purposes, deliberately not interchangeable. */
 function builtName(c: Contact): string {
   return [c.firstName?.trim(), c.lastName?.trim()].filter(Boolean).join(' ');
+}
+
+/** THE DISPLAY LABEL, and deliberately the SAME helper the shared chooser uses
+ *  for its option rows (ContactSearchField.tsx:163) - so what the operator
+ *  clicks in the dropdown is what the member row then reads. A nameless contact
+ *  shows its formatted phone, e.g. "(512) 555-0134", because "Unnamed number"
+ *  next to a dropdown that just showed the number is not identification.
+ *  Display only: this value never becomes a member `name` (see builtName). */
+function rowLabel(name: string, phone: string | undefined): string {
+  return name !== '' ? name : contactDisplayName(undefined, undefined, phone);
 }
 
 function toMember(row: PickedRow): RelayGroupMemberInput {
@@ -490,11 +513,11 @@ export function CreateRelayGroupModal({
       <ul className={styles.members} aria-label="Members">
         {/* The seeded contact is LOCKED - no remove affordance at all. */}
         <li className={styles.member}>
-          <span className={styles.memberName}>{seedName === '' ? UNNAMED : seedName}</span>
+          <span className={styles.memberName}>{rowLabel(seedName, seedPhone)}</span>
           {seedPhone === undefined ? <span className={styles.note}>{NO_MOBILE}</span> : null}
         </li>
         {added.map((row) => {
-          const label = row.name === '' ? UNNAMED : row.name;
+          const label = rowLabel(row.name, row.phone);
           return (
             <li key={row.contactId} className={styles.member}>
               <span className={styles.memberName}>{label}</span>

@@ -48,8 +48,9 @@ const PARTNER: Contact = {
   lastName: 'Carter',
   phone: '+14045550143',
 };
-/** No first or last name: the picker must render "Unnamed number" and send NO
- *  name, never the search field's formatted-phone display value. */
+/** No first or last name: the member row must render the SAME formatted phone
+ *  the chooser's option showed, and still send NO name on the wire. Those are
+ *  two different values from two different helpers - see the modal's rule 2. */
 const NAMELESS: Contact = { contactId: 'N1', type: 'unknown', phone: '+14040100002' };
 const PHONELESS: Contact = {
   contactId: 'X1',
@@ -247,11 +248,15 @@ describe('CreateRelayGroupModal - the picker', () => {
     expect(screen.getByRole('button', { name: 'Create group' })).toBeDisabled();
   });
 
-  it('sends NO name for a nameless pick and renders the dialog string "Unnamed number"', async () => {
+  it('labels a nameless pick with the phone the chooser showed, and still sends NO name', async () => {
     const { user } = renderIt();
     await pick(user, '4040100002', /010-0002/);
     const members = within(screen.getByRole('list', { name: 'Members' }));
-    expect(members.getByText('Unnamed number')).toBeInTheDocument();
+    // The row reads like the option that produced it. It must NOT read
+    // "Unnamed number": the dropdown had just shown this number, so denying it
+    // here removed the only identifying thing on screen (the original bug).
+    expect(members.getByText('(404) 010-0002')).toBeInTheDocument();
+    expect(members.queryByText('Unnamed number')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Create group' }));
     await screen.findByRole('button', { name: 'Open relay group' });
     const sent = sentMembers(previewRelayGroup);

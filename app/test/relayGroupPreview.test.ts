@@ -343,8 +343,12 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
     expect(res.body.duplicateOf).toBeDefined();
     expect(res.body.duplicateOf.partition).toBe('open');
     expect(res.body.duplicateOf.memberNames).toEqual(['Alice Adams', 'Bob Brown']);
-    // The wire rule: names travel, phones do not.
-    expect(JSON.stringify(res.body)).not.toContain(ALICE);
+    // The wire rule, NARROWED 2026-08-19: the OUTBOUND BODY carries names and
+    // never a phone. The staff-only chrome around it (duplicateOf.memberNames)
+    // may fall back to a number, so asserting over the whole payload would pin
+    // the wrong rule. app/test/rosterEdits.test.ts holds the nameless-roster
+    // guard that keeps this honest.
+    expect(res.body.body).not.toContain(ALICE);
   });
 
   it('does NOT warn for a superset roster', async () => {

@@ -3851,8 +3851,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.body.duplicateOf.conversationId).toBe(existing.conversationId);
     expect(res.body.duplicateOf.partition).toBe('open');
     expect(res.body.duplicateOf.memberNames).toEqual(['Tina Tenant', 'Pat Manager']);
-    // The wire rule holds on the route too: names travel, phones do not.
-    expect(JSON.stringify(res.body)).not.toContain(TENANT_PHONE);
+    // The wire rule holds on the route too, NARROWED 2026-08-19 to the half it
+    // actually is: the OUTBOUND BODY carries names and never a phone. Staff-only
+    // chrome in the same payload may fall back to a number.
+    expect(res.body.body).not.toContain(TENANT_PHONE);
   });
 
   it('preview-open does NOT carry duplicateOf for a merely OVERLAPPING live group', async () => {

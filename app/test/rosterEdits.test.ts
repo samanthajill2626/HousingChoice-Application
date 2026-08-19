@@ -392,16 +392,72 @@ describe('owner vs standalone parity', () => {
       if (outcome.ok) expect(outcome.preview.duplicateOf).toBeUndefined();
     });
 
-    it('the serialized preview contains NO phone numbers', async () => {
+    it('the OUTBOUND BODY contains NO phone numbers', async () => {
+      // NARROWED from the whole serialized payload (2026-08-19). The rule is not
+      // "no phone anywhere on the wire" - it is that OUTBOUND MESSAGE CONTENT,
+      // the text a tenant or landlord actually receives, carries names only,
+      // while STAFF-ONLY CHROME in the same payload (duplicateOf.memberNames)
+      // may carry a number so the navigator has somebody to act on. `body` is
+      // the outbound half; assert on it, not on the envelope around it.
       const preview = await buildStandaloneOpenPreview(
         { contacts: world.contactsRepo, conversations: world.conversationsRepo },
         members,
         QUIET_OFF,
         async () => DUP,
       );
-      const wire = JSON.stringify(preview);
-      expect(wire).not.toContain(ALICE);
-      expect(wire).not.toContain(BOB);
+      expect(preview.body).not.toContain(ALICE);
+      expect(preview.body).not.toContain(BOB);
+    });
+
+    it('the OUTBOUND BODY carries no phone EVEN WHEN EVERY MEMBER IS NAMELESS', async () => {
+      // THE GUARD FOR THIS WHOLE SLICE. Narrowing the assertion above is exactly
+      // the moment the protection could weaken silently, so this pins the case
+      // that now produces phone numbers EVERYWHERE ELSE in the payload: nobody
+      // on the roster has a resolvable name.
+      //
+      // composeIntroBody must still degrade to the neutral count phrasing rather
+      // than name anyone by number. This test fails the moment someone wires the
+      // staff-chrome phone fallback into `bodyMembers`.
+      const NO_NAME_1 = '+15550100077';
+      const NO_NAME_2 = '+15550100078';
+      const nameless: ConversationParticipant[] = [
+        { contactId: '', phone: NO_NAME_1 },
+        { contactId: '', phone: NO_NAME_2 },
+      ];
+      // What the detector really returns for a nameless roster now: numbers.
+      const numericDup = {
+        conversationId: 'conv-existing',
+        partition: 'open' as const,
+        memberNames: ['(555) 010-0077', '(555) 010-0078'],
+      };
+
+      const standalone = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        nameless,
+        QUIET_OFF,
+        async () => numericDup,
+      );
+      const { deps, owner } = ownerFixture(world, nameless);
+      const ownerOutcome = await buildOpenPreview(deps, owner, QUIET_OFF, async () => numericDup);
+      expect(ownerOutcome.ok).toBe(true);
+      if (!ownerOutcome.ok) return;
+
+      for (const body of [standalone.body, ownerOutcome.preview.body]) {
+        // Neither the raw E.164 nor the formatted rendering of it.
+        expect(body).not.toContain(NO_NAME_1);
+        expect(body).not.toContain(NO_NAME_2);
+        expect(body).not.toContain('(555) 010-0077');
+        expect(body).not.toContain('(555) 010-0078');
+        expect(body).not.toMatch(/\d{3}[ .-]?\d{4}/);
+        // Positive half: it says something, and what it says is the count.
+        expect(body).toContain('1 other person');
+      }
+
+      // NON-VACUOUS: the payload really does carry a number in its staff chrome,
+      // so the assertions above are ruling something out that is present two
+      // fields away - not passing because no phone existed anywhere.
+      expect(JSON.stringify(standalone)).toContain('(555) 010-0077');
+      expect(standalone.duplicateOf?.memberNames).toEqual(numericDup.memberNames);
     });
 
     it('buildAddPreview NEVER sets duplicateOf', async () => {

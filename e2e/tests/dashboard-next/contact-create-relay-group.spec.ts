@@ -380,9 +380,17 @@ test('Contact file: a second group for the same pair WARNS, and is still created
   await expect(warning).toContainText('already have an open relay group');
   await expect(warning).toContainText(TENANT_NAME);
   await expect(warning).toContainText(LANDLORD_NAME);
-  // It names people and never prints a phone number (doc section 9).
-  await expect(warning).not.toContainText(TENANT_PHONE);
-  await expect(warning).not.toContainText(LANDLORD_PHONE);
+  // NO "and never a phone" assertion here, deliberately (founder ruling
+  // 2026-08-19). This warning is STAFF-ONLY CHROME - it renders in the
+  // navigator's confirm dialog and is transmitted to nobody - so a member with
+  // no name now shows their formatted number rather than 'Unknown'. Both members
+  // in this fixture ARE named, so a not-toContainText here would only have been a
+  // vacuous restatement of the two assertions above.
+  //
+  // The rule that IS worth guarding lives on the OUTBOUND half, and it is pinned
+  // above at the intro-body assertions: what the tenant actually receives carries
+  // names and never a phone. See app/test/rosterEdits.test.ts for the
+  // nameless-roster version of that guard.
 
   // It links to THAT conversation, and opens it in a NEW TAB - following it in
   // this one would discard the half-built group the operator is standing in.

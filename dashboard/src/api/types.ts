@@ -1441,6 +1441,19 @@ export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by 
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
+/** Provider call lifecycle status, projected onto a `call` timeline entry. MIRROR
+ *  of the app's repos/messagesRepo.ts CallStatus (the dashboard cannot import from
+ *  app/, so keep the two in sync by hand). The machine is forward-only and nothing
+ *  transitions INTO `ringing`. */
+export type CallStatus =
+  | 'ringing'
+  | 'in-progress'
+  | 'completed'
+  | 'no-answer'
+  | 'busy'
+  | 'failed'
+  | 'canceled';
+
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'partner' | 'team_member' | 'unknown';
 

@@ -9,6 +9,43 @@ r5 fold in the findings against that deletion, including two BLOCKING ones - a
 self-contradiction in D6, and a preview parameter shape that could not be supplied. Adjudications at
 `.superpowers/design-review/adjudications.md`.
 
+## Amendment 2026-08-19: outbound content vs staff-only chrome
+
+This document states the PII rule in its blunt form - "a preview carries names,
+never phones" - and section 4 mandates the literal `'Unknown'` for a nameless
+participant. The founder corrected the line after the branch went green. The rule
+is NOT "preview vs not-preview":
+
+- OUTBOUND MESSAGE CONTENT - anything a tenant or landlord actually receives -
+  carries names and NEVER a phone. That is the intro body
+  (`jobs/relayFanOut.ts` `composeConnectionSentence` / `composeIntroBody`), which
+  drops a nameless member and falls back to a neutral count. UNCHANGED, and it
+  must stay unchanged.
+- STAFF-ONLY CHROME - a label or sentence only a navigator ever sees - falls back
+  to the member's FORMATTED phone. A navigator cannot act on "Unknown", and
+  silently dropping a nameless member loses a person from a staff-facing list.
+  This is already the app's convention elsewhere (`contactDisplayName`,
+  `dashboard/src/routes/contact/format.ts`).
+
+The relay chains avoided the fallback wholesale only because ONE resolved name fed
+BOTH consumers. They are now split: `lib/groupTitle.ts` `relayMemberLabels` serves
+the staff half for `relayThreadLabel`, `routes/contacts.ts` `otherMemberNames`, and
+`routes/poolNumbersAdmin.ts` `serverLabel`; `relayGroupDuplicates.toDuplicate`
+applies the same fallback. `'Unknown'` is GONE from that path, not merely unused:
+`rosterMembers` already keeps only phone-bearing participants, so every entry has a
+name or a number and the branch was unreachable.
+
+One rule rides along with the fallback: where a chain has a `placement_tag` rung,
+the TAG STILL WINS when NOBODY on the roster has a real name. An operator's
+deliberate label beats a list of raw digits, and without the carve-out the tag rung
+would be dead code for every group that has participants.
+
+Out of scope of the amendment, deliberately: `preview.recipients[].name` and
+`RosterPreviewRecipient` keep withholding the phone (`RosterMemberView` exposes only
+`phoneLast4`), because widening that roster wire type is a separate decision.
+
+Read sections 4, 5, and 9 below with this amendment in front of them.
+
 ## 1. The feature, in one paragraph
 
 When an operator is about to open a relay group whose members are exactly the members
@@ -126,7 +163,10 @@ not matter what about.
   guarantee is enforced at the producer (`buildAddPreview`), not here - see 5.
 
 `RosterPreview`'s header states the rule this design obeys: previews carry names,
-never phones (doc section 9).
+never phones (doc section 9). AMENDED 2026-08-19 - see the amendment at the top:
+the rule binds the preview's OUTBOUND BODY, not every field of the payload. The
+staff-only chrome beside it (`duplicateOf.memberNames`) falls back to a formatted
+phone.
 
 ### 2.5 Detection primitive
 
@@ -228,14 +268,17 @@ duplicate.
 ## 4. New module: `app/src/services/relayGroupDuplicates.ts`
 
 ```
-/** The existing group a proposed roster duplicates. Names only - NEVER phones. */
+/** The existing group a proposed roster duplicates. Staff-facing labels only -
+ *  see the 2026-08-19 amendment at the top of this document. */
 export interface DuplicateOpenGroup {
   conversationId: string;
   /** The PARTITION it was found in, not the row's own `status` - those can skew
    *  (section 7). */
   partition: 'open' | 'connecting';
-  /** Display names of the existing group's members. A participant with no name
-   *  contributes the literal 'Unknown' - never the phone. */
+  /** The existing group's members, for the warning copy: each one's display
+   *  name, else their FORMATTED phone. This is staff chrome - it renders only in
+   *  the navigator's confirm dialog and is transmitted to nobody. (r5 mandated
+   *  the literal 'Unknown' here; amended 2026-08-19.) */
   memberNames: string[];
 }
 
@@ -467,8 +510,12 @@ Unit (`app/test/`):
   when it resolves undefined; the builder passes the callback the DEDUPED phone set it
   actually previews (D2 - assert on the argument, since nothing else pins what is
   compared); and OMITTING the callback entirely yields a preview with no `duplicateOf`
-  and no throw, which is the degradation contract that lets a caller opt out. Plus: the
-  serialized payload contains NO phone numbers (assert on the JSON, not the object).
+  and no throw, which is the degradation contract that lets a caller opt out. Plus the
+  PII guard - AMENDED 2026-08-19: assert on `preview.body`, the outbound half, NOT on
+  the serialized payload, whose staff chrome may legitimately carry a formatted phone.
+  The narrowed assertion is paired with a case where EVERY member is nameless, since
+  that is the only world in which the body could acquire a number; without it, the
+  narrowing silently retires the guard.
 - `buildAddPreview` never sets `duplicateOf`, whatever it is given (5).
 
 Dashboard:

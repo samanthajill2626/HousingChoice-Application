@@ -35,6 +35,22 @@ the missing piece is one endpoint, not a whole surface.
 block in the "Reopen group?" modal. Nothing refuses here either - reopen stays
 allowed, exactly as the open path does.
 
+**The trap that will bite whoever builds this.** `findDuplicate` is an OPTIONAL
+trailing parameter on both open preview builders (`buildOpenPreview` and
+`buildStandaloneOpenPreview` in `app/src/services/rosterEdits.ts`), and omitting
+it means "no warning, no log" - the correct degradation for a feature that never
+refuses, but an invisible one. A reopen preview written WITHOUT that argument
+compiles, returns a payload byte-identical to a correct one against any world
+that has no duplicate, and silently never warns. No existing test turns red:
+`rosterEdits.test.ts` deliberately pins the omitted-callback silence as intended
+behavior, so the repo asserts the degradation rather than guarding it.
+
+So the new call site must be pinned by its OWN test - seed a live group holding
+exactly the closed group's roster, hit the reopen preview, and assert
+`duplicateOf` names it - the same way `toursApi.test.ts` and
+`placementsApi.test.ts` pin the two owner-scoped preview routes. Without that
+test, "we wired the warning into reopen" is unfalsifiable.
+
 One trap to avoid, recorded from the design review: an idempotent reopen RETRY
 must not match ITSELF. A group that is already open is in the scanned partition,
 so a naive check would warn the operator about the very group they are

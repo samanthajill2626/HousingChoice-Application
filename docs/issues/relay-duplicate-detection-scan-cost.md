@@ -21,6 +21,19 @@ so the ceiling is up to 40 Queries and 4,000 items per preview - and the
 NO-DUPLICATE case, which is the common one, ALWAYS pays the maximum, because a
 full walk is exactly what proves there is nothing there.
 
+**How OFTEN that ceiling is paid, which is the other half of the number.** Once
+per operator CLICK on a create-or-preview action - never on a page load. All
+three call sites are action handlers: the tour hub's [Open relay group]
+(`TourDetail.tsx:346-351`), the placement hub's
+(`PlacementDetail.tsx:306-311`), and the contact file's create-relay-group modal
+(`CreateRelayGroupModal.tsx:295-330`, which previews on the operator's own
+press). Nothing fetches a preview on mount, on render, on an SSE event, or on a
+poll, so the scan cannot be driven by traffic - only by a human deciding to open
+a group. That materially lowers the urgency: the worst case is 40 Queries on a
+screen the operator is already waiting on, at human click rate, not 40 Queries
+multiplied by page views. It also means the mitigation lever is the WALK, not a
+cache - there is no repeat-read pattern to cache against.
+
 This is accepted for now: opening a relay group is a rare, human-initiated
 action on relays-only partitions that are sparse today, and the cost is paid
 once per preview on a screen the operator is already waiting on. It is recorded

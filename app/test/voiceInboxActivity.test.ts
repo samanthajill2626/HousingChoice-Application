@@ -216,6 +216,70 @@ describe('inbound founder-bridge call -> inbox activity + unread', () => {
     expect(await inboxRow('c-inprog-bare')).toMatchObject({ channel: 'call', preview: 'Incoming call' });
   });
 
+  it('a D12 gate-refusal stamp (terminal canceled, NO outcome) keeps the inbox row it had while ringing', async () => {
+    // Spec 6.4: the three refusal branches move the stored call_status from
+    // 'ringing' to 'canceled', which is the exact value the derive arm keys on.
+    // Without the companion derive arm a row with a stored preview would stop
+    // deriving and fall back to the previous TEXT's body. All three stamp sites
+    // are OUTBOUND, so every case here passes direction: 'outbound' explicitly
+    // (the seed helper defaults to inbound).
+    const world = createFakeWorld();
+    const authed = (r: request.Test) => r.set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    const harness = makeWebhookHarness({ world });
+    const inboxRow = async (contactId: string) => {
+      const rows = (await authed(request(harness.app).get('/api/inbox'))).body.rows as Array<Record<string, unknown>>;
+      return rows.find((r) => r['contactId'] === contactId);
+    };
+    const seed = (n: string, phone: string, conv: Record<string, unknown>, msg: Record<string, unknown>) => {
+      world.contacts.push({ contactId: `c-${n}`, type: 'tenant', phone, firstName: n, lastName: 'X' });
+      world.conversations.set(`conv-${n}`, {
+        conversationId: `conv-${n}`,
+        participant_phone: phone,
+        status: 'open',
+        type: 'tenant_1to1',
+        ai_mode: 'manual',
+        participants: [{ contactId: `c-${n}`, phone }],
+        created_at: '2024-01-01T00:00:00.000Z',
+        last_activity_at: '2024-01-02T00:00:00.000Z',
+        ...conv,
+      } as ConversationItem);
+      world.messages.push({
+        conversationId: `conv-${n}`,
+        tsMsgId: '2024-01-02T00:00:00.000Z#m1',
+        provider_sid: `CA-${n}`,
+        type: 'call',
+        direction: 'inbound',
+        author: 'tenant',
+        delivery_status: 'delivered',
+        created_at: '2024-01-02T00:00:00.000Z',
+        ...msg,
+      } as never);
+    };
+    // (1) The regression case: a D12 stamp on a thread whose stored preview is
+    // the previous text. Reads exactly as the same row read while 'ringing'.
+    seed('d12-stored', '+15550199207', { last_message_preview: 'can we tour saturday?' }, {
+      direction: 'outbound',
+      call_status: 'canceled',
+    });
+    // (2) CHARACTERIZATION - cannot be red. With no stored preview the second
+    // disjunct (fallbackPreview === '') already fired before this change; this
+    // pins that the new disjunct did not disturb it.
+    seed('d12-bare', '+15550199208', {}, { direction: 'outbound', call_status: 'canceled' });
+    // (3) CHARACTERIZATION - cannot be red. It is the regression net for the
+    // BARE-disjunct mistake: a 'canceled' row that DOES carry an outcome (the
+    // shape left behind when stampCallActivity fails and swallows it) must keep
+    // showing its stored preview and must NOT start deriving.
+    seed('cancel-outcome', '+15550199209', { last_message_preview: 'can we tour saturday?' }, {
+      direction: 'outbound',
+      call_status: 'canceled',
+      call_outcome: 'missed',
+    });
+
+    expect(await inboxRow('c-d12-stored')).toMatchObject({ channel: 'call', preview: 'Outgoing call' });
+    expect(await inboxRow('c-d12-bare')).toMatchObject({ channel: 'call', preview: 'Outgoing call' });
+    expect(await inboxRow('c-cancel-outcome')).toMatchObject({ channel: 'call', preview: 'can we tour saturday?' });
+  });
+
   it('a redelivered inbound webhook (dedupe) does not re-emit', async () => {
     const world = createFakeWorld();
     const { app } = await ringBridge(world);

@@ -1043,6 +1043,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // The conversation is gone / has no target — refuse cleanly (never a leak,
       // never a 5xx). The navigator hears a brief note + hangup.
       log.warn({ callSid: parentCallSid }, 'outbound bridge: target unresolved from conversationId — hanging up');
+      // D12 (spec 6.3): no <Dial> runs on this path, so no <Dial action>
+      // summary will ever arrive to close the call out. Stamp a TERMINAL
+      // call_status with NO call_outcome - we know the call did not complete,
+      // we do not know an outcome, and inventing one is the false attribution
+      // this exists to prevent. Best-effort: the leg must end even if the write
+      // fails. The row may not exist yet (originateCall appends best-effort and
+      // may have failed) - updateCallStatus is a no-op returning false there,
+      // never an error.
+      if (parentCallSid.length > 0) {
+        try {
+          await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+        } catch (err) {
+          log.warn(
+            { err, callSid: parentCallSid },
+            'outbound bridge: stamping the refused call canceled failed (best-effort) - continuing',
+          );
+        }
+      }
       sendTwiml(
         res,
         maskedSayHangup(resolveMessage('voice.outbound_unavailable')),
@@ -1164,6 +1182,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           { callSid: parentCallSid, outbound: true },
           'outbound whisper gate: target/business number unresolved — hanging up',
         );
+        // D12 (spec 6.3): the navigator answered and pressed 1, then the system
+        // refused to dial. No <Dial> runs, so no Dial summary ever closes this
+        // call out - stamp a TERMINAL call_status with NO call_outcome (see the
+        // /outbound-bridge branch above). Best-effort; never breaks the hangup.
+        if (parentCallSid.length > 0) {
+          try {
+            await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
+            );
+          }
+        }
         sendTwiml(res, vr);
         return;
       }
@@ -1171,14 +1203,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // the originate service refused voice_opt_out pre-dial, but staff can set
       // the flag in the seconds between originate and this press-1 — the flag
       // was just re-read from the contact, so honor it and hang up INSTEAD of
-      // dialing. No status regression concerns: the leg simply ends (the status
-      // callback stamps the terminal outcome). IDs-only log — never a phone.
+      // dialing. NO status callback ever arrives on this path - the leg simply
+      // ends without a <Dial>, so nothing else would ever close the call out;
+      // the D12 stamp below is what does. IDs-only log - never a phone.
       if (target.optedOut) {
         vr.hangup();
         log.info(
           { callSid: parentCallSid, outbound: true },
           'outbound whisper gate: target opted out mid-ring (voice_opt_out) — hanging up, not dialing',
         );
+        // D12 (spec 6.3): TERMINAL call_status, NO call_outcome. On this branch
+        // in particular an invented outcome would read as staff negligence when
+        // the truth is that the contact is opted out of voice. Best-effort;
+        // never breaks the hangup.
+        if (parentCallSid.length > 0) {
+          try {
+            await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
+            );
+          }
+        }
         sendTwiml(res, vr);
         return;
       }

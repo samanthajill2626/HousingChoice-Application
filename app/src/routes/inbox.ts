@@ -500,7 +500,22 @@ function deriveLatest(
   // any summary (docs/issues/voice-caller-abandon-no-dial-summary.md), where
   // the stored preview is empty or the previous TEXT's body under a "Call"
   // chip - or (b) no preview was ever stored (a call that finished before this
-  // shipped). Never for a row without a known call_status (the Quo importer
+  // shipped) - or (c) the row carries a TERMINAL call_status with NO
+  // call_outcome, which is the signature of a gate refusal stamp (spec 6.3 D12,
+  // written at voice.ts's three outbound refusal branches: the /outbound-bridge
+  // unresolved target, the whisper gate's unresolved target/business number,
+  // and the DNC re-check). Those calls never dial, so no Dial summary ever
+  // stamps a preview; before D12 they sat at 'ringing' and derived through (a),
+  // and clause (c) keeps that same row. Raw absence of call_outcome is the test
+  // (NOT isCallOutcome): an imported row's out-of-union outcome is not a D12
+  // stamp, and a 'canceled' row that DOES carry an outcome - reachable when
+  // stampCallActivity fails and swallows it - must keep its stored preview.
+  // The strings coincide because callPreview's base case and its ringing arm
+  // are both "Outgoing call" FOR OUTBOUND, which is what all three D12 sites
+  // are; they are NOT the same arm. An inbound terminal-with-no-outcome writer
+  // would derive "Call" here where the ringing row derived "Incoming call", so
+  // re-check this if one is ever added. Never for a row without a known
+  // call_status (the Quo importer
   // writes none, and its call_outcome values are outside the union): a stored
   // preview or blank is the honest answer there, not a synthetic live ring.
   // Never overrides a stored terminal preview - the outbound preview is
@@ -517,7 +532,11 @@ function deriveLatest(
   const preview =
     typeof latest.body === 'string' && latest.body.length > 0
       ? latest.body
-      : channel === 'call' && callStatus !== undefined && (callStatus === 'ringing' || fallbackPreview === '')
+      : channel === 'call' &&
+          callStatus !== undefined &&
+          (callStatus === 'ringing' ||
+            (callStatus === 'canceled' && latest.call_outcome === undefined) ||
+            fallbackPreview === '')
         ? callPreview({
             direction,
             callStatus: callStatus === 'in-progress' ? 'ringing' : callStatus,

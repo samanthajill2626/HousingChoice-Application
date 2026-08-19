@@ -29,7 +29,7 @@ import { listThreads } from '../fixtures/fakeTwilio.js';
 // The distinctive no_show_checkin substring (app/src/messages/catalog.ts,
 // 'tour.no_show_checkin') - unique to this rung, so a body match cleanly
 // identifies the check-in among the other four reminder bodies.
-const CHECKIN_PHRASE = 'may have missed your tour';
+const CHECKIN_PHRASE = 'Do you need to reschedule?';
 
 test('no_show_checkin is not auto-sent; staff send it manually with prefilled copy', async ({
   page,

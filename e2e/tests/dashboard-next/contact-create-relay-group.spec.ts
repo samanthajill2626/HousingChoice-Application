@@ -71,9 +71,11 @@ const LANDLORD_PHONE = '+15550100002';
 const CONNECTING_NOTICE =
   'This group is still getting its number. The intro text has not been sent yet; it goes out once the number is ready.';
 
-// The relay.intro trailing opt-out footer - a stable substring that identifies
-// the auto-intro leg in the outbox (relay-open-stop.spec.ts:39).
-const INTRO_NEEDLE = 'Reply STOP to opt out';
+// A stable substring that identifies the auto-intro leg in the outbox. It used
+// to be the trailing "Reply STOP to opt out." footer; the founder decision of
+// 2026-08-18 removed that line from relay.intro, so the needle now keys off the
+// intro's own body copy instead (relay-open-stop.spec.ts uses the same one).
+const INTRO_NEEDLE = 'Use this group text';
 
 /** Reseed the lane with the LEAN profile (the byte-stable e2e world). */
 async function reseedLean(request: APIRequestContext): Promise<void> {

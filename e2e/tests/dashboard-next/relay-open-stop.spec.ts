@@ -34,9 +34,13 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 // than that a reply carried it.
 const STOP_COPY = MESSAGE_CATALOG['keyword.stop'].default;
 const WELCOME_COPY = MESSAGE_CATALOG['welcome.sms'].default;
-// The relay.intro trailing opt-out footer: the settle barrier for the create-time
-// intro fan-out (so the negative baseline excludes it). Substring of relay.intro.
-const INTRO_NEEDLE = 'Reply STOP to opt out';
+// The settle barrier for the create-time intro fan-out (so the negative baseline
+// excludes it). Substring of relay.intro - previously its trailing "Reply STOP to
+// opt out." footer, which the founder decision of 2026-08-18 removed from that
+// template. NOTE this spec still exercises real STOP HANDLING (an inbound STOP
+// suppresses relay legs, START resumes them); only the intro's printed footer
+// changed, not the keyword behaviour.
+const INTRO_NEEDLE = 'Use this group text';
 
 // --- Per-run-unique phones + inbound SIDs ------------------------------------
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool

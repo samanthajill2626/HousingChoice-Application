@@ -627,22 +627,25 @@ test.describe('A2P §8.6 — first-contact template opt-out floor', () => {
     const login = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'founder@example.com' } });
     expect(login.ok()).toBeTruthy();
 
-    // missedCallAutoText WITHOUT "STOP" → rejected.
-    const badMissed = await page.request.put(`${NEXT}/api/settings`, {
+    // FOUNDER DECISION 2026-08-18: the floor was LIFTED for missedCallAutoText
+    // only, so wording without a STOP line is now ACCEPTED on that field. This is
+    // the one deliberate hole in the §8.6 floor; engineering advised against it
+    // and was overruled (see FOUNDER_MISSED_CALL_AUTOTEXT in lib/smsCompliance.ts).
+    const missedNoStop = await page.request.put(`${NEXT}/api/settings`, {
       data: { missedCallAutoText: 'Sorry we missed your call! Text us back.' },
     });
-    expect(badMissed.status()).toBe(400);
-    expect((await badMissed.json()).error).toBe('missing_opt_out_language');
+    expect(missedNoStop.ok()).toBeTruthy();
 
-    // welcomeText WITHOUT "STOP" → rejected too.
+    // welcomeText WITHOUT "STOP" → still rejected. The asymmetry is the point:
+    // if this ever starts passing, the floor has been removed wholesale.
     const badWelcome = await page.request.put(`${NEXT}/api/settings`, {
       data: { welcomeText: 'Welcome! Come find a home with us.' },
     });
     expect(badWelcome.status()).toBe(400);
     expect((await badWelcome.json()).error).toBe('missing_opt_out_language');
 
-    // A template that KEEPS the opt-out line is accepted (control) — then restore a
-    // compliant default so we don't leave a mutated template for cross-spec reads.
+    // Restore a compliant missed-call template so we do not leave a mutated one
+    // for cross-spec reads (this suite shares a lane).
     const good = await page.request.put(`${NEXT}/api/settings`, {
       data: { missedCallAutoText: `${SMS_BRAND_NAME}: Sorry we missed your call! Reply STOP to opt out.` },
     });

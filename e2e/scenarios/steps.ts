@@ -184,12 +184,15 @@ export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): 
  *  "did not send" is always asserted against a fragment that is stable across
  *  times and addresses AND present in both the addressed and `_no_address`
  *  variants. (tour-no-show-checkin.spec.ts already uses this idiom.) */
+// Re-picked 2026-08-18 for the founder's rewritten copy. Each fragment is still
+// chosen to appear in BOTH the addressed and `_no_address` variant of its rung,
+// which is what keeps an absence assertion from passing vacuously.
 export const REMINDER_BODY_MARKERS: Record<ReminderKind, string> = {
-  confirmation: 'Tour confirmed',
-  day_before: 'is tomorrow,',
-  morning_of: 'is today at',
-  en_route: "Text us when you're on the way!",
-  no_show_checkin: 'may have missed your tour',
+  confirmation: 'your tour is set for',
+  day_before: 'confirming your tour tomorrow at',
+  morning_of: 'excited for you to see',
+  en_route: "let me know when you're on the way",
+  no_show_checkin: 'Do you need to reschedule?',
 };
 
 /** The staff-facing rung labels the Reminders panel renders (verbatim mirror of
@@ -246,11 +249,12 @@ export function tourSchedule(hoursFromNow = 48): TourTimes {
  * 14:00 local. Plain tourSchedule() books at "now + 48h", which inherits the
  * suite's time-of-day - run between 00:00 and 08:00 local, that tour STARTS
  * before 08:00, so its morning_of (08:00 tour-day, org-local) lands at/after
- * the start and is born SKIPPED (past_event); at exactly 10:00, en_route lands
- * ON the morning_of slot and supersedes it. That made the full-ladder
- * assertion a 00:00-08:00 wall-clock flake (root-caused 2026-08-04). 14:00
- * keeps every rung distinct and pre-start: day_before 14:00 D-1 < morning_of
- * 08:00 D < en_route 12:00 D < start. Use this whenever a spec asserts the
+ * the start and is born SKIPPED (past_event); at exactly 09:00 (10:00 before
+ * the 2026-08-18 move to a 1h en_route), en_route lands ON the morning_of slot
+ * and supersedes it. That made the full-ladder assertion a 00:00-08:00
+ * wall-clock flake (root-caused 2026-08-04). 14:00 keeps every rung distinct
+ * and pre-start: day_before 14:00 D-1 < morning_of 08:00 D < en_route 13:00 D
+ * < start. Use this whenever a spec asserts the
  * WHOLE ladder; keep plain tourSchedule() for quiet-hours flows that need
  * dueAts anchored to the wall clock's own time-of-day.
  */
@@ -268,7 +272,9 @@ function timesFor(sched: Date): TourTimes {
   return {
     scheduledAtLocal,
     dayBefore: new Date(t - 24 * 3_600_000).toISOString(),
-    enRoute: new Date(t - 2 * 3_600_000).toISOString(),
+    // ONE hour before (founder decision 2026-08-18, was two) - mirrors
+    // computeDueAt in app/src/jobs/tourReminders.ts. Move both together.
+    enRoute: new Date(t - 1 * 3_600_000).toISOString(),
     noShowCheckin: new Date(t + 30 * 60_000).toISOString(),
   };
 }

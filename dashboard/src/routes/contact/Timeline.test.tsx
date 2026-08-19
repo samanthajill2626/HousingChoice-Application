@@ -1704,7 +1704,9 @@ describe('Timeline call cards - direction', () => {
     const name = card.getAttribute('aria-label') ?? '';
 
     expect(name).toContain('Outgoing call');
-    expect(name).toContain('11:00a');
+    // SECONDS, not minutes: minute precision is not unique (see the redial case
+    // below), and the VISIBLE clock stays at minutes regardless.
+    expect(name).toContain('11:00:00a');
     // The outcome flips with the ringing/in-progress clauses, so an accessible
     // name carrying it would make any handle built on it race the staleness
     // timer. It stays assertable as the chip's own text instead.
@@ -1751,8 +1753,10 @@ describe('Timeline call cards - direction', () => {
     });
     const card = screen.getByRole('group', { name: /Outgoing call/ });
     // A real control, not a click handler on the card surface - and not the card
-    // itself as a button, which holds an audio player and a <details>.
-    const button = screen.getByRole('button', { name: 'Details' });
+    // itself as a button, which holds an audio player and a <details>. Its
+    // VISIBLE text is "Details"; its accessible name identifies its own card.
+    const button = screen.getByRole('button', { name: /^Details for Outgoing call/ });
+    expect(button.textContent).toBe('Details');
     expect(button).toHaveAttribute('aria-expanded', 'false');
     // jsdom loads no stylesheet here (vitest css:false), so the `display:none`
     // half is not observable - the reveal STATE class on the CARD is what
@@ -1778,15 +1782,37 @@ describe('Timeline call cards - direction', () => {
         }),
       ],
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Details for Incoming call/ }));
     expect(screen.getByText('from (404) 010-0007 - 11:00a')).toBeVisible();
   });
 
   it('degrades the detail line to the time alone on a MASKED call (no party_phone on the wire)', () => {
     renderTimeline({ items: [callItem({ id: 'c-masked', direction: 'inbound', call_outcome: 'missed' })] });
     const card = screen.getByRole('group', { name: /Incoming call/ });
-    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Details for Incoming call/ }));
     expect(card.querySelector('[class*="cardMeta"]')?.textContent).toBe('11:00a');
+  });
+
+  // A REDIAL after a miss: two inbound calls inside one minute. At minute
+  // precision both cards, and both reveal buttons, carried the same accessible
+  // name - ambiguous to a screen-reader user and a Playwright strict-mode
+  // violation on the very locator the selectors doc blesses.
+  it('gives two calls in the SAME minute distinct accessible names (card and reveal button)', () => {
+    renderTimeline({
+      items: [
+        callItem({ id: 'c-a', direction: 'inbound', at: '2026-06-08T11:00:07', call_outcome: 'missed' }),
+        callItem({ id: 'c-b', direction: 'inbound', at: '2026-06-08T11:00:41', call_outcome: 'answered' }),
+      ],
+    });
+    const names = screen
+      .getAllByRole('group', { name: /^Incoming call/ })
+      .map((el) => el.getAttribute('aria-label'));
+    expect(new Set(names)).toEqual(new Set(['Incoming call - 11:00:07a', 'Incoming call - 11:00:41a']));
+
+    const buttonNames = screen
+      .getAllByRole('button', { name: /^Details for Incoming call/ })
+      .map((el) => el.getAttribute('aria-label'));
+    expect(new Set(buttonNames).size).toBe(2);
   });
 });
 
@@ -1859,6 +1885,31 @@ describe('Timeline call card - staleness timer', () => {
     // The effect advanced the card's clock itself rather than merely skipping the
     // schedule - skipping would have stranded it on "Ringing..." with no
     // correction path, since `now` only ever advances there.
+    expect(screen.getByText('No team answer')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still settles when its timer fires MARGINALLY EARLY (a backwards clock step)', () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    const t0 = Date.now();
+    render(ui([ringingAt(t0)]));
+    expect(screen.getByText('Ringing...')).toBeInTheDocument();
+
+    // The wall clock steps BACK 10 seconds. Fake timers keep a pending timeout
+    // relative to the new system time, so it now comes due at t0 + 80s - ten
+    // seconds BEFORE the label's own expiry at t0 + 90s. An early-firing timeout
+    // produces the same shape.
+    vi.setSystemTime(t0 - 10_000);
+    act(() => {
+      vi.advanceTimersByTime(90_000);
+    });
+
+    // A bare Date.now() in the callback would write t0 + 80s; the presenter would
+    // return the SAME staleAt, the [staleAt] dependency would not change, the
+    // effect would not re-run, and no replacement timer would ever be scheduled -
+    // the card would sit on "Ringing..." forever. The callback advances to at
+    // least the boundary instead, so the next render takes the stale branch.
     expect(screen.getByText('No team answer')).toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(0);
   });

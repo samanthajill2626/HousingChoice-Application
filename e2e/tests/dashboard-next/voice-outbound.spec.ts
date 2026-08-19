@@ -597,6 +597,18 @@ test('an outbound and an inbound call on one thread land on opposite sides of th
   expect(inBox, 'inbound call card has no box').not.toBeNull();
   expect(outBox!.x).toBeGreaterThan(inBox!.x);
   expect(outBox!.x + outBox!.width).toBeGreaterThan(inBox!.x + inBox!.width);
+
+  // The click-to-reveal detail line, proved in a REAL browser. The unit test
+  // cannot do this: vitest runs with `css: false`, so jsdom loads no stylesheet
+  // and toBeVisible() there cannot see the `display: none` that comes from the
+  // CSS module - a reveal selector rooted on the wrong ancestor would still pass
+  // it. Here the stylesheet is actually loaded, so hidden-then-visible is real.
+  // Scoped to the card: the same page carries a `Details` card HEADING, and
+  // every call card offers a reveal button of its own.
+  const detail = outCard.getByText(/^to .+ - /);
+  await expect(detail).toBeHidden();
+  await outCard.getByRole('button', { name: 'Details' }).click();
+  await expect(detail).toBeVisible();
 });
 
 test('an outbound call whose terminal Dial summary is no-answer reads "No answer" on its card', async ({

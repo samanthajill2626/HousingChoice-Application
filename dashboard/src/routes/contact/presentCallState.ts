@@ -62,9 +62,12 @@ export interface CallStatePresentation {
  * How long a `ringing` row may still read "Ringing...".
  *
  * Derivation, so a reader knows what invalidates it: Twilio's default ring is 60
- * seconds and we pass no `timeout` on the originate, plus the whisper `<Gather>`
- * timeout of 8 seconds. 90s is that 68-second worst case with headroom. If either
- * of those two numbers changes, this one is wrong.
+ * seconds and we pass no `timeout` on the originate; then the whisper `<Say>`
+ * plays on the answered leg BEFORE the `<Gather>`'s 8-second silence timer even
+ * starts, so the realistic worst case is 60s + the whisper (a few seconds of
+ * speech) + 8s, i.e. roughly 73-78s rather than a flat 68s. 90s clears that with
+ * headroom, but not much - if the ring timeout, the `<Gather>` timeout, or the
+ * length of the whisper copy changes, re-derive this number.
  */
 export const RINGING_STALE_MS = 90_000;
 

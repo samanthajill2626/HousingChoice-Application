@@ -23,7 +23,14 @@ import type {
 import { ApiError, confirmMmsMedia, presignMmsMedia, uploadToPresignedPost } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
-import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
+import {
+  dayKey,
+  formatDayDivider,
+  formatDuration,
+  formatPhone,
+  formatTime,
+  formatTimeWithSeconds,
+} from './format.js';
 import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
 import type { DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
@@ -775,11 +782,23 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
     }
     const delay = staleAt - fresh;
     if (delay > MAX_TIMEOUT_MS) return undefined;
-    const timer = setTimeout(() => setNow(Date.now()), delay);
+    // Math.max, NOT a bare Date.now(): a timeout can fire marginally EARLY (an
+    // early-firing timer, or the clock stepping backwards). A bare read would
+    // then still be before staleAt, the presenter would return the SAME staleAt,
+    // the [staleAt] dependency would not change, this effect would not re-run,
+    // and no replacement timer would ever be scheduled - stranding the card on
+    // "Ringing..." forever. Advancing to at least the boundary makes the next
+    // render take the stale branch. `now` deliberately stays OUT of the
+    // dependency list: adding it would reintroduce the reschedule spin the three
+    // constraints above exist to make unrepresentable.
+    const timer = setTimeout(() => setNow(Math.max(Date.now(), staleAt)), delay);
     return () => clearTimeout(timer);
   }, [staleAt]);
 
   const time = formatTime(call.at);
+  // SECONDS precision for the accessible names ONLY. The visible clock stays at
+  // minutes; two calls inside one minute would otherwise carry identical names.
+  const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
   const duration = formatDuration(call.call_duration);
   const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
@@ -798,7 +817,9 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       // outcome. The outcome flips with the ringing / in-progress clauses, so a
       // handle built on it would inherit exactly the staleness race this design
       // exists to escape. The outcome stays assertable as the chip's own text.
-      aria-label={`${directionWord} - ${time}`}
+      // The time is carried to SECONDS so a redial inside the same minute does
+      // not produce two cards with one name.
+      aria-label={`${directionWord} - ${nameTime}`}
     >
       <div className={styles.callSummary}>
         <span className={styles.callArrow} aria-hidden="true">
@@ -815,6 +836,10 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
             type="button"
             className={styles.callReveal}
             aria-expanded={revealed}
+            // The VISIBLE text stays "Details"; the accessible name identifies
+            // which card the control belongs to. A contact with call history
+            // otherwise hands a screen-reader user N buttons all named "Details".
+            aria-label={`Details for ${directionWord} - ${nameTime}`}
             onClick={() => setRevealed((r) => !r)}
           >
             Details

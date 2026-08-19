@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { listThreads } from '../../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Matching entry points (:5174) - the two ways a navigator starts a "send a
 // property to tenants" flow, end to end against the real backend:
@@ -23,7 +24,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Create a consenting tenant via the API (camelCase voucherSize so the resolver

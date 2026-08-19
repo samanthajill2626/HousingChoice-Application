@@ -42,6 +42,7 @@ import { placeCall, listCalls } from '../../fixtures/fakeVoice.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { uniqueVoicePhone, callTimeline } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -61,7 +62,7 @@ async function devLogin(page: Page): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Create a fresh tenant contact via the authenticated API; returns its id + phone.

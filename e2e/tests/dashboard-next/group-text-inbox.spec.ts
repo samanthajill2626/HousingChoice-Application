@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { registerParty, sendGroupAsParty } from '../../fixtures/fakeTwilio.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 7 - the inbox surfaces: the Groups filter, its own cursor, mark-read,
 // the deep link, and the unread walk.
@@ -26,7 +27,7 @@ const apiHeaders = { 'x-origin-verify': ORIGIN_SECRET };
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('the Groups filter is a real deep link, pages on its own cursor, and refuses a foreign one', async ({

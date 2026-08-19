@@ -8,6 +8,7 @@ import {
   APP_NUMBER,
 } from '../../fixtures/fakeTwilio.js';
 import { callTimeline, uniqueVoicePhone, verifyCell } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // A2P / SMS compliance (design §8) — end-to-end coverage of the front-of-lifecycle
 // consent hardening shipped in Phases 1–3, against the real hermetic stack (:5174
@@ -46,7 +47,7 @@ const OPT_IN_KEYWORDS = ['START', 'JOIN', 'HOME', 'YES', 'UNSTOP'];
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 let phoneSeq = 0;

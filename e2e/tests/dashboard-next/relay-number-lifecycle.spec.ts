@@ -5,6 +5,7 @@ import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the final "group is closed" copy (no drift).
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 import { Scenario, freshTenant, freshLandlord, tourSchedule } from '../../scenarios/steps.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay NUMBER LIFECYCLE end-to-end proofs (design section 8). Drives the real
 // dashboard + API + fake-phones against the hermetic lane and proves the burn-
@@ -79,7 +80,7 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The bodies of a conversation's transcript (GET /api/conversations/:id/messages). */

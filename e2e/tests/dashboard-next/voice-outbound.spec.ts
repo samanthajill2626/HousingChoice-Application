@@ -55,6 +55,7 @@ import {
   legPhones,
   uniqueVoicePhone as uniquePhone,
 } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // The app's real address (not the dashboard proxy — webhooks go direct to the app).
 const APP_URL = process.env['E2E_APP_URL'] ?? 'http://127.0.0.1:8080';
@@ -129,7 +130,7 @@ async function devLoginAs(page: Page, email: string): Promise<{ userId: string }
   expect(res.ok()).toBeTruthy();
   const body = (await res.json()) as { userId: string };
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
   return { userId: body.userId };
 }
 
@@ -529,7 +530,7 @@ test('§flex settings voice: human-format cell `404-982-4978` normalizes on blur
   const loginRes = await api.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(loginRes.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 
   // Navigate to Settings ▸ Voice.
   await page.goto(`${NEXT}/settings/voice`);

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Tours e2e spec (:5174) — covers the three scenarios from the task brief:
 //
@@ -45,7 +46,7 @@ async function devLogin(page: Page): Promise<void> {
   // `exact: true` — match ONLY the <h1>Today</h1> board title, never the
   // <h2>Tours today</h2> section heading (both contain the substring "today", so a
   // non-exact match trips Playwright strict mode once that section renders).
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 // Reseed once before the entire describe block so every test starts clean.
@@ -182,7 +183,7 @@ test.describe('Tours page', () => {
     // `exact: true` matches ONLY the <h1>Today</h1> title, not the <h2>Tours
     // today</h2> section heading that now renders (both contain "today").
     await page.goto(`${NEXT}/`);
-    await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+    await expectTodayReady(page);
 
     // The "Tours today" section must exist and contain a link to this tour.
     const toursSection = page.getByRole('list', { name: 'Tours today' });
@@ -260,7 +261,7 @@ test.describe('Tours page', () => {
     // scheduled-tour test leaves visible (its noon tour persists via the shared
     // once-per-file reseed).
     await page.goto(`${NEXT}/`);
-    await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+    await expectTodayReady(page);
 
     // Either the "Tours today" section is absent entirely, or it doesn't contain
     // a link to the requested tour.

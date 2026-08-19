@@ -1,6 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { extractionTick, sendExtractSms, planTranscribedCall } from '../../fixtures/extraction.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Voice-extraction end-to-end against the hermetic stack, reusing the DETERMINISTIC
 // FAKE extraction driver (EXTRACTION_DRIVER=fake). The full pipeline runs for real -
@@ -30,7 +31,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 let seq = 0;

@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Property Activity card (:5174) against the real backend — proves the unit
 // audit trail round-trip: a real edit (PATCH /api/units/:id) writes a
@@ -16,7 +17,7 @@ const UNIT = 'unit-0002'; // 88 Sycamore St, Decatur
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Open the ⋯ → Edit property dialog, set Utilities, save, and wait for close. */

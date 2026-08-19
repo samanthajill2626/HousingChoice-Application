@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { sendAsParty } from '../../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Inbox unread ↔ contact-page "mark read on view" (the Slack/iMessage model).
 // Proves the bug fix end-to-end: viewing a contact's page (while the tab is
@@ -11,7 +12,7 @@ const TASHA = '+15550100001';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('opening a contact page clears its Inbox unread', async ({ page, request }) => {

@@ -21,6 +21,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { placeCall } from '../../fixtures/fakeVoice.js';
 import { uniqueVoicePhone, callTimeline, NEXT } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 /** The app's own business number in the e2e stack -> the founder-bridge line. */
 const BUSINESS = '+15550009999';
@@ -29,7 +30,7 @@ async function devLogin(page: Page): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 async function createContact(api: APIRequestContext): Promise<{ contactId: string; phone: string }> {

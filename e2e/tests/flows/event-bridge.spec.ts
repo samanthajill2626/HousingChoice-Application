@@ -2,6 +2,7 @@ import { hkdfSync } from 'node:crypto';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { planTranscribedCall } from '../../fixtures/extraction.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Cross-process event bridge, end-to-end against the hermetic stack (spec
 // docs/superpowers/specs/2026-07-20-event-bridge-design.md). The worker process
@@ -38,7 +39,7 @@ const BRIDGE_TOKEN = Buffer.from(
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 let seq = 0;

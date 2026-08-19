@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import { registerParty, sendGroupAsParty, listConversations } from '../../fixtures/fakeTwilio.js';
 import { minutesFromNow, readLogTail, tickGuardrails } from '../../fixtures/groupText.js';
 import { conversationIdForGroup, contactIdForPhone } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 3 - STOP on a group text, scoped to the person who sent it.
 //
@@ -26,7 +27,7 @@ const MONIQUE_SECOND = '+15550100105';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 async function reseed(request: APIRequestContext, profile: 'lean' | 'full'): Promise<void> {

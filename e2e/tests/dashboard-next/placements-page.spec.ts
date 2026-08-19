@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Placements page (:5174) against the real status-model backend. The kanban
 // board is gone: the page is a phase FILTER (rail on desktop / chips on mobile)
@@ -11,7 +12,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLoginAndReset(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
   const res = await page.request.post(`${NEXT}/api/placements/placement-0001/transition`, {
     data: { toStage: 'awaiting_inspection', source: 'manual' },
   });

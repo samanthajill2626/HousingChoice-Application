@@ -30,11 +30,14 @@
 //      The member row's LABEL is the opposite call: it uses that same helper on
 //      purpose, so a row reads exactly like the dropdown option that produced
 //      it. Labelling a nameless pick "Unnamed number" - the confirm dialog's
-//      string - was the original rule and it was WRONG: the chooser had just
+//      old string - was the original rule and it was WRONG: the chooser had just
 //      shown the number, so the row denied the operator the one identifying
-//      thing on screen. The dialog still says "Unnamed number" (it is shared
-//      with tour/placement and prints no phone numbers); that difference is
-//      visible in the same glance and is accepted.
+//      thing on screen. The dialog has since been brought in line rather than
+//      left to differ: its recipient rows now read "Unnamed number ...1234" from
+//      the server-composed label (founder ruling 2026-08-19), so the picker's
+//      full number and the dialog's last four identify the same person. Neither
+//      reaches the outbound intro, which still sends a nameless member with NO
+//      name at all.
 //      builtName() and rowLabel() are the two functions. Never swap them.
 //
 // A create that answers `connecting` has NO number and sent NO intro yet, so

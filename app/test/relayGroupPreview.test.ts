@@ -208,20 +208,26 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
     expect(res.body.body).toBe(composeIntroBody(['Alice Adams', 'Bob Brown']));
   });
 
-  it('names a bare-phone member structurally and never puts a phone in the body', async () => {
+  it('labels a bare-phone member by their last four, and never puts a phone in the body', async () => {
     const { app } = makeWebhookHarness({ world });
     const res = await preview(app, {
       members: [{ phone: ALICE, contactId: 'c-alice' }, { phone: '+15550100777' }],
     });
 
     expect(res.status).toBe(200);
-    // No contact, no name - the dialog renders 'Unnamed number' from the
-    // absent name; the preview itself carries no phone anywhere.
+    // No contact, no name -> the STAFF-facing recipient row carries the last four
+    // so a navigator can tell two nameless members apart (founder ruling
+    // 2026-08-19). This row is dashboard-only chrome.
     expect(res.body.recipients).toEqual([
       { name: 'Alice Adams', reachability: 'reachable' },
-      { reachability: 'reachable' },
+      { name: 'Unnamed number ...0777', reachability: 'reachable' },
     ]);
+    // THE GUARD THAT MATTERS, and it did not move: the FULL number appears
+    // nowhere on the payload, and the BODY - the only part a tenant or landlord
+    // ever receives - carries no digits from it at all.
+    expect(JSON.stringify(res.body)).not.toContain('+15550100777');
     expect(JSON.stringify(res.body)).not.toContain('5550100777');
+    expect(res.body.body).not.toContain('0777');
   });
 
   it('uses a client-supplied name VERBATIM, never a recomputed one', async () => {

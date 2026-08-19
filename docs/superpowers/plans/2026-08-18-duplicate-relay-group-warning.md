@@ -1277,12 +1277,12 @@ Everything below was read in that file. Do not re-derive it, and do not modify
 | `TENANT_ID`, `TENANT_NAME`, `TENANT_PHONE`, `LANDLORD_NAME`, `LANDLORD_PHONE` | :64-68 | There is NO `LANDLORD_ID` and NO third-party phone. Add `THIRD_PHONE` yourself (below). |
 | `devLogin(page)` | :87 | |
 | `test.beforeEach` reseed | :116 | Every test starts on a fresh lean world, so these tests cannot leave residue for each other. |
-| `driveConnectingGroupToOpen` | imported at :4, used at :263 | |
+| `driveConnectingGroupToOpen` | imported at :4, used at :267 | |
 | Card action | `getByRole('button', { name: 'Create a relay group' })` | :146 |
 | Picker | `getByRole('dialog', { name: 'Create a relay group' })` | :147 |
 | Member search | `picker.getByRole('combobox', { name: 'Add member' })` | :159 |
-| Submit picker | `picker.getByRole('button', { name: 'Create group' })` | :172 |
-| Confirm dialog | `getByRole('dialog', { name: 'Open the relay group?' })` with `{ timeout: 20_000 }` | :175-176 |
+| Submit picker | `picker.getByRole('button', { name: 'Create group' })` | :176 |
+| Confirm dialog | `getByRole('dialog', { name: 'Open the relay group?' })` with `{ timeout: 20_000 }` | :179-180 |
 
 TWO TRAPS THIS TASK HAS FALLEN INTO BEFORE:
 
@@ -1396,7 +1396,7 @@ The warning element is located by `getByRole('status')` because Task 4 gives it
 
 The pool-number assertion from spec 9 is deliberately NOT here. It belongs with
 `createGroupOpen`, which lives in `relay-number-lifecycle.spec.ts`, and that file
-already proves the property this feature does not change: its overlap test at :190-206
+already proves the property this feature does not change: its overlap test at :204
 asserts a roster sharing a member is forced onto a different number. Re-proving it
 through a third group created after a UI flow tests the wrong object.
 

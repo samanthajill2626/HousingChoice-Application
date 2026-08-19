@@ -130,10 +130,10 @@ never phones (doc section 9).
 
 ### 2.5 Detection primitive
 
-`conversations.listRelayGroups(status)` (`app/src/repos/conversationsRepo.ts:758`)
+`conversations.listRelayGroups(status)` (`app/src/repos/conversationsRepo.ts:778`)
 is a DIRECT Query on the SPARSE `byRelayStatus` GSI - relay groups only, never a Scan.
 Returns `{ items, truncated }`; `truncated` means a fixed page budget
-(100 x 20 = 2000, `:395-396`) stopped the walk. There is NO index for "group by exact
+(100 x 20 = 2000, `:415-416`) stopped the walk. There is NO index for "group by exact
 participant set", so exact-set lookup is this Query plus an in-code comparison. Going
 via `GET /api/contacts/:id/relay-groups` would be strictly more work - it walks THREE
 partitions to answer a different question.

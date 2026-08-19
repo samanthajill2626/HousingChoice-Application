@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import { getOutbox } from '../../fixtures/outbox.js';
 // The final "group is closed" copy (single source of truth) - close now sends it.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay-group conversation view (/conversations/:conversationId) — spec §10.
 // Drives the real dashboard + API against the hermetic lane stack and proves the
@@ -43,7 +44,7 @@ async function reseedFull(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The group view's roster list — its aria-label is stable ("Group members"). */
@@ -199,18 +200,21 @@ test('Close group: final message sent to both, number kept, composer hard-disabl
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
   await expect(page.getByText('Closed').first()).toBeVisible();
 
-  // Close sends the relay.group_closed final message to EVERY member FROM the pool
-  // number (burn-multiplexing: the copy invites late texts to the same number).
+  // FOUNDER DECISION 2026-08-18: closing no longer texts anyone. The template,
+  // the copy and the announcement plumbing are all still in place (the message is
+  // expected back), but RELAY_CLOSE_ANNOUNCEMENT_ENABLED is off, so NO member
+  // receives a final note. Everything else about close still has to work, which
+  // the assertions above and below cover.
+  //
+  // Asserted against the same UI settle points used above, so this is not a
+  // vacuous "nothing arrived yet" check: by the time the Closed pill renders the
+  // close request has completed server-side.
   for (const memberPhone of [DIANA_PHONE, GLORIA_PHONE]) {
-    await expect
-      .poll(
-        async () => {
-          const msgs = await getOutbox(request, { to: memberPhone });
-          return msgs.some((m) => (m.body ?? '').includes(CLOSED_COPY) && m.from === POOL);
-        },
-        { timeout: 15_000, message: `closed-copy to ${memberPhone} not observed in outbox` },
-      )
-      .toBe(true);
+    const msgs = await getOutbox(request, { to: memberPhone });
+    expect(
+      msgs.some((m) => (m.body ?? '').includes(CLOSED_COPY)),
+      `no close message should reach ${memberPhone}`,
+    ).toBe(false);
   }
 
   // The pool number is KEPT on the closed conversation (never released now).

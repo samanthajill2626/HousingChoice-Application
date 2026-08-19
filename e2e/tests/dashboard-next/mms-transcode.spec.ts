@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { sendAsParty, listThreads } from '../../fixtures/fakeTwilio.js';
 import { dashboardUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Outbound MMS media transcoding (spec 2026-07-16, fixes Twilio 12300).
 // Drives the REAL composer upload path (presign -> browser POSTs the bytes
@@ -25,7 +26,7 @@ const TASHA_ID = 'contact-tenant-0001';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Open Tasha's contact page with an open 1:1 thread to send into. */

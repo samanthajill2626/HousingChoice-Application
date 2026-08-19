@@ -47,7 +47,7 @@ function NavLeafLink({
         ? unmatchedUnread
         : null;
   return (
-    <div className={styles.linkRow}>
+    <div className={`${styles.linkRow} ${badge !== null ? styles.linkRowBadged : ''}`}>
       <NavLink
         to={item.to}
         end={item.end ?? false}

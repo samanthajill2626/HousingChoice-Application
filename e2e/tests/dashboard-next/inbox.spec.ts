@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Entity-centric Inbox (:5174) against the real C8 feed. Proves the merged
 // frontend (useInbox/InboxRow) + backend (GET /api/inbox) behave together:
@@ -9,7 +10,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('Inbox: contact rows + filter tabs; a row opens its contact page', async ({ page }) => {

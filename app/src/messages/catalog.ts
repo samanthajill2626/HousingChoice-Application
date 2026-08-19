@@ -12,7 +12,7 @@
 // and the relay identity REFERENCE the smsCompliance.ts constants by import —
 // smsCompliance.ts stays the A2P single source of truth for that filed copy.
 import {
-  DEFAULT_MISSED_CALL_AUTOTEXT,
+  FOUNDER_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
   OPT_IN_CONFIRMATION,
   RELAY_INTRO_IDENTITY,
@@ -106,9 +106,19 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // passing a string, which reopens the hole the split exists to close (spec D7).
   // Unreachable today regardless: settingsToOverrides maps only welcome.sms and
   // missed_call.autotext, so no tour.* override can exist.
+  // FOUNDER VOICE (Sam, 2026-08-18). The whole ladder was rewritten to read like
+  // one person texting, not a system: first-person singular, no "Reminder:"
+  // prefix, no corporate "we". Two token rules fall out of that wording and are
+  // easy to get wrong on a future edit:
+  //   - {when} is DATE + TIME ("Thu, Aug 20 at 3:00 PM"). It belongs only where
+  //     the day is not already in the sentence - i.e. the confirmation, which
+  //     can go out weeks ahead.
+  //   - {time} is the TIME ALONE ("3:00 PM"). The day_before/morning_of rungs
+  //     say "tomorrow"/"today" in the copy, so {when} there would double up
+  //     ("tomorrow at Thu, Aug 20 at 3:00 PM").
   'tour.confirmation': {
     id: 'tour.confirmation',
-    default: "Tour confirmed at {where} for {when}. We'll text reminders as it gets closer.",
+    default: 'Hey, your tour is set for {when} at {where}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -116,7 +126,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.confirmation_no_address': {
     id: 'tour.confirmation_no_address',
-    default: "Tour confirmed for {when}. We'll text reminders as it gets closer.",
+    default: 'Hey, your tour is set for {when}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -124,15 +134,19 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.day_before': {
     id: 'tour.day_before',
-    default: 'Reminder: tour at {where} is tomorrow, {when}.',
+    default: 'Hey, confirming your tour tomorrow at {time}. Looking forward to having you tour!',
     class: 'operational',
     editable: true,
     channel: 'sms',
     vars: ['when', 'time', 'where'],
   },
+  // Byte-identical to its address-bearing twin ON PURPOSE: the founder wording
+  // for this rung never mentions the address, so there is nothing to drop. Keep
+  // both entries - the twin exists so a future edit CAN reintroduce {where} on
+  // the address-bearing side without leaking it into the addressless one.
   'tour.day_before_no_address': {
     id: 'tour.day_before_no_address',
-    default: 'Reminder: tour is tomorrow, {when}.',
+    default: 'Hey, confirming your tour tomorrow at {time}. Looking forward to having you tour!',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -140,15 +154,19 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.morning_of': {
     id: 'tour.morning_of',
-    default: 'Good morning! Tour at {where} is today at {time}.',
+    default:
+      'Good morning, excited for you to see {where} today at {time}. Let me know if your timing changes.',
     class: 'operational',
     editable: true,
     channel: 'sms',
     vars: ['when', 'time', 'where'],
   },
+  // No address to name, so it falls back to the TENANT-facing noun: "home".
+  // Never "property" here - that is the landlord/staff word (documentation/GLOSSARY.md).
   'tour.morning_of_no_address': {
     id: 'tour.morning_of_no_address',
-    default: 'Good morning! Tour is today at {time}.',
+    default:
+      'Good morning, excited for you to see the home today at {time}. Let me know if your timing changes.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -156,7 +174,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.en_route': {
     id: 'tour.en_route',
-    default: "Tour at {where} starts at {time}. Text us when you're on the way!",
+    default: "Hey, see you soon at {where}. Please let me know when you're on the way.",
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -164,7 +182,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.en_route_no_address': {
     id: 'tour.en_route_no_address',
-    default: "Tour starts at {time}. Text us when you're on the way!",
+    default: "Hey, see you soon. Please let me know when you're on the way.",
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -172,7 +190,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.no_show_checkin': {
     id: 'tour.no_show_checkin',
-    default: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
+    default: 'Hi! Do you need to reschedule?',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -215,27 +233,52 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
 
   // --- Operational: relay group intro ---
-  // §7 + founder wording (2026-07-14): the brand leads, the "Reply STOP to opt
-  // out." opt-out TRAILS (a first-contact message needs both — the A2P floor —
-  // but the content reads first). {members} is the count-plurality /
-  // Oxford-list `connection` string, computed in code (jobs/relayFanOut.ts
-  // composeIntroBody) and passed in.
+  //
+  // do-not-remove-without-reading — FOUNDER DECISION, 2026-08-18.
+  //
+  // These two entries NO LONGER carry "Reply STOP to opt out.". Both are
+  // FIRST-CONTACT messages, so that line is the TCPA/CTIA floor for our filed
+  // A2P campaign, and engineering advised AGAINST removing it. The founder
+  // (Sam, relayed by Cameron 2026-08-18) directed the removal anyway so the
+  // group intro reads like a person rather than a compliance notice. Recording
+  // the attribution here so a later reader does not mistake it for a developer
+  // oversight and does not "helpfully" restore it without asking.
+  //
+  // The identity half is DELIBERATELY KEPT (see relay.identity, which still
+  // pins the filed brand+opt-out string): a stranger's first text from an
+  // unknown number still says who it is from.
+  //
+  // Superseded wording, for reference:
+  //   relay.intro        `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`
+  //   relay.member_added `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`
+  //
+  // {members} is the count-plurality / Oxford-list `connection` string, computed
+  // in code (jobs/relayFanOut.ts composeIntroBody) and passed in. NOTE it is a
+  // whole SENTENCE, not a name list.
+  //
+  // "Sam" is hardcoded, accepted by Cameron 2026-08-18 while she is the only
+  // person opening groups. Revisit if that changes - the greeting would name
+  // the wrong person. TODO(founder-message-template-updates-owed).
   'relay.intro': {
     id: 'relay.intro',
-    default: `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`,
+    default:
+      `Hey, it's Sam with ${SMS_BRAND_NAME}. {members} Use this group text for anything that ` +
+      "comes up - I'll share updates as I get them from the housing authority. It can be a " +
+      'long process, so ask me anything in here!',
     class: 'operational',
     editable: true,
     channel: 'sms',
     vars: ['members'],
   },
-  // Member added to an EXISTING group: announced to the WHOLE group (the new
-  // member's first contact on this number, so brand + trailing opt-out fold in
-  // exactly like the intro). {joined} = "<Name> joined this group chat." and
-  // {members} = the connection sentence, both computed in code
-  // (jobs/relayFanOut.ts composeMemberAddedBody).
+  // Member added to an EXISTING group: announced to the WHOLE group. {joined} =
+  // "<Name> joined this group chat." and {members} = the connection sentence,
+  // both computed in code (jobs/relayFanOut.ts composeMemberAddedBody). The
+  // founder's wording also wanted the new member's ROLE ("who is
+  // tenant/landlord/property manager"); there is no role token on this job, so
+  // it is left out rather than faked. TODO(founder-message-template-updates-owed).
   'relay.member_added': {
     id: 'relay.member_added',
-    default: `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`,
+    default: 'Hey! {joined} {members}',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -288,14 +331,26 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     vars: ['firstName'],
     requiresOptOut: true,
   },
+  // FOUNDER DECISION 2026-08-18 - no opt-out line. The full rationale and the
+  // attribution live on FOUNDER_MISSED_CALL_AUTOTEXT in lib/smsCompliance.ts;
+  // `requiresOptOut` is correspondingly gone, which is also what lets an admin
+  // save wording like this through PUT /api/settings (routes/settings.ts).
+  //
+  // HEADS UP - THIS DEFAULT IS UNREACHABLE AT RUNTIME. OrgSettings.missedCallAutoText
+  // is a REQUIRED string that falls back to DEFAULT_ORG_SETTINGS, so
+  // settingsToOverrides() always produces a `missed_call.autotext` override and
+  // the override always wins. The value that actually goes out is
+  // DEFAULT_ORG_SETTINGS.missedCallAutoText (repos/settingsRepo.ts) or whatever
+  // an admin saved over it. Both are pointed at the same constant so they can
+  // never disagree, but edit BOTH or neither. (welcome.sms is NOT like this:
+  // welcomeText is optional and clearable, so its catalog default is live.)
   'missed_call.autotext': {
     id: 'missed_call.autotext',
-    default: DEFAULT_MISSED_CALL_AUTOTEXT,
+    default: FOUNDER_MISSED_CALL_AUTOTEXT,
     class: 'operational',
     editable: true,
     channel: 'sms',
     vars: [],
-    requiresOptOut: true,
   },
 
   // --- Compliance-locked (never freely editable; reference smsCompliance consts) ---
@@ -389,19 +444,30 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'voice',
     vars: [],
   },
+  // FOUNDER VOICE, 2026-08-18 (second pass). The first pass gave FIVE different
+  // situations the same sentence; each now says something true about the
+  // situation the caller is actually in. The plural "we"/"us" is the founder's
+  // own wording and is kept deliberately - it was never the problem.
+  //
+  // ONE EXCEPTION, do not "unify" it: voice.outbound_unavailable is heard by
+  // STAFF, not a tenant (see its own note), so it stays plain and diagnostic
+  // like the whispers.
   'voice.greeting_no_holder': {
     id: 'voice.greeting_no_holder',
     default:
-      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
+      "Hey, sorry we can't get to the phone right now! Please text us your first name, last name and voucher size, and we'll get right back to you. Thanks!",
     class: 'voice',
     editable: false,
     channel: 'voice',
     vars: [],
   },
+  // Heard ONLY when the business line is dialed from the very number it forwards
+  // to - in practice staff calling their own line. Asking that caller to text
+  // their voucher size made no sense, so it explains the actual problem.
   'voice.self_call': {
     id: 'voice.self_call',
     default:
-      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
+      "This line can't connect a call from its own number. Please try from a different phone, or send us a text instead. Goodbye.",
     class: 'voice',
     editable: false,
     channel: 'voice',
@@ -417,10 +483,16 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     vars: [],
     dead: true,
   },
+  // Heard by a TENANT OR LANDLORD who dialed one of our pool numbers after that
+  // thread closed, or after they were taken off it. The old wording was a dead
+  // end; texting that same number DOES still reach the team (closed-group ->
+  // 1:1 interception), so the caller is handed a route that works. Deliberately
+  // avoids "no longer available" - wrong for the removed-member case, where
+  // nothing was closed.
   'voice.thread_closed': {
     id: 'voice.thread_closed',
     default:
-      'Sorry, this Housing Choice connection is no longer available. Please send us a text message instead.',
+      "Hey, we can't connect this call, but you can still text this number and we'll get right back to you. Thanks!",
     class: 'voice',
     editable: false,
     channel: 'voice',
@@ -436,35 +508,52 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     vars: [],
     dead: true,
   },
+  // STAFF-FACING, unlike every other line in this block. It plays on the
+  // NAVIGATOR's own leg when they start a call from the dashboard and the target
+  // cannot be resolved (routes/webhooks/voice.ts /outbound-bridge). A tenant
+  // never hears it, so it names the likely cause and the next action instead of
+  // adopting the founder's warm phone voice.
   'voice.outbound_unavailable': {
     id: 'voice.outbound_unavailable',
-    default: 'Sorry, this Housing Choice call is no longer available. Goodbye.',
+    default:
+      "This call can't be connected - the conversation may no longer be available. Please check the dashboard and try again. Goodbye.",
     class: 'voice',
     editable: false,
     channel: 'voice',
     vars: [],
   },
+  // A masked/outbound call was missed and NO voicemail is offered, so this has
+  // to end the call. Kept short on purpose: the caller is being hung up on, and
+  // asking for a full name plus voucher size at that moment is too much.
   'voice.missed_call_goodbye': {
     id: 'voice.missed_call_goodbye',
-    default:
-      "Hey sorry we can't get to the phone right now. Please text us your first name, last name and voucher size for fastest response. Thank you.",
+    default: "Sorry we missed you! Please send us a text and we'll get right back to you. Goodbye.",
     class: 'voice',
     editable: false,
     channel: 'voice',
     vars: [],
   },
+  // Spoken IMMEDIATELY BEFORE the recording beep, so it must invite a message -
+  // that is the entire job of the prompt. It also carries the founder's "text us
+  // your name and voucher size" ask and flags texting as the faster route, so
+  // both goals are served without dropping the voicemail invitation.
   'voice.voicemail_prompt': {
     id: 'voice.voicemail_prompt',
     default:
-      'Sorry we missed your call. Please leave a message after the tone, and we will get back to you as soon as we can.',
+      'Hey, sorry we missed your call! Leave a message after the tone, or text us your first name, last name and voucher size for the fastest response.',
     class: 'voice',
     editable: false,
     channel: 'voice',
     vars: [],
   },
+  // Plays AFTER the caller has already left their message, so it confirms the
+  // voicemail landed. Never re-run the prompt's "leave a message" here, and keep
+  // the texting line phrased as an option ("you can always") rather than an
+  // instruction - they have already done what was asked.
   'voice.voicemail_thanks': {
     id: 'voice.voicemail_thanks',
-    default: 'Thank you. We got your message and will get back to you soon. Goodbye.',
+    default:
+      "Got it, thanks! We'll listen and get back to you soon. You can always text this number too. Goodbye.",
     class: 'voice',
     editable: false,
     channel: 'voice',

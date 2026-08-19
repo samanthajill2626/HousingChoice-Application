@@ -42,6 +42,7 @@ import { placeCall, listCalls } from '../../fixtures/fakeVoice.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { uniqueVoicePhone, callTimeline } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -61,7 +62,7 @@ async function devLogin(page: Page): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Create a fresh tenant contact via the authenticated API; returns its id + phone.
@@ -168,7 +169,12 @@ test('a missed business-line call takes a voicemail (single-channel transcript +
     .poll(
       async () => {
         const msgs = await getOutbox(api, { to: caller });
-        return msgs.some((m) => /Sorry we missed your call/i.test(m.body ?? ''));
+        // Deliberately loose on the pronoun. The founder rewrite of 2026-08-18
+        // made this "Sorry I missed your call", but a2p-compliance.spec.ts
+        // restores a "we" variant into the SAME shared lane, so a needle that
+        // survives both is the honest one - this test is about the auto-text
+        // firing at all, not about its exact wording.
+        return msgs.some((m) => /missed your call/i.test(m.body ?? ''));
       },
       { timeout: 20_000, message: 'missed-call auto-text not observed in the outbox' },
     )

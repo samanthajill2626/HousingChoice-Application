@@ -107,7 +107,11 @@ function computeDueAt(
         window.timezone,
       );
     case 'en_route':
-      return new Date(scheduled - 2 * 60 * 60 * 1000).toISOString();
+      // ONE hour before (founder decision 2026-08-18, was two). Sam had always
+      // read this rung as the "hour before" message, and its copy now says "see
+      // you soon" - which is a stretch at two hours out. Keep the offset and the
+      // wording in step if either moves again.
+      return new Date(scheduled - 1 * 60 * 60 * 1000).toISOString();
     case 'no_show_checkin':
       return new Date(scheduled + 30 * 60 * 1000).toISOString();
   }

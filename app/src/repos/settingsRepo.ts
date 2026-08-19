@@ -19,7 +19,7 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
-import { DEFAULT_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
+import { FOUNDER_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
 import {
   GroupFingerprintCorruptError,
   type GroupFingerprintClaim,
@@ -122,11 +122,21 @@ export interface OrgSettings {
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
-  // A2P/CTIA (spec §5): the missed-call auto-text is a FIRST-CONTACT template, so
-  // its default carries brand identity + opt-out language. Sourced from the
-  // single source of truth (lib/smsCompliance.ts) — the CO2 helpful content is
-  // preserved, with the identity prefix + "Reply STOP to opt out." added.
-  missedCallAutoText: DEFAULT_MISSED_CALL_AUTOTEXT,
+  // FOUNDER DECISION 2026-08-18: the missed-call auto-text no longer carries the
+  // "Reply STOP to opt out." line. Rationale + attribution live on
+  // FOUNDER_MISSED_CALL_AUTOTEXT (lib/smsCompliance.ts); engineering advised
+  // against it and was overruled, which is recorded there rather than repeated.
+  //
+  // THIS is the value that actually reaches a recipient - not the catalog
+  // default. missedCallAutoText is a REQUIRED string, so settingsToOverrides()
+  // always emits an override for `missed_call.autotext` and the catalog default
+  // is never consulted. The two are pointed at the same constant deliberately;
+  // change both or neither.
+  //
+  // An env whose stored settings item ALREADY carries a missedCallAutoText keeps
+  // that stored value - this default only covers a stack that has never saved
+  // one. Changing it there is a Settings > Templates edit, not a deploy.
+  missedCallAutoText: FOUNDER_MISSED_CALL_AUTOTEXT,
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
   preRingPauseSeconds: 2,

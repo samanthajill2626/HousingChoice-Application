@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { sendAsParty } from '../../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Deleted-contact resurfacing (2026-08-03 spec) - the end-to-end proof for the
 // whole feature. A soft-deleted contact who texts back resurfaces their ORIGINAL
@@ -26,7 +27,7 @@ async function devLogin(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   // exact: a non-exact name is a case-insensitive SUBSTRING match, and the Today
   // board's "Tours today" group heading would then collide (strict-mode).
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 async function reseedLean(request: APIRequestContext): Promise<void> {

@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { listThreads, type FakeThread } from '../../fixtures/fakeTwilio.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { fakeUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay CONNECT-WHEN-READY end-to-end proof (relay number buying strategy, plan
 // Task 12; worklist SLICE 11). Drives the real dashboard + API + fake-twilio on
@@ -42,11 +43,12 @@ import { fakeUrl } from '../../support/urls.js';
 // /control/register-number (the T9 seam that drives warming -> active).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
-// The relay.intro trailing opt-out footer (catalog relay.intro default ends
-// "... Reply STOP to opt out."). A stable substring that identifies the auto-intro
-// leg and NEVER appears on a fan-out content leg (group content carries no opt-out
-// footer), so it cleanly separates the intro from the queued team message.
-const INTRO_NEEDLE = 'Reply STOP to opt out';
+// A stable substring of the relay.intro body that NEVER appears on a fan-out
+// content leg, so it cleanly separates the intro from the queued team message.
+// Was the trailing "Reply STOP to opt out." footer until the founder decision of
+// 2026-08-18 removed that line from relay.intro; the intro's own copy serves the
+// same purpose and is just as specific.
+const INTRO_NEEDLE = 'Use this group text';
 
 // --- Per-run-unique phones ---------------------------------------------------
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
@@ -90,7 +92,7 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Log the SEPARATE `request` context in as the seeded FOUNDER (role admin) so it

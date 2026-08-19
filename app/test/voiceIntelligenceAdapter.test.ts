@@ -8,6 +8,7 @@ const BASE_DEPS = {
   apiKeySid: 'SKtest',
   apiKeySecret: 'secret',
   messagingServiceSid: 'MGtest',
+  appEnv: 'local',
 } as const;
 
 // Shapes match twilio v6 intelligence.v2.transcripts exactly (worklist SDK FACTS):

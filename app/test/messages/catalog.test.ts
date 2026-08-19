@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { MESSAGE_CATALOG, type MessageDef, type MessageId } from '../../src/messages/catalog.js';
 import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
+  FOUNDER_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
   RELAY_INTRO_IDENTITY,
   SMS_BRAND_NAME,
@@ -72,19 +73,38 @@ describe('MESSAGE_CATALOG', () => {
   it('compliance copy references smsCompliance.ts constants verbatim (never re-literaled)', () => {
     // These defaults MUST equal the imported A2P single-source constants.
     expect(MESSAGE_CATALOG['welcome.sms'].default).toBe(WELCOME_SMS);
-    expect(MESSAGE_CATALOG['missed_call.autotext'].default).toBe(DEFAULT_MISSED_CALL_AUTOTEXT);
+    // FOUNDER DECISION 2026-08-18: the missed-call auto-text now points at the
+    // founder wording, NOT the filed A2P constant. DEFAULT_MISSED_CALL_AUTOTEXT
+    // is deliberately left in place as the registered copy we would restore to.
+    expect(MESSAGE_CATALOG['missed_call.autotext'].default).toBe(FOUNDER_MISSED_CALL_AUTOTEXT);
+    expect(FOUNDER_MISSED_CALL_AUTOTEXT).not.toBe(DEFAULT_MISSED_CALL_AUTOTEXT);
     expect(MESSAGE_CATALOG['keyword.stop'].default).toBe(STOP_CONFIRMATION);
     expect(MESSAGE_CATALOG['keyword.help'].default).toBe(HELP_REPLY);
     expect(MESSAGE_CATALOG['keyword.optin'].default).toBe(OPT_IN_CONFIRMATION);
     expect(MESSAGE_CATALOG['consent.web_form'].default).toBe(WEB_FORM_CONSENT_COPY);
     expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
-    // The relay announcements lead with the brand and TRAIL the opt-out
-    // (founder wording 2026-07-14: content first, STOP last).
-    expect(MESSAGE_CATALOG['relay.intro'].default).toBe(
-      `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`,
-    );
-    expect(MESSAGE_CATALOG['relay.member_added'].default).toBe(
-      `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`,
-    );
+    // FOUNDER DECISION 2026-08-18: the relay announcements NO LONGER carry
+    // "Reply STOP to opt out.". Engineering advised against removing it (both
+    // are first-contact messages, so it is the A2P floor) and was overruled;
+    // full attribution is in catalog.ts above these entries. Asserted rather
+    // than merely deleted, so restoring the line is a deliberate act with a
+    // failing test behind it, not an accident.
+    expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain('Reply STOP');
+    expect(MESSAGE_CATALOG['relay.member_added'].default).not.toContain('Reply STOP');
+    // The brand identity half IS kept - a stranger's first text from an unknown
+    // number still says who it is from.
+    expect(MESSAGE_CATALOG['relay.intro'].default).toContain(SMS_BRAND_NAME);
+    // relay.identity still pins the filed brand + opt-out string, untouched.
+    expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
+  });
+
+  // The opt-out floor still applies everywhere it was NOT explicitly lifted.
+  // welcome.sms keeps requiresOptOut; missed_call.autotext had it removed by the
+  // same founder decision. If a future edit re-adds requiresOptOut to the
+  // missed-call entry without restoring a STOP line, the invariant test above
+  // will fail - which is the intended tripwire.
+  it('the opt-out requirement is lifted ONLY where the founder decision applies', () => {
+    expect(MESSAGE_CATALOG['welcome.sms'].requiresOptOut).toBe(true);
+    expect(MESSAGE_CATALOG['missed_call.autotext'].requiresOptOut).toBeUndefined();
   });
 });

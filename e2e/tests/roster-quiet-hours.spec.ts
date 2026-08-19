@@ -38,6 +38,7 @@
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { driveConnectingGroupToOpen } from '../fixtures/relayConnect.js';
 import { listThreads, type FakeThread } from '../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -105,7 +106,7 @@ async function putQuietHours(
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** A run-unique E.164 - never a seeded number. */

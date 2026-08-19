@@ -664,7 +664,12 @@ describe('relay-group API (M1.7)', () => {
   });
 
   // --- close lifecycle: final announcement, nag clear, defer (Task 5) -------
-  it('close sends the relay.group_closed final message to every member FIRST, then flips to closed', async () => {
+  // FOUNDER DECISION 2026-08-18: closing a relay group no longer texts anyone.
+  // RELAY_CLOSE_ANNOUNCEMENT_ENABLED (routes/relayGroups.ts) is off; the copy,
+  // the catalog entry and sendRelayAnnouncement are all still in place, because
+  // the message is expected back. Everything ELSE about close must keep working,
+  // which is what this test now guards.
+  it('close sends NO final message but still flips to closed and keeps the number', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     const created = await request(app)
@@ -674,7 +679,7 @@ describe('relay-group API (M1.7)', () => {
       .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
     const id = created.body.conversation.conversationId;
     const poolNumber = created.body.conversation.pool_number;
-    world.sent.length = 0; // drop the intro sends - assert only the close message
+    world.sent.length = 0; // drop the intro sends
 
     const closed = await request(app)
       .patch(`/api/conversations/${id}/close`)
@@ -683,16 +688,15 @@ describe('relay-group API (M1.7)', () => {
       .send({ closed: true });
     expect(closed.status).toBe(200);
     expect(closed.body.conversation.status).toBe('closed');
+    // Burn-multiplexing is unaffected: the number is KEPT so a late text still
+    // resolves the closed group and intercepts to the sender's 1:1.
+    expect(closed.body.conversation.pool_number).toBe(poolNumber);
 
-    // The final message went to BOTH members FROM the pool number, verbatim copy.
-    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
-    expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
-    expect(world.sent.every((s) => s.body === CLOSED_COPY)).toBe(true);
-    // Persisted ONCE on the (was-open) group thread as a system announcement.
-    const systemRows = world.messages.filter(
-      (m) => m.conversationId === id && m.relay_sender_key === 'system' && m.body === CLOSED_COPY,
-    );
-    expect(systemRows).toHaveLength(1);
+    // Nobody was texted, and nothing was persisted on the thread.
+    expect(world.sent).toHaveLength(0);
+    expect(
+      world.messages.filter((m) => m.conversationId === id && m.body === CLOSED_COPY),
+    ).toHaveLength(0);
   });
 
   it('a second close does NOT re-announce (idempotent, no second final message)', async () => {
@@ -1115,12 +1119,16 @@ describe('relay-group API (M1.7)', () => {
           .send({ closed: true }),
       ]);
       expect([a.status, b.status]).toEqual([200, 200]);
-      // Exactly ONE relay.group_closed announcement persisted; one leg per member.
-      const systemRows = world.messages.filter(
-        (m) => m.conversationId === id && m.relay_sender_key === 'system' && m.body === CLOSED_COPY,
-      );
-      expect(systemRows).toHaveLength(1);
-      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(2);
+      // The announcement itself is switched off (founder decision 2026-08-18),
+      // so nothing is sent or persisted. The CLAIM still runs, which is the
+      // point of keeping this test: the dedup/TOCTOU machinery stays exercised,
+      // so turning the message back on cannot quietly resurrect a
+      // double-announce. Exactly one claim was won across both concurrent calls.
+      expect(world.conversations.get(id)!.close_announced_at).toBeDefined();
+      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(0);
+      expect(
+        world.messages.filter((m) => m.conversationId === id && m.body === CLOSED_COPY),
+      ).toHaveLength(0);
     });
 
     it('a close retry after a crash between announce and flip announces NOTHING and still flips to closed', async () => {
@@ -1150,7 +1158,7 @@ describe('relay-group API (M1.7)', () => {
       expect(world.messages.filter((m) => m.conversationId === id).length).toBe(rowsBefore);
     });
 
-    it('reopen clears the announce marker, so a subsequent close announces again (exactly once)', async () => {
+    it('reopen clears the announce marker, so a subsequent close re-claims it (exactly once)', async () => {
       const pool = makeFakePoolNumbers();
       const { app } = authedHarness(world, pool);
       const created = await request(app)
@@ -1172,14 +1180,18 @@ describe('relay-group API (M1.7)', () => {
         .set('cookie', TEST_SESSION_COOKIE)
         .send({ closed: false });
       expect(world.conversations.get(id)!.close_announced_at).toBeUndefined();
-      // A subsequent close announces AGAIN, exactly once.
+      // A subsequent close RE-CLAIMS the marker. No message goes out while the
+      // announcement is switched off (founder decision 2026-08-18), but the
+      // claim/clear cycle is what a future re-enable depends on, so it is still
+      // pinned here.
       world.sent.length = 0;
       await request(app)
         .patch(`/api/conversations/${id}/close`)
         .set('x-origin-verify', SECRET)
         .set('cookie', TEST_SESSION_COOKIE)
         .send({ closed: true });
-      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(1);
+      expect(world.conversations.get(id)!.close_announced_at).toBeDefined();
+      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(0);
     });
   });
 
@@ -1335,7 +1347,7 @@ describe('relay-group API (M1.7)', () => {
       // The flipped copy: composed by the SAME composer the send path uses, so
       // the body opens with the confirmation lead-in and carries the local time
       // (zone-agnostic shape - this bucket does not pin the org zone).
-      expect(first['body']).toContain('Tour confirmed');
+      expect(first['body']).toContain('your tour is set for');
       expect(first['body']).toMatch(/at \d{1,2}:\d{2} (AM|PM)/);
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');

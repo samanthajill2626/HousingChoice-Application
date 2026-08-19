@@ -15,6 +15,7 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Surface | Element | Selector |
 |---------|---------|----------|
 | Login | sign-in affordance | `getByText('Sign in with Google')` |
+| Today | the page is ready | `expectTodayReady(page)` from `support/today.ts` - NEVER hand-roll it. A bare `getByRole('heading', { name: 'Today' })` is substring-matched and so ALSO matches the queue's own `Tours today` group `<h2>`: the moment a tour is scheduled for the current day it resolves to two elements and every sign-in in the run dies on a strict-mode violation, in whichever spec happens to run next. See `support/today.ts` and `docs/issues/today-heading-selector-ambiguity.md` |
 | Inbox | heading | `getByRole('heading', { name: 'Inbox' })` |
 | Inbox | a conversation row | `getByRole('link').filter({ hasText: <preview/name> })` |
 | Inbox | filter tabs | `getByRole('tab', { name: 'All'\|'Unread'\|'Unknown'\|'Groups' })` - the active tab carries `aria-selected="true"`. The filter is a URL param, so `/inbox?filter=groups` is a real deep link |

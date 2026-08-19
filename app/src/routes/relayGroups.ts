@@ -81,6 +81,25 @@ import {
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
 
+/**
+ * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-18, EXPECTED BACK.
+ *
+ * OFF: closing a relay group no longer texts its members the relay.group_closed
+ * final message. The founder asked for the message to stop going out; she also
+ * expects to want it back, so this is a one-line flip rather than a deletion.
+ *
+ * Everything around it is deliberately LEFT INTACT - the catalog entry, the
+ * copy, sendRelayAnnouncement, and the claimCloseAnnounce dedup claim (which
+ * still runs, so the idempotency/TOCTOU semantics are unchanged and re-enabling
+ * cannot resurrect a double-announce bug). Only the send is skipped.
+ *
+ * KEEP IN STEP: the dashboard must not promise a message we do not send. The
+ * "Also close the relay group?" dialog copy was changed with this flag
+ * (dashboard/src/routes/conversation/RelayCloseAskDialog.tsx). Flipping this
+ * back to true means putting that sentence back.
+ */
+const RELAY_CLOSE_ANNOUNCEMENT_ENABLED = false;
+
 export interface RelayGroupsRouterDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -468,7 +487,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       // This closes BOTH the concurrent-close double-announce TOCTOU and the
       // crash-between-announce-and-flip retry.
       const announceWon = await conversations.claimCloseAnnounce(conversationId);
-      if (announceWon) {
+      if (announceWon && RELAY_CLOSE_ANNOUNCEMENT_ENABLED) {
         // (1) FINAL MESSAGE (spec 4.4): announce relay.group_closed to every
         // member while the group is STILL OPEN (the announcement gate refuses a
         // closed group). A send/persist failure LOGS and the close STILL PROCEEDS.

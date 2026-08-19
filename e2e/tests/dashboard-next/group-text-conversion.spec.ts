@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import { registerParty, sendGroupAsParty, listConversations } from '../../fixtures/fakeTwilio.js';
 import { readLogTail } from '../../fixtures/groupText.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 5 - conversion: an imported relay group becomes the native group text it
 // always was, and CONVERGES however many times it is retried.
@@ -39,7 +40,7 @@ const CONNECTING_ID = conversationIdForGroup([MARCUS, RENEE]);
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 async function reseedLean(request: APIRequestContext): Promise<void> {

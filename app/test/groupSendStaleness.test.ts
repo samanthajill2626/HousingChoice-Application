@@ -27,6 +27,7 @@ import {
 } from '../src/repos/messagesRepo.js';
 import { suppressedSlot } from '../src/services/groupDelivery.js';
 import {
+  classifyStuck,
   createGroupSendStaleness,
   isGroupDeliveryTerminal,
   isGroupSlotTerminal,
@@ -86,6 +87,28 @@ describe('slot-level terminality: a leg no receipt will ever arrive for (L3)', (
     expect(isGroupSlotTerminal({ status: 'failed', errorCode: '30007' })).toBe(true);
     // A pending slot with an unrelated code is still pending.
     expect(isGroupSlotTerminal({ status: 'sent', errorCode: '30003' })).toBe(false);
+  });
+});
+
+// PROD 2026-08-19. A business texting line in two group threads returned `sent`
+// for every group-MMS leg and never `delivered`, while its siblings delivered in
+// seconds; eight ERRORs told the operator to check a webhook that was provably
+// alive on those same messages. A dead webhook cannot move a slot off its seeded
+// `queued`, so the shape "a sibling went terminal AND every stuck leg reached
+// `sent`" is a recipient carrier fact, not a receipts outage.
+describe('stuck-send classification: webhook outage vs a carrier that never reports', () => {
+  it('a sibling receipted + every stuck leg at `sent` is NO-RECEIPT, not the alarm', () => {
+    expect(classifyStuck([{ status: 'sent' }], 2)).toBe('no_receipt');
+    expect(classifyStuck([{ status: 'sent' }, { status: 'sent' }], 1)).toBe('no_receipt');
+  });
+
+  it('a leg still `queued` is the alarm - the webhook never moved it, whatever the siblings did', () => {
+    expect(classifyStuck([{ status: 'queued' }], 2)).toBe('alarmed');
+    expect(classifyStuck([{ status: 'sent' }, { status: 'queued' }], 1)).toBe('alarmed');
+  });
+
+  it('no leg receipted is the alarm, even with every stuck leg at `sent` (webhook died after sent)', () => {
+    expect(classifyStuck([{ status: 'sent' }, { status: 'sent' }], 0)).toBe('alarmed');
   });
 });
 
@@ -153,7 +176,7 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
   }
 
   function service(
-    log: { error: unknown },
+    log: { error: unknown; warn: unknown },
     receipts: { drainParked: (sid: string) => Promise<number> } = recordingReceipts(),
   ) {
     return createGroupSendStaleness({
@@ -163,7 +186,10 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     });
   }
 
-  it('PARTIAL RECEIPT LOSS alarms: one member delivered, one still `sent`', async () => {
+  it('a member stuck at `sent` beside a delivered sibling is a NO-RECEIPT warn, not the webhook alarm', async () => {
+    // The prod 2026-08-19 shape exactly: two legs delivered within seconds, the
+    // third (a business texting line) acknowledged `sent` and never reported
+    // delivery. The webhook is proven alive by the siblings' own receipts.
     const send = await groupSend({
       'phone#+15551110001': { status: 'delivered' },
       'phone#+15551110002': { status: 'sent' },
@@ -172,14 +198,73 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
 
     const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
 
+    expect(outcome.noReceipt).toBe(1);
+    expect(outcome.alarmed).toBe(0);
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'group_send_recipient_no_receipt',
+        conversationId: send.conversationId,
+        providerSid: send.providerSid,
+        stuck: 1,
+        receipted: 1,
+        statuses: ['sent'],
+      }),
+      expect.stringContaining('not a webhook fault'),
+    );
+    // No member key in the line (PII rule): statuses and counts only.
+    const fields = (log.warn.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect(JSON.stringify(fields)).not.toContain('phone#');
+    // Resolved like any other decided send - it is logged ONCE.
+    log.warn.mockClear();
+    expect((await service(log).sweepSendStaleness(PAST_DEADLINE)).noReceipt).toBe(0);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('EVERY leg stuck at `sent` with no terminal sibling is still the webhook alarm', async () => {
+    // The documented case the alarm exists for: the receipts webhook died after
+    // the `sent` transitions. Nothing here proves it alive, so it stays ERROR.
+    const send = await groupSend({
+      'phone#+15551110030': { status: 'sent' },
+      'phone#+15551110031': { status: 'sent' },
+    });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+    const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
+
     expect(outcome.alarmed).toBe(1);
+    expect(outcome.noReceipt).toBe(0);
     expect(log.error).toHaveBeenCalledWith(
       expect.objectContaining({
         event: 'group_send_receipts_stale',
         conversationId: send.conversationId,
-        providerSid: send.providerSid,
       }),
       'group delivery receipts silent - check Conversations service webhook config',
+    );
+  });
+
+  it('a delivered sibling does NOT excuse a leg still `queued` - that is the alarm', async () => {
+    // A suppressed-but-unknown member, or a leg whose receipts never arrived at
+    // all, looks exactly like this. The webhook may be partially blind; say so.
+    const send = await groupSend({
+      'phone#+15551110032': { status: 'delivered' },
+      'phone#+15551110033': { status: 'sent' },
+      'phone#+15551110034': { status: 'queued' },
+    });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+    const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(outcome.alarmed).toBe(1);
+    expect(outcome.noReceipt).toBe(0);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'group_send_receipts_stale',
+        conversationId: send.conversationId,
+        stuck: 2,
+      }),
+      expect.any(String),
     );
   });
 
@@ -286,17 +371,20 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
       'phone#+15551110011': { status: 'sent' },
     });
 
-    const result = await service({ error: vi.fn() }).checkMessage({
+    const result = await service({ error: vi.fn(), warn: vi.fn() }).checkMessage({
       conversationId: send.conversationId,
       tsMsgId: send.tsMsgId,
     });
 
-    expect(result.outcome).toBe('alarmed');
+    // delivered + sent is the no-receipt shape; the stuck member is still named
+    // to the dev caller (that seam is not a log line).
+    expect(result.outcome).toBe('no_receipt');
+    expect(result.receipted).toBe(1);
     expect(result.stuck).toEqual([{ memberKey: 'phone#+15551110011', status: 'sent' }]);
   });
 
   it('a message row that is gone resolves as missing rather than alarming forever', async () => {
-    const result = await service({ error: vi.fn() }).checkMessage({
+    const result = await service({ error: vi.fn(), warn: vi.fn() }).checkMessage({
       conversationId: 'convGroup:no-such-thread',
       tsMsgId: '2026-08-11T12:00:00.000Z#nope',
     });
@@ -313,7 +401,7 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     const send = await groupSend({ 'phone#+15551110012': { status: 'queued' } });
     const receipts = recordingReceipts();
 
-    await service({ error: vi.fn() }, receipts).sweepSendStaleness(PAST_DEADLINE);
+    await service({ error: vi.fn(), warn: vi.fn() }, receipts).sweepSendStaleness(PAST_DEADLINE);
 
     expect(receipts.drained).toContain(send.providerSid);
   });

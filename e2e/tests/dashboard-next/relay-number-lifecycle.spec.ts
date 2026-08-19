@@ -5,6 +5,7 @@ import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the final "group is closed" copy (no drift).
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 import { Scenario, freshTenant, freshLandlord, tourSchedule } from '../../scenarios/steps.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay NUMBER LIFECYCLE end-to-end proofs (design section 8). Drives the real
 // dashboard + API + fake-phones against the hermetic lane and proves the burn-
@@ -79,7 +80,7 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The bodies of a conversation's transcript (GET /api/conversations/:id/messages). */
@@ -123,6 +124,20 @@ async function expectOutboxIncludes(
       { timeout: 15_000, message: `outbox to ${phone} never carried the expected copy` },
     )
     .toBe(true);
+}
+
+/** The negative twin. Only sound after a UI settle point that proves the action
+ *  already completed server-side - otherwise it passes vacuously by racing. */
+async function expectOutboxExcludes(
+  request: APIRequestContext,
+  phone: string,
+  needle: string,
+): Promise<void> {
+  const msgs = await getOutbox(request, { to: phone });
+  expect(
+    msgs.some((m) => (m.body ?? '').includes(needle)),
+    `outbox to ${phone} should NOT carry: ${needle}`,
+  ).toBe(false);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -229,9 +244,11 @@ test('close (ConversationDetail): final message to both members, composer hard-d
   await expect(page.getByText(/This group is closed/i)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
 
-  // The final catalog message went out to BOTH members FROM the pool number.
-  await expectOutboxIncludes(request, tenant.phone, CLOSED_COPY, group.pool_number);
-  await expectOutboxIncludes(request, landlord.phone, CLOSED_COPY, group.pool_number);
+  // FOUNDER DECISION 2026-08-18: close no longer texts anyone
+  // (RELAY_CLOSE_ANNOUNCEMENT_ENABLED off). The composer assertions above are the
+  // settle point, so the close has already completed server-side by here.
+  await expectOutboxExcludes(request, tenant.phone, CLOSED_COPY);
+  await expectOutboxExcludes(request, landlord.phone, CLOSED_COPY);
 
   // The number is KEPT on the closed conversation (burn-multiplexing invariant).
   const conv = await getConversation(page, group.conversationId);
@@ -280,9 +297,12 @@ test('close (inline ask): "not a fit" on a tour pops RelayCloseAskDialog; "Close
   await ask.getByRole('button', { name: 'Close relay group' }).click();
   await expect(ask).toHaveCount(0, { timeout: 15_000 });
 
-  // "Close relay group" ran the close: the final catalog copy reached BOTH members.
-  await expectOutboxIncludes(request, tenant.phone, CLOSED_COPY);
-  await expectOutboxIncludes(request, owner.phone, CLOSED_COPY);
+  // "Close relay group" ran the close, but sends nothing (founder decision
+  // 2026-08-18). The dialog dismissal above is the settle point. That the close
+  // itself really happened is covered by the conversation-status assertions in
+  // the sibling test; here the point is only that no member was texted.
+  await expectOutboxExcludes(request, tenant.phone, CLOSED_COPY);
+  await expectOutboxExcludes(request, owner.phone, CLOSED_COPY);
 });
 
 test('late text: a closed member texting the kept number lands in their 1:1 with the provenance badge (group + disjoint open group untouched)', async ({

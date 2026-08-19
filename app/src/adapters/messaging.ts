@@ -537,6 +537,8 @@ export interface TwilioMessagingDriverDeps {
   apiKeySid: string;
   apiKeySecret: string;
   messagingServiceSid: string;
+  /** Runtime environment label (`local`, `dev`, or `prod`) used in Twilio resource names. */
+  appEnv: string;
   /**
    * Public https base URL (the CloudFront domain) — used to pre-wire a newly
    * provisioned number's SmsUrl (inbound webhook) and VoiceUrl (M1.9 voice
@@ -564,11 +566,14 @@ const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 
 /**
  * FriendlyName stamped on every purchased pool number so the Twilio Console's
- * number list self-documents what the number is for. Deliberately STATIC (never
- * a group name): pool numbers multiplex across relay groups and are reused
- * after retirement, so any per-group label would go stale.
+ * number list self-documents both its environment and purpose. The purpose is
+ * deliberately static (never a group name): pool numbers multiplex across
+ * relay groups and are reused after retirement, so a per-group label would go
+ * stale.
  */
-const POOL_NUMBER_FRIENDLY_NAME = 'HousingChoice relay (group chats)';
+function poolNumberFriendlyName(appEnv: string): string {
+  return `HousingChoice ${appEnv} relay (group chats)`;
+}
 
 export class TwilioMessagingDriver implements MessagingAdapter {
   private readonly client: TwilioClientLike;
@@ -725,7 +730,7 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     const base = this.deps.publicBaseUrl;
     const purchased = await incoming.create({
       phoneNumber: candidate.phoneNumber,
-      friendlyName: POOL_NUMBER_FRIENDLY_NAME,
+      friendlyName: poolNumberFriendlyName(this.deps.appEnv),
       ...(base !== undefined && {
         smsUrl: `${base}${SMS_WEBHOOK_PATH}`,
         voiceUrl: `${base}${VOICE_WEBHOOK_PATH}`,
@@ -1176,6 +1181,7 @@ export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): M
       apiKeySid: config.twilioApiKeySid,
       apiKeySecret: config.twilioApiKeySecret,
       messagingServiceSid: config.twilioMessagingServiceSid,
+      appEnv: config.appEnv,
       ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
       ...(config.twilioApiBaseUrl !== undefined && { apiBaseUrl: config.twilioApiBaseUrl }),
       // A2P kill-switch: OFF on deployed/twilio until A2P approved (config default).

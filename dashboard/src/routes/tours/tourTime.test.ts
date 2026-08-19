@@ -2,7 +2,12 @@
 // share: past and >14-days-out values warn (the dialogs then require a second
 // submit); empty (timeless) and unparseable values are not this check's job.
 import { describe, expect, it } from 'vitest';
-import { currentHourLocal, FAR_FUTURE_DAYS, tourTimeWarning } from './tourTime.js';
+import {
+  currentHourLocal,
+  FAR_FUTURE_DAYS,
+  pastTourTimeWarning,
+  tourTimeWarning,
+} from './tourTime.js';
 
 /** A datetime-local value `msFromNow` relative to `now`, in host-local time
  *  (mirrors how the dialogs' values parse back via `new Date(local)`). */
@@ -42,6 +47,41 @@ describe('tourTimeWarning', () => {
 
   it(`warns beyond ${FAR_FUTURE_DAYS} days out`, () => {
     expect(tourTimeWarning(localDatetime(NOW, 15 * DAY), NOW)).toMatch(/more than 14 days/);
+  });
+});
+
+// The mirror image, for the already-happened dialog: past is the normal case,
+// so only a FUTURE value warns.
+describe('pastTourTimeWarning', () => {
+  it('returns null for an empty value (the field is optional)', () => {
+    expect(pastTourTimeWarning('', NOW)).toBeNull();
+  });
+
+  it('returns null for an unparseable value', () => {
+    expect(pastTourTimeWarning('not-a-date', NOW)).toBeNull();
+  });
+
+  it('returns null for a past time - the whole point of the dialog', () => {
+    expect(pastTourTimeWarning(localDatetime(NOW, -3_600_000), NOW)).toBeNull();
+    // Deep back-dating stays unremarkable: recording an old tour is legitimate.
+    expect(pastTourTimeWarning(localDatetime(NOW, -400 * DAY), NOW)).toBeNull();
+  });
+
+  it('returns null for exactly now (it just happened)', () => {
+    expect(pastTourTimeWarning(localDatetime(NOW, 0), NOW)).toBeNull();
+  });
+
+  it('warns for a future time (a tour that already happened cannot be later)', () => {
+    expect(pastTourTimeWarning(localDatetime(NOW, 3_600_000), NOW)).toMatch(/in the future/);
+  });
+
+  it('is the inverse of tourTimeWarning at the boundaries', () => {
+    const past = localDatetime(NOW, -DAY);
+    const future = localDatetime(NOW, DAY);
+    expect(tourTimeWarning(past, NOW)).not.toBeNull();
+    expect(pastTourTimeWarning(past, NOW)).toBeNull();
+    expect(tourTimeWarning(future, NOW)).toBeNull();
+    expect(pastTourTimeWarning(future, NOW)).not.toBeNull();
   });
 });
 

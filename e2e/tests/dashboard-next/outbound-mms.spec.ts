@@ -11,6 +11,7 @@ import { dashboardUrl, fakeUrl } from '../../support/urls.js';
 // module (no repo/AWS deps) so the media-only relay body is asserted against the
 // catalog default rather than a hard-coded string.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Outbound MMS - attach + send media everywhere staff send SMS (design Sec 12).
 // Drives the REAL dashboard composer against the hermetic lane stack and proves
@@ -55,7 +56,7 @@ async function devLogin(page: Page): Promise<void> {
   // name matches TWO headings the moment any tour lands in that group and the
   // wait fails on a strict-mode violation rather than on anything this spec is
   // about. Same correction ba1df280 already made in the group-text specs.
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Attach the fixture image on the shared composer and wait for the upload to

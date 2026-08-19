@@ -50,7 +50,7 @@ function guardrailDeps() {
     staleness: {
       async sweepSendStaleness() {
         sweeps.staleness += 1;
-        return { scanned: 0, alarmed: 0, cleared: 0 };
+        return { scanned: 0, alarmed: 0, noReceipt: 0, cleared: 0 };
       },
     },
     conversationsRepo: {

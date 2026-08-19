@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { registerParty, sendGroupAsParty } from '../../fixtures/fakeTwilio.js';
 import { conversationIdForGroup, contactIdForPhone } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 1 - a carrier group text becomes a GROUP THREAD, and confers no consent.
 //
@@ -30,7 +31,7 @@ const RENEE = '+15550100003';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('a carrier group MMS files as a group thread; silent members gain no consent', async ({

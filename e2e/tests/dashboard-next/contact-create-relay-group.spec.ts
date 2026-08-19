@@ -5,6 +5,7 @@ import { driveConnectingGroupToOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the relay intro copy (no drift): the spec reads the
 // app catalog directly, the same cross-package import tour-roster.spec.ts uses.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Start a STANDALONE relay group from a contact file (contact-create-relay-group
 // design section 7). Drives the real dashboard + API on the hermetic lane through
@@ -71,9 +72,11 @@ const LANDLORD_PHONE = '+15550100002';
 const CONNECTING_NOTICE =
   'This group is still getting its number. The intro text has not been sent yet; it goes out once the number is ready.';
 
-// The relay.intro trailing opt-out footer - a stable substring that identifies
-// the auto-intro leg in the outbox (relay-open-stop.spec.ts:39).
-const INTRO_NEEDLE = 'Reply STOP to opt out';
+// A stable substring that identifies the auto-intro leg in the outbox. It used
+// to be the trailing "Reply STOP to opt out." footer; the founder decision of
+// 2026-08-18 removed that line from relay.intro, so the needle now keys off the
+// intro's own body copy instead (relay-open-stop.spec.ts uses the same one).
+const INTRO_NEEDLE = 'Use this group text';
 
 /** Reseed the lane with the LEAN profile (the byte-stable e2e world). */
 async function reseedLean(request: APIRequestContext): Promise<void> {
@@ -89,7 +92,7 @@ async function devLogin(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   // exact: a non-exact name is a case-insensitive SUBSTRING match, and the Today
   // board's "Tours today" group heading would then collide (strict-mode).
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Poll the dev outbox until a message to `phone` whose body includes `needle`

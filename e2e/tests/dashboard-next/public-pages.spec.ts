@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { getOutbox } from '../../fixtures/outbox.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Public-pages surface (spec section 5 e2e) - the UNAUTHENTICATED pages that mount
 // OUTSIDE the auth gate (dashboard/src/App.tsx): `/p/:unitId` (the full-info flyer
@@ -49,7 +50,7 @@ const NON_SHAREABLE_UNIT = 'unit-0001'; // seeded `under_application` -> opaque 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** A unique +1555 phone per submit so the idempotent (per-phone) welcome never

@@ -54,6 +54,7 @@ section of that document.
 | `app/src/routes/placements.ts` | Placement preview route constructs the callback. |
 | `dashboard/src/api/types.ts` | Mirrored `DuplicateOpenGroup` + `RosterPreview.duplicateOf`. |
 | `dashboard/src/routes/shared/RosterConfirmDialog.tsx` | The warning block. |
+| `e2e/tests/dashboard-next/contact-create-relay-group.spec.ts` | The end-to-end proof - the ONLY spec that drives the create-group flow. |
 | `docs/issues/*.md` (6 new) | The gaps the spec deliberately does not build - all six of spec section 8. |
 
 ---
@@ -79,7 +80,7 @@ Create `app/test/relayGroupDuplicates.test.ts`:
 ```ts
 // The duplicate-relay-group detector (spec D1/D2a/D4/D6). Pure unit tests over a
 // fake listRelayGroups - no DynamoDB, no network.
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -89,9 +90,16 @@ import {
 } from '../src/services/relayGroupDuplicates.js';
 
 // KEEP the capture handle - D6 mandates a WARN on an incomplete scan, and a
-// discarded handle makes that log unreachable to any assertion.
-const logs = createLogCapture();
-const logger = createLogger({ destination: logs.stream });
+// discarded handle makes that log unreachable to any assertion. RESET it per test:
+// a module-scope buffer that accumulates makes the WARN assertion pass on residue
+// from an earlier case, so it would be green regardless of the implementation.
+let logs = createLogCapture();
+let logger = createLogger({ destination: logs.stream });
+
+beforeEach(() => {
+  logs = createLogCapture();
+  logger = createLogger({ destination: logs.stream });
+});
 
 /** A relay group row with just the fields the detector reads. */
 function group(
@@ -674,10 +682,12 @@ quietly warning on the add dialog.
 ```ts
   it('buildAddPreview NEVER sets duplicateOf', async () => {
     const { deps, owner } = ownerFixture(world, members);
+    // The candidate must NOT already be on the roster, or the add preview takes its
+    // idempotent branch and the assertion proves nothing about a real add.
     const outcome = await buildAddPreview(
       deps,
       owner,
-      { contactId: 'c-bob', phone: BOB, name: 'Bob Brown', optedOut: false },
+      { contactId: 'c-carla', phone: '+15550100003', name: 'Carla Cole', optedOut: false },
       QUIET_OFF,
     );
     expect(outcome.ok).toBe(true);
@@ -1105,8 +1115,13 @@ describe('duplicate warning', () => {
 
 - [ ] **Step 2: Run and verify they fail**
 
-Run: `cd dashboard && npx vitest run src/routes/shared/RosterConfirmDialog.test.tsx`
-Expected: FAIL - no warning text, and `duplicateOf` is not on the client `RosterPreview`.
+Run: `cd dashboard && npx vitest run src/routes/shared/RosterConfirmDialog.test.tsx -t "duplicate warning"`
+Expected: FAIL on the two cases that assert the warning IS rendered.
+
+Same caveat as Task 2: vitest strips types without checking them, so "duplicateOf is
+not on RosterPreview" is NOT what makes this red - the two NEGATIVE cases (no warning
+when absent, onConfirm still receives only `force`) pass vacuously before any
+implementation. Confirm the runner reports 2 failures, not 4.
 
 - [ ] **Step 3: Mirror the type**
 
@@ -1187,28 +1202,30 @@ Add the class to `dashboard/src/routes/shared/RosterConfirmDialog.module.css`, b
 the existing `.quiet` notice at :63 which is the precedent for a warning block in this
 component. Without this the element renders `class="undefined"` and no test catches it:
 
+This file uses design tokens exclusively - `--sp-*` for spacing, `--fs-*` for size,
+`--c-*` for color (see `.count`, `.quiet` and `.error`). Literal px and invented
+`--color-*` names would be the only ones in the file:
+
 ```css
+/* An existing live group with exactly these members. Unlike .quiet - which
+ * explains a default - this one is a warning about a thing the operator is
+ * about to do. */
 .duplicateWarning {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-warning-border, #d9a441);
-  border-radius: 6px;
-  background: var(--color-warning-bg, #fdf6e6);
-  font-size: 13px;
-  line-height: 1.45;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-warning, var(--c-danger));
+  border-radius: var(--radius-sm, 6px);
+  font-size: var(--fs-xs);
 }
 
 .duplicateWarning p {
-  margin: 0 0 6px;
-}
-
-.duplicateWarning a {
-  font-weight: 600;
+  margin: 0 0 var(--sp-1);
 }
 ```
 
-Match the surrounding file's variable names if they differ - read `.quiet` and `.error`
-first rather than assuming these token names exist.
+Read the file's existing rules first and use the token names it actually declares; the
+`--c-warning` and `--radius-sm` fallbacks above are guesses at names this file does not
+itself use.
 
 - [ ] **Step 5: Run and verify they pass**
 
@@ -1243,96 +1260,125 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 5: End-to-end proof
 
 **Files:**
-- Modify: `e2e/tests/dashboard-next/relay-number-lifecycle.spec.ts`
+- Modify: `e2e/tests/dashboard-next/contact-create-relay-group.spec.ts`
 
-WHY THIS FILE and not another: it is the only relay spec that already has all three
-helpers this task needs - `createGroupOpen` imported at :4, a file-local `devLogin` at
-:79, and `uniquePhone` at :57. `relay-group-view.spec.ts` has `devLogin` only, and it
-reseeds the FULL profile per test. Do NOT modify `e2e/fixtures/relayConnect.ts`;
-consume it read-only.
+WHY THIS FILE. It is the only spec that drives the create-group flow, and the flow only
+exists there: the picker is opened from a CONTACT FILE and adds CONTACTS, so a test
+built on ad-hoc phone numbers has no entry point and no pickable option. An earlier
+draft of this task invented such a test against `relay-number-lifecycle.spec.ts`; it was
+unbuildable for exactly that reason. This file already has the seeded contacts
+(`TENANT_ID` :64, `TENANT_NAME` :65, `LANDLORD_NAME` :67), `devLogin` :29, and the real
+accessible names, verified at :146-175:
 
-**Interfaces:**
-- Consumes: `createGroupOpen(page, members)` -> `{ conversationId, status, pool_number }`,
-  `devLogin(page)`, `uniquePhone()` - all already in scope in that file.
+- `getByRole('button', { name: 'Create a relay group' })` - the card action
+- `getByRole('dialog', { name: 'Create a relay group' })` - the picker
+- `picker.getByRole('combobox', { name: 'Add member' })`
+- `picker.getByRole('option', { name: <RegExp> })`
+- `picker.getByRole('button', { name: 'Create group' })`
+- `getByRole('dialog', { name: 'Open the relay group?' })` - the confirm dialog
+
+Use those names verbatim. Do NOT modify `e2e/fixtures/relayConnect.ts`.
 
 - [ ] **Step 1: Write the spec**
 
-Append to `e2e/tests/dashboard-next/relay-number-lifecycle.spec.ts`:
+Append to `e2e/tests/dashboard-next/contact-create-relay-group.spec.ts`:
 
 ```ts
-test('a second group for the same pair WARNS in the dialog, and is still created', async ({
+test('Contact file: a second group for the same pair WARNS, and is still created', async ({
   page,
+  request,
 }) => {
+  // A connect-when-ready handshake plus a full browser flow against a 30s default.
+  test.slow();
   await devLogin(page);
 
-  const tenant = { phone: uniquePhone(), name: 'Dup Tenant' };
-  const landlord = { phone: uniquePhone(), name: 'Dup Landlord' };
+  // Arrange: a live group for exactly this tenant + landlord, made through the API
+  // so the UI half of the test is only about the WARNING. Reuse the same seeded
+  // contacts the picker offers, or the rosters will not match and nothing warns.
+  const seedRes = await request.post(`${NEXT}/api/relay-groups`, {
+    data: {
+      members: [
+        { contactId: TENANT_ID, phone: TENANT_PHONE, name: TENANT_NAME },
+        { contactId: LANDLORD_ID, phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+      ],
+    },
+  });
+  expect(seedRes.ok(), await seedRes.text()).toBeTruthy();
+  const existingId = (await seedRes.json()).conversation.conversationId;
 
-  // createGroupOpen drives the connect-when-ready sequence: in the hermetic lane a
-  // fresh pair lands CONNECTING with no pool number (twilio driver, K=0, seeded pool
-  // numbers are console-tagged), and the helper registers the warmed number.
-  const first = await createGroupOpen(page, [tenant, landlord]);
-  expect(first.status).toBe('open');
-  expect(first.pool_number).toBeTruthy();
+  // Act: build the SAME pair again through the real picker.
+  await page.goto(`${NEXT}/contacts/${TENANT_ID}`);
+  await page.getByRole('button', { name: 'Create a relay group' }).click();
+  const picker = page.getByRole('dialog', { name: 'Create a relay group' });
+  await picker.getByRole('combobox', { name: 'Add member' }).fill(LANDLORD_NAME);
+  await picker.getByRole('option', { name: new RegExp(LANDLORD_NAME) }).click();
+  await picker.getByRole('button', { name: 'Create group' }).click();
 
-  // Drive the REAL create flow from the contact page, so the DIALOG renders - an
-  // API-only assertion would leave the entire warning UI unproven.
-  await page.goto(`${NEXT}/contacts`);
-  await page.getByRole('link', { name: tenant.name }).click();
-  await page.getByRole('button', { name: /Create group/i }).click();
-  await page.getByLabel(/Add someone/i).fill(landlord.phone);
-  await page.getByRole('option', { name: new RegExp(landlord.name, 'i') }).click();
-  await page.getByRole('button', { name: /Continue|Preview/i }).click();
+  // Assert THE WARNING, in the confirm dialog the server populated.
+  const confirm = page.getByRole('dialog', { name: 'Open the relay group?' });
+  await expect(confirm).toBeVisible();
+  await expect(confirm.getByText(/already have an open relay group/i)).toBeVisible();
+  await expect(confirm.getByText(new RegExp(`${TENANT_NAME}.*${LANDLORD_NAME}`))).toBeVisible();
+  const link = confirm.getByRole('link', { name: /View the existing group/i });
+  await expect(link).toHaveAttribute('href', `/conversations/${existingId}`);
+  await expect(link).toHaveAttribute('target', '_blank');
 
-  // THE WARNING: names the existing pair and links to the group that already exists.
-  await expect(page.getByText(/already have an open relay group/i)).toBeVisible();
-  await expect(page.getByText(new RegExp(`${tenant.name} and ${landlord.name}`, 'i'))).toBeVisible();
-  const existing = page.getByRole('link', { name: /View the existing group/i });
-  await expect(existing).toHaveAttribute('href', `/conversations/${first.conversationId}`);
-  await expect(existing).toHaveAttribute('target', '_blank');
-
-  // NOTHING IS REFUSED (spec D5): confirming creates the duplicate.
-  await page.getByRole('button', { name: /Create|Open relay group/i }).click();
-  await expect(page.getByText(/already have an open relay group/i)).toBeHidden();
-
-  // And it lands on a DIFFERENT number - the allocation behavior this feature
-  // deliberately does not change (spec 2.2). Read it once the second group has
-  // been driven open, since a just-created group has no number to compare.
-  const second = await createGroupOpen(page, [tenant, landlord]);
-  expect(second.conversationId).not.toBe(first.conversationId);
-  expect(second.pool_number).not.toBe(first.pool_number);
+  // NOTHING IS REFUSED (spec D5). Confirming creates the duplicate and the dialog
+  // closes - the warning is advice, not a gate.
+  await confirm.getByRole('button', { name: /^(Open relay group|Create group)$/ }).click();
+  await expect(confirm).toBeHidden({ timeout: 15_000 });
 });
 
-test('a superset roster does NOT warn', async ({ page }) => {
+test('Contact file: a SUPERSET roster does not warn', async ({ page, request }) => {
+  test.slow();
   await devLogin(page);
 
-  const tenant = { phone: uniquePhone(), name: 'Superset Tenant' };
-  const landlord = { phone: uniquePhone(), name: 'Superset Landlord' };
-  const third = { phone: uniquePhone(), name: 'Superset Third' };
+  await request.post(`${NEXT}/api/relay-groups`, {
+    data: {
+      members: [
+        { contactId: TENANT_ID, phone: TENANT_PHONE, name: TENANT_NAME },
+        { contactId: LANDLORD_ID, phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+      ],
+    },
+  });
 
-  await createGroupOpen(page, [tenant, landlord]);
-
-  // API-level here on purpose: this asserts an ABSENCE, and the cheapest honest
-  // proof that the server did not flag it is the preview payload itself.
-  // Without this case, a regression to containment-matching passes every other test.
-  const res = await page.request.post('/api/relay-groups/preview', {
-    data: { members: [tenant, landlord, third] },
+  // Asserting an ABSENCE, so go straight at the payload the dialog is built from -
+  // it is the cheapest honest proof the SERVER did not flag it. Without this case a
+  // regression to containment-matching passes every other test in the suite.
+  const res = await request.post(`${NEXT}/api/relay-groups/preview`, {
+    data: {
+      members: [
+        { contactId: TENANT_ID, phone: TENANT_PHONE, name: TENANT_NAME },
+        { contactId: LANDLORD_ID, phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+        { phone: THIRD_PHONE, name: 'Third Person' },
+      ],
+    },
   });
   expect(res.ok()).toBeTruthy();
   expect((await res.json()).duplicateOf, 'a superset is a different conversation').toBeUndefined();
 });
 ```
 
-BEFORE writing the UI steps, open `dashboard/src/routes/contact/CreateRelayGroupModal.tsx`
-and match the ACTUAL accessible names of the create-group entry point, the member
-picker, and the confirm button. The selectors above are the shape to follow, not
-verified strings - the modal shipped on a branch this plan did not read line by line,
-and an accessibility-first selector that does not match is the single most common way
-an e2e lands red for the wrong reason.
+BEFORE writing these, read the file's constants block at :64-70 and use whatever it
+actually declares. It has `TENANT_ID`, `TENANT_NAME` and `LANDLORD_NAME`; if it has no
+`TENANT_PHONE` / `LANDLORD_PHONE` / `LANDLORD_ID`, get them from the lean seed
+(`app/src/lib/seed/lean.ts`) and add them as local constants beside the existing ones -
+do NOT invent numbers, because the rosters must match exactly or the first test warns
+about nothing and passes for the wrong reason.
+
+NOTE ON RESIDUE: this spec reseeds per its own setup. Both new tests create relay
+groups through the API, so if the file asserts on a clean "No relay groups yet." state
+anywhere, place these tests AFTER those assertions rather than before.
+
+The pool-number assertion from spec 9 is deliberately NOT here. It belongs with
+`createGroupOpen`, which lives in `relay-number-lifecycle.spec.ts`, and that file
+ALREADY proves the property this feature does not change: its overlap test at :191-207
+asserts a roster sharing a member is forced onto a different number. Re-proving it
+through a third group created after a UI flow tests the wrong object.
 
 - [ ] **Step 2: Run the suite**
 
-Run: `npm run e2e`
+Run: `cd "W:/tmp/relay-number-reuse" && npm run e2e`
 Expected: exit 0. Re-run ONCE on a failure in `tour-reminders-panel-e2e-flake` or
 `conversationdetail-members-mock-suite-flake` and report BOTH runs.
 
@@ -1431,24 +1477,43 @@ single-line PowerShell merge command. Do NOT merge.
 
 ## Self-Review
 
-**Spec coverage.** D1 -> Task 1 Steps 1/3 and Task 5. D2 -> Task 2 Step 4 (the deduped
-set) and its argument test. D2a -> Task 1's adjacent-field test. D4 -> Task 1's
-partition tests and the imported-row skip. D5 (nothing refuses) -> Task 4's
-onConfirm-unchanged test and Task 5's 201 assertion. D6 -> Task 1's four cases.
-D7 (preview only) -> Task 3 Step 4's "do NOT add the callback to any other call".
-Spec 5's copy rules -> Task 4 Step 4. Spec 6 (cost) -> issue 5. Spec 8 (gaps) -> Task 6.
+**Spec coverage.** D1 -> Task 1's three negatives and Task 5's superset case. D2 ->
+Task 2's deduped-argument test. D2a -> Task 1's adjacent-field test. D4 -> Task 1's
+partition tests, including BOTH directions of the imported-row rule. D5 (nothing
+refuses) -> Task 4's onConfirm-unchanged test and Task 5's "confirming creates it".
+D6 -> Task 1's four truncation cases plus the WARN assertion. D7 (preview only) ->
+Task 3 Step 4's "do NOT add the callback to any other call". Spec 5's copy rules ->
+Task 4 Step 4; its "pin the add path with a test on the builder" -> Task 2's
+buildAddPreview case. Spec 6 (cost) -> issue 5. Spec 8's six gaps -> Task 6.
 
 **Placeholders.** None: every code step carries runnable code, every run step names the
 exact command and expected result.
+
+**Where this plan still asks the builder to look before typing, and why that is not a
+placeholder.** Three places name a real file, say exactly what to read in it, and say
+what goes wrong if the read is skipped: Task 5's seed constants, Task 4's CSS token
+names, and Task 2's import block. Each is a fact that lives in one known file and would
+be stale the moment it was copied here. That is different from the guess-instructions
+this plan removed - "use its names rather than adding duplicates", "or the relay spec
+whose fixtures best fit" - which named no file and left the builder to choose.
 
 **Type consistency.** `DuplicateOpenGroup` is defined once in Task 1, imported by
 Task 2, mirrored by hand in Task 4 with identical field names and the same
 `'open' | 'connecting'` union. `FindDuplicateFn` is declared in Task 2 and used in
 Task 3. `findOpenGroupWithSamePhones` keeps one signature throughout.
 
-**Test fixtures verified, not assumed.** Task 2's tests were first written against
-invented helpers (`standaloneDeps()`, `quietState()`), which do not exist. They are now
-written against what `app/test/rosterEdits.test.ts` actually has: the `ownerFixture`
-helper at :116, the `ALICE`/`BOB` constants at :101-102, the `QUIET_OFF` constant at
-:27, and the `world` seeded by the parity block's `beforeEach`. That is why Task 2 says
-to append INSIDE that describe block rather than at file scope.
+**Test fixtures verified, not assumed - the lesson of two review rounds.** Every code
+block here was originally written from memory of the codebase and every one of them was
+wrong somewhere. Task 2 used helpers that do not exist (`standaloneDeps()`,
+`quietState()`); it now uses `ownerFixture` :116, `ALICE`/`BOB` :101-102 and
+`QUIET_OFF` :27 from `app/test/rosterEdits.test.ts`, which is why it says to append
+INSIDE that describe block. Task 3 used a file-scope `app` and `conversations` that do
+not exist; it now uses the file's own `preview(app, body)` helper and
+`makeWebhookHarness({ world })`. Task 1's fixture derived member names from phone
+numbers, making its own privacy assertion unpassable. Task 5 was built on a flow that
+does not exist - ad-hoc phones cannot enter a picker seeded from a contact file - and
+now uses `contact-create-relay-group.spec.ts` and its verified accessible names.
+
+A builder executing this should still confirm each block against the file before
+running it. The plan's code is verified as of this revision, not guaranteed against
+drift.

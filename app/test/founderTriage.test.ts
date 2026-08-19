@@ -535,6 +535,8 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
         auditRepo: world.auditRepo,
         events: world.events,
       }),
+      conversationsRepo: world.conversationsRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
@@ -544,9 +546,17 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     _resetForTests();
   });
 
-  /** Run the inbound bridge once so a ringing founder-bridge call exists. */
-  async function seedRingingBridge() {
-    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+  /**
+   * Run the inbound bridge once so a ringing founder-bridge call exists.
+   *
+   * The caller defaults to a BLANK unknown-type contact - what auto-capture
+   * actually creates for a first-time caller, and the only population the
+   * intake gate (jobs/missedCallAutoText.ts) lets the auto-text reach. Tests
+   * that need a named/typed caller pass the fields explicitly; doing so also
+   * SUPPRESSES the auto-text, which is the gate working as designed.
+   */
+  async function seedRingingBridge(caller: Record<string, unknown> = { type: 'unknown' }) {
+    world.contacts.push({ contactId: 'c-caller', phone: CALLER, ...caller } as (typeof world.contacts)[number]);
     const { app } = founderHarness(world);
     await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
     // Clear the pre-ring push so the missed-call assertions start clean.
@@ -554,8 +564,12 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     return app;
   }
 
-  it('no-answer → missed-call push (with quick-reply actions) + auto-text sent once', async () => {
-    const app = await seedRingingBridge();
+  it('no-answer → missed-call push (with quick-reply actions); a KNOWN tenant gets no auto-text', async () => {
+    // A named tenant caller: the push must still fire (and carry the masked
+    // role+name label), while the intake gate suppresses the auto-text - we
+    // already hold this caller's details, so the "text us your name, voucher
+    // size, and housing authority" copy would be wrong to send.
+    const app = await seedRingingBridge({ type: 'tenant', firstName: 'Jane', lastName: 'Doe' });
 
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAbiz0001',
@@ -579,7 +593,20 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(actions[0]!.action).toBe('qr-0');
     expect(JSON.stringify(missed!.notification.payload)).not.toContain(CALLER);
 
+    expect(world.sent).toHaveLength(0); // intake gate: details already on file
+  });
+
+  it('no-answer from a caller we hold NOTHING on → auto-text sent once', async () => {
+    const app = await seedRingingBridge(); // blank unknown caller
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
     // Zero-tap auto-text fired ONCE into the caller's conversation.
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
     expect(world.sent).toHaveLength(1);
     expect(world.sent[0]!.to).toBe(CALLER);
     expect(world.sent[0]!.body).toBe(world.settings.missedCallAutoText);

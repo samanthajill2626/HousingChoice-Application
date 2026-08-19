@@ -67,6 +67,15 @@ describe('TemplatesSection — admin edit', () => {
     expect(screen.queryByText(/Read-only/i)).not.toBeInTheDocument();
   });
 
+  it('explains WHO receives the missed-call text next to the toggle', async () => {
+    render(<TemplatesSection />);
+    // The operator-facing statement of the job's intake gate. Matched loosely on
+    // the load-bearing clauses so wording tweaks do not break the test, but a
+    // silent DELETION of the explanation does.
+    expect(await screen.findByText(/hold no details on/i)).toBeInTheDocument();
+    expect(screen.getByText(/landlord, partner,\s*or team member/i)).toBeInTheDocument();
+  });
+
   it('shows the served default welcome body as the empty box placeholder', async () => {
     render(<TemplatesSection />);
     const welcome = await screen.findByLabelText(/Housing-fair welcome text/i);

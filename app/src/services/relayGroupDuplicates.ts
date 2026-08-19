@@ -7,7 +7,11 @@
 //
 // PII (doc section 9): a preview carries NAMES, never phones. DuplicateOpenGroup
 // therefore holds display names only, and the log lines carry ids and counts.
-import type { ConversationItem, ConversationsRepo } from '../repos/conversationsRepo.js';
+import type {
+  ConversationItem,
+  ConversationParticipant,
+  ConversationsRepo,
+} from '../repos/conversationsRepo.js';
 import type { Logger } from '../lib/logger.js';
 
 /** The live group a proposed roster duplicates. Names only - never phones. */
@@ -34,6 +38,23 @@ export function samePhoneSet(a: Set<string>, b: Set<string>): boolean {
 }
 
 /**
+ * THE ONE definition of who is on a group's roster: the participants carrying a
+ * non-empty phone. `ConversationParticipant.phone` is typed as required, but rows
+ * are unvalidated casts off DynamoDB and legacy/imported rows really can carry a
+ * blank one, so the guard is a runtime check rather than a type assumption.
+ *
+ * Both the phone set the MATCH is made on and the names the WARNING renders read
+ * this, so the two cannot disagree. Split them and a phoneless participant is
+ * excluded from the comparison but still named in the copy - the warning then
+ * names somebody who was never part of the set that matched.
+ */
+function rosterMembers(conv: ConversationItem): ConversationParticipant[] {
+  return (conv.participants ?? []).filter(
+    (member) => typeof member.phone === 'string' && member.phone.length > 0,
+  );
+}
+
+/**
  * The phones of a group's CURRENT roster (spec D2a).
  *
  * Deliberately `participants`, never `ever_member_phones` - the latter sits directly
@@ -43,11 +64,7 @@ export function samePhoneSet(a: Set<string>, b: Set<string>): boolean {
  * match at all.
  */
 function rosterPhones(conv: ConversationItem): Set<string> {
-  const out = new Set<string>();
-  for (const member of conv.participants ?? []) {
-    if (typeof member.phone === 'string' && member.phone.length > 0) out.add(member.phone);
-  }
-  return out;
+  return new Set(rosterMembers(conv).map((member) => member.phone));
 }
 
 /**
@@ -80,9 +97,11 @@ function toDuplicate(
   return {
     conversationId: conv.conversationId,
     partition,
-    // A nameless participant renders as 'Unknown'. NEVER fall back to the phone -
-    // doc section 9 forbids it on the wire.
-    memberNames: (conv.participants ?? []).map((m) =>
+    // Named from `rosterMembers`, the SAME walk the match was made on - never from
+    // the raw participants array (see that function). A nameless participant renders
+    // as 'Unknown'. NEVER fall back to the phone - doc section 9 forbids it on the
+    // wire.
+    memberNames: rosterMembers(conv).map((m) =>
       typeof m.name === 'string' && m.name.length > 0 ? m.name : 'Unknown',
     ),
   };
@@ -121,7 +140,16 @@ export async function findOpenGroupWithSamePhones(
       if (page.truncated) incomplete = true;
     } catch (err) {
       // Silence, not a broken dialog. See the NEVER THROWS note above.
-      deps.log.warn({ err, partition }, 'duplicate relay-group scan failed - no warning shown');
+      //
+      // Says ONLY what is true HERE: this partition could not be read, so nothing in
+      // it is represented in the answer. It does NOT claim the preview went unwarned
+      // - the other partition is still walked and may well match, in which case a
+      // warning IS shown. The "found nothing" claim belongs to the summary WARN
+      // below, which is reached only when no partition matched.
+      deps.log.warn(
+        { err, partition },
+        'duplicate relay-group scan could not read this partition - it is not represented in the answer',
+      );
       incomplete = true;
       continue;
     }

@@ -1009,6 +1009,35 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect(add.body.recipientCount).toBe(3);
   });
 
+  it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
+    // Pins the WIRING, not the detector (relayGroupDuplicates.test.ts owns that).
+    // The route passes findOpenGroupWithSamePhones as an OPTIONAL argument, so
+    // deleting it would typecheck cleanly and silently drop every warning on this
+    // endpoint. This test is what turns red if that happens.
+    const placementId = await createPlacement();
+    // The placement's default roster is exactly {tenant, PM}, so this standalone
+    // group is the exact-set duplicate the preview must find. It is NOT the
+    // placement's own thread - group_thread is never pointed at it.
+    const existing = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550409777',
+      members: [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeDefined();
+    expect(res.body.duplicateOf.conversationId).toBe(existing.conversationId);
+    expect(res.body.duplicateOf.partition).toBe('open');
+    expect(res.body.duplicateOf.memberNames).toEqual(['Tasha Tenant', 'Pat Manager']);
+    // The wire rule holds on the route too: names travel, phones do not.
+    expect(JSON.stringify(res.body)).not.toContain(TENANT_PHONE);
+  });
+
   // --- Quiet-hours deferral (contact-rosters Task 13) ----------------------
   //
   // The placement mirrors of the tour paths, on the SAME pinned clock:

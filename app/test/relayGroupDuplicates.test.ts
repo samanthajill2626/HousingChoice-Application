@@ -243,6 +243,31 @@ describe('findOpenGroupWithSamePhones - the wire rule', () => {
     expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
   });
 
+  it('names ONLY the phone-bearing participants the match was made on', async () => {
+    // The asymmetry this pins: the match is decided on participants that HAVE a
+    // phone, so the copy must be too. A stored row really can carry a blank phone
+    // (participants are unvalidated casts off DynamoDB), and naming that person
+    // tells the operator the existing group holds somebody who is not in the set
+    // that matched at all.
+    const row = {
+      conversationId: 'conv-1',
+      participants: [
+        { contactId: '', phone: A, name: 'Dana Reed' },
+        { contactId: '', phone: B, name: 'Marcus Bell' },
+        { contactId: '', phone: '', name: 'Renee Carter' },
+      ],
+      last_activity_at: '2026-08-18T00:00:00.000Z',
+    } as unknown as ConversationItem;
+    const conversations = repo({ open: [row] });
+    const found = await findOpenGroupWithSamePhones(
+      { conversations, log: logger },
+      new Set([A, B]),
+    );
+    // The two-phone roster still MATCHES - the phoneless row is not a member.
+    expect(found?.conversationId).toBe('conv-1');
+    expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
+  });
+
   it('renders a nameless participant as Unknown', async () => {
     const row = {
       conversationId: 'conv-1',

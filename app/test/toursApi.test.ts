@@ -3824,6 +3824,37 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.body.quietEndsAt).toBeUndefined();
   });
 
+  it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
+    // Pins the WIRING, not the detector (relayGroupDuplicates.test.ts owns that).
+    // The route passes findOpenGroupWithSamePhones as an OPTIONAL argument, so
+    // deleting it would typecheck cleanly and silently drop every warning on this
+    // endpoint. This test is what turns red if that happens.
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+    // The tour's default roster is exactly {tenant, PM}, so this standalone group
+    // is the exact-set duplicate the preview must find. It is NOT the tour's own
+    // thread - nothing points the tour at it.
+    const existing = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550309777',
+      members: [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeDefined();
+    expect(res.body.duplicateOf.conversationId).toBe(existing.conversationId);
+    expect(res.body.duplicateOf.partition).toBe('open');
+    expect(res.body.duplicateOf.memberNames).toEqual(['Tina Tenant', 'Pat Manager']);
+    // The wire rule holds on the route too: names travel, phones do not.
+    expect(JSON.stringify(res.body)).not.toContain(TENANT_PHONE);
+  });
+
   it('preview-open marks an opted-out member and excludes them from recipientCount', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });

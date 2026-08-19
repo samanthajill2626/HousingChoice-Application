@@ -82,7 +82,7 @@ said replies "split between the two threads at random"; that is false and was
 corrected by Cameron. Copy that overstates the risk will be disbelieved the first time
 an operator checks.
 
-### 2.2 Every duplicate ALREADY gets a new number - verified, do not "fix" it
+### 2.2 Every duplicate ALREADY gets a DIFFERENT number - verified, do not "fix" it
 
 `provisionForGroup` tier 1 skips any active number whose burn overlaps the new roster
 AT ALL (`app/src/services/poolNumbers.ts:539-540`, via `rosterOverlapsBurn` at
@@ -91,6 +91,11 @@ accepts EMPTY-burn spares. `burned_phones` is permanent and never cleared
 (`app/src/repos/poolNumbersRepo.ts:15-21, :100-111`). So once A and B are burned on a
 number, no later group containing A or B can land on it - open or closed, same set or
 merely overlapping.
+
+DIFFERENT, not NEW: tier 1 can multiplex the duplicate onto an existing number that
+hosts unrelated groups, in which case nothing is bought and nothing is consumed. The
+guarantee is separation, not novelty - which is why the copy makes no pool-accounting
+claim (5).
 
 The warning does not cause this and does not change it.
 
@@ -284,10 +289,19 @@ RECEIVES the phone set:
 findDuplicate?: (phones: Set<string>) => Promise<DuplicateOpenGroup | undefined>
 ```
 
+It is a TRAILING OPTIONAL PARAMETER on both builders - the same position and the same
+name in each, so the two cannot drift - not a new field on either deps object.
+
 Each builder derives its deduped phone set (D2), and if `findDuplicate` was supplied,
 awaits it and puts the result on the preview. Omitted, the preview simply carries no
 `duplicateOf` and nothing warns - which is the correct degradation for a feature that
 never refuses.
+
+The builders do NOT wrap the call in a try/catch. Error swallowing belongs to
+`findOpenGroupWithSamePhones` (D6), which is the only thing that knows a failed lookup
+means silence rather than a broken preview; a second catch in the builder would make
+it ambiguous which layer is responsible and would also swallow a genuine bug in an
+injected stub during tests.
 
 The THREE preview routes supply it, one line each, closing over the full repo and
 logger they already hold:
@@ -340,11 +354,13 @@ Copy - two variants, because the connecting case has no second number YET (2.1):
   have two numbers for one conversation with no way to tell which one staff is
   watching.
 - CONNECTING match. "Dana Reed and Marcus Bell already have a relay group being
-  connected." Why: that group is still waiting on a number, and this one will take a
-  second - same two-numbers-one-conversation outcome, and it consumes another number
-  from the pool. Do NOT say "buys": `provisionForGroup` never purchases (2.2); a
-  duplicate takes a warm spare and only the buffer refill behind it may eventually
-  buy.
+  connected." Why: that group is still waiting on a number, and this one will get a
+  second - the same two-numbers-one-conversation outcome. Make NO claim about pool
+  accounting in either variant. What a duplicate costs the pool is genuinely variable:
+  tier 1 may multiplex it onto an existing number at no cost, tier 2 consumes a warm
+  spare, and only tier 3 purchases. An earlier draft said "buys" (wrong for tiers 1-2)
+  and its correction said "consumes another number" (wrong for tier 1). The harm that
+  is ALWAYS true is the two numbers between the same people; say that and stop.
 - Neither variant may say "messages may go to the wrong thread". They will not (2.1),
   and an operator who checks and finds it false will discount the next warning too.
 - A link to the existing conversation, opening in a NEW TAB. It is deliberately not
@@ -437,15 +453,23 @@ Unit (`app/test/`):
   `{A,B}` does NOT match `{A,C}` (D1 - these three negatives ARE the rule).
   Order-independent. Matches across OPEN and CONNECTING (D4). SKIPS a connecting row
   carrying `imported_from` (fixture: the lean seed's only connecting row carries it,
-  `lib/seed/lean.ts:263`). D6, all four cases, since r3 encoded this backwards: a match
-  found BEFORE a truncation in the SAME partition is still returned; a match in OPEN
-  survives a truncated CONNECTING walk; NO match plus a truncated walk returns
-  undefined with a WARN; and a thrown Query returns undefined rather than propagating.
-  Multiple matches return the newest. D2a: a group whose `ever_member_phones` matches
-  but whose `participants` do NOT is NOT a match - the adjacent-field trap.
-- Preview tests - `duplicateOf` present/absent on both builders; absent when detection
-  fails; the serialized payload contains NO phone numbers (assert on the JSON, not the
-  object).
+  `lib/seed/lean.ts:263`). D6, all four cases, since an earlier revision encoded this
+  backwards: a match found BEFORE a truncation in the SAME partition is still returned;
+  a match in OPEN survives a truncated CONNECTING walk; NO match plus a truncated walk
+  returns undefined with a WARN; and a thrown Query returns undefined rather than
+  propagating. TIE-BREAK, and this is the ONLY place it is pinned: given one OPEN and
+  one CONNECTING exact match, the OPEN one is returned EVEN WHEN the connecting row has
+  the newer `last_activity_at` - a fresh connecting shell must not outrank a live
+  thread; newest wins only WITHIN a status. D2a: a group whose `ever_member_phones`
+  matches but whose `participants` do NOT is NOT a match - the adjacent-field trap.
+- Preview tests, in CALLBACK terms (section 5's split) - for EACH open builder: given a
+  stub `findDuplicate`, `duplicateOf` is present when it resolves a group and absent
+  when it resolves undefined; the builder passes the callback the DEDUPED phone set it
+  actually previews (D2 - assert on the argument, since nothing else pins what is
+  compared); and OMITTING the callback entirely yields a preview with no `duplicateOf`
+  and no throw, which is the degradation contract that lets a caller opt out. Plus: the
+  serialized payload contains NO phone numbers (assert on the JSON, not the object).
+- `buildAddPreview` never sets `duplicateOf`, whatever it is given (5).
 
 Dashboard:
 
@@ -464,7 +488,7 @@ E2E (`e2e/tests/dashboard-next/`):
   console-tagged seed numbers), and that helper drives the fake's register-number seam.
   Assert the second group is created; assert a DIFFERENT pool number ONLY once it too
   has been driven to open, since a just-created second group has no number to compare.
-  r3 asserted the number difference directly, which is unrunnable in the lean lane.
+  An earlier draft asserted the number difference directly, which is unrunnable there.
 - Start a group for the same pair PLUS a third person and assert NO warning renders -
   D1's negative case. Without it, a regression to containment-matching passes silently.
 

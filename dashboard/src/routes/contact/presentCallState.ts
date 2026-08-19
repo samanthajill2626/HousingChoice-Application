@@ -158,6 +158,21 @@ export function presentCallState({
     // and stranded a call whose result we DID learn on "Outcome unknown" - the
     // label that exists to say we never learned it. Falling through hands the
     // row to clauses 5/6, where the stored answer wins.
+    //
+    // HOW NARROW this actually is (adversarial re-review, 2026-08-19): on an
+    // outbound originate that went through press-1 the row is ALREADY
+    // `in-progress`, so a later NON-terminal Dial summary is a no-op that writes
+    // nothing at all - the ConditionExpression covers the whole UpdateItem. So
+    // the deferral is reachable only when press-1's best-effort write FAILED and
+    // the Dial still ran. It is a real corner, not the common case; stated here
+    // so the next reader does not over-estimate its reach.
+    //
+    // Safety on the OUTBOUND side was verified independently rather than assumed:
+    // press-1 alone can never put `answered` here, because the gate's accept
+    // write sets callStatus + answeredAt and NO callOutcome. The only writer of
+    // `in-progress` + `answered` is /status on a non-terminal Dial summary, and
+    // with answerOnBridge that summary describes the TARGET leg. So "Connected"
+    // is the honest label and I1 is not weakened.
     if (callOutcome === undefined) {
       // Nothing stored. Inbound: the press-1 whisper gate ran on the DIALED
       // callee's leg, so a human accepted. Outbound: it ran on the navigator's

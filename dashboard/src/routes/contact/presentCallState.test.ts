@@ -80,6 +80,12 @@ const MATRIX: MatrixRow[] = [
   { status: 'in-progress', outcome: undefined, fresh: false, inbound: ANSWERED, outbound: OUTCOME_UNKNOWN },
   { status: 'in-progress', outcome: 'answered', fresh: true, inbound: IN_PROGRESS, outbound: IN_PROGRESS },
   { status: 'in-progress', outcome: 'answered', fresh: false, inbound: ANSWERED, outbound: CONNECTED },
+  //     The two `missed` rows below are CHARACTERIZATION, not coverage: no
+  //     writer can produce `in-progress` + `missed`, because `missed` requires a
+  //     TERMINAL Dial summary and a terminal summary forces a terminal
+  //     call_status. They pin what the clause order DOES with the combination if
+  //     it ever arises; they do not describe a reachable state (adversarial
+  //     re-review, 2026-08-19).
   { status: 'in-progress', outcome: 'missed', fresh: true, inbound: IN_PROGRESS, outbound: IN_PROGRESS },
   { status: 'in-progress', outcome: 'missed', fresh: false, inbound: MISSED, outbound: NO_ANSWER },
   { status: 'in-progress', outcome: 'voicemail', fresh: true, inbound: VOICEMAIL, outbound: VOICEMAIL },

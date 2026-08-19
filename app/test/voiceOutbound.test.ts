@@ -521,8 +521,8 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
 
     // CHARACTERIZATION: originateCall appends the row best-effort, so this
     // branch can run against a CallSid with NO row at all. updateCallStatus is
-    // a no-op returning false there (never a throw) - the refusal must still
-    // hang up cleanly rather than 5xx.
+    // a no-op there (transitioned:false, no row - never a throw) - the refusal
+    // must still hang up cleanly rather than 5xx.
     const orphan = await signedTwilioPost(
       harness.app,
       '/webhooks/twilio/voice/outbound-bridge?conversationId=conv-does-not-exist',
@@ -664,8 +664,8 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     );
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Hangup');
-    // updateCallStatus is a no-op returning false on a missing row; a no-op must
-    // not announce a change that never happened.
+    // updateCallStatus is a no-op on a missing row (transitioned:false, no
+    // row); a no-op must not announce a change that never happened.
     expect(world.emitted).toHaveLength(0);
   });
 
@@ -673,7 +673,8 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     const { world, harness, conversationId, callSid } = await originate();
     // Close the call out for real first, so the row is terminal. A late/
     // redelivered refusal then finds `canceled` unreachable from `completed`
-    // (forward-only) and updateCallStatus returns false with the row untouched.
+    // (forward-only) and updateCallStatus reports transitioned:false with the
+    // row untouched.
     await signedTwilioPost(
       harness.app,
       `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,

@@ -1103,8 +1103,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // we do not know an outcome, and inventing one is the false attribution
       // this exists to prevent. Best-effort: the leg must end even if the write
       // fails. The row may not exist yet (originateCall appends best-effort and
-      // may have failed) - updateCallStatus is a no-op returning false there,
-      // never an error.
+      // may have failed) - updateCallStatus is a no-op there, reporting
+      // transitioned:false with no row, never an error.
       if (parentCallSid.length > 0) {
         let stamp: CallStatusUpdate | undefined;
         try {

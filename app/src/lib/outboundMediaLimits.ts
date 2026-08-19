@@ -37,5 +37,11 @@ export const MMS_TRANSCODE_MAX_CONCURRENT = 2;
 /** How long a queued confirm waits for a transcode slot before 503. */
 export const MMS_TRANSCODE_WAIT_TIMEOUT_MS = 20_000;
 
-/** sharp input-pixel cap: reject absurd dimensions before a full raster decode. */
-export const SHARP_MAX_INPUT_PIXELS = 24_000_000;
+/** sharp input-pixel cap: reject absurd dimensions before a full raster decode.
+ *  50MP, the same budget as the unit-photo profile (UNIT_PHOTO_SHARP_MAX_INPUT_PIXELS):
+ *  ~200MB peak raster per slot behind the SHARED 2-slot transcode gate on the 2GB
+ *  box. It was 24MP until 2026-08-19, when a current phone's DEFAULT photo
+ *  (5712x4284 = 24,470,208 px) missed the cap by 2% and four of nine attachments
+ *  on a prod MMS were refused with "Input image exceeds pixel limit". 48MP-class
+ *  camera output is the ordinary case now, not an absurd dimension. */
+export const SHARP_MAX_INPUT_PIXELS = 50_000_000;

@@ -78,6 +78,30 @@ describe('transcodeForMms', () => {
   it('non-image bytes throw', async () => {
     await expect(transcodeForMms(Buffer.from('NOT AN IMAGE'), 'image/webp')).rejects.toThrow();
   });
+
+  // PROD 2026-08-19: four of nine attachments on one MMS were refused with
+  // "Input image exceeds pixel limit". All four were 5712x4284 = 24,470,208 px -
+  // a current phone's DEFAULT camera photo - 2% over the old 24MP cap. The cap is
+  // now the same 50MP budget the unit-photo profile already proved on this box.
+  it('accepts a 24MP default phone photo (5712x4284) and fits it for MMS', async () => {
+    const phone = await sharp({ create: { width: 5712, height: 4284, channels: 3, background: { r: 90, g: 120, b: 60 } } })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+    const out = await transcodeForMms(phone, 'image/jpeg');
+    expect(out.contentType).toBe('image/jpeg');
+    const meta = await sharp(out.bytes).metadata();
+    expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBe(TRANSCODE_TARGET_MAX_EDGE);
+    expect(out.bytes.length).toBeLessThanOrEqual(TRANSCODE_TARGET_MAX_BYTES);
+  }, 30_000);
+
+  it('still refuses a source over the 50MP budget before decoding it', async () => {
+    // 7200x7200 = 51,840,000 px. The cap is checked on the header, so the test
+    // only pays for the encode of a flat source, never a full decode.
+    const absurd = await sharp({ create: { width: 7200, height: 7200, channels: 3, background: { r: 0, g: 0, b: 0 } } })
+      .jpeg({ quality: 50 })
+      .toBuffer();
+    await expect(transcodeForMms(absurd, 'image/jpeg')).rejects.toThrow(/pixel limit/);
+  }, 30_000);
 });
 
 describe('transcodeForUnitPhoto (photo profile - gentler than MMS)', () => {
@@ -98,11 +122,9 @@ describe('transcodeForUnitPhoto (photo profile - gentler than MMS)', () => {
     expect(meta.height).toBe(480);
   });
 
-  it('accepts a 27MP source the MMS 24MP cap rejects (per-profile pixel caps)', async () => {
-    // 6000x4500 = 27,000,000 px: over SHARP_MAX_INPUT_PIXELS (24MP), under the
-    // photo profile's 50MP.
+  it('accepts a 27MP source under the shared 50MP budget', async () => {
+    // 6000x4500 = 27,000,000 px: under the photo profile's 50MP.
     const huge = await sharp({ create: { width: 6000, height: 4500, channels: 3, background: { r: 128, g: 128, b: 128 } } }).png().toBuffer();
-    await expect(transcodeForMms(huge, 'image/png')).rejects.toThrow();
     const out = await transcodeForUnitPhoto(huge, 'image/png');
     expect(out.contentType).toBe('image/jpeg');
   });

@@ -3,10 +3,11 @@ id: e2e-today-heading-selector-ambiguous
 title: 38 e2e specs wait on a non-exact "Today" heading that the Today page can match twice
 type: debt
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-08-12
-refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:51, dashboard/src/routes/today/Today.tsx:28
+resolved: 2026-08-19
+refs: e2e/support/today.ts, docs/issues/today-heading-selector-ambiguity.md
 ---
 
 **Problem.** Most `dashboard-next` specs land their dev-login helper on
@@ -33,3 +34,10 @@ and `group-text-stop` carry it today.
 or better, one shared `devLogin` helper in `e2e/support` that every spec calls,
 so the selector exists once. Worth doing in a quiet moment rather than inside a
 feature branch, because it touches ~38 files that concurrent branches also edit.
+
+**Resolution (2026-08-19).** `fix/e2e-today-selector` replaced every Today-page
+readiness assertion with `expectTodayReady(page)` from `e2e/support/today.ts`.
+That helper owns the exact heading locator, so the ambiguous selector no longer
+survives in individual specs. The later duplicate issue
+`today-heading-selector-ambiguity` contains the full diagnosis and resolution
+record.

@@ -3855,6 +3855,40 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(JSON.stringify(res.body)).not.toContain(TENANT_PHONE);
   });
 
+  it('preview-open does NOT carry duplicateOf for a merely OVERLAPPING live group', async () => {
+    // The negative half of the wiring test above, and the half that matters most:
+    // the positive case stays green if the match is loosened from exact equality to
+    // containment, so without this a regression to "warn when the rosters overlap"
+    // passes the entire suite.
+    //
+    // Both containment directions are seeded, because catching only one is how a
+    // negative test quietly stops guarding. The tour's roster is {tenant, PM}; one
+    // live group is a strict SUBSET of it and the other a strict SUPERSET. Neither
+    // is this conversation, so neither may warn.
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550309778',
+      members: [{ contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' }],
+      owner: { type: null },
+    });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550309779',
+      members: [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+        { contactId: '', phone: '+15558009002', name: 'Third Person' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeUndefined();
+  });
+
   it('preview-open marks an opted-out member and excludes them from recipientCount', async () => {
     const { app } = makeWebhookHarness({ world });
     await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });

@@ -42,6 +42,22 @@ than hypothetically: `app/src/lib/seed/performance.ts` builds up to 1,000 relay
 groups, and the performance workload already drives both affected preview
 endpoints against that seed.
 
+**Past the ceiling the failure is not only a MISS - it can be a WORSE ANSWER.**
+Recorded because it is not obvious and a reviewer had to argue it. The OPEN
+partition is scanned first. If that walk hits the page budget without matching
+and the CONNECTING walk then matches, the operator is shown the connecting
+group - "already have a relay group being connected", link and all - while an
+OPEN group with the same roster may have been sitting past the truncation point
+unseen. The tie-break exists precisely to stop a fresh connecting shell
+outranking a live thread, and an incomplete OPEN walk defeats it by accident.
+
+The warning is still true (that connecting group really is a duplicate) and
+nothing is gated on it, which is why this is not a defect in the detector -
+returning a match found rather than discarding it is the specified behavior. But
+it does mean the honest description of the ceiling is "past 2,000 groups per
+partition the warning degrades in quality, not just in coverage", and it is one
+more reason the walk is the right lever to fix rather than the copy.
+
 **Suggested fix.** If it becomes hot, add an index on a participant-set hash - a
 sorted, joined digest of the roster phones, written on group create and on every
 roster mutation, queried directly instead of scanned. That is schema work (a new

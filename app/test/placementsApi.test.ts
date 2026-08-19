@@ -1038,6 +1038,38 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect(JSON.stringify(res.body)).not.toContain(TENANT_PHONE);
   });
 
+  it('preview-open does NOT carry duplicateOf for a merely OVERLAPPING live group', async () => {
+    // The negative half of the wiring test above, and the half that matters most:
+    // the positive case stays green if the match is loosened from exact equality to
+    // containment, so without this a regression to "warn when the rosters overlap"
+    // passes the entire suite.
+    //
+    // Both containment directions are seeded, because catching only one is how a
+    // negative test quietly stops guarding. The placement's roster is {tenant, PM};
+    // one live group is a strict SUBSET of it and the other a strict SUPERSET.
+    // Neither is this conversation, so neither may warn.
+    const placementId = await createPlacement();
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550409778',
+      members: [{ contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' }],
+      owner: { type: null },
+    });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550409779',
+      members: [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+        { contactId: '', phone: '+15558009002', name: 'Third Person' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeUndefined();
+  });
+
   // --- Quiet-hours deferral (contact-rosters Task 13) ----------------------
   //
   // The placement mirrors of the tour paths, on the SAME pinned clock:

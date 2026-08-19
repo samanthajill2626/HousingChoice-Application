@@ -44,9 +44,16 @@ export function samePhoneSet(a: Set<string>, b: Set<string>): boolean {
  * blank one, so the guard is a runtime check rather than a type assumption.
  *
  * Both the phone set the MATCH is made on and the names the WARNING renders read
- * this, so the two cannot disagree. Split them and a phoneless participant is
- * excluded from the comparison but still named in the copy - the warning then
- * names somebody who was never part of the set that matched.
+ * this, so neither can include a member the other left out. Split them and a
+ * phoneless participant is excluded from the comparison but still named in the
+ * copy - the warning then names somebody who was never part of the set that
+ * matched.
+ *
+ * They are NOT one-to-one, and the difference is deliberate: `rosterPhones`
+ * collapses to a Set, so two members sharing one handset contribute one phone but
+ * two names. A two-phone match can therefore render three names. That is honest -
+ * all three people really are on the thread - and naming fewer people than the
+ * thread holds would be worse. Do not "fix" it by deduping the names.
  */
 function rosterMembers(conv: ConversationItem): ConversationParticipant[] {
   return (conv.participants ?? []).filter(

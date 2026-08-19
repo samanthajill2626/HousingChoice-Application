@@ -97,9 +97,11 @@ an honest outcome.
   is `aria-hidden` - an unhidden U+2197 is announced as "north east arrow",
   which is the noise this decision exists to avoid.
 - **D3 - Outcome vocabulary.** Inbound: "Answered", "Missed", "Voicemail".
-  Outbound: "Connected" and "No answer". Plus two states that belong to neither
-  side's outcome: "Ringing..." and "In progress" while a call is live, and "Not
-  completed" for a call the system refused to place (D12). "Connected" rather
+  Outbound: "Connected" and "No answer". Plus three states that belong to
+  neither side's outcome: "Ringing..." and "In progress" while a call is live,
+  "Not completed" for a call the system refused to place (D12), and "Outcome
+  unknown" for an outbound call we know was accepted and placed but whose result
+  never came back (7.1 clause 4). "Connected" rather
   than "Answered" on outbound is deliberate and load-bearing - see I2. Duration
   is NOT part of the outcome label; it renders beside it (D4).
 - **D4 - Duration stays on the face; only the phone number moves behind a
@@ -260,13 +262,7 @@ No DynamoDB schema change, no index change, no migration.
 `TimelineCall` gains two fields and loses a lie. Both declarations change
 identically and independently (`app/src/routes/contactTimeline.ts:179-195` and
 `dashboard/src/api/types.ts:2222-2238` are hand-mirrored by convention, and
-`Timeline.tsx` imports the dashboard one). The only lockstep pin today is each
-side's own `tsc`, which cannot catch a divergence between two independently
-declared types - do NOT assume a cross-package shape test exists, because none
-was found (R2 finding 6). Since `direction` becomes REQUIRED on both sides, a
-server that omits it type-checks clean and fails only at runtime; the plan must
-add an explicit assertion that the projection's emitted shape carries every
-field the dashboard declares required):
+`Timeline.tsx` imports the dashboard one):
 
 ```
 direction: MessageDirection;      // NEW - required; every stored row has it
@@ -280,6 +276,14 @@ the server should invent. Dropping `?? 'missed'` is what makes D6 possible.
 
 The dashboard has no `CallStatus` type today (`types.ts:1442` declares
 `CallOutcome` only); add it mirroring `messagesRepo.ts:42-49`.
+
+There is NO cross-package shape test pinning the two declarations together -
+each side's own `tsc` is the only check, and it cannot see a divergence between
+two independently declared types (R2 finding 6; none was found in the repo). This
+matters more than usual here because `direction` becomes REQUIRED on both sides:
+a projection that omits it type-checks clean on the server and fails only at
+runtime in the browser. The plan must add an explicit assertion that the
+projection's emitted shape carries every field the dashboard declares required.
 
 `call_duration_seconds` (the importer's duration field, `apply.ts:445`) is NOT
 declared on `MessageItem` - `messagesRepo.ts:909` declares `call_duration` only,
@@ -405,6 +409,37 @@ forward-only machine. Requirements:
 - The DNC branch keeps logging IDs only (`voice.ts:1178-1181`); the stamp adds
   no PII.
 
+### 6.4 Keeping the inbox row unchanged under D12 (R3 finding 1)
+
+D12 is not derivation-only: it changes stored `call_status` from `ringing` to
+`canceled`, and `deriveLatest` branches on that exact value. Its derive arm is
+`channel === 'call' && callStatus !== undefined && (callStatus === 'ringing' ||
+fallbackPreview === '')` (`inbox.ts:518-527`). Two cases, and the R2 analysis
+only checked one of them:
+
+- **No stored preview** (`fallbackPreview === ''`): the derive arm fires either
+  way, and `callPreview` (`callPreview.ts:35-47`) returns the same "Outgoing
+  call" base for `ringing` and for `canceled` - neither matches its voicemail,
+  ringing, in-progress, missed or answered arms. Unchanged, as R2 concluded.
+- **A stored preview exists** - the ordinary case, because any prior text on the
+  thread leaves one. Today `callStatus === 'ringing'` satisfies the first
+  disjunct, so the row derives "Outgoing call". After D12 stamps `canceled`,
+  NEITHER disjunct holds, the derive arm stops firing, and the inbox row falls
+  back to the previous TEXT's body - a stale, unrelated message presented as the
+  thread's latest. That is a regression, and section 8's non-goal would have
+  been false.
+
+REQUIRED companion change: add `canceled` to the derive arm's first disjunct, so
+a D12-stamped row derives exactly as it does today. This preserves behavior
+rather than changing it - the resulting string is identical - and it matches the
+arm's evident intent, which is to derive whenever the row has no terminal
+outcome of its own to describe. It is the one inbox-side edit this mission
+makes, and it exists solely to keep section 8's promise true.
+
+Both cases get a test. The no-stored-preview equivalence in particular holds by
+base-case fallthrough in `callPreview`, not by design, so it is pinned rather
+than inherited.
+
 ## 7. Client design
 
 ### 7.1 A pure presenter, extracted
@@ -432,15 +467,32 @@ unrepresentable rather than merely avoided.
 
 The flip needs a re-render, and R1's rewrite dropped it (R2 finding 5). The
 mechanism, stated so it cannot be improvised: the card holds `now` in state,
-seeded from `Date.now()` at mount. When the presenter returns a `staleAt` in the
-future, the card sets exactly one `setTimeout` for `staleAt - now` whose callback
-writes a fresh `Date.now()` into that state; the re-render re-runs the presenter,
-which now takes the stale branch and returns no `staleAt`, so no further timer is
-scheduled. `staleAt` in the past or absent schedules nothing. The timeout is
-cleared on unmount and re-established only when `staleAt` changes. Every clause
-must therefore return either no `staleAt` or one strictly in the future -
-asserted directly in section 9, because a past `staleAt` is the one input shape
-that could still reintroduce a spin.
+seeded from `Date.now()` at mount. When the presenter returns a `staleAt`, the
+card sets exactly one `setTimeout` whose callback writes a fresh `Date.now()`
+into that state; the re-render re-runs the presenter, which now takes the stale
+branch and returns no `staleAt`, so no further timer is scheduled. The timeout is
+cleared on unmount and re-established only when `staleAt` changes.
+
+Three constraints on that timer, each closing a way the spin comes back:
+
+- The DELAY is computed from a fresh `Date.now()` read at SCHEDULE time, never
+  from the `now` held in state (R3 finding 7). State `now` only advances at
+  mount and on its own timeout, so a props-driven re-render in between would
+  otherwise schedule against a stale clock and fire early.
+- The delay is CLAMPED to `setTimeout`'s 32-bit range (R3 finding 8): a delay
+  above 2^31-1 ms fires immediately rather than late, so "strictly in the
+  future" is not on its own a sufficient spin guard. Above the ceiling, schedule
+  nothing - the label is not going to change within 24 days of anyone looking.
+- Nothing is scheduled for a `staleAt` at or before the fresh read.
+
+Every clause must still return either no `staleAt` or one strictly in the
+future; section 9 asserts it directly.
+
+Note the card is keyed by `item.id` (`Timeline.tsx:1371`), so a different row
+remounts rather than reusing state - the mount-seeded `now` is safe against a
+prop swap, and R3 checked this negative explicitly. Paging older history in does
+remount a cluster of cards, which is harmless but is what the mount seeding
+relies on.
 
 `age` is `now - at` when `at` parses to an instant, and UNDEFINED otherwise -
 `atOf` can return a non-instant (`contactTimeline.ts:362-365`) and the codebase
@@ -454,18 +506,32 @@ Resolution order, each clause the ELSE of the one before:
 1. `callOutcome === 'voicemail'` -> "Voicemail" (warning). Wins over any status.
 2. `callStatus === 'canceled'` AND `callOutcome` is absent -> "Not completed"
    (neutral). Keyed to `canceled` SPECIFICALLY, not to terminality in general
-   (spec review R2, finding 4): `canceled` is the status 6.3 stamps and nothing
-   else writes it, whereas the dev transcript seam appends a call with terminal
+   (R2 finding 4): the dev transcript seam appends a call with terminal
    `callStatus: 'completed'` and no outcome (`dev.ts:745-757`) before attaching a
-   full transcript. A terminality-keyed clause would have rendered a fully
+   full transcript, so a terminality-keyed clause would have rendered a fully
    transcribed call "Not completed" and failed the transcription e2e.
+
+   The reason this is SAFE is not that 6.3 is the only writer of `canceled` -
+   it is not. `mapCallStatus` maps Twilio's own `canceled`
+   (`voice.ts:199-200`) and `/status` can write it (R3 finding 4). The clause is
+   safe because every `/status` terminal write pairs a status WITH an outcome
+   (`voice.ts:1376-1392`), so a Twilio-originated `canceled` never satisfies the
+   second conjunct. 6.3 is precisely the code that breaks that pairing, on
+   purpose, which is what makes status-plus-no-outcome a reliable signature for
+   it. Anything that later writes a terminal status without an outcome will land
+   in this clause, and that coupling is stated here so it is not rediscovered.
 3. `callStatus === 'ringing'` and age is defined:
    - `age < 90s` -> "Ringing..." (neutral), `staleAt = at + 90s`
    - else -> outbound "No team answer" (danger); inbound "Missed" (danger)
 4. `callStatus === 'in-progress'` and age is defined:
    - `age < 15min` -> "In progress" (neutral), `staleAt = at + 15min`
    - else, INBOUND -> "Answered" (success), no duration rendered
-   - else, OUTBOUND -> no label and no chip. See below; this asymmetry is I1.
+   - else, OUTBOUND -> "Outcome unknown" (neutral), no duration. See below; the
+     asymmetry is I1. NOT "no chip" (R3 finding 6): an accepted, placed call
+     whose result we never learned is a different thing from a row carrying no
+     information at all, and collapsing it into clause 7 would render the two
+     identically. "Outcome unknown" claims nothing about the target while still
+     telling the operator the call went out.
 5. `callOutcome === 'answered'` -> outbound "Connected" (success); inbound
    "Answered" (success)
 6. `callOutcome === 'missed'` -> outbound "No answer" (danger); inbound "Missed"
@@ -499,9 +565,9 @@ So the asymmetry is not a special case, it is I1 applied to the read side:
 - INBOUND stale in-progress: the bridge is proven, the ending is not. "Answered"
   with no duration is the true terminal claim.
 - OUTBOUND stale in-progress: only the navigator's acceptance is proven. We do
-  not know whether the target ever answered, so we claim nothing - no chip. The
-  card still shows the direction, the arrow, and the time, which is everything
-  the data supports.
+  not know whether the target ever answered, so the chip claims nothing about
+  them - "Outcome unknown". That is everything the data supports, and it stays
+  distinguishable from a row we know nothing about at all.
 
 Clause 3's inbound arm changes today's behavior for the first 90 seconds and
 this is deliberate (F9): today's `?? 'missed'` fires on read, so an abandoned
@@ -529,7 +595,12 @@ removed by D12/6.3, not by the label.
   2's "every communication takes a side" for the two item kinds this spec exists
   to change. The guarantee outranks the cosmetic defect: content sizing wins,
   the `min-width` floor removes the sliver case, and disclosure-driven resize is
-  accepted (a bubble already grows the same way when media loads).
+  accepted (a bubble already grows the same way when media loads). The floor is
+  `min-width: 40%`, chosen so the shortest possible summary line - arrow,
+  "Outgoing call", a two-word chip, a time - still reads as a card rather than a
+  chip, and so the two directions remain visibly offset from each other. Named
+  with a value because 7.5's stated job is to leave no CSS to improvisation (R3
+  finding 10).
 - Summary line, in order: arrow glyph (`aria-hidden`, D2), "Incoming call" /
   "Outgoing call", the outcome chip from 7.1, the duration when one is known and
   the clause permits it, then the time. Note both `.status` (`:311-314`) and
@@ -564,8 +635,12 @@ removed by D12/6.3, not by the label.
 
 ### 7.3 EmailCard
 
-Alignment only: the same alignment-only class by direction, keeping
-`width: 84%`. The outbound tint already exists (`.emailOut`) and stays; the
+Alignment only: the same alignment-only class by direction, and the SAME sizing
+change as the call card - `max-width: 84%` with the `min-width` floor, replacing
+`width: 84%` (R3 finding 2; the R2 sizing reversal updated 7.2 and 7.5 and
+missed this section, leaving a contradiction that would have restored the 16%
+offset for emails and re-created exactly the two-rules defect D1 exists to
+remove). The outbound tint already exists (`.emailOut`) and stays; the
 brand left-border, tag, subject, snippet, disclosures, and delivery chip are
 untouched.
 
@@ -624,17 +699,8 @@ identically on both paths. Verified rather than assumed.
 - **Masked relay calls anywhere** (I5) - `docs/issues/masked-relay-calls-invisible.md`.
 - **The inbox row preview for a never-accepted originate.** The preview is a
   stored string and the originate deliberately stamps nothing
-  (`originateCall.ts:193-199`). QUALIFIED at R2 (finding 2): D12/6.3 is no longer
-  derivation-only - it changes stored `call_status` from `ringing` to `canceled`
-  on three paths, and `deriveLatest` branches on that field
-  (`inbox.ts:518-527`, deriving whenever the status is `ringing` OR no preview
-  was ever stored). The rendered string is nevertheless unchanged: with no
-  stored preview the derive arm runs either way, and `callPreview`
-  (`callPreview.ts:35-47`) returns the same "Outgoing call" base for `ringing`
-  and for `canceled`, since neither matches its voicemail, ringing-specific,
-  in-progress, missed, or answered arms. The plan must PIN that equivalence with
-  a test rather than inherit it - it holds by coincidence of the base-case
-  fallthrough, not by design.
+  (`originateCall.ts:193-199`). This holds ONLY because of the companion change
+  in 6.4; without it D12 would silently change the inbox row. See 6.4.
 - **Reconciling the inbox's call vocabulary with the timeline's.** `callPreview`
   (`callPreview.ts:34-48`) says "Outgoing call - no answer" and "Outgoing call -
   42s" where the timeline will say "No answer" and "Connected" beside a
@@ -700,9 +766,12 @@ Fixture sweep (named as work, F16): making `direction` required and
 outcome. The projection and card changes must land in ONE commit.
 
 E2E: extend `e2e/tests/dashboard-next/call-inbox-unread.spec.ts` or add a
-sibling - an inbound and an outbound call in one thread land on opposite sides
-and announce different labels, asserted through the card's role and accessible
-name per `e2e/support/selectors.md`.
+sibling - an inbound and an outbound call in one thread, asserted in two parts
+because the accessible name deliberately no longer carries the outcome (R3
+finding 5, following from 7.2): locate each card by role and accessible name,
+which carry the DIRECTION and are stable; then assert the outcome as the chip's
+own text WITHIN that located card. Selector discipline per
+`e2e/support/selectors.md`.
 
 Existing e2e text assertions survive only CONDITIONALLY, and the condition is
 new (R2 finding 8). `call-inbox-unread.spec.ts:256` asserts 'Missed' on an
@@ -722,14 +791,28 @@ Gates, run bare from the feature worktree per AGENTS.md: `npm run typecheck`,
   that default changes, or if a `timeout` is ever passed on the originate, the
   threshold must be revisited. D7 records the derivation so the coupling is
   visible; the constant carries a comment pointing at it. The 15-minute
-  in-progress bound is not coupled to anything - past it the label degrades to a
-  statement that is true either way (7.1 clause 4).
+  in-progress bound is not coupled to anything external; what it degrades to is
+  covered separately below.
 - **The staleness flip uses the viewer's clock** against a server timestamp. A
   badly skewed client flips early or late. Cosmetic, self-correcting on the next
   real status, and bounded to rows with no terminal outcome.
 - **A gate-write failure can mislabel a live outbound call** for the duration of
   that call (I3). Requires a DynamoDB write to have failed; self-corrects at the
   terminal summary.
+- **A failed D12 stamp is PERMANENT, unlike a failed gate write** (R3 finding
+  3). 6.3's stamps are best-effort by necessity - they must never break the
+  hangup - but the three paths they cover are exactly the paths where no Dial
+  summary ever arrives, so there is no later write to correct them. A dropped
+  stamp leaves the row at `ringing` and the card reads "No team answer" forever,
+  which is the false attribution D12 exists to prevent. Accepted rather than
+  fixed: making the stamp blocking would trade a rare wrong label for a broken
+  call, and the derived label is still no worse than what ships today. The
+  stamps log their own failure, so the condition is at least visible.
+- **The 15-minute in-progress bound degrades differently by direction.**
+  Inbound degrades to "Answered", true whether or not the call is still running.
+  Outbound degrades to "Outcome unknown", which is also true either way but
+  carries less information than the live label it replaces (R3 finding 6). Both
+  are honest; neither is a claim about the target.
 - **"Connected" cannot distinguish a human from the target's voicemail** (I2,
   D9). This is a real limit on what the panel can tell an operator, and it is
   the same limit every consumer call log has.

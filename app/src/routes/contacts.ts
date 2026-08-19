@@ -24,7 +24,7 @@ import {
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { groupThreadLabel } from '../lib/groupTitle.js';
+import { groupThreadLabel, relayMemberLabels } from '../lib/groupTitle.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
   LANDLORD_STATUS_LABELS,
@@ -222,6 +222,16 @@ interface RelayGroupRow {
   lastActivityAt: string;
   owner: RelayOwner;
   tag?: string;
+  /**
+   * The OTHER members' staff-facing labels: each one's name, else their own
+   * formatted phone (lib/groupTitle relayMemberLabels). Staff chrome, never a
+   * message body - see that helper for the outbound/staff line.
+   *
+   * EMPTY IS MEANINGFUL: the client mirror
+   * (dashboard/src/routes/contact/GroupTextsCard.tsx groupLabel) falls through
+   * to `tag` when this is empty, so the tag carve-out is expressed by leaving it
+   * empty when nobody else on the roster has a real name and a tag exists.
+   */
   otherMemberNames: string[];
 }
 
@@ -1181,10 +1191,20 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       for (const conv of items) {
         const roster = conv.participants ?? [];
         if (!roster.some(isSelf)) continue;
-        const otherMemberNames = roster
-          .filter((p) => !isSelf(p))
-          .map((p) => p.name)
-          .filter((n): n is string => typeof n === 'string' && n.length > 0);
+        // Staff chrome: each OTHER member renders their name, else their own
+        // formatted phone, so the contact card stops silently dropping a
+        // nameless person from a list the navigator is trying to act on.
+        const others = relayMemberLabels(roster.filter((p) => !isSelf(p)));
+        const tag =
+          typeof conv['placement_tag'] === 'string' && conv['placement_tag'].length > 0
+            ? conv['placement_tag']
+            : '';
+        // The tag carve-out, mirroring relayThreadLabel: an operator's
+        // deliberate label beats a list of raw digits. The client computes its
+        // own precedence over this DTO, so the only way to hand it the tag is to
+        // send no member labels at all.
+        const otherMemberNames =
+          others.anyNamed || tag.length === 0 ? others.labels : [];
         groups.push({
           conversationId: conv.conversationId,
           status,
@@ -1193,8 +1213,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
           memberCount: roster.length,
           lastActivityAt: conv.last_activity_at,
           owner: getOwner(conv),
-          ...(typeof conv['placement_tag'] === 'string' &&
-            conv['placement_tag'].length > 0 && { tag: conv['placement_tag'] }),
+          ...(tag.length > 0 && { tag }),
           otherMemberNames,
         });
       }

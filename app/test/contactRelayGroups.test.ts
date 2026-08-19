@@ -6,8 +6,9 @@
 //   - non-member relay groups + 1:1 threads never match;
 //   - closed groups included (status 'closed', NO poolNumber);
 //   - newest-activity-first ordering across the open+closed partitions;
-//   - otherMemberNames excludes self + nameless entries; owner/tag/memberCount
-//     surfaced;
+//   - otherMemberNames excludes self and renders a nameless member as their own
+//     formatted phone (staff chrome), with the placement_tag carve-out when NOBODY
+//     else has a real name; owner/tag/memberCount surfaced;
 //   - 404 unknown contact + 404 a phone-pointer id; { groups: [] } for none.
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
@@ -153,14 +154,17 @@ describe('GET /api/contacts/:id/relay-groups', () => {
     expect(res.body.groups[0].conversationId).toBe('conv-r2');
   });
 
-  it('surfaces the row fields: pool number, count, owner, tag, other names (self + nameless excluded)', async () => {
+  it('surfaces the row fields: pool number, count, owner, tag, other names (self excluded, nameless shown by number)', async () => {
     seedContact();
     seedRelay(
       'conv-r3',
       [
         { contactId: TENANT, phone: PHONE_A, name: 'Tina Tenant' }, // self — excluded from others
         { contactId: '', phone: LANDLORD_PHONE, name: 'Lars Landlord' },
-        { contactId: '', phone: '+15550100008' }, // nameless — excluded from others
+        // Nameless - rendered as their OWN formatted phone, not dropped. This card
+        // is staff chrome; the navigator needs somebody to call, and a silently
+        // shorter list misrepresents who is on the thread.
+        { contactId: '', phone: '+15550100008' },
       ],
       {
         poolNumber: POOL,
@@ -180,9 +184,44 @@ describe('GET /api/contacts/:id/relay-groups', () => {
         lastActivityAt: '2026-07-02T12:00:00.000Z',
         owner: { type: 'tour', id: 'tour-1' },
         tag: 'Maple St tour',
-        otherMemberNames: ['Lars Landlord'],
+        otherMemberNames: ['Lars Landlord', '(555) 010-0008'],
       },
     ]);
+  });
+
+  it('sends NO otherMemberNames when nobody else is named and a tag exists (the tag carve-out)', async () => {
+    // The client mirror (GroupTextsCard groupLabel) computes its own precedence
+    // over this DTO: names -> tag -> pool number. Handing it a list of raw digits
+    // would make its tag rung unreachable for every group that has members, so an
+    // empty array is how the server says "let the operator's label win here".
+    seedContact();
+    seedRelay(
+      'conv-r9',
+      [
+        { contactId: TENANT, phone: PHONE_A, name: 'Tina Tenant' },
+        { contactId: '', phone: LANDLORD_PHONE },
+      ],
+      { lastActivityAt: '2026-07-02T12:00:00.000Z', tag: 'Maple St tour' },
+    );
+    const res = await authedGet(`/api/contacts/${TENANT}/relay-groups`);
+    expect(res.status).toBe(200);
+    expect(res.body.groups[0].otherMemberNames).toEqual([]);
+    expect(res.body.groups[0].tag).toBe('Maple St tour');
+  });
+
+  it('falls back to numbers when nobody else is named and there is NO tag', async () => {
+    seedContact();
+    seedRelay(
+      'conv-r10',
+      [
+        { contactId: TENANT, phone: PHONE_A, name: 'Tina Tenant' },
+        { contactId: '', phone: LANDLORD_PHONE },
+      ],
+      { lastActivityAt: '2026-07-02T12:00:00.000Z' },
+    );
+    const res = await authedGet(`/api/contacts/${TENANT}/relay-groups`);
+    expect(res.status).toBe(200);
+    expect(res.body.groups[0].otherMemberNames).toEqual(['(555) 010-0003']);
   });
 
   it('legacy placementId-only rows resolve a placement owner (getOwner fallback)', async () => {

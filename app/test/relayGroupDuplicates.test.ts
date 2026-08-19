@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { createLogger } from '../src/lib/logger.js';
+import { formatPhoneForDisplay } from '../src/lib/phone.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
   findOpenGroupWithSamePhones,
@@ -232,15 +233,16 @@ describe('findOpenGroupWithSamePhones - D2a, the adjacent-field trap', () => {
 });
 
 describe('findOpenGroupWithSamePhones - the wire rule', () => {
-  it('returns member NAMES and never a phone', async () => {
+  it('returns member NAMES when it has them', async () => {
     const conversations = repo({ open: [group('conv-1', [A, B])] });
     const found = await findOpenGroupWithSamePhones(
       { conversations, log: logger },
       new Set([A, B]),
     );
+    expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
+    // A named member's number never appears - a name is always preferred.
     expect(JSON.stringify(found)).not.toContain(A);
     expect(JSON.stringify(found)).not.toContain(B);
-    expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
   });
 
   it('names ONLY the phone-bearing participants the match was made on', async () => {
@@ -268,7 +270,16 @@ describe('findOpenGroupWithSamePhones - the wire rule', () => {
     expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
   });
 
-  it('renders a nameless participant as Unknown', async () => {
+  it('renders a nameless participant as their FORMATTED PHONE, never "Unknown"', async () => {
+    // The founder ruling 2026-08-19: this warning is STAFF CHROME - it renders
+    // only in the navigator's confirm dialog and is transmitted to nobody - so it
+    // owes the navigator something actionable. 'Unknown already has an open relay
+    // group' names nobody they can look up or call.
+    //
+    // The outbound half is unaffected and stays that way: the intro body a tenant
+    // actually receives still drops a nameless member (relayFanOut
+    // composeConnectionSentence), pinned by the preview-body guard in
+    // app/test/rosterEdits.test.ts.
     const row = {
       conversationId: 'conv-1',
       participants: [{ contactId: '', phone: A }, { contactId: '', phone: B, name: 'Bee' }],
@@ -279,6 +290,27 @@ describe('findOpenGroupWithSamePhones - the wire rule', () => {
       { conversations, log: logger },
       new Set([A, B]),
     );
-    expect(found?.memberNames).toEqual(['Unknown', 'Bee']);
+    expect(found?.memberNames).toEqual([formatPhoneForDisplay(A), 'Bee']);
+    expect(found?.memberNames[0]).toBe('(555) 800-0001');
+    // Assert the FORMATTED form specifically: the raw E.164 is what a log line or
+    // a message body would carry, and it must not be what a label carries.
+    expect(JSON.stringify(found)).not.toContain(A);
+  });
+
+  it('treats a whitespace-only name as no name', async () => {
+    const row = {
+      conversationId: 'conv-1',
+      participants: [
+        { contactId: '', phone: A, name: '   ' },
+        { contactId: '', phone: B, name: 'Bee' },
+      ],
+      last_activity_at: '2026-08-18T00:00:00.000Z',
+    } as unknown as ConversationItem;
+    const conversations = repo({ open: [row] });
+    const found = await findOpenGroupWithSamePhones(
+      { conversations, log: logger },
+      new Set([A, B]),
+    );
+    expect(found?.memberNames).toEqual(['(555) 800-0001', 'Bee']);
   });
 });

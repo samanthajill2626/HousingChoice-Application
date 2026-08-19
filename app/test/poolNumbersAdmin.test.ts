@@ -366,7 +366,7 @@ describe('GET /api/pool-numbers - warming numbers', () => {
 });
 
 describe('GET /api/pool-numbers - group label precedence', () => {
-  it('names > tag > "Relay group"', async () => {
+  it('member labels > tag > "Relay group", with a nameless member shown by number', async () => {
     const world = createFakeWorld();
     const pn = '+15551230200';
     const withNames = await seedGroup(world, pn, {
@@ -381,9 +381,20 @@ describe('GET /api/pool-numbers - group label precedence', () => {
       tag: 'Maple St lease-up',
       createdAt: '2026-05-02T00:00:00.000Z',
     });
-    const bare = await seedGroup(world, pn, {
+    const mixed = await seedGroup(world, pn, {
+      members: [
+        { contactId: 'c5', phone: '+15550000005', name: 'Cleo' },
+        { contactId: 'c6', phone: '+15550000006' },
+      ],
+      createdAt: '2026-05-04T00:00:00.000Z',
+    });
+    const numbersOnly = await seedGroup(world, pn, {
       members: [{ contactId: 'c4', phone: '+15550000004' }],
       createdAt: '2026-05-01T00:00:00.000Z',
+    });
+    const bare = await seedGroup(world, pn, {
+      members: [],
+      createdAt: '2026-04-30T00:00:00.000Z',
     });
     const pool = makeFakePoolRepo([poolItem(pn)]);
     const { app } = makeWebhookHarness({ world, poolNumbersRepo: pool });
@@ -393,7 +404,16 @@ describe('GET /api/pool-numbers - group label precedence', () => {
     const byId = (id: string) => groups.find((g) => g.conversationId === id);
     expect(byId(withNames.conversationId)?.label).toBe('With Alice & Bob');
     expect(byId(withNames.conversationId)?.memberCount).toBe(2);
+    // Staff-only admin chrome: the nameless half of a MIXED roster renders their
+    // own number rather than disappearing out of the label.
+    expect(byId(mixed.conversationId)?.label).toBe('With Cleo & (555) 000-0006');
+    // ...but a roster of nothing BUT numbers loses to the operator's own label.
+    // That carve-out is what keeps this rung reachable at all.
     expect(byId(withTag.conversationId)?.label).toBe('Maple St lease-up');
+    // No name, no tag -> the number is still better than "Relay group".
+    expect(byId(numbersOnly.conversationId)?.label).toBe('With (555) 000-0004');
+    // Nothing to say at all: no members, no tag. (No pool-number rung here, by
+    // design - the number is the parent row's own column.)
     expect(byId(bare.conversationId)?.label).toBe('Relay group');
   });
 });

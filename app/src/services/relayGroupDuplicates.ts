@@ -5,16 +5,23 @@
 // nothing here refuses anything, and a miss costs a confusing week rather than a
 // misdelivered message (spec 2.1), which is why every failure mode here is silence.
 //
-// PII (doc section 9): a preview carries NAMES, never phones. DuplicateOpenGroup
-// therefore holds display names only, and the log lines carry ids and counts.
+// PII (doc section 9, as corrected by the founder ruling 2026-08-19): the line is
+// OUTBOUND CONTENT vs STAFF CHROME, not preview vs not-preview. Anything a tenant
+// or landlord RECEIVES carries names and never a phone - that is the intro body
+// (jobs/relayFanOut composeConnectionSentence), and it is untouched. This warning
+// is STAFF CHROME: it renders only in the navigator's confirm dialog
+// (dashboard/src/routes/shared/RosterConfirmDialog.tsx) and is transmitted to
+// nobody, so a nameless member shows their formatted phone rather than a useless
+// 'Unknown'. Log lines still carry ids and counts only.
 import type {
   ConversationItem,
   ConversationParticipant,
   ConversationsRepo,
 } from '../repos/conversationsRepo.js';
+import { formatPhoneForDisplay } from '../lib/phone.js';
 import type { Logger } from '../lib/logger.js';
 
-/** The live group a proposed roster duplicates. Names only - never phones. */
+/** The live group a proposed roster duplicates. Staff-facing labels only. */
 export interface DuplicateOpenGroup {
   conversationId: string;
   /**
@@ -23,7 +30,10 @@ export interface DuplicateOpenGroup {
    * with relay_status 'relay_group#closed' (spec 7).
    */
   partition: 'open' | 'connecting';
-  /** Display names of the existing group's members, for the warning copy. */
+  /**
+   * The existing group's members, for the warning copy: each one's display name,
+   * else their formatted phone. Staff-only - see this file's header.
+   */
   memberNames: string[];
 }
 
@@ -105,11 +115,20 @@ function toDuplicate(
     conversationId: conv.conversationId,
     partition,
     // Named from `rosterMembers`, the SAME walk the match was made on - never from
-    // the raw participants array (see that function). A nameless participant renders
-    // as 'Unknown'. NEVER fall back to the phone - doc section 9 forbids it on the
-    // wire.
+    // the raw participants array (see that function). A nameless participant falls
+    // back to their formatted phone: this copy is read by a navigator deciding
+    // whether to open a second group, and 'Unknown' is nothing to decide on.
+    //
+    // There is no 'Unknown' rung left, deliberately. `rosterMembers` keeps only
+    // participants carrying a non-empty phone, so every entry here has a name or a
+    // number and the old fallback was unreachable - leaving it in would document a
+    // behaviour the code cannot produce. (`?? m.phone` is the type guard, not a
+    // third rung: formatPhoneForDisplay returns undefined only for an empty input,
+    // which rosterMembers already excluded.)
     memberNames: rosterMembers(conv).map((m) =>
-      typeof m.name === 'string' && m.name.length > 0 ? m.name : 'Unknown',
+      typeof m.name === 'string' && m.name.trim().length > 0
+        ? m.name
+        : (formatPhoneForDisplay(m.phone) ?? m.phone),
     ),
   };
 }

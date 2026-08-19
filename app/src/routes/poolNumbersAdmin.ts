@@ -17,6 +17,7 @@
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { requireRole } from '../middleware/auth.js';
+import { relayMemberLabels } from '../lib/groupTitle.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -91,18 +92,24 @@ const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
 
 /**
  * Server-side group label, precedence (spec sec 3; adjudication A6): (1) ALL
- * participants that carry a non-empty name, joined with ' & ' under a 'With '
- * prefix (admin view - no "self" to exclude); (2) the placement_tag, read
- * DEFENSIVELY via the index signature (it is written by createRelayGroup but not
- * declared on ConversationItem - mirrors inbox.ts / contacts.ts); (3) the literal
- * 'Relay group'. No pool-number rung - the number is the parent row's own column.
+ * participants, each rendered as their name ELSE their own formatted phone
+ * (lib/groupTitle relayMemberLabels), joined with ' & ' under a 'With ' prefix
+ * (admin view - no "self" to exclude); (2) the placement_tag, read DEFENSIVELY
+ * via the index signature (it is written by createRelayGroup but not declared on
+ * ConversationItem - mirrors inbox.ts / contacts.ts); (3) the literal 'Relay
+ * group'. No pool-number rung - the number is the parent row's own column.
+ *
+ * This is a STAFF-ONLY admin label, so a nameless member shows their number
+ * rather than vanishing from the row - see relayMemberLabels for the outbound
+ * content vs staff chrome line. The PRECEDENCE is unchanged: `trimNames` is off
+ * (this chain deliberately does not trim), and the tag still wins outright when
+ * nobody on the roster has a real name, which is what keeps rung (2) reachable.
  */
 function serverLabel(conv: ConversationItem): string {
-  const names = (conv.participants ?? [])
-    .map((p) => p.name)
-    .filter((n): n is string => typeof n === 'string' && n.length > 0);
-  if (names.length > 0) return `With ${names.join(' & ')}`;
+  const { labels, anyNamed } = relayMemberLabels(conv.participants);
   const tag = conv['placement_tag'];
+  const hasTag = typeof tag === 'string' && tag.length > 0;
+  if (labels.length > 0 && (anyNamed || !hasTag)) return `With ${labels.join(' & ')}`;
   if (typeof tag === 'string' && tag.length > 0) return tag;
   return 'Relay group';
 }

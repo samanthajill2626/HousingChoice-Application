@@ -79,7 +79,13 @@ function relayConv(fields: Record<string, unknown>): ConversationItem {
 }
 
 describe('relayThreadLabel', () => {
-  it('prefers member names: "With A & B"', () => {
+  it('prefers member names, and falls back PER MEMBER to that member\'s own number', () => {
+    // THE MIXED CASE, and the reason the fallback is per-member rather than
+    // whole-list: this label is STAFF chrome (an inbox row, a push title), so a
+    // nameless member must show their number instead of vanishing from a list the
+    // navigator is trying to act on. Dropping them used to render "With Ana Diaz &
+    // Jose" for a THREE-person thread. Names still travel alone in the outbound
+    // intro body - see jobs/relayFanOut composeConnectionSentence, unchanged.
     const conv = relayConv({
       participants: [
         member({ contactId: 'c1', phone: '+15550100001', name: 'Ana Diaz' }),
@@ -87,10 +93,51 @@ describe('relayThreadLabel', () => {
         member({ contactId: 'c3', phone: '+15550100003', name: '' }),
       ],
     });
-    expect(relayThreadLabel(conv)).toBe('With Ana Diaz & Jose');
+    expect(relayThreadLabel(conv)).toBe('With Ana Diaz & Jose & (555) 010-0003');
+  });
+  it('skips a member with neither a name nor a phone', () => {
+    const conv = relayConv({
+      participants: [
+        member({ contactId: 'c1', phone: '+15550100001', name: 'Ana Diaz' }),
+        member({ contactId: 'c2', phone: '', name: '   ' }),
+      ],
+    });
+    expect(relayThreadLabel(conv)).toBe('With Ana Diaz');
   });
   it('falls back to the operator placement_tag', () => {
     expect(relayThreadLabel(relayConv({ placement_tag: ' 12 Oak St ' }))).toBe('12 Oak St');
+  });
+  it('lets the placement_tag BEAT a roster of nothing but raw numbers', () => {
+    // The carve-out that keeps the tag rung alive. Without it the per-member
+    // number fallback would satisfy rung 1 for every group that has participants,
+    // and an operator's deliberate label could never render again.
+    const conv = relayConv({
+      placement_tag: '12 Oak St',
+      participants: [
+        member({ contactId: 'c1', phone: '+15550100001', name: '' }),
+        member({ contactId: 'c2', phone: '+15550100002' }),
+      ],
+    });
+    expect(relayThreadLabel(conv)).toBe('12 Oak St');
+  });
+  it('but ONE real name is enough to beat the tag', () => {
+    const conv = relayConv({
+      placement_tag: '12 Oak St',
+      participants: [
+        member({ contactId: 'c1', phone: '+15550100001', name: 'Ana Diaz' }),
+        member({ contactId: 'c2', phone: '+15550100002' }),
+      ],
+    });
+    expect(relayThreadLabel(conv)).toBe('With Ana Diaz & (555) 010-0002');
+  });
+  it('numbers still beat the pool number when there is no tag', () => {
+    // Rung 1 is reached, so the pool-number rung is NOT: naming the actual
+    // members beats naming the shared line they are talking through.
+    const conv = relayConv({
+      pool_number: '+15550100009',
+      participants: [member({ contactId: 'c1', phone: '+15550100001' })],
+    });
+    expect(relayThreadLabel(conv)).toBe('With (555) 010-0001');
   });
   it('falls back to the formatted pool number', () => {
     // Assert the FORMATTED output, derived from the same formatter the rung

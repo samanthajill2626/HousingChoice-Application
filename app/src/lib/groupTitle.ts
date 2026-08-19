@@ -52,35 +52,101 @@ export function groupThreadLabel(
 }
 
 /**
+ * ONE member's STAFF-FACING label: their name, else their OWN formatted phone.
+ *
+ * THE LINE (founder ruling 2026-08-19), and it is not "preview vs not-preview":
+ *
+ *   OUTBOUND MESSAGE CONTENT - anything a tenant or landlord actually receives -
+ *   carries names and NEVER a phone. jobs/relayFanOut composeConnectionSentence
+ *   drops a nameless member and falls back to a neutral count rather than print
+ *   their number, and that stays exactly as it is.
+ *
+ *   STAFF-ONLY CHROME - a label or sentence only a navigator ever sees - falls
+ *   back to the number. Rendering "Unknown" gives a navigator nothing to act on,
+ *   and silently DROPPING the member loses a person from a staff-facing list.
+ *   This is already the app's convention: contactDisplayName
+ *   (dashboard/src/routes/contact/format.ts) is name -> formatted phone.
+ *
+ * The relay chains avoided the fallback wholesale only because ONE resolved name
+ * used to feed both consumers. This helper serves the staff half ONLY - never
+ * pass its output to a message body.
+ *
+ * `anyNamed` rides along because every caller's TAG rung depends on it: an
+ * operator's deliberate `placement_tag` beats a list of raw digits, so the tag
+ * still wins when NOBODY on the roster has a real name. Without that carve-out
+ * the tag rung would be dead code for every group that has participants, which
+ * would silently retire an operator-facing feature.
+ *
+ * `trimNames` is the one caller-visible difference between the chains: the
+ * inbox/push chain trims, poolNumbersAdmin's serverLabel deliberately does not.
+ * Emptiness is judged on the TRIMMED value either way - a whitespace-only name
+ * is not a name, whichever chain is asking.
+ *
+ * GUARDED (A25 / adversarial 21): formatPhoneForDisplay returns undefined for an
+ * absent number, so `?? phone` keeps every element a string. A member with
+ * NEITHER a name NOR a phone contributes nothing.
+ */
+export function relayMemberLabels(
+  members: readonly ConversationParticipant[] | undefined,
+  opts: { trimNames?: boolean } = {},
+): { labels: string[]; anyNamed: boolean } {
+  const labels: string[] = [];
+  let anyNamed = false;
+  for (const p of members ?? []) {
+    const raw = typeof p.name === 'string' ? p.name : '';
+    if (raw.trim().length > 0) {
+      anyNamed = true;
+      labels.push(opts.trimNames === true ? raw.trim() : raw);
+      continue;
+    }
+    const phone = typeof p.phone === 'string' ? p.phone : '';
+    const label = formatPhoneForDisplay(phone) ?? phone;
+    if (label.length > 0) labels.push(label);
+  }
+  return { labels, anyNamed };
+}
+
+/**
  * The relay-group thread label - the EXACT precedence chain the inbox
- * row uses (member names -> operator placement_tag -> formatted pool
+ * row uses (member labels -> operator placement_tag -> formatted pool
  * number -> "Relay group"), extracted from routes/inbox.ts relayRowFor
  * so the push title and the inbox row cannot drift.
  *
+ * The FIRST rung is per-member (relayMemberLabels): each participant renders
+ * their name, else their own formatted phone, so a MIXED roster reads
+ * "With Dana Reed & (555) 010-0002" instead of dropping the second person. This
+ * is staff-only chrome - see relayMemberLabels for the outbound/staff line.
+ * When NOBODY has a real name the tag rung still wins.
+ *
  * SCOPE GUARD: this consolidates ONLY the inbox row + push title.
  * Other relay-label chains (notably routes/poolNumbersAdmin.ts
- * serverLabel) are DELIBERATELY different precedences pinned by their
- * own tests - do not re-point them here. serverLabel differs in two
- * ways on purpose: it has NO pool-number rung (the number is the parent
- * row's own column) and it does not trim member names.
+ * serverLabel and routes/contacts.ts `otherMemberNames`) are DELIBERATELY
+ * different precedences pinned by their own tests - do not re-point them
+ * here. They share the per-member fallback via relayMemberLabels and
+ * NOTHING else. serverLabel differs in two ways on purpose: it has NO
+ * pool-number rung (the number is the parent row's own column) and it
+ * does not trim member names.
  *
  * CLIENT MIRROR: dashboard/src/routes/contact/GroupTextsCard.tsx
  * groupLabel carries the same four-step precedence client-side over its
  * own server-computed RelayGroupRow DTO (it cannot import from app/src)
- * - the groupThreadLabel precedent above; they change together.
+ * - the groupThreadLabel precedent above; they change together. Its name
+ * rung reads the server-computed `otherMemberNames`, so the per-member
+ * fallback reaches it from routes/contacts.ts with no client edit; the
+ * tag carve-out reaches it the same way, by leaving that array empty.
  *
  * Unlike groupThreadLabel this takes the WHOLE ConversationItem: the tag
  * and pool-number rungs read fields that live on the conversation, not
  * on the roster.
  */
 export function relayThreadLabel(conv: ConversationItem): string {
-  const memberNames = (conv.participants ?? [])
-    .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
-    .filter((n) => n.length > 0);
-  if (memberNames.length > 0) return `With ${memberNames.join(' & ')}`;
+  const { labels, anyNamed } = relayMemberLabels(conv.participants, { trimNames: true });
   // GOTCHA: the operator tag rides ConversationItem's index signature
   // under the key `placement_tag` (NOT `tag`) and is untyped.
   const tag = typeof conv['placement_tag'] === 'string' ? conv['placement_tag'].trim() : '';
+  // The tag carve-out: raw digits lose to a deliberate operator label, but only
+  // when there is no real name anywhere on the roster.
+  if (labels.length > 0 && (anyNamed || tag.length === 0)) return `With ${labels.join(' & ')}`;
   if (tag.length > 0) return tag;
   const pool =
     typeof conv.pool_number === 'string' && conv.pool_number.length > 0 ? conv.pool_number : '';

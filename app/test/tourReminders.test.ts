@@ -190,8 +190,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // morning_of: 08:00 ORG-LOCAL on the tour's local date = Jan 20 08:00 EST
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
 
-    // en_route: scheduledAt - 2h = Jan 20 13:00 EST (daytime, unclamped)
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T18:00:00.000Z');
+    // en_route: scheduledAt - 1h = Jan 20 14:00 EST (daytime, unclamped).
+    // One hour since the founder decision of 2026-08-18 (was two).
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T19:00:00.000Z');
 
     // no_show_checkin is manual-send only, so it is NOT auto-armed (absent here).
     expect(byKind['no_show_checkin']).toBeUndefined();
@@ -282,11 +283,28 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
     expect(byKind['morning_of']!.skippedAt).toBeUndefined();
 
-    // The rest of the ladder is untouched by the collision.
     expect(byKind['confirmation']!.dueAt).toBe(now);
-    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T01:00:00.000Z'); // Jan 20 20:00 EST
+
+    // (b) past-event, and the ONE behaviour change the 2h -> 1h move introduces
+    // (founder decision 2026-08-18). At two hours this rung fired at Jan 20
+    // 20:00 EST, comfortably before the 21:00 window. At ONE hour it lands at
+    // 21:00 EST exactly - inside the window - so it clamps forward to the next
+    // 08:00 local, which is AFTER this 10pm tour has already happened.
+    //
+    // The ladder's existing rule then does the right thing on its own: a rung
+    // whose clamped dueAt lands at/after the tour is born SKIPPED rather than
+    // sent late. That is the intended posture (Cameron 2026-08-18) - a 10pm tour
+    // may well be a mistyped 10am, so a reminder that is useless by the time the
+    // window lifts should not go out at all. Only tours at/after ~10pm local are
+    // affected; everything earlier is unchanged.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T13:00:00.000Z'); // Jan 21 08:00 EST
+    expect(byKind['en_route']!.skippedAt).toBe(now);
+    expect(byKind['en_route']!.skipReason).toBe('past_event');
+
+    // Still four VISIBLE rows - a skipped rung stays as an honest trace in the
+    // panel rather than vanishing - but only two are live.
     expect(rows).toHaveLength(4);
-    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(2);
   });
 
   // ---------------------------------------------------------------------------
@@ -484,7 +502,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(byKind['day_before']!.skippedAt).toBe(now);
     expect(byKind['day_before']!.skipReason).toBe('quiet_hours_superseded');
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
-    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
+    // ...including Test 1c's past-event en_route: the fallback window is what
+    // makes that rung clamp past the tour, so a read failure must reproduce the
+    // skip exactly. Two live rows, same as Test 1c.
+    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(2);
   });
 
   // ---------------------------------------------------------------------------
@@ -1177,15 +1199,21 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // confirmation = now0 - always armed (quiet hours are OFF for this case)
     expect(armedKinds).toContain('confirmation');
 
-    // morning_of = 08:00 ORG-LOCAL on 2026-07-13 (EDT) = '2026-07-13T12:00:00.000Z',
-    // which is the SAME instant as en_route below -> the later rung wins and
-    // morning_of is retired as a VISIBLE skipped row (the panel's honest trace).
+    // morning_of = 08:00 ORG-LOCAL on 2026-07-13 (EDT) = '2026-07-13T12:00:00.000Z'.
+    //
+    // BOTH RUNGS NOW SURVIVE, where they used to collide. At the old 2h offset
+    // en_route landed on 12:00 too - the same instant - so the later rung took
+    // the slot and morning_of was retired as a superseded row. Moving en_route
+    // to 1h (founder decision 2026-08-18) separates them by an hour, so the
+    // tenant gets both the 08:00 heads-up and the hour-before nudge. That is the
+    // intended reading of the change, not an accident of this fixture.
     const morningOf = rows.find((r) => r.kind === 'morning_of');
-    expect(morningOf?.skippedAt).toBe(now0);
-    expect(morningOf?.skipReason).toBe('quiet_hours_superseded');
-    expect(armedKinds).not.toContain('morning_of');
+    expect(morningOf?.dueAt).toBe('2026-07-13T12:00:00.000Z');
+    expect(morningOf?.skippedAt).toBeUndefined();
+    expect(armedKinds).toContain('morning_of');
 
-    // en_route = scheduledAt - 2h = '2026-07-13T12:00:00.000Z' > now0 → armed
+    // en_route = scheduledAt - 1h = '2026-07-13T13:00:00.000Z' > now0 → armed
+    expect(rows.find((r) => r.kind === 'en_route')?.dueAt).toBe('2026-07-13T13:00:00.000Z');
     expect(armedKinds).toContain('en_route');
 
     // no_show_checkin is manual-send only now, so it is never auto-armed.

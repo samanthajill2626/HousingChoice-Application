@@ -97,6 +97,37 @@ export const NUDGE_RUNGS: Partial<Record<PlacementStage, NudgeRung>> = {
 };
 
 /**
+ * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-18, TEMPORARY.
+ *
+ * Application nudges are MANUAL ONLY for now: the ladder still ARMS a row on
+ * every stage entry (so the placement keeps showing the suggested chase and its
+ * draft copy, and "Send now" keeps working), but the poll never sends one on its
+ * own. A human decides when to chase.
+ *
+ * WHY: the founder's stated reason was that the system "isn't set up to know
+ * when I have shared an application". Worth being precise, because it shapes any
+ * future revisit - the system never inferred that. A rung is armed only because
+ * a person moved the placement into the matching stage by hand. What she is
+ * really saying is that the stage is moved for record-keeping before the real-
+ * world step has happened, so a delay measured from it chases too early. The
+ * completion/approval rungs are the honest cases: nobody knows those outcomes
+ * until a landlord or PM is contacted directly.
+ *
+ * Emptying NUDGE_RUNGS instead would ALSO stop the arming, which would take the
+ * suggested action and its copy off the placement page entirely - not what was
+ * asked for.
+ *
+ * TO RESTORE: empty this set. Nothing else has to change.
+ * TODO(founder-message-template-updates-owed).
+ */
+export const MANUAL_ONLY_NUDGE_KINDS: ReadonlySet<NudgeKind> = new Set<NudgeKind>([
+  'receipt_check',
+  'completion_check',
+  'approval_check',
+  'rta_window_closing',
+]);
+
+/**
  * Reverse index kind → the stage whose rung it belongs to. Used by the poller to
  * decide whether a due row is still relevant to the placement's CURRENT stage.
  */
@@ -231,6 +262,18 @@ export interface RunDuePlacementNudgesDeps {
    *  bridge (lib/eventBridge.ts) to app SSE clients when EVENT_BRIDGE_URL is set;
    *  the dev tick seam continues to inject its own bus. */
   events?: EventBus;
+  /**
+   * Rung kinds the poll must NEVER send automatically. Defaults to
+   * MANUAL_ONLY_NUDGE_KINDS, which is currently EVERY kind (founder decision
+   * 2026-08-18), so production sends none of them on its own.
+   *
+   * Injectable because that default would otherwise make the poll's own
+   * behaviour untestable - with every kind held back there is no rung left to
+   * drive claim / send / skip / quiet-hours coverage through. Tests pass an
+   * empty set to exercise the sending path; the hold-back is covered by its own
+   * test rather than by the absence of sends everywhere else.
+   */
+  manualOnlyKinds?: ReadonlySet<NudgeKind>;
   logger?: Logger;
 }
 
@@ -283,7 +326,22 @@ export async function runDuePlacementNudges(
 ): Promise<void> {
   const log = deps.logger ?? defaultLogger;
 
-  const dueRows = await deps.placementNudgesRepo.listDue(nowIso);
+  const allDueRows = await deps.placementNudgesRepo.listDue(nowIso);
+
+  // MANUAL-ONLY FILTER (founder decision 2026-08-18) - see MANUAL_ONLY_NUDGE_KINDS.
+  // These rows are LEFT PENDING on purpose, NOT claim-skipped: "Send now"
+  // (forceSendNudge) only works on a row that is still pending, so retiring them
+  // here would silently disable the very button this change exists to preserve.
+  // They simply stop being candidates for an automatic send.
+  const manualOnly = deps.manualOnlyKinds ?? MANUAL_ONLY_NUDGE_KINDS;
+  const dueRows = allDueRows.filter((r) => !manualOnly.has(r.kind));
+  const heldBack = allDueRows.length - dueRows.length;
+  if (heldBack > 0) {
+    log.info(
+      { heldBack, now: nowIso },
+      'placement nudge poll: manual-only rungs left pending (no automatic send)',
+    );
+  }
   if (dueRows.length === 0) return;
 
   log.info({ count: dueRows.length, now: nowIso }, 'placement nudge poll: processing due rows');

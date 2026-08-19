@@ -185,6 +185,26 @@ export const WEB_FORM_CONSENT_COPY = `I agree to receive recurring texts from ${
 export const DEFAULT_MISSED_CALL_AUTOTEXT = `${SMS_BRAND_NAME}: Sorry we missed your call! To get started, please text us your full name, voucher size, and housing authority and we'll be right with you. Reply STOP to opt out.`;
 
 /**
+ * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-18.
+ *
+ * The missed-call auto-text the app ACTUALLY sends today. It deliberately does
+ * NOT carry "Reply STOP to opt out.".
+ *
+ * This is a first-contact template, so dropping the opt-out line puts it below
+ * the TCPA/CTIA floor for our filed A2P campaign, and engineering advised
+ * AGAINST it. The founder (Sam, relayed by Cameron 2026-08-18) directed the
+ * change anyway, to make a missed call read like a person texting back. The
+ * attribution is recorded here so a later reader does not mistake it for an
+ * oversight and silently "fix" it.
+ *
+ * DEFAULT_MISSED_CALL_AUTOTEXT above is KEPT UNCHANGED and still pinned to the
+ * filed spec copy: it is what the A2P campaign was registered with, and it is
+ * what we would restore to if the campaign is ever re-reviewed. Do not delete
+ * it just because nothing sends it right now.
+ */
+export const FOUNDER_MISSED_CALL_AUTOTEXT = `Hey, this is Sam. Sorry I missed your call! Can you please text me your full name, voucher size, and housing authority?`;
+
+/**
  * Business identity + opt-out string the relay job PREPENDS to the group intro
  * (spec §5). Phase 2 composes it in front of the existing intro copy; here we
  * only export the identity + opt-out prefix (today the intro has neither).

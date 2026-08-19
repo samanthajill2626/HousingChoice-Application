@@ -70,12 +70,16 @@ function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string }
     if (typeof v !== 'string' || v.length === 0 || v.length > MAX_TEMPLATE_CHARS) {
       return { error: `missedCallAutoText must be a 1..${MAX_TEMPLATE_CHARS}-char string` };
     }
-    // do-not-remove — A2P/CTIA compliance floor. A first-contact template MUST
-    // keep opt-out language ("Reply STOP…") — an admin must never be able to
-    // strip it, or the app would text people with no documented way to opt out.
-    if (!templateHasOptOutLanguage(v)) {
-      return { error: 'missing_opt_out_language' };
-    }
+    // FOUNDER DECISION, 2026-08-18: the opt-out gate is LIFTED for this ONE
+    // field. It used to reject any missed-call auto-text without "Reply STOP...",
+    // which is why the founder's wording could not be saved here at all. The
+    // rationale and the attribution live on FOUNDER_MISSED_CALL_AUTOTEXT
+    // (lib/smsCompliance.ts) - engineering advised keeping the gate and was
+    // overruled.
+    //
+    // NOTE THE ASYMMETRY, IT IS INTENTIONAL: welcomeText below STILL enforces
+    // templateHasOptOutLanguage. Only the missed-call auto-text was cleared, so
+    // do not "tidy" the two branches into one shared check.
     patch.missedCallAutoText = v;
   }
   if ('missedCallAutoTextEnabled' in b) {

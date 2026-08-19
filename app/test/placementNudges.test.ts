@@ -39,7 +39,9 @@ import { SendRefusedError } from '../src/services/sendMessage.js';
 import {
   armNudgeForStage,
   forceSendNudge,
-  runDuePlacementNudges,
+  MANUAL_ONLY_NUDGE_KINDS,
+  NUDGE_RUNGS,
+  runDuePlacementNudges as runDuePlacementNudgesRaw,
   type RunDuePlacementNudgesDeps,
 } from '../src/jobs/placementNudges.js';
 import { resolveMessage } from '../src/messages/index.js';
@@ -50,6 +52,19 @@ import {
 } from './helpers/settingsStub.js';
 
 const FIXED_CREATED = '2026-07-03T00:00:00.000Z';
+
+// Since 2026-08-18 the poll holds back EVERY rung kind by default (founder
+// decision: application nudges are manual-only). These suites exist to cover the
+// poll's own claim / send / skip / quiet-hours behaviour, and with the default
+// hold-back there would be no rung left to drive any of it - every assertion
+// would pass for the wrong reason. So they run the poll with the hold-back
+// switched OFF, and the hold-back itself is asserted on its own below
+// ("manual-only hold-back"). Individual tests may still pass an explicit
+// manualOnlyKinds; the spread order lets theirs win.
+const NO_MANUAL_HOLD_BACK: ReadonlySet<NudgeKind> = new Set();
+function runDuePlacementNudges(now: string, deps: RunDuePlacementNudgesDeps): Promise<void> {
+  return runDuePlacementNudgesRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
+}
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -447,6 +462,42 @@ describe('runDuePlacementNudges', () => {
     };
     return { repo, deps, send, row, tenantPhone };
   }
+
+  // Founder decision 2026-08-18: application nudges are MANUAL ONLY. The poll
+  // must not send them, and - the part that is easy to get wrong - must leave
+  // the row PENDING rather than claim-skipping it, because "Send now"
+  // (forceSendNudge) refuses any row that is already sent/skipped/canceled.
+  // Retiring them here would silently disable the button this change exists to
+  // keep.
+  describe('manual-only hold-back (founder decision 2026-08-18)', () => {
+    it('every armed rung kind is manual-only, so the poll sends nothing by default', () => {
+      for (const rung of Object.values(NUDGE_RUNGS)) {
+        expect(MANUAL_ONLY_NUDGE_KINDS.has(rung.kind), `${rung.kind} not held back`).toBe(true);
+      }
+    });
+
+    it('a due manual-only rung is NOT sent and is LEFT PENDING (still force-sendable)', async () => {
+      const { deps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check');
+      // The real production default - no manualOnlyKinds override.
+      await runDuePlacementNudgesRaw(NOW, deps);
+      expect(send.sent).toHaveLength(0);
+      const after = (await repo.listByPlacement('p-1')).find((r) => r.nudgeId === row.nudgeId)!;
+      expect(after.sentAt, 'must not report a send that never happened').toBeUndefined();
+      expect(after.skippedAt, 'claim-skipping would break Send now').toBeUndefined();
+      expect(after.canceledAt).toBeUndefined();
+    });
+
+    it('a held-back rung is still reachable by a human force-send', async () => {
+      const { deps, row } = tenantRig('awaiting_receipt', 'receipt_check');
+      await runDuePlacementNudgesRaw(NOW, deps);
+      const result = await forceSendNudge(row.nudgeId, 'p-1', NOW, true, deps);
+      // This rig's contact carries no consent_method, so the send itself is
+      // refused at the consent gate - that is not what this test is about. What
+      // matters is that force-send REACHED that gate at all: a row the poll had
+      // consumed would have short-circuited to 'not_pending' before any gate ran.
+      expect(result.outcome).not.toBe('not_pending');
+    });
+  });
 
   it('sends the tenant rung body to the tenant 1:1 conversation', async () => {
     const { deps, send } = tenantRig('awaiting_receipt', 'receipt_check');

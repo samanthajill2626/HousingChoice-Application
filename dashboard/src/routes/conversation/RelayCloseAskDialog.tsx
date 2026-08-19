@@ -80,9 +80,13 @@ export function RelayCloseAskDialog({
         </>
       }
     >
+      {/* Deliberately does NOT say members are texted on close: the final
+          "group is closed" message was switched off by founder decision
+          2026-08-18 (RELAY_CLOSE_ANNOUNCEMENT_ENABLED in app/src/routes/relayGroups.ts).
+          Restore that half of the sentence if the flag goes back to true. */}
       <p className={styles.body}>
-        This relay group is still open. Closing it sends everyone a final note and stops new
-        messages; keeping it open reminds you again in 28 days.
+        This relay group is still open. Closing it stops new messages; keeping it open reminds you
+        again in 28 days.
       </p>
       {error !== null ? (
         <p role="alert" className={styles.error}>

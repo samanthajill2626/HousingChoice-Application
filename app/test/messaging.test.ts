@@ -154,6 +154,7 @@ describe('TwilioMessagingDriver', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -185,6 +186,7 @@ describe('TwilioMessagingDriver', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       sendingEnabled: false,
       client,
       logger: createLogger({ level: 'info', destination: capture.stream }),
@@ -207,6 +209,7 @@ describe('TwilioMessagingDriver', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -226,6 +229,7 @@ describe('TwilioMessagingDriver', () => {
         apiKeySid: 'SKtest',
         apiKeySecret: 'secret',
         messagingServiceSid: 'MGtest',
+        appEnv: 'local',
         client: {
           messages: {
             create: async () => {
@@ -256,6 +260,7 @@ describe('TwilioMessagingDriver', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client: {
         messages: {
           create: async () => {
@@ -291,6 +296,7 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client: makeFakeTwilioClient().client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -356,6 +362,7 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client: makeFakeTwilioClient().client,
       logger: createLogger({ destination: createLogCapture().stream }),
       apiBaseUrl: 'http://localhost:8889',
@@ -533,6 +540,7 @@ describe('TwilioMessagingDriver.initiateCall (M1.9a)', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -598,6 +606,7 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       publicBaseUrl: 'https://dxxxx.cloudfront.example',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
@@ -606,13 +615,32 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
     expect(result.phoneNumber).toBe('+15550109001');
     expect(result.capabilities).toEqual({ sms: true, voice: true });
     expect(result.sid).toBe('PN123');
-    // Pre-wired both webhooks + the static self-labeling FriendlyName at purchase.
+    // Pre-wired both webhooks at purchase.
     expect(created[0]).toMatchObject({
       phoneNumber: '+15550109001',
-      friendlyName: 'HousingChoice relay (group chats)',
       smsUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/sms',
       voiceUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/voice',
     });
+  });
+
+  it.each([
+    ['dev', 'HousingChoice dev relay (group chats)'],
+    ['prod', 'HousingChoice prod relay (group chats)'],
+  ])('includes the %s environment in the purchased number FriendlyName', async (appEnv, friendlyName) => {
+    const { client, created } = makeFakeProvisioningClient({ voice: true });
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv,
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+
+    await driver.provisionPhoneNumber({ voiceCapable: true });
+
+    expect(created[0]).toMatchObject({ friendlyName });
   });
 
   it('throws VoiceCapabilityError when the purchased number lacks voice', async () => {
@@ -622,6 +650,7 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -637,6 +666,7 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -651,6 +681,7 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -747,6 +778,7 @@ describe('provisionPhoneNumber - geographic search hints', () => {
       apiKeySid: 'SKtest',
       apiKeySecret: 'secret',
       messagingServiceSid: 'MGtest',
+      appEnv: 'local',
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
@@ -910,6 +942,7 @@ function makeMessagingServiceDriver(client: TwilioClientLike, messagingServiceSi
     apiKeySid: 'SKtest',
     apiKeySecret: 'secret',
     messagingServiceSid,
+    appEnv: 'local',
     client,
     logger: createLogger({ destination: createLogCapture().stream }),
   });

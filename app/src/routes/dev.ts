@@ -582,7 +582,24 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       }
       nowIso = new Date(body.now).toISOString();
     }
-    await runDuePlacementNudges(nowIso, placementNudgeDeps());
+    // DELIBERATE DIVERGENCE FROM PRODUCTION - read before trusting a tick.
+    //
+    // Production holds every nudge kind back (MANUAL_ONLY_NUDGE_KINDS, founder
+    // decision 2026-08-18), so the real poll sends nothing on its own. This
+    // dev/e2e seam switches that off: its entire job is to drive the send
+    // machinery deterministically, and inheriting the hold-back would turn every
+    // tick into a silent no-op and drop the whole nudge send path out of e2e
+    // coverage for as long as "temporary" lasts.
+    //
+    // SO: a green tick proves the machinery works, NOT that the message would go
+    // out in production today - there it waits for a human. Applied HERE rather
+    // than in placementNudgeDeps() so an injected test/e2e deps object cannot
+    // silently miss it. Delete this when the hold-back is lifted; do not leave a
+    // permanent dev/prod fork.
+    await runDuePlacementNudges(nowIso, {
+      manualOnlyKinds: new Set(),
+      ...placementNudgeDeps(),
+    });
     log.info({ now: nowIso }, 'dev placement-nudge tick ran');
     res.status(200).json({ ok: true, now: nowIso });
   });

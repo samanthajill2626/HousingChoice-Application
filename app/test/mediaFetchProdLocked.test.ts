@@ -8,6 +8,7 @@ import { TwilioMessagingDriver } from '../src/adapters/messaging.js';
 function driver(apiBaseUrl?: string) {
   return new TwilioMessagingDriver({
     accountSid: 'ACx', apiKeySid: 'SKx', apiKeySecret: 'secret', messagingServiceSid: 'MGx',
+    appEnv: 'local',
     ...(apiBaseUrl !== undefined && { apiBaseUrl }),
     client: {} as never, // not used for media fetch (raw fetch)
   });

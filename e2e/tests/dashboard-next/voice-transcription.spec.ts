@@ -168,7 +168,12 @@ test('a missed business-line call takes a voicemail (single-channel transcript +
     .poll(
       async () => {
         const msgs = await getOutbox(api, { to: caller });
-        return msgs.some((m) => /Sorry we missed your call/i.test(m.body ?? ''));
+        // Deliberately loose on the pronoun. The founder rewrite of 2026-08-18
+        // made this "Sorry I missed your call", but a2p-compliance.spec.ts
+        // restores a "we" variant into the SAME shared lane, so a needle that
+        // survives both is the honest one - this test is about the auto-text
+        // firing at all, not about its exact wording.
+        return msgs.some((m) => /missed your call/i.test(m.body ?? ''));
       },
       { timeout: 20_000, message: 'missed-call auto-text not observed in the outbox' },
     )

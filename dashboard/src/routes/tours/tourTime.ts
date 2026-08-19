@@ -24,6 +24,21 @@ export function currentHourLocal(now: Date = new Date()): string {
  * needs no confirmation. Empty (a timeless tour) and unparseable values return
  * null — required/native input validation owns those, not this check.
  */
+/**
+ * The confirmable warning for an ALREADY-HAPPENED tour's datetime-local value -
+ * the mirror image of tourTimeWarning. A past time is the NORMAL case here, so
+ * only a FUTURE one asks for confirmation (usually a mistyped month or year on
+ * a tour being recorded after the fact). Empty (the field is optional) and
+ * unparseable values return null.
+ */
+export function pastTourTimeWarning(local: string, now: number = Date.now()): string | null {
+  if (local === '') return null;
+  const ts = new Date(local).getTime();
+  if (Number.isNaN(ts)) return null;
+  if (ts > now) return 'This date and time is in the future.';
+  return null;
+}
+
 export function tourTimeWarning(local: string, now: number = Date.now()): string | null {
   if (local === '') return null;
   const ts = new Date(local).getTime();

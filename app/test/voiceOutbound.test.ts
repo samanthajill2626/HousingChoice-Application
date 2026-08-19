@@ -469,6 +469,47 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Hangup');
     expect(res.text).not.toContain('<Dial');
+
+    // The failure that actually happened IS the write, so that is the story the
+    // log tells (and only that one - nothing announced).
+    const lines = JSON.stringify(harness.capture.lines);
+    expect(lines).toContain('stamping the refused call canceled failed');
+    expect(lines).not.toContain('announcing the refusal stamp failed');
+  });
+
+  // F-1: the two best-effort failures must be DISTINGUISHABLE. The announce only
+  // ever runs after the conditional write COMMITTED, so a failure inside it means
+  // the row is correctly `canceled` and only the live push was lost. Logging that
+  // as "stamping ... failed" would send an operator investigating a complaint
+  // into the write path to hunt for a row that is perfectly fine.
+  it('a stamp that COMMITS but whose ANNOUNCE throws still hangs up - and never logs the stamp as failed', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const contact = world.contacts.find((c) => c.contactId === 'c-target')!;
+    contact.voice_opt_out = true;
+    world.emitted.length = 0;
+    // announceRefusalStamp's ONLY repo call. updateCallStatus resolves the row
+    // through its own internal lookup, so this breaks the announce alone.
+    vi.spyOn(world.messagesRepo, 'getByProviderSid').mockRejectedValue(new Error('ddb read down'));
+
+    const res = await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain('<Dial');
+
+    // The write really did commit - that is the whole point of the distinction.
+    expect(world.messages.find((m) => m.provider_sid === callSid)!.call_status).toBe('canceled');
+    expect(world.emitted.filter((e) => e.event === 'message.persisted')).toHaveLength(0);
+
+    const lines = JSON.stringify(harness.capture.lines);
+    expect(lines).toContain('announcing the refusal stamp failed');
+    expect(lines).not.toContain('stamping the refused call canceled failed');
+    // IDs only - never a phone, even on the failure path.
+    expect(lines).not.toContain(TARGET);
+    expect(lines).not.toContain(NAV_CELL);
   });
 
   // D12 (spec 6.3), the LIVE-SURFACE half: the stamp lands in the database, but

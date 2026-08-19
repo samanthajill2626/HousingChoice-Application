@@ -1024,9 +1024,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   /**
    * D12 (spec 6.3) companion: tell any OPEN contact timeline that a gate refusal
    * just stamped the call terminal. Called ONLY when `updateCallStatus` reported
-   * a real transition, and ONLY from inside the refusal's existing swallowing
-   * try/catch - these are TwiML response paths and the hangup outranks the
-   * announcement. Resolves the row by provider sid (the same lookup /voice/status
+   * a real transition, and always from inside its OWN swallowing try/catch,
+   * separate from the stamp's - these are TwiML response paths and the hangup
+   * outranks the announcement, but a failure here means the stamp COMMITTED and
+   * only the push was lost, which is a different operator story from a failed
+   * write. Resolves the row by provider sid (the same lookup /voice/status
    * uses) because the emit needs its tsMsgId, and because the row's own
    * conversationId is available even on the branch whose query-string
    * conversation did not resolve. Emits `message.persisted` ONLY: the inbox row
@@ -1075,26 +1077,40 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // may have failed) - updateCallStatus is a no-op returning false there,
       // never an error.
       if (parentCallSid.length > 0) {
+        let stamped = false;
         try {
-          const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
-          // The navigator may have this contact's timeline OPEN - originateCall
-          // emitted message.persisted on the append that put the "Ringing..."
-          // card on screen. The timeline refetches ONLY on message.persisted /
-          // conversation.updated, so a silent stamp leaves that open card on the
-          // stale `ringing` row, which flips to "No team answer" at t+90s - the
-          // exact false attribution D12 exists to remove, on the one surface
-          // anyone is watching. Emit ONLY when the stamp actually transitioned;
-          // a no-op against a missing row announces nothing. Deliberately NO
-          // stampCallActivity and NO conversation.updated: spec 6.4 promises the
-          // inbox row is left exactly as it is. The conversationId comes off the
-          // STAMPED ROW, not the query string - this branch runs precisely
-          // because the query's conversation did not resolve.
-          if (stamped) await announceRefusalStamp(parentCallSid);
+          stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
         } catch (err) {
           log.warn(
             { err, callSid: parentCallSid },
             'outbound bridge: stamping the refused call canceled failed (best-effort) - continuing',
           );
+        }
+        // The navigator may have this contact's timeline OPEN - originateCall
+        // emitted message.persisted on the append that put the "Ringing..."
+        // card on screen. The timeline refetches ONLY on message.persisted /
+        // conversation.updated, so a silent stamp leaves that open card on the
+        // stale `ringing` row, which flips to "No team answer" at t+90s - the
+        // exact false attribution D12 exists to remove, on the one surface
+        // anyone is watching. Emit ONLY when the stamp actually transitioned;
+        // a no-op against a missing row announces nothing. Deliberately NO
+        // stampCallActivity and NO conversation.updated: spec 6.4 promises the
+        // inbox row is left exactly as it is. The conversationId comes off the
+        // STAMPED ROW, not the query string - this branch runs precisely
+        // because the query's conversation did not resolve. Its OWN catch: the
+        // announce only ever runs after the conditional write COMMITTED, so
+        // folding it into the stamp's catch would log "the stamp failed" for a
+        // row that is perfectly `canceled` and send an operator hunting in the
+        // write path. Both stay best-effort - neither may break the hangup.
+        if (stamped) {
+          try {
+            await announceRefusalStamp(parentCallSid);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound bridge: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
         }
       }
       sendTwiml(
@@ -1223,17 +1239,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // call out - stamp a TERMINAL call_status with NO call_outcome (see the
         // /outbound-bridge branch above). Best-effort; never breaks the hangup.
         if (parentCallSid.length > 0) {
+          let stamped = false;
           try {
-            const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
-            // Announce the stamp so an OPEN contact timeline refetches instead
-            // of sitting on the stale ringing card (see the /outbound-bridge
-            // branch above). Transition-gated, inbox untouched.
-            if (stamped) await announceRefusalStamp(parentCallSid);
+            stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
               'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
             );
+          }
+          // Announce the stamp so an OPEN contact timeline refetches instead
+          // of sitting on the stale ringing card (see the /outbound-bridge
+          // branch above). Transition-gated, inbox untouched, and caught
+          // SEPARATELY so an announce failure is never reported as a failed
+          // stamp - by then the write has already committed.
+          if (stamped) {
+            try {
+              await announceRefusalStamp(parentCallSid);
+            } catch (err) {
+              log.warn(
+                { err, callSid: parentCallSid },
+                'outbound whisper gate: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+              );
+            }
           }
         }
         sendTwiml(res, vr);
@@ -1257,17 +1285,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // the truth is that the contact is opted out of voice. Best-effort;
         // never breaks the hangup.
         if (parentCallSid.length > 0) {
+          let stamped = false;
           try {
-            const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
-            // Announce the stamp so an OPEN contact timeline refetches instead
-            // of sitting on the stale ringing card (see the /outbound-bridge
-            // branch above). Transition-gated, inbox untouched.
-            if (stamped) await announceRefusalStamp(parentCallSid);
+            stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
               'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
             );
+          }
+          // Announce the stamp so an OPEN contact timeline refetches instead
+          // of sitting on the stale ringing card (see the /outbound-bridge
+          // branch above). Transition-gated, inbox untouched, and caught
+          // SEPARATELY so an announce failure is never reported as a failed
+          // stamp - by then the write has already committed.
+          if (stamped) {
+            try {
+              await announceRefusalStamp(parentCallSid);
+            } catch (err) {
+              log.warn(
+                { err, callSid: parentCallSid },
+                'outbound whisper gate: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+              );
+            }
           }
         }
         sendTwiml(res, vr);

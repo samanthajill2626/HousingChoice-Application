@@ -1814,6 +1814,38 @@ describe('Timeline call cards - direction', () => {
       .map((el) => el.getAttribute('aria-label'));
     expect(new Set(buttonNames).size).toBe(2);
   });
+
+  // An UNPARSEABLE timestamp is a real handled case on this surface (the
+  // presenter has matrix coverage for it). formatTimeWithSeconds answers '' for
+  // it, so a bare concatenation produced "Incoming call - " - a dangling
+  // separator and, on two such rows, the exact collision the seconds removed.
+  // The row id is the fallback.
+  it('keeps two UNPARSEABLE-timestamp cards distinctly named, with no dangling separator', () => {
+    renderTimeline({
+      items: [
+        callItem({ id: 'c-bad-a', direction: 'inbound', at: 'not-a-date', call_outcome: 'missed' }),
+        callItem({ id: 'c-bad-b', direction: 'inbound', at: 'also-not-a-date', call_outcome: 'answered' }),
+      ],
+    });
+    const names = screen
+      .getAllByRole('group', { name: /^Incoming call/ })
+      .map((el) => el.getAttribute('aria-label') ?? '');
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) {
+      expect(name.endsWith('- ')).toBe(false);
+      expect(name).not.toBe('Incoming call - ');
+    }
+    expect(new Set(names)).toEqual(
+      new Set(['Incoming call - c-bad-a', 'Incoming call - c-bad-b']),
+    );
+
+    // The reveal buttons inherit the same name, so they stay distinct too.
+    const buttonNames = screen
+      .getAllByRole('button', { name: /^Details for Incoming call/ })
+      .map((el) => el.getAttribute('aria-label'));
+    expect(new Set(buttonNames).size).toBe(2);
+  });
 });
 
 describe('Timeline call card - staleness timer', () => {

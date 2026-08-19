@@ -800,6 +800,14 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // minutes; two calls inside one minute would otherwise carry identical names.
   const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  // An unparseable `at` is a REAL handled case here (the presenter treats it as
+  // one and has matrix coverage for it), and the formatter answers '' for it.
+  // Concatenating that unconditionally would emit a dangling separator -
+  // "Incoming call - " - and two such rows would collide on one name, which is
+  // exactly the ambiguity the seconds were added to remove. Fall back to the
+  // row id: it is always present, always distinct, and an opaque key rather
+  // than anything a screen reader would announce as a phone.
+  const cardName = `${directionWord} - ${nameTime || call.id}`;
   const duration = formatDuration(call.call_duration);
   const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
   // A MASKED row carries no counterpart identity at all - party_phone is
@@ -818,8 +826,9 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       // handle built on it would inherit exactly the staleness race this design
       // exists to escape. The outcome stays assertable as the chip's own text.
       // The time is carried to SECONDS so a redial inside the same minute does
-      // not produce two cards with one name.
-      aria-label={`${directionWord} - ${nameTime}`}
+      // not produce two cards with one name (and falls back to the row id when
+      // the timestamp will not parse - see cardName).
+      aria-label={cardName}
     >
       <div className={styles.callSummary}>
         <span className={styles.callArrow} aria-hidden="true">
@@ -839,7 +848,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
             // The VISIBLE text stays "Details"; the accessible name identifies
             // which card the control belongs to. A contact with call history
             // otherwise hands a screen-reader user N buttons all named "Details".
-            aria-label={`Details for ${directionWord} - ${nameTime}`}
+            aria-label={`Details for ${cardName}`}
             onClick={() => setRevealed((r) => !r)}
           >
             Details

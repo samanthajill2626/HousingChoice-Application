@@ -35,7 +35,11 @@ export function formatTime(iso: string): string {
  *  is not unique in practice: two calls inside one minute (an ordinary redial
  *  after a miss) would share one accessible name, which is a Playwright
  *  strict-mode violation on the call-card locator and, for a screen-reader user,
- *  two cards that cannot be told apart. */
+ *  two cards that cannot be told apart.
+ *  An UNPARSEABLE instant answers '' (same contract as formatTime). Callers that
+ *  build an accessible name by concatenation MUST handle that rather than emit a
+ *  dangling separator - see CallCard's `cardName`, which falls back to the row
+ *  id so two such rows still differ. */
 export function formatTimeWithSeconds(iso: string): string {
   const d = new Date(isoOf(iso));
   if (Number.isNaN(d.getTime())) return '';

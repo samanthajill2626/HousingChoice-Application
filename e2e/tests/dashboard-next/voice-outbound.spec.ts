@@ -575,7 +575,11 @@ test('an outbound and an inbound call on one thread land on opposite sides of th
   const region = page.getByRole('region', { name: 'Communications and activity' });
 
   // Part 1: locate by role + accessible name (direction + time, never the outcome).
-  // Anchored regexes - Playwright matches an accessible name by substring.
+  // Anchored regexes - Playwright matches an accessible name by substring. The
+  // anchored PREFIX is a multi-match form (it matches every card of that
+  // direction); it resolves to exactly one element here only because this thread
+  // is a freshly created contact with exactly one call per direction. A thread
+  // with two calls the same way needs the full name + `exact: true`, or `.nth()`.
   const outCard = region.getByRole('group', { name: /^Outgoing call\b/ });
   const inCard = region.getByRole('group', { name: /^Incoming call\b/ });
   await expect(outCard).toBeVisible({ timeout: 15_000 });

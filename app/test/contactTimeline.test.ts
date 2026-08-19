@@ -408,6 +408,78 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(masked.call_sid).toBeUndefined();
   });
 
+  it('projects direction on calls: an inbound call carries inbound, an outbound call carries outbound', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-in',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+    });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-out',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      type: 'call',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+    });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const inbound = calls.find((c: { id: string }) => c.id.includes('CA-in'));
+    const outbound = calls.find((c: { id: string }) => c.id.includes('CA-out'));
+
+    expect(inbound.direction).toBe('inbound');
+    expect(outbound.direction).toBe('outbound');
+  });
+
+  it('projects call_status ONLY when the stored value is a member of the CallStatus union', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // A live outbound call still ringing - a real member of the union.
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-ringing',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      callStatus: 'ringing',
+    });
+    // An imported/anomalous row carrying an out-of-union status. `append` cannot
+    // produce one (its param is typed CallStatus), so stamp the stored row.
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-bogus',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+    });
+    const bogus = world.messages.find((m) => m.provider_sid === 'CA-bogus')!;
+    (bogus as Record<string, unknown>)['call_status'] = 'queued';
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const ringing = calls.find((c: { id: string }) => c.id.includes('CA-ringing'));
+    const outOfUnion = calls.find((c: { id: string }) => c.id.includes('CA-bogus'));
+
+    expect(ringing.call_status).toBe('ringing');
+    // Never cast an unrecognized string onto the wire - drop it.
+    expect(outOfUnion.call_status).toBeUndefined();
+  });
+
   it("a call's at equals its provider_ts (sort-key parity) and sorts among messages", async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);

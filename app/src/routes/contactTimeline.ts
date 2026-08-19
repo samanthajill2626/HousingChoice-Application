@@ -70,6 +70,7 @@ import {
   type MessageItem,
   type MessagesRepo,
   type CallOutcome,
+  type CallStatus,
   type DeliveryStatus,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
@@ -179,6 +180,12 @@ interface TimelineMessage extends TimelineBase {
 interface TimelineCall extends TimelineBase {
   kind: 'call';
   conversationId?: string;
+  /** Who placed the call. REQUIRED - every stored call row carries it, and the
+   *  card renders the side/arrow from it (no backfill needed). */
+  direction: MessageDirection;
+  /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
+   *  status) and on any row whose stored value is not a union member. */
+  call_status?: CallStatus;
   call_outcome: CallOutcome;
   call_duration?: number;
   party_phone?: string;
@@ -411,6 +418,24 @@ function toTimelineMessage(
   };
 }
 
+/** CallStatus membership, deliberately duplicated from inbox.ts's private copy:
+ *  the normalization for this projection has ONE home here, and promoting the
+ *  inbox's guards would touch a surface this mission scopes out. The
+ *  `satisfies Record<CallStatus, true>` form keeps the copy honest if the union
+ *  grows - a hand-written array would silently drift. */
+const CALL_STATUS_MAP = {
+  ringing: true,
+  'in-progress': true,
+  completed: true,
+  'no-answer': true,
+  busy: true,
+  failed: true,
+  canceled: true,
+} satisfies Record<CallStatus, true>;
+function isCallStatus(v: unknown): v is CallStatus {
+  return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
+}
+
 /**
  * Map a stored call → a TimelineCall. PII: recording_s3_key + transcript ONLY
  * when masked !== true (founder-bridge); a MASKED call omits both entirely.
@@ -434,6 +459,11 @@ function toTimelineCall(
     id: m.tsMsgId,
     at: atOf(m.tsMsgId, m.provider_ts),
     ...(m.conversationId !== undefined && { conversationId: m.conversationId }),
+    // Direction + lifecycle status are METADATA, not content: they are emitted
+    // for masked rows too (I4 strips content, and is untouched here). An
+    // unrecognized stored status is dropped rather than cast onto the wire.
+    direction: m.direction,
+    ...(isCallStatus(m.call_status) && { call_status: m.call_status }),
     // call_outcome is required on the wire; default 'missed' when a call entry
     // has no recorded outcome yet (a ringing/unanswered metadata row).
     call_outcome: (m.call_outcome ?? 'missed') as CallOutcome,

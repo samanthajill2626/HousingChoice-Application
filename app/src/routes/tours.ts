@@ -21,6 +21,10 @@
 //     it to 'scheduled' in the same update.
 //   - Status change: { status } — allowlisted via isTourStatus; illegal transitions
 //     (e.g. closed → scheduled) are rejected 409.
+//   - Already toured: { status: 'toured', scheduledAt? } on a 'requested' tour —
+//     the tour happened without ever being booked. SILENT (no ladder is armed,
+//     so nothing is sent); the optional scheduledAt records when it actually
+//     happened and may be in the past.
 //   - Exit gate: { outcome, moveForward } — records the navigator decision; sets
 //     convertible:true when moveForward is true. Does NOT create a placement or
 //     touch tenant status (conversion is a downstream feature).
@@ -1025,8 +1029,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Rules:
     //   - 'closed' is terminal: no status change is allowed from 'closed'.
     //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
-    //     it, and the only ways out are booking (-> scheduled, which requires a
-    //     time) or canceling - toured/no_show presuppose a time.
+    //     it, and the ways out are booking (-> scheduled, which requires a
+    //     time), canceling, or recording that it already happened (-> toured).
     //   - The only path back to 'scheduled' is via canReschedule() (i.e. from
     //     requested/scheduled/canceled/no_show - NOT toured/closed).
     if (newStatus !== undefined) {
@@ -1045,12 +1049,26 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         return;
       }
 
-      if (currentStatus === 'requested' && targetStatus !== 'scheduled' && targetStatus !== 'canceled') {
-        // Booking is the only forward path out of requested (the diagram's
-        // booking step is what advances the tour); toured/no_show on a tour
-        // that never had a time would break booking semantics - e.g. an
-        // unreschedulable 'toured' dead end with no ladder ever armed.
-        res.status(409).json({ error: 'illegal_status_transition', detail: `a requested tour can only be booked (scheduled) or canceled (requested: ${targetStatus})` });
+      if (
+        currentStatus === 'requested' &&
+        targetStatus !== 'scheduled' &&
+        targetStatus !== 'canceled' &&
+        targetStatus !== 'toured'
+      ) {
+        // Booking is the normal forward path out of requested, and canceling
+        // the normal way out. 'toured' is the THIRD: a tour can happen without
+        // us ever booking it (the tenant and the landlord arranged it between
+        // themselves), and forcing a scheduledAt just to reach the exit gate
+        // would arm - and SEND - a reminder ladder for a visit that already
+        // took place. This edge is silent: arming is gated on the EFFECTIVE
+        // status being 'scheduled' (see the side effects below), so a
+        // requested -> toured patch texts nobody. An optional scheduledAt may
+        // ride along to record when it actually happened - a past time is
+        // accepted, and it does NOT arm anything for the same reason.
+        //
+        // 'no_show' stays refused: a tour nobody booked and nobody attended is
+        // a cancellation, not a no-show.
+        res.status(409).json({ error: 'illegal_status_transition', detail: `a requested tour can only be booked (scheduled), marked toured, or canceled (requested: ${targetStatus})` });
         return;
       }
 

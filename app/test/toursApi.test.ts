@@ -1101,15 +1101,18 @@ describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
     expect(res.body.error).toBe('illegal_status_transition');
   });
 
-  it("a requested tour can only be booked or canceled - toured/no_show/closed are 409", async () => {
+  it("a requested tour can be booked, marked toured, or canceled - no_show/closed are 409", async () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    for (const target of ['toured', 'no_show', 'closed']) {
+    // no_show presupposes a booking nobody kept; a tour that was never booked
+    // and never happened is a cancellation. closed is only ever reached through
+    // the exit gate.
+    for (const target of ['no_show', 'closed']) {
       const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: target });
-      expect(res.status, `requested → ${target}`).toBe(409);
+      expect(res.status, `requested -> ${target}`).toBe(409);
       expect(res.body.error).toBe('illegal_status_transition');
     }
 
@@ -1117,6 +1120,78 @@ describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
     const canceled = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
     expect(canceled.status).toBe(200);
     expect(canceled.body.tour.status).toBe('canceled');
+  });
+
+  // --- requested -> toured: the tour happened without ever being booked -----
+  // Scheduling it just to reach the exit gate would arm - and send - a reminder
+  // ladder for a visit already in the past, so the status model takes the edge
+  // directly. These four lock the properties that make it SAFE.
+
+  it('requested -> toured is allowed with no scheduledAt at all', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('toured');
+    // Still timeless - the attribute must stay ABSENT, not null/undefined, so
+    // the sparse byScheduledAt GSI stays sparse.
+    expect(res.body.tour.scheduledAt).toBeUndefined();
+  });
+
+  it('requested -> toured accepts a PAST scheduledAt recording when it happened', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ status: 'toured', scheduledAt: '2020-01-02T15:30:00.000Z' });
+    expect(res.status).toBe(200);
+    // The explicit status wins: the booking auto-advance (which fires only when
+    // no status is supplied) must NOT rewrite this to 'scheduled'.
+    expect(res.body.tour.status).toBe('toured');
+    expect(res.body.tour.scheduledAt).toBe('2020-01-02T15:30:00.000Z');
+  });
+
+  it('requested -> toured arms NO reminders (with or without a time)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const bare = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    const bareId = bare.body.tour.tourId as string;
+    const dated = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    const datedId = dated.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${bareId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${datedId}`)
+      .send({ status: 'toured', scheduledAt: '2020-01-02T15:30:00.000Z' })
+      .expect(200);
+
+    // THE point of this edge: nobody gets texted about a tour that already
+    // happened. Arming is gated on the EFFECTIVE status being 'scheduled'.
+    const rows = [...world.tourRemindersMap.values()].filter(
+      (r) => r.tourId === bareId || r.tourId === datedId,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('requested -> toured records tour_took_place and opens the exit gate', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    const { items } = await world.activityEventsRepo.listByContact(TIMELESS_BODY.tenantId);
+    expect(items.filter((e) => e.type === 'tour_took_place' && e.refId === tourId)).toHaveLength(1);
+
+    // The whole reason for the edge: the exit gate now accepts the decision.
+    const gate = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false, status: 'closed' });
+    expect(gate.status).toBe(200);
+    expect(gate.body.tour.outcome).toBe('not_a_fit');
+    expect(gate.body.tour.status).toBe('closed');
   });
 
   it('the exit gate requires a toured tour (409 on scheduled, immutable once closed)', async () => {

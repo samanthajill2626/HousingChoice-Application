@@ -1,4 +1,4 @@
-// TourModals - the four small input dialogs the tour header + Schedule card open:
+// TourModals - the five small input dialogs the tour header + Schedule card open:
 //   - BookTourModal / RescheduleTourModal: a datetime-local, normalized to a full
 //     ISO instant (the navigator's timezone) before the parent PATCHes it. Book
 //     runs on a timeless 'requested' tour (sets scheduledAt + status scheduled);
@@ -7,6 +7,10 @@
 //     and the button becomes "Schedule anyway"/"Reschedule anyway" — submitting
 //     again confirms; editing the time clears it (tourTime.ts, shared with
 //     ScheduleTourForm).
+//   - MarkAlreadyTouredModal: the requested-tour escape hatch - an OPTIONAL
+//     "when did it happen" datetime, then straight to 'toured' (skipping
+//     scheduling, which would arm and send a ladder for a past visit). Its
+//     odd-time check is inverted: a FUTURE time is what asks for confirmation.
 //   - RecordOutcomeModal: the exit gate - a move-forward / not-a-fit radio choice.
 //     The parent PATCHes { outcome, moveForward } (and closes the tour on not-a-fit).
 //   - CancelTourModal: a confirm dialog - the parent PATCHes { status: canceled }.
@@ -19,7 +23,7 @@ import { useState } from 'react';
 import { type TourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
-import { currentHourLocal, tourTimeWarning } from './tourTime.js';
+import { currentHourLocal, pastTourTimeWarning, tourTimeWarning } from './tourTime.js';
 import styles from './TourDetail.module.css';
 
 /** Normalize a zoneless datetime-local value to a full ISO instant. */
@@ -165,6 +169,111 @@ export function RescheduleTourModal({ onClose, onConfirm }: DateModalProps): Rea
       onClose={onClose}
       onConfirm={onConfirm}
     />
+  );
+}
+
+/**
+ * MarkAlreadyTouredModal - the requested-tour escape hatch: the visit happened
+ * without us ever booking it, so it skips scheduling and goes straight to
+ * `toured` (the parent then chains into RecordOutcomeModal, exactly as the
+ * "Mark toured" CTA does). Scheduling it instead would arm - and SEND - a
+ * reminder ladder for a visit that already took place.
+ *
+ * The date is OPTIONAL (Cameron, 2026-08-19): supplying it records when the
+ * tour actually happened so the Schedule card and the date-range views show a
+ * real date instead of "Not booked"; leaving it blank records only that it
+ * happened. It is seeded with the current whole hour and is clearable, and the
+ * odd-time check is INVERTED against the booking dialogs - a past time is
+ * expected here, a FUTURE one is what asks for confirmation.
+ */
+export function MarkAlreadyTouredModal({
+  onClose,
+  onConfirm,
+}: {
+  onClose: () => void;
+  /** PATCH { status:'toured', scheduledAt? } - undefined when the date was left
+   *  blank. Resolves on success (the dialog closes), throws to stay open. */
+  onConfirm: (isoHappenedAt: string | undefined) => Promise<void>;
+}): React.JSX.Element {
+  const [value, setValue] = useState(() => currentHourLocal());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Same confirmable-warning contract as DateTimeModal: the first submit stops
+  // on it, submitting the same value again confirms, editing withdraws it.
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (busy) return;
+    const oddTime = pastTourTimeWarning(value);
+    if (oddTime !== null && oddTime !== warning) {
+      setWarning(oddTime);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      // Blank = record only that it happened; no scheduledAt is sent, so the
+      // tour stays off the byScheduledAt index exactly as it is today.
+      await onConfirm(value === '' ? undefined : toIso(value));
+      onClose();
+    } catch {
+      setError("Couldn't mark the tour as toured - please try again.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Tour already happened"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" type="submit" form="tour-already-toured-form" disabled={busy}>
+            {busy ? 'Saving...' : warning !== null ? 'Mark toured anyway' : 'Mark toured'}
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="tour-already-toured-form"
+        className={styles.modalForm}
+        aria-label="Mark already toured form"
+        onSubmit={(e) => void submit(e)}
+      >
+        <label className={styles.modalLabel} htmlFor="tour-happened-at">
+          When did it happen? (optional)
+        </label>
+        <input
+          id="tour-happened-at"
+          className={styles.modalInput}
+          type="datetime-local"
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            if (warning !== null) setWarning(null);
+          }}
+        />
+        <p className={styles.modalHint}>
+          Records a tour that took place without being scheduled. Nothing is sent and no reminders
+          are armed. A toured tour can&apos;t be rescheduled - book a new tour if they need to visit
+          again.
+        </p>
+        {warning !== null ? (
+          <p role="alert" className={styles.modalWarn}>
+            {warning} Press &quot;Mark toured anyway&quot; to confirm, or pick a different time.
+          </p>
+        ) : null}
+        {error !== null ? (
+          <p role="alert" className={styles.modalError}>
+            {error}
+          </p>
+        ) : null}
+      </form>
+    </Modal>
   );
 }
 

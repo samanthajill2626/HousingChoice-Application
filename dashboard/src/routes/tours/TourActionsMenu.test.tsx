@@ -14,6 +14,8 @@ function renderMenu(over: Partial<React.ComponentProps<typeof TourActionsMenu>> 
   const props: React.ComponentProps<typeof TourActionsMenu> = {
     canReschedule: false,
     onReschedule: vi.fn(),
+    canMarkAlreadyToured: false,
+    onMarkAlreadyToured: vi.fn(),
     canCancel: false,
     onCancel: vi.fn(),
     canMarkNoShow: false,
@@ -50,5 +52,38 @@ describe('TourActionsMenu - Send no-show check-in', () => {
     // Only canSendNoShowCheckin is true -> the kebab must still render (not null).
     renderMenu({ canSendNoShowCheckin: true });
     expect(screen.getByRole('button', { name: /more actions/i })).toBeInTheDocument();
+  });
+});
+
+describe('TourActionsMenu - Mark already toured', () => {
+  it('shows the item when canMarkAlreadyToured and calls back once', async () => {
+    const onMarkAlreadyToured = vi.fn();
+    renderMenu({ canMarkAlreadyToured: true, onMarkAlreadyToured });
+    await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /mark already toured/i }));
+    expect(onMarkAlreadyToured).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the item when canMarkAlreadyToured is false', async () => {
+    renderMenu({ canCancel: true, canMarkAlreadyToured: false });
+    await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
+    expect(screen.getByRole('menuitem', { name: /cancel tour/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('menuitem', { name: /mark already toured/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('counts toward the "nothing qualifies" short-circuit (kebab shows for it alone)', () => {
+    renderMenu({ canMarkAlreadyToured: true });
+    expect(screen.getByRole('button', { name: /more actions/i })).toBeInTheDocument();
+  });
+
+  it('does NOT collide with the scheduled-tour "Mark no-show" item', async () => {
+    // The two are mutually exclusive by status in TourDetail, but the labels are
+    // near-neighbours - a name-based selector must not match both.
+    renderMenu({ canMarkNoShow: true, canMarkAlreadyToured: false });
+    await userEvent.click(screen.getByRole('button', { name: /more actions/i }));
+    expect(screen.getAllByRole('menuitem')).toHaveLength(1);
+    expect(screen.getByRole('menuitem', { name: /mark no-show/i })).toBeInTheDocument();
   });
 });

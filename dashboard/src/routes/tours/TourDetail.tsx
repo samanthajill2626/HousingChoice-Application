@@ -17,8 +17,11 @@
 // retry path when the chained conversion fails). "Mark toured" likewise opens
 // the Record-outcome modal itself on success (Cameron 2026-08-06) - the CTA
 // ladder still HAS a "Record outcome" rung, but only as the way back in after a
-// dismiss (or for a tour marked toured elsewhere). Audience: staff see
-// "property" for the unit (GLOSSARY).
+// dismiss (or for a tour marked toured elsewhere). A REQUESTED tour reaches the
+// same gate through the kebab's "Mark already toured": the visit happened
+// without us booking it, and scheduling it just to record the outcome would arm
+// - and send - a reminder ladder for a visit already in the past. Audience:
+// staff see "property" for the unit (GLOSSARY).
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
@@ -58,6 +61,7 @@ import { TourConversation } from './TourConversation.js';
 import {
   BookTourModal,
   CancelTourModal,
+  MarkAlreadyTouredModal,
   RecordOutcomeModal,
   RescheduleTourModal,
 } from './TourModals.js';
@@ -229,7 +233,9 @@ function TourDetailLoaded({
   // whole-inbox-row fan-out).
   const narrowShell = useTwoPaneNarrow();
   const commsVisible = !narrowShell || pane === 'conversation';
-  const [modal, setModal] = useState<'book' | 'reschedule' | 'outcome' | 'cancel' | null>(null);
+  const [modal, setModal] = useState<
+    'book' | 'reschedule' | 'outcome' | 'cancel' | 'already-toured' | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // "Send no-show check-in" seed handed to TourConversation (nonce bumps per click).
@@ -252,6 +258,10 @@ function TourDetailLoaded({
   const canReschedule = RESCHEDULABLE_UI.has(tour.status);
   const canCancel = CANCELABLE.has(tour.status);
   const canMarkNoShow = tour.status === 'scheduled';
+  // The tour happened without us booking it - the only forward path out of
+  // 'requested' that is not scheduling. Scheduling it to reach the exit gate
+  // would arm (and send) a reminder ladder for a visit already in the past.
+  const canMarkAlreadyToured = tour.status === 'requested';
   // "Send no-show check-in" shows only once the tour start has passed AND the tour
   // is still scheduled or already no_show (hidden for canceled/toured/closed/requested).
   const startPassed =
@@ -442,6 +452,25 @@ function TourDetailLoaded({
   const confirmReschedule = async (isoScheduledAt: string): Promise<void> => {
     setTour(await patchTour(tourId, { scheduledAt: isoScheduledAt, status: 'scheduled' }));
   };
+  // "Mark already toured" (requested only): skip scheduling entirely and land on
+  // 'toured', then chain into the exit gate exactly as markToured does - the
+  // outcome is what the operator came to record. The optional isoHappenedAt
+  // rides the SAME patch as scheduledAt, recording when the visit actually took
+  // place; because the status is explicitly 'toured', the server's
+  // booking auto-advance never fires and no reminder ladder is armed, so this
+  // texts nobody. Unlike markToured this is confirmed from a MODAL, so it
+  // THROWS on failure (the dialog keeps its own inline error) instead of
+  // routing through runDirect's header alert.
+  const confirmAlreadyToured = async (isoHappenedAt: string | undefined): Promise<void> => {
+    setActionError(null);
+    setTour(
+      await patchTour(tourId, {
+        status: 'toured',
+        ...(isoHappenedAt !== undefined && { scheduledAt: isoHappenedAt }),
+      }),
+    );
+    setModal('outcome');
+  };
   const confirmOutcome = async (decision: {
     outcome: TourOutcome;
     moveForward: boolean;
@@ -564,6 +593,8 @@ function TourDetailLoaded({
           <TourActionsMenu
             canReschedule={canReschedule}
             onReschedule={() => setModal('reschedule')}
+            canMarkAlreadyToured={canMarkAlreadyToured}
+            onMarkAlreadyToured={() => setModal('already-toured')}
             canCancel={canCancel}
             onCancel={() => setModal('cancel')}
             canMarkNoShow={canMarkNoShow}
@@ -728,6 +759,16 @@ function TourDetailLoaded({
       ) : null}
       {modal === 'reschedule' ? (
         <RescheduleTourModal onClose={() => setModal(null)} onConfirm={confirmReschedule} />
+      ) : null}
+      {modal === 'already-toured' ? (
+        // The dialog calls onConfirm and THEN onClose, and confirmAlreadyToured
+        // has already handed the modal slot to the outcome gate by that point -
+        // so this close is guarded: it clears the slot only if it is still ours.
+        // A flat setModal(null) would slam the exit gate shut the instant it opened.
+        <MarkAlreadyTouredModal
+          onClose={() => setModal((m) => (m === 'already-toured' ? null : m))}
+          onConfirm={confirmAlreadyToured}
+        />
       ) : null}
       {modal === 'outcome' ? (
         <RecordOutcomeModal onClose={() => setModal(null)} onConfirm={confirmOutcome} />

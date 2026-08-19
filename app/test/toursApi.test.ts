@@ -1337,8 +1337,9 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
     // morning_of = 08:00 ORG-LOCAL (EDT) on 2026-07-15 = '2026-07-15T12:00:00.000Z'
     expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T12:00:00.000Z');
-    // en_route = SCHEDULED_AT - 2h = '2026-07-15T16:00:00.000Z'
-    expect(byKind['en_route']?.dueAt).toBe('2026-07-15T16:00:00.000Z');
+    // en_route = SCHEDULED_AT - 1h = '2026-07-15T17:00:00.000Z' (was 2h before
+    // the founder decision of 2026-08-18; its copy now says "see you soon").
+    expect(byKind['en_route']?.dueAt).toBe('2026-07-15T17:00:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -1427,7 +1428,7 @@ describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/no-show-checkin-draft`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
+      body: 'Hi! Do you need to reschedule?',
     });
   });
 

@@ -65,7 +65,11 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
           QUIET_WINDOW.timezone,
         );
       case 'en_route':
-        return new Date(scheduled - 2 * 60 * 60 * 1000).toISOString();
+        // ONE hour before (founder decision 2026-08-18, was two). This is a
+        // DELIBERATE second implementation of jobs/tourReminders.ts computeDueAt
+        // - it exists to catch drift, so it has to be moved in lockstep whenever
+        // the real offset changes.
+        return new Date(scheduled - 1 * 60 * 60 * 1000).toISOString();
       case 'no_show_checkin':
         return new Date(scheduled + 30 * 60 * 1000).toISOString();
     }
@@ -183,19 +187,23 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       }));
       const rows = Items ?? [];
       // confirmation would have been sent at 05:00 EDT - it is clamped to 08:00
-      // EDT and collides with morning_of/en_route there. The LAST rung (the one
-      // whose copy is still true) is the only PENDING row; the losers are now
-      // written as VISIBLE skipped rows (the panel trace, 2026-08-04) instead
-      // of silently absent. day_before (yesterday, past-dueAt) stays row-less.
+      // EDT, where it collides with morning_of and loses the slot to it. The
+      // losers are written as VISIBLE skipped rows (the panel trace, 2026-08-04)
+      // rather than silently absent. day_before (yesterday, past-dueAt) stays
+      // row-less.
+      //
+      // en_route NO LONGER shares that 08:00 slot: at 1h before the tour
+      // (founder decision 2026-08-18, was 2h) it sits an hour later and is armed
+      // in its own right, so morning_of now survives as the 08:00 rung.
       const pending = rows.filter((r) => r['skippedAt'] === undefined);
-      expect(pending.map((r) => r['kind'])).toEqual(['en_route']);
-      expect(pending[0]!['dueAt']).toBe(
+      expect(pending.map((r) => r['kind']).sort()).toEqual(['en_route', 'morning_of']);
+      const morningOf = rows.find((r) => r['kind'] === 'morning_of');
+      expect(morningOf?.['skippedAt']).toBeUndefined();
+      expect(morningOf?.['dueAt']).toBe(
         instantAtLocalTime(FIXED_NOW_ISO.slice(0, 10), '08:00', QUIET_WINDOW.timezone),
       );
       const confirmation = rows.find((r) => r['kind'] === 'confirmation');
       expect(confirmation?.['skipReason']).toBe('quiet_hours_superseded');
-      const morningOf = rows.find((r) => r['kind'] === 'morning_of');
-      expect(morningOf?.['skipReason']).toBe('quiet_hours_superseded');
       expect(rows.find((r) => r['kind'] === 'day_before')).toBeUndefined();
     });
   });
@@ -221,9 +229,10 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       // confirmation = 09:00 today, inside the window -> clamped to 12:00 today
       // day_before = 14:00 today (future, daytime - unclamped)
       // morning_of = 08:00 EDT tomorrow = 12:00 UTC tomorrow
-      // en_route = 12:00 UTC tomorrow - the SAME instant as morning_of, so the
-      //   later rung supersedes morning_of, which is written as a VISIBLE
-      //   skipped row (the arm-time trace, 2026-08-04), not left absent.
+      // en_route = 13:00 UTC tomorrow (scheduledAt - 1h since the founder
+      //   decision of 2026-08-18; at the old 2h it was 12:00, the SAME instant
+      //   as morning_of, which is why morning_of used to be superseded here).
+      //   An hour apart now, so ALL FOUR rungs are armed.
       // no_show_checkin is manual-send only now, so it is NOT auto-armed.
       expect(Items).toBeDefined();
       expect(Items!.length).toBe(4);
@@ -232,9 +241,8 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         'confirmation',
         'day_before',
         'en_route',
+        'morning_of',
       ]);
-      const morningOf = (Items ?? []).find((r) => r['kind'] === 'morning_of');
-      expect(morningOf?.['skipReason']).toBe('quiet_hours_superseded');
     });
 
     it('each reminder dueAt matches computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO)', async () => {
@@ -249,11 +257,12 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       for (const item of Items ?? []) {
         byKind.set(item['kind'] as string, item['dueAt'] as string);
       }
-      // morning_of clamps onto the SAME instant as en_route (both 08:00 EDT on
-      // tour day), so the arm-time supersession rule births it as a VISIBLE
-      // skipped row (2026-08-04) - asserted explicitly, so a regression that
-      // arms it as PENDING again fails here.
-      const superseded: ReminderKind[] = ['morning_of'];
+      // Nothing is superseded on this tour any more. morning_of used to clamp
+      // onto the SAME instant as en_route (both 08:00 EDT on tour day) and lose
+      // the slot; moving en_route to 1h before (founder decision 2026-08-18)
+      // separates them, so every rung is armed with its own computed dueAt. Kept
+      // as an explicit empty list so a future collision has an obvious home.
+      const superseded: ReminderKind[] = [];
       for (const kind of REMINDER_KINDS) {
         const expectedDueAt = computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO);
         if (superseded.includes(kind)) {

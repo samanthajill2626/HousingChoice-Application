@@ -376,7 +376,10 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('<Dial'); // never bridges the founder to themselves
     expect(res.text).toContain('<Hangup');
-    expect(res.text).toContain('text us your first name');
+    // Copy reworked 2026-08-18: the self-call line no longer reuses the generic
+    // "text us your name and voucher size" greeting - it explains the actual
+    // problem, since the caller IS the line they are dialing.
+    expect(res.text).toContain("can't connect a call from its own number");
     // No bogus call entry persisted, no pre-ring push fired.
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(0);
     expect(world.pushSends).toHaveLength(0);
@@ -942,8 +945,17 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(res.status).toBe(403);
   });
 
-  it('catalog: the voicemail prompt + thanks entries resolve', () => {
-    expect(resolveMessage('voice.voicemail_prompt')).toMatch(/leave a message after the tone/);
-    expect(resolveMessage('voice.voicemail_thanks')).toMatch(/got your message/);
+  // These two play either side of the recording, so their DISTINCT jobs are the
+  // thing worth pinning: the prompt must invite a message (it runs immediately
+  // before the beep), and the thanks must confirm one was received (it runs
+  // after). They were briefly given identical "text us" copy in the first
+  // founder pass, which read as though the voicemail had not registered.
+  it('catalog: the voicemail prompt invites a message, the thanks confirms one', () => {
+    const prompt = resolveMessage('voice.voicemail_prompt');
+    expect(prompt).toMatch(/leave a message after the tone/i);
+    const thanks = resolveMessage('voice.voicemail_thanks');
+    expect(thanks).toMatch(/got it/i);
+    expect(thanks, 'the thanks must not re-run the prompt').not.toMatch(/after the tone/i);
+    expect(prompt).not.toBe(thanks);
   });
 });

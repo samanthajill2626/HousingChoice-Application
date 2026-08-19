@@ -125,6 +125,12 @@ TDD (`app/test/voiceOutbound.test.ts`):
   characterization test guarding the S2 gate, and it goes red only if a builder
   drops the `terminal` conjunct - which is the failure it exists to catch.
 - `:391-409` and `:428-455` must pass UNMODIFIED.
+- Also inspect `app/test/voiceInboxActivity.test.ts:534-575` (R2 finding 3): it
+  drives press-1 + `DialCallStatus: 'no-answer'`, the exact S2 scenario, and its
+  comment asserts the bug still exists - while section 7.3 of this plan closes
+  that issue in the same change. The test itself SURVIVES because it asserts the
+  preview, not the stored outcome; update its comment so the repo does not carry
+  a note claiming a bug it has just fixed.
 
 Gate: `npm run typecheck`, `npm test`.
 
@@ -198,9 +204,10 @@ Gate: `npm run typecheck`, `npm test`.
 ### 5.1 Types - `dashboard/src/api/types.ts`
 
 Add `export type CallStatus` mirroring `messagesRepo.ts:42-49`. This lands HERE,
-not in the card slice, because the presenter imports it and S4 must pass its own
-typecheck gate (plan review A2/B1 - the original plan put it in a later slice and
-S4 could not compile).
+not in the card slice, because the presenter imports it and THIS slice must pass
+its own typecheck gate (plan review A2/B1 - in the first draft the type landed
+in a LATER slice than the presenter, so the presenter slice could not compile.
+The slice numbers have changed since; the defect was positional, not S4's).
 
 ### 5.2 The presenter - new `dashboard/src/routes/contact/presentCallState.ts`
 
@@ -272,11 +279,33 @@ New: `.itemIn { align-self: flex-start; }`, `.itemOut { align-self: flex-end; }`
 (alignment and nothing else); `.callOut` - the outbound call-card tint
 mirroring `.emailOut` (`:949-952`); a card-scoped reveal
 (`.cardMeta { display: none; }` + `.cardRevealed .cardMeta { display: block; }`);
-a summary-line layout that does not inherit the `margin-left: auto` fight
-between `.status` (`:311-314`) and `.callTime` (`:459-463`); and **`.toneWarning`
-using `--c-resp-wait`** - the presenter emits four tones and the existing
-`TONE_CLASS` map has no `warning` member (plan review B5). Map all four tones to
-classes explicitly.
+and a summary-line layout that does not inherit the `margin-left: auto` fight
+between `.status` (`:311-314`) and `.callTime` (`:459-463`).
+
+**The tone mapping, spelled out, because the obvious execution silently
+recolors every call chip** (plan review R2 finding 1). The card today uses a
+call-specific palette - `.answered` is `--c-resp-yes` (#15803d), `.missed` is
+`--c-resp-no` (#b91c1c), `.voicemail` is `--c-resp-wait` (#a16207), at
+`Timeline.module.css:447-457`. The DELIVERY tone classes are a different palette
+- `.toneSuccess` is `--c-success` (#1a7f4b), `.toneDanger` is `--c-danger`
+(#c23934). A builder told only "map the tones to classes" reaches for
+`TONE_CLASS` and mixes two greens and two reds on one row.
+
+So: introduce a SEPARATE `CALL_TONE_CLASS` map - do not extend `TONE_CLASS`,
+which is typed `Record<DeliveryTone, ...>` and cannot hold `warning` anyway -
+and point it at the EXISTING call classes, keeping today's colors exactly:
+
+| tone | class | token |
+|---|---|---|
+| `success` | `.answered` | `--c-resp-yes` |
+| `danger` | `.missed` | `--c-resp-no` |
+| `warning` | `.voicemail` | `--c-resp-wait` |
+| `neutral` | NEW `.callNeutral` | `--c-text-subtle` |
+
+`.answered` / `.missed` / `.voicemail` keep their names and definitions rather
+than being orphaned by the rewrite; only `.callNeutral` is new. If a rename
+feels tidier, it is out of scope - the chips must not change color in this
+change.
 
 Changed: `.callcard` (`:426-433`) and `.emailCard` (`:938-946`) drop
 `align-self: center` and replace `width: 84%` with `max-width: 84%` plus
@@ -333,8 +362,17 @@ A test that a D12-stamped row goes end to end - stored `call_status: 'canceled'`
 with no outcome, through the real projection, into `presentCallState` - and
 produces "Not completed". Nothing else in the plan crosses the projection /
 presenter boundary, and without it every gate passes green while D12 is defeated
-(plan review A1). Place it app-side over the real `toTimelineCall` output feeding
-the presenter's input shape, or as an e2e assertion in S6 - but it must exist.
+(plan review A1).
+
+Mechanics, because `toTimelineCall` is module-private (`contactTimeline.ts:421`)
+and cannot simply be called (R2 finding 2): drive the projection through its
+ROUTE, as every existing app test does, and feed the resulting payload into
+`presentCallState`. Importing dashboard source from an app test is already
+established practice (`app/test/consentDrift.test.ts:34`), so the cross-package
+half needs no new machinery. Exporting `toTimelineCall` purely for the test is
+acceptable if the route path proves unwieldy - say which was chosen in the
+handback. It lands in THIS slice (S5); section 9's "S5 seam test" is the
+binding statement.
 
 ### 6.8 Required-field shape assertion (spec section 5)
 
@@ -385,10 +423,13 @@ precondition tying it to the Dial summary having landed. Under clause 3 that row
 reads "Ringing..." for its first 90 seconds, so the assertion becomes a timing
 race. Give it an explicit precondition - drive the terminal summary, then assert.
 
-Two further e2e readers assert on outbound `call_outcome` and must be checked
-against S2's new stored value: `e2e/support/steps.ts:1176` and
-`voice-outbound.spec.ts:204` (plan review B10 - the first draft's surface map
-omitted both).
+Two further e2e readers assert on outbound `call_outcome` and were checked
+against S2's new stored value: `e2e/scenarios/steps.ts:1176` (note the path -
+there is no `e2e/support/steps.ts`, R2 finding 4) and
+`voice-outbound.spec.ts:204`. BOTH SURVIVE, and the reason is recorded here so
+it is not re-derived at the most expensive gate (R2 finding 7): each drives the
+bridge through `driveBridge`, which takes the Dial to `completed`, so S2's gate
+yields `'answered'` exactly as before. Confirm rather than re-investigate.
 
 `voice-transcription.spec.ts:189` ('Voicemail') is unaffected: clause 1 wins over
 any status. Do not touch it.
@@ -440,11 +481,11 @@ READERS:
 | `contactTimeline.ts:425-449` projection | YES - S1, S5 |
 | `inbox.ts:518-527` `deriveLatest` | YES - S3 (behavior-preserving) |
 | `voice.ts:1607` recording voicemail gate | No - direction-gated, I8 |
-| `voice.ts:1693-1699` voicemail re-stamp | No - reads `call_status` + `direction`, writes the same preview field 6.4 governs; inbound-gated at `:1607` (plan review A6/B11) |
+| `voice.ts:1693-1699` voicemail re-stamp | No - reads `call_status` + `direction`, writes the same conversation preview field the SPEC's section 6.4 governs; inbound-gated at `:1607` (plan review A6/B11) |
 | `voice.ts:1444, 1466` unread + miss trigger | No - direction-gated |
 | `callPreview.ts:35-47` preview strings | No - spec section 8 |
 | `Timeline.tsx:710-760` CallCard | YES - S5 |
-| `e2e/support/steps.ts:1176` | CHECK - S6 |
+| `e2e/scenarios/steps.ts:1176` | CONFIRM - S6 (survives; `driveBridge` reaches `completed`) |
 | `voice-outbound.spec.ts:204` | CHECK - S6 |
 | `useRelayThread.ts:49` | No - drops calls entirely |
 | `buildTimelineFallback.ts:36` | No - drops calls entirely |

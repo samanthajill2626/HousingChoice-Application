@@ -31,6 +31,7 @@ import {
   freshLandlord,
   freshTenant,
   tourSchedule,
+  pastTourTime,
   justAfter,
   REMINDER_BODY_MARKERS,
   type Contact,
@@ -314,6 +315,33 @@ test('activity coverage: a canceled tour pins on the tenant timeline', async ({ 
   // Cancel → a `tour_canceled` pin.
   await flow.teamCancelsTour();
   await flow.expectTourMilestoneOnTenantTimeline('Tour canceled');
+});
+
+// The unscheduled-completion path: a tour can happen without us ever booking it
+// (the tenant and the landlord arranged it between themselves). Booking it just
+// to reach the exit gate would arm - and SEND - a reminder ladder for a visit
+// already in the past, so the kebab takes the tour straight Requested -> Toured.
+test('already toured: requested -> marked toured (never booked) -> nothing armed -> exit NO', async ({
+  page,
+  request,
+}) => {
+  const flow = new Scenario(page, request);
+  const { unit } = await searchingTenantOwnerUnit(flow, { tenant: 'Unbooked', owner: 'Walkin' });
+
+  await flow.tenantAsksToTour(unit);
+  await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
+
+  // Straight past scheduling, recording when it actually happened (3h ago).
+  await flow.teamMarksAlreadyToured(pastTourTime());
+
+  // The load-bearing property: no ladder exists, so no rung can ever fire at a
+  // tenant whose tour is already behind them.
+  await flow.expectNoRemindersArmed();
+
+  // The pin lands exactly as it does on the booked path...
+  await flow.expectTourMilestoneOnTenantTimeline('Tour took place');
+  // ...and the exit gate is reachable, which is the whole point of the edge.
+  await flow.teamRecordsExitGate('no');
 });
 
 // The page-driven arc: walk the WHOLE sequence THROUGH the rebuilt TourDetail

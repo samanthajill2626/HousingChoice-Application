@@ -279,6 +279,18 @@ function timesFor(sched: Date): TourTimes {
   };
 }
 
+/**
+ * A datetime-local value `hoursAgo` in the PAST - the "when did it happen"
+ * value for a tour recorded after the fact (teamMarksAlreadyToured). Deliberately
+ * NOT a TourTimes: an already-happened tour arms no ladder, so there are no rung
+ * dueAts to mirror.
+ */
+export function pastTourTime(hoursAgo = 3): string {
+  const d = new Date(Date.now() - hoursAgo * 3_600_000);
+  d.setSeconds(0, 0);
+  return toDatetimeLocal(d);
+}
+
 /** 1s past an ISO instant — a tick `now` that fires exactly the rungs due ≤ it. */
 export function justAfter(iso: string): string {
   return new Date(Date.parse(iso) + 1_000).toISOString();
@@ -353,12 +365,19 @@ export class Scenario {
     private readonly request: APIRequestContext,
   ) {}
 
-  /** Team signs in to the dashboard (seeded VA dev-login). */
+  /** Team signs in to the dashboard (seeded VA dev-login).
+   *
+   *  The readiness assertion is `exact: true` ON PURPOSE: a substring match on
+   *  'Today' ALSO matches the queue's own "Tours today" group heading, so the
+   *  moment any spec in the lane leaves a tour scheduled for today, every
+   *  sign-in in the run dies on a strict-mode violation. See
+   *  docs/issues/today-heading-selector-ambiguity.md - the same trap is still
+   *  live in ~40 per-spec sign-in helpers. */
   login(): Promise<void> {
     return step('Team signs in to the dashboard', async () => {
       await this.page.goto(`${NEXT}/`);
       await this.page.getByRole('button', { name: /Continue as dev user/i }).click();
-      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
     });
   }
 
@@ -2007,6 +2026,59 @@ export class Scenario {
     });
   }
 
+  /**
+   * [Team, MANUAL] Record a tour that happened WITHOUT ever being booked: the
+   * requested-only kebab item 'Mark already toured' -> the optional
+   * "when did it happen" dialog -> 'Toured'. Booking it to reach the exit gate
+   * would arm - and SEND - a reminder ladder for a visit already in the past.
+   *
+   * `happenedAtLocal` omitted CLEARS the seeded date, leaving the tour timeless;
+   * supplying one (pastTourTime()) records when it actually happened. Like
+   * teamMarksToured this opens the Record-outcome modal itself, so the step
+   * dismisses it - teamRecordsExitGate owns the gate, and an open modal's
+   * backdrop would swallow the next click.
+   */
+  teamMarksAlreadyToured(happenedAtLocal?: string): Promise<void> {
+    const tour = this.requireActiveTour();
+    const when = happenedAtLocal !== undefined ? ` (${happenedAtLocal})` : ' (no date)';
+    return step(`Team marks the tour already toured${when}`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const menu = await this.openTourKebab();
+      await menu.getByRole('menuitem', { name: 'Mark already toured' }).click();
+      const form = this.page.getByRole('form', { name: 'Mark already toured form' });
+      await expect(form).toBeVisible();
+      // '' clears the seeded current-hour value -> no scheduledAt is sent.
+      await form.getByLabel('When did it happen?').fill(happenedAtLocal ?? '');
+      // The confirm sits in the modal FOOTER (outside the <form>), so it is
+      // page-scoped; exact so it can never match "Mark toured anyway".
+      await this.page.getByRole('button', { name: 'Mark toured', exact: true }).click();
+      const gate = this.page.getByRole('form', { name: 'Record outcome form' });
+      await expect(gate).toBeVisible({ timeout: 10_000 });
+      await this.page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Cancel', exact: true })
+        .click();
+      await expect(gate).toHaveCount(0);
+      await expect(this.tourStatusBadge('Toured')).toBeVisible({ timeout: 10_000 });
+      if (happenedAtLocal !== undefined) {
+        tour.scheduledAt = new Date(happenedAtLocal).toISOString();
+      }
+    });
+  }
+
+  /** [App] The tour carries NO armed reminder ladder (the Reminders panel says
+   *  so). The load-bearing assertion for the already-toured path: recording a
+   *  past visit must never arm - and so never send - a rung. */
+  expectNoRemindersArmed(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('App: no reminders armed on the tour', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await expect(this.remindersCard().getByText('No reminders armed.')).toBeVisible({
+        timeout: 10_000,
+      });
+    });
+  }
+
   /** [Team, MANUAL] Log a no-show (header kebab item; scheduled-only). No-show
    *  tours stay reschedulable. */
   teamMarksNoShow(): Promise<void> {
@@ -2652,7 +2724,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the overdue RTA deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
       const needs = this.page.getByRole('list', { name: 'Needs you now' });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
@@ -2677,7 +2749,7 @@ export class Scenario {
         this.page.goto(`${NEXT}/`),
       ]);
       expect(resp.ok()).toBeTruthy();
-      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
       await expect(this.page.locator(`a[href="/placements/${id}"]`)).toHaveCount(0, {
         timeout: 10_000,
       });
@@ -2718,7 +2790,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the voucher deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
       const needs = this.page.getByRole('list', { name: 'Needs you now' });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
@@ -2755,7 +2827,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the placement shows as Stuck in Follow-ups (derived)', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
       const followUps = this.page.getByRole('list', { name: 'Follow-ups due' });
       const row = followUps.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });

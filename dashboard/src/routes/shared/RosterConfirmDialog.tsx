@@ -226,17 +226,22 @@ export function RosterConfirmDialog({
   );
 }
 
-/** One recipient line: the name, plus the reason when their leg is suppressed.
+/** One recipient line: the label, plus the reason when their leg is suppressed.
  *
- *  A bare-phone participant renders as 'Unnamed number' here, while the DUPLICATE
- *  WARNING above prints that same person's formatted number. The asymmetry is real
- *  and is not an oversight: the warning is built from `duplicateOf.memberNames`,
- *  which the server resolves with the staff name-else-number fallback, whereas this
- *  row is built from `RosterPreviewRecipient`, whose wire type exposes only
- *  `phoneLast4`. Widening that roster type is a separate decision nobody has made
- *  (spec amendment 2026-08-19, "out of scope"). Both are staff-only surfaces, so
- *  neither leaks to a tenant or landlord - see
- *  docs/issues/relay-recipient-row-nameless-inconsistency.md. */
+ *  The label is composed SERVER-SIDE (rosterEdits `recipientLabel`): a member's
+ *  saved name, else `Unnamed number ...1234` from their last four digits. Two
+ *  nameless members are therefore tellable apart, which a bare 'Unnamed number'
+ *  never allowed.
+ *
+ *  LAST FOUR here, FULL number in the duplicate warning above - deliberate, not
+ *  drift. The warning names a group that already exists, where a navigator is
+ *  deciding whether it is the same people; these rows describe who this send
+ *  touches. Both are staff-only chrome (founder ruling 2026-08-19) and neither
+ *  reaches a tenant or landlord. Matching them would mean widening
+ *  `RosterPreviewRecipient`, whose wire type carries no full number by design.
+ *
+ *  The `?? 'Unnamed number'` below is now a LAST resort only - it survives for a
+ *  member with neither a name nor any phone at all. */
 function RecipientRow({ recipient }: { recipient: RosterPreviewRecipient }): React.JSX.Element {
   const reason = NOT_RECEIVING[recipient.reachability];
   return (

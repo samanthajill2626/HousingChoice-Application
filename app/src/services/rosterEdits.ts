@@ -27,8 +27,14 @@
 // The resolver's 'unavailable' state (pointer set, thread unreadable) NEVER
 // falls through to the plan or the default here either - it refuses.
 //
-// PII (doc section 9): previews carry NAMES (the dialog shows people), never
-// phone numbers; the full phone stays on the server.
+// PII (doc section 9), as amended by the founder ruling 2026-08-19: the line is
+// OUTBOUND vs STAFF-ONLY, not preview vs not-preview. The intro/member-added BODY
+// (composed from `bodyMembers`) carries names and NEVER a phone - that is what a
+// tenant or landlord receives and it is unchanged. The confirm dialog's RECIPIENT
+// ROWS are staff-only chrome: a member with no saved name renders as
+// "Unnamed number ...1234" from `phoneLast4`, so a navigator can tell two nameless
+// members apart. The FULL number still never leaves the server on either shape.
+// The two lists are built separately here; keep them that way.
 import { composeIntroBody, composeMemberAddedBody } from '../jobs/relayFanOut.js';
 import {
   clampOutOfQuietHours,
@@ -362,9 +368,49 @@ function withQuietHours(
   };
 }
 
-function toRecipient(member: { name?: string; reachability: RosterReachability }): RosterPreviewRecipient {
+/**
+ * ONE recipient row's STAFF-FACING label: their name, else `Unnamed number ...1234`.
+ *
+ * Founder ruling 2026-08-19. The confirm dialog is dashboard-only, behind
+ * requireAuth, and nothing a tenant or landlord receives is built from
+ * `recipients` - the outbound body is composed from `bodyMembers` (see
+ * buildOpenPreviewFromParts), a separate list that keeps the names-only rule. A bare
+ * 'Unnamed number' gave a navigator nothing to tell two nameless members apart with.
+ *
+ * LAST FOUR, NOT THE FULL NUMBER - the founder's call, and it is also the only form
+ * that works the same on every path. `phoneLast4` is what `RosterMemberView` already
+ * exposes (rosterResolution), so BOTH a bare-phone member and a contact-keyed member
+ * with no saved name render identically. Reaching for the full E.164 would have meant
+ * widening that wire type for the contact-keyed case, which is a decision nobody has
+ * made, and would have produced two different renderings of the same situation.
+ *
+ * Returns undefined only for a member carrying neither a name nor any phone at all;
+ * the dialog still renders its own 'Unnamed number' fallback for that.
+ */
+/** Last 4 digits of an E.164, or undefined when there is no usable number. The
+ *  owner path gets this from RosterMemberView; the standalone and add paths hold
+ *  the full number and derive it here so all three render identically. */
+function lastFour(phone: string | undefined): string | undefined {
+  const digits = typeof phone === 'string' ? phone.replace(/\D/g, '') : '';
+  return digits.length >= 4 ? digits.slice(-4) : undefined;
+}
+
+function recipientLabel(member: { name?: string; phoneLast4?: string }): string | undefined {
+  const name = typeof member.name === 'string' ? member.name.trim() : '';
+  if (name.length > 0) return member.name;
+
+  const last4 = typeof member.phoneLast4 === 'string' ? member.phoneLast4.trim() : '';
+  return last4.length > 0 ? `Unnamed number ...${last4}` : undefined;
+}
+
+function toRecipient(member: {
+  name?: string;
+  phoneLast4?: string;
+  reachability: RosterReachability;
+}): RosterPreviewRecipient {
+  const label = recipientLabel(member);
   return {
-    ...(member.name !== undefined && { name: member.name }),
+    ...(label !== undefined && { name: label }),
     reachability: member.reachability,
   };
 }
@@ -381,6 +427,10 @@ export interface PreviewBodyMember {
 export interface PreviewRecipientRow {
   name?: string;
   memberKey: string;
+  /** Last 4 of the number this member is texted on - the staff-facing fallback
+   *  label when they have no saved name (recipientLabel). Display only; the full
+   *  number never rides this shape. */
+  phoneLast4?: string;
   reachability: RosterReachability;
 }
 
@@ -496,6 +546,9 @@ export async function buildOpenPreview(
         recipients: view.members.map((m) => ({
           ...(m.name !== undefined && { name: m.name }),
           memberKey: m.memberKey,
+          // Feeds recipientLabel's "Unnamed number ...1234" for a member with no
+          // saved name. RosterMemberView already exposes it; nothing widened.
+          ...(m.phoneLast4 !== undefined && { phoneLast4: m.phoneLast4 }),
           reachability: m.reachability,
         })),
         ...(duplicateOf !== undefined && { duplicateOf }),
@@ -565,6 +618,7 @@ export async function buildStandaloneOpenPreview(
     rows.push({
       ...(named.name !== undefined && { name: named.name }),
       memberKey,
+      ...(lastFour(member.phone) !== undefined && { phoneLast4: lastFour(member.phone) }),
       reachability: suppressed ? 'opted_out' : 'reachable',
     });
     bodyMembers.push({
@@ -633,10 +687,13 @@ export async function buildAddPreview(
 
   const recipients = view.members.map(toRecipient);
   if (!alreadyMember) {
-    recipients.push({
-      ...(candidate.name !== undefined && { name: candidate.name }),
-      reachability: candidate.optedOut ? 'opted_out' : 'reachable',
-    });
+    recipients.push(
+      toRecipient({
+        ...(candidate.name !== undefined && { name: candidate.name }),
+        ...(lastFour(candidate.phone) !== undefined && { phoneLast4: lastFour(candidate.phone) }),
+        reachability: candidate.optedOut ? 'opted_out' : 'reachable',
+      }),
+    );
   }
   return {
     ok: true,

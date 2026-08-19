@@ -316,6 +316,76 @@ describe('owner vs standalone parity', () => {
     expect(standalone.body).toBe(ownerOutcome.preview.body);
   });
 
+  describe('recipient labels - staff-only chrome (founder ruling 2026-08-19)', () => {
+    // A member with NO saved name must be tellable apart from another nameless
+    // member. Last four only, never the full number, and identically on every
+    // path - the owner path has only phoneLast4 to work with, so reaching for the
+    // full E.164 elsewhere would have rendered the same situation two ways.
+    const nameless: ConversationParticipant[] = [
+      { contactId: '', phone: ALICE },
+      { contactId: '', phone: BOB },
+    ];
+
+    it('standalone: a nameless member renders as Unnamed number + last 4', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        nameless,
+        QUIET_OFF,
+      );
+      expect(preview.recipients.map((r) => r.name)).toEqual([
+        'Unnamed number ...0001',
+        'Unnamed number ...0002',
+      ]);
+    });
+
+    it('owner: same rendering, from RosterMemberView phoneLast4', async () => {
+      const { deps, owner } = ownerFixture(world, nameless);
+      const outcome = await buildOpenPreview(deps, owner, QUIET_OFF);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.preview.recipients.map((r) => r.name)).toEqual([
+        'Unnamed number ...0001',
+        'Unnamed number ...0002',
+      ]);
+    });
+
+    it('a saved name always wins over the number', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        [{ contactId: 'c-alice', phone: ALICE }, { contactId: '', phone: BOB }],
+        QUIET_OFF,
+      );
+      expect(preview.recipients[0]?.name).toBe('Alice Adams');
+      expect(preview.recipients[1]?.name).toBe('Unnamed number ...0002');
+    });
+
+    it('the FULL number never reaches the wire, on any field', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        nameless,
+        QUIET_OFF,
+      );
+      const wire = JSON.stringify(preview);
+      expect(wire).not.toContain(ALICE);
+      expect(wire).not.toContain(BOB);
+      // ...and the last four ARE there, so this cannot pass by the number being
+      // absent altogether.
+      expect(wire).toContain('...0001');
+    });
+
+    it('the OUTBOUND body still carries no digits at all for a nameless roster', async () => {
+      // The half that must not move: what a tenant or landlord actually receives.
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        nameless,
+        QUIET_OFF,
+      );
+      expect(preview.body).not.toContain('0001');
+      expect(preview.body).not.toContain('0002');
+      expect(preview.body).not.toMatch(/\d{4}/);
+    });
+  });
+
   describe('duplicate warning (spec 5)', () => {
     const DUP = {
       conversationId: 'conv-existing',

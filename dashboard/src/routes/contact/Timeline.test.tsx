@@ -1,9 +1,16 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline, type TimelinePaging } from './Timeline.js';
 import { ApiError } from '../../api/index.js';
-import type { TimelineItem, TimelineScheduled } from '../../api/index.js';
+import { buildTimelineFallback } from './buildTimelineFallback.js';
+import type {
+  ConversationSummary,
+  Message,
+  TimelineCall,
+  TimelineItem,
+  TimelineScheduled,
+} from '../../api/index.js';
 
 function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
   const items: TimelineItem[] = props.items ?? [];
@@ -55,6 +62,7 @@ const CALL: TimelineItem = {
   kind: 'call',
   id: 'call1',
   at: '2026-06-08T11:00:00',
+  direction: 'inbound',
   call_outcome: 'answered',
   call_duration: 252,
   transcript: 'Operator: hello. Tenant: hi there.',
@@ -119,7 +127,14 @@ describe('Timeline', () => {
   it('renders "Transcribing..." while a transcript is pending (no collapsible)', () => {
     renderTimeline({
       items: [
-        { kind: 'call', id: 'call1', at: '2026-06-08T11:00:00', call_outcome: 'missed', transcript_status: 'pending' },
+        {
+          kind: 'call',
+          id: 'call1',
+          at: '2026-06-08T11:00:00',
+          direction: 'inbound',
+          call_outcome: 'missed',
+          transcript_status: 'pending',
+        },
       ],
     });
     expect(screen.getByText('Transcribing...')).toBeInTheDocument();
@@ -129,7 +144,14 @@ describe('Timeline', () => {
   it('renders "Transcript unavailable" when the transcript failed', () => {
     renderTimeline({
       items: [
-        { kind: 'call', id: 'call1', at: '2026-06-08T11:00:00', call_outcome: 'answered', transcript_status: 'failed' },
+        {
+          kind: 'call',
+          id: 'call1',
+          at: '2026-06-08T11:00:00',
+          direction: 'inbound',
+          call_outcome: 'answered',
+          transcript_status: 'failed',
+        },
       ],
     });
     expect(screen.getByText('Transcript unavailable')).toBeInTheDocument();
@@ -143,6 +165,7 @@ describe('Timeline', () => {
           kind: 'call',
           id: 'ts#CA1', // the composite tsMsgId - NOT what the player should use
           at: '2026-06-08T11:00:00',
+          direction: 'inbound',
           call_outcome: 'voicemail',
           recording_s3_key: 'recordings/CA1/RE1',
           call_sid: 'CA1',
@@ -164,6 +187,7 @@ describe('Timeline', () => {
           kind: 'call',
           id: 'ts#CA1',
           at: '2026-06-08T11:00:00',
+          direction: 'inbound',
           call_outcome: 'voicemail',
           recording_s3_key: 'recordings/CA1/RE1',
         },
@@ -198,6 +222,7 @@ describe('Timeline', () => {
             kind: 'call',
             id: 'ts#CA1',
             at: '2026-06-08T11:00:00',
+            direction: 'inbound',
             call_outcome: 'answered',
             recording_s3_key: 'recordings/CA1/RE1',
             call_sid: 'CA1',
@@ -229,6 +254,7 @@ describe('Timeline', () => {
           kind: 'call',
           id: 'ts#CA2',
           at: '2026-06-08T11:00:00',
+          direction: 'inbound',
           call_outcome: 'answered',
           recording_s3_key: 'recordings/CA2/RE2',
           call_sid: 'CA2',
@@ -1613,5 +1639,307 @@ describe('Timeline load-older control', () => {
     // Hiding the milestone dropped the first RENDERED item with no page merged.
     // Counter-keyed: untouched. First-item-keyed: 500 -> 400 would have moved it.
     expect(el.scrollTop).toBe(0);
+  });
+});
+
+// --- Call cards as first-class DIRECTIONAL items ----------------------------
+// The card takes a side, says which way the call went, and states only what the
+// data supports. The label itself is unit-tested in presentCallState.test.ts;
+// what is proved here is the WIRING - direction -> side/arrow/word/tint, the
+// snake_case -> camelCase mapping at the call site, the accessible name, the
+// click-to-reveal detail line, and the staleness timer.
+
+// The arrows are written as code points, not literal characters, for the same
+// reason the component does: every source line in this repo stays ASCII.
+const GLYPH_IN = String.fromCodePoint(0x2199);
+const GLYPH_OUT = String.fromCodePoint(0x2197);
+
+function callItem(
+  partial: Partial<TimelineCall> & Pick<TimelineCall, 'id' | 'direction'>,
+): TimelineItem {
+  return { kind: 'call', at: '2026-06-08T11:00:00', ...partial };
+}
+
+describe('Timeline call cards - direction', () => {
+  it('aligns by direction: inbound left, outbound right + the outbound tint', () => {
+    renderTimeline({
+      items: [
+        callItem({ id: 'c-in', direction: 'inbound', call_outcome: 'answered' }),
+        callItem({ id: 'c-out', direction: 'outbound', call_outcome: 'answered', at: '2026-06-08T11:05:00' }),
+      ],
+    });
+    const inbound = screen.getByRole('group', { name: /Incoming call/ });
+    const outbound = screen.getByRole('group', { name: /Outgoing call/ });
+
+    // Alignment-ONLY classes - never .in/.out, which would repaint the card as a
+    // chat bubble. CSS-module class names are hashed under vitest, so match on
+    // the readable stem rather than the emitted name.
+    expect(inbound.className).toContain('itemIn');
+    expect(outbound.className).toContain('itemOut');
+    // The outbound tint, the same signal the outbound email card carries.
+    expect(outbound.className).toContain('callOut');
+    expect(inbound.className).not.toContain('callOut');
+  });
+
+  it('renders the direction word and an aria-hidden arrow glyph', () => {
+    renderTimeline({
+      items: [
+        callItem({ id: 'c-in', direction: 'inbound', call_outcome: 'answered' }),
+        callItem({ id: 'c-out', direction: 'outbound', call_outcome: 'answered', at: '2026-06-08T11:05:00' }),
+      ],
+    });
+    expect(screen.getByText('Incoming call')).toBeInTheDocument();
+    expect(screen.getByText('Outgoing call')).toBeInTheDocument();
+
+    // Decorative only: an unhidden arrow is announced as "north east arrow".
+    expect(screen.getByText(GLYPH_IN)).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByText(GLYPH_OUT)).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('names the card by direction and time ONLY - the outcome stays out of it', () => {
+    renderTimeline({
+      items: [callItem({ id: 'c-out', direction: 'outbound', call_outcome: 'answered' })],
+    });
+    const card = screen.getByRole('group', { name: /Outgoing call/ });
+    const name = card.getAttribute('aria-label') ?? '';
+
+    expect(name).toContain('Outgoing call');
+    expect(name).toContain('11:00a');
+    // The outcome flips with the ringing/in-progress clauses, so an accessible
+    // name carrying it would make any handle built on it race the staleness
+    // timer. It stays assertable as the chip's own text instead.
+    expect(name).not.toContain('Connected');
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+  });
+
+  it('maps the wire fields to the presenter: outbound answered is "Connected", inbound "Answered"', () => {
+    renderTimeline({
+      items: [
+        callItem({ id: 'c-in', direction: 'inbound', call_outcome: 'answered' }),
+        callItem({ id: 'c-out', direction: 'outbound', call_outcome: 'answered', at: '2026-06-08T11:05:00' }),
+      ],
+    });
+    expect(screen.getByText('Answered')).toBeInTheDocument();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+  });
+
+  it('renders NO chip when nothing is known - the direction and time still render', () => {
+    renderTimeline({ items: [callItem({ id: 'c-bare', direction: 'inbound' })] });
+    const card = screen.getByRole('group', { name: /Incoming call/ });
+    expect(card.querySelector('[class*="outcome"]')).toBeNull();
+    expect(screen.getByText('Incoming call')).toBeInTheDocument();
+  });
+
+  it('keeps the duration on the card face', () => {
+    renderTimeline({
+      items: [callItem({ id: 'c-out', direction: 'outbound', call_outcome: 'answered', call_duration: 252 })],
+    });
+    const card = screen.getByRole('group', { name: /Outgoing call/ });
+    expect(card.querySelector('[class*="callDuration"]')?.textContent).toBe('4m 12s');
+  });
+
+  it('hides the party number behind a Details BUTTON and reveals it on click', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'c-out',
+          direction: 'outbound',
+          call_outcome: 'answered',
+          party_phone: '+14040100007',
+        }),
+      ],
+    });
+    const card = screen.getByRole('group', { name: /Outgoing call/ });
+    // A real control, not a click handler on the card surface - and not the card
+    // itself as a button, which holds an audio player and a <details>.
+    const button = screen.getByRole('button', { name: 'Details' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    // jsdom loads no stylesheet here (vitest css:false), so the `display:none`
+    // half is not observable - the reveal STATE class on the CARD is what
+    // discriminates a working reveal from a dead one, and it is exactly what the
+    // card-scoped CSS selector roots on.
+    expect(card.className).not.toContain('cardRevealed');
+
+    fireEvent.click(button);
+
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(card.className).toContain('cardRevealed');
+    expect(screen.getByText('to (404) 010-0007 - 11:00a')).toBeVisible();
+  });
+
+  it('reveals "from <number>" on an inbound call', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'c-in',
+          direction: 'inbound',
+          call_outcome: 'answered',
+          party_phone: '+14040100007',
+        }),
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(screen.getByText('from (404) 010-0007 - 11:00a')).toBeVisible();
+  });
+
+  it('degrades the detail line to the time alone on a MASKED call (no party_phone on the wire)', () => {
+    renderTimeline({ items: [callItem({ id: 'c-masked', direction: 'inbound', call_outcome: 'missed' })] });
+    const card = screen.getByRole('group', { name: /Incoming call/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(card.querySelector('[class*="cardMeta"]')?.textContent).toBe('11:00a');
+  });
+});
+
+describe('Timeline call card - staleness timer', () => {
+  const ui = (items: TimelineItem[]) => (
+    <MemoryRouter>
+      <Timeline status="ready" items={items} source="server" canSend={false} onSend={vi.fn()} />
+    </MemoryRouter>
+  );
+  const ringingAt = (ms: number): TimelineItem => ({
+    kind: 'call',
+    id: 'c-ring',
+    at: new Date(ms).toISOString(),
+    direction: 'outbound',
+    call_status: 'ringing',
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('computes the delay from a FRESH clock read at schedule time, not the card clock', () => {
+    // Release the global Date pin (src/test/setup.ts) BEFORE enabling fake
+    // timers - vitest throws otherwise.
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    const t0 = Date.now();
+    const { rerender } = render(ui([ringingAt(t0)]));
+    expect(screen.getByText('Ringing...')).toBeInTheDocument();
+
+    // 60s pass with no re-render, so the card's own `now` is still t0. Then a
+    // props change moves the call's instant 1s forward, so the expiry becomes
+    // t0 + 91s and the effect reschedules.
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    rerender(ui([ringingAt(t0 + 1_000)]));
+
+    // A delay taken from the card's stale `now` would be 91s and nothing would
+    // fire here; taken from a fresh read it is 31s and the label flips.
+    act(() => {
+      vi.advanceTimersByTime(31_000);
+    });
+    expect(screen.getByText('No team answer')).toBeInTheDocument();
+  });
+
+  it('schedules NOTHING when the expiry is beyond the 32-bit setTimeout ceiling', () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    // An instant 30 days in the FUTURE: still "fresh" by age, but its expiry is
+    // ~30 days out. Above the ceiling setTimeout fires IMMEDIATELY rather than
+    // late, which is the spin this guard exists to make unrepresentable.
+    render(ui([ringingAt(Date.now() + 30 * 24 * 60 * 60 * 1_000)]));
+    expect(screen.getByText('Ringing...')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles on the stale label immediately when the expiry has already passed', () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    const t0 = Date.now();
+    const { rerender } = render(ui([ringingAt(t0)]));
+    expect(screen.getByText('Ringing...')).toBeInTheDocument();
+
+    // Move the wall clock two minutes WITHOUT running the pending timer, then
+    // nudge the props so the effect re-runs against an expiry already in the past.
+    vi.setSystemTime(t0 + 120_000);
+    rerender(ui([ringingAt(t0 + 1_000)]));
+
+    // The effect advanced the card's clock itself rather than merely skipping the
+    // schedule - skipping would have stranded it on "Ringing..." with no
+    // correction path, since `now` only ever advances there.
+    expect(screen.getByText('No team answer')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a settled call card schedules no timer at all', () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    render(
+      ui([
+        {
+          kind: 'call',
+          id: 'c-done',
+          at: new Date(Date.now()).toISOString(),
+          direction: 'outbound',
+          call_status: 'completed',
+          call_outcome: 'answered',
+        },
+      ]),
+    );
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('Timeline email cards - alignment', () => {
+  const emailItem = (direction: 'inbound' | 'outbound', id: string): TimelineItem => ({
+    kind: 'message',
+    id,
+    at: direction === 'inbound' ? '2026-06-08T09:14:00' : '2026-06-08T09:20:00',
+    conversationId: 'c1',
+    tsMsgId: id,
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    type: 'email',
+    delivery_status: 'delivered',
+    subject: 'Re: 1450 Joseph Blvd',
+    body: 'Tuesday at 3pm works.',
+  });
+
+  it('aligns email cards by direction on the SERVER timeline path', () => {
+    renderTimeline({ items: [emailItem('inbound', 'e-in'), emailItem('outbound', 'e-out')] });
+    const cards = document.querySelectorAll('[class*="emailCard"]');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.className).toContain('itemIn');
+    expect(cards[1]?.className).toContain('itemOut');
+  });
+
+  it('aligns email cards by direction on the buildTimelineFallback path too', () => {
+    const conv: ConversationSummary = {
+      conversationId: 'c1',
+      type: 'tenant_1to1',
+      participant_phone: '+14040100007',
+      participants: [],
+      preview: null,
+      last_activity_at: '2026-06-08T13:14:00Z',
+      unread_count: 0,
+      sms_opt_out: false,
+      participant_display_name: null,
+    };
+    const mail = (direction: 'inbound' | 'outbound', tsMsgId: string): Message => ({
+      conversationId: 'c1',
+      tsMsgId,
+      type: 'email',
+      direction,
+      author: direction === 'inbound' ? 'tenant' : 'teammate',
+      provider_sid: `EM-${tsMsgId}`,
+      provider_ts: direction === 'inbound' ? '2026-06-08T09:14:00Z' : '2026-06-08T09:20:00Z',
+      delivery_status: 'delivered',
+      created_at: '2026-06-08T09:14:00Z',
+      subject: 'Re: 1450 Joseph Blvd',
+      body: 'Tuesday at 3pm works.',
+    });
+    const items = buildTimelineFallback(
+      [conv],
+      new Map([['c1', [mail('inbound', 'e-in'), mail('outbound', 'e-out')]]]),
+    );
+
+    renderTimeline({ items, source: 'fallback' });
+    const cards = document.querySelectorAll('[class*="emailCard"]');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.className).toContain('itemIn');
+    expect(cards[1]?.className).toContain('itemOut');
   });
 });

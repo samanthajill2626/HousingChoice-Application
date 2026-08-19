@@ -421,29 +421,116 @@ a.pill:focus-visible {
   color: var(--c-evt-green-text);
 }
 
+/* --- Card alignment + card-scoped reveal ---------------------------------- */
+/* Direction alignment for the two CARD kinds (call, email). ALIGNMENT ONLY, and
+ * deliberately NOT .in/.out: those also carry the chat-bubble background and
+ * border, so applying them to a card repaints it as a bubble and fights
+ * .emailIn/.emailOut. .day is a flex column, so an aligned child sizes to its
+ * content - which is why both cards carry a min-width floor. */
+.itemIn {
+  align-self: flex-start;
+}
+
+.itemOut {
+  align-self: flex-end;
+}
+
+/* Click-to-reveal detail line, rooted on the CARD. Deliberately NOT .metaText:
+ * its only reveal selector is `.bubble.revealed .metaText`, so a card applying
+ * it would render `display: none` FOREVER (a silently dead feature), and adding
+ * .bubble to fix that drags in the bubble's max-width, padding and hover lift. */
+.cardMeta {
+  display: none;
+  margin-top: var(--sp-1);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.cardRevealed .cardMeta {
+  display: block;
+}
+
 /* --- Call card ------------------------------------------------------------ */
 
 .callcard {
-  align-self: center;
-  width: 84%;
+  max-width: 84%;
+  min-width: 40%;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-3);
 }
 
-.callTop {
+/* Outbound: the same faint tint the outbound email card uses, so the two card
+ * kinds encode direction identically (position + word + tint). */
+.callOut {
+  background: var(--c-bubble-out-bg);
+  border-color: var(--c-bubble-out-border);
+}
+
+/* The summary line: arrow, direction word, outcome chip, duration, then the
+ * trailing time + reveal control. Purpose-built rather than reusing .status,
+ * which claims `margin-left: auto` for itself - only .callTrail claims the
+ * right edge here, so nothing fights over it. */
+.callSummary {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   font-size: var(--fs-sm);
   color: var(--c-text);
+}
+
+.callArrow {
+  color: var(--c-text-muted);
+}
+
+.callWho {
+  font-weight: var(--fw-medium);
+}
+
+.callDuration {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}
+
+.callTrail {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.callAt {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}
+
+/* A real <button>, not a click handler on the card surface: the card contains an
+ * audio player and a <details>, so it may neither be a button itself nor carry a
+ * bare onClick with no role/tabIndex/key handling. */
+.callReveal {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+}
+
+.callReveal:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
 }
 
 .outcome {
   font-weight: var(--fw-semibold);
 }
 
+/* The call chip palette. Distinct from the DELIVERY tone classes on purpose -
+ * .toneSuccess/.toneDanger are a different green and a different red, and mixing
+ * the two palettes would put two greens and two reds on one row. */
 .answered {
   color: var(--c-resp-yes);
 }
@@ -456,10 +543,8 @@ a.pill:focus-visible {
   color: var(--c-resp-wait);
 }
 
-.callTime {
-  margin-left: auto;
+.callNeutral {
   color: var(--c-text-subtle);
-  font-size: var(--fs-xs);
 }
 
 .transcript {
@@ -933,11 +1018,13 @@ a.pill:focus-visible {
 }
 
 /* --- Email card (email-channel v1, A6): a DISTINCT collapsed card (the CallCard
- * treatment), never a chat bubble. Centered, surface-backed, with an EMAIL tag. */
+ * treatment), never a chat bubble. Surface-backed, with an EMAIL tag, and
+ * ALIGNED BY DIRECTION (.itemIn/.itemOut) rather than centered - every
+ * communication takes a side. */
 
 .emailCard {
-  align-self: center;
-  width: 84%;
+  max-width: 84%;
+  min-width: 40%;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-left: 3px solid var(--c-brand);

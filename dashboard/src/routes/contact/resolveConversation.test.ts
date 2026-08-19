@@ -35,6 +35,7 @@ describe('resolveSingleConversation', () => {
       id: 'call1',
       at: '2026-06-08T11:00:00Z',
       conversationId: 'c9',
+      direction: 'inbound',
       call_outcome: 'answered',
     };
     expect(resolveSingleConversation([call])).toBe('c9');

@@ -24,7 +24,12 @@
 // The presenter's inputs are camelCase and the wire contract is snake_case; the
 // CallCard does that mapping at the call site, which is the only place the two
 // vocabularies meet.
-import type { CallOutcome, CallStatus, MessageDirection } from '../../api/index.js';
+// Imported from `api/types.js` rather than the `api/index.js` barrel ON PURPOSE:
+// the S5 seam test drives this presenter from an APP-side test, and the barrel
+// re-exports a .tsx module, which the app's tsconfig (no `jsx`) refuses to load.
+// types.ts has no imports of its own, so this keeps the presenter reachable from
+// both packages. Type-only either way - nothing is emitted.
+import type { CallOutcome, CallStatus, MessageDirection } from '../../api/types.js';
 
 /** Chip color intent. Declared here (not in types.ts) for the same reason
  *  `DeliveryTone` is: it is a presentation concept, not a wire type. */

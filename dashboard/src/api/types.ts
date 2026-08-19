@@ -2235,7 +2235,17 @@ export interface TimelineMessage extends TimelineBase {
 export interface TimelineCall extends TimelineBase {
   kind: 'call';
   conversationId?: string;
-  call_outcome: CallOutcome; // reuse legacy
+  /** Who placed the call. REQUIRED - every stored call row carries it (no
+   *  backfill needed), and the card renders the side + arrow from it. */
+  direction: MessageDirection;
+  /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
+   *  status) and on any row whose stored value is not a union member. */
+  call_status?: CallStatus;
+  /** Coarse human-facing outcome. OPTIONAL: absent means "no terminal outcome is
+   *  known" - a real state the card renders honestly (presentCallState derives a
+   *  label from call_status, or shows no chip at all). The server no longer
+   *  invents 'missed' for a row that has none. */
+  call_outcome?: CallOutcome;
   call_duration?: number;
   party_phone?: string; // which number
   recording_s3_key?: string; // present ⇒ playable

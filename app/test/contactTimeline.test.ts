@@ -28,6 +28,10 @@ import {
   quietOffSettingsRepo,
   type SettingsReadRepo,
 } from './helpers/settingsStub.js';
+// Cross-package import: the D12 seam test drives the REAL client presenter with
+// the REAL projected payload, because nothing else in this mission spans the
+// projection/presenter boundary. Established practice - see consentDrift.test.ts.
+import { presentCallState } from '../../dashboard/src/routes/contact/presentCallState.js';
 
 const TENANT = 'c-tenant';
 const PHONE_A = '+15550100001';
@@ -478,6 +482,156 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(ringing.call_status).toBe('ringing');
     // Never cast an unrecognized string onto the wire - drop it.
     expect(outOfUnion.call_status).toBeUndefined();
+  });
+
+  it('normalizes the importer call outcomes, drops unrecognized ones, and never defaults to missed', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // Four call rows whose stored outcome the repo API cannot express: the
+    // importer's two out-of-union strings (apply.ts writes `no_answer` /
+    // `completed`), one unrecognized string, and one row with NO outcome at all
+    // (the shape the /status gate refusal stamp produces). `append`'s
+    // `callOutcome` param is typed CallOutcome, so all three are stamped onto
+    // the stored row directly.
+    const sids = ['CA-imp-noanswer', 'CA-imp-completed', 'CA-imp-bogus', 'CA-none'];
+    for (const [i, sid] of sids.entries()) {
+      await world.messagesRepo.append({
+        conversationId: 'conv-a',
+        providerSid: sid,
+        providerTs: `2026-06-16T1${i}:00:00.000Z`,
+        type: 'call',
+        direction: 'inbound',
+        author: 'tenant',
+        deliveryStatus: 'delivered',
+      });
+    }
+    const stamp = (sid: string, outcome: string): void => {
+      const row = world.messages.find((m) => m.provider_sid === sid)!;
+      (row as Record<string, unknown>)['call_outcome'] = outcome;
+    };
+    stamp('CA-imp-noanswer', 'no_answer');
+    stamp('CA-imp-completed', 'completed');
+    stamp('CA-imp-bogus', 'not-a-real-outcome');
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const pick = (sid: string) => calls.find((c: { id: string }) => c.id.includes(sid));
+
+    // D10: the two importer strings normalize BEFORE the membership test.
+    expect(pick('CA-imp-noanswer').call_outcome).toBe('missed');
+    expect(pick('CA-imp-completed').call_outcome).toBe('answered');
+    // Anything else unrecognized is DROPPED, never cast through `as CallOutcome`.
+    expect(pick('CA-imp-bogus').call_outcome).toBeUndefined();
+    // And a row with no stored outcome projects NO outcome. The `?? 'missed'`
+    // default is gone; inventing one is the false attribution D6 exists to remove.
+    expect(pick('CA-none').call_outcome).toBeUndefined();
+  });
+
+  it("falls back to the importer's call_duration_seconds when call_duration is absent", async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-imported-dur',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+    });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-native-dur',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+      callDuration: 61,
+    });
+    // call_duration_seconds is the importer's own field. It is NOT declared on
+    // MessageItem (only call_duration is), so it is neither an append param nor
+    // a plain property read - stamp it directly, as the projection reads it
+    // through the index signature with a typeof narrow.
+    const imported = world.messages.find((m) => m.provider_sid === 'CA-imported-dur')!;
+    (imported as Record<string, unknown>)['call_duration_seconds'] = 252;
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const pick = (sid: string) => calls.find((c: { id: string }) => c.id.includes(sid));
+
+    expect(pick('CA-imported-dur').call_duration).toBe(252);
+    // A declared call_duration still wins - the fallback only fills a gap.
+    expect(pick('CA-native-dur').call_duration).toBe(61);
+  });
+
+  it('projects every field the dashboard TimelineCall declares REQUIRED (manual cross-package mirror)', async () => {
+    // There is NO cross-package type check: a projection that omits `direction`
+    // type-checks clean on BOTH sides and fails only in the browser. This list is
+    // a MANUAL mirror of the REQUIRED keys on `TimelineCall` in
+    // dashboard/src/api/types.ts (plus its TimelineBase). It does not update
+    // itself - if that interface gains a required field, add it here by hand.
+    const DASHBOARD_REQUIRED_KEYS = ['kind', 'id', 'at', 'direction'];
+
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-shape',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      callStatus: 'ringing',
+    });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const call = res.body.items.find((i: { kind: string }) => i.kind === 'call');
+    for (const key of DASHBOARD_REQUIRED_KEYS) {
+      expect(Object.keys(call)).toContain(key);
+      expect(call[key]).toBeDefined();
+    }
+  });
+
+  it('D12 seam: a refusal-stamped row (canceled, no outcome) presents as "Not completed" end to end', async () => {
+    // The ONE test that spans the projection/presenter boundary. With the
+    // `?? 'missed'` default restored on the server, this row arrives as
+    // call_outcome: 'missed', the presenter's canceled clause never fires, and
+    // the card reads "No answer" - the false attribution D12 exists to remove -
+    // with every other gate still green.
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-refused',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      callStatus: 'ringing',
+    });
+    // The gate refusal stamp: a terminal `canceled` with NO outcome.
+    await world.messagesRepo.updateCallStatus('CA-refused', { callStatus: 'canceled' });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const call = res.body.items.find((i: { kind: string }) => i.kind === 'call');
+    expect(call.call_status).toBe('canceled');
+    expect(call.call_outcome).toBeUndefined();
+
+    // Straight into the real client presenter, with the wire payload's own values.
+    const presented = presentCallState({
+      direction: call.direction,
+      callStatus: call.call_status,
+      callOutcome: call.call_outcome,
+      at: call.at,
+      now: Date.parse(call.at) + 5_000,
+    });
+    expect(presented.label).toBe('Not completed');
+    expect(presented.tone).toBe('neutral');
   });
 
   it("a call's at equals its provider_ts (sort-key parity) and sorts among messages", async () => {

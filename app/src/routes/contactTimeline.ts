@@ -186,7 +186,10 @@ interface TimelineCall extends TimelineBase {
   /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
    *  status) and on any row whose stored value is not a union member. */
   call_status?: CallStatus;
-  call_outcome: CallOutcome;
+  /** Coarse human-facing outcome. OPTIONAL: absent means "no terminal outcome is
+   *  known", which the client renders honestly (no chip / a status-derived
+   *  label). The server no longer invents 'missed' for a row that has none. */
+  call_outcome?: CallOutcome;
   call_duration?: number;
   party_phone?: string;
   recording_s3_key?: string;
@@ -436,6 +439,49 @@ function isCallStatus(v: unknown): v is CallStatus {
   return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
 }
 
+/** CallOutcome membership, same deliberate duplication as CALL_STATUS_MAP above. */
+const CALL_OUTCOME_MAP = {
+  answered: true,
+  missed: true,
+  voicemail: true,
+} satisfies Record<CallOutcome, true>;
+function isCallOutcome(v: unknown): v is CallOutcome {
+  return typeof v === 'string' && Object.hasOwn(CALL_OUTCOME_MAP, v);
+}
+
+/** The Quo importer writes two OUT-OF-UNION outcome strings straight through
+ *  `messageBatch.put` (`lib/import/apply.ts`), bypassing the typed `append`:
+ *  `no_answer` and `completed`. They mean the same two things our union spells
+ *  differently, so map them FIRST and membership-test AFTER. */
+const IMPORTED_CALL_OUTCOME: Record<string, CallOutcome> = {
+  no_answer: 'missed',
+  completed: 'answered',
+};
+
+/**
+ * A stored outcome -> the wire outcome, or undefined. Order matters: normalize
+ * the importer's two strings, THEN test membership. Anything still unrecognized
+ * is DROPPED rather than cast through `as CallOutcome` - a call with a direction
+ * and a time and no chip is honest, and better than a confidently wrong one.
+ */
+function normalizeCallOutcome(v: unknown): CallOutcome | undefined {
+  if (typeof v !== 'string') return undefined;
+  const mapped = IMPORTED_CALL_OUTCOME[v] ?? v;
+  return isCallOutcome(mapped) ? mapped : undefined;
+}
+
+/**
+ * Connected duration in seconds. Native rows carry `call_duration`; IMPORTED
+ * rows carry `call_duration_seconds`, which is not a declared MessageItem field
+ * at all - it is reachable only through the interface's index signature, so it
+ * needs an explicit runtime narrow rather than a property read.
+ */
+function callDurationOf(m: MessageItem): number | undefined {
+  if (typeof m.call_duration === 'number') return m.call_duration;
+  const imported = m['call_duration_seconds'];
+  return typeof imported === 'number' ? imported : undefined;
+}
+
 /**
  * Map a stored call → a TimelineCall. PII: recording_s3_key + transcript ONLY
  * when masked !== true (founder-bridge); a MASKED call omits both entirely.
@@ -454,6 +500,8 @@ function toTimelineCall(
   // to stay consistent with what the server sorts/paginates by — same as
   // TimelineMessage. (started_at is the call's first-seen time, not a sort key.)
   const partyPhone = masked ? undefined : conversation?.participant_phone;
+  const callOutcome = normalizeCallOutcome(m.call_outcome);
+  const callDuration = callDurationOf(m);
   return {
     kind: 'call',
     id: m.tsMsgId,
@@ -464,10 +512,12 @@ function toTimelineCall(
     // unrecognized stored status is dropped rather than cast onto the wire.
     direction: m.direction,
     ...(isCallStatus(m.call_status) && { call_status: m.call_status }),
-    // call_outcome is required on the wire; default 'missed' when a call entry
-    // has no recorded outcome yet (a ringing/unanswered metadata row).
-    call_outcome: (m.call_outcome ?? 'missed') as CallOutcome,
-    ...(typeof m.call_duration === 'number' && { call_duration: m.call_duration }),
+    // call_outcome is OPTIONAL on the wire and there is NO default. A row with
+    // no recorded outcome (a ringing metadata row, or a D12 gate-refusal stamp)
+    // emits none, and the client derives an honest label from call_status
+    // instead of reading a server-invented "Missed".
+    ...(callOutcome !== undefined && { call_outcome: callOutcome }),
+    ...(callDuration !== undefined && { call_duration: callDuration }),
     ...(partyPhone !== undefined && { party_phone: partyPhone }),
     // Masked calls are NEVER recorded/transcribed — never expose these.
     ...(!masked && typeof m.recording_s3_key === 'string' && { recording_s3_key: m.recording_s3_key }),

@@ -14,47 +14,64 @@ const base = { scheduledAt: AT, timezone: NY } as const;
 describe('composeTourReminderBody: rendered copy', () => {
   const addr = '412 Oak St Apt 2';
 
+  // Copy rewritten 2026-08-18 to the founder's voice (see catalog.ts). The
+  // token contract is the part worth guarding here: confirmation carries the
+  // full {when} because it can arrive weeks out, while day_before/morning_of
+  // say "tomorrow"/"today" in the copy and so must render the BARE time - a
+  // regression to {when} there reads "tomorrow at Thu, Jul 23 at 3:00 PM".
   it('confirmation names the address and the full date-time', () => {
     expect(composeTourReminderBody({ ...base, kind: 'confirmation', address: addr }))
-      .toBe("Tour confirmed at 412 Oak St Apt 2 for Thu, Jul 23 at 3:00 PM. We'll text reminders as it gets closer.");
+      .toBe('Hey, your tour is set for Thu, Jul 23 at 3:00 PM at 412 Oak St Apt 2.');
   });
 
-  it('day_before says tomorrow AND the explicit date', () => {
-    expect(composeTourReminderBody({ ...base, kind: 'day_before', address: addr }))
-      .toBe('Reminder: tour at 412 Oak St Apt 2 is tomorrow, Thu, Jul 23 at 3:00 PM.');
+  it('day_before says tomorrow and the BARE time (never the full date)', () => {
+    const body = composeTourReminderBody({ ...base, kind: 'day_before', address: addr });
+    expect(body).toBe('Hey, confirming your tour tomorrow at 3:00 PM. Looking forward to having you tour!');
+    expect(body, 'the date would double up with "tomorrow"').not.toContain('Jul 23');
   });
 
   it('morning_of uses the bare time', () => {
-    expect(composeTourReminderBody({ ...base, kind: 'morning_of', address: addr }))
-      .toBe('Good morning! Tour at 412 Oak St Apt 2 is today at 3:00 PM.');
+    const body = composeTourReminderBody({ ...base, kind: 'morning_of', address: addr });
+    expect(body).toBe(
+      'Good morning, excited for you to see 412 Oak St Apt 2 today at 3:00 PM. Let me know if your timing changes.',
+    );
+    expect(body, 'the date would double up with "today"').not.toContain('Jul 23');
   });
 
   it('en_route keeps its tenant-facing closing line', () => {
     expect(composeTourReminderBody({ ...base, kind: 'en_route', address: addr }))
-      .toBe("Tour at 412 Oak St Apt 2 starts at 3:00 PM. Text us when you're on the way!");
+      .toBe("Hey, see you soon at 412 Oak St Apt 2. Please let me know when you're on the way.");
   });
 
-  it('no_show_checkin is untouched and token-free', () => {
+  it('no_show_checkin is token-free', () => {
     expect(composeTourReminderBody({ ...base, kind: 'no_show_checkin', address: addr }))
-      .toBe('Hi! We noticed you may have missed your tour. Want to reschedule?');
+      .toBe('Hi! Do you need to reschedule?');
   });
 });
 
 describe('composeTourReminderBody: the no-address variants', () => {
   it('drops the address clause cleanly - no double spaces, no stray {where}', () => {
     expect(composeTourReminderBody({ ...base, kind: 'confirmation' }))
-      .toBe("Tour confirmed for Thu, Jul 23 at 3:00 PM. We'll text reminders as it gets closer.");
+      .toBe('Hey, your tour is set for Thu, Jul 23 at 3:00 PM.');
     expect(composeTourReminderBody({ ...base, kind: 'day_before' }))
-      .toBe('Reminder: tour is tomorrow, Thu, Jul 23 at 3:00 PM.');
+      .toBe('Hey, confirming your tour tomorrow at 3:00 PM. Looking forward to having you tour!');
     expect(composeTourReminderBody({ ...base, kind: 'morning_of' }))
-      .toBe('Good morning! Tour is today at 3:00 PM.');
+      .toBe('Good morning, excited for you to see the home today at 3:00 PM. Let me know if your timing changes.');
     expect(composeTourReminderBody({ ...base, kind: 'en_route' }))
-      .toBe("Tour starts at 3:00 PM. Text us when you're on the way!");
+      .toBe("Hey, see you soon. Please let me know when you're on the way.");
+  });
+
+  // The addressless morning_of says "the home" - the TENANT-facing noun. Never
+  // "property", which is the landlord/staff word (documentation/GLOSSARY.md).
+  it('the addressless morning_of uses the tenant-facing noun, never "property"', () => {
+    const body = composeTourReminderBody({ ...base, kind: 'morning_of' });
+    expect(body).toContain('the home');
+    expect(body).not.toContain('property');
   });
 
   it('an all-empty structured address takes the no-address path', () => {
     expect(composeTourReminderBody({ ...base, kind: 'morning_of', address: {} }))
-      .toBe('Good morning! Tour is today at 3:00 PM.');
+      .toBe('Good morning, excited for you to see the home today at 3:00 PM. Let me know if your timing changes.');
   });
 
   it('a NULL address composes the _no_address variant instead of throwing', () => {
@@ -67,20 +84,24 @@ describe('composeTourReminderBody: the no-address variants', () => {
     })).not.toThrow();
     expect(composeTourReminderBody({
       ...base, kind: 'morning_of', address: null as unknown as Address,
-    })).toBe('Good morning! Tour is today at 3:00 PM.');
+    })).toBe('Good morning, excited for you to see the home today at 3:00 PM. Let me know if your timing changes.');
   });
 
   it('a structured address contributes street only', () => {
     expect(composeTourReminderBody({
       ...base, kind: 'morning_of',
       address: { line1: '412 Oak St', line2: 'Apt 2', city: 'Atlanta', state: 'GA', zip: '30312' },
-    })).toBe('Good morning! Tour at 412 Oak St Apt 2 is today at 3:00 PM.');
+    })).toBe(
+      'Good morning, excited for you to see 412 Oak St Apt 2 today at 3:00 PM. Let me know if your timing changes.',
+    );
   });
 
   it('a legacy string address passes through whole (D5 - what every seed looks like)', () => {
     expect(composeTourReminderBody({
       ...base, kind: 'morning_of', address: '350 Boulevard SE, Atlanta, GA 30312',
-    })).toBe('Good morning! Tour at 350 Boulevard SE, Atlanta, GA 30312 is today at 3:00 PM.');
+    })).toBe(
+      'Good morning, excited for you to see 350 Boulevard SE, Atlanta, GA 30312 today at 3:00 PM. Let me know if your timing changes.',
+    );
   });
 });
 

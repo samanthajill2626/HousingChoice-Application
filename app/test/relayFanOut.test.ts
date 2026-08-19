@@ -646,19 +646,23 @@ describe('relay body/intro composition (M1.7)', () => {
     expect(composeIntroBody([undefined, undefined])).toMatch(/connected with 1 other person/);
   });
 
-  it('A2P/CTIA (spec §5): every intro leads with the brand and TRAILS the opt-out', () => {
-    // Founder wording (2026-07-14): content first, "Reply STOP to opt out." last.
+  // FOUNDER DECISION 2026-08-18: the intro no longer carries "Reply STOP to opt
+  // out.". It is a first-contact message, so engineering advised keeping the
+  // line (the A2P floor) and was overruled - attribution is in catalog.ts. The
+  // BRAND half survives, so a stranger's first text from an unknown number still
+  // identifies the sender. Asserted, not deleted: putting STOP back should be a
+  // deliberate act that trips a test, never a silent drift.
+  it('every intro identifies the sender and carries NO opt-out line (founder decision)', () => {
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
       const body = composeIntroBody(names);
-      expect(body.startsWith('HousingChoice.')).toBe(true);
-      expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
+      expect(body).toContain('HousingChoice');
+      expect(body).not.toContain('Reply STOP');
     }
   });
 
-  it('composeMemberAddedBody names the joiner (neutral fallback) with brand-first, STOP-last framing', () => {
+  it('composeMemberAddedBody names the joiner (neutral fallback), with no opt-out line', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
-    expect(body.startsWith('HousingChoice.')).toBe(true);
-    expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
+    expect(body).not.toContain('Reply STOP');
     expect(body).toContain('Carol Brown joined this group chat.');
     expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
     // No name (phone-only member) → neutral label, NEVER a phone.

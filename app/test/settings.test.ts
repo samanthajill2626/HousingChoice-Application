@@ -7,7 +7,7 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { WELCOME_SMS } from '../src/lib/smsCompliance.js';
+import { FOUNDER_MISSED_CALL_AUTOTEXT, WELCOME_SMS } from '../src/lib/smsCompliance.js';
 import { createSettingsRepo, DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -25,10 +25,14 @@ describe('GET /api/settings', () => {
     expect(res.body.settings).toEqual(DEFAULT_ORG_SETTINGS);
     expect(res.body.settings.missedCallAutoTextEnabled).toBe(true);
     expect(res.body.settings.quickReplies).toEqual(['Please text me', "I'll call you back soon"]);
-    // A2P/CTIA (spec §5): the default first-contact template carries brand
-    // identity + opt-out language (the compliant DEFAULT_MISSED_CALL_AUTOTEXT).
-    expect(res.body.settings.missedCallAutoText).toContain('HousingChoice');
-    expect(res.body.settings.missedCallAutoText).toMatch(/Reply STOP to opt out\./);
+    // FOUNDER DECISION 2026-08-18: the default missed-call auto-text is now the
+    // founder wording and deliberately carries NO opt-out line. Engineering
+    // advised against it; attribution is on FOUNDER_MISSED_CALL_AUTOTEXT in
+    // lib/smsCompliance.ts. This is THE value that actually reaches a caller -
+    // the catalog default for missed_call.autotext is unreachable, because
+    // missedCallAutoText is a required string and always wins as an override.
+    expect(res.body.settings.missedCallAutoText).toBe(FOUNDER_MISSED_CALL_AUTOTEXT);
+    expect(res.body.settings.missedCallAutoText).not.toMatch(/Reply STOP/);
     // The read-only built-in welcome body rides ALONGSIDE the settings (never
     // inside them — it's not patchable) so the UI can show what "blank" sends.
     expect(res.body.welcomeTextDefault).toBe(WELCOME_SMS);
@@ -245,19 +249,34 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
     }
   });
 
-  it('400s missing_opt_out_language when a first-contact template drops opt-out copy (A2P floor)', async () => {
+  it('400s missing_opt_out_language when welcomeText drops opt-out copy (A2P floor)', async () => {
     const { app, world } = makeWebhookHarness();
-    for (const field of ['welcomeText', 'missedCallAutoText'] as const) {
-      const res = await request(app)
-        .put('/api/settings')
-        .set('x-origin-verify', SECRET)
-        .set('cookie', TEST_ADMIN_COOKIE)
-        .send({ [field]: 'Hi there — no way to opt out here.' });
-      expect(res.status, field).toBe(400);
-      expect(res.body).toEqual({ error: 'missing_opt_out_language' });
-    }
+    const res = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ welcomeText: 'Hi there - no way to opt out here.' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'missing_opt_out_language' });
     // Nothing was written (the floor rejects BEFORE the repo).
     expect(world.settings.welcomeText).toBeUndefined();
+  });
+
+  // FOUNDER DECISION 2026-08-18: the opt-out gate was lifted for the missed-call
+  // auto-text ONLY, which is what lets the founder's wording be saved at all.
+  // welcomeText above still enforces it - the asymmetry is deliberate, so this
+  // pins both halves and fails if someone "tidies" them back into one check.
+  it('ACCEPTS a missedCallAutoText with no opt-out copy (gate lifted for this field only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const body = 'Hey, this is Sam. Sorry I missed your call! Text me your name and voucher size?';
+    const res = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ missedCallAutoText: body });
+    expect(res.status).toBe(200);
+    expect(res.body.settings.missedCallAutoText).toBe(body);
+    expect(world.settings.missedCallAutoText).toBe(body);
   });
 
   it('400s an empty string, an over-320-char string, and a non-string (but NOT null — that CLEARS)', async () => {

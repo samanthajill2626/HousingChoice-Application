@@ -544,7 +544,12 @@ Resolution order, each clause the ELSE of the one before:
    - `age < 90s` -> "Ringing..." (neutral), `staleAt = at + 90s`
    - else -> outbound "No team answer" (danger); inbound "Missed" (danger)
 4. `callStatus === 'in-progress'` and age is defined:
-   - `age < 15min` -> "In progress" (neutral), `staleAt = at + 15min`
+   - `age < 15min` -> "In progress" (neutral), `staleAt = at + 15min`. The fresh
+     arm does NOT defer to a stored outcome: "In progress" is the right label on
+     a live call whatever outcome already sits on the row.
+   - else, when a `callOutcome` IS present -> fall THROUGH to clauses 5/6 and let
+     the stored outcome win (AMENDED 2026-08-19, post-merge independent review;
+     see the note below).
    - else, INBOUND -> "Answered" (success), no duration rendered
    - else, OUTBOUND -> "Outcome unknown" (neutral), no duration. See below; the
      asymmetry is I1. NOT "no chip" (R3 finding 6): an accepted, placed call
@@ -552,6 +557,20 @@ Resolution order, each clause the ELSE of the one before:
      information at all, and collapsing it into clause 7 would render the two
      identically. "Outcome unknown" claims nothing about the target while still
      telling the operator the call went out.
+
+   **AMENDMENT (2026-08-19), and why the original was wrong.** As first written,
+   this clause keyed on the STATUS alone and returned before clause 5 could read
+   the OUTCOME. That is unsound because `in-progress` and a stored outcome really
+   do co-exist: `mapCallStatus` folds Twilio's `DialCallStatus: 'answered'` onto
+   `'in-progress'` (`voice.ts:188-190`), while the SAME handler's `stampAnsweredAt`
+   writes `call_outcome: 'answered'` on that same non-terminal summary. So a
+   connected call whose answer we DID record would go stale at 15 minutes and
+   strand on "Outcome unknown" - the label whose entire meaning is that we never
+   learned the result. The stale arm now defers whenever an outcome exists.
+   This does NOT weaken I1: an outbound stale in-progress row with NO stored
+   outcome still reads "Outcome unknown" and still never reads "Connected",
+   because press-1 on an originate is the navigator's own leg. The deferral adds
+   a case for data we have; it does not invent one for data we lack.
 5. `callOutcome === 'answered'` -> outbound "Connected" (success); inbound
    "Answered" (success)
 6. `callOutcome === 'missed'` -> outbound "No answer" (danger); inbound "Missed"

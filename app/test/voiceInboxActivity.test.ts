@@ -100,9 +100,20 @@ function founderHarness(world: FakeWorld) {
   return harness;
 }
 
-/** Ring the founder bridge once from a known tenant; return the app + the caller's 1:1 thread. */
-async function ringBridge(world: FakeWorld) {
-  world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+/**
+ * Ring the founder bridge once from a known tenant; return the app + the
+ * caller's 1:1 thread.
+ *
+ * The caller defaults to a NAMED tenant, which the missed-call intake gate
+ * (jobs/missedCallAutoText.ts) suppresses the auto-text for - correct for every
+ * test here except the auto-text preview wart below, which passes a blank
+ * unknown caller so the text actually fires.
+ */
+async function ringBridge(
+  world: FakeWorld,
+  caller: Record<string, unknown> = { type: 'tenant', firstName: 'Jane', lastName: 'Doe' },
+) {
+  world.contacts.push({ contactId: 'c-caller', phone: CALLER, ...caller } as (typeof world.contacts)[number]);
   const harness = founderHarness(world);
   const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
   expect(res.status).toBe(200);
@@ -727,6 +738,8 @@ describe('accepted v1 wart: the missed-call auto-text overwrites the call previe
         auditRepo: world.auditRepo,
         events: world.events,
       }),
+      conversationsRepo: world.conversationsRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
@@ -737,7 +750,9 @@ describe('accepted v1 wart: the missed-call auto-text overwrites the call previe
   });
 
   it('after the auto-text the preview is the auto-text body but the thread stays UNREAD (design item 4, v1)', async () => {
-    const { app, conv } = await ringBridge(world);
+    // Blank unknown caller: the only shape the intake gate lets the auto-text
+    // reach, and this test is about what the auto-text does to the preview.
+    const { app, conv } = await ringBridge(world, { type: 'unknown' });
     await noAnswer(app);
     expect(world.sent).toHaveLength(1);
     const fresh = world.conversations.get(conv.conversationId)!;

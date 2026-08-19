@@ -261,6 +261,7 @@
   position: absolute;
   top: 1px;
   right: 6px;
+  transform: none;
   min-width: 0.95rem;
   padding: 0 4px;
   font-size: 0.62rem;
@@ -540,18 +541,29 @@
 
 /* Wraps a nav leaf link + its optional unread badge as siblings (the badge is
    a sibling of the <a>, not nested inside it, to keep the link's accessible
-   name clean). The link (flex, flex:1) fills the row; badge sits at the end. */
+   name clean). The badge overlays the full-width link so active/hover fills are
+   not shortened, while the link reserves enough space for the count. */
 .linkRow {
   display: flex;
   align-items: center;
+  position: relative;
 }
 
 .linkRow > .link {
   flex: 1;
+  min-width: 0;
+}
+
+.linkRowBadged > .link {
+  padding-right: calc(var(--sp-2) + 2rem);
 }
 
 .badge {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 50%;
+  right: var(--sp-2);
+  transform: translateY(-50%);
+  pointer-events: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;

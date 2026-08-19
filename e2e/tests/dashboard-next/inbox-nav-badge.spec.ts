@@ -112,6 +112,33 @@ test.beforeEach(async ({ request }) => {
   await reseed(request);
 });
 
+test('the active Inbox link spans the full nav row when its unread badge is present', async ({
+  page,
+  request,
+}) => {
+  const stamp = `${Date.now()}`.slice(-7);
+  await sendAsParty(request, { from: TASHA, body: `nav badge layout ${stamp}` });
+
+  await devLogin(page);
+  await page.goto(`${NEXT}/inbox`);
+
+  const inboxLink = page
+    .getByRole('navigation', { name: 'Communications' })
+    .getByRole('link', { name: 'Inbox' });
+  const linkRow = inboxLink.locator('..');
+  await expect(navBadge(page)).toHaveAttribute('aria-label', '1 unread', { timeout: 20_000 });
+
+  const [linkBox, rowBox] = await Promise.all([
+    inboxLink.boundingBox(),
+    linkRow.boundingBox(),
+  ]);
+  expect(linkBox).not.toBeNull();
+  expect(rowBox).not.toBeNull();
+  expect(Math.abs(
+    (linkBox?.x ?? 0) + (linkBox?.width ?? 0) - (rowBox?.x ?? 0) - (rowBox?.width ?? 0),
+  )).toBeLessThanOrEqual(1);
+});
+
 test('the nav Inbox badge counts unread rows and decrements the instant a row is acted on', async ({
   page,
   request,

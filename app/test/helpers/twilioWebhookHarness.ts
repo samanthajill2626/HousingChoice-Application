@@ -13,11 +13,12 @@ import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
 import { RangeNotSatisfiableError } from '../../src/adapters/mediaStore.js';
 import type { Semaphore } from '../../src/lib/semaphore.js';
-import type {
-  InitiateCallParams,
-  MessagingAdapter,
-  SendMessageParams,
-  SendMessageResult,
+import {
+  MediaFetchHttpError,
+  type InitiateCallParams,
+  type MessagingAdapter,
+  type SendMessageParams,
+  type SendMessageResult,
 } from '../../src/adapters/messaging.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
@@ -79,6 +80,9 @@ import {
   allowedPriorCallStatuses,
   allowedPriorStatuses,
   buildTsMsgId,
+  mediaAttachmentsOf,
+  mediaPointerSk,
+  type MediaPointer,
   type MessageItem,
   type MessagesRepo,
   type ParkedEmailEvent,
@@ -253,6 +257,12 @@ export interface FakeWorld {
   failMediaDeletes: Set<string>;
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
+  /**
+   * Media URLs that getMediaStream should fail for ONLY the next N calls, then
+   * serve - the "Twilio has not served this media yet" beat the mirror's retry
+   * exists for (prod 2026-08-17/18). Consumed per call; an entry at 0 serves.
+   */
+  failMediaUrlsFor: Map<string, number>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
   failRecordingUrls: Set<string>;
   /** What mediaStore.put stored, by S3 key — read back by getStream (M1.9c). */
@@ -417,6 +427,7 @@ export function createFakeWorld(): FakeWorld {
   const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
   const failMediaDeletes = new Set<string>();
   const failMediaUrls = new Set<string>();
+  const failMediaUrlsFor = new Map<string, number>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
   // M1.9c recording round-trip).
@@ -779,6 +790,8 @@ export function createFakeWorld(): FakeWorld {
       if (status === 'closed') {
         conv.unread_count = 0;
         delete conv.unread_flag;
+        // ...and leaves byRelayOptOut in the same write (2026-08-18).
+        delete conv.relay_optout_flag;
       }
       return conv;
     },
@@ -814,8 +827,10 @@ export function createFakeWorld(): FakeWorld {
     async setRelayMemberOptedOut(conversationId, memberKey, entry) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setRelayMemberOptedOut: no conversation ${conversationId}`);
-      // Merge one slot without clobbering the others (mirrors the targeted SET).
+      // Merge one slot without clobbering the others (mirrors the targeted SET),
+      // and stamp the sparse byRelayOptOut flag in the same write (2026-08-18).
       conv.relay_opted_out_members = { ...(conv.relay_opted_out_members ?? {}), [memberKey]: entry };
+      conv.relay_optout_flag = 'attention';
     },
     async clearRelayMemberOptedOut(conversationId, memberKey) {
       const conv = conversations.get(conversationId);
@@ -823,7 +838,20 @@ export function createFakeWorld(): FakeWorld {
       if (conv.relay_opted_out_members !== undefined) {
         const { [memberKey]: _removed, ...rest } = conv.relay_opted_out_members;
         conv.relay_opted_out_members = rest;
+        // Models the real conditional second write: the flag goes when the
+        // map is empty.
+        if (Object.keys(rest).length === 0) delete conv.relay_optout_flag;
       }
+    },
+    async listRelayOptOutAttention({ limit }) {
+      // Models the sparse byRelayOptOut GSI: rows carrying the flag ONLY, newest
+      // activity first, one page. A seeded row without the flag is invisible
+      // here exactly as it would be to the real index (hence the backfill).
+      const items = [...conversations.values()]
+        .filter((c) => c.relay_optout_flag === 'attention')
+        .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
+        .slice(0, limit);
+      return { items };
     },
     async rebindOwner(conversationId, newOwner) {
       const conv = conversations.get(conversationId);
@@ -1184,6 +1212,36 @@ export function createFakeWorld(): FakeWorld {
       if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
       if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
       if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
+    },
+    async putMediaPointers() {
+      // The fake DERIVES the media index from the stored messages (below), so
+      // there is nothing to write - the real repo keeps two structures in step,
+      // this one keeps one and reads it two ways.
+    },
+    async listMediaPointers(conversationId, { limit, before }) {
+      // Models the media#<conversationId> partition: one pointer per stored
+      // attachment, sorted by (message SK, position) newest-first, paged by
+      // an exclusive `before` sort key.
+      const out: MediaPointer[] = [];
+      for (const m of messages) {
+        if (m.conversationId !== conversationId) continue;
+        mediaAttachmentsOf(m).forEach((a, index) => {
+          const sortKey = mediaPointerSk(m.tsMsgId, index);
+          if (before !== undefined && !(sortKey < before)) return;
+          out.push({
+            conversationId,
+            tsMsgId: m.tsMsgId,
+            providerSid: m.provider_sid,
+            index,
+            s3Key: a.s3Key,
+            contentType: a.contentType,
+            at: m.provider_ts,
+            sortKey,
+          });
+        });
+      }
+      out.sort((x, y) => (x.sortKey < y.sortKey ? 1 : x.sortKey > y.sortKey ? -1 : 0));
+      return out.slice(0, limit);
     },
     async putJobExecutionMarker(jobId, conversationId) {
       // Mirrors the conditional put: true only on the FIRST write per jobId.
@@ -3201,7 +3259,15 @@ export function createFakeWorld(): FakeWorld {
       };
     },
     async getMediaStream(mediaUrl) {
-      if (failMediaUrls.has(mediaUrl)) throw new Error(`fake media fetch failed: 404`);
+      // The failure shape Twilio really returns for media it has not served
+      // yet (prod 2026-08-17/18): a typed 404, which the mirror treats as
+      // TRANSIENT (retried inline, then deferred to media.mirror).
+      if (failMediaUrls.has(mediaUrl)) throw new MediaFetchHttpError('fake media fetch failed: 404', 404);
+      const remaining = failMediaUrlsFor.get(mediaUrl) ?? 0;
+      if (remaining > 0) {
+        failMediaUrlsFor.set(mediaUrl, remaining - 1);
+        throw new MediaFetchHttpError('fake media fetch failed: 404 (not served yet)', 404);
+      }
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
     },
     async getRecordingStream(recordingUrl) {
@@ -3461,6 +3527,7 @@ export function createFakeWorld(): FakeWorld {
     deletedMediaKeys,
     failMediaDeletes,
     failMediaUrls,
+    failMediaUrlsFor,
     failRecordingUrls,
     mediaObjects,
     events,

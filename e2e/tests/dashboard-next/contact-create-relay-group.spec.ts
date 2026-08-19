@@ -158,7 +158,11 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   //     there is no Add button - and the field resets itself. ---
   const search = picker.getByRole('combobox', { name: 'Add member' });
   await search.fill('Marcus');
-  await picker.getByRole('option', { name: new RegExp(LANDLORD_NAME) }).click();
+  // Portaled to document.body - a sibling of the picker, not a descendant.
+  await page
+    .getByRole('listbox', { name: 'Add member suggestions' })
+    .getByRole('option', { name: new RegExp(LANDLORD_NAME) })
+    .click();
   await expect(members.getByRole('listitem')).toHaveCount(2);
   await expect(members.getByText(LANDLORD_NAME)).toBeVisible();
   await expect(search).toHaveValue('');

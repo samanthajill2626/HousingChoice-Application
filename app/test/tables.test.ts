@@ -161,7 +161,7 @@ describe('tables.ts — the table contract', () => {
     expect(byProperty?.sparse).toBe(true);
   });
 
-  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus, byUnread', () => {
+  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus, byUnread, byRelayOptOut', () => {
     const t = spec('conversations');
     expect(t.hashKey.name).toBe('conversationId');
     expect(t.rangeKey).toBeUndefined();
@@ -172,6 +172,7 @@ describe('tables.ts — the table contract', () => {
       'byPoolNumber',
       'byRelayStatus',
       'byUnread',
+      'byRelayOptOut',
     ]);
     // byParticipantEmail: sparse email-participant index (email channel v1).
     const byParticipantEmail = t.gsis.find((g) => g.indexName === 'byParticipantEmail');
@@ -193,6 +194,16 @@ describe('tables.ts — the table contract', () => {
     expect(byUnread?.hashKey.type).toBe('S');
     expect(byUnread?.rangeKey?.name).toBe('last_activity_at');
     expect(byUnread?.rangeKey?.type).toBe('S');
+    // byRelayOptOut: sparse relay opt-out ATTENTION index (2026-08-18), same
+    // shape as byUnread - a constant HASH, last_activity_at as the sort, REMOVE
+    // retires the row - so Today's relay opt-out pass reads O(attention items)
+    // instead of walking the open partition.
+    const byRelayOptOut = t.gsis.find((g) => g.indexName === 'byRelayOptOut');
+    expect(byRelayOptOut?.sparse).toBe(true);
+    expect(byRelayOptOut?.hashKey.name).toBe('relay_optout_flag');
+    expect(byRelayOptOut?.hashKey.type).toBe('S');
+    expect(byRelayOptOut?.rangeKey?.name).toBe('last_activity_at');
+    expect(byRelayOptOut?.rangeKey?.type).toBe('S');
   });
 
   it('messages: PK conversationId, SK ts#msgId; stream on; no GSIs', () => {

@@ -141,9 +141,6 @@ export function RosterConfirmDialog({
       // an intro to everyone listed), and `POST /api/relay-groups` has no
       // idempotency key, so the re-armed retry is a SECOND number and a second
       // text to the same people.
-      // TODO(modal-onclose-refocus-trap): an inline callback re-runs Modal's
-      // Escape/focus effect on every render of this component. Harmless here (no
-      // text input in the dialog); the class fix belongs in Modal.
       onClose={() => {
         if (!busy) onClose();
       }}

@@ -144,6 +144,7 @@ function makeSendFakes(
     queryUnreadPage: async (opts) => queryUnreadPageFromItems([conversation], opts),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
+    listRelayOptOutAttention: async () => ({ items: [] }),
     setMode: async (_id, mode) => {
       conversation.ai_mode = mode;
     },
@@ -242,6 +243,8 @@ function makeSendFakes(
     getByTsMsgId: async () => undefined,
     getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
+    putMediaPointers: async () => {},
+    listMediaPointers: async () => [],
     putJobExecutionMarker: async () => true,
     getJobExecutionMarker: async () => false,
     putParkedEmailEvent: async () => {},

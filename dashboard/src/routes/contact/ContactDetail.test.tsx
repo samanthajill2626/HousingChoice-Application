@@ -67,6 +67,10 @@ let capturedHandlers: Record<string, ((e: unknown) => void) | undefined> = {};
 // the fan-out below is what actually models it; handlers are useCallback-stable,
 // so this Set holds one entry per caller.
 const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
+// message.persisted likewise has several listeners (the timeline refetch, S7's
+// mark-read, and useContactMedia's gallery refetch since 2026-08-18) - fanned
+// out the same way so a test can deliver ONE event to all of them.
+const messagePersistedHandlers = new Set<(e: unknown) => void>();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -109,6 +113,9 @@ vi.mock('../../api/index.js', async () => {
       if (handlers['onConversationUpdated'] !== undefined) {
         conversationUpdatedHandlers.add(handlers['onConversationUpdated']);
       }
+      if (handlers['onMessagePersisted'] !== undefined) {
+        messagePersistedHandlers.add(handlers['onMessagePersisted']);
+      }
     },
   };
 });
@@ -135,6 +142,13 @@ function renderAt(contactId: string) {
 function emitConversationUpdated(event: Record<string, unknown>): void {
   act(() => {
     for (const handler of [...conversationUpdatedHandlers]) handler(event);
+  });
+}
+
+/** Deliver one message.persisted to EVERY registered listener. */
+function emitMessagePersisted(event: Record<string, unknown>): void {
+  act(() => {
+    for (const handler of [...messagePersistedHandlers]) handler(event);
   });
 }
 
@@ -232,6 +246,7 @@ const OTHER: Contact = {
 
 beforeEach(() => {
   conversationUpdatedHandlers.clear();
+  messagePersistedHandlers.clear();
   noteRowsCleared.mockReset();
   rollbackRowsCleared.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
@@ -265,7 +280,8 @@ beforeEach(() => {
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-  getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+  // The gallery reads the media index (2026-08-18): an empty first page by default.
+  getContactMedia.mockResolvedValue({ media: [] });
   // Same degrade-on-404 default as the sibling slices: the "Relay groups" card
   // renders its pending panel, exactly as it did before this slice was mocked.
   getContactRelayGroups.mockReset();
@@ -2186,7 +2202,7 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     // Still on the contact page, still looking at it: a new inbound must be
     // marked read exactly as it was before the failed attempt.
     markInboxRead.mockClear();
-    act(() => capturedHandlers['onMessagePersisted']?.({}));
+    emitMessagePersisted({});
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'k1' }));
   });
 

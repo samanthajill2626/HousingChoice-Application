@@ -529,7 +529,10 @@ describe('PeopleCard - edit mode', () => {
     await userEvent.click(screen.getByRole('button', { name: '+ Add any contact' }));
     const search = await screen.findByRole('combobox', { name: 'Add any contact' });
     await userEvent.type(search, 'Alicia');
-    await userEvent.click(await screen.findByRole('option', { name: 'Alicia Grant' }));
+    // Substring, not exact: a chooser option's accessible name is the contact's
+    // name PLUS their kind (ContactSearchField renders it so a first-name-only
+    // roster is navigable), so an exact name never matches.
+    await userEvent.click(await screen.findByRole('option', { name: /Alicia Grant/ }));
     await userEvent.click(screen.getByRole('button', { name: 'Add contact to this tour' }));
     await waitFor(() =>
       expect(addTourRosterMember).toHaveBeenCalledWith('tour-abc', { contactId: 'c-pm' }),

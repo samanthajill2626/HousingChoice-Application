@@ -106,6 +106,56 @@ describe('inbound MMS media mirroring', () => {
     ]);
   });
 
+  // THE DEFECT THESE PIN (prod, 2026-08-17/18). Twilio serves an inbound MMS's
+  // media a beat AFTER it fires the webhook; the single inline fetch 404'd on 2
+  // of the day's 6 inbound MMS (~140ms after the message existed, media present
+  // on re-read), logged ERROR, and the photo was lost from the thread for good
+  // because the dashboard never renders the provider URL it "kept".
+  it('a media 404 that clears within the inline retries STILL LANDS on the first delivery', async () => {
+    const world = createFakeWorld();
+    const { app, capture } = makeWebhookHarness({ world });
+    // Not served yet on the first two tries; served on the third.
+    world.failMediaUrlsFor.set('https://api.twilio.com/media/abc0', 2);
+
+    await signedTwilioPost(app, '/webhooks/twilio/sms', inboundMmsParams());
+
+    expect(world.mediaPuts).toHaveLength(1);
+    const msg = [...world.messages.values()].find((m) => m.provider_sid === 'SMmms0001');
+    expect(msg?.media_attachments).toEqual([{ s3Key: world.mediaPuts[0]!.key, contentType: 'image/jpeg' }]);
+    // No ERROR for a race that resolved itself; the retries are INFO.
+    expect(capture.atLevel(50).find((l) => String(l['msg']).includes('media mirror'))).toBeUndefined();
+    expect(capture.atLevel(30).filter((l) => String(l['msg']).includes('retrying'))).toHaveLength(2);
+  }, 15_000);
+
+  it('a media 404 that OUTLASTS the inline retries is DEFERRED to media.mirror at WARN, not lost at ERROR', async () => {
+    const world = createFakeWorld();
+    const { app, capture } = makeWebhookHarness({ world });
+    // A capturing queue: the deferral is asserted, never run here.
+    const envelopes: { jobName: string; payload: unknown }[] = [];
+    configureOutboundQueue({
+      async enqueue(envelope) {
+        envelopes.push({ jobName: envelope.jobName, payload: envelope.payload });
+      },
+    });
+    world.failMediaUrls.add('https://api.twilio.com/media/abc0');
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/sms', inboundMmsParams());
+
+    expect(res.status).toBe(200);
+    expect(world.mediaPuts).toHaveLength(0);
+    // The job carries exactly the missing attachment, at rung 1.
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]!.jobName).toBe('media.mirror');
+    expect(envelopes[0]!.payload).toMatchObject({
+      messageSid: 'SMmms0001',
+      attempt: 1,
+      media: [{ index: 0, url: 'https://api.twilio.com/media/abc0', contentType: 'image/jpeg' }],
+    });
+    const deferred = capture.atLevel(40).find((l) => l['event'] === 'media_mirror_deferred');
+    expect(deferred).toBeDefined();
+    expect(capture.atLevel(50).find((l) => String(l['msg']).includes('media mirror'))).toBeUndefined();
+  }, 15_000);
+
   it('normalizes a dangerous sender Content-Type to octet-stream AT STORE time', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });

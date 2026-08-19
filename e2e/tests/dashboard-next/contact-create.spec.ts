@@ -184,7 +184,11 @@ test.describe('Extensible contact creation', () => {
     await editDialog.getByRole('button', { name: '+ Add relationship' }).click();
     await editDialog.getByLabel('Relationship role 1').fill('Caseworker');
     await editDialog.getByLabel('Contact search 1').fill('Marcus');
-    await editDialog.getByRole('option', { name: /Marcus Bell/i }).click();
+    // Portaled to document.body - a sibling of the dialog, not a descendant.
+    await page
+      .getByRole('listbox', { name: 'Contact search 1 suggestions' })
+      .getByRole('option', { name: /Marcus Bell/i })
+      .click();
     await editDialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(editDialog).toHaveCount(0);
 

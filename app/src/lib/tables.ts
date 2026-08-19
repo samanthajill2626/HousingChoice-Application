@@ -185,6 +185,21 @@ export const TABLES: readonly TableSpec[] = [
         rangeKey: { name: 'last_activity_at', type: 'S' },
         sparse: true,
       },
+      // Sparse relay opt-out ATTENTION index (2026-08-18): relay_optout_flag
+      // exists ONLY while a relay group's `relay_opted_out_members` map is
+      // non-empty, maintained by setRelayMemberOptedOut / clearRelayMemberOptedOut
+      // and dropped on relay close. Today's "opted out of a relay group" attention
+      // pass used to WALK the whole open 1:1+relay partition (hard-capped at 100
+      // rows) to find these - 649 open threads in prod, one relay group, and a
+      // truncation WARN on every Today load. Same shape as byUnread: a CONSTANT
+      // hash value, last_activity_at as the sort, REMOVE retires the row, so the
+      // read costs O(actual attention items) and a cap on it means something.
+      {
+        indexName: 'byRelayOptOut',
+        hashKey: { name: 'relay_optout_flag', type: 'S' },
+        rangeKey: { name: 'last_activity_at', type: 'S' },
+        sparse: true,
+      },
     ],
   },
   {

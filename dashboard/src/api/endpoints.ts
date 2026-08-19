@@ -21,7 +21,7 @@ import type {
   PoolNumberRow,
   Contact,
   ContactCreate,
-  ContactMediaItem,
+  ContactMediaPage,
   ContactPatch,
   ContactsPage,
   ContactTimelinePage,
@@ -1228,17 +1228,19 @@ export async function getContactListingsSent(
   return res.sent;
 }
 
-/** GET /api/contacts/:id/media (C5) - aggregated comms media. 404s until BE5
- *  lands ? the "Media from comms" panel renders a "pending backend" state. */
-export async function getContactMedia(
+/** GET /api/contacts/:id/media?limit=&cursor= - one newest-first page of the
+ *  contact's indexed comms media across their 1:1 threads (2026-08-18). Pass the
+ *  previous page's `nextCursor` to walk older media; no cap on how far back. */
+export function getContactMedia(
   contactId: string,
+  opts: { cursor?: string | undefined; limit?: number | undefined } = {},
   signal?: AbortSignal,
-): Promise<ContactMediaItem[]> {
-  const res = await request<{ media: ContactMediaItem[] }>(
-    `/api/contacts/${encodeURIComponent(contactId)}/media`,
-    { ...(signal !== undefined && { signal }) },
-  );
-  return res.media;
+): Promise<ContactMediaPage> {
+  return request<ContactMediaPage>(`/api/contacts/${encodeURIComponent(contactId)}/media`, {
+    // request() drops undefined query values: no cursor = the newest page.
+    query: { limit: opts.limit, cursor: opts.cursor },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/contacts/:id/relay-groups - the contact's relay-group

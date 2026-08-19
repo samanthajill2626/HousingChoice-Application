@@ -163,8 +163,10 @@ describe('GET /:contactId/media - email attachments (ADJ-1c)', () => {
     const res = await auth(request(app).get('/api/contacts/c-m/media'));
     expect(res.status).toBe(200);
     expect(res.body.media).toHaveLength(1);
+    // Addressed as the serve endpoint addresses it (2026-08-18) - never an S3 key.
     expect(res.body.media[0]).toMatchObject({
-      s3Key: 'media/conv-m/doc0',
+      providerSid: '<in-doc@sender.example.com>',
+      index: 0,
       contentType: 'application/pdf',
       conversationId: 'conv-m',
     });

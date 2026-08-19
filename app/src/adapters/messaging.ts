@@ -263,6 +263,24 @@ export class MediaFetchRefusedError extends Error {
 }
 
 /**
+ * The provider answered the media fetch with a non-2xx status. Carries the
+ * status so the mirror can tell a TRANSIENT refusal from a permanent one:
+ * Twilio serves an inbound MMS's media a beat AFTER it fires the message
+ * webhook, and a fetch inside that beat gets a 404 (prod, 2026-08-17/18: 2 of
+ * 6 inbound MMS in one day, both ~140ms after the webhook, both media present
+ * on re-read). A 404/408/425/429/5xx is retried; any other 4xx is not.
+ */
+export class MediaFetchHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/**
  * Wrap a media Readable in a byte-COUNTING cap (FIX 3). The Content-Length
  * header is a cheap early-out but is unreliable: a chunked / Content-Length-less
  * response (common once Twilio 302-redirects the media to S3) would otherwise
@@ -949,7 +967,10 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       signal: controller.signal,
     });
     if (!res.ok || !res.body) {
-      throw new Error(`${op}: ${res.status} ${res.statusText} fetching Twilio media`);
+      throw new MediaFetchHttpError(
+        `${op}: ${res.status} ${res.statusText} fetching Twilio media`,
+        res.status,
+      );
     }
     // Size cap, layer 1 (cheap early-out): refuse up front when the response
     // ADVERTISES an oversize Content-Length, before streaming a byte.
@@ -1011,7 +1032,10 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     // Local media needs no provider auth — plain streamed fetch.
     const res = await fetch(mediaUrl);
     if (!res.ok || !res.body) {
-      throw new Error(`getMediaStream: ${res.status} ${res.statusText} fetching media`);
+      throw new MediaFetchHttpError(
+        `getMediaStream: ${res.status} ${res.statusText} fetching media`,
+        res.status,
+      );
     }
     return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
   }

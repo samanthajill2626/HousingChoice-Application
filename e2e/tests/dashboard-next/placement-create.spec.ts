@@ -49,11 +49,17 @@ test.describe('Manual placement creation', () => {
 
     // Pick the seeded tenant (type → click the matching option).
     await dialog.getByRole('combobox', { name: 'Tenant' }).fill('Tasha');
-    await dialog.getByRole('option', { name: /Tasha Nguyen/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Tenant suggestions' })
+      .getByRole('option', { name: /Tasha Nguyen/ })
+      .click();
 
     // Pick unit-0002 (88 Sycamore) — no UNIT-side overlap.
     await dialog.getByRole('combobox', { name: 'Unit' }).fill('Sycamore');
-    await dialog.getByRole('option', { name: /88 Sycamore St/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Unit suggestions' })
+      .getByRole('option', { name: /88 Sycamore St/ })
+      .click();
 
     // Warn-but-allow (§G-4): Tasha already has an active placement, so the
     // TENANT-side overlap notice IS shown. It must NOT block the create — assert it
@@ -94,7 +100,10 @@ test.describe('Manual placement creation', () => {
 
     // Pick the seeded tenant; Create.
     await dialog.getByRole('combobox', { name: 'Tenant' }).fill('Tasha');
-    await dialog.getByRole('option', { name: /Tasha Nguyen/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Tenant suggestions' })
+      .getByRole('option', { name: /Tasha Nguyen/ })
+      .click();
     await dialog.getByRole('button', { name: 'Create' }).click();
 
     // Lands on the new placement's detail page, showing this tenant + unit.
@@ -124,7 +133,10 @@ test.describe('Manual placement creation', () => {
 
     // Pick unit-0002; Create.
     await dialog.getByRole('combobox', { name: 'Unit' }).fill('Sycamore');
-    await dialog.getByRole('option', { name: /88 Sycamore St/ }).click();
+    await page
+      .getByRole('listbox', { name: 'Unit suggestions' })
+      .getByRole('option', { name: /88 Sycamore St/ })
+      .click();
     await dialog.getByRole('button', { name: 'Create' }).click();
 
     // Lands on the new placement's detail page, showing this tenant + unit.

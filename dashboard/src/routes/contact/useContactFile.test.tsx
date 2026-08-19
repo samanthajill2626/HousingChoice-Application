@@ -6,7 +6,6 @@ import type { PlacementsPage, UnitsPage } from '../../api/index.js';
 const getPlacements = vi.fn();
 const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
-const getContactMedia = vi.fn();
 const getContactRelayGroups = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
@@ -16,7 +15,6 @@ vi.mock('../../api/index.js', async () => {
     getPlacements: (...a: unknown[]) => getPlacements(...a),
     getUnits: (...a: unknown[]) => getUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
-    getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
   };
 });
@@ -31,7 +29,6 @@ function Probe({ contactId }: { contactId: string }): React.JSX.Element {
       <span data-testid="placements">{f.placements.length}</span>
       <span data-testid="units">{f.units.length}</span>
       <span data-testid="sent">{f.listingsSent.status}</span>
-      <span data-testid="media">{f.media.status}</span>
       <span data-testid="groups">{f.relayGroups.status}</span>
       <span data-testid="groupCount">
         {f.relayGroups.status === 'ready' ? f.relayGroups.rows.length : ''}
@@ -56,7 +53,6 @@ beforeEach(() => {
   getPlacements.mockReset();
   getUnits.mockReset();
   getContactListingsSent.mockReset();
-  getContactMedia.mockReset();
   getContactRelayGroups.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
@@ -66,7 +62,6 @@ describe('useContactFile', () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe contactId="k1" />);
@@ -75,7 +70,6 @@ describe('useContactFile', () => {
     expect(screen.getByTestId('placements').textContent).toBe('1');
     expect(screen.getByTestId('units').textContent).toBe('1');
     expect(screen.getByTestId('sent').textContent).toBe('pending');
-    expect(screen.getByTestId('media').textContent).toBe('pending');
     expect(screen.getByTestId('groups').textContent).toBe('pending');
   });
 
@@ -93,7 +87,6 @@ describe('useContactFile', () => {
       ),
     );
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe contactId="k1" />);
@@ -106,7 +99,6 @@ describe('useContactFile', () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockResolvedValue([]);
-    getContactMedia.mockResolvedValue([]);
     getContactRelayGroups.mockResolvedValue([
       {
         conversationId: 'conv-g1',
@@ -123,7 +115,6 @@ describe('useContactFile', () => {
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(screen.getByTestId('sent').textContent).toBe('ready');
-    expect(screen.getByTestId('media').textContent).toBe('ready');
     expect(screen.getByTestId('groups').textContent).toBe('ready');
     expect(screen.getByTestId('groupCount').textContent).toBe('1');
   });
@@ -136,7 +127,6 @@ describe('useContactFile', () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockResolvedValueOnce([]).mockResolvedValue([
       {
         conversationId: 'conv-new',
@@ -171,7 +161,6 @@ describe('useContactFile', () => {
     getPlacements.mockResolvedValueOnce(CASES).mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockResolvedValue([
       {
         conversationId: 'conv-g1',
@@ -201,7 +190,6 @@ describe('useContactFile', () => {
     getPlacements.mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-    getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe contactId="k1" />);

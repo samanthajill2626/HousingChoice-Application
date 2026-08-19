@@ -1,53 +1,47 @@
 ---
 id: modal-onclose-refocus-trap
-title: Modal keys its Escape/focus effect on onClose, so any parent re-render steals focus into the dialog and drops keystrokes
+title: Modal onClose changes steal input focus during re-renders
 type: bug
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-17
-refs: dashboard/src/routes/contact/Modal.tsx:21-36, dashboard/src/routes/contact/CreateRelayGroupModal.tsx:252-255, dashboard/src/routes/contact/ContactEditForm.tsx, dashboard/src/routes/contact/PhoneManager.tsx
+updated: 2026-08-18
+resolved: 2026-08-18
+refs: dashboard/src/routes/contact/Modal.tsx, dashboard/src/routes/contact/Modal.test.tsx, dashboard/src/routes/contact/CreateRelayGroupModal.test.tsx, e2e/tests/flows/email-triage.spec.ts
 ---
 
-**Problem.** `Modal`'s one effect does three things - move focus into the dialog,
-register the document-level Escape handler, and (on cleanup) return focus to the
-previously focused element - and it is keyed on `[onClose]`
-(`Modal.tsx:21-36`). So every time a parent passes a NEW callback identity the
-effect tears down and re-runs: focus leaves whatever the operator was typing in,
-lands on the dialog container, and every subsequent keystroke goes nowhere until
-they click back into the field.
+**Problem.** `Modal` previously used one effect keyed on `[onClose]` to move focus
+into the dialog, register its document-level Escape handler, and restore focus on
+cleanup. A parent render that supplied a new callback identity therefore looked
+like dialog teardown and remount: focus left the field the operator was typing in,
+landed on the dialog container, and later keystrokes were dropped.
 
-Nothing about a re-render should move focus, so the trap fires on ordinary page
-activity. Reproduced in the contact-create-relay-group re-review against
-`CreateRelayGroupModal`, whose parent (`ContactDetail`) re-renders on
-`message.persisted`, `conversation.updated` and `scheduled.updated` SSE events -
-and the operator is on that page precisely because the contact is texting them:
+The failure was reproduced both through an ordinary controlled input render in the
+Email "Link to contact" dialog and through a page-behind update while the relay
+group member search held focus. In the Email flow, character-by-character input
+stopped at `T` while `document.activeElement` became the dialog.
 
-```
-PROBE control value >>> Marcus      (no parent re-render: typing accumulates)
-PROBE before bump, activeElement >>> Add member
-PROBE after bump, activeElement >>> dialog
-PROBE after bump, value >>> Mar     (three keystrokes dropped)
-```
+**Resolution (2026-08-18).** `Modal` now separates current callback state from
+mount lifecycle state. Its document listener reads the latest `onClose` from a ref,
+while dialog focus, listener registration, and trigger restoration run only for the
+mount lifecycle. Initial dialog focus is a fallback: if a child has already focused
+one of its fields during mount, that focus is preserved. The original trigger is
+captured before child effects can claim focus. The final dialog restores that
+trigger on unmount; when another dialog remains, focus instead stays within that
+next dialog.
 
-That branch fixed its own instance from the caller's side (ContactDetail
-memoizes the handler it passes, and the modal memoizes the busy-guard it builds
-from it), which makes the symptom unreachable for that ONE modal. It is a
-discipline every future caller has to know about rather than a fix: the same
-wiring is shared by `ContactEditForm` and `PhoneManager`, which also hold text
-inputs, and by `RosterConfirmDialog`, which now passes an inline busy-guard by
-design.
+The Escape listener also respects a descendant that has already called
+`preventDefault()`, allowing an open typeahead to consume the first Escape without
+closing its dialog. A mount-order stack ensures that, if more than one dialog is
+temporarily mounted, only the top dialog consumes Escape and underlying busy guards
+cannot intercept it. Caller-side callback memoization used only as a focus
+workaround was removed. Unit coverage pins mount-time child focus, fresh callbacks,
+current Escape callbacks, descendant and stacked-dialog Escape handling, and
+trigger restoration. The focused Email Playwright regression types sequentially
+and asserts both retained focus and the complete value.
 
-**Suggested fix.** Fix it in `Modal`, where it belongs: keep `onClose` in a ref
-updated each render, and key the effect `[]`. The Escape handler reads the ref,
-so it always calls the current callback while the focus/cleanup pair runs exactly
-once per mount. That retires the whole class and lets the callers stop memoizing
-defensively.
-
-**Same component, while you are in there (re-review R8).** The header X still
-LOOKS live while a flow is busy: after the busy guards landed, Cancel greys out
-but Escape / the backdrop / the X silently no-op, so the X invites a click that
-does nothing and says nothing (`PROBE X-Close disabled while busy >>> false`).
-An optional `busy` prop that disables the X - or a short note in the header -
-would make the freeze legible instead of merely safe. Legibility, not
-correctness: nothing is lost by the no-op.
+Two separate concerns remain intentionally open: the busy-state close affordance in
+[modal-busy-close-affordance](./modal-busy-close-affordance.md) and missing Tab-key
+containment in
+[modal-tab-focus-containment](./modal-tab-focus-containment.md).

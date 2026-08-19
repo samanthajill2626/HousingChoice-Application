@@ -2352,14 +2352,26 @@ export interface MmsMediaAttachment {
   pdfPageCount?: number;
 }
 
-// --- C5: Media aggregation (§API Contract C5) -------------------------------
-// Copied verbatim from the build plan §C5. The "Media from comms" card.
+// --- Media aggregation: the "Media from comms" gallery ------------------------
+// Copied verbatim from the backend wire shape (routes/contacts.ts
+// ContactMediaItem - GET /api/contacts/:id/media, 2026-08-18). One indexed
+// attachment, ADDRESSED the way the serve endpoint addresses it:
+// GET /api/messages/:providerSid/media/:index. Never an S3 key or a provider URL.
 
 export interface ContactMediaItem {
-  s3Key: string;
+  providerSid: string;
+  /** Position in the carrying message's stored attachments - the serve :index. */
+  index: number;
   contentType: string;
+  /** ISO 8601 - the carrying message's provider_ts (the gallery order). */
   at: string;
   conversationId: string;
+}
+
+/** One newest-first page of the gallery; `nextCursor` present while older media exists. */
+export interface ContactMediaPage {
+  media: ContactMediaItem[];
+  nextCursor?: string;
 }
 
 // --- Relay-group memberships (the contact file's "Relay groups" card) --------

@@ -76,8 +76,19 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
     await strangerRow.getByRole('button', { name: 'Link to contact' }).click();
     const dialog = page.getByRole('dialog', { name: 'Link to contact' });
     await expect(dialog).toBeVisible();
-    await dialog.getByRole('combobox', { name: 'Search contacts' }).fill('Tasha');
-    await dialog.getByRole('option', { name: /Tasha/ }).click();
+    const contactSearch = dialog.getByRole('combobox', { name: 'Search contacts' });
+    await contactSearch.pressSequentially('Tasha');
+    await expect(contactSearch).toBeFocused();
+    await expect(contactSearch).toHaveValue('Tasha');
+    // The suggestion list is PORTALED to document.body (a fixed-position popover,
+    // so a modal's scrolling body cannot clip it), which makes it a SIBLING of
+    // the dialog rather than a descendant. Scope options through the page-level
+    // listbox by its accessible name - `<input label> suggestions` - never
+    // through the dialog. See e2e/support/selectors.md.
+    await page
+      .getByRole('listbox', { name: 'Search contacts suggestions' })
+      .getByRole('option', { name: /Tasha/ })
+      .click();
     await dialog.getByRole('button', { name: 'Link', exact: true }).click();
 
     // (e) It lands in Tasha's timeline (re-ingested into her thread) AND her contact

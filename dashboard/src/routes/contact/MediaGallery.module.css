@@ -35,3 +35,29 @@
 .glyph {
   font-size: var(--fs-lg);
 }
+
+/* "Load older media" - the same quiet pill the timeline's load-older uses. */
+.loadMore {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--sp-2);
+}
+
+.loadMoreButton {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.loadMoreButton:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.loadMoreButton:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

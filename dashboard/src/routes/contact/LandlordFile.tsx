@@ -34,7 +34,7 @@ import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
-import { MediaGallery } from './MediaGallery.js';
+import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordPlacements, landlordUnits } from './buildContactFile.js';
 import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
@@ -60,6 +60,8 @@ export interface LandlordFileProps {
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** "Load older media" for the gallery (useContactMedia's paging), when the caller pages. */
+  mediaPaging?: MediaGalleryPaging | undefined;
   /** Open the edit dialog (Details "Edit" + Preferences "+ Add"). */
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
@@ -97,6 +99,7 @@ export function LandlordFile({
   groupThreadsTruncated,
   media,
   mediaLoading,
+  mediaPaging,
   onEdit,
   onManagePhones,
   onAddProperty,
@@ -260,7 +263,7 @@ export function LandlordFile({
       />
 
       <Card title="Media from comms">
-        <MediaGallery media={media} loading={mediaLoading ?? false} />
+        <MediaGallery media={media} loading={mediaLoading ?? false} paging={mediaPaging} />
       </Card>
     </>
   );

@@ -1,7 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { clearLogTail } from '../../fixtures/groupText.js';
 import { getOutbox } from '../../fixtures/outbox.js';
-import { driveConnectingGroupToOpen } from '../../fixtures/relayConnect.js';
+import { driveConnectingGroupToOpen, type RelayConversation } from '../../fixtures/relayConnect.js';
 // Single source of truth for the relay intro copy (no drift): the spec reads the
 // app catalog directly, the same cross-package import tour-roster.spec.ts uses.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
@@ -66,6 +66,9 @@ const TENANT_NAME = 'Tasha Nguyen';
 const TENANT_PHONE = '+15550100001';
 const LANDLORD_NAME = 'Marcus Bell';
 const LANDLORD_PHONE = '+15550100002';
+// A third party for the superset case, deliberately OUTSIDE the lean seed's
+// +1555010xxxx block so it can never collide with a seeded contact.
+const THIRD_PHONE = '+15558009001';
 
 // The connecting result panel's notice, byte-exact (the string the modal ships).
 const CONNECTING_NOTICE =
@@ -276,4 +279,178 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   //     group's own warmed number (it could not have before the group opened). --
   await expectOutboxIncludes(request, TENANT_PHONE, INTRO_NEEDLE, opened.pool_number);
   await expectOutboxIncludes(request, LANDLORD_PHONE, INTRO_NEEDLE, opened.pool_number);
+});
+
+// --- The duplicate-group warning (duplicate-relay-group-warning spec 5) ------
+//
+// Opening a relay group whose members EXACTLY match a group that is already live
+// warns, names the existing group's members, and links to it - and refuses
+// nothing. The two tests below are the only end-to-end proof of that: the first
+// walks the real picker into the real confirm dialog and then confirms THROUGH
+// the warning; the second pins the exactness of the match, which no UI assertion
+// can (a superset roster simply renders nothing, and "nothing rendered" is also
+// what a broken detector renders).
+//
+// Both need a live group for the pair BEFORE the browser work starts, which is
+// why both set an explicit timeout: the connect-when-ready handshake alone
+// budgets 30s (warm poll) + 60s (open poll), so test.slow()'s 90s leaves nothing
+// for the flow that follows it. The create test above survives on test.slow()
+// only because its handshake runs LAST.
+
+/** The tenant+landlord relay group these tests duplicate, created through the API
+ *  and returned OPEN.
+ *
+ *  The CONNECTING landing is asserted loudly rather than assumed: a group that
+ *  provisioned immediately would send driveConnectingGroupToOpen into a 30s hunt
+ *  for a warming number that is never coming, and the failure would read as a
+ *  timeout instead of "the lane's tier-3 precondition is gone". */
+async function seedLivePairGroup(page: Page): Promise<RelayConversation> {
+  const res = await page.request.post(`${NEXT}/api/relay-groups`, {
+    data: {
+      members: [
+        { phone: TENANT_PHONE, name: TENANT_NAME },
+        { phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+      ],
+    },
+  });
+  expect(res.ok(), `seed relay group create failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+  const { conversation } = (await res.json()) as {
+    conversation: { conversationId: string; status?: string };
+  };
+  expect(conversation.status, 'a fresh pair with no reusable number must be CONNECTING').toBe(
+    'connecting',
+  );
+  return driveConnectingGroupToOpen(page.request, conversation.conversationId);
+}
+
+/** The `duplicateOf` the SERVER puts on a standalone open preview for `members`,
+ *  or undefined when it flagged nothing. `page.request`, never the bare `request`
+ *  fixture: /api is behind requireAuth() and the bare fixture carries no session. */
+async function previewDuplicateOf(
+  page: Page,
+  members: { phone: string; name: string }[],
+): Promise<{ conversationId: string; partition: string; memberNames: string[] } | undefined> {
+  const res = await page.request.post(`${NEXT}/api/relay-groups/preview`, { data: { members } });
+  expect(res.ok(), `relay group preview failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+  // The route answers the RosterPreview itself, not a wrapper.
+  return (
+    (await res.json()) as {
+      duplicateOf?: { conversationId: string; partition: string; memberNames: string[] };
+    }
+  ).duplicateOf;
+}
+
+test('Contact file: a second group for the same pair WARNS, and is still created', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await devLogin(page);
+
+  // --- Arrange: a LIVE group for exactly this pair, made through the API so the
+  //     browser half of this test is only about the warning. ---
+  const existing = await seedLivePairGroup(page);
+
+  // --- Act: build the SAME pair again through the real picker ----------------
+  await page.goto(`${NEXT}/contacts/${TENANT_ID}`);
+  await page.getByRole('button', { name: 'Create a relay group' }).click();
+  const picker = page.getByRole('dialog', { name: 'Create a relay group' });
+  await expect(picker).toBeVisible();
+  await picker.getByRole('combobox', { name: 'Add member' }).fill('Marcus');
+  // Portaled to document.body - a sibling of the picker, not a descendant.
+  await page
+    .getByRole('listbox', { name: 'Add member suggestions' })
+    .getByRole('option', { name: new RegExp(LANDLORD_NAME) })
+    .click();
+  const members = picker.getByRole('list', { name: 'Members' });
+  await expect(members.getByRole('listitem')).toHaveCount(2);
+  await picker.getByRole('button', { name: 'Create group' }).click();
+
+  // --- Assert THE WARNING ----------------------------------------------------
+  const confirm = page.getByRole('dialog', { name: 'Open the relay group?' });
+  await expect(confirm).toBeVisible({ timeout: 20_000 });
+  // SCOPE EVERYTHING. role="status" is unique inside this dialog but NOT at page
+  // level (ContactDetail and CallMenu both render one), and the member names
+  // appear again in the message-preview bubble and the recipient rows - so a
+  // dialog-wide getByText would match several nodes and fail strict mode.
+  const warning = confirm.getByRole('status');
+  await expect(warning).toBeVisible();
+  // The OPEN variant specifically: the seeded group was driven all the way to
+  // open, so the connecting sentence here would be a real mismatch rather than a
+  // lane artifact.
+  await expect(warning).toContainText('already have an open relay group');
+  await expect(warning).toContainText(TENANT_NAME);
+  await expect(warning).toContainText(LANDLORD_NAME);
+  // It names people and never prints a phone number (doc section 9).
+  await expect(warning).not.toContainText(TENANT_PHONE);
+  await expect(warning).not.toContainText(LANDLORD_PHONE);
+
+  // It links to THAT conversation, and opens it in a NEW TAB - following it in
+  // this one would discard the half-built group the operator is standing in.
+  const link = warning.getByRole('link', { name: 'View the existing group' });
+  await expect(link).toHaveAttribute('href', `/conversations/${existing.conversationId}`);
+  await expect(link).toHaveAttribute('target', '_blank');
+
+  // --- Assert NOTHING IS REFUSED: this is the point of the feature -----------
+  // The warning is advice, not a gate. Confirming through it creates the second
+  // group exactly as it would have without one.
+  await confirm.getByRole('button', { name: 'Open relay group' }).click();
+  await expect(confirm).toHaveCount(0, { timeout: 30_000 });
+
+  // A closed dialog is not proof of a created group. Read the tenant's own
+  // relay-groups slice - the endpoint the card behind the modal re-reads, and the
+  // one that lists the connecting partition too, so this holds whichever tier the
+  // second create landed on. Polled because that read walks the byRelayStatus
+  // GSI, which is eventually consistent (the create test above allows the same
+  // slack when it waits for the card row).
+  let secondId = '';
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(`${NEXT}/api/contacts/${TENANT_ID}/relay-groups`);
+        if (!res.ok()) return -1;
+        const { groups } = (await res.json()) as { groups: { conversationId: string }[] };
+        secondId =
+          groups.map((g) => g.conversationId).find((id) => id !== existing.conversationId) ?? '';
+        return groups.length;
+      },
+      {
+        timeout: 20_000,
+        message: 'the confirmed duplicate group never appeared on the contact file',
+      },
+    )
+    .toBe(2);
+  expect(secondId, 'the second group is a NEW conversation, not the existing one').not.toBe('');
+});
+
+test('Contact file: a SUPERSET roster does not warn', async ({ page }) => {
+  test.setTimeout(180_000);
+  await devLogin(page);
+
+  const existing = await seedLivePairGroup(page);
+
+  // This case asserts an ABSENCE, so it goes straight at the payload the dialog
+  // is built from: the server's own preview. That is the cheapest honest proof
+  // that the SERVER did not flag it - and without this case a regression to
+  // containment matching passes every other test in this suite.
+  //
+  // THE CONTROL FIRST. A detector that matched nothing at all would sail through
+  // the negative below, so prove the seeded group is discoverable on the exact
+  // pair before proving the superset is not.
+  const exact = await previewDuplicateOf(page, [
+    { phone: TENANT_PHONE, name: TENANT_NAME },
+    { phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+  ]);
+  expect(
+    exact?.conversationId,
+    'the exact pair must still flag, or the superset negative below is vacuous',
+  ).toBe(existing.conversationId);
+  expect(exact?.partition).toBe('open');
+
+  // Same pair PLUS a third person: a different conversation, so no warning.
+  const superset = await previewDuplicateOf(page, [
+    { phone: TENANT_PHONE, name: TENANT_NAME },
+    { phone: LANDLORD_PHONE, name: LANDLORD_NAME },
+    { phone: THIRD_PHONE, name: 'Third Person' },
+  ]);
+  expect(superset, 'a superset roster is a different group and must not warn').toBeUndefined();
 });

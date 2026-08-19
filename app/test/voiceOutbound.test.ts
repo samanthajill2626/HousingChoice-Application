@@ -408,6 +408,64 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(entry.call_duration).toBe(30);
   });
 
+  // I1 REGRESSION (spec 6.2 / issue
+  // docs/issues/outbound-call-outcome-answered-before-target-rings.md): the
+  // outbound whisper gate stamps answered_at on the NAVIGATOR's own leg at
+  // press-1, before the target's phone rings. The stored outcome must come from
+  // the <Dial action> summary (which describes the TARGET leg), not from that
+  // stamp, so a rung-out outbound call is stored 'missed' with no duration.
+  it('press-1 then a TERMINAL no-answer Dial summary stores missed with NO duration (outbound reads the Dial summary, not press-1)', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    // press-1 landed, so answered_at (and therefore bridgeAccepted) is set.
+    const accepted = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(accepted.answered_at).toBeDefined();
+
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'no-answer',
+      DialCallDuration: '0',
+      ApiVersion: '2010-04-01',
+    });
+
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(entry.call_status).toBe('no-answer');
+    expect(entry.call_outcome).toBe('missed');
+    expect(entry.call_duration).toBeUndefined();
+  });
+
+  // CHARACTERIZATION (plan section 3 / spec 6.2's `terminal` conjunct). HONEST
+  // NOTE: this cannot be red against the pre-S2 code - today's handler also
+  // writes 'answered' here (stampAnsweredAt). It guards the `terminal` conjunct
+  // of the S2 gate together with the fact that `entry` is fetched only for a
+  // terminal Dial summary: drop either and a non-terminal in-progress summary
+  // (where mapped !== 'completed') would store 'missed' for a call that just
+  // bridged. The row is deliberately left at 'ringing' - the gate's best-effort
+  // answered_at write is allowed to fail (spec I3), and that is exactly the case
+  // where the forward-only ConditionExpression would NOT mask the mistake.
+  it('a NON-terminal in-progress Dial summary on a still-ringing outbound call never stores missed', async () => {
+    const { world, harness, callSid } = await originate();
+    // NO press-1: the gate write never happened, so the row is still 'ringing'.
+    const before = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(before.call_status).toBe('ringing');
+    expect(before.answered_at).toBeUndefined();
+
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'in-progress',
+      ApiVersion: '2010-04-01',
+    });
+
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(entry.call_status).toBe('in-progress');
+    expect(entry.call_outcome).not.toBe('missed');
+    expect(entry.call_outcome).toBe('answered');
+  });
+
   // B-missed: outbound call that the target never answers must NOT fire
   // onFounderBridgeMissed — no missed-call push, no MISSED_CALL_AUTOTEXT_JOB.
   // (Regression test for review finding I-1 / I-2.)

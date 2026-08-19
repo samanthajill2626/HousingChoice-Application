@@ -533,10 +533,12 @@ describe('outbound originate -> "Outgoing call" lifecycle, never unread', () => 
 
   it('outbound no-answer THROUGH the gate accept (the only production path to a <Dial>) -> "Outgoing call - no answer"; NEVER unread', async () => {
     // Adversarial r2 HIGH 1: the outbound gate stamps answered_at on the parent
-    // BEFORE the target rings, so the row's call_outcome reads 'answered' even
-    // when the target never picks up (pre-existing classification, tracked in
-    // docs/issues/outbound-call-outcome-answered-before-target-rings.md). The
-    // PREVIEW must still say no answer - it reads the Dial summary's own status.
+    // BEFORE the target rings, so `bridgeAccepted` describes the NAVIGATOR, not
+    // the target. The PREVIEW has always said no answer here - it reads the Dial
+    // summary's own status. As of spec 6.2 the STORED call_outcome reads the
+    // same signal and is 'missed' too (see voiceOutbound.test.ts), which closed
+    // docs/issues/outbound-call-outcome-answered-before-target-rings.md. This
+    // test still asserts only the preview, so it is unchanged by that fix.
     const world = createFakeWorld();
     const { app, conv, callSid } = await originate(world);
     await signedTwilioPost(

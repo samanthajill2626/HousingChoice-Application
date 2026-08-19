@@ -1381,14 +1381,53 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           : 'missed'
         : undefined;
 
+    // OUTBOUND SUBSTITUTION (spec 6.2, invariant I1). On an originate the
+    // whisper gate stamps answered_at on the NAVIGATOR's own leg at press-1,
+    // BEFORE the target's phone rings, so `bridgeAccepted` describes the
+    // navigator and never the target. The <Dial action> summary DOES describe
+    // the target leg, so for a TERMINAL outbound Dial summary the stored
+    // outcome and duration come from `mapped` instead. Every conjunct below is
+    // load-bearing:
+    //   - `terminal`: on a NON-terminal ('in-progress') summary `mapped` is not
+    //     'completed', so this rule would store 'missed' for a call that just
+    //     bridged. (`entry` is likewise fetched only under isDialSummary &&
+    //     terminal, so the two guards must stay in step.)
+    //   - `type === 'call'` / `masked !== true`: mirror the preview guard below.
+    //     Every masked row is inbound today (I7); restated so a future masked
+    //     outbound writer cannot silently inherit this rule.
+    //   - `direction === 'outbound'`: INBOUND is byte-identical to before and
+    //     keeps reading `bridgeAccepted`, where press-1 IS authoritative (the
+    //     whisper gate exists to block carrier voicemail, which cannot press 1).
+    // An undefined `entry` (unknown CallSid) falls through to the old behavior.
+    //
+    // NAMED DIVERGENCE (spec 6.2): a rung-out outbound call now stores
+    // call_outcome: 'missed' while THIS SAME invocation computes
+    // `isMissed === false` (answered_at is set, so `bridgeAccepted` is true).
+    // The two notions of "missed" now disagree inside one function. Nothing
+    // changes behaviorally because every consumer of `isMissed` is
+    // direction-gated: the unread rule below (`fresh.direction === 'inbound'`),
+    // the missed-founder-bridge trigger below (`fresh.direction !==
+    // 'outbound'`), and the TwiML voicemail offer at the tail of this handler
+    // (`entry.direction !== 'outbound'`). The next reader of `isMissed` on an
+    // OUTBOUND path must NOT inherit that trap - read the stored outcome.
+    const outboundSubstituted =
+      isDialSummary &&
+      terminal &&
+      entry?.type === 'call' &&
+      entry?.masked !== true &&
+      entry?.direction === 'outbound';
+    const storedOutcome = outboundSubstituted ? (mapped === 'completed' ? 'answered' : 'missed') : outcome;
+    const storedDuration = (outboundSubstituted ? mapped === 'completed' : bridgeAccepted) ? callDuration : undefined;
+
     const transitioned = await messages.updateCallStatus(entryCallSid, {
       callStatus: mapped,
-      ...(outcome !== undefined && { callOutcome: outcome }),
+      ...(storedOutcome !== undefined && { callOutcome: storedOutcome }),
       ...(stampAnsweredAt && { answeredAt: now }),
       ...(stampEndedAt && { endedAt: now }),
-      // A MISS has no meaningful talk time — only record a duration when the
-      // bridge was actually accepted.
-      ...(bridgeAccepted && callDuration !== undefined && { callDuration }),
+      // A MISS has no meaningful talk time - only record a duration when the
+      // call actually connected: inbound, that is the accepted bridge; outbound,
+      // it is the Dial summary reporting 'completed' (the substitution above).
+      ...(storedDuration !== undefined && { callDuration: storedDuration }),
     });
     log.info(
       { callSid: entryCallSid, providerStatus: rawStatus, callStatus: mapped, isDialSummary, transitioned },
@@ -1418,14 +1457,19 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // runs on the NAVIGATOR's own leg and stamps answered_at BEFORE the
         // target's phone rings, so `bridgeAccepted`/`outcome` say "answered"
         // for every outbound call that got as far as a <Dial> - including one
-        // the target never picked up. The stored call_outcome keeps that
-        // (pre-existing) classification - see
-        // docs/issues/outbound-call-outcome-answered-before-target-rings.md -
-        // but the PREVIEW reads the Dial summary's own status, which on an
-        // outbound leg describes the target: completed = the target answered,
-        // anything else = no answer. (An outbound Dial in-progress summary
-        // never transitions here - the gate already wrote in-progress - and
-        // callPreview renders "in progress" from callStatus regardless.)
+        // the target never picked up. The PREVIEW therefore reads the Dial
+        // summary's own status, which on an outbound leg describes the target:
+        // completed = the target answered, anything else = no answer. As of
+        // spec 6.2 the STORED call_outcome reads the same signal (the outbound
+        // substitution above the write - it closes
+        // docs/issues/outbound-call-outcome-answered-before-target-rings.md),
+        // so the two agree on a terminal summary. The one-line ternary below is
+        // duplicated ON PURPOSE rather than shared: it keys on `fresh` and also
+        // runs on NON-terminal summaries, where `entry` - and therefore the
+        // stored substitution - is undefined. (An outbound Dial in-progress
+        // summary normally never transitions here - the gate already wrote
+        // in-progress - and callPreview renders "in progress" from callStatus
+        // regardless.)
         let touched: ConversationItem | undefined;
         if (isDialSummary && fresh.type === 'call' && fresh.masked !== true) {
           const outbound = fresh.direction === 'outbound';

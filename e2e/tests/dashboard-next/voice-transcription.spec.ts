@@ -147,13 +147,18 @@ test('an answered business-line call gets a transcript with speaker labels + a r
 
 // ---------------------------------------------------------------------------
 // 2. Missed business-line call -> voicemail card + single-channel transcript,
-//    and the missed-call auto-text still fires
+//    and the INTAKE GATE withholds the auto-text from a caller we already know
 // ---------------------------------------------------------------------------
-test('a missed business-line call takes a voicemail (single-channel transcript + player) and still auto-texts', async ({
+test('a missed business-line call takes a voicemail (single-channel transcript + player) and does NOT auto-text a known caller', async ({
   page,
 }) => {
   const api = page.request;
   await devLogin(page);
+  // createContact() makes a NAMED tenant, so the 2026-08-19 intake gate
+  // (app/src/jobs/missedCallAutoText.ts) withholds the auto-text: the copy asks
+  // for a name, voucher size, and housing authority we already hold. The
+  // POSITIVE case - a caller we hold nothing on - is covered end-to-end by the
+  // by-phone arm of tests/scenarios/tenant-onboarding.spec.ts.
   const { contactId, phone: caller } = await createContact(api);
 
   // digit:null -> the founder never accepts the whisper gate -> the bridge MISSES ->
@@ -164,22 +169,6 @@ test('a missed business-line call takes a voicemail (single-channel transcript +
     scenario: { digit: null, transcript: 'Please call me back.' },
   });
 
-  // The missed-call auto-text fires at Dial-summary time (unchanged behavior).
-  await expect
-    .poll(
-      async () => {
-        const msgs = await getOutbox(api, { to: caller });
-        // Deliberately loose on the pronoun. The founder rewrite of 2026-08-18
-        // made this "Sorry I missed your call", but a2p-compliance.spec.ts
-        // restores a "we" variant into the SAME shared lane, so a needle that
-        // survives both is the honest one - this test is about the auto-text
-        // firing at all, not about its exact wording.
-        return msgs.some((m) => /missed your call/i.test(m.body ?? ''));
-      },
-      { timeout: 20_000, message: 'missed-call auto-text not observed in the outbox' },
-    )
-    .toBe(true);
-
   // Wait (API level) for the outcome to upgrade to voicemail AND the single-channel
   // transcript to persist, then navigate.
   await expect
@@ -188,6 +177,14 @@ test('a missed business-line call takes a voicemail (single-channel transcript +
       return c ? `${String(c['call_outcome'])}|${typeof c['transcript'] === 'string' ? String(c['transcript']) : ''}` : '';
     }, { timeout: 25_000 })
     .toMatch(/^voicemail\|.*Please call me back/);
+
+  // The auto-text job runs at Dial-summary time, well before the voicemail
+  // outcome above lands - so by now it has either sent or been gated. Nothing
+  // in the outbox means the gate held. Deliberately loose on the pronoun: the
+  // founder rewrite of 2026-08-18 made this "Sorry I missed your call", but
+  // a2p-compliance.spec.ts restores a "we" variant into the SAME shared lane.
+  const outbox = await getOutbox(api, { to: caller });
+  expect(outbox.some((m) => /missed your call/i.test(m.body ?? ''))).toBe(false);
 
   await page.goto(`${NEXT}/contacts/${contactId}`);
   const region = commsRegion(page);

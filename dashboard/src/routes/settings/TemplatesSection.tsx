@@ -198,15 +198,26 @@ export function TemplatesSection(): React.JSX.Element {
             </span>
           </label>
 
-          <label className={styles.checkboxField}>
-            <input
-              type="checkbox"
-              checked={form.missedCallAutoTextEnabled}
-              disabled={disabled}
-              onChange={(e) => update('missedCallAutoTextEnabled', e.target.checked)}
-            />
-            <span>Send the missed-call text automatically</span>
-          </label>
+          {/* The toggle plus a plain-language statement of WHO actually receives
+              this text. The rule it describes lives in the job's intake gate
+              (app/src/jobs/missedCallAutoText.ts, needsMissedCallIntakeText) -
+              change both together or the page starts lying to operators. */}
+          <div className={styles.field}>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={form.missedCallAutoTextEnabled}
+                disabled={disabled}
+                onChange={(e) => update('missedCallAutoTextEnabled', e.target.checked)}
+              />
+              <span>Send the missed-call text automatically</span>
+            </label>
+            <span className={styles.hint}>
+              Sent only to a missed caller we hold no details on. If the contact already has a
+              name, voucher size, or housing authority saved - or is saved as a landlord, partner,
+              or team member - no text goes out.
+            </span>
+          </div>
 
           {/* Quick replies (chip list) */}
           <div className={styles.field}>

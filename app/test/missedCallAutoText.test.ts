@@ -20,6 +20,7 @@ import {
 } from '../src/jobs/jobs.js';
 import {
   MISSED_CALL_AUTOTEXT_JOB,
+  needsMissedCallIntakeText,
   parseMissedCallAutoTextPayload,
   registerMissedCallAutoTextJobHandler,
 } from '../src/jobs/missedCallAutoText.js';
@@ -28,6 +29,7 @@ import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -49,6 +51,16 @@ function seedCallerConversation(world: FakeWorld, overrides: Partial<Conversatio
   });
 }
 
+/** Give the caller number a contact record so the intake gate can resolve it. */
+function seedCallerContact(world: FakeWorld, fields: Record<string, unknown> = {}): void {
+  world.contacts.push({
+    contactId: 'contact-caller-1',
+    type: 'unknown',
+    phone: CALLER,
+    ...fields,
+  } as ContactItem);
+}
+
 describe('call.missedAutoText (M1.9b)', () => {
   let world: FakeWorld;
   let capture: LogCapture;
@@ -66,6 +78,8 @@ describe('call.missedAutoText (M1.9b)', () => {
     registerMissedCallAutoTextJobHandler({
       settingsRepo: world.settingsRepo,
       messagesRepo: world.messagesRepo,
+      conversationsRepo: world.conversationsRepo,
+      contactsRepo: world.contactsRepo,
       sendMessageService: createSendMessageService({
         config: loadConfig({ NODE_ENV: 'test', BUSINESS_PHONE_NUMBER: '+15550009999' } as NodeJS.ProcessEnv),
         logger,
@@ -132,6 +146,100 @@ describe('call.missedAutoText (M1.9b)', () => {
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
     await queueAdapter.settle();
     expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
+  });
+
+  // --- INTAKE GATE (2026-08-19) --------------------------------------------
+  // The copy asks for full name, voucher size, and housing authority, so it may
+  // only go to a caller we hold NONE of that on. The default fixture seeds no
+  // contact at all, which is the first-time caller - covered by the 'enabled'
+  // test above and re-asserted explicitly here.
+
+  it('gate: no contact record at all (first-time caller) - sends', async () => {
+    expect(world.contacts).toHaveLength(0);
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('gate: unadjudicated caller with a blank profile - sends (founder ruling)', async () => {
+    seedCallerContact(world, { type: 'unknown', status: 'needs_review' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('gate: tenant with the full intake profile - skips', async () => {
+    seedCallerContact(world, {
+      type: 'tenant',
+      firstName: 'Destiny',
+      lastName: 'Cole',
+      voucherSize: 2,
+      housingAuthority: 'Fulton County',
+    });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('gate: ONE fact on file is enough to skip (partial re-ask is deferred)', async () => {
+    seedCallerContact(world, { type: 'unknown', firstName: 'Destiny' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('gate: landlord with a blank profile - skips (never asked for a voucher)', async () => {
+    seedCallerContact(world, { type: 'landlord', status: 'active' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('gate: skip logs the contact type but never the caller phone', async () => {
+    seedCallerContact(world, { type: 'landlord' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    const logged = JSON.stringify(capture.lines);
+    expect(logged).toContain('intake details already on file');
+    expect(logged).not.toContain(CALLER);
+  });
+
+  describe('needsMissedCallIntakeText (pure)', () => {
+    const contact = (over: Record<string, unknown>): ContactItem =>
+      ({ contactId: 'c1', type: 'unknown', ...over }) as ContactItem;
+
+    it('no contact - send', () => {
+      expect(needsMissedCallIntakeText(undefined)).toBe(true);
+    });
+
+    it('blank tenant/unknown - send', () => {
+      expect(needsMissedCallIntakeText(contact({ type: 'unknown' }))).toBe(true);
+      expect(needsMissedCallIntakeText(contact({ type: 'tenant' }))).toBe(true);
+    });
+
+    it('any single fact present - skip', () => {
+      for (const field of ['firstName', 'lastName', 'housingAuthority']) {
+        expect(needsMissedCallIntakeText(contact({ [field]: 'x' }))).toBe(false);
+      }
+      expect(needsMissedCallIntakeText(contact({ voucherSize: 3 }))).toBe(false);
+    });
+
+    it('TRAP: voucherSize 0 is a studio, NOT a blank field - skip', () => {
+      expect(needsMissedCallIntakeText(contact({ voucherSize: 0 }))).toBe(false);
+    });
+
+    it('whitespace-only and non-scalar values do NOT count as on file - send', () => {
+      expect(needsMissedCallIntakeText(contact({ firstName: '   ' }))).toBe(true);
+      expect(needsMissedCallIntakeText(contact({ firstName: null }))).toBe(true);
+      expect(needsMissedCallIntakeText(contact({ voucherSize: Number.NaN }))).toBe(true);
+      expect(needsMissedCallIntakeText(contact({ housingAuthority: { v: 1 } }))).toBe(true);
+    });
+
+    it('landlord/partner/team member - skip regardless of blank fields', () => {
+      for (const type of ['landlord', 'partner', 'team_member']) {
+        expect(needsMissedCallIntakeText(contact({ type }))).toBe(false);
+      }
+    });
   });
 
   it('parseMissedCallAutoTextPayload rejects a malformed payload', () => {

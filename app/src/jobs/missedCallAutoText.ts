@@ -14,7 +14,10 @@
 // which can be enqueued more than once — so CallSid is the correct key.)
 //
 // GATING: load OrgSettings; if missedCallAutoTextEnabled is false → mark done +
-// skip (no send). Acquire ONE A2P token (shared bucket) before the send so the
+// skip (no send). Then the INTAKE GATE (2026-08-19): resolve the caller and skip
+// when we already hold any of the facts the copy asks for, or when the caller is
+// a landlord/partner/team member - see needsMissedCallIntakeText below.
+// Acquire ONE A2P token (shared bucket) before the send so the
 // auto-text is paced under the registered tier alongside relay/broadcast. The
 // send goes through sendMessage(automated:true), so the opt-out gate + the
 // per-conversation breaker apply: a SendRefusedError (opt-out / breaker /
@@ -45,10 +48,72 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { defineJobHandler } from './jobs.js';
 
 export const MISSED_CALL_AUTOTEXT_JOB = 'call.missedAutoText';
+
+/**
+ * Contact types that NEVER receive the intake auto-text, whatever their fields
+ * say. The filed copy asks for voucher size and housing authority, which a
+ * landlord/partner/team member will never have - so a fields-only rule would
+ * ask them forever. An UNKNOWN caller is deliberately absent from this set:
+ * founder ruling (2026-08-19) is that an unadjudicated caller gets the
+ * tenant-flavored copy.
+ */
+const NON_INTAKE_CONTACT_TYPES: ReadonlySet<string> = new Set([
+  'landlord',
+  'partner',
+  'team_member',
+]);
+
+/**
+ * The intake facts the auto-text asks for. They ride ContactItem's flexible-doc
+ * index signature rather than being declared fields (same as lib/contactName.ts
+ * reads them), so every read here is defensive.
+ */
+const INTAKE_FIELDS: readonly string[] = ['firstName', 'lastName', 'voucherSize', 'housingAuthority'];
+
+/**
+ * Is one intake fact actually on file? PRESENCE, never truthiness:
+ * `voucherSize: 0` is a real value (studio/efficiency - lib/contactName.ts), so
+ * a truthy test would classify every studio tenant as blank and keep texting
+ * them. A whitespace-only string counts as absent.
+ */
+function hasIntakeFact(contact: ContactItem, field: string): boolean {
+  const value = contact[field];
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'number') return Number.isFinite(value);
+  return false;
+}
+
+/**
+ * THE INTAKE GATE (2026-08-19 product decision). The missed-call auto-text asks
+ * the caller for their full name, voucher size, and housing authority, so it is
+ * only correct for a caller we hold NONE of that on. Send when:
+ *
+ *   - there is no contact record at all (a true first-time caller), OR
+ *   - the contact is not a landlord/partner/team member AND every one of the
+ *     four intake fields is blank.
+ *
+ * Any single fact already on file suppresses the send: re-asking for all three
+ * when we hold some of them reads as not having listened. The partial case
+ * (hold one fact, want the others) is deliberately NOT handled here - it needs
+ * its own copy and is deferred.
+ *
+ * Mirrored in the settings UI hint that describes this rule to operators
+ * (dashboard/src/routes/settings/TemplatesSection.tsx) - change both together.
+ */
+export function needsMissedCallIntakeText(contact: ContactItem | undefined): boolean {
+  if (contact === undefined) return true;
+  if (NON_INTAKE_CONTACT_TYPES.has(contact.type)) return false;
+  return !INTAKE_FIELDS.some((field) => hasIntakeFact(contact, field));
+}
 
 export interface MissedCallAutoTextPayload {
   /** Twilio CallSid of the missed founder-bridge call — the idempotency key. */
@@ -75,6 +140,10 @@ export interface MissedCallAutoTextJobDeps {
   settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
   messagesRepo?: MessagesRepo;
+  /** Resolves the caller conversation so the intake gate can find the contact. */
+  conversationsRepo?: ConversationsRepo;
+  /** Resolves the caller contact (by participant phone) for the intake gate. */
+  contactsRepo?: ContactsRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   logger?: Logger;
@@ -86,12 +155,16 @@ export function registerMissedCallAutoTextJobHandler(deps: MissedCallAutoTextJob
   let settings = deps.settingsRepo;
   let sendMessage = deps.sendMessageService;
   let messages = deps.messagesRepo;
+  let conversations = deps.conversationsRepo;
+  let contacts = deps.contactsRepo;
 
   defineJobHandler(MISSED_CALL_AUTOTEXT_JOB, async (rawPayload) => {
     const payload = parseMissedCallAutoTextPayload(rawPayload);
     settings ??= createSettingsRepo({ logger: deps.logger });
     sendMessage ??= createSendMessageService({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
+    conversations ??= createConversationsRepo({ logger: deps.logger });
+    contacts ??= createContactsRepo({ logger: deps.logger });
 
     // ONE auto-text per CallSid, EVER (the guardrail). Conditionally claim the
     // CallSid marker BEFORE any send: the first job to reach here wins, and a
@@ -115,6 +188,41 @@ export function registerMissedCallAutoTextJobHandler(deps: MissedCallAutoTextJob
       log.info(
         { callSid: payload.callSid, conversationId: payload.conversationId },
         'missed-call auto-text disabled in settings — skipped',
+      );
+      return;
+    }
+
+    // INTAKE GATE: resolve the caller and skip when we already hold any of the
+    // intake facts the copy asks for (see needsMissedCallIntakeText). The marker
+    // is already claimed above, exactly like the disabled-toggle branch, so a
+    // redelivery stays a no-op.
+    //
+    // A lookup that THROWS falls through to SEND (contact stays undefined):
+    // preserving the pre-gate behavior on a transient DynamoDB error is better
+    // than silently going quiet on a caller who may well be a first-timer. The
+    // contact TYPE is safe to log (a category, not identity); the phone/name
+    // are not (PII, doc section 9).
+    let callerContact: ContactItem | undefined;
+    try {
+      const conversation = await conversations.getById(payload.conversationId);
+      const callerPhone = conversation?.participant_phone;
+      if (callerPhone !== undefined && callerPhone.length > 0) {
+        callerContact = await contacts.findByPhone(callerPhone);
+      }
+    } catch (err) {
+      log.warn(
+        { err, callSid: payload.callSid, conversationId: payload.conversationId },
+        'missed-call auto-text caller lookup failed - sending anyway (pre-gate behavior)',
+      );
+    }
+    if (!needsMissedCallIntakeText(callerContact)) {
+      log.info(
+        {
+          callSid: payload.callSid,
+          conversationId: payload.conversationId,
+          contactType: callerContact?.type,
+        },
+        'missed-call auto-text skipped - caller intake details already on file',
       );
       return;
     }

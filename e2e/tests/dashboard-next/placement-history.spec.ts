@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Placement history (:5174) against the real backend (F2.3). Proves the placement
 // detail page renders the placement facts + the provenance history, and that a
@@ -16,7 +17,7 @@ const TENANT = 'contact-tenant-0001'; // Tasha Nguyen — the tenant on placemen
 async function devLoginAndReset(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
   const res = await page.request.post(`${NEXT}/api/placements/placement-0001/transition`, {
     data: { toStage: 'awaiting_inspection', source: 'manual' },
   });

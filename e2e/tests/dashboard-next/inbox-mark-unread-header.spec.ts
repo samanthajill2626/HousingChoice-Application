@@ -49,6 +49,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { registerParty, sendAsParty, sendGroupAsParty } from '../../fixtures/fakeTwilio.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 /** The dashboard dev-server origin - resolved per-lane by playwright.config.ts. */
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -65,7 +66,7 @@ async function devLogin(page: Page, email = 'va@example.com'): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Per-run-unique NANP E.164s so cases never collide across a full-suite run. */

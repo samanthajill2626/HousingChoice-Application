@@ -2,6 +2,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import { listThreads, type FakeThread } from '../../fixtures/fakeTwilio.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { fakeUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay CONNECT-WHEN-READY end-to-end proof (relay number buying strategy, plan
 // Task 12; worklist SLICE 11). Drives the real dashboard + API + fake-twilio on
@@ -91,7 +92,7 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Log the SEPARATE `request` context in as the seeded FOUNDER (role admin) so it

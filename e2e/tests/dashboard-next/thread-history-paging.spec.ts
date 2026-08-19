@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
 import { postInboundSms, listThreads } from '../../fixtures/fakeTwilio.js';
 import { dashboardUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Thread history paging (design section 5.2; plan Task 8). Proves an operator can
 // reach relay-group messages OLDER than the newest server page: the newest page
@@ -48,7 +49,7 @@ function uniqueSid(tag: string): string {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 // 55 inbounds on top of the ONE message a createGroupOpen group already carries -

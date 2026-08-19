@@ -1,6 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Conversation-fact-extraction, end-to-end against the hermetic stack with the
 // DETERMINISTIC FAKE driver (EXTRACTION_DRIVER=fake, set in e2e-session childEnv).
@@ -22,7 +23,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 let seq = 0;
@@ -308,7 +309,7 @@ test('Today tile: a pending suggestion surfaces the AI-suggestions-to-review gro
   // The Today action queue is the dashboard home route ("/"). Re-navigate so
   // useToday refetches now that a pending suggestion exists.
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
   const group = page.getByRole('list', { name: 'AI suggestions to review' });
   await expect(group).toBeVisible({ timeout: 10_000 });
   expect(await group.getByRole('listitem').count()).toBeGreaterThanOrEqual(1);

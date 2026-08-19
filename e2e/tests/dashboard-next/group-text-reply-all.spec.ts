@@ -8,6 +8,7 @@ import {
 } from '../../fixtures/fakeTwilio.js';
 import { clearLogTail, readLogTail } from '../../fixtures/groupText.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 2 - reply-all: ONE send, every handset, per-member delivery.
 //
@@ -38,7 +39,7 @@ const BUSINESS = process.env['BUSINESS_PHONE_NUMBER'] ?? '+15550009999';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('a dashboard reply reaches every handset once, with per-member delivery and no unknown-SID error', async ({

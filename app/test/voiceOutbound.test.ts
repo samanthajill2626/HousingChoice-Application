@@ -568,9 +568,13 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     const contact = world.contacts.find((c) => c.contactId === 'c-target')!;
     contact.voice_opt_out = true;
     world.emitted.length = 0;
-    // announceCallStamp's ONLY repo call. updateCallStatus resolves the row
-    // through its own internal lookup, so this breaks the announce alone.
-    vi.spyOn(world.messagesRepo, 'getByProviderSid').mockRejectedValue(new Error('ddb read down'));
+    // The announce performs NO read of its own any more (fix wave 4, N-1) - it
+    // emits from the row updateCallStatus already resolved - so the only thing
+    // left in it that CAN fail is the emit. Breaking that breaks the announce
+    // alone, while the conditional write underneath still commits.
+    vi.spyOn(world.events, 'emit').mockImplementation(() => {
+      throw new Error('bus down');
+    });
 
     const res = await signedTwilioPost(
       harness.app,

@@ -1113,25 +1113,34 @@ export function createFakeWorld(): FakeWorld {
     async updateCallStatus(callSid, fields, options) {
       // Mirror the real repo: forward-only on call_status, idempotent stamp of
       // the supplied lifecycle fields. Unknown CallSid or a regressing
-      // transition is a no-op (false) — so a redelivery never double-writes.
-      // Mirrors the real ConditionExpression's OPTIONAL narrowing too
-      // (expectedPriorCallStatuses INTERSECTS the machine's allowed set): if
-      // only the real repo implemented it, these tests would go green against a
-      // broken implementation.
+      // transition is a no-op (transitioned:false) - so a redelivery never
+      // double-writes. Mirrors the real ConditionExpression's OPTIONAL
+      // narrowing too (expectedPriorCallStatuses INTERSECTS the machine's
+      // allowed set): if only the real repo implemented it, these tests would go
+      // green against a broken implementation.
+      //
+      // It also returns the resolved ROW, in the same CallStatusUpdate shape, so
+      // a caller that reads the row (the voice gate's announce) is exercised
+      // here exactly as in production. One honest difference: the in-memory row
+      // IS the stored object, so the fake's `row` reflects the write while the
+      // real repo's is a pre-write snapshot. Every field the announce reads is
+      // append-time immutable, so the two agree on all of them.
       const existing = findBySid(callSid);
-      if (!existing) return false;
+      if (!existing) return { transitioned: false, row: undefined };
       const expectedPrior = options?.expectedPriorCallStatuses;
       const allowed = allowedPriorCallStatuses(fields.callStatus).filter(
         (p) => expectedPrior === undefined || expectedPrior.includes(p),
       );
       const current = existing.call_status;
-      if (current === undefined || !allowed.includes(current)) return false;
+      if (current === undefined || !allowed.includes(current)) {
+        return { transitioned: false, row: existing };
+      }
       existing.call_status = fields.callStatus;
       if (fields.callOutcome !== undefined) existing.call_outcome = fields.callOutcome;
       if (fields.answeredAt !== undefined) existing.answered_at = fields.answeredAt;
       if (fields.endedAt !== undefined) existing.ended_at = fields.endedAt;
       if (fields.callDuration !== undefined) existing.call_duration = fields.callDuration;
-      return true;
+      return { transitioned: true, row: existing };
     },
     async setCallRecording(callSid, recording) {
       // Mirror the real repo: idempotent per RecordingSid — once a recording is

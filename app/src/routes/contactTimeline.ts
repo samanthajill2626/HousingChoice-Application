@@ -504,6 +504,38 @@ function callDurationOf(m: MessageItem): number | undefined {
 }
 
 /**
+ * PER-REQUEST tally of call rows whose stored `direction` is out of union,
+ * flushed as ONE warn by the route (see reportDirectionAnomalies).
+ *
+ * The condition is a PERMANENT property of a stored row, and this surface
+ * refetches on every message.persisted / conversation.updated /
+ * scheduled.updated (debounced 300ms) - so a per-row warn turns one corrupt row
+ * on a busy thread into a sustained WARN stream for as long as anyone leaves
+ * that contact open. Count + one example instead, the shape the orphan-logs
+ * work established for its per-poll-tick rollup.
+ */
+interface DirectionAnomalies {
+  count: number;
+  exampleConversationId?: string;
+  exampleTsMsgId?: string;
+}
+
+/** One warn per REQUEST, or none at all. IDs + a count only - never a phone. */
+function reportDirectionAnomalies(anomalies: DirectionAnomalies, log: Logger): void {
+  if (anomalies.count === 0) return;
+  log.warn(
+    {
+      count: anomalies.count,
+      ...(anomalies.exampleConversationId !== undefined && {
+        exampleConversationId: anomalies.exampleConversationId,
+      }),
+      ...(anomalies.exampleTsMsgId !== undefined && { exampleTsMsgId: anomalies.exampleTsMsgId }),
+    },
+    'contact timeline: call rows have an out-of-union direction - emitting the stored values unchanged',
+  );
+}
+
+/**
  * Map a stored call → a TimelineCall. PII: recording_s3_key + transcript ONLY
  * when masked !== true (founder-bridge); a MASKED call omits both entirely.
  * party_phone is the contact's OWN number for a 1:1 call — never a masked
@@ -513,7 +545,7 @@ function callDurationOf(m: MessageItem): number | undefined {
 function toTimelineCall(
   m: MessageItem,
   conversation: ConversationItem | undefined,
-  log: Logger,
+  anomalies: DirectionAnomalies,
 ): TimelineCall {
   const masked = m.masked === true;
   // OBSERVABILITY ONLY - do NOT "tidy" this into a drop or a default.
@@ -523,12 +555,12 @@ function toTimelineCall(
   // very data this feature exists to stop inventing. The client's check is
   // `=== 'outbound'`, so a bad or absent stored value silently renders
   // "Incoming call". Narrowing here changes NOTHING about what is emitted; it
-  // only makes the silent case visible. IDs only - never a phone.
+  // only makes the silent case visible. TALLIED, not logged per row - see
+  // DirectionAnomalies. IDs only - never a phone.
   if (!isMessageDirection(m.direction)) {
-    log.warn(
-      { conversationId: m.conversationId, tsMsgId: m.tsMsgId },
-      'contact timeline: call row has an out-of-union direction - emitting the stored value unchanged',
-    );
+    anomalies.count += 1;
+    anomalies.exampleConversationId ??= m.conversationId;
+    anomalies.exampleTsMsgId ??= m.tsMsgId;
   }
   // at == sort-key == cursor: all provider_ts. The merge/sort + cursor use
   // globalKey = m.tsMsgId (`<provider_ts>#<sid>`) and messagesRepo paginates on
@@ -979,6 +1011,8 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    are gathered into the separate first-page `upcoming[]` bucket in step 6.
     const candidates: Candidate[] = [];
 
+    // Tallied across every thread in THIS request, then flushed once below.
+    const directionAnomalies: DirectionAnomalies = { count: 0 };
     if (wantMessage || wantCall) {
       for (const conv of convById.values()) {
         const page = await messages.listByConversation(conv.conversationId, {
@@ -988,13 +1022,17 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
         for (const m of page) {
           if (m.type === 'call') {
             if (!wantCall) continue;
-            candidates.push({ globalKey: m.tsMsgId, item: toTimelineCall(m, conv, log) });
+            candidates.push({
+              globalKey: m.tsMsgId,
+              item: toTimelineCall(m, conv, directionAnomalies),
+            });
           } else {
             if (!wantMessage) continue;
             candidates.push({ globalKey: m.tsMsgId, item: toTimelineMessage(m, conv, ourNumber) });
           }
         }
       }
+      reportDirectionAnomalies(directionAnomalies, log);
     }
 
     if (wantMilestone) {

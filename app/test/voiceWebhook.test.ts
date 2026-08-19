@@ -323,6 +323,39 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).not.toContain('<Dial');
   });
 
+  // A MASKED relay bridge's call row is rendered by NO surface: the contact
+  // timeline excludes relay_group conversations, and the relay thread mapper
+  // drops type:'call' rows entirely. Announcing the press-1 stamp would fan an
+  // SSE broadcast out to every connected dashboard - plus a mark-read POST and
+  // a media refetch from every open contact page - to redraw a row nobody
+  // draws. Relay groups are the growing product, so this must not scale with
+  // them.
+  it('press-1 on a MASKED relay bridge stamps the row but announces NOTHING', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+    // Ring the masked bridge first so the call row exists in `ringing`.
+    await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams());
+    world.emitted.length = 0;
+    world.touches.length = 0;
+
+    const res = await signedTwilioPost(app, `/webhooks/twilio/voice/whisper-gate${gateQuery}`, {
+      Digits: '1',
+      CallSid: 'CAchild-bob',
+    });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Pause');
+
+    // The STAMP still happens - press-1 is the authoritative answered signal,
+    // and the /status classification depends on it.
+    const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
+    expect(call.masked).toBe(true);
+    expect(call.call_status).toBe('in-progress');
+    // ...and nothing at all is announced for it.
+    expect(world.emitted).toHaveLength(0);
+    expect(world.touches).toHaveLength(0);
+  });
+
   it("gate: Digits='0' -> <Hangup> (the press-0 team escape was removed)", async () => {
     // '0' is no longer special: it takes the same fall-through as a Gather
     // timeout or any other key. See docs/issues/press-0-team-escape-removed.md.

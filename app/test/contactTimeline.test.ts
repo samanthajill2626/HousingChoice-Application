@@ -40,11 +40,13 @@ const PHONE_B = '+15550100002';
 describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
   let app: Express;
   let world: FakeWorld;
+  let capture: ReturnType<typeof createLogCapture>;
 
   beforeEach(() => {
     const h = makeWebhookHarness();
     app = h.app;
     world = h.world;
+    capture = h.capture;
   });
 
   const authedGet = (path: string) =>
@@ -482,6 +484,76 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(ringing.call_status).toBe('ringing');
     // Never cast an unrecognized string onto the wire - drop it.
     expect(outOfUnion.call_status).toBeUndefined();
+  });
+
+  // N-4: the out-of-union `direction` warn is OBSERVABILITY on a PERMANENT data
+  // condition, and this surface refetches on every message.persisted /
+  // conversation.updated / scheduled.updated (debounced 300ms). Per-row, one
+  // corrupt row on a busy thread becomes a sustained WARN stream for as long as
+  // anyone leaves the contact open. Aggregate per REQUEST with a count + one
+  // example, the same shape the orphan-logs work established for its per-poll-
+  // tick rollup. What goes on the WIRE is unchanged - this is log shape only.
+  it('aggregates the out-of-union direction warn to ONE line per request, carrying a count', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // Three call rows whose stored `direction` the repo API cannot express
+    // (`append`'s param is typed MessageDirection), so stamp the stored rows.
+    const sids = ['CA-dir-1', 'CA-dir-2', 'CA-dir-3'];
+    for (const [i, sid] of sids.entries()) {
+      await world.messagesRepo.append({
+        conversationId: 'conv-a',
+        providerSid: sid,
+        providerTs: `2026-06-16T1${i}:00:00.000Z`,
+        type: 'call',
+        direction: 'inbound',
+        author: 'tenant',
+        deliveryStatus: 'delivered',
+        callStatus: 'ringing',
+      });
+      const row = world.messages.find((m) => m.provider_sid === sid)!;
+      (row as Record<string, unknown>)['direction'] = 'sideways';
+    }
+    capture.lines.length = 0;
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+
+    // The wire contract is untouched: the stored value is still emitted as-is.
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    expect(calls).toHaveLength(3);
+    for (const call of calls) expect(call.direction).toBe('sideways');
+
+    // ONE warn for the whole request, carrying the count + one example id.
+    const warns = capture
+      .atLevel(40)
+      .filter((l) => String(l['msg']).includes('out-of-union direction'));
+    expect(warns).toHaveLength(1);
+    const warn = warns[0]!;
+    expect(warn['count']).toBe(3);
+    expect(sids.some((sid) => String(warn['exampleTsMsgId']).includes(sid))).toBe(true);
+    expect(warn['exampleConversationId']).toBe('conv-a');
+  });
+
+  it('a timeline with no anomalous direction warns NOT AT ALL', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-ok',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'sent',
+      callStatus: 'ringing',
+    });
+    capture.lines.length = 0;
+
+    await authedGet('/api/contacts/c-tenant/timeline');
+
+    expect(
+      capture.atLevel(40).filter((l) => String(l['msg']).includes('out-of-union direction')),
+    ).toHaveLength(0);
   });
 
   it('normalizes the importer call outcomes, drops unrecognized ones, and never defaults to missed', async () => {

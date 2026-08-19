@@ -1037,6 +1037,25 @@ export interface ParkedEmailEvent {
   bounceType?: string;
 }
 
+/**
+ * What a call status-callback transition attempt reports back.
+ *
+ * `row` is the item the write ALREADY resolved by provider sid on its way to
+ * the item's key - handed back rather than discarded so a caller that needs the
+ * row (the voice gate's live-timeline announce) does not pay a second,
+ * eventually-consistent lookup on a latency-sensitive path. It is a PRE-WRITE
+ * SNAPSHOT: append-time fields (conversationId/tsMsgId/direction/
+ * delivery_status/type/masked) are authoritative, lifecycle fields
+ * (call_status/call_outcome/answered_at/...) describe the state BEFORE this
+ * call's write. Undefined only when the CallSid resolves to nothing.
+ */
+export interface CallStatusUpdate {
+  /** True only when the conditional write COMMITTED (a real transition). */
+  transitioned: boolean;
+  /** The resolved row (pre-write snapshot); undefined for an unknown CallSid. */
+  row: MessageItem | undefined;
+}
+
 export interface MessagesRepo {
   /** Conditional append + SID pointer in one transaction; dedupe is a no-op. */
   append(message: NewMessage): Promise<AppendResult>;
@@ -1075,9 +1094,17 @@ export interface MessagesRepo {
    * `type:'call'` item, found by CallSid (== provider_sid). Forward-only on
    * call_status (a redelivered/out-of-order callback can never regress a
    * terminal call), and idempotently stamps the supplied lifecycle fields
-   * (answered_at/ended_at/call_duration/call_outcome). Returns false (no-op)
-   * when the call is unknown or the transition would regress — so a redelivered
-   * webhook never double-writes or double-counts. PII (doc §9): IDs/labels only.
+   * (answered_at/ended_at/call_duration/call_outcome). Reports
+   * `transitioned:false` (no-op) when the call is unknown or the transition
+   * would regress - so a redelivered webhook never double-writes or
+   * double-counts. PII (doc section 9): IDs/labels only.
+   *
+   * It ALSO returns the row it resolved on the way to the write (see
+   * CallStatusUpdate). A caller that needs the item - the voice gate's
+   * live-timeline announce - reads it from there rather than re-reading a row
+   * the repo already held: on the press-1 bridge-connect path that second
+   * lookup cost two more DynamoDB round trips between the keypress and the
+   * <Dial> that joins two humans.
    *
    * `expectedPriorCallStatuses` is OPTIONAL and purely ADDITIVE: it INTERSECTS
    * with the machine's allowed prior set, so a caller can only ever narrow, and
@@ -1100,7 +1127,7 @@ export interface MessagesRepo {
       callDuration?: number;
     },
     options?: { expectedPriorCallStatuses?: CallStatus[] },
-  ): Promise<boolean>;
+  ): Promise<CallStatusUpdate>;
   /**
    * Voice call recording (M1.9c): stamp recording_s3_key (+ recording_sid +
    * recording_duration) onto a `type:'call'` item found by CallSid. IDEMPOTENT
@@ -2184,16 +2211,38 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       const existing = await getByProviderSid(callSid);
       if (!existing) {
         log.warn({ callSid, callStatus: fields.callStatus }, 'call status for unknown CallSid ignored');
-        return false;
+        return { transitioned: false, row: undefined };
       }
+      // TWO DISTINCT no-transition cases, deliberately split (fix wave 4, N-3):
+      // one is the state machine's own shape and the other is a caller bug.
+      const machineAllowed = allowedPriorCallStatuses(fields.callStatus);
+      // (a) Nothing transitions INTO `ringing` - it is only ever the first
+      // write. Ordinary and expected (a redelivered ring callback lands here),
+      // so it stays silent.
+      if (machineAllowed.length === 0) return { transitioned: false, row: existing };
       // The caller's optional expectation INTERSECTS the machine's allowed set -
       // it can only narrow, never widen - and the result feeds the SAME atomic
       // ConditionExpression below, so the narrowing is race-free.
       const expected = options?.expectedPriorCallStatuses;
-      const allowed = allowedPriorCallStatuses(fields.callStatus).filter(
-        (p) => expected === undefined || expected.includes(p),
-      );
-      if (allowed.length === 0) return false; // nothing transitions INTO ringing
+      const allowed = machineAllowed.filter((p) => expected === undefined || expected.includes(p));
+      // (b) The caller's expectation does not intersect the machine's allowed
+      // set, so NO prior status could ever satisfy the condition and the write
+      // is skipped before it is issued. That is a caller bug or a stale
+      // expectation, not case (a) - it used to return silently under case (a)'s
+      // comment, while the sibling unknown-CallSid branch above logged. PII
+      // (doc section 9): IDs + status values only, never a phone.
+      if (allowed.length === 0) {
+        log.warn(
+          {
+            callSid,
+            callStatus: fields.callStatus,
+            expectedPriorCallStatuses: expected,
+            allowedPriorCallStatuses: machineAllowed,
+          },
+          'call status expectation does not intersect the allowed prior set - no transition is possible',
+        );
+        return { transitioned: false, row: existing };
+      }
       const sets = ['call_status = :s'];
       const values: Record<string, unknown> = { ':s': fields.callStatus };
       if (fields.callOutcome !== undefined) {
@@ -2233,12 +2282,12 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             { callSid, callStatus: fields.callStatus, currentStatus: existing.call_status },
             'call status transition skipped (would regress)',
           );
-          return false;
+          return { transitioned: false, row: existing };
         }
         throw err;
       }
       log.info({ callSid, callStatus: fields.callStatus }, 'call status updated');
-      return true;
+      return { transitioned: true, row: existing };
     },
 
     async setCallRecording(callSid, recording) {

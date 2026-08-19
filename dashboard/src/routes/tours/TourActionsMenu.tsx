@@ -1,7 +1,8 @@
 // TourActionsMenu - the tour header kebab. A popover menu (outside-click + Escape
 // close) mirroring ContactActionsMenu, holding the STATUS-BRANCH actions that
-// aren't the one guided primary CTA: Reschedule, Cancel, Mark no-show, and Open
-// relay group. Each item is shown only when its guard passes (the parent computes
+// aren't the one guided primary CTA: Reschedule, Mark already toured, Cancel,
+// Mark no-show, and Open relay group.
+// Each item is shown only when its guard passes (the parent computes
 // the guards from the tour status); an item that needs input opens a Modal that
 // the parent owns. When no item qualifies the parent renders nothing (no empty
 // kebab).
@@ -12,6 +13,12 @@ export interface TourActionsMenuProps {
   /** Reschedule (canReschedule statuses: scheduled / canceled / no_show). */
   canReschedule: boolean;
   onReschedule: () => void;
+  /** Mark already toured (requested only): the tour happened without ever being
+   *  booked, so it skips scheduling entirely and goes straight to the exit gate.
+   *  Scheduling it instead would arm - and send - a reminder ladder for a visit
+   *  that already took place. */
+  canMarkAlreadyToured: boolean;
+  onMarkAlreadyToured: () => void;
   /** Cancel (pre-tour statuses: requested / scheduled). */
   canCancel: boolean;
   onCancel: () => void;
@@ -37,6 +44,8 @@ export interface TourActionsMenuProps {
 export function TourActionsMenu({
   canReschedule,
   onReschedule,
+  canMarkAlreadyToured,
+  onMarkAlreadyToured,
   canCancel,
   onCancel,
   canMarkNoShow,
@@ -69,7 +78,14 @@ export function TourActionsMenu({
 
   // Nothing qualifies -> no kebab at all (a closed tour with a group has no branch
   // actions, so the parent shows only the header + primary CTA).
-  if (!canReschedule && !canCancel && !canMarkNoShow && !canOpenGroup && !canSendNoShowCheckin)
+  if (
+    !canReschedule &&
+    !canMarkAlreadyToured &&
+    !canCancel &&
+    !canMarkNoShow &&
+    !canOpenGroup &&
+    !canSendNoShowCheckin
+  )
     return null;
 
   const run = (fn: () => void): void => {
@@ -103,6 +119,17 @@ export function TourActionsMenu({
               onClick={() => run(onReschedule)}
             >
               Reschedule
+            </button>
+          ) : null}
+          {canMarkAlreadyToured ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              disabled={busy}
+              onClick={() => run(onMarkAlreadyToured)}
+            >
+              Mark already toured
             </button>
           ) : null}
           {canMarkNoShow ? (

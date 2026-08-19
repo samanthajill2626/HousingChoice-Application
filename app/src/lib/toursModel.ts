@@ -7,6 +7,7 @@
 // STATUS LIFECYCLE:
 //   requested -> scheduled                    (booking - the time is set)
 //   requested -> canceled                     (canceled before a time is set)
+//   requested -> toured                       (it happened without being booked)
 //   scheduled -> toured -> closed             (normal happy path)
 //   * -> canceled                             (pre-tour cancellation)
 //   scheduled -> no_show                      (tenant no-show)
@@ -20,6 +21,12 @@
 // the coordination anchor (it owns the group thread) before any time is set.
 // Booking = setting scheduledAt, which advances it to `scheduled` — only then
 // are reminders armed (a `requested` tour MUST have no reminder rows).
+//
+// A `requested` tour may ALSO go straight to `toured`: it happened without us
+// booking it. That edge is deliberately SILENT - it arms nothing and sends
+// nothing, which is the whole point (booking it just to reach the exit gate
+// would text the group about a visit that already took place). It may carry an
+// optional past scheduledAt recording when it actually happened.
 //
 // `closed` is the terminal for a finished-and-decided tour. The `outcome`
 // field (TourOutcome) records the exit decision; `moveForward=true` marks

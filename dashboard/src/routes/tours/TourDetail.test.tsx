@@ -399,15 +399,26 @@ describe('TourDetail - kebab guards', () => {
     expect(screen.queryByRole('menuitem', { name: 'Open relay group' })).not.toBeInTheDocument();
   });
 
-  it('requested: Cancel + Open relay group; NO Reschedule, NO Mark no-show', async () => {
+  it('requested: Mark already toured + Cancel + Open relay group; NO Reschedule, NO Mark no-show', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     renderDetail();
     await waitLoaded();
     await openKebab();
+    expect(screen.getByRole('menuitem', { name: 'Mark already toured' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Cancel tour' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Open relay group' })).toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Reschedule' })).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Mark no-show' })).not.toBeInTheDocument();
+  });
+
+  it('Mark already toured is REQUESTED-only (absent on a scheduled tour)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    expect(
+      screen.queryByRole('menuitem', { name: 'Mark already toured' }),
+    ).not.toBeInTheDocument();
   });
 
   it('a closed tour with a group has no kebab at all', async () => {
@@ -441,6 +452,94 @@ describe('TourDetail - kebab guards', () => {
     await openKebab();
     await userEvent.click(screen.getByRole('menuitem', { name: 'Mark no-show' }));
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
+  });
+});
+
+// The requested-tour escape hatch: the visit happened without us booking it, so
+// it skips scheduling (which would arm and SEND a ladder for a past visit) and
+// lands on 'toured' with the exit gate already open.
+describe('TourDetail - Mark already toured', () => {
+  async function openMarkAlreadyToured() {
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Mark already toured' }));
+    return screen.getByRole('form', { name: 'Mark already toured form' });
+  }
+
+  beforeEach(() => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
+  });
+
+  it('PATCHes { status: toured, scheduledAt } for a back-dated time and opens the outcome modal', async () => {
+    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    await openMarkAlreadyToured();
+
+    fireEvent.change(screen.getByLabelText(/when did it happen/i), {
+      target: { value: '2020-01-02T15:30' },
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', {
+      status: 'toured',
+      scheduledAt: new Date('2020-01-02T15:30').toISOString(),
+    });
+    // Straight into the exit gate - the same chain "Mark toured" runs.
+    await waitFor(() =>
+      expect(screen.getByRole('form', { name: 'Record outcome form' })).toBeInTheDocument(),
+    );
+    // ...and the dialog that opened it is gone (its own close must not slam the
+    // outcome gate shut, nor leave both dialogs stacked).
+    expect(
+      screen.queryByRole('form', { name: 'Mark already toured form' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('omits scheduledAt entirely when the date is cleared', async () => {
+    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    await openMarkAlreadyToured();
+
+    fireEvent.change(screen.getByLabelText(/when did it happen/i), { target: { value: '' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+
+    // Exactly { status } - a stray scheduledAt: undefined would still serialize
+    // the key and put a timeless tour on the byScheduledAt index.
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
+  });
+
+  it('a FUTURE time warns first and only saves on the second submit', async () => {
+    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    await openMarkAlreadyToured();
+
+    fireEvent.change(screen.getByLabelText(/when did it happen/i), {
+      target: { value: '2099-01-02T15:30' },
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+    // Stopped: a tour that already happened cannot be in the future.
+    expect(patchTour).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/in the future/i);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured anyway' }));
+    expect(patchTour).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed PATCH keeps the dialog open with an inline error and no outcome modal', async () => {
+    patchTour.mockRejectedValue(new ApiError(409, 'illegal_status_transition', 'nope'));
+    renderDetail();
+    await waitLoaded();
+    await openMarkAlreadyToured();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/couldn't mark the tour as toured/i),
+    );
+    expect(screen.getByRole('form', { name: 'Mark already toured form' })).toBeInTheDocument();
+    expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
   });
 });
 

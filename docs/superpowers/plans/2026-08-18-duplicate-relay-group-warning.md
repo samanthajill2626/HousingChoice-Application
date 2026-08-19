@@ -54,7 +54,7 @@ section of that document.
 | `app/src/routes/placements.ts` | Placement preview route constructs the callback. |
 | `dashboard/src/api/types.ts` | Mirrored `DuplicateOpenGroup` + `RosterPreview.duplicateOf`. |
 | `dashboard/src/routes/shared/RosterConfirmDialog.tsx` | The warning block. |
-| `docs/issues/*.md` (5 new) | The gaps the spec deliberately does not build. |
+| `docs/issues/*.md` (6 new) | The gaps the spec deliberately does not build - all six of spec section 8. |
 
 ---
 
@@ -88,7 +88,10 @@ import {
   samePhoneSet,
 } from '../src/services/relayGroupDuplicates.js';
 
-const logger = createLogger({ destination: createLogCapture().stream });
+// KEEP the capture handle - D6 mandates a WARN on an incomplete scan, and a
+// discarded handle makes that log unreachable to any assertion.
+const logs = createLogCapture();
+const logger = createLogger({ destination: logs.stream });
 
 /** A relay group row with just the fields the detector reads. */
 function group(
@@ -98,7 +101,9 @@ function group(
 ): ConversationItem {
   return {
     conversationId,
-    participants: phones.map((phone) => ({ contactId: '', phone, name: `N${phone}` })),
+    // Names are FIXED, never derived from the phone. Deriving them made the
+    // "wire carries no phone" assertion below unpassable against correct code.
+    participants: phones.map((phone, i) => ({ contactId: '', phone, name: NAMES[i] ?? 'Someone' })),
     last_activity_at: '2026-08-18T00:00:00.000Z',
     ...extra,
   } as unknown as ConversationItem;
@@ -120,6 +125,7 @@ function repo(
 const A = '+15558000001';
 const B = '+15558000002';
 const C = '+15558000003';
+const NAMES = ['Dana Reed', 'Marcus Bell', 'Third Person'];
 
 describe('samePhoneSet', () => {
   it('is true for the same members in a different order', () => {
@@ -176,13 +182,26 @@ describe('findOpenGroupWithSamePhones - D4, which partitions count', () => {
     expect(found?.partition).toBe('connecting');
   });
 
-  it('SKIPS an imported connecting row - it is an unconverted carrier group text', async () => {
+  it('SKIPS an imported CONNECTING row - it is an unconverted carrier group text', async () => {
     const conversations = repo({
       connecting: [group('conv-imported', [A, B], { imported_from: 'quo' } as Partial<ConversationItem>)],
     });
     expect(
       await findOpenGroupWithSamePhones({ conversations, log: logger }, new Set([A, B])),
     ).toBeUndefined();
+  });
+
+  it('does NOT skip an imported OPEN row - it is a live group', async () => {
+    // `imported_from` is never cleared, so an import-origin group that later went
+    // live still carries the stamp. Filtering it here would silence it forever.
+    const conversations = repo({
+      open: [group('conv-was-imported', [A, B], { imported_from: 'quo' } as Partial<ConversationItem>)],
+    });
+    const found = await findOpenGroupWithSamePhones(
+      { conversations, log: logger },
+      new Set([A, B]),
+    );
+    expect(found?.conversationId).toBe('conv-was-imported');
   });
 
   it('never reads the closed partition', async () => {
@@ -232,20 +251,30 @@ describe('findOpenGroupWithSamePhones - D6, a match always wins', () => {
     expect(found?.conversationId).toBe('conv-1');
   });
 
-  it('returns an OPEN match when the CONNECTING walk truncated', async () => {
-    const conversations = repo({ open: [group('conv-1', [A, B])] }, { connecting: true });
+  it('returns a CONNECTING match when the OPEN walk truncated and matched nothing', async () => {
+    // The non-vacuous direction: OPEN is scanned FIRST, so a truncated OPEN walk
+    // must not stop the CONNECTING scan that holds the real match. Asserting the
+    // reverse would prove nothing - the detector returns on the first hit and
+    // never reaches the second partition at all.
+    const conversations = repo(
+      { open: [group('conv-other', [A, C])], connecting: [group('conv-2', [A, B])] },
+      { open: true },
+    );
     const found = await findOpenGroupWithSamePhones(
       { conversations, log: logger },
       new Set([A, B]),
     );
-    expect(found?.conversationId).toBe('conv-1');
+    expect(found?.conversationId).toBe('conv-2');
   });
 
-  it('returns undefined when there is NO match and a walk truncated', async () => {
+  it('returns undefined AND warns when there is NO match and a walk truncated', async () => {
     const conversations = repo({ open: [group('conv-1', [A, C])] }, { open: true });
     expect(
       await findOpenGroupWithSamePhones({ conversations, log: logger }, new Set([A, B])),
     ).toBeUndefined();
+    // D6 mandates the WARN. Without this assertion an implementation that
+    // silently gives up passes every other case in this file.
+    expect(logs.lines.some((l) => l['event'] === 'relay_duplicate_scan_incomplete')).toBe(true);
   });
 
   it('swallows a thrown Query and returns undefined rather than propagating', async () => {
@@ -283,7 +312,7 @@ describe('findOpenGroupWithSamePhones - the wire rule', () => {
     );
     expect(JSON.stringify(found)).not.toContain(A);
     expect(JSON.stringify(found)).not.toContain(B);
-    expect(found?.memberNames).toHaveLength(2);
+    expect(found?.memberNames).toEqual(['Dana Reed', 'Marcus Bell']);
   });
 
   it('renders a nameless participant as Unknown', async () => {
@@ -368,7 +397,8 @@ function rosterPhones(conv: ConversationItem): Set<string> {
  * True for a row the IMPORTER wrote (spec D4). It writes type 'relay_group' with
  * relay_status 'relay_group#connecting' for unconverted carrier group texts, which
  * are not relay groups we provisioned - warning "a relay group already exists" about
- * one would be false in every clause.
+ * one would be false in every clause. Checked ONLY against the connecting
+ * partition, for the reason given at the call site.
  *
  * `imported_from` is NOT a declared field on ConversationItem; it rides the
  * `[key: string]: unknown` index signature, so this is a keyed read, not a property
@@ -440,7 +470,12 @@ export async function findOpenGroupWithSamePhones(
     }
 
     const matches = items
-      .filter((conv) => !isImported(conv))
+      // The imported skip applies ONLY to the connecting partition, where the
+      // importer parks unconverted carrier group texts. `imported_from` is never
+      // cleared (nothing in app/src removes it, and the group-text conversion
+      // drops relay_status but keeps it), so filtering it in the OPEN partition
+      // would permanently silence any import-origin group that later went live.
+      .filter((conv) => partition !== 'connecting' || !isImported(conv))
       .filter((conv) => samePhoneSet(rosterPhones(conv), phones));
 
     if (matches.length > 0) {
@@ -472,8 +507,9 @@ Expected: PASS, all cases.
 
 - [ ] **Step 5: Typecheck**
 
-Run: `npm run typecheck`
-Expected: exit 0.
+Run: `cd "W:/tmp/relay-number-reuse" && npm run typecheck`
+Expected: exit 0. Run it from the ROOT - a `npm run typecheck` after `cd app` checks
+only that workspace and lets a dashboard or e2e break surface tasks later.
 
 - [ ] **Step 6: Commit**
 
@@ -629,16 +665,40 @@ constants and its `QUIET_OFF` constant - do not introduce new fixtures.
   });
 ```
 
-The `buildAddPreview` guarantee is proven by CONSTRUCTION rather than by a test here:
-that function is not modified and never receives a `findDuplicate`, so it has nothing
-to set. If `app/test/rosterEdits.test.ts` grows an add-preview case later, asserting
-`duplicateOf` is undefined there is a cheap belt-and-braces addition.
+Plus the ADD-path guarantee, which spec 5 says to "pin with a test on the builder".
+An earlier draft of this plan declined it as "proven by construction". That was
+scope-shaving: construction proves it TODAY, and the whole point of the test is that a
+future edit which threads the callback into `buildAddPreview` fails loudly instead of
+quietly warning on the add dialog.
+
+```ts
+  it('buildAddPreview NEVER sets duplicateOf', async () => {
+    const { deps, owner } = ownerFixture(world, members);
+    const outcome = await buildAddPreview(
+      deps,
+      owner,
+      { contactId: 'c-bob', phone: BOB, name: 'Bob Brown', optedOut: false },
+      QUIET_OFF,
+    );
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.preview.duplicateOf).toBeUndefined();
+  });
+```
+
+Add `buildAddPreview` to the file's existing import block from
+`../src/services/rosterEdits.js` if it is not already there.
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
 Run: `cd app && npx vitest run test/rosterEdits.test.ts -t "duplicate warning"`
-Expected: FAIL - `buildStandaloneOpenPreview` takes 3 arguments, and `duplicateOf` is
-not a property of `RosterPreview`.
+Expected: FAIL on the cases that assert a PRESENT `duplicateOf` - the extra argument is
+ignored at runtime, so the field comes back undefined.
+
+READ THIS BEFORE BELIEVING THE RESULT. Vitest runs through esbuild, which STRIPS types
+without checking them, so a type error is NOT a red test here - a case that only
+asserts `duplicateOf` is UNDEFINED passes vacuously before any implementation exists.
+Only the present-case assertions are genuinely red. Confirm the runner reports at least
+3 failures; if everything passes, the tests are not pinning what you think.
 
 - [ ] **Step 3: Add the field and the parameter**
 
@@ -756,7 +816,8 @@ Expected: PASS, including the pre-existing cases.
 
 - [ ] **Step 6: Typecheck and commit**
 
-Run: `npm run typecheck` (expect exit 0). Read a bare `git status`, then:
+Run: `cd "W:/tmp/relay-number-reuse" && npm run typecheck` (expect exit 0; from the
+ROOT, so all three workspaces are checked). Read a bare `git status`, then:
 
 ```bash
 git add app/src/services/rosterEdits.ts app/test/rosterEdits.test.ts
@@ -797,63 +858,71 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 Append to `app/test/relayGroupPreview.test.ts`:
 
+Append INSIDE the existing top-level `describe` in that file, so it inherits the
+`beforeEach` that builds `world`. It uses the file's OWN conventions, verified at
+`app/test/relayGroupPreview.test.ts:99-104`: `app` comes from
+`makeWebhookHarness({ world })` per test, requests go through the file's local
+`preview(app, body)` helper which already sets `x-origin-verify` and the session
+cookie, and the repo is `world.conversationsRepo` - there is no file-scope
+`conversations` or `app`.
+
 ```ts
-it('POST /api/relay-groups/preview warns when a live group has exactly these members', async () => {
-  // Seed an OPEN relay group with the same two phones the preview asks about.
-  await conversations.createRelayGroup({
-    poolNumber: '+15550190999',
-    members: [
-      { contactId: '', phone: '+15558000001', name: 'Dana Reed' },
-      { contactId: '', phone: '+15558000002', name: 'Marcus Bell' },
-    ],
-    owner: { type: null },
+  it('warns when a live group has exactly these members', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550190999',
+      members: [
+        { contactId: '', phone: ALICE, name: 'Alice Adams' },
+        { contactId: '', phone: BOB, name: 'Bob Brown' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await preview(app, {
+      members: [
+        { phone: ALICE, name: 'Alice Adams' },
+        { phone: BOB, name: 'Bob Brown' },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeDefined();
+    expect(res.body.duplicateOf.partition).toBe('open');
+    expect(res.body.duplicateOf.memberNames).toEqual(['Alice Adams', 'Bob Brown']);
+    // The wire rule: names travel, phones do not.
+    expect(JSON.stringify(res.body)).not.toContain(ALICE);
   });
 
-  const res = await request(app)
-    .post('/api/relay-groups/preview')
-    .send({
+  it('does NOT warn for a superset roster', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550190998',
       members: [
-        { phone: '+15558000001', name: 'Dana Reed' },
-        { phone: '+15558000002', name: 'Marcus Bell' },
+        { contactId: '', phone: ALICE, name: 'Alice Adams' },
+        { contactId: '', phone: BOB, name: 'Bob Brown' },
       ],
-    })
-    .expect(200);
+      owner: { type: null },
+    });
 
-  expect(res.body.duplicateOf).toBeDefined();
-  expect(res.body.duplicateOf.partition).toBe('open');
-  expect(res.body.duplicateOf.memberNames).toHaveLength(2);
-  expect(JSON.stringify(res.body)).not.toContain('+15558000001');
-});
+    const res = await preview(app, {
+      members: [
+        { phone: ALICE, name: 'Alice Adams' },
+        { phone: BOB, name: 'Bob Brown' },
+        { phone: CARLA, name: 'Carla Cole' },
+      ],
+    });
 
-it('POST /api/relay-groups/preview does NOT warn for a superset roster', async () => {
-  await conversations.createRelayGroup({
-    poolNumber: '+15550190998',
-    members: [
-      { contactId: '', phone: '+15558000001', name: 'Dana Reed' },
-      { contactId: '', phone: '+15558000002', name: 'Marcus Bell' },
-    ],
-    owner: { type: null },
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeUndefined();
   });
-
-  const res = await request(app)
-    .post('/api/relay-groups/preview')
-    .send({
-      members: [
-        { phone: '+15558000001', name: 'Dana Reed' },
-        { phone: '+15558000002', name: 'Marcus Bell' },
-        { phone: '+15558000003', name: 'Third Person' },
-      ],
-    })
-    .expect(200);
-
-  expect(res.body.duplicateOf).toBeUndefined();
-});
 ```
 
 - [ ] **Step 2: Run it and verify it fails**
 
-Run: `cd app && npx vitest run test/relayGroupPreview.test.ts -t "duplicateOf"`
-Expected: FAIL - `res.body.duplicateOf` is undefined in the first case.
+Run: `cd app && npx vitest run test/relayGroupPreview.test.ts -t "warns when a live group"`
+Expected: FAIL - `res.body.duplicateOf` is undefined, because no route supplies the
+callback yet. Verify the runner reports 1 test run and 1 failed; a filter that matches
+ZERO tests reports success and proves nothing.
 
 - [ ] **Step 3: Wire `relayGroups.ts`**
 
@@ -1114,8 +1183,32 @@ COPY RULES, from spec 5 - do not restate them in other words:
 - The dialog's own buttons, including the quiet-hours defer/send-now pair, keep their
   existing labels, positions and behavior.
 
-Style `.duplicateWarning` to match the component's existing warning treatment (the
-quiet-hours notice is the precedent in this file).
+Add the class to `dashboard/src/routes/shared/RosterConfirmDialog.module.css`, beside
+the existing `.quiet` notice at :63 which is the precedent for a warning block in this
+component. Without this the element renders `class="undefined"` and no test catches it:
+
+```css
+.duplicateWarning {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-warning-border, #d9a441);
+  border-radius: 6px;
+  background: var(--color-warning-bg, #fdf6e6);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.duplicateWarning p {
+  margin: 0 0 6px;
+}
+
+.duplicateWarning a {
+  font-weight: 600;
+}
+```
+
+Match the surrounding file's variable names if they differ - read `.quiet` and `.error`
+first rather than assuming these token names exist.
 
 - [ ] **Step 5: Run and verify they pass**
 
@@ -1150,16 +1243,26 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 5: End-to-end proof
 
 **Files:**
-- Modify: `e2e/tests/dashboard-next/relay-group-view.spec.ts` (or the relay spec whose
-  fixtures best fit; do NOT modify `e2e/fixtures/relayConnect.ts`)
+- Modify: `e2e/tests/dashboard-next/relay-number-lifecycle.spec.ts`
+
+WHY THIS FILE and not another: it is the only relay spec that already has all three
+helpers this task needs - `createGroupOpen` imported at :4, a file-local `devLogin` at
+:79, and `uniquePhone` at :57. `relay-group-view.spec.ts` has `devLogin` only, and it
+reseeds the FULL profile per test. Do NOT modify `e2e/fixtures/relayConnect.ts`;
+consume it read-only.
 
 **Interfaces:**
-- Consumes: `createGroupOpen` from `e2e/fixtures/relayConnect.ts`, READ-ONLY.
+- Consumes: `createGroupOpen(page, members)` -> `{ conversationId, status, pool_number }`,
+  `devLogin(page)`, `uniquePhone()` - all already in scope in that file.
 
 - [ ] **Step 1: Write the spec**
 
+Append to `e2e/tests/dashboard-next/relay-number-lifecycle.spec.ts`:
+
 ```ts
-test('a second group for the same pair warns, and is still created', async ({ page }) => {
+test('a second group for the same pair WARNS in the dialog, and is still created', async ({
+  page,
+}) => {
   await devLogin(page);
 
   const tenant = { phone: uniquePhone(), name: 'Dup Tenant' };
@@ -1170,21 +1273,34 @@ test('a second group for the same pair warns, and is still created', async ({ pa
   // numbers are console-tagged), and the helper registers the warmed number.
   const first = await createGroupOpen(page, [tenant, landlord]);
   expect(first.status).toBe('open');
+  expect(first.pool_number).toBeTruthy();
 
-  // Preview the SAME pair again - the server must report the duplicate.
-  const preview = await page.request.post('/api/relay-groups/preview', {
-    data: { members: [tenant, landlord] },
-  });
-  expect(preview.ok()).toBeTruthy();
-  const body = await preview.json();
-  expect(body.duplicateOf, 'an identical live pair must be reported').toBeTruthy();
-  expect(body.duplicateOf.conversationId).toBe(first.conversationId);
+  // Drive the REAL create flow from the contact page, so the DIALOG renders - an
+  // API-only assertion would leave the entire warning UI unproven.
+  await page.goto(`${NEXT}/contacts`);
+  await page.getByRole('link', { name: tenant.name }).click();
+  await page.getByRole('button', { name: /Create group/i }).click();
+  await page.getByLabel(/Add someone/i).fill(landlord.phone);
+  await page.getByRole('option', { name: new RegExp(landlord.name, 'i') }).click();
+  await page.getByRole('button', { name: /Continue|Preview/i }).click();
 
-  // Nothing is refused: creating it anyway succeeds (spec D5).
-  const created = await page.request.post('/api/relay-groups', {
-    data: { members: [tenant, landlord] },
-  });
-  expect(created.status(), 'the duplicate is created, not refused').toBe(201);
+  // THE WARNING: names the existing pair and links to the group that already exists.
+  await expect(page.getByText(/already have an open relay group/i)).toBeVisible();
+  await expect(page.getByText(new RegExp(`${tenant.name} and ${landlord.name}`, 'i'))).toBeVisible();
+  const existing = page.getByRole('link', { name: /View the existing group/i });
+  await expect(existing).toHaveAttribute('href', `/conversations/${first.conversationId}`);
+  await expect(existing).toHaveAttribute('target', '_blank');
+
+  // NOTHING IS REFUSED (spec D5): confirming creates the duplicate.
+  await page.getByRole('button', { name: /Create|Open relay group/i }).click();
+  await expect(page.getByText(/already have an open relay group/i)).toBeHidden();
+
+  // And it lands on a DIFFERENT number - the allocation behavior this feature
+  // deliberately does not change (spec 2.2). Read it once the second group has
+  // been driven open, since a just-created group has no number to compare.
+  const second = await createGroupOpen(page, [tenant, landlord]);
+  expect(second.conversationId).not.toBe(first.conversationId);
+  expect(second.pool_number).not.toBe(first.pool_number);
 });
 
 test('a superset roster does NOT warn', async ({ page }) => {
@@ -1196,14 +1312,23 @@ test('a superset roster does NOT warn', async ({ page }) => {
 
   await createGroupOpen(page, [tenant, landlord]);
 
-  const preview = await page.request.post('/api/relay-groups/preview', {
+  // API-level here on purpose: this asserts an ABSENCE, and the cheapest honest
+  // proof that the server did not flag it is the preview payload itself.
+  // Without this case, a regression to containment-matching passes every other test.
+  const res = await page.request.post('/api/relay-groups/preview', {
     data: { members: [tenant, landlord, third] },
   });
-  const body = await preview.json();
-  // Without this, a regression to containment-matching passes every other test.
-  expect(body.duplicateOf, 'a superset is a different conversation').toBeUndefined();
+  expect(res.ok()).toBeTruthy();
+  expect((await res.json()).duplicateOf, 'a superset is a different conversation').toBeUndefined();
 });
 ```
+
+BEFORE writing the UI steps, open `dashboard/src/routes/contact/CreateRelayGroupModal.tsx`
+and match the ACTUAL accessible names of the create-group entry point, the member
+picker, and the confirm button. The selectors above are the shape to follow, not
+verified strings - the modal shipped on a branch this plan did not read line by line,
+and an accessibility-first selector that does not match is the single most common way
+an e2e lands red for the wrong reason.
 
 - [ ] **Step 2: Run the suite**
 
@@ -1224,8 +1349,16 @@ Read a bare `git status`, then commit the spec file only.
 
 - [ ] **Step 1: Write the issues**
 
-One file each, `type: improvement` unless noted, `severity: low`, `status: open`,
-`area: app`, `created: 2026-08-18`:
+SIX files, one per gap in spec section 8. An earlier draft filed five and silently
+dropped the deferral-staleness one.
+
+Frontmatter is VALIDATED by `scripts/issues.mjs:15` - `id`, `title`, `type`,
+`severity` and `status` are all REQUIRED, and `id` MUST equal the filename slug or
+`npm run issues` warns. Copy `docs/issues/_TEMPLATE.md` and fill every field; do not
+hand-write a partial block.
+
+Each is `severity: low`, `status: open`, `area: app`, `created: 2026-08-18`, and
+`type: improvement` unless noted:
 
 1. `relay-single-live-conversation-per-pair.md` (`type: decision`) - if a pair should
    only ever have one live conversation, the eventual right behavior is to route new
@@ -1242,11 +1375,18 @@ One file each, `type: improvement` unless noted, `severity: low`, `status: open`
 5. `relay-duplicate-detection-scan-cost.md` (`type: debt`) - each preview walks both
    live partitions to exhaustion, and the no-match case always pays the maximum. The
    perf workload already drives both affected endpoints against the 1,000-group seed.
+6. `relay-duplicate-warning-stale-after-defer.md` - a quiet-hours DEFERRED open applies
+   at quiet-end, hours after the dialog rendered. A duplicate created in between is
+   never warned about, and one that WAS warned about may have closed by then. Nothing
+   refuses, so this is staleness rather than a wrong refusal - but it is a real limit
+   of a preview-time-only check.
 
 - [ ] **Step 2: Regenerate the index and commit**
 
 Run: `npm run issues`
-Read a bare `git status`, then commit the five files (NOT the gitignored
+Confirm `npm run issues` printed NO warnings for the six new files - a missing
+required field or an `id` that does not match the slug is reported there, not by a
+test. Then read a bare `git status` and commit the six files (NOT the gitignored
 `docs/issues/INDEX.md`).
 
 ---
@@ -1266,7 +1406,13 @@ that conflicts with active work elsewhere, STOP and ask before syncing.
 
 Never pipe them - a pipe returns the tail command's exit code and hides a real failure.
 
+Run all three from the WORKTREE ROOT, not from `app/` or `dashboard/`. The per-task
+commands in Tasks 1-4 use `cd app` / `cd dashboard` for speed, and a root-level
+`npm run typecheck` is the only thing that checks the app, dashboard AND e2e
+workspaces - which is where a broken e2e spec surfaces.
+
 ```
+cd "W:/tmp/relay-number-reuse"
 npm run typecheck
 npm test
 npm run e2e

@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/inbox
 created: 2026-08-18
-refs: app/src/routes/inbox.ts, app/src/lib/callPreview.ts, app/src/routes/contactTimeline.ts, app/src/lib/import/apply.ts
+refs: app/src/routes/inbox.ts, app/src/lib/callPreview.ts:28, app/src/routes/contactTimeline.ts:488, app/src/lib/import/apply.ts
+updated: 2026-08-19
 ---
 
 **Problem.** The Quo importer writes call rows whose `call_outcome` is OUTSIDE
@@ -62,3 +63,24 @@ to watch:
 A shared helper would also delete the deliberate duplication of `isCallStatus` /
 `isCallOutcome` between `inbox.ts` and `contactTimeline.ts`, which is accepted
 today only because the two surfaces were kept independent.
+
+**Widened 2026-08-19: a ZERO duration is now a second divergence case.** The
+comms-panel call-direction fix wave stopped the timeline projecting a zero call
+duration - `callDurationOf` (`app/src/routes/contactTimeline.ts:488`) treats a
+non-positive value as ABSENT on both the native `call_duration` and the imported
+`call_duration_seconds`, because a miss has no meaningful talk time. The inbox
+still renders one: `formatCallDuration`
+(`app/src/lib/callPreview.ts:28`) guards `seconds < 0` rather than `<= 0`, so
+zero survives and `callPreview` appends it
+(`app/src/lib/callPreview.ts:44-45`).
+
+Net effect on a zero-duration ANSWERED row: the inbox reads `Call - 0s` while the
+timeline card shows the outcome with no duration at all. Same row, two readings -
+the same divergence this issue already describes, one case wider.
+
+The one-character fix (`< 0` becomes `<= 0`) was deliberately not taken with the
+timeline change: it alters inbox preview text for historical rows, which spec
+section 8 of
+`docs/superpowers/specs/2026-08-18-comms-panel-call-direction-design.md` declares
+an explicit non-goal. Fold it into whichever change reconciles the two surfaces
+above, not before.

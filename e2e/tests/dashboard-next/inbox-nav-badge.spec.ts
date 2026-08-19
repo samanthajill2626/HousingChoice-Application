@@ -105,6 +105,39 @@ async function expectBadgeAfter(
   else await expect(navBadge(page)).toHaveAttribute('aria-label', expected);
 }
 
+async function expectLinkSpansRow(link: Locator): Promise<void> {
+  const [linkBox, rowBox] = await Promise.all([
+    link.boundingBox(),
+    link.locator('..').boundingBox(),
+  ]);
+  expect(linkBox).not.toBeNull();
+  expect(rowBox).not.toBeNull();
+
+  const tolerance = 1;
+  expect(Math.abs((linkBox?.x ?? 0) - (rowBox?.x ?? 0))).toBeLessThanOrEqual(tolerance);
+  expect(Math.abs((linkBox?.width ?? 0) - (rowBox?.width ?? 0))).toBeLessThanOrEqual(tolerance);
+}
+
+async function expectBadgeInsideRow(link: Locator): Promise<void> {
+  const badge = link.locator('xpath=following-sibling::span[contains(@aria-label, "unread")]');
+  const [badgeBox, rowBox] = await Promise.all([
+    badge.boundingBox(),
+    link.locator('..').boundingBox(),
+  ]);
+  expect(badgeBox).not.toBeNull();
+  expect(rowBox).not.toBeNull();
+
+  const tolerance = 1;
+  expect((badgeBox?.x ?? 0) + tolerance).toBeGreaterThanOrEqual(rowBox?.x ?? 0);
+  expect((badgeBox?.y ?? 0) + tolerance).toBeGreaterThanOrEqual(rowBox?.y ?? 0);
+  expect((badgeBox?.x ?? 0) + (badgeBox?.width ?? 0)).toBeLessThanOrEqual(
+    (rowBox?.x ?? 0) + (rowBox?.width ?? 0) + tolerance,
+  );
+  expect((badgeBox?.y ?? 0) + (badgeBox?.height ?? 0)).toBeLessThanOrEqual(
+    (rowBox?.y ?? 0) + (rowBox?.height ?? 0) + tolerance,
+  );
+}
+
 test.beforeEach(async ({ request }) => {
   // An EXACT count assertion needs a known world. The standing lean seed carries
   // no nonzero unread anywhere (guarded by app/test/seedUnreadFlag.test.ts), so
@@ -125,18 +158,23 @@ test('the active Inbox link spans the full nav row when its unread badge is pres
   const inboxLink = page
     .getByRole('navigation', { name: 'Communications' })
     .getByRole('link', { name: 'Inbox' });
-  const linkRow = inboxLink.locator('..');
   await expect(navBadge(page)).toHaveAttribute('aria-label', '1 unread', { timeout: 20_000 });
+  await expectLinkSpansRow(inboxLink);
 
-  const [linkBox, rowBox] = await Promise.all([
-    inboxLink.boundingBox(),
-    linkRow.boundingBox(),
-  ]);
-  expect(linkBox).not.toBeNull();
-  expect(rowBox).not.toBeNull();
-  expect(Math.abs(
-    (linkBox?.x ?? 0) + (linkBox?.width ?? 0) - (rowBox?.x ?? 0) - (rowBox?.width ?? 0),
-  )).toBeLessThanOrEqual(1);
+  await page.getByRole('button', { name: 'Collapse navigation' }).click();
+  await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible();
+  await expectLinkSpansRow(inboxLink);
+  await expectBadgeInsideRow(inboxLink);
+
+  await page.setViewportSize({ width: 500, height: 800 });
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  const drawer = page.locator('#nav-drawer');
+  await expect(drawer).toBeVisible();
+  await expectLinkSpansRow(
+    drawer
+      .getByRole('navigation', { name: 'Communications' })
+      .getByRole('link', { name: 'Inbox' }),
+  );
 });
 
 test('the nav Inbox badge counts unread rows and decrements the instant a row is acted on', async ({

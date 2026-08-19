@@ -227,8 +227,16 @@ export function RosterConfirmDialog({
 }
 
 /** One recipient line: the name, plus the reason when their leg is suppressed.
- *  A bare-phone participant has no name and this dialog prints no phone numbers
- *  (spec 6.2's rule holds everywhere), so they are named structurally. */
+ *
+ *  A bare-phone participant renders as 'Unnamed number' here, while the DUPLICATE
+ *  WARNING above prints that same person's formatted number. The asymmetry is real
+ *  and is not an oversight: the warning is built from `duplicateOf.memberNames`,
+ *  which the server resolves with the staff name-else-number fallback, whereas this
+ *  row is built from `RosterPreviewRecipient`, whose wire type exposes only
+ *  `phoneLast4`. Widening that roster type is a separate decision nobody has made
+ *  (spec amendment 2026-08-19, "out of scope"). Both are staff-only surfaces, so
+ *  neither leaks to a tenant or landlord - see
+ *  docs/issues/relay-recipient-row-nameless-inconsistency.md. */
 function RecipientRow({ recipient }: { recipient: RosterPreviewRecipient }): React.JSX.Element {
   const reason = NOT_RECEIVING[recipient.reachability];
   return (

@@ -159,45 +159,51 @@ export async function findOpenGroupWithSamePhones(
   let incomplete = false;
 
   for (const partition of LIVE_PARTITIONS) {
-    let items: ConversationItem[] = [];
+    // The try spans the WHOLE partition pass, not just the read. An earlier version
+    // guarded only listRelayGroups, which left the match/sort/shape chain below
+    // outside it - and that chain touches unvalidated stored rows (participants may
+    // be absent, may hold non-string phones, may be missing entirely on a legacy
+    // item). A throw there escaped a function whose contract is NEVER THROWS, and
+    // because both preview routes deliberately do not catch, it would have 500'd
+    // every relay-open preview rather than degrading to no warning. Widening the
+    // boundary is what makes the docstring true.
     try {
       const page = await deps.conversations.listRelayGroups(partition);
-      items = page.items;
       if (page.truncated) incomplete = true;
+
+      const matches = page.items
+        // The imported skip applies ONLY to the connecting partition, where the
+        // importer parks unconverted carrier group texts. `imported_from` is never
+        // cleared (nothing in app/src removes it, and the group-text conversion
+        // drops relay_status but keeps it), so filtering it in the OPEN partition
+        // would permanently silence any import-origin group that later went live.
+        .filter((conv) => partition !== 'connecting' || !isImported(conv))
+        .filter((conv) => samePhoneSet(rosterPhones(conv), phones));
+
+      if (matches.length > 0) {
+        const winner = [...matches].sort(byNewestActivity)[0]!;
+        if (matches.length > 1) {
+          deps.log.warn(
+            { partition, matchCount: matches.length, conversationId: winner.conversationId },
+            'several live relay groups share this exact roster - warning names the newest',
+          );
+        }
+        return toDuplicate(winner, partition);
+      }
     } catch (err) {
       // Silence, not a broken dialog. See the NEVER THROWS note above.
       //
-      // Says ONLY what is true HERE: this partition could not be read, so nothing in
-      // it is represented in the answer. It does NOT claim the preview went unwarned
-      // - the other partition is still walked and may well match, in which case a
-      // warning IS shown. The "found nothing" claim belongs to the summary WARN
-      // below, which is reached only when no partition matched.
+      // Says ONLY what is true HERE: this partition could not be processed, so
+      // nothing in it is represented in the answer. It does NOT claim the preview
+      // went unwarned - the other partition is still walked and may well match, in
+      // which case a warning IS shown. The "found nothing" claim belongs to the
+      // summary WARN below, which is reached only when no partition matched.
       deps.log.warn(
         { err, partition },
         'duplicate relay-group scan could not read this partition - it is not represented in the answer',
       );
       incomplete = true;
       continue;
-    }
-
-    const matches = items
-      // The imported skip applies ONLY to the connecting partition, where the
-      // importer parks unconverted carrier group texts. `imported_from` is never
-      // cleared (nothing in app/src removes it, and the group-text conversion
-      // drops relay_status but keeps it), so filtering it in the OPEN partition
-      // would permanently silence any import-origin group that later went live.
-      .filter((conv) => partition !== 'connecting' || !isImported(conv))
-      .filter((conv) => samePhoneSet(rosterPhones(conv), phones));
-
-    if (matches.length > 0) {
-      const winner = [...matches].sort(byNewestActivity)[0]!;
-      if (matches.length > 1) {
-        deps.log.warn(
-          { partition, matchCount: matches.length, conversationId: winner.conversationId },
-          'several live relay groups share this exact roster - warning names the newest',
-        );
-      }
-      return toDuplicate(winner, partition);
     }
   }
 

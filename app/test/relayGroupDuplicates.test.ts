@@ -216,6 +216,47 @@ describe('findOpenGroupWithSamePhones - D6, a match always wins', () => {
       findOpenGroupWithSamePhones({ conversations, log: logger }, new Set([A, B])),
     ).resolves.toBeUndefined();
   });
+
+  it('swallows a throw from MATCHING a malformed row, not just from the read', async () => {
+    // The read succeeding and the row being unusable are different failures, and an
+    // earlier version guarded only the read - leaving the match/sort/shape chain
+    // outside the try. Both preview routes deliberately do not catch, so a throw
+    // here 500'd every relay-open preview instead of degrading to no warning.
+    //
+    // `participants` typed as a non-iterable is a real legacy shape: the field is
+    // optional on ConversationItem and nothing validates it on read, so `for...of`
+    // over it throws TypeError.
+    const malformed = {
+      conversationId: 'conv-legacy',
+      participants: 42,
+      last_activity_at: '2026-08-18T00:00:00.000Z',
+    } as unknown as ConversationItem;
+    const conversations = repo({ open: [malformed] });
+
+    await expect(
+      findOpenGroupWithSamePhones({ conversations, log: logger }, new Set([A, B])),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still matches a GOOD row in the other partition when one partition throws', async () => {
+    // The degradation must be per-partition, not global: a bad row in OPEN must not
+    // cost the operator a warning that CONNECTING can still supply.
+    const malformed = {
+      conversationId: 'conv-legacy',
+      participants: 42,
+      last_activity_at: '2026-08-18T00:00:00.000Z',
+    } as unknown as ConversationItem;
+    const conversations = repo({
+      open: [malformed],
+      connecting: [group('conv-good', [A, B])],
+    });
+
+    const found = await findOpenGroupWithSamePhones(
+      { conversations, log: logger },
+      new Set([A, B]),
+    );
+    expect(found?.conversationId).toBe('conv-good');
+  });
 });
 
 describe('findOpenGroupWithSamePhones - D2a, the adjacent-field trap', () => {

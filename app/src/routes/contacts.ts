@@ -181,10 +181,13 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
  * thread + its open/closed status, the pool number fronting it (absent once
  * closed — close clears it), roster size, last activity, the owning entity
  * (tour/placement — the dashboard's link target, from getOwner()), the
- * operator tag, and the OTHER members' resolved display names (known names
- * only, NEVER a phone — least data that makes the row readable). Carrying
- * numbers/names to the authed client matches the M1.7 relay posture; LOG
- * LINES stay IDs/counts only (doc §9).
+ * operator tag, and the OTHER members' STAFF-FACING labels - each member's name,
+ * else their formatted phone (founder ruling 2026-08-19). The rule is NOT "never
+ * a phone"; it is that a phone never reaches a TENANT OR LANDLORD. This card is
+ * staff-only, and a navigator cannot act on a member who was silently dropped for
+ * having no name. Outbound message content is the guarded side and is unchanged
+ * (jobs/relayFanOut). Carrying numbers/names to the authed client matches the M1.7
+ * relay posture; LOG LINES stay IDs/counts only (doc section 9).
  */
 /**
  * One NATIVE group text on a contact's page. Smaller than RelayGroupRow by

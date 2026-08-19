@@ -1016,7 +1016,10 @@ export interface RosterPreviewRecipient {
 
 /**
  * A live relay group with EXACTLY the members being proposed (server-detected).
- * Names only - the wire never carries member phones.
+ * Each entry is a STAFF-FACING label: the member's name, else their formatted
+ * phone (founder ruling 2026-08-19). A nameless member therefore DOES put a
+ * number on this wire, deliberately - the guarded boundary is outbound message
+ * content, which never carries one, not the authed staff client.
  *
  * MIRRORS app/src/services/relayGroupDuplicates.ts `DuplicateOpenGroup`.
  * `partition` is the status partition the match was found in, which is what the

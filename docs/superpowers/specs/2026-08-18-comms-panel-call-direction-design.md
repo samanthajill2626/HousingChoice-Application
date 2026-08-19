@@ -429,16 +429,31 @@ only checked one of them:
   thread's latest. That is a regression, and section 8's non-goal would have
   been false.
 
-REQUIRED companion change: add `canceled` to the derive arm's first disjunct, so
-a D12-stamped row derives exactly as it does today. This preserves behavior
-rather than changing it - the resulting string is identical - and it matches the
-arm's evident intent, which is to derive whenever the row has no terminal
-outcome of its own to describe. It is the one inbox-side edit this mission
-makes, and it exists solely to keep section 8's promise true.
+REQUIRED companion change: extend the derive arm's first disjunct to
+`callStatus === 'ringing' || (callStatus === 'canceled' && callOutcome ===
+undefined)`, so a D12-stamped row derives exactly as it does today.
 
-Both cases get a test. The no-stored-preview equivalence in particular holds by
-base-case fallthrough in `callPreview`, not by design, so it is pinned rather
-than inherited.
+The second conjunct is load-bearing, not decoration (R4 finding 1). A BARE
+`canceled` disjunct would also capture `canceled` rows that DO carry an outcome -
+a state reachable today when `stampCallActivity` fails and swallows it
+(`voice.ts:389-406`, which logs "call row persisted, inbox stale"). Those rows
+currently show their stored preview and would start deriving instead, which is a
+behavior change to calls this mission has nothing to do with. Pairing
+status-with-no-outcome is the same signature clause 2 uses, and for the same
+reason: it is what identifies a D12 stamp specifically.
+
+This preserves behavior rather than changing it - the resulting string is
+identical - and it matches the arm's evident intent, which is to derive whenever
+the row has no terminal outcome of its own to describe. It is the one inbox-side
+edit this mission makes, and it exists solely to keep section 8's promise true.
+
+Masked rows are out of scope for this change entirely: `deriveLatest`'s contact
+row source excludes `relay_group` and `group_text` (`inbox.ts:777-784`), so no
+masked call can reach it. Checked, not assumed.
+
+Both cases get a test (section 9). The no-stored-preview equivalence in
+particular holds by base-case fallthrough in `callPreview`, not by design, so it
+is pinned rather than inherited.
 
 ## 7. Client design
 
@@ -483,7 +498,12 @@ Three constraints on that timer, each closing a way the spin comes back:
   above 2^31-1 ms fires immediately rather than late, so "strictly in the
   future" is not on its own a sufficient spin guard. Above the ceiling, schedule
   nothing - the label is not going to change within 24 days of anyone looking.
-- Nothing is scheduled for a `staleAt` at or before the fresh read.
+- When `staleAt` is at or before the fresh read, the effect does NOT simply
+  schedule nothing - it advances state `now` to the fresh read immediately (R4
+  finding 4). Skipping the schedule would strand the card on the fresh label
+  with no correction path, because state `now` otherwise only advances when a
+  timer fires. The immediate advance re-renders into the stale branch, which
+  returns no `staleAt`, and the effect settles.
 
 Every clause must still return either no `staleAt` or one strictly in the
 future; section 9 asserts it directly.
@@ -602,8 +622,11 @@ removed by D12/6.3, not by the label.
   with a value because 7.5's stated job is to leave no CSS to improvisation (R3
   finding 10).
 - Summary line, in order: arrow glyph (`aria-hidden`, D2), "Incoming call" /
-  "Outgoing call", the outcome chip from 7.1, the duration when one is known and
-  the clause permits it, then the time. Note both `.status` (`:311-314`) and
+  "Outgoing call", the outcome chip from 7.1, the duration whenever one is
+  present, then the time. No permission signal is needed from the presenter (R4
+  finding 5): the only clauses that would want duration suppressed - the stale
+  in-progress arms - describe rows that never carried one in the first place.
+  Note both `.status` (`:311-314`) and
   `.callTime` (`:459-463`) currently claim `margin-left: auto`; the new line
   needs its own layout rather than inheriting that fight.
 - The card carries `role="group"` and an `aria-label` built from the direction
@@ -629,9 +652,13 @@ removed by D12/6.3, not by the label.
 - Recording player and transcript disclosure are unchanged in behavior; the
   `call_sid`-not-`id` rule for the recording URL is unchanged
   (`Timeline.tsx:734-745`).
-- Timer: one `setTimeout` at `staleAt - now`, only when `staleAt` is set and in
-  the future; cleared on unmount. No polling interval, and no timer on a settled
-  card.
+- Timer: exactly as specified by 7.1's three constraints - delay from a FRESH
+  `Date.now()` read at schedule time (never from state `now`), clamped to the
+  32-bit range, and an immediate state advance instead of a schedule when
+  `staleAt` has already passed. Cleared on unmount. No polling interval, and no
+  timer on a settled card. This bullet previously restated the formula as
+  `staleAt - now`, which is the stale-clock bug 7.1 forbids (R4 finding 2);
+  there is ONE timer rule and it lives in 7.1.
 
 ### 7.3 EmailCard
 
@@ -738,6 +765,13 @@ Unit (app):
   no `call_outcome`, and a stamp failure does not break the hangup.
   `voiceOutbound.test.ts:380-382` currently asserts `call_status === 'ringing'`
   after the DNC path and must be re-pinned to the new terminal value.
+- 6.4's derive arm (R4 finding 6 - the mission's only inbox-side edit, and the
+  subject of a finding that was wrong three rounds running, so it gets explicit
+  coverage rather than a design-section promise): a D12-stamped row WITH a
+  stored preview derives "Outgoing call" exactly as the `ringing` row did
+  before; the same row with no stored preview is unchanged; and a `canceled` row
+  that DOES carry an outcome still shows its stored preview and does NOT derive.
+  That last case is the one the bare disjunct would have broken.
 - Inbound classification, the missed-bridge trigger, and the unread rule are
   byte-identical: assert on the existing tests, unmodified.
   `voiceOutbound.test.ts:391-409` (press-1 + `completed` -> `answered`) and
@@ -752,6 +786,14 @@ Unit (dashboard):
   evaluated at 200 seconds (still "Connected", never relabelled - I3).
 - Every returned `staleAt` is in the future or absent; no clause returns a
   `staleAt` in the past.
+- The three timer constraints, at the CARD level, because the presenter-level
+  assertion above is satisfied by construction and would pass on a card that
+  schedules against a stale clock (R4 finding 3): the scheduled delay is
+  computed from a clock read AFTER a props-driven re-render, not from the mount
+  seed; a `staleAt` beyond the 32-bit ceiling schedules nothing rather than
+  firing immediately; and a `staleAt` already in the past advances state
+  immediately and settles on the stale label rather than stranding the fresh
+  one. Fake timers, asserting the scheduled delay and the settled label.
 - CallCard: alignment class by direction, arrow plus word, duration on the face,
   role and accessible name, and the reveal asserted with `toBeVisible()` AFTER a
   click - not `getByText`, which matches `display: none` nodes and would pass on
@@ -826,10 +868,11 @@ Gates, run bare from the feature worktree per AGENTS.md: `npm run typecheck`,
 - **Aligning emails touches one surface, not the app.** Corrected at R1 (F14):
   four of the five `Timeline` consumers cannot render an email at all (7.6). The
   original spec ranked this the widest visual change; it is not.
-- **A never-accepted originate reads correctly on the timeline and stays absent
-  from the inbox row**, and an imported call reads richer on the timeline than
-  in the inbox (section 8). Three declared surface divergences, each with a
-  reason.
+- **Two declared timeline/inbox divergences, each with a reason** (section 8):
+  the two surfaces use different call vocabularies on purpose, and an imported
+  call reads richer on the timeline than in the inbox. The never-accepted
+  originate is NOT a third - 6.4 keeps the inbox row exactly as it is today, so
+  that one is preserved behavior rather than a divergence (R4 finding 7).
 
 ## 11. Post-merge obligations
 

@@ -3,6 +3,7 @@
 // rule, whose de-dupe-then-filter order is easy to invert silently.
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  buildAddPreview,
   buildOpenPreview,
   buildOpenPreviewFromParts,
   buildStandaloneOpenPreview,
@@ -313,5 +314,108 @@ describe('owner vs standalone parity', () => {
     expect(standalone.recipientCount).toBe(ownerOutcome.preview.recipientCount);
     expect(standalone.recipientCount).toBe(2);
     expect(standalone.body).toBe(ownerOutcome.preview.body);
+  });
+
+  describe('duplicate warning (spec 5)', () => {
+    const DUP = {
+      conversationId: 'conv-existing',
+      partition: 'open' as const,
+      memberNames: ['Dana Reed', 'Marcus Bell'],
+    };
+    const members: ConversationParticipant[] = [
+      { contactId: 'c-alice', phone: ALICE },
+      { contactId: 'c-bob', phone: BOB },
+    ];
+
+    it('standalone: sets duplicateOf when the callback resolves a group', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        members,
+        QUIET_OFF,
+        async () => DUP,
+      );
+      expect(preview.duplicateOf).toEqual(DUP);
+    });
+
+    it('standalone: omits duplicateOf when the callback resolves undefined', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        members,
+        QUIET_OFF,
+        async () => undefined,
+      );
+      expect(preview.duplicateOf).toBeUndefined();
+    });
+
+    it('standalone: omitting the callback yields no duplicateOf and does not throw', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        members,
+        QUIET_OFF,
+      );
+      expect(preview.duplicateOf).toBeUndefined();
+    });
+
+    it('standalone: passes the callback the DEDUPED phone set it previews', async () => {
+      const seen: Set<string>[] = [];
+      await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        // ALICE twice - the second slot is dropped by the de-dupe, so the callback
+        // must see two phones, not three. Nothing else pins WHAT is compared.
+        [...members, { contactId: 'c-alice', phone: ALICE }],
+        QUIET_OFF,
+        async (phones) => {
+          seen.push(phones);
+          return undefined;
+        },
+      );
+      expect(seen).toHaveLength(1);
+      expect([...seen[0]!].sort()).toEqual([ALICE, BOB].sort());
+    });
+
+    it('owner: sets duplicateOf and receives the same deduped set', async () => {
+      const { deps, owner } = ownerFixture(world, members);
+      const seen: Set<string>[] = [];
+      const outcome = await buildOpenPreview(deps, owner, QUIET_OFF, async (phones) => {
+        seen.push(phones);
+        return DUP;
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) expect(outcome.preview.duplicateOf).toEqual(DUP);
+      expect([...seen[0]!].sort()).toEqual([ALICE, BOB].sort());
+    });
+
+    it('owner: omitting the callback yields no duplicateOf', async () => {
+      const { deps, owner } = ownerFixture(world, members);
+      const outcome = await buildOpenPreview(deps, owner, QUIET_OFF);
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) expect(outcome.preview.duplicateOf).toBeUndefined();
+    });
+
+    it('the serialized preview contains NO phone numbers', async () => {
+      const preview = await buildStandaloneOpenPreview(
+        { contacts: world.contactsRepo, conversations: world.conversationsRepo },
+        members,
+        QUIET_OFF,
+        async () => DUP,
+      );
+      const wire = JSON.stringify(preview);
+      expect(wire).not.toContain(ALICE);
+      expect(wire).not.toContain(BOB);
+    });
+
+    it('buildAddPreview NEVER sets duplicateOf', async () => {
+      const { deps, owner } = ownerFixture(world, members);
+      // The candidate must NOT already be on the roster, or the add preview takes its
+      // idempotent branch and the assertion proves nothing about a real add.
+      const outcome = await buildAddPreview(
+        deps,
+        owner,
+        { contactId: 'c-carla', phone: '+15550100003', name: 'Carla Cole', optedOut: false },
+        QUIET_OFF,
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) expect(outcome.preview.duplicateOf).toBeUndefined();
+    });
   });
 });

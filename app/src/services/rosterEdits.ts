@@ -52,6 +52,7 @@ import type {
   ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { isMemberSuppressed } from './relayAnnouncements.js';
+import type { DuplicateOpenGroup } from './relayGroupDuplicates.js';
 import { LAST_MEMBER_REFUSAL, nameFromContact, resolveMemberName } from './relayMembers.js';
 
 /** A refusal the route renders verbatim. */
@@ -325,6 +326,12 @@ export interface RosterPreview {
   deferred: boolean;
   /** The clamped quiet-END instant; absent when not deferred. */
   quietEndsAt?: string;
+  /**
+   * A LIVE relay group with EXACTLY these members already exists (spec D1). Absent
+   * when there is none AND when detection could not tell - the dialog cannot
+   * distinguish those, by design: both mean "say nothing".
+   */
+  duplicateOf?: DuplicateOpenGroup;
 }
 
 export type RosterPreviewOutcome =
@@ -386,6 +393,8 @@ export interface PreviewRecipientRow {
 export interface OpenPreviewParts {
   bodyMembers: PreviewBodyMember[];
   recipients: PreviewRecipientRow[];
+  /** Set by the two OPEN builders; the ADD preview never sets it (spec 5). */
+  duplicateOf?: DuplicateOpenGroup;
 }
 
 /**
@@ -410,13 +419,30 @@ export function buildOpenPreviewFromParts(
     parts.recipients.filter((r) => r.reachability === 'reachable').map((r) => r.memberKey),
   );
   const recipientCount = parts.bodyMembers.filter((m) => reachableKeys.has(m.memberKey)).length;
-  return withQuietHours(
+  const preview = withQuietHours(
     composeIntroBody(parts.bodyMembers.map((m) => m.name)),
     parts.recipients.map(toRecipient),
     recipientCount,
     quiet,
   );
+  return parts.duplicateOf === undefined
+    ? preview
+    : { ...preview, duplicateOf: parts.duplicateOf };
 }
+
+/**
+ * Resolve the duplicate warning for a proposed roster (spec 5). Injected rather
+ * than imported so neither builder needs a ConversationsRepo with listRelayGroups
+ * nor a Logger - the preview ROUTES hold both and construct this. Omitted, the
+ * preview simply carries no warning, which is the correct degradation for a
+ * feature that never refuses.
+ *
+ * The phones are passed IN because the deduped set does not exist until the
+ * builder has resolved the roster: a caller has nothing to compute it from.
+ */
+export type FindDuplicateFn = (
+  phones: Set<string>,
+) => Promise<DuplicateOpenGroup | undefined>;
 
 /**
  * Preview OPENING the group: the relay.intro body, per-member deliverability,
@@ -433,6 +459,7 @@ export async function buildOpenPreview(
   deps: RosterResolutionDeps,
   owner: RosterOwner,
   quiet: QuietHoursState,
+  findDuplicate?: FindDuplicateFn,
 ): Promise<RosterPreviewOutcome> {
   const view = await describeRoster(deps, owner);
   if (view.source === 'unavailable') return { ok: false, refusal: ROSTER_UNAVAILABLE };
@@ -448,6 +475,16 @@ export async function buildOpenPreview(
     seenPhones.add(phone);
     provisioned.push(member);
   }
+
+  // Do NOT wrap this in try/catch. Error swallowing belongs to the detector, which
+  // is the only layer that knows a failed lookup means silence rather than a broken
+  // preview; a second catch here would also hide a genuine bug in a test stub.
+  //
+  // `seenPhones` IS the deduped, phone-bearing set (spec D2): a member reaches
+  // `provisioned` only after its phone was added here, on the same guarded local.
+  const duplicateOf =
+    findDuplicate === undefined ? undefined : await findDuplicate(new Set(seenPhones));
+
   return {
     ok: true,
     preview: buildOpenPreviewFromParts(
@@ -461,6 +498,7 @@ export async function buildOpenPreview(
           memberKey: m.memberKey,
           reachability: m.reachability,
         })),
+        ...(duplicateOf !== undefined && { duplicateOf }),
       },
       quiet,
     ),
@@ -499,6 +537,7 @@ export async function buildStandaloneOpenPreview(
   },
   members: ConversationParticipant[],
   quiet: QuietHoursState,
+  findDuplicate?: FindDuplicateFn,
 ): Promise<RosterPreview> {
   // De-dupe by phone, FIRST WINS - exactly what POST /api/relay-groups does, so
   // the dialog lists only people who will really be on the thread.
@@ -509,6 +548,12 @@ export async function buildStandaloneOpenPreview(
     seenPhones.add(m.phone);
     deduped.push(m);
   }
+
+  // See buildOpenPreview: no try/catch here, the detector owns its own failures.
+  const duplicateOf =
+    findDuplicate === undefined
+      ? undefined
+      : await findDuplicate(new Set(deduped.map((m) => m.phone)));
 
   const rows: PreviewRecipientRow[] = [];
   const bodyMembers: PreviewBodyMember[] = [];
@@ -528,7 +573,14 @@ export async function buildStandaloneOpenPreview(
     });
   }
 
-  return buildOpenPreviewFromParts({ bodyMembers, recipients: rows }, quiet);
+  return buildOpenPreviewFromParts(
+    {
+      bodyMembers,
+      recipients: rows,
+      ...(duplicateOf !== undefined && { duplicateOf }),
+    },
+    quiet,
+  );
 }
 
 /** The person an add-preview / live add is about, already resolved + validated. */

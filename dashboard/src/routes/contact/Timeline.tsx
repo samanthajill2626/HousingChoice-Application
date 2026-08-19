@@ -23,9 +23,18 @@ import type {
 import { ApiError, confirmMmsMedia, presignMmsMedia, uploadToPresignedPost } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
-import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
+import {
+  dayKey,
+  formatDayDivider,
+  formatDuration,
+  formatPhone,
+  formatTime,
+  formatTimeWithSeconds,
+} from './format.js';
 import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
 import type { DeliveryTone } from './deliveryStatus.js';
+import { presentCallState } from './presentCallState.js';
+import type { CallTone } from './presentCallState.js';
 import { senderLabel as resolveSenderLabel } from '../../lib/memberAttribution.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
@@ -427,6 +436,31 @@ const TONE_CLASS: Record<DeliveryTone, string | undefined> = {
   danger: styles.toneDanger,
 };
 
+/** Call tone -> chip color class. DELIBERATELY separate from TONE_CLASS above:
+ *  that map is typed Record<DeliveryTone, ...> so it cannot hold 'warning', and
+ *  it points at the DELIVERY palette, which is a different green (--c-success)
+ *  and a different red (--c-danger) from the call palette. Reusing it would put
+ *  two greens and two reds on one row. These are the card's own existing
+ *  classes, so the chips keep exactly today's colors. */
+const CALL_TONE_CLASS: Record<CallTone, string | undefined> = {
+  success: styles.answered,
+  danger: styles.missed,
+  warning: styles.voicemail,
+  neutral: styles.callNeutral,
+};
+
+// Direction glyphs as ESCAPES (pure-ASCII source; byte-identical render to the
+// literal characters): U+2199 down-left = inbound, U+2197 up-right = outbound.
+// Purely decorative - both are aria-hidden, and the direction word beside them
+// is what carries the meaning to a screen reader.
+const ARROW_IN = '\u2199';
+const ARROW_OUT = '\u2197';
+
+/** setTimeout's 32-bit ceiling. A delay ABOVE this fires IMMEDIATELY rather than
+ *  late, so "strictly in the future" is not on its own a spin guard - past the
+ *  ceiling the card schedules nothing at all. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 // Attachment glyphs via String.fromCodePoint (pure-ASCII source; byte-identical
 // render to the literal emoji) so every source line stays ASCII. U+1F4CE =
 // paperclip; U+1F4C4 = page (PDF).
@@ -707,30 +741,125 @@ function MonoAudio(props: React.ComponentProps<'audio'>): React.JSX.Element {
   return <audio ref={elRef} {...props} />;
 }
 
+/** A call card: a FIRST-CLASS directional item. It takes a side like a message
+ *  bubble does (position + direction word + outbound tint), states what we
+ *  actually know about the call, and never asserts an outcome the data does not
+ *  support - the label comes from presentCallState, which returns nothing at all
+ *  when nothing is known. The party number lives behind a click-to-reveal detail
+ *  line rather than on the face. */
 function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
-  const outcomeClass =
-    call.call_outcome === 'answered'
-      ? styles.answered
-      : call.call_outcome === 'voicemail'
-        ? styles.voicemail
-        : styles.missed;
-  const summary = [
-    'Call',
-    formatDuration(call.call_duration),
-    call.party_phone ? formatPhone(call.party_phone) : null,
-  ]
-    .filter(Boolean)
-    .join(' - ');
+  // The card's own clock: seeded once at mount, advanced by EXACTLY one timeout
+  // when the presenter says the current label has an expiry.
+  const [now, setNow] = useState<number>(() => Date.now());
+  const [revealed, setRevealed] = useState(false);
+  const outbound = call.direction === 'outbound';
+  // The ONE place the snake_case wire vocabulary meets the presenter's camelCase.
+  const state = presentCallState({
+    direction: call.direction,
+    callStatus: call.call_status,
+    callOutcome: call.call_outcome,
+    at: call.at,
+    now,
+  });
+  const staleAt = state.staleAt;
+
+  useEffect(() => {
+    // No expiry -> no timer at all. A settled card never schedules anything, and
+    // there is no polling interval anywhere in here.
+    if (staleAt === undefined) return undefined;
+    // The delay is computed from a FRESH read, NEVER from state `now`: state
+    // `now` only advances at mount and on its own timeout, so a props-driven
+    // re-render in between would otherwise schedule against a stale clock and
+    // fire early.
+    const fresh = Date.now();
+    if (staleAt <= fresh) {
+      // Already expired. Advance immediately rather than merely skipping the
+      // schedule - skipping would strand the card on the fresh label with no
+      // correction path. The re-render takes the stale branch, which returns no
+      // staleAt, and this effect settles.
+      setNow(fresh);
+      return undefined;
+    }
+    const delay = staleAt - fresh;
+    if (delay > MAX_TIMEOUT_MS) return undefined;
+    // Math.max, NOT a bare Date.now(): a timeout can fire marginally EARLY (an
+    // early-firing timer, or the clock stepping backwards). A bare read would
+    // then still be before staleAt, the presenter would return the SAME staleAt,
+    // the [staleAt] dependency would not change, this effect would not re-run,
+    // and no replacement timer would ever be scheduled - stranding the card on
+    // "Ringing..." forever. Advancing to at least the boundary makes the next
+    // render take the stale branch. `now` deliberately stays OUT of the
+    // dependency list: adding it would reintroduce the reschedule spin the three
+    // constraints above exist to make unrepresentable.
+    const timer = setTimeout(() => setNow(Math.max(Date.now(), staleAt)), delay);
+    return () => clearTimeout(timer);
+  }, [staleAt]);
+
+  const time = formatTime(call.at);
+  // SECONDS precision for the accessible names ONLY. The visible clock stays at
+  // minutes; two calls inside one minute would otherwise carry identical names.
+  const nameTime = formatTimeWithSeconds(call.at);
+  const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  // An unparseable `at` is a REAL handled case here (the presenter treats it as
+  // one and has matrix coverage for it), and the formatter answers '' for it.
+  // Concatenating that unconditionally would emit a dangling separator -
+  // "Incoming call - " - and two such rows would collide on one name, which is
+  // exactly the ambiguity the seconds were added to remove. Fall back to the
+  // row id: it is always present, always distinct, and an opaque key rather
+  // than anything a screen reader would announce as a phone.
+  const cardName = `${directionWord} - ${nameTime || call.id}`;
+  const duration = formatDuration(call.call_duration);
+  const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
+  // A MASKED row carries no counterpart identity at all - party_phone is
+  // stripped server-side and call_party_label is not on the wire. The time is
+  // ALREADY on the card face, so a detail line there would disclose a duplicate
+  // of what the reader can already see. `undefined` means no line AND no reveal
+  // control: a disclosure that discloses nothing is worse than no disclosure.
+  const detail = call.party_phone
+    ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
+    : undefined;
 
   return (
-    <div className={styles.callcard}>
-      <div className={styles.callTop}>
-        <span>📞 {summary}</span>
-        <span className={`${styles.outcome} ${outcomeClass}`}>
-          {call.call_outcome.charAt(0).toUpperCase() + call.call_outcome.slice(1)}
+    <div
+      className={`${styles.callcard ?? ''} ${outbound ? styles.itemOut ?? '' : styles.itemIn ?? ''} ${outbound ? styles.callOut ?? '' : ''} ${revealed ? styles.cardRevealed ?? '' : ''}`}
+      role="group"
+      // The accessible name is the direction word and the time ONLY - NEVER the
+      // outcome. The outcome flips with the ringing / in-progress clauses, so a
+      // handle built on it would inherit exactly the staleness race this design
+      // exists to escape. The outcome stays assertable as the chip's own text.
+      // The time is carried to SECONDS so a redial inside the same minute does
+      // not produce two cards with one name (and falls back to the row id when
+      // the timestamp will not parse - see cardName).
+      aria-label={cardName}
+    >
+      <div className={styles.callSummary}>
+        <span className={styles.callArrow} aria-hidden="true">
+          {outbound ? ARROW_OUT : ARROW_IN}
         </span>
-        <span className={styles.callTime}>{formatTime(call.at)}</span>
+        <span className={styles.callWho}>{directionWord}</span>
+        {state.label !== undefined ? (
+          <span className={`${styles.outcome ?? ''} ${toneClass}`}>{state.label}</span>
+        ) : null}
+        {duration ? <span className={styles.callDuration}>{duration}</span> : null}
+        <span className={styles.callTrail}>
+          <span className={styles.callAt}>{time}</span>
+          {detail !== undefined ? (
+            <button
+              type="button"
+              className={styles.callReveal}
+              aria-expanded={revealed}
+              // The VISIBLE text stays "Details"; the accessible name identifies
+              // which card the control belongs to. A contact with call history
+              // otherwise hands a screen-reader user N buttons all named "Details".
+              aria-label={`Details for ${cardName}`}
+              onClick={() => setRevealed((r) => !r)}
+            >
+              Details
+            </button>
+          ) : null}
+        </span>
       </div>
+      {detail !== undefined ? <div className={styles.cardMeta}>{detail}</div> : null}
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}
@@ -791,7 +920,9 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
   const hasMore = truncated || cc.length > 0 || (msg.media_attachments ?? []).length > 0;
 
   return (
-    <div className={`${styles.emailCard ?? ''} ${outbound ? styles.emailOut ?? '' : styles.emailIn ?? ''}`}>
+    <div
+      className={`${styles.emailCard ?? ''} ${outbound ? styles.itemOut ?? '' : styles.itemIn ?? ''} ${outbound ? styles.emailOut ?? '' : styles.emailIn ?? ''}`}
+    >
       <div className={styles.emailTop}>
         <span className={styles.emailTag}>EMAIL</span>
         <span className={styles.emailSubject}>{subject}</span>

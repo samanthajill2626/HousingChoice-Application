@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // B0 foundation proof for the NEW entity-centric dashboard (:5174): an anonymous
 // visitor sees the Login screen, uses the hermetic dev-login button to sign in as
@@ -32,7 +33,7 @@ test('new dashboard: dev-login → AppFrame nav renders → sign out', async ({ 
   await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible();
 
   // The Today landing page renders inside the frame.
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 
   // Account menu shows the seeded VA email + a Sign out action.
   await page.getByRole('button', { name: 'Account menu' }).click();

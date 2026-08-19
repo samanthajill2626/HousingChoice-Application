@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
 import { clearLogTail, readLogTail } from '../../fixtures/groupText.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // SPEC 4 - the TRIPWIRE: what happens the day Twilio stops sending the envelope.
 //
@@ -31,7 +32,7 @@ const apiHeaders = { 'x-origin-verify': ORIGIN_SECRET };
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('an MM inbound with no media and no envelope files 1:1, WARNs, and is kept out of extraction', async ({

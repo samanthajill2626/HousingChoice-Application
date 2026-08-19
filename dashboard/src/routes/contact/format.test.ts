@@ -7,6 +7,7 @@ import {
   formatDuration,
   formatPhone,
   formatTime,
+  formatTimeWithSeconds,
   humanize,
 } from './format.js';
 
@@ -56,6 +57,25 @@ describe('formatTime', () => {
   });
   it('returns empty for an invalid instant', () => {
     expect(formatTime('not-a-date')).toBe('');
+  });
+});
+
+describe('formatTimeWithSeconds', () => {
+  it('carries the clock label to seconds, zero-padded', () => {
+    expect(formatTimeWithSeconds('2026-06-08T09:14:07')).toBe('9:14:07a');
+    expect(formatTimeWithSeconds('2026-06-08T13:02:00')).toBe('1:02:00p');
+    expect(formatTimeWithSeconds('2026-06-08T00:05:09')).toBe('12:05:09a');
+  });
+  it('normalises a `<ISO>#<suffix>` sort key the same way formatTime does', () => {
+    expect(formatTimeWithSeconds('2026-06-08T09:14:07#m1')).toBe('9:14:07a');
+  });
+  // The callers build an accessible name by concatenation, so an empty answer is
+  // NOT a neutral one: it is what produces "Incoming call - " and, on two such
+  // rows, the very name collision the seconds exist to remove. Pinned so the
+  // caller-side fallback has something to key off.
+  it('returns empty for an unparseable instant', () => {
+    expect(formatTimeWithSeconds('not-a-date')).toBe('');
+    expect(formatTimeWithSeconds('')).toBe('');
   });
 });
 

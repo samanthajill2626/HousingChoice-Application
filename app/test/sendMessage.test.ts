@@ -213,7 +213,7 @@ function makeFakes(
     getByRfcMessageId: async () => undefined,
     recordProviderSidAlias: async () => {},
     updateDeliveryStatus: async () => true,
-    updateCallStatus: async () => true,
+    updateCallStatus: async () => ({ transitioned: true, row: undefined }),
     setCallRecording: async () => true,
     releaseCallRecording: async () => {},
     setCallTranscript: async () => true,

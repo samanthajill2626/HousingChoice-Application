@@ -24,7 +24,8 @@
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { placeCall } from '../../fixtures/fakeVoice.js';
 import { reseed } from '../../fixtures/reseed.js';
-import { uniqueVoicePhone, NEXT } from '../../fixtures/voiceSetup.js';
+import { uniqueVoicePhone, callTimeline, NEXT } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 /** The app's business number in the e2e stack (BUSINESS_PHONE_NUMBER). */
 const BUSINESS = '+15550009999';
@@ -46,7 +47,7 @@ async function devLogin(page: Page, email = 'va@example.com'): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 async function createContact(api: APIRequestContext): Promise<{ contactId: string; phone: string }> {
@@ -251,6 +252,24 @@ test('a missed call that lands WHILE staff are viewing the contact page does not
   await expect(page.getByRole('heading', { name: 'Details' })).toBeVisible();
 
   await placeCall(api, { from: phone, to: BUSINESS, scenario: { digit: null, voicemail: false } });
+
+  // PRECONDITION, not decoration: the card is a directional item now, and a row
+  // whose terminal <Dial action> summary has not landed yet legitimately reads
+  // "Ringing..." for its first 90 seconds. Wait at the API level for the stored
+  // outcome BEFORE asserting the chip, exactly as voice-transcription.spec.ts
+  // waits for 'voicemail' before it navigates. Without this the assertion below
+  // is a race between webhook/SSE latency and the timeout.
+  await expect
+    .poll(
+      async () => {
+        const calls = await callTimeline(api, contactId);
+        const entry = calls[calls.length - 1];
+        return entry ? entry['call_outcome'] : undefined;
+      },
+      { timeout: 20_000, message: 'the missed call never stored a terminal outcome' },
+    )
+    .toBe('missed');
+
   // The call card renders live in the comms region.
   const region = page.getByRole('region', { name: 'Communications and activity' });
   await expect(region.getByText('Missed', { exact: true })).toBeVisible({ timeout: 20_000 });

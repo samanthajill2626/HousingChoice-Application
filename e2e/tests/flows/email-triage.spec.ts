@@ -3,6 +3,7 @@ import { Scenario } from '../../scenarios/steps.js';
 import { resetMail } from '../../fixtures/fakeEmail.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { dashboardUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Email triage (email-channel v1, B8 matrix items 3, 4, 5) - inbound email from
 // UNKNOWN senders never becomes a contact/conversation (spec Decision 4); it lands
@@ -62,7 +63,7 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
 
     // (b) Nothing shows up in Today either.
     await page.goto(`${NEXT}/`);
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible({ timeout: 15_000 });
+    await expectTodayReady(page, { timeout: 15_000 });
     await expect(page.getByText(/stranger\.caller/)).toHaveCount(0);
 
     // (c) The row IS in the Unmatched tab.

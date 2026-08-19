@@ -63,6 +63,7 @@ import {
   REMINDER_KIND_LABELS,
   REMINDER_SKIP_REASON_LABELS,
 } from '../../dashboard/src/api/types.js';
+import { expectTodayReady } from '../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -72,7 +73,7 @@ async function devLogin(page: Page): Promise<void> {
   // `exact` on purpose: the home page also renders an <h2>Tours today</h2> the
   // moment any tour is scheduled for the current day, and a substring 'Today'
   // matches both (docs/issues/today-heading-locator-substring-collision.md).
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** A run-unique E.164 (the landlord-activity.spec idiom) - never a seeded number. */

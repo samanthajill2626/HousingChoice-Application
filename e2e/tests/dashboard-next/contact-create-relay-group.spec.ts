@@ -5,6 +5,7 @@ import { driveConnectingGroupToOpen, type RelayConversation } from '../../fixtur
 // Single source of truth for the relay intro copy (no drift): the spec reads the
 // app catalog directly, the same cross-package import tour-roster.spec.ts uses.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Start a STANDALONE relay group from a contact file (contact-create-relay-group
 // design section 7). Drives the real dashboard + API on the hermetic lane through
@@ -94,7 +95,7 @@ async function devLogin(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   // exact: a non-exact name is a case-insensitive SUBSTRING match, and the Today
   // board's "Tours today" group heading would then collide (strict-mode).
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Poll the dev outbox until a message to `phone` whose body includes `needle`

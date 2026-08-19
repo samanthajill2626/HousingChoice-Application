@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Manual placement creation (:5174) against the real status-model backend. Proves
 // the "New placement" flow end-to-end from all three entry points:
@@ -31,7 +32,7 @@ const PLACEMENT_DETAIL_URL = /\/placements\/[A-Za-z0-9_-]+$/;
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test.describe('Manual placement creation', () => {

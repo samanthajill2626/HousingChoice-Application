@@ -1461,6 +1461,19 @@ export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by 
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
+/** Provider call lifecycle status, projected onto a `call` timeline entry. MIRROR
+ *  of the app's repos/messagesRepo.ts CallStatus (the dashboard cannot import from
+ *  app/, so keep the two in sync by hand). The machine is forward-only and nothing
+ *  transitions INTO `ringing`. */
+export type CallStatus =
+  | 'ringing'
+  | 'in-progress'
+  | 'completed'
+  | 'no-answer'
+  | 'busy'
+  | 'failed'
+  | 'canceled';
+
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'partner' | 'team_member' | 'unknown';
 
@@ -2242,7 +2255,17 @@ export interface TimelineMessage extends TimelineBase {
 export interface TimelineCall extends TimelineBase {
   kind: 'call';
   conversationId?: string;
-  call_outcome: CallOutcome; // reuse legacy
+  /** Who placed the call. REQUIRED - every stored call row carries it (no
+   *  backfill needed), and the card renders the side + arrow from it. */
+  direction: MessageDirection;
+  /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
+   *  status) and on any row whose stored value is not a union member. */
+  call_status?: CallStatus;
+  /** Coarse human-facing outcome. OPTIONAL: absent means "no terminal outcome is
+   *  known" - a real state the card renders honestly (presentCallState derives a
+   *  label from call_status, or shows no chip at all). The server no longer
+   *  invents 'missed' for a row that has none. */
+  call_outcome?: CallOutcome;
   call_duration?: number;
   party_phone?: string; // which number
   recording_s3_key?: string; // present ⇒ playable

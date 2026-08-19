@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Contact-detail actions (:5174) against the real backend. Proves the hardened
 // header + file pane actually FUNCTION end-to-end: the ⋯ menu, the Call menu's
@@ -13,7 +14,7 @@ const LANDLORD = 'contact-landlord-0001';
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test.describe('Contact detail — header actions + edit', () => {

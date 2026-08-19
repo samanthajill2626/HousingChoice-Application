@@ -31,7 +31,9 @@ export const UNIT_PHOTO_TRANSCODE_TARGET_BYTES = 3 * 1024 * 1024;
 
 /** sharp input-pixel cap for photo sources: 48MP-class phone photos decode
  *  (~200MB peak RGBA raster per gate slot, bounded by the SHARED 2-slot gate
- *  on the 2GB box). MMS keeps its tighter 24MP cap. */
+ *  on the 2GB box). MMS shares the same 50MP budget since 2026-08-19 (see
+ *  SHARP_MAX_INPUT_PIXELS); the two constants stay separate because the
+ *  profiles are tuned independently, not because the memory math differs. */
 export const UNIT_PHOTO_SHARP_MAX_INPUT_PIXELS = 50_000_000;
 
 /**

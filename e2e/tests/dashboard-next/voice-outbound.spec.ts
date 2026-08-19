@@ -55,6 +55,7 @@ import {
   legPhones,
   uniqueVoicePhone as uniquePhone,
 } from '../../fixtures/voiceSetup.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // The app's real address (not the dashboard proxy — webhooks go direct to the app).
 const APP_URL = process.env['E2E_APP_URL'] ?? 'http://127.0.0.1:8080';
@@ -129,7 +130,7 @@ async function devLoginAs(page: Page, email: string): Promise<{ userId: string }
   expect(res.ok()).toBeTruthy();
   const body = (await res.json()) as { userId: string };
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
   return { userId: body.userId };
 }
 
@@ -513,6 +514,147 @@ test('§9.8 outbound-missed regression guard (I-1): a no-answer outbound call mu
 });
 
 // ---------------------------------------------------------------------------
+// Directional call cards (comms-panel-call-direction S6)
+//
+// The timeline card is a DIRECTIONAL item: it aligns by direction, leads with a
+// direction word, and announces an outcome in a direction-specific vocabulary
+// ("Connected" / "No answer" outbound, "Answered" / "Missed" inbound).
+//
+// These two cases live in THIS spec, not call-inbox-unread.spec.ts, because the
+// outbound half needs the verified-cell + originate + driveBridge machinery that
+// only this file has.
+//
+// Assert in TWO parts, always:
+//   1. locate the card by role + accessible name, which carries the DIRECTION and
+//      the time and is therefore stable, then
+//   2. assert the outcome as the chip's own text WITHIN that located card.
+// The outcome is deliberately NOT in the accessible name: it flips with the live
+// "Ringing..." / "In progress" clauses, so a locator built on it would race.
+//
+// Every outcome assertion gets an API-level precondition that the terminal
+// <Dial action> summary has landed - a fresh row legitimately reads "Ringing..."
+// for its first 90 seconds.
+// ---------------------------------------------------------------------------
+test('an outbound and an inbound call on one thread land on opposite sides of the timeline and announce direction-specific outcomes', async ({
+  page,
+}) => {
+  const api = page.request;
+  await devLoginAs(page, 'va@example.com');
+  const navCell = uniquePhone();
+  await verifyCell(api, navCell);
+  const { contactId, phone: target } = await createContact(api);
+
+  // OUTBOUND: originate, then drive press-1 -> <Dial> the target -> a terminal
+  // completed <Dial action> summary. driveBridge can only ever produce
+  // DialCallStatus=completed, so this is the honest outbound happy path.
+  const res = await api.post(`${NEXT}/api/contacts/${contactId}/call`, { data: {} });
+  expect(res.status(), await res.text()).toBe(200);
+  const { callSid } = (await res.json()) as { callSid: string };
+  const bridged = await driveBridge(api, callSid);
+  expect(bridged.status).toBe('completed');
+
+  // INBOUND: the SAME person calls the business line and nobody accepts the
+  // whisper gate (digit:null), so the bridge misses; voicemail:false keeps it a
+  // plain miss. Same 1:1 thread, opposite direction.
+  await placeCall(api, { from: target, to: BUSINESS, scenario: { digit: null, voicemail: false } });
+
+  // Precondition: BOTH terminal summaries have landed and both rows carry their
+  // stored outcome, so neither card can still be showing a live label.
+  await expect
+    .poll(
+      async () => {
+        const calls = await callTimeline(api, contactId);
+        const out = calls.find((c) => c['direction'] === 'outbound');
+        const inbound = calls.find((c) => c['direction'] === 'inbound');
+        return { out: out?.['call_outcome'], inbound: inbound?.['call_outcome'] };
+      },
+      { timeout: 25_000, message: 'the two calls never both reached a stored outcome' },
+    )
+    .toEqual({ out: 'answered', inbound: 'missed' });
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const region = page.getByRole('region', { name: 'Communications and activity' });
+
+  // Part 1: locate by role + accessible name (direction + time, never the outcome).
+  // Anchored regexes - Playwright matches an accessible name by substring. The
+  // anchored PREFIX is a multi-match form (it matches every card of that
+  // direction); it resolves to exactly one element here only because this thread
+  // is a freshly created contact with exactly one call per direction. A thread
+  // with two calls the same way needs the full name + `exact: true`, or `.nth()`.
+  const outCard = region.getByRole('group', { name: /^Outgoing call\b/ });
+  const inCard = region.getByRole('group', { name: /^Incoming call\b/ });
+  await expect(outCard).toBeVisible({ timeout: 15_000 });
+  await expect(inCard).toBeVisible({ timeout: 15_000 });
+
+  // Part 2: the outcome is the chip's own text INSIDE the located card, in the
+  // direction's own vocabulary. Note "No answer" is not a substring of the
+  // outbound stale-ringing label "No team answer", so these do not collide.
+  await expect(outCard).toContainText('Connected');
+  await expect(inCard).toContainText('Missed');
+
+  // Opposite SIDES, proved geometrically rather than by reading a class name.
+  // Both cards are capped at 84% of the stream width, so an outbound card pinned
+  // to the right edge always starts strictly right of an inbound card pinned to
+  // the left edge.
+  const outBox = await outCard.boundingBox();
+  const inBox = await inCard.boundingBox();
+  expect(outBox, 'outbound call card has no box').not.toBeNull();
+  expect(inBox, 'inbound call card has no box').not.toBeNull();
+  expect(outBox!.x).toBeGreaterThan(inBox!.x);
+  expect(outBox!.x + outBox!.width).toBeGreaterThan(inBox!.x + inBox!.width);
+
+  // The click-to-reveal detail line, proved in a REAL browser. The unit test
+  // cannot do this: vitest runs with `css: false`, so jsdom loads no stylesheet
+  // and toBeVisible() there cannot see the `display: none` that comes from the
+  // CSS module - a reveal selector rooted on the wrong ancestor would still pass
+  // it. Here the stylesheet is actually loaded, so hidden-then-visible is real.
+  // Scoped to the card: the same page carries a `Details` card HEADING, and
+  // every call card offers a reveal button of its own.
+  const detail = outCard.getByText(/^to .+ - /);
+  await expect(detail).toBeHidden();
+  await outCard.getByRole('button', { name: 'Details' }).click();
+  await expect(detail).toBeVisible();
+});
+
+test('an outbound call whose terminal Dial summary is no-answer reads "No answer" on its card', async ({
+  page,
+}) => {
+  const api = page.request;
+  await devLoginAs(page, 'va@example.com');
+  const navCell = uniquePhone();
+  await verifyCell(api, navCell);
+  const { contactId } = await createContact(api);
+
+  const originateRes = await api.post(`${NEXT}/api/contacts/${contactId}/call`, { data: {} });
+  expect(originateRes.status(), await originateRes.text()).toBe(200);
+  const { callSid } = (await originateRes.json()) as { callSid: string };
+
+  // The fake engine's press-1 ALWAYS answers the target, so a no-answer outbound
+  // Dial summary can only come from the signed direct POST (same reasoning as the
+  // regression guard above).
+  expect(await postVoiceStatusCallback(api, callSid, 'no-answer', '0')).toBe(200);
+
+  // Precondition: the stored outcome landed. This is also the read-side proof of
+  // the outbound-outcome fix - before it, this row stored 'answered'.
+  await expect
+    .poll(
+      async () => {
+        const calls = await callTimeline(api, contactId);
+        const entry = calls[calls.length - 1];
+        return entry ? entry['call_outcome'] : undefined;
+      },
+      { timeout: 15_000, message: 'the outbound row never stored a terminal outcome' },
+    )
+    .toBe('missed');
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const region = page.getByRole('region', { name: 'Communications and activity' });
+  const outCard = region.getByRole('group', { name: /^Outgoing call\b/ });
+  await expect(outCard).toBeVisible({ timeout: 15_000 });
+  await expect(outCard).toContainText('No answer');
+});
+
+// ---------------------------------------------------------------------------
 // §flex — Settings ▸ Voice: verify cell with a HUMAN-format input
 //
 // The VoiceSection normalizes on blur: typing `404-982-4978` → field snaps to
@@ -529,7 +671,7 @@ test('§flex settings voice: human-format cell `404-982-4978` normalizes on blur
   const loginRes = await api.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
   expect(loginRes.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 
   // Navigate to Settings ▸ Voice.
   await page.goto(`${NEXT}/settings/voice`);

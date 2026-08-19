@@ -6,6 +6,7 @@ severity: low
 status: resolved
 area: app
 created: 2026-07-01
+updated: 2026-08-18
 resolved: 2026-07-02
 refs: app/src/routes/webhooks/voice.ts:901
 ---
@@ -37,3 +38,21 @@ inbound/masked-relay gate branches are unchanged. `voice_opt_out` is now
 honored on EVERY originate path (§8 invariant closed). Covered by a unit test
 in `app/test/voiceOutbound.test.ts` (opt-out set between originate and press-1
 → hangup TwiML, no `<Dial>`, no raw phone in logs).
+
+**Update (2026-08-18).** The DNC branch now also STAMPS a terminal `call_status`
+(`canceled`, with no `call_outcome`) on the parent CallSid immediately before it
+answers the hangup - decision D12 of
+`docs/superpowers/specs/2026-08-18-comms-panel-call-direction-design.md`, section
+6.3. That is a read-side concern only: without it the timeline card would have
+read "No team answer" for a call the navigator DID answer and the system then
+refused to place, which reads as staff negligence when the truth is that the
+contact is opted out of voice. With the stamp it reads "Not completed".
+
+The re-check behavior described above is UNCHANGED - same refusal, same hangup
+TwiML, same IDs-only log, same absence of a `<Dial>`. The stamp is best-effort
+in a swallowing try/catch and can never break the hangup. The DNC path's own
+assertion in `app/test/voiceOutbound.test.ts` was re-pinned from
+`call_status === 'ringing'` to the new terminal value; that re-pin is the proof
+of the stamp. The other two gate refusal branches (unresolved target or business
+caller ID at the whisper gate, unresolved target in `/outbound-bridge`) got the
+same treatment in the same change.

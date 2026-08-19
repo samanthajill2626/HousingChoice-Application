@@ -66,6 +66,7 @@ import {
 import {
   createMessagesRepo,
   type CallStatus,
+  type CallStatusUpdate,
   type MessageItem,
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
@@ -1021,6 +1022,59 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     };
   }
 
+  /**
+   * D12 (spec 6.3) companion: tell any OPEN contact timeline that a gate write
+   * just changed this call's lifecycle - a REFUSAL stamping it terminal, or a
+   * press-1 ACCEPTANCE stamping it in-progress. Both are gate paths whose only
+   * other signal would arrive at t+90s, and the timeline refetches ONLY on
+   * message.persisted / conversation.updated.
+   *
+   * Called ONLY when `updateCallStatus` reported a real transition, and always
+   * from inside its OWN swallowing try/catch, separate from the stamp's - these
+   * are TwiML response paths and the call itself outranks the announcement, but
+   * a failure here means the stamp COMMITTED and only the push was lost, which
+   * is a different operator story from a failed write. Emits
+   * `message.persisted` ONLY: the inbox row must stay exactly as it is
+   * (spec 6.4), so NO stampCallActivity and NO conversation.updated. IDs only in
+   * any log - never a phone.
+   *
+   * NO READ OF ITS OWN (fix wave 4, N-1). It takes the ROW `updateCallStatus`
+   * already resolved. It used to re-read that same row by provider sid - two
+   * more sequential DynamoDB round trips, AWAITED between a human pressing 1 and
+   * the <Dial> that joins the two parties, with both of them silent on the line.
+   * A swallowing try/catch bounds errors, not latency: overrun Twilio's
+   * TwiML-fetch ceiling during a DynamoDB spike and the caller hears an
+   * application error and THE BRIDGE NEVER HAPPENS. The row's own
+   * conversationId is still what is emitted, so the branch whose query-string
+   * conversation did not resolve is unaffected.
+   *
+   * INVARIANT - every field emitted here (conversationId, tsMsgId, direction,
+   * delivery_status) is stamped at APPEND time and never mutated on a call row,
+   * so a PRE-WRITE snapshot carries them correctly (which also closes N-2: the
+   * old re-read had no ConsistentRead and could return a pre-update snapshot
+   * anyway - this is the same data with known provenance). A lifecycle field
+   * (call_status / call_outcome / answered_at / ended_at / call_duration) must
+   * NOT be added to this payload without reconsidering provenance: `row`
+   * describes the state BEFORE the stamp committed.
+   */
+  function announceCallStamp(row: MessageItem): void {
+    // A MASKED relay bridge's call row is rendered by NO surface - the contact
+    // timeline excludes relay_group conversations and the relay thread mapper
+    // drops type:'call' rows - so announcing it costs an SSE broadcast to every
+    // connected dashboard, plus a mark-read POST and a media refetch from every
+    // open contact page, to redraw a row nobody draws. Relay groups are the
+    // GROWING product, so this must not scale with them. DO NOT "restore" this:
+    // it is a no-op only for as long as no surface renders a masked call, and
+    // the surface that starts rendering one is the change that removes it.
+    if (row.masked === true) return;
+    events.emit('message.persisted', {
+      conversationId: row.conversationId,
+      tsMsgId: row.tsMsgId,
+      direction: row.direction,
+      deliveryStatus: row.delivery_status,
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Outbound bridge — POST /voice/outbound-bridge (Voice Phase 1, spec §5).
   // Runs on the NAVIGATOR leg when they answer the originated call. Resolves the
@@ -1043,6 +1097,66 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // The conversation is gone / has no target — refuse cleanly (never a leak,
       // never a 5xx). The navigator hears a brief note + hangup.
       log.warn({ callSid: parentCallSid }, 'outbound bridge: target unresolved from conversationId — hanging up');
+      // D12 (spec 6.3): no <Dial> runs on this path, so no <Dial action>
+      // summary will ever arrive to close the call out. Stamp a TERMINAL
+      // call_status with NO call_outcome - we know the call did not complete,
+      // we do not know an outcome, and inventing one is the false attribution
+      // this exists to prevent. Best-effort: the leg must end even if the write
+      // fails. The row may not exist yet (originateCall appends best-effort and
+      // may have failed) - updateCallStatus is a no-op there, reporting
+      // transitioned:false with no row, never an error.
+      if (parentCallSid.length > 0) {
+        let stamp: CallStatusUpdate | undefined;
+        try {
+          // The refusal stamp may transition ONLY from `ringing`. `canceled` is
+          // legal from `in-progress` in the forward-only machine (a genuine
+          // mid-call cancel is a real thing), so the narrowing belongs to THIS
+          // stamp rather than to the machine: a REDELIVERED refusal arriving
+          // after press-1 already succeeded would otherwise terminate a LIVE
+          // call and - terminal states being absorbing - permanently lock out
+          // the authoritative <Dial action> summary. The expectation rides the
+          // repo's atomic condition; a pre-read plus an if-check would lose
+          // exactly the race it is meant to close.
+          stamp = await messages.updateCallStatus(
+            parentCallSid,
+            { callStatus: 'canceled' },
+            { expectedPriorCallStatuses: ['ringing'] },
+          );
+        } catch (err) {
+          log.warn(
+            { err, callSid: parentCallSid },
+            'outbound bridge: stamping the refused call canceled failed (best-effort) - continuing',
+          );
+        }
+        // The navigator may have this contact's timeline OPEN - originateCall
+        // emitted message.persisted on the append that put the "Ringing..."
+        // card on screen. The timeline refetches ONLY on message.persisted /
+        // conversation.updated, so a silent stamp leaves that open card on the
+        // stale `ringing` row, which flips to "No team answer" at t+90s - the
+        // exact false attribution D12 exists to remove, on the one surface
+        // anyone is watching. Emit ONLY when the stamp actually transitioned;
+        // a no-op against a missing row announces nothing. Deliberately NO
+        // stampCallActivity and NO conversation.updated: spec 6.4 promises the
+        // inbox row is left exactly as it is. The conversationId comes off the
+        // STAMPED ROW, not the query string - this branch runs precisely
+        // because the query's conversation did not resolve - and it comes off
+        // the row `updateCallStatus` ALREADY resolved, so the announce costs no
+        // read. Its OWN catch: the announce only ever runs after the
+        // conditional write COMMITTED, so folding it into the stamp's catch
+        // would log "the stamp failed" for a row that is perfectly `canceled`
+        // and send an operator hunting in the write path. Both stay
+        // best-effort - neither may break the hangup.
+        if (stamp?.transitioned === true && stamp.row !== undefined) {
+          try {
+            announceCallStamp(stamp.row);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound bridge: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
+        }
+      }
       sendTwiml(
         res,
         maskedSayHangup(resolveMessage('voice.outbound_unavailable')),
@@ -1164,6 +1278,44 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           { callSid: parentCallSid, outbound: true },
           'outbound whisper gate: target/business number unresolved — hanging up',
         );
+        // D12 (spec 6.3): the navigator answered and pressed 1, then the system
+        // refused to dial. No <Dial> runs, so no Dial summary ever closes this
+        // call out - stamp a TERMINAL call_status with NO call_outcome (see the
+        // /outbound-bridge branch above). Best-effort; never breaks the hangup.
+        if (parentCallSid.length > 0) {
+          let stamp: CallStatusUpdate | undefined;
+          try {
+            // Refusal stamp: ONLY from `ringing` (see the /outbound-bridge
+            // branch above). A redelivered refusal must never terminate a call
+            // that press-1 already took LIVE, nor lock out its Dial summary.
+            stamp = await messages.updateCallStatus(
+              parentCallSid,
+              { callStatus: 'canceled' },
+              { expectedPriorCallStatuses: ['ringing'] },
+            );
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
+            );
+          }
+          // Announce the stamp so an OPEN contact timeline refetches instead
+          // of sitting on the stale ringing card (see the /outbound-bridge
+          // branch above). Transition-gated, inbox untouched, announced from
+          // the row the stamp ALREADY resolved (no extra read), and caught
+          // SEPARATELY so an announce failure is never reported as a failed
+          // stamp - by then the write has already committed.
+          if (stamp?.transitioned === true && stamp.row !== undefined) {
+            try {
+              announceCallStamp(stamp.row);
+            } catch (err) {
+              log.warn(
+                { err, callSid: parentCallSid },
+                'outbound whisper gate: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+              );
+            }
+          }
+        }
         sendTwiml(res, vr);
         return;
       }
@@ -1171,22 +1323,62 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // the originate service refused voice_opt_out pre-dial, but staff can set
       // the flag in the seconds between originate and this press-1 — the flag
       // was just re-read from the contact, so honor it and hang up INSTEAD of
-      // dialing. No status regression concerns: the leg simply ends (the status
-      // callback stamps the terminal outcome). IDs-only log — never a phone.
+      // dialing. NO status callback ever arrives on this path - the leg simply
+      // ends without a <Dial>, so nothing else would ever close the call out;
+      // the D12 stamp below is what does. IDs-only log - never a phone.
       if (target.optedOut) {
         vr.hangup();
         log.info(
           { callSid: parentCallSid, outbound: true },
           'outbound whisper gate: target opted out mid-ring (voice_opt_out) — hanging up, not dialing',
         );
+        // D12 (spec 6.3): TERMINAL call_status, NO call_outcome. On this branch
+        // in particular an invented outcome would read as staff negligence when
+        // the truth is that the contact is opted out of voice. Best-effort;
+        // never breaks the hangup.
+        if (parentCallSid.length > 0) {
+          let stamp: CallStatusUpdate | undefined;
+          try {
+            // Refusal stamp: ONLY from `ringing` (see the /outbound-bridge
+            // branch above). A redelivered refusal must never terminate a call
+            // that press-1 already took LIVE, nor lock out its Dial summary.
+            stamp = await messages.updateCallStatus(
+              parentCallSid,
+              { callStatus: 'canceled' },
+              { expectedPriorCallStatuses: ['ringing'] },
+            );
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: stamping the refused call canceled failed (best-effort) - continuing',
+            );
+          }
+          // Announce the stamp so an OPEN contact timeline refetches instead
+          // of sitting on the stale ringing card (see the /outbound-bridge
+          // branch above). Transition-gated, inbox untouched, announced from
+          // the row the stamp ALREADY resolved (no extra read), and caught
+          // SEPARATELY so an announce failure is never reported as a failed
+          // stamp - by then the write has already committed.
+          if (stamp?.transitioned === true && stamp.row !== undefined) {
+            try {
+              announceCallStamp(stamp.row);
+            } catch (err) {
+              log.warn(
+                { err, callSid: parentCallSid },
+                'outbound whisper gate: announcing the refusal stamp failed (best-effort) - the canceled stamp itself COMMITTED; only the live timeline push was lost',
+              );
+            }
+          }
+        }
         sendTwiml(res, vr);
         return;
       }
       // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
       // signal, same as the inbound legs). Best-effort.
       if (parentCallSid.length > 0) {
+        let stamp: CallStatusUpdate | undefined;
         try {
-          await messages.updateCallStatus(parentCallSid, {
+          stamp = await messages.updateCallStatus(parentCallSid, {
             callStatus: 'in-progress',
             answeredAt: new Date().toISOString(),
           });
@@ -1195,6 +1387,31 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             { err, callSid: parentCallSid },
             'outbound whisper gate: marking the bridge accepted failed (best-effort) — continuing',
           );
+        }
+        // The ACCEPTANCE half of the same live-surface problem the refusal
+        // announcements solve. The navigator who originated this call is
+        // looking at the "Ringing..." card originateCall emitted, and the
+        // timeline refetches ONLY on message.persisted / conversation.updated
+        // - so a silent accept leaves that card on the stale `ringing` row until it
+        // flips to a red "No team answer" at t+90s WHILE THEY ARE ON THE CALL.
+        // Transition-gated exactly like the refusal announces (a no-op write
+        // announces nothing), and message.persisted ONLY: spec 6.4 promises the
+        // inbox row is left exactly as it is, so no stampCallActivity and no
+        // conversation.updated. Its OWN catch, with its OWN message: by the time
+        // the announce runs the accept has already COMMITTED, so logging this as
+        // a failed stamp would send an operator hunting in the write path.
+        // Both stay best-effort - neither may break an accepted bridge. The
+        // row comes from the stamp itself: nothing may be read between press-1
+        // and the <Dial> below (fix wave 4, N-1).
+        if (stamp?.transitioned === true && stamp.row !== undefined) {
+          try {
+            announceCallStamp(stamp.row);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: announcing the accepted bridge failed (best-effort) - the in-progress stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
         }
       }
       const dial = vr.dial({
@@ -1230,8 +1447,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // never break an accepted bridge; the call simply falls back to the status
       // handler's terminal classification.
       if (parentCallSid.length > 0) {
+        let stamp: CallStatusUpdate | undefined;
         try {
-          await messages.updateCallStatus(parentCallSid, {
+          stamp = await messages.updateCallStatus(parentCallSid, {
             callStatus: 'in-progress',
             answeredAt: new Date().toISOString(),
           });
@@ -1240,6 +1458,27 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             { err, callSid: parentCallSid },
             'whisper gate: marking the bridge accepted failed (best-effort) — continuing',
           );
+        }
+        // Announce the accept so an OPEN contact timeline refetches instead of
+        // sitting on the stale ringing card and flipping it to a red "Missed"
+        // at t+90s while the call is CONNECTED (see the outbound arm above).
+        // Transition-gated, inbox untouched (spec 6.4: message.persisted ONLY,
+        // no stampCallActivity, no conversation.updated), and caught SEPARATELY
+        // so an announce failure is never reported as a failed stamp - by then
+        // the write has already committed. Best-effort on both halves: neither
+        // may break an accepted bridge. The row comes from the stamp itself -
+        // NOTHING may be read between press-1 and the bridge (fix wave 4, N-1),
+        // and this arm also serves every MASKED relay bridge, whose row the
+        // announce skips entirely (see announceCallStamp).
+        if (stamp?.transitioned === true && stamp.row !== undefined) {
+          try {
+            announceCallStamp(stamp.row);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'whisper gate: announcing the accepted bridge failed (best-effort) - the in-progress stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
         }
       }
       log.info(
@@ -1381,14 +1620,57 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           : 'missed'
         : undefined;
 
-    const transitioned = await messages.updateCallStatus(entryCallSid, {
+    // OUTBOUND SUBSTITUTION (spec 6.2, invariant I1). On an originate the
+    // whisper gate stamps answered_at on the NAVIGATOR's own leg at press-1,
+    // BEFORE the target's phone rings, so `bridgeAccepted` describes the
+    // navigator and never the target. The <Dial action> summary DOES describe
+    // the target leg, so for a TERMINAL outbound Dial summary the stored
+    // outcome and duration come from `mapped` instead. Every conjunct below is
+    // load-bearing:
+    //   - `terminal`: on a NON-terminal ('in-progress') summary `mapped` is not
+    //     'completed', so this rule would store 'missed' for a call that just
+    //     bridged. (`entry` is likewise fetched only under isDialSummary &&
+    //     terminal, so the two guards must stay in step.)
+    //   - `type === 'call'` / `masked !== true`: mirror the preview guard below.
+    //     Every masked row is inbound today (I7); restated so a future masked
+    //     outbound writer cannot silently inherit this rule.
+    //   - `direction === 'outbound'`: INBOUND is byte-identical to before and
+    //     keeps reading `bridgeAccepted`, where press-1 IS authoritative (the
+    //     whisper gate exists to block carrier voicemail, which cannot press 1).
+    // An undefined `entry` (unknown CallSid) falls through to the old behavior.
+    //
+    // NAMED DIVERGENCE (spec 6.2): a rung-out outbound call now stores
+    // call_outcome: 'missed' while THIS SAME invocation computes
+    // `isMissed === false` (answered_at is set, so `bridgeAccepted` is true).
+    // The two notions of "missed" now disagree inside one function. Nothing
+    // changes behaviorally because every consumer of `isMissed` is
+    // direction-gated: the unread rule below (`fresh.direction === 'inbound'`),
+    // the missed-founder-bridge trigger below (`fresh.direction !==
+    // 'outbound'`), and the TwiML voicemail offer at the tail of this handler
+    // (`entry.direction !== 'outbound'`). The next reader of `isMissed` on an
+    // OUTBOUND path must NOT inherit that trap - read the stored outcome.
+    const outboundSubstituted =
+      isDialSummary &&
+      terminal &&
+      entry?.type === 'call' &&
+      entry?.masked !== true &&
+      entry?.direction === 'outbound';
+    const storedOutcome = outboundSubstituted ? (mapped === 'completed' ? 'answered' : 'missed') : outcome;
+    const storedDuration = (outboundSubstituted ? mapped === 'completed' : bridgeAccepted) ? callDuration : undefined;
+
+    // Only the transition flag is read here: this handler already holds `entry`
+    // (fetched for the terminal classification above) and re-resolves `fresh`
+    // for the non-terminal case, so the row the repo hands back adds nothing
+    // on this path.
+    const { transitioned } = await messages.updateCallStatus(entryCallSid, {
       callStatus: mapped,
-      ...(outcome !== undefined && { callOutcome: outcome }),
+      ...(storedOutcome !== undefined && { callOutcome: storedOutcome }),
       ...(stampAnsweredAt && { answeredAt: now }),
       ...(stampEndedAt && { endedAt: now }),
-      // A MISS has no meaningful talk time — only record a duration when the
-      // bridge was actually accepted.
-      ...(bridgeAccepted && callDuration !== undefined && { callDuration }),
+      // A MISS has no meaningful talk time - only record a duration when the
+      // call actually connected: inbound, that is the accepted bridge; outbound,
+      // it is the Dial summary reporting 'completed' (the substitution above).
+      ...(storedDuration !== undefined && { callDuration: storedDuration }),
     });
     log.info(
       { callSid: entryCallSid, providerStatus: rawStatus, callStatus: mapped, isDialSummary, transitioned },
@@ -1418,14 +1700,19 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // runs on the NAVIGATOR's own leg and stamps answered_at BEFORE the
         // target's phone rings, so `bridgeAccepted`/`outcome` say "answered"
         // for every outbound call that got as far as a <Dial> - including one
-        // the target never picked up. The stored call_outcome keeps that
-        // (pre-existing) classification - see
-        // docs/issues/outbound-call-outcome-answered-before-target-rings.md -
-        // but the PREVIEW reads the Dial summary's own status, which on an
-        // outbound leg describes the target: completed = the target answered,
-        // anything else = no answer. (An outbound Dial in-progress summary
-        // never transitions here - the gate already wrote in-progress - and
-        // callPreview renders "in progress" from callStatus regardless.)
+        // the target never picked up. The PREVIEW therefore reads the Dial
+        // summary's own status, which on an outbound leg describes the target:
+        // completed = the target answered, anything else = no answer. As of
+        // spec 6.2 the STORED call_outcome reads the same signal (the outbound
+        // substitution above the write - it closes
+        // docs/issues/outbound-call-outcome-answered-before-target-rings.md),
+        // so the two agree on a terminal summary. The one-line ternary below is
+        // duplicated ON PURPOSE rather than shared: it keys on `fresh` and also
+        // runs on NON-terminal summaries, where `entry` - and therefore the
+        // stored substitution - is undefined. (An outbound Dial in-progress
+        // summary normally never transitions here - the gate already wrote
+        // in-progress - and callPreview renders "in progress" from callStatus
+        // regardless.)
         let touched: ConversationItem | undefined;
         if (isDialSummary && fresh.type === 'call' && fresh.masked !== true) {
           const outbound = fresh.direction === 'outbound';

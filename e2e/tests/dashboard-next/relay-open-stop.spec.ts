@@ -5,6 +5,7 @@ import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the filed keyword-reply copy (no drift): the spec reads
 // the app catalog directly, mirroring the lifecycle spec's cross-package import.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay OPEN-PATH STOP/START round-trip (design section 3; plan Task 4). Proves the
 // A2P keyword parity shipped for the OPEN relay path end-to-end against the hermetic
@@ -78,7 +79,7 @@ async function reseedLean(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** Poll the dev outbox until a message to `phone` whose body includes `needle`

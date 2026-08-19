@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { listThreads } from '../../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Settings surface (:5174), Phase A — the rebuilt tabbed page (Team · Templates ·
 // Notifications · System status). Proves the role-aware shell + the section flows
@@ -19,7 +20,7 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test.describe('Settings — admin path', () => {

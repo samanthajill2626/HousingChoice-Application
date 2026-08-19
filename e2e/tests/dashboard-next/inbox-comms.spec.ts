@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { sendAsParty, listThreads } from '../../fixtures/fakeTwilio.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Comms round-trip rebuilt on the NEW entity-centric surface (:5174), replacing the
 // legacy-inbox version deleted in 40bd4f0. Proves the full seam end-to-end against
@@ -13,7 +14,7 @@ const TASHA = '+15550100001'; // contact-tenant-0001's primary number
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 test('inbound SMS → new Inbox (unread) → open contact → reply round-trips to the fake', async ({

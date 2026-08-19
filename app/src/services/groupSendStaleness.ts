@@ -15,6 +15,18 @@
 // after the `sent` transition is EXACTLY the failure this alarm exists to
 // catch. The group-local terminal set is {delivered, failed, undelivered}.
 //
+// NOT EVERY STUCK SLOT IS THE WEBHOOK (prod 2026-08-19). One member of two
+// group threads - a business texting line - returned `sent` for every group
+// MMS leg and never `delivered`, while its two siblings delivered in seconds
+// and the same number delivers plain 1:1 SMS fine. Eight ERRORs in two hours
+// told the operator to check a webhook that was provably alive on the very
+// same messages. The discriminator is structural: a DEAD webhook cannot move a
+// slot off its seeded `queued`, so "some sibling reached a terminal receipt AND
+// every stuck leg got as far as `sent`" is a recipient whose carrier does not
+// report delivery, not a receipts outage. That shape is a WARN naming the
+// count; a `queued` leg, or a send where NO leg went terminal (the documented
+// "webhook died after the `sent` transition" case), is still the ERROR.
+//
 // THE DUE ROW IS TRANSACTIONAL WITH THE APPEND (S5/T5.2, worklist A13), so a
 // crash anywhere after the message row exists still leaves the send monitored -
 // there is no window where a message is stored and unwatched. Its `expires_at`
@@ -30,7 +42,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { SUPPRESSED_ERROR_CODE } from './groupDelivery.js';
+import { isSuppressedSlot, SUPPRESSED_ERROR_CODE } from './groupDelivery.js';
 import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
 
 /**
@@ -69,8 +81,18 @@ export function isGroupSlotTerminal(slot: Pick<RelayRecipientDelivery, 'status' 
 }
 
 export type StalenessOutcome =
-  /** At least one slot is still non-terminal past the deadline. */
+  /**
+   * At least one slot is still non-terminal past the deadline AND nothing
+   * proves the receipts webhook alive for this send: a leg never left `queued`,
+   * or no leg reached a terminal receipt at all. The ERROR case.
+   */
   | 'alarmed'
+  /**
+   * Some leg reached a terminal receipt and every stuck leg is at `sent`: the
+   * webhook delivered for this very message, so the stuck member's carrier is
+   * simply not reporting delivery. The WARN case - not a webhook fault.
+   */
+  | 'no_receipt'
   /** Every slot reached a terminal state - the due row is resolved. */
   | 'cleared'
   /** The message row is gone (retention, a deleted thread) - resolve and move on. */
@@ -80,6 +102,26 @@ export interface StalenessCheck {
   outcome: StalenessOutcome;
   /** Member keys still non-terminal, with the status they are stuck at. */
   stuck: Array<{ memberKey: string; status: string }>;
+  /**
+   * Fanned (non-suppressed) legs that reached a terminal status. Those statuses
+   * are only ever written by a receipt once the suppressed seed is excluded, so
+   * a positive count is proof the webhook delivered for this send.
+   */
+  receipted: number;
+}
+
+/**
+ * Decide between the two stuck outcomes. Exported so the contract is testable
+ * without a table: a dead webhook leaves every slot at its seeded `queued`, so
+ * the only shape that can clear it of blame is "a sibling went terminal by
+ * receipt and every stuck leg at least reached `sent`".
+ */
+export function classifyStuck(
+  stuck: ReadonlyArray<{ status: string }>,
+  receipted: number,
+): 'alarmed' | 'no_receipt' {
+  const webhookProven = receipted > 0 && stuck.every((s) => s.status === 'sent');
+  return webhookProven ? 'no_receipt' : 'alarmed';
 }
 
 export interface GroupSendStalenessService {
@@ -93,10 +135,11 @@ export interface GroupSendStalenessService {
     tsMsgId: string;
     providerSid?: string;
   }): Promise<StalenessCheck>;
-  /** The T6.3 duty: every overdue send due-row, alarmed or cleared. */
+  /** The T6.3 duty: every overdue send due-row, alarmed, no-receipt or cleared. */
   sweepSendStaleness(nowIso: string): Promise<{
     scanned: number;
     alarmed: number;
+    noReceipt: number;
     cleared: number;
   }>;
 }
@@ -142,14 +185,21 @@ export function createGroupSendStaleness(
     // The due row carries the message's exact primary key, so this is a POINT
     // GET - no query, no scan, one read per overdue send.
     const message = await messages.getByTsMsgId(ref.conversationId, ref.tsMsgId);
-    if (message === undefined) return { outcome: 'missing', stuck: [] };
+    if (message === undefined) return { outcome: 'missing', stuck: [], receipted: 0 };
     // Spec 15.9: the map is SEEDED at send time and is never empty, so an
     // "empty map" branch would be dead code. A genuinely empty map here means
     // the seed itself failed, which is a real non-terminal state - report it.
-    const stuck = slotsOf(message)
+    const slots = slotsOf(message);
+    const stuck = slots
       .filter(([, slot]) => !isGroupSlotTerminal(slot))
       .map(([memberKey, slot]) => ({ memberKey, status: slot.status }));
-    return { outcome: stuck.length > 0 ? 'alarmed' : 'cleared', stuck };
+    // Suppressed legs are terminal by SEED, not by receipt - they prove nothing
+    // about the webhook, so they are excluded from the receipted count.
+    const receipted = slots.filter(
+      ([, slot]) => !isSuppressedSlot(slot) && isGroupDeliveryTerminal(slot.status),
+    ).length;
+    if (stuck.length === 0) return { outcome: 'cleared', stuck, receipted };
+    return { outcome: classifyStuck(stuck, receipted), stuck, receipted };
   }
 
   return {
@@ -167,6 +217,7 @@ export function createGroupSendStaleness(
       // below is now a structural assertion, not a filter.
       const due = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, through, SWEEP_BATCH);
       let alarmed = 0;
+      let noReceipt = 0;
       let cleared = 0;
       for (const row of due) {
         if (row.kind !== GROUP_SEND_DUE_KIND) {
@@ -204,15 +255,32 @@ export function createGroupSendStaleness(
             },
             'group delivery receipts silent - check Conversations service webhook config',
           );
+        } else if (result.outcome === 'no_receipt') {
+          noReceipt += 1;
+          // WARN, not ERROR: the webhook delivered terminal receipts for this
+          // very message, so the operator has nothing to fix - a member's
+          // carrier does not report group-MMS delivery. Statuses and counts
+          // only, never the member key (PII rule, doc 9).
+          log.warn(
+            {
+              event: 'group_send_recipient_no_receipt',
+              conversationId: row.ref.conversationId,
+              providerSid: row.providerSid,
+              stuck: result.stuck.length,
+              receipted: result.receipted,
+              statuses: [...new Set(result.stuck.map((s) => s.status))],
+            },
+            'group send left Twilio for every member but a recipient carrier never reported delivery - not a webhook fault',
+          );
         } else {
           cleared += 1;
         }
-        // Resolve either way: an alarmed send has raised its ONE alarm, and a
-        // cleared send has nothing left to watch. Leaving the row would alarm
-        // the same send on every sweep from here to the TTL horizon.
+        // Resolve either way: an alarmed or no-receipt send has raised its ONE
+        // line, and a cleared send has nothing left to watch. Leaving the row
+        // would log the same send on every sweep from here to the TTL horizon.
         await messages.deleteDueRow(row.partition, row.sortKey);
       }
-      return { scanned: due.length, alarmed, cleared };
+      return { scanned: due.length, alarmed, noReceipt, cleared };
     },
   };
 }

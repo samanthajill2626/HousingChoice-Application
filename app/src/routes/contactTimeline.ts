@@ -70,6 +70,7 @@ import {
   type MessageItem,
   type MessagesRepo,
   type CallOutcome,
+  type CallStatus,
   type DeliveryStatus,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
@@ -179,7 +180,16 @@ interface TimelineMessage extends TimelineBase {
 interface TimelineCall extends TimelineBase {
   kind: 'call';
   conversationId?: string;
-  call_outcome: CallOutcome;
+  /** Who placed the call. REQUIRED - every stored call row carries it, and the
+   *  card renders the side/arrow from it (no backfill needed). */
+  direction: MessageDirection;
+  /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
+   *  status) and on any row whose stored value is not a union member. */
+  call_status?: CallStatus;
+  /** Coarse human-facing outcome. OPTIONAL: absent means "no terminal outcome is
+   *  known", which the client renders honestly (no chip / a status-derived
+   *  label). The server no longer invents 'missed' for a row that has none. */
+  call_outcome?: CallOutcome;
   call_duration?: number;
   party_phone?: string;
   recording_s3_key?: string;
@@ -411,6 +421,120 @@ function toTimelineMessage(
   };
 }
 
+/** CallStatus membership, deliberately duplicated from inbox.ts's private copy:
+ *  the normalization for this projection has ONE home here, and promoting the
+ *  inbox's guards would touch a surface this mission scopes out. The
+ *  `satisfies Record<CallStatus, true>` form keeps the copy honest if the union
+ *  grows - a hand-written array would silently drift. */
+const CALL_STATUS_MAP = {
+  ringing: true,
+  'in-progress': true,
+  completed: true,
+  'no-answer': true,
+  busy: true,
+  failed: true,
+  canceled: true,
+} satisfies Record<CallStatus, true>;
+function isCallStatus(v: unknown): v is CallStatus {
+  return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
+}
+
+/** MessageDirection membership, same deliberate duplication as CALL_STATUS_MAP. */
+const CALL_DIRECTION_MAP = {
+  inbound: true,
+  outbound: true,
+} satisfies Record<MessageDirection, true>;
+function isMessageDirection(v: unknown): v is MessageDirection {
+  return typeof v === 'string' && Object.hasOwn(CALL_DIRECTION_MAP, v);
+}
+
+/** CallOutcome membership, same deliberate duplication as CALL_STATUS_MAP above. */
+const CALL_OUTCOME_MAP = {
+  answered: true,
+  missed: true,
+  voicemail: true,
+} satisfies Record<CallOutcome, true>;
+function isCallOutcome(v: unknown): v is CallOutcome {
+  return typeof v === 'string' && Object.hasOwn(CALL_OUTCOME_MAP, v);
+}
+
+/** The Quo importer writes two OUT-OF-UNION outcome strings straight through
+ *  `messageBatch.put` (`lib/import/apply.ts`), bypassing the typed `append`:
+ *  `no_answer` and `completed`. They mean the same two things our union spells
+ *  differently, so map them FIRST and membership-test AFTER. */
+const IMPORTED_CALL_OUTCOME: Record<string, CallOutcome> = {
+  no_answer: 'missed',
+  completed: 'answered',
+};
+
+/**
+ * A stored outcome -> the wire outcome, or undefined. Order matters: normalize
+ * the importer's two strings, THEN test membership. Anything still unrecognized
+ * is DROPPED rather than cast through `as CallOutcome` - a call with a direction
+ * and a time and no chip is honest, and better than a confidently wrong one.
+ */
+function normalizeCallOutcome(v: unknown): CallOutcome | undefined {
+  if (typeof v !== 'string') return undefined;
+  const mapped = IMPORTED_CALL_OUTCOME[v] ?? v;
+  return isCallOutcome(mapped) ? mapped : undefined;
+}
+
+/**
+ * Connected duration in seconds. Native rows carry `call_duration`; IMPORTED
+ * rows carry `call_duration_seconds`, which is not a declared MessageItem field
+ * at all - it is reachable only through the interface's index signature, so it
+ * needs an explicit runtime narrow rather than a property read.
+ *
+ * A NON-POSITIVE duration is treated as ABSENT, on BOTH fields. The importer
+ * derives its outcome FROM the duration (`lib/import/apply.ts`), so every
+ * imported MISS carries a literal `0` alongside `no_answer`; projecting that
+ * renders "Missed - 0s", because `formatDuration(0)` returns the truthy string
+ * "0s". The NATIVE path reaches it too: voice.ts /status emits `callDuration`
+ * whenever the mapped Dial summary is `completed`, so a `DialCallDuration` of
+ * '0' parses to 0 and IS stored on a completed outbound call. This drop is
+ * therefore a READ-SIDE normalization the write side does NOT share - not an
+ * agreement with it. The INBOX still renders such a row as "Outgoing call - 0s";
+ * that divergence is recorded in
+ * docs/issues/inbox-imported-call-outcome-normalization.md.
+ */
+function callDurationOf(m: MessageItem): number | undefined {
+  if (typeof m.call_duration === 'number') return m.call_duration > 0 ? m.call_duration : undefined;
+  const imported = m['call_duration_seconds'];
+  return typeof imported === 'number' && imported > 0 ? imported : undefined;
+}
+
+/**
+ * PER-REQUEST tally of call rows whose stored `direction` is out of union,
+ * flushed as ONE warn by the route (see reportDirectionAnomalies).
+ *
+ * The condition is a PERMANENT property of a stored row, and this surface
+ * refetches on every message.persisted / conversation.updated /
+ * scheduled.updated (debounced 300ms) - so a per-row warn turns one corrupt row
+ * on a busy thread into a sustained WARN stream for as long as anyone leaves
+ * that contact open. Count + one example instead, the shape the orphan-logs
+ * work established for its per-poll-tick rollup.
+ */
+interface DirectionAnomalies {
+  count: number;
+  exampleConversationId?: string;
+  exampleTsMsgId?: string;
+}
+
+/** One warn per REQUEST, or none at all. IDs + a count only - never a phone. */
+function reportDirectionAnomalies(anomalies: DirectionAnomalies, log: Logger): void {
+  if (anomalies.count === 0) return;
+  log.warn(
+    {
+      count: anomalies.count,
+      ...(anomalies.exampleConversationId !== undefined && {
+        exampleConversationId: anomalies.exampleConversationId,
+      }),
+      ...(anomalies.exampleTsMsgId !== undefined && { exampleTsMsgId: anomalies.exampleTsMsgId }),
+    },
+    'contact timeline: call rows have an out-of-union direction - emitting the stored values unchanged',
+  );
+}
+
 /**
  * Map a stored call → a TimelineCall. PII: recording_s3_key + transcript ONLY
  * when masked !== true (founder-bridge); a MASKED call omits both entirely.
@@ -421,23 +545,47 @@ function toTimelineMessage(
 function toTimelineCall(
   m: MessageItem,
   conversation: ConversationItem | undefined,
+  anomalies: DirectionAnomalies,
 ): TimelineCall {
   const masked = m.masked === true;
+  // OBSERVABILITY ONLY - do NOT "tidy" this into a drop or a default.
+  // `direction` is REQUIRED on the wire, so omitting it would type-check clean
+  // and fail only in the browser (the required-key mirror test exists for
+  // exactly that failure mode), and substituting a default would INVENT the
+  // very data this feature exists to stop inventing. The client's check is
+  // `=== 'outbound'`, so a bad or absent stored value silently renders
+  // "Incoming call". Narrowing here changes NOTHING about what is emitted; it
+  // only makes the silent case visible. TALLIED, not logged per row - see
+  // DirectionAnomalies. IDs only - never a phone.
+  if (!isMessageDirection(m.direction)) {
+    anomalies.count += 1;
+    anomalies.exampleConversationId ??= m.conversationId;
+    anomalies.exampleTsMsgId ??= m.tsMsgId;
+  }
   // at == sort-key == cursor: all provider_ts. The merge/sort + cursor use
   // globalKey = m.tsMsgId (`<provider_ts>#<sid>`) and messagesRepo paginates on
   // tsMsgId, so the displayed `at` MUST be provider_ts (which append always sets)
   // to stay consistent with what the server sorts/paginates by — same as
   // TimelineMessage. (started_at is the call's first-seen time, not a sort key.)
   const partyPhone = masked ? undefined : conversation?.participant_phone;
+  const callOutcome = normalizeCallOutcome(m.call_outcome);
+  const callDuration = callDurationOf(m);
   return {
     kind: 'call',
     id: m.tsMsgId,
     at: atOf(m.tsMsgId, m.provider_ts),
     ...(m.conversationId !== undefined && { conversationId: m.conversationId }),
-    // call_outcome is required on the wire; default 'missed' when a call entry
-    // has no recorded outcome yet (a ringing/unanswered metadata row).
-    call_outcome: (m.call_outcome ?? 'missed') as CallOutcome,
-    ...(typeof m.call_duration === 'number' && { call_duration: m.call_duration }),
+    // Direction + lifecycle status are METADATA, not content: they are emitted
+    // for masked rows too (I4 strips content, and is untouched here). An
+    // unrecognized stored status is dropped rather than cast onto the wire.
+    direction: m.direction,
+    ...(isCallStatus(m.call_status) && { call_status: m.call_status }),
+    // call_outcome is OPTIONAL on the wire and there is NO default. A row with
+    // no recorded outcome (a ringing metadata row, or a D12 gate-refusal stamp)
+    // emits none, and the client derives an honest label from call_status
+    // instead of reading a server-invented "Missed".
+    ...(callOutcome !== undefined && { call_outcome: callOutcome }),
+    ...(callDuration !== undefined && { call_duration: callDuration }),
     ...(partyPhone !== undefined && { party_phone: partyPhone }),
     // Masked calls are NEVER recorded/transcribed — never expose these.
     ...(!masked && typeof m.recording_s3_key === 'string' && { recording_s3_key: m.recording_s3_key }),
@@ -863,6 +1011,8 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    are gathered into the separate first-page `upcoming[]` bucket in step 6.
     const candidates: Candidate[] = [];
 
+    // Tallied across every thread in THIS request, then flushed once below.
+    const directionAnomalies: DirectionAnomalies = { count: 0 };
     if (wantMessage || wantCall) {
       for (const conv of convById.values()) {
         const page = await messages.listByConversation(conv.conversationId, {
@@ -872,13 +1022,17 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
         for (const m of page) {
           if (m.type === 'call') {
             if (!wantCall) continue;
-            candidates.push({ globalKey: m.tsMsgId, item: toTimelineCall(m, conv) });
+            candidates.push({
+              globalKey: m.tsMsgId,
+              item: toTimelineCall(m, conv, directionAnomalies),
+            });
           } else {
             if (!wantMessage) continue;
             candidates.push({ globalKey: m.tsMsgId, item: toTimelineMessage(m, conv, ourNumber) });
           }
         }
       }
+      reportDirectionAnomalies(directionAnomalies, log);
     }
 
     if (wantMilestone) {

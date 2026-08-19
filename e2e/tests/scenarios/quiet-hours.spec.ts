@@ -51,6 +51,7 @@ import {
   type Contact,
   type TourTimes,
 } from '../../scenarios/steps.js';
+import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -132,7 +133,7 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
   expect(res.ok(), await res.text()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The Quiet hours section on /settings/system. It is a <section> with an

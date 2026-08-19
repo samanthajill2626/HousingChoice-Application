@@ -788,6 +788,40 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
+  // The INBOUND arm of the same live-surface problem the D12 refusal emits
+  // solve. press-1 flips the row ringing -> in-progress, but the contact
+  // timeline refetches ONLY on message.persisted / conversation.updated, so
+  // without an emit a navigator with this contact open keeps the stale
+  // "Ringing..." card and watches it flip to a red "Missed" at t+90s WHILE THE
+  // CALL IS CONNECTED. The INBOX row is deliberately untouched (spec 6.4).
+  it('PRESS-1 on the founder leg announces message.persisted for the open timeline - and leaves the inbox untouched', async () => {
+    const app = await seedRingingBridge();
+    world.emitted.length = 0;
+    world.touches.length = 0;
+
+    await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/whisper-gate?conversationId=x&parentCallSid=CAbiz0001&leg=founder',
+      { Digits: '1', CallSid: 'CAfounder-leg' },
+    );
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_status).toBe('in-progress');
+    const persisted = world.emitted
+      .filter((e) => e.event === 'message.persisted')
+      .map((e) => e.payload as Record<string, unknown>);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      conversationId: call.conversationId,
+      tsMsgId: call.tsMsgId,
+      direction: 'inbound',
+    });
+    // Asserted from the OTHER side too: the inbox row must be left exactly as
+    // it is, so no conversation.updated and no activity touch.
+    expect(world.emitted.filter((e) => e.event === 'conversation.updated')).toHaveLength(0);
+    expect(world.touches).toHaveLength(0);
+  });
+
   it('ANSWERED (completed with duration) → NO missed push, NO auto-text', async () => {
     const app = await seedRingingBridge();
 

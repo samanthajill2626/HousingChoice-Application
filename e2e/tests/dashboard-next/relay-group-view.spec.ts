@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import { getOutbox } from '../../fixtures/outbox.js';
 // The final "group is closed" copy (single source of truth) - close now sends it.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Relay-group conversation view (/conversations/:conversationId) — spec §10.
 // Drives the real dashboard + API against the hermetic lane stack and proves the
@@ -43,7 +44,7 @@ async function reseedFull(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The group view's roster list — its aria-label is stable ("Group members"). */

@@ -1,4 +1,5 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import { expectTodayReady } from '../../support/today.js';
 
 // Mobile composer layout — regression cover for "the reply box gets squished on
 // mobile when the reply is long" (tour / placement relay group, and every other
@@ -44,7 +45,7 @@ async function reseedFull(request: APIRequestContext): Promise<void> {
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The narrow-width pane toggle (twoPaneShell's segMobile, aria-label "View").

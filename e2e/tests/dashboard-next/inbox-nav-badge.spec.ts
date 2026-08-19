@@ -2,6 +2,7 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 import { registerParty, sendAsParty, sendGroupAsParty } from '../../fixtures/fakeTwilio.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // THE NAV INBOX BADGE - its first e2e coverage (inbox-unread-index spec 4.4/4.7).
 //
@@ -45,7 +46,7 @@ const RECHECK_SETTLE_MS = 3_000;
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /** The nav badge, and ONLY the nav badge (see the header note on the row twin). */

@@ -30,6 +30,28 @@ export function formatTime(iso: string): string {
   return `${h}:${min.toString().padStart(2, '0')}${mer}`;
 }
 
+/** The same clock label carried to SECONDS, e.g. "9:14:07a". For ACCESSIBLE
+ *  NAMES only - visible clock labels stay at minute precision. Minute precision
+ *  is not unique in practice: two calls inside one minute (an ordinary redial
+ *  after a miss) would share one accessible name, which is a Playwright
+ *  strict-mode violation on the call-card locator and, for a screen-reader user,
+ *  two cards that cannot be told apart.
+ *  An UNPARSEABLE instant answers '' (same contract as formatTime). Callers that
+ *  build an accessible name by concatenation MUST handle that rather than emit a
+ *  dangling separator - see CallCard's `cardName`, which falls back to the row
+ *  id so two such rows still differ. */
+export function formatTimeWithSeconds(iso: string): string {
+  const d = new Date(isoOf(iso));
+  if (Number.isNaN(d.getTime())) return '';
+  let h = d.getHours();
+  const min = d.getMinutes();
+  const sec = d.getSeconds();
+  const mer = h < 12 ? 'a' : 'p';
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}${mer}`;
+}
+
 /** A date-divider label for a day, e.g. "Mon Jun 8". Accepts a clean ISO instant or
  *  a `<ISO>#<suffix>` sort key (normalised via isoOf). */
 export function formatDayDivider(iso: string): string {

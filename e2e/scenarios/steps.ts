@@ -35,6 +35,7 @@ import {
 // the module is PURE (no repo/AWS deps - resolve.ts's settings dependency was
 // split out into resolveWithSettings.ts), so the e2e bundle stays light.
 import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
+import { expectTodayReady } from '../support/today.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
 // config load from the lane resolver). Fall back to the lane-0 dev default so
@@ -377,7 +378,7 @@ export class Scenario {
     return step('Team signs in to the dashboard', async () => {
       await this.page.goto(`${NEXT}/`);
       await this.page.getByRole('button', { name: /Continue as dev user/i }).click();
-      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+      await expectTodayReady(this.page);
     });
   }
 
@@ -2724,7 +2725,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the overdue RTA deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+      await expectTodayReady(this.page);
       const needs = this.page.getByRole('list', { name: 'Needs you now' });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
@@ -2749,7 +2750,7 @@ export class Scenario {
         this.page.goto(`${NEXT}/`),
       ]);
       expect(resp.ok()).toBeTruthy();
-      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+      await expectTodayReady(this.page);
       await expect(this.page.locator(`a[href="/placements/${id}"]`)).toHaveCount(0, {
         timeout: 10_000,
       });
@@ -2790,7 +2791,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the voucher deadline surfaces on the Today board', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+      await expectTodayReady(this.page);
       const needs = this.page.getByRole('list', { name: 'Needs you now' });
       const row = needs.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });
@@ -2827,7 +2828,7 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step('App: the placement shows as Stuck in Follow-ups (derived)', async () => {
       await this.page.goto(`${NEXT}/`);
-      await expect(this.page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+      await expectTodayReady(this.page);
       const followUps = this.page.getByRole('list', { name: 'Follow-ups due' });
       const row = followUps.locator(`a[href="/placements/${id}"]`);
       await expect(row).toBeVisible({ timeout: 10_000 });

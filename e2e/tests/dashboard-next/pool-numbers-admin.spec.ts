@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
 import { APP_NUMBER } from '../../scenarios/steps.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Settings > Phone numbers (:5174) - the READ-ONLY numbers surface, whose two
 // blocks have DIFFERENT audiences (spec docs/superpowers/specs/
@@ -35,7 +36,7 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
   const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 // --- Per-run-unique phones (relay-number-lifecycle.spec.ts idiom) -------------

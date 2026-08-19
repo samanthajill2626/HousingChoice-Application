@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { dashboardUrl } from '../../support/urls.js';
+import { expectTodayReady } from '../../support/today.js';
 
 // Property photos (unit-photos direct-upload, spec Sec 5) - drives the REAL
 // dashboard Photos gallery against the hermetic lane stack + MinIO and proves the
@@ -40,7 +41,7 @@ const FIXTURE_PNG = fileURLToPath(new URL('../../fixtures/tiny.png', import.meta
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 /**

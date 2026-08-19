@@ -475,11 +475,20 @@ function normalizeCallOutcome(v: unknown): CallOutcome | undefined {
  * rows carry `call_duration_seconds`, which is not a declared MessageItem field
  * at all - it is reachable only through the interface's index signature, so it
  * needs an explicit runtime narrow rather than a property read.
+ *
+ * A NON-POSITIVE duration is treated as ABSENT. The importer derives its outcome
+ * FROM the duration (`lib/import/apply.ts`), so every imported MISS carries a
+ * literal `0` alongside `no_answer`; projecting that renders "Missed - 0s",
+ * because `formatDuration(0)` returns the truthy string "0s". The native path
+ * can reach it too - a `DialCallDuration` of '0' parses to 0. The live WRITE
+ * side already refuses to store a duration for a call that never connected
+ * (voice.ts /status), so this makes the read side agree with it: no connected
+ * time is no duration, not a zero one.
  */
 function callDurationOf(m: MessageItem): number | undefined {
-  if (typeof m.call_duration === 'number') return m.call_duration;
+  if (typeof m.call_duration === 'number') return m.call_duration > 0 ? m.call_duration : undefined;
   const imported = m['call_duration_seconds'];
-  return typeof imported === 'number' ? imported : undefined;
+  return typeof imported === 'number' && imported > 0 ? imported : undefined;
 }
 
 /**

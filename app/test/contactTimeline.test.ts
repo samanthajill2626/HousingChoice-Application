@@ -567,6 +567,50 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(pick('CA-native-dur').call_duration).toBe(61);
   });
 
+  // A ZERO duration is ABSENT, not a duration. The importer derives its outcome
+  // FROM the duration, so every imported MISS carries a literal 0 next to
+  // 'no_answer'; projecting it made the card read "Incoming call - Missed - 0s",
+  // because the client's formatDuration(0) returns the truthy string "0s". The
+  // native path can reach it too (a DialCallDuration of '0'). The live WRITE side
+  // already refuses to store a duration for a call that never connected.
+  it('treats a NON-POSITIVE call duration as absent, on both the imported and the native field', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-imported-zero',
+      providerTs: '2026-06-16T10:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+    });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-native-zero',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callDuration: 0,
+    });
+    // The importer's own pairing: duration 0 and the out-of-union 'no_answer'
+    // outcome are written together on the SAME row (lib/import/apply.ts).
+    const imported = world.messages.find((m) => m.provider_sid === 'CA-imported-zero')!;
+    (imported as Record<string, unknown>)['call_duration_seconds'] = 0;
+    (imported as Record<string, unknown>)['call_outcome'] = 'no_answer';
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const pick = (sid: string) => calls.find((c: { id: string }) => c.id.includes(sid));
+
+    // The outcome still projects - only the meaningless duration is dropped.
+    expect(pick('CA-imported-zero').call_outcome).toBe('missed');
+    expect(pick('CA-imported-zero').call_duration).toBeUndefined();
+    expect(pick('CA-native-zero').call_duration).toBeUndefined();
+  });
+
   it('projects every field the dashboard TimelineCall declares REQUIRED (manual cross-package mirror)', async () => {
     // There is NO cross-package type check: a projection that omits `direction`
     // type-checks clean on BOTH sides and fails only in the browser. This list is

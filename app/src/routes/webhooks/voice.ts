@@ -1021,6 +1021,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     };
   }
 
+  /**
+   * D12 (spec 6.3) companion: tell any OPEN contact timeline that a gate refusal
+   * just stamped the call terminal. Called ONLY when `updateCallStatus` reported
+   * a real transition, and ONLY from inside the refusal's existing swallowing
+   * try/catch - these are TwiML response paths and the hangup outranks the
+   * announcement. Resolves the row by provider sid (the same lookup /voice/status
+   * uses) because the emit needs its tsMsgId, and because the row's own
+   * conversationId is available even on the branch whose query-string
+   * conversation did not resolve. Emits `message.persisted` ONLY: the inbox row
+   * must stay exactly as it is (spec 6.4), so NO stampCallActivity and NO
+   * conversation.updated. IDs only in any log - never a phone.
+   */
+  async function announceRefusalStamp(parentCallSid: string): Promise<void> {
+    const stampedRow = await messages.getByProviderSid(parentCallSid);
+    if (stampedRow === undefined) return;
+    events.emit('message.persisted', {
+      conversationId: stampedRow.conversationId,
+      tsMsgId: stampedRow.tsMsgId,
+      direction: stampedRow.direction,
+      deliveryStatus: stampedRow.delivery_status,
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Outbound bridge — POST /voice/outbound-bridge (Voice Phase 1, spec §5).
   // Runs on the NAVIGATOR leg when they answer the originated call. Resolves the
@@ -1053,7 +1076,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // never an error.
       if (parentCallSid.length > 0) {
         try {
-          await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+          const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+          // The navigator may have this contact's timeline OPEN - originateCall
+          // emitted message.persisted on the append that put the "Ringing..."
+          // card on screen. The timeline refetches ONLY on message.persisted /
+          // conversation.updated, so a silent stamp leaves that open card on the
+          // stale `ringing` row, which flips to "No team answer" at t+90s - the
+          // exact false attribution D12 exists to remove, on the one surface
+          // anyone is watching. Emit ONLY when the stamp actually transitioned;
+          // a no-op against a missing row announces nothing. Deliberately NO
+          // stampCallActivity and NO conversation.updated: spec 6.4 promises the
+          // inbox row is left exactly as it is. The conversationId comes off the
+          // STAMPED ROW, not the query string - this branch runs precisely
+          // because the query's conversation did not resolve.
+          if (stamped) await announceRefusalStamp(parentCallSid);
         } catch (err) {
           log.warn(
             { err, callSid: parentCallSid },
@@ -1188,7 +1224,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // /outbound-bridge branch above). Best-effort; never breaks the hangup.
         if (parentCallSid.length > 0) {
           try {
-            await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            // Announce the stamp so an OPEN contact timeline refetches instead
+            // of sitting on the stale ringing card (see the /outbound-bridge
+            // branch above). Transition-gated, inbox untouched.
+            if (stamped) await announceRefusalStamp(parentCallSid);
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
@@ -1218,7 +1258,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // never breaks the hangup.
         if (parentCallSid.length > 0) {
           try {
-            await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            const stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            // Announce the stamp so an OPEN contact timeline refetches instead
+            // of sitting on the stale ringing card (see the /outbound-bridge
+            // branch above). Transition-gated, inbox untouched.
+            if (stamped) await announceRefusalStamp(parentCallSid);
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },

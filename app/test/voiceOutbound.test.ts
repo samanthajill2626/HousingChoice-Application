@@ -471,6 +471,109 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(res.text).not.toContain('<Dial');
   });
 
+  // D12 (spec 6.3), the LIVE-SURFACE half: the stamp lands in the database, but
+  // the contact timeline refetches ONLY on message.persisted / conversation.
+  // updated - and originateCall already emitted one for the "Ringing..." card the
+  // navigator is looking at right now. Without an emit here that open card keeps
+  // the stale `ringing` row and flips to "No team answer" at t+90s, which is
+  // exactly the false attribution the stamp exists to prevent, on the one surface
+  // anyone is watching. The INBOX row is deliberately untouched (spec 6.4): no
+  // stampCallActivity, no conversation.updated.
+  const persistedEvents = (world: FakeWorld): Record<string, unknown>[] =>
+    world.emitted
+      .filter((e) => e.event === 'message.persisted')
+      .map((e) => e.payload as Record<string, unknown>);
+
+  it('a refusal that STAMPS announces message.persisted for the open timeline - and NEVER conversation.updated', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    const contact = world.contacts.find((c) => c.contactId === 'c-target')!;
+    contact.voice_opt_out = true;
+    world.emitted.length = 0;
+
+    await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    const persisted = persistedEvents(world);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      conversationId,
+      tsMsgId: entry.tsMsgId,
+      direction: 'outbound',
+    });
+    // The inbox row must be left EXACTLY as it is - that is a promise spec 6.4
+    // makes explicitly, and an activity stamp would break it.
+    expect(world.emitted.filter((e) => e.event === 'conversation.updated')).toHaveLength(0);
+    expect(world.touches).toHaveLength(0);
+  });
+
+  it('the /outbound-bridge refusal announces too - the conversationId comes off the STAMPED ROW, not the unresolvable query', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.emitted.length = 0;
+
+    // This branch runs precisely because the query's conversation did not
+    // resolve, so the usable conversationId can only come from the row itself.
+    await signedTwilioPost(
+      harness.app,
+      '/webhooks/twilio/voice/outbound-bridge?conversationId=conv-does-not-exist',
+      { CallSid: callSid },
+    );
+
+    const persisted = persistedEvents(world);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({ conversationId, direction: 'outbound' });
+  });
+
+  it('a refusal against a MISSING row transitions nothing and announces NOTHING', async () => {
+    const { world, harness } = await originate();
+    world.emitted.length = 0;
+
+    const res = await signedTwilioPost(
+      harness.app,
+      '/webhooks/twilio/voice/outbound-bridge?conversationId=conv-does-not-exist',
+      { CallSid: 'CAnever-persisted' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    // updateCallStatus is a no-op returning false on a missing row; a no-op must
+    // not announce a change that never happened.
+    expect(world.emitted).toHaveLength(0);
+  });
+
+  it('a refusal whose transition is REFUSED (the row is already terminal) announces NOTHING', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    // Close the call out for real first, so the row is terminal. A late/
+    // redelivered refusal then finds `canceled` unreachable from `completed`
+    // (forward-only) and updateCallStatus returns false with the row untouched.
+    await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'completed',
+      DialCallDuration: '30',
+      ApiVersion: '2010-04-01',
+    });
+    world.emitted.length = 0;
+
+    await signedTwilioPost(
+      harness.app,
+      '/webhooks/twilio/voice/outbound-bridge?conversationId=conv-does-not-exist',
+      { CallSid: callSid },
+    );
+
+    // The row still exists and still resolves by provider sid, so ONLY the
+    // transition gate keeps this quiet. Announcing here would make an open
+    // timeline refetch for a write that never happened.
+    expect(world.messages.find((m) => m.provider_sid === callSid)!.call_status).toBe('completed');
+    expect(world.emitted).toHaveLength(0);
+  });
+
   it('status callback on the originated CallSid stamps the outbound entry (answered)', async () => {
     const { world, harness, conversationId, callSid } = await originate();
     // press-1 accept, then the <Dial action> summary completes with a duration.

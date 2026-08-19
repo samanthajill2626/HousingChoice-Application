@@ -1078,6 +1078,17 @@ export interface MessagesRepo {
    * (answered_at/ended_at/call_duration/call_outcome). Returns false (no-op)
    * when the call is unknown or the transition would regress — so a redelivered
    * webhook never double-writes or double-counts. PII (doc §9): IDs/labels only.
+   *
+   * `expectedPriorCallStatuses` is OPTIONAL and purely ADDITIVE: it INTERSECTS
+   * with the machine's allowed prior set, so a caller can only ever narrow, and
+   * omitting it leaves every existing caller's behavior untouched. It exists
+   * because some writes are legal for the state machine but not for the caller:
+   * a D12 gate-refusal stamp may transition ONLY from `ringing`, since a
+   * redelivered refusal landing after press-1 would otherwise terminate a LIVE
+   * call and - terminal states being absorbing - permanently lock out the
+   * authoritative <Dial action> summary. The narrowing rides the SAME atomic
+   * ConditionExpression as the machine's own set; a pre-read plus an if-check
+   * would lose exactly the race it is meant to close.
    */
   updateCallStatus(
     callSid: string,
@@ -1088,6 +1099,7 @@ export interface MessagesRepo {
       endedAt?: string;
       callDuration?: number;
     },
+    options?: { expectedPriorCallStatuses?: CallStatus[] },
   ): Promise<boolean>;
   /**
    * Voice call recording (M1.9c): stamp recording_s3_key (+ recording_sid +
@@ -2166,7 +2178,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       log.info({ providerSid, conversationId: ref.conversationId }, 'email provider-sid alias recorded');
     },
 
-    async updateCallStatus(callSid, fields) {
+    async updateCallStatus(callSid, fields, options) {
       // CallSid == provider_sid, so the same sid# pointer the call append wrote
       // resolves the item — no separate callsid partition needed.
       const existing = await getByProviderSid(callSid);
@@ -2174,7 +2186,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         log.warn({ callSid, callStatus: fields.callStatus }, 'call status for unknown CallSid ignored');
         return false;
       }
-      const allowed = allowedPriorCallStatuses(fields.callStatus);
+      // The caller's optional expectation INTERSECTS the machine's allowed set -
+      // it can only narrow, never widen - and the result feeds the SAME atomic
+      // ConditionExpression below, so the narrowing is race-free.
+      const expected = options?.expectedPriorCallStatuses;
+      const allowed = allowedPriorCallStatuses(fields.callStatus).filter(
+        (p) => expected === undefined || expected.includes(p),
+      );
       if (allowed.length === 0) return false; // nothing transitions INTO ringing
       const sets = ['call_status = :s'];
       const values: Record<string, unknown> = { ':s': fields.callStatus };

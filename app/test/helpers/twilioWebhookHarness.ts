@@ -1110,13 +1110,20 @@ export function createFakeWorld(): FakeWorld {
       if (errorCode !== undefined) existing.error_code = errorCode;
       return true;
     },
-    async updateCallStatus(callSid, fields) {
+    async updateCallStatus(callSid, fields, options) {
       // Mirror the real repo: forward-only on call_status, idempotent stamp of
       // the supplied lifecycle fields. Unknown CallSid or a regressing
       // transition is a no-op (false) — so a redelivery never double-writes.
+      // Mirrors the real ConditionExpression's OPTIONAL narrowing too
+      // (expectedPriorCallStatuses INTERSECTS the machine's allowed set): if
+      // only the real repo implemented it, these tests would go green against a
+      // broken implementation.
       const existing = findBySid(callSid);
       if (!existing) return false;
-      const allowed = allowedPriorCallStatuses(fields.callStatus);
+      const expectedPrior = options?.expectedPriorCallStatuses;
+      const allowed = allowedPriorCallStatuses(fields.callStatus).filter(
+        (p) => expectedPrior === undefined || expectedPrior.includes(p),
+      );
       const current = existing.call_status;
       if (current === undefined || !allowed.includes(current)) return false;
       existing.call_status = fields.callStatus;

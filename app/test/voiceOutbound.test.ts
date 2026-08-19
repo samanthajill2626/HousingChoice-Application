@@ -348,6 +348,87 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(entry.answered_at).toBeDefined();
   });
 
+  // The ACCEPTANCE half of the same live-surface problem the D12 refusal emits
+  // solve. press-1 flips the row ringing -> in-progress, but the contact
+  // timeline refetches ONLY on message.persisted / conversation.updated, so
+  // without an emit the navigator who originated this call keeps the stale
+  // "Ringing..." card in front of them and watches it flip to a red "No team
+  // answer" at t+90s WHILE THEY ARE ON THE CALL. The INBOX row is deliberately
+  // untouched (spec 6.4), exactly as on the refusal path.
+  it('press-1 on the outbound gate announces message.persisted for the open timeline - and leaves the inbox untouched', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    world.emitted.length = 0;
+    world.touches.length = 0;
+
+    await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(entry.call_status).toBe('in-progress');
+    const persisted = world.emitted
+      .filter((e) => e.event === 'message.persisted')
+      .map((e) => e.payload as Record<string, unknown>);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      conversationId,
+      tsMsgId: entry.tsMsgId,
+      direction: 'outbound',
+    });
+    // Asserted from the OTHER side too: spec 6.4 promises the inbox row is left
+    // exactly as it is, and an activity stamp would break that promise.
+    expect(world.emitted.filter((e) => e.event === 'conversation.updated')).toHaveLength(0);
+    expect(world.touches).toHaveLength(0);
+  });
+
+  // A REDELIVERED gate refusal arriving after press-1 already succeeded must not
+  // terminate a LIVE call. `canceled` is reachable from `in-progress` in the
+  // forward-only machine (a genuine mid-call cancel is legal), so the narrowing
+  // belongs to the D12 STAMP, not the machine: the refusal may transition ONLY
+  // from `ringing`. Terminal states are absorbing, so getting this wrong would
+  // also lock out the authoritative <Dial action> summary forever.
+  it('a redelivered refusal AFTER press-1 is a NO-OP - the live call survives and its Dial summary still lands', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+
+    // press-1: the bridge is accepted and the call is LIVE.
+    await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    expect(world.messages.find((m) => m.provider_sid === callSid)!.call_status).toBe('in-progress');
+    world.emitted.length = 0;
+
+    // Twilio redelivers the earlier /outbound-bridge request (the query's
+    // conversation no longer resolves), which would otherwise stamp canceled.
+    const res = await signedTwilioPost(
+      harness.app,
+      '/webhooks/twilio/voice/outbound-bridge?conversationId=conv-does-not-exist',
+      { CallSid: callSid },
+    );
+    expect(res.status).toBe(200);
+
+    const during = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(during.call_status).toBe('in-progress');
+    expect(during.call_outcome).toBeUndefined();
+    // A no-op must not announce a change that never happened.
+    expect(world.emitted.filter((e) => e.event === 'message.persisted')).toHaveLength(0);
+
+    // The authoritative Dial summary still closes the call out normally.
+    await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'completed',
+      DialCallDuration: '42',
+      ApiVersion: '2010-04-01',
+    });
+    const after = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(after.call_status).toBe('completed');
+    expect(after.call_outcome).toBe('answered');
+    expect(after.call_duration).toBe(42);
+  });
+
   it('timeout (no press-1) on the outbound gate → <Hangup>, never a <Dial>', async () => {
     const { harness, conversationId, callSid } = await originate();
     const res = await signedTwilioPost(
@@ -487,7 +568,7 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     const contact = world.contacts.find((c) => c.contactId === 'c-target')!;
     contact.voice_opt_out = true;
     world.emitted.length = 0;
-    // announceRefusalStamp's ONLY repo call. updateCallStatus resolves the row
+    // announceCallStamp's ONLY repo call. updateCallStatus resolves the row
     // through its own internal lookup, so this breaks the announce alone.
     vi.spyOn(world.messagesRepo, 'getByProviderSid').mockRejectedValue(new Error('ddb read down'));
 

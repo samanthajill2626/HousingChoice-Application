@@ -439,6 +439,15 @@ function isCallStatus(v: unknown): v is CallStatus {
   return typeof v === 'string' && Object.hasOwn(CALL_STATUS_MAP, v);
 }
 
+/** MessageDirection membership, same deliberate duplication as CALL_STATUS_MAP. */
+const CALL_DIRECTION_MAP = {
+  inbound: true,
+  outbound: true,
+} satisfies Record<MessageDirection, true>;
+function isMessageDirection(v: unknown): v is MessageDirection {
+  return typeof v === 'string' && Object.hasOwn(CALL_DIRECTION_MAP, v);
+}
+
 /** CallOutcome membership, same deliberate duplication as CALL_STATUS_MAP above. */
 const CALL_OUTCOME_MAP = {
   answered: true,
@@ -476,14 +485,17 @@ function normalizeCallOutcome(v: unknown): CallOutcome | undefined {
  * at all - it is reachable only through the interface's index signature, so it
  * needs an explicit runtime narrow rather than a property read.
  *
- * A NON-POSITIVE duration is treated as ABSENT. The importer derives its outcome
- * FROM the duration (`lib/import/apply.ts`), so every imported MISS carries a
- * literal `0` alongside `no_answer`; projecting that renders "Missed - 0s",
- * because `formatDuration(0)` returns the truthy string "0s". The native path
- * can reach it too - a `DialCallDuration` of '0' parses to 0. The live WRITE
- * side already refuses to store a duration for a call that never connected
- * (voice.ts /status), so this makes the read side agree with it: no connected
- * time is no duration, not a zero one.
+ * A NON-POSITIVE duration is treated as ABSENT, on BOTH fields. The importer
+ * derives its outcome FROM the duration (`lib/import/apply.ts`), so every
+ * imported MISS carries a literal `0` alongside `no_answer`; projecting that
+ * renders "Missed - 0s", because `formatDuration(0)` returns the truthy string
+ * "0s". The NATIVE path reaches it too: voice.ts /status emits `callDuration`
+ * whenever the mapped Dial summary is `completed`, so a `DialCallDuration` of
+ * '0' parses to 0 and IS stored on a completed outbound call. This drop is
+ * therefore a READ-SIDE normalization the write side does NOT share - not an
+ * agreement with it. The INBOX still renders such a row as "Outgoing call - 0s";
+ * that divergence is recorded in
+ * docs/issues/inbox-imported-call-outcome-normalization.md.
  */
 function callDurationOf(m: MessageItem): number | undefined {
   if (typeof m.call_duration === 'number') return m.call_duration > 0 ? m.call_duration : undefined;
@@ -501,8 +513,23 @@ function callDurationOf(m: MessageItem): number | undefined {
 function toTimelineCall(
   m: MessageItem,
   conversation: ConversationItem | undefined,
+  log: Logger,
 ): TimelineCall {
   const masked = m.masked === true;
+  // OBSERVABILITY ONLY - do NOT "tidy" this into a drop or a default.
+  // `direction` is REQUIRED on the wire, so omitting it would type-check clean
+  // and fail only in the browser (the required-key mirror test exists for
+  // exactly that failure mode), and substituting a default would INVENT the
+  // very data this feature exists to stop inventing. The client's check is
+  // `=== 'outbound'`, so a bad or absent stored value silently renders
+  // "Incoming call". Narrowing here changes NOTHING about what is emitted; it
+  // only makes the silent case visible. IDs only - never a phone.
+  if (!isMessageDirection(m.direction)) {
+    log.warn(
+      { conversationId: m.conversationId, tsMsgId: m.tsMsgId },
+      'contact timeline: call row has an out-of-union direction - emitting the stored value unchanged',
+    );
+  }
   // at == sort-key == cursor: all provider_ts. The merge/sort + cursor use
   // globalKey = m.tsMsgId (`<provider_ts>#<sid>`) and messagesRepo paginates on
   // tsMsgId, so the displayed `at` MUST be provider_ts (which append always sets)
@@ -961,7 +988,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
         for (const m of page) {
           if (m.type === 'call') {
             if (!wantCall) continue;
-            candidates.push({ globalKey: m.tsMsgId, item: toTimelineCall(m, conv) });
+            candidates.push({ globalKey: m.tsMsgId, item: toTimelineCall(m, conv, log) });
           } else {
             if (!wantMessage) continue;
             candidates.push({ globalKey: m.tsMsgId, item: toTimelineMessage(m, conv, ourNumber) });

@@ -1022,20 +1022,25 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   }
 
   /**
-   * D12 (spec 6.3) companion: tell any OPEN contact timeline that a gate refusal
-   * just stamped the call terminal. Called ONLY when `updateCallStatus` reported
-   * a real transition, and always from inside its OWN swallowing try/catch,
-   * separate from the stamp's - these are TwiML response paths and the hangup
-   * outranks the announcement, but a failure here means the stamp COMMITTED and
-   * only the push was lost, which is a different operator story from a failed
-   * write. Resolves the row by provider sid (the same lookup /voice/status
-   * uses) because the emit needs its tsMsgId, and because the row's own
-   * conversationId is available even on the branch whose query-string
-   * conversation did not resolve. Emits `message.persisted` ONLY: the inbox row
-   * must stay exactly as it is (spec 6.4), so NO stampCallActivity and NO
-   * conversation.updated. IDs only in any log - never a phone.
+   * D12 (spec 6.3) companion: tell any OPEN contact timeline that a gate write
+   * just changed this call's lifecycle - a REFUSAL stamping it terminal, or a
+   * press-1 ACCEPTANCE stamping it in-progress. Both are gate paths whose only
+   * other signal would arrive at t+90s, and the timeline refetches ONLY on
+   * message.persisted / conversation.updated.
+   *
+   * Called ONLY when `updateCallStatus` reported a real transition, and always
+   * from inside its OWN swallowing try/catch, separate from the stamp's - these
+   * are TwiML response paths and the call itself outranks the announcement, but
+   * a failure here means the stamp COMMITTED and only the push was lost, which
+   * is a different operator story from a failed write. Resolves the row by
+   * provider sid (the same lookup /voice/status uses) because the emit needs its
+   * tsMsgId, and because the row's own conversationId is available even on the
+   * branch whose query-string conversation did not resolve. Emits
+   * `message.persisted` ONLY: the inbox row must stay exactly as it is
+   * (spec 6.4), so NO stampCallActivity and NO conversation.updated. IDs only in
+   * any log - never a phone.
    */
-  async function announceRefusalStamp(parentCallSid: string): Promise<void> {
+  async function announceCallStamp(parentCallSid: string): Promise<void> {
     const stampedRow = await messages.getByProviderSid(parentCallSid);
     if (stampedRow === undefined) return;
     events.emit('message.persisted', {
@@ -1079,7 +1084,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       if (parentCallSid.length > 0) {
         let stamped = false;
         try {
-          stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+          // The refusal stamp may transition ONLY from `ringing`. `canceled` is
+          // legal from `in-progress` in the forward-only machine (a genuine
+          // mid-call cancel is a real thing), so the narrowing belongs to THIS
+          // stamp rather than to the machine: a REDELIVERED refusal arriving
+          // after press-1 already succeeded would otherwise terminate a LIVE
+          // call and - terminal states being absorbing - permanently lock out
+          // the authoritative <Dial action> summary. The expectation rides the
+          // repo's atomic condition; a pre-read plus an if-check would lose
+          // exactly the race it is meant to close.
+          stamped = await messages.updateCallStatus(
+            parentCallSid,
+            { callStatus: 'canceled' },
+            { expectedPriorCallStatuses: ['ringing'] },
+          );
         } catch (err) {
           log.warn(
             { err, callSid: parentCallSid },
@@ -1104,7 +1122,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // write path. Both stay best-effort - neither may break the hangup.
         if (stamped) {
           try {
-            await announceRefusalStamp(parentCallSid);
+            await announceCallStamp(parentCallSid);
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
@@ -1241,7 +1259,14 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         if (parentCallSid.length > 0) {
           let stamped = false;
           try {
-            stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            // Refusal stamp: ONLY from `ringing` (see the /outbound-bridge
+            // branch above). A redelivered refusal must never terminate a call
+            // that press-1 already took LIVE, nor lock out its Dial summary.
+            stamped = await messages.updateCallStatus(
+              parentCallSid,
+              { callStatus: 'canceled' },
+              { expectedPriorCallStatuses: ['ringing'] },
+            );
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
@@ -1255,7 +1280,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           // stamp - by then the write has already committed.
           if (stamped) {
             try {
-              await announceRefusalStamp(parentCallSid);
+              await announceCallStamp(parentCallSid);
             } catch (err) {
               log.warn(
                 { err, callSid: parentCallSid },
@@ -1287,7 +1312,14 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         if (parentCallSid.length > 0) {
           let stamped = false;
           try {
-            stamped = await messages.updateCallStatus(parentCallSid, { callStatus: 'canceled' });
+            // Refusal stamp: ONLY from `ringing` (see the /outbound-bridge
+            // branch above). A redelivered refusal must never terminate a call
+            // that press-1 already took LIVE, nor lock out its Dial summary.
+            stamped = await messages.updateCallStatus(
+              parentCallSid,
+              { callStatus: 'canceled' },
+              { expectedPriorCallStatuses: ['ringing'] },
+            );
           } catch (err) {
             log.warn(
               { err, callSid: parentCallSid },
@@ -1301,7 +1333,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           // stamp - by then the write has already committed.
           if (stamped) {
             try {
-              await announceRefusalStamp(parentCallSid);
+              await announceCallStamp(parentCallSid);
             } catch (err) {
               log.warn(
                 { err, callSid: parentCallSid },
@@ -1316,8 +1348,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
       // signal, same as the inbound legs). Best-effort.
       if (parentCallSid.length > 0) {
+        let stamped = false;
         try {
-          await messages.updateCallStatus(parentCallSid, {
+          stamped = await messages.updateCallStatus(parentCallSid, {
             callStatus: 'in-progress',
             answeredAt: new Date().toISOString(),
           });
@@ -1326,6 +1359,29 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             { err, callSid: parentCallSid },
             'outbound whisper gate: marking the bridge accepted failed (best-effort) — continuing',
           );
+        }
+        // The ACCEPTANCE half of the same live-surface problem the refusal
+        // announcements solve. The navigator who originated this call is
+        // looking at the "Ringing..." card originateCall emitted, and the
+        // timeline refetches ONLY on message.persisted / conversation.updated
+        // - so a silent accept leaves that card on the stale `ringing` row until it
+        // flips to a red "No team answer" at t+90s WHILE THEY ARE ON THE CALL.
+        // Transition-gated exactly like the refusal announces (a no-op write
+        // announces nothing), and message.persisted ONLY: spec 6.4 promises the
+        // inbox row is left exactly as it is, so no stampCallActivity and no
+        // conversation.updated. Its OWN catch, with its OWN message: by the time
+        // the announce runs the accept has already COMMITTED, so logging this as
+        // a failed stamp would send an operator hunting in the write path.
+        // Both stay best-effort - neither may break an accepted bridge.
+        if (stamped) {
+          try {
+            await announceCallStamp(parentCallSid);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'outbound whisper gate: announcing the accepted bridge failed (best-effort) - the in-progress stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
         }
       }
       const dial = vr.dial({
@@ -1361,8 +1417,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // never break an accepted bridge; the call simply falls back to the status
       // handler's terminal classification.
       if (parentCallSid.length > 0) {
+        let stamped = false;
         try {
-          await messages.updateCallStatus(parentCallSid, {
+          stamped = await messages.updateCallStatus(parentCallSid, {
             callStatus: 'in-progress',
             answeredAt: new Date().toISOString(),
           });
@@ -1371,6 +1428,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             { err, callSid: parentCallSid },
             'whisper gate: marking the bridge accepted failed (best-effort) — continuing',
           );
+        }
+        // Announce the accept so an OPEN contact timeline refetches instead of
+        // sitting on the stale ringing card and flipping it to a red "Missed"
+        // at t+90s while the call is CONNECTED (see the outbound arm above).
+        // Transition-gated, inbox untouched (spec 6.4: message.persisted ONLY,
+        // no stampCallActivity, no conversation.updated), and caught SEPARATELY
+        // so an announce failure is never reported as a failed stamp - by then
+        // the write has already committed. Best-effort on both halves: neither
+        // may break an accepted bridge.
+        if (stamped) {
+          try {
+            await announceCallStamp(parentCallSid);
+          } catch (err) {
+            log.warn(
+              { err, callSid: parentCallSid },
+              'whisper gate: announcing the accepted bridge failed (best-effort) - the in-progress stamp itself COMMITTED; only the live timeline push was lost',
+            );
+          }
         }
       }
       log.info(

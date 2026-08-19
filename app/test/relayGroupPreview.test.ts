@@ -320,4 +320,53 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
     // A preview creates no conversation either.
     expect(world.conversations.size).toBe(0);
   });
+
+  it('warns when a live group has exactly these members', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550190999',
+      members: [
+        { contactId: '', phone: ALICE, name: 'Alice Adams' },
+        { contactId: '', phone: BOB, name: 'Bob Brown' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await preview(app, {
+      members: [
+        { phone: ALICE, name: 'Alice Adams' },
+        { phone: BOB, name: 'Bob Brown' },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeDefined();
+    expect(res.body.duplicateOf.partition).toBe('open');
+    expect(res.body.duplicateOf.memberNames).toEqual(['Alice Adams', 'Bob Brown']);
+    // The wire rule: names travel, phones do not.
+    expect(JSON.stringify(res.body)).not.toContain(ALICE);
+  });
+
+  it('does NOT warn for a superset roster', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550190998',
+      members: [
+        { contactId: '', phone: ALICE, name: 'Alice Adams' },
+        { contactId: '', phone: BOB, name: 'Bob Brown' },
+      ],
+      owner: { type: null },
+    });
+
+    const res = await preview(app, {
+      members: [
+        { phone: ALICE, name: 'Alice Adams' },
+        { phone: BOB, name: 'Bob Brown' },
+        { phone: CARLA, name: 'Carla Cole' },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.duplicateOf).toBeUndefined();
+  });
 });

@@ -82,6 +82,7 @@ import {
   resolveMemberName,
   type RelayMemberDeps,
 } from '../services/relayMembers.js';
+import { findOpenGroupWithSamePhones } from '../services/relayGroupDuplicates.js';
 import {
   applyRosterPlanEdit,
   buildAddPreview,
@@ -927,7 +928,12 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       sendRefusal(res, { status: 409, error: 'relay_already_provisioned' });
       return;
     }
-    const preview = await buildOpenPreview(rosterDeps, rosterOwnerOf(tour), await quietHoursState());
+    const preview = await buildOpenPreview(
+      rosterDeps,
+      rosterOwnerOf(tour),
+      await quietHoursState(),
+      (phones) => findOpenGroupWithSamePhones({ conversations, log }, phones),
+    );
     if (!preview.ok) {
       sendRefusal(res, preview.refusal);
       return;

@@ -32,6 +32,7 @@ import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js'
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
+import { findOpenGroupWithSamePhones } from '../services/relayGroupDuplicates.js';
 import {
   addMemberToRelay,
   parseRelayMember,
@@ -292,6 +293,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         { contacts, conversations },
         members,
         await quietHoursState(),
+        (phones) => findOpenGroupWithSamePhones({ conversations, log }, phones),
       ),
     );
   });

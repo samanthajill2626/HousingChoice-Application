@@ -71,13 +71,17 @@ const MATRIX: MatrixRow[] = [
   { status: 'ringing', outcome: 'voicemail', fresh: true, inbound: VOICEMAIL, outbound: VOICEMAIL },
   { status: 'ringing', outcome: 'voicemail', fresh: false, inbound: VOICEMAIL, outbound: VOICEMAIL },
 
-  // --- in-progress: age-bounded, then the I1 asymmetry ---
+  // --- in-progress: age-bounded, then the I1 asymmetry - but the STALE arm
+  //     defers to a stored outcome, because `in-progress` + an outcome really
+  //     co-exist (the server folds Twilio's `answered` onto `in-progress` while
+  //     the same handler stamps `call_outcome: 'answered'`). The FRESH arm does
+  //     NOT defer: a live call reads "In progress" whatever is on the row.
   { status: 'in-progress', outcome: undefined, fresh: true, inbound: IN_PROGRESS, outbound: IN_PROGRESS },
   { status: 'in-progress', outcome: undefined, fresh: false, inbound: ANSWERED, outbound: OUTCOME_UNKNOWN },
   { status: 'in-progress', outcome: 'answered', fresh: true, inbound: IN_PROGRESS, outbound: IN_PROGRESS },
-  { status: 'in-progress', outcome: 'answered', fresh: false, inbound: ANSWERED, outbound: OUTCOME_UNKNOWN },
+  { status: 'in-progress', outcome: 'answered', fresh: false, inbound: ANSWERED, outbound: CONNECTED },
   { status: 'in-progress', outcome: 'missed', fresh: true, inbound: IN_PROGRESS, outbound: IN_PROGRESS },
-  { status: 'in-progress', outcome: 'missed', fresh: false, inbound: ANSWERED, outbound: OUTCOME_UNKNOWN },
+  { status: 'in-progress', outcome: 'missed', fresh: false, inbound: MISSED, outbound: NO_ANSWER },
   { status: 'in-progress', outcome: 'voicemail', fresh: true, inbound: VOICEMAIL, outbound: VOICEMAIL },
   { status: 'in-progress', outcome: 'voicemail', fresh: false, inbound: VOICEMAIL, outbound: VOICEMAIL },
 
@@ -295,7 +299,7 @@ describe('presentCallState - the cases the matrix axes do not cover', () => {
     ).toEqual({ label: 'Voicemail', tone: 'warning' });
   });
 
-  it('says "Outcome unknown" on a stale OUTBOUND in-progress row - never "Connected" (I1)', () => {
+  it('says "Outcome unknown" on a stale OUTBOUND in-progress row with NO outcome - never "Connected" (I1)', () => {
     const res = presentCallState({
       direction: 'outbound',
       callStatus: 'in-progress',
@@ -331,5 +335,108 @@ describe('presentCallState - the cases the matrix axes do not cover', () => {
         now: NOW,
       }),
     ).toEqual({ label: 'Voicemail', tone: 'warning' });
+  });
+});
+
+// `mapCallStatus` folds Twilio's `DialCallStatus: 'answered'` onto
+// `call_status: 'in-progress'` while the SAME handler stamps
+// `call_outcome: 'answered'`, so a row genuinely carries both at once. Clause 4
+// keys on the STATUS, so without a deferral its stale arm returned before clause
+// 5 could read the OUTCOME - stranding a call whose result we DID learn on
+// "Outcome unknown", the label that exists to say we never learned it.
+describe('presentCallState - clause 4 defers to a stored outcome once stale', () => {
+  const staleAtIso = new Date(startedMsFor(false)).toISOString();
+  const freshAtIso = new Date(startedMsFor(true)).toISOString();
+
+  it('renders "Connected" on a stale OUTBOUND in-progress row that stored `answered`', () => {
+    expect(
+      presentCallState({
+        direction: 'outbound',
+        callStatus: 'in-progress',
+        callOutcome: 'answered',
+        at: staleAtIso,
+        now: NOW,
+      }),
+    ).toEqual({ label: 'Connected', tone: 'success' });
+  });
+
+  it('renders "Answered" on a stale INBOUND in-progress row that stored `answered`', () => {
+    expect(
+      presentCallState({
+        direction: 'inbound',
+        callStatus: 'in-progress',
+        callOutcome: 'answered',
+        at: staleAtIso,
+        now: NOW,
+      }),
+    ).toEqual({ label: 'Answered', tone: 'success' });
+  });
+
+  it('still says "Outcome unknown" on a stale OUTBOUND in-progress row with NO outcome (I1 guard)', () => {
+    const res = presentCallState({
+      direction: 'outbound',
+      callStatus: 'in-progress',
+      at: staleAtIso,
+      now: NOW,
+    });
+    expect(res).toEqual({ label: 'Outcome unknown', tone: 'neutral' });
+    // The deferral must not weaken I1: press-1 on an originate is the
+    // navigator's OWN leg, so with no stored outcome we know nothing about the
+    // target and must never claim a connection.
+    expect(res.label).not.toBe('Connected');
+  });
+
+  it('leaves the FRESH arm alone - a live call reads "In progress" even with an outcome stored', () => {
+    const startedMs = startedMsFor(true);
+    for (const direction of DIRECTIONS) {
+      for (const outcome of ['answered', 'missed'] as const) {
+        expect(
+          presentCallState({
+            direction,
+            callStatus: 'in-progress',
+            callOutcome: outcome,
+            at: freshAtIso,
+            now: NOW,
+          }),
+        ).toEqual({
+          label: 'In progress',
+          tone: 'neutral',
+          staleAt: startedMs + IN_PROGRESS_STALE_MS,
+        });
+      }
+    }
+  });
+});
+
+// The sort keys in this codebase are `<ISO>#<collision suffix>` - a shape
+// `Date.parse` cannot read. The projection's `atOf` strips the suffix before it
+// reaches this surface today, so this is a consistency guard: a future producer
+// handing over a raw sort key must not silently disable the age-based clauses.
+describe('presentCallState - `<ISO>#<suffix>` sort keys normalise like their ISO prefix', () => {
+  it('treats a sort key exactly as its clean ISO prefix (fresh and stale, both clauses)', () => {
+    for (const fresh of [true, false]) {
+      const startedMs = startedMsFor(fresh);
+      const iso = new Date(startedMs).toISOString();
+      const sortKey = `${iso}#0001`;
+      for (const direction of DIRECTIONS) {
+        for (const status of ['ringing', 'in-progress'] as const) {
+          expect(presentCallState({ direction, callStatus: status, at: sortKey, now: NOW })).toEqual(
+            presentCallState({ direction, callStatus: status, at: iso, now: NOW }),
+          );
+        }
+      }
+    }
+  });
+
+  it('reads a sort key as a live "Ringing..." rather than falling through to no chip', () => {
+    const startedMs = startedMsFor(true);
+    expect(
+      presentCallState({
+        direction: 'inbound',
+        callStatus: 'ringing',
+        at: `${new Date(startedMs).toISOString()}#0001`,
+        now: NOW,
+      }),
+    ).toEqual({ label: 'Ringing...', tone: 'neutral', staleAt: startedMs + RINGING_STALE_MS });
   });
 });

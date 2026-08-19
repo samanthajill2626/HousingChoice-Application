@@ -811,11 +811,13 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   const duration = formatDuration(call.call_duration);
   const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
   // A MASKED row carries no counterpart identity at all - party_phone is
-  // stripped server-side and call_party_label is not on the wire - so the detail
-  // line degrades to the time alone.
+  // stripped server-side and call_party_label is not on the wire. The time is
+  // ALREADY on the card face, so a detail line there would disclose a duplicate
+  // of what the reader can already see. `undefined` means no line AND no reveal
+  // control: a disclosure that discloses nothing is worse than no disclosure.
   const detail = call.party_phone
     ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
-    : time;
+    : undefined;
 
   return (
     <div
@@ -841,21 +843,23 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
         {duration ? <span className={styles.callDuration}>{duration}</span> : null}
         <span className={styles.callTrail}>
           <span className={styles.callAt}>{time}</span>
-          <button
-            type="button"
-            className={styles.callReveal}
-            aria-expanded={revealed}
-            // The VISIBLE text stays "Details"; the accessible name identifies
-            // which card the control belongs to. A contact with call history
-            // otherwise hands a screen-reader user N buttons all named "Details".
-            aria-label={`Details for ${cardName}`}
-            onClick={() => setRevealed((r) => !r)}
-          >
-            Details
-          </button>
+          {detail !== undefined ? (
+            <button
+              type="button"
+              className={styles.callReveal}
+              aria-expanded={revealed}
+              // The VISIBLE text stays "Details"; the accessible name identifies
+              // which card the control belongs to. A contact with call history
+              // otherwise hands a screen-reader user N buttons all named "Details".
+              aria-label={`Details for ${cardName}`}
+              onClick={() => setRevealed((r) => !r)}
+            >
+              Details
+            </button>
+          ) : null}
         </span>
       </div>
-      <div className={styles.cardMeta}>{detail}</div>
+      {detail !== undefined ? <div className={styles.cardMeta}>{detail}</div> : null}
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}

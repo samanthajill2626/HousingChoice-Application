@@ -30,6 +30,10 @@
 // types.ts has no imports of its own, so this keeps the presenter reachable from
 // both packages. Type-only either way - nothing is emitted.
 import type { CallOutcome, CallStatus, MessageDirection } from '../../api/types.js';
+// Same reasoning as the types import above: `lib/time.ts` is pure, imports
+// nothing, and pulls in no .tsx, so it stays reachable from the app-side seam
+// test. It is also what every sibling formatter in this directory uses.
+import { isoOf } from '../../lib/time.js';
 
 /** Chip color intent. Declared here (not in types.ts) for the same reason
  *  `DeliveryTone` is: it is a presentation concept, not a wire type. */
@@ -81,9 +85,18 @@ export const IN_PROGRESS_STALE_MS = 900_000;
 
 /** ISO instant -> epoch ms, or undefined when it does not parse. `at` can be a
  *  non-instant (the projection's `atOf` can return one, and an empty `at` is a
- *  real case elsewhere in this directory). */
+ *  real case elsewhere in this directory).
+ *
+ *  Normalised through `isoOf` FIRST, exactly like the sibling formatters in this
+ *  directory: this codebase's sort keys are `<ISO>#<collision suffix>`, a shape
+ *  `Date.parse` cannot read. The server's `atOf` strips that suffix before it
+ *  reaches this surface today, so this is a consistency guard rather than a live
+ *  bug fix - it stops a future producer handing over a raw sort key from
+ *  silently disabling the age-based clauses (3 and 4) instead of failing loudly.
+ *  A genuinely unparseable value still yields undefined and still falls THROUGH
+ *  those clauses. */
 function parseInstant(at: string): number | undefined {
-  const ms = Date.parse(at);
+  const ms = Date.parse(isoOf(at));
   return Number.isNaN(ms) ? undefined : ms;
 }
 
@@ -129,18 +142,32 @@ export function presentCallState({
       : { label: 'Missed', tone: 'danger' };
   }
 
-  // 4. Connected, for as long as a live call is plausible - then the I1 split.
+  // 4. Connected, for as long as a live call is plausible - then the I1 split,
+  //    but ONLY when no outcome was ever stored.
   if (callStatus === 'in-progress' && startedAt !== undefined && age !== undefined) {
     if (age < IN_PROGRESS_STALE_MS) {
+      // The FRESH arm does NOT defer. "In progress" is the right label on a live
+      // call whatever outcome is already sitting on the row.
       return { label: 'In progress', tone: 'neutral', staleAt: startedAt + IN_PROGRESS_STALE_MS };
     }
-    // Inbound: the press-1 whisper gate ran on the DIALED callee's leg, so a
-    // human accepted. Outbound: it ran on the navigator's OWN leg, so press-1
-    // proves only that our staff member picked up their own phone - it says
-    // nothing about whether the target ever answered. NEVER "Connected" here.
-    return outbound
-      ? { label: 'Outcome unknown', tone: 'neutral' }
-      : { label: 'Answered', tone: 'success' };
+    // The STALE arm DEFERS to a stored outcome. `in-progress` and a stored
+    // outcome really co-exist: the server's `mapCallStatus` folds Twilio's
+    // `DialCallStatus: 'answered'` onto `'in-progress'` while the SAME handler's
+    // answered-stamp writes `call_outcome: 'answered'`. Keying this arm on the
+    // STATUS alone therefore returned before clause 5 could read the OUTCOME,
+    // and stranded a call whose result we DID learn on "Outcome unknown" - the
+    // label that exists to say we never learned it. Falling through hands the
+    // row to clauses 5/6, where the stored answer wins.
+    if (callOutcome === undefined) {
+      // Nothing stored. Inbound: the press-1 whisper gate ran on the DIALED
+      // callee's leg, so a human accepted. Outbound: it ran on the navigator's
+      // OWN leg, so press-1 proves only that our staff member picked up their
+      // own phone - it says nothing about whether the target ever answered.
+      // NEVER "Connected" here; this is I1 on the read side.
+      return outbound
+        ? { label: 'Outcome unknown', tone: 'neutral' }
+        : { label: 'Answered', tone: 'success' };
+    }
   }
 
   // 5. "Connected" is the strongest honest claim on outbound: a completed Dial

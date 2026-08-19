@@ -1786,22 +1786,59 @@ describe('Timeline call cards - direction', () => {
     expect(screen.getByText('from (404) 010-0007 - 11:00a')).toBeVisible();
   });
 
-  it('degrades the detail line to the time alone on a MASKED call (no party_phone on the wire)', () => {
+  // A MASKED row carries no counterpart identity at all, and the time is ALREADY
+  // on the card face - so a reveal there would disclose a duplicate of what the
+  // reader can already see. No control, and no line for it to open.
+  it('renders NO reveal control and NO detail line on a MASKED call (no party_phone on the wire)', () => {
     renderTimeline({ items: [callItem({ id: 'c-masked', direction: 'inbound', call_outcome: 'missed' })] });
     const card = screen.getByRole('group', { name: /Incoming call/ });
-    fireEvent.click(screen.getByRole('button', { name: /^Details for Incoming call/ }));
-    expect(card.querySelector('[class*="cardMeta"]')?.textContent).toBe('11:00a');
+    expect(screen.queryByRole('button', { name: /^Details for Incoming call/ })).toBeNull();
+    expect(card.querySelector('[class*="cardMeta"]')).toBeNull();
+    // The time is still on the face, which is the whole reason the reveal is gone.
+    expect(card.querySelector('[class*="callAt"]')?.textContent).toBe('11:00a');
+  });
+
+  it('still renders the reveal control when there IS a party phone to disclose', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'c-party',
+          direction: 'inbound',
+          call_outcome: 'missed',
+          party_phone: '+14040100007',
+        }),
+      ],
+    });
+    const card = screen.getByRole('group', { name: /Incoming call/ });
+    expect(screen.getByRole('button', { name: /^Details for Incoming call/ })).toBeInTheDocument();
+    expect(card.querySelector('[class*="cardMeta"]')?.textContent).toBe(
+      'from (404) 010-0007 - 11:00a',
+    );
   });
 
   // A REDIAL after a miss: two inbound calls inside one minute. At minute
   // precision both cards, and both reveal buttons, carried the same accessible
   // name - ambiguous to a screen-reader user and a Playwright strict-mode
   // violation on the very locator the selectors doc blesses.
+  // Both rows carry a party_phone: the reveal control exists ONLY when there is
+  // something to disclose, and this case is about the NAMES of those controls.
   it('gives two calls in the SAME minute distinct accessible names (card and reveal button)', () => {
     renderTimeline({
       items: [
-        callItem({ id: 'c-a', direction: 'inbound', at: '2026-06-08T11:00:07', call_outcome: 'missed' }),
-        callItem({ id: 'c-b', direction: 'inbound', at: '2026-06-08T11:00:41', call_outcome: 'answered' }),
+        callItem({
+          id: 'c-a',
+          direction: 'inbound',
+          at: '2026-06-08T11:00:07',
+          call_outcome: 'missed',
+          party_phone: '+14040100007',
+        }),
+        callItem({
+          id: 'c-b',
+          direction: 'inbound',
+          at: '2026-06-08T11:00:41',
+          call_outcome: 'answered',
+          party_phone: '+14040100007',
+        }),
       ],
     });
     const names = screen
@@ -1823,8 +1860,20 @@ describe('Timeline call cards - direction', () => {
   it('keeps two UNPARSEABLE-timestamp cards distinctly named, with no dangling separator', () => {
     renderTimeline({
       items: [
-        callItem({ id: 'c-bad-a', direction: 'inbound', at: 'not-a-date', call_outcome: 'missed' }),
-        callItem({ id: 'c-bad-b', direction: 'inbound', at: 'also-not-a-date', call_outcome: 'answered' }),
+        callItem({
+          id: 'c-bad-a',
+          direction: 'inbound',
+          at: 'not-a-date',
+          call_outcome: 'missed',
+          party_phone: '+14040100007',
+        }),
+        callItem({
+          id: 'c-bad-b',
+          direction: 'inbound',
+          at: 'also-not-a-date',
+          call_outcome: 'answered',
+          party_phone: '+14040100007',
+        }),
       ],
     });
     const names = screen

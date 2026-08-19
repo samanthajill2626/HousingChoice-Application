@@ -66,6 +66,23 @@
   color: var(--c-text-subtle);
 }
 
+/* An existing live group with exactly these members. Unlike .quiet - which
+ * explains a default - this warns about a thing the operator is about to do.
+ * --c-warning, NOT --c-danger: the copy is deliberately non-alarmist because
+ * nothing here is broken or refused (spec 2.1), and danger styling would
+ * contradict the words inside it. */
+.duplicateWarning {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-warning);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+}
+
+.duplicateWarning p {
+  margin: 0 0 var(--sp-1);
+}
+
 .error {
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-xs);

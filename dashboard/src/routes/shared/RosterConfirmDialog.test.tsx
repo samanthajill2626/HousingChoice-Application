@@ -351,6 +351,62 @@ describe('RosterConfirmDialog - the confirm round trip is HELD', () => {
   });
 });
 
+describe('RosterConfirmDialog - duplicate warning (spec 5)', () => {
+  // The server says a LIVE relay group already has exactly these members. The
+  // dialog names them, says what the second group costs them, and links to the
+  // existing thread - then the operator decides. NOTHING is refused, and
+  // `onConfirm` keeps its one-parameter contract.
+  const withDuplicate = (partition: 'open' | 'connecting'): RosterPreview =>
+    preview({
+      recipients: [{ name: 'Dana Reed', reachability: 'reachable' }],
+      recipientCount: 1,
+      duplicateOf: {
+        conversationId: 'conv-existing',
+        partition,
+        memberNames: ['Dana Reed', 'Marcus Bell'],
+      },
+    });
+
+  it('names the existing group and links to it', () => {
+    renderDialog({ preview: withDuplicate('open') });
+    // Scope the NAME assertion to the warning block: the message-preview bubble
+    // and the recipient rows both render member names, so a bare query would
+    // pass on the wrong element the first time a fixture body changes.
+    const warning = screen.getByRole('status');
+    expect(within(warning).getByText(/already have an open relay group/i)).toBeInTheDocument();
+    expect(within(warning).getByText(/Dana Reed and Marcus Bell/)).toBeInTheDocument();
+    const link = within(warning).getByRole('link', { name: /view (the )?existing group/i });
+    expect(link).toHaveAttribute('href', '/conversations/conv-existing');
+    // A NEW TAB deliberately: navigating this tab away would discard the
+    // half-built group the operator is standing in.
+    expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  it('uses the connecting wording when the match is connecting', () => {
+    // A connecting group has NO pool number yet, so the open variant's
+    // present-tense claim would be false on this tier.
+    renderDialog({ preview: withDuplicate('connecting') });
+    expect(
+      within(screen.getByRole('status')).getByText(/relay group being connected/i),
+    ).toBeInTheDocument();
+  });
+
+  it('renders nothing when there is no duplicate', () => {
+    renderDialog();
+    expect(screen.queryByText(/already have/i)).not.toBeInTheDocument();
+    // The block is the dialog's ONLY role=status, which is what the e2e locator
+    // scopes to - keep it absent, not merely empty, when there is no match.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('does not change the confirm contract - onConfirm still receives only force', async () => {
+    const { onConfirm } = renderDialog({ preview: withDuplicate('open') });
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
+    expect(onConfirm).toHaveBeenCalledWith(false);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('RosterConfirmDialog - narrow viewport (spec 6.7)', () => {
   it('stacks the footer buttons full-width with the DEFAULT on top below 860px', () => {
     renderDialog();

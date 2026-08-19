@@ -1015,6 +1015,20 @@ export interface RosterPreviewRecipient {
 }
 
 /**
+ * A live relay group with EXACTLY the members being proposed (server-detected).
+ * Names only - the wire never carries member phones.
+ *
+ * MIRRORS app/src/services/relayGroupDuplicates.ts `DuplicateOpenGroup`.
+ * `partition` is the status partition the match was found in, which is what the
+ * two copy variants key off: a connecting group has no pool number yet.
+ */
+export interface DuplicateOpenGroup {
+  conversationId: string;
+  partition: 'open' | 'connecting';
+  memberNames: string[];
+}
+
+/**
  * What a group send WOULD do, resolved server-side. Returned as the BODY by
  * `GET .../roster/preview-open` and `POST .../roster/preview-add`.
  *
@@ -1040,6 +1054,9 @@ export interface RosterPreview {
   deferred: boolean;
   /** ISO instant the quiet window ends; present only when `deferred`. */
   quietEndsAt?: string;
+  /** A live group with exactly these members already exists. Absent when none
+   *  does AND when the server could not tell - both mean "say nothing". */
+  duplicateOf?: DuplicateOpenGroup;
 }
 
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------

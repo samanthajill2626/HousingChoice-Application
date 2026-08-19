@@ -67,6 +67,13 @@ export interface RosterConfirmDialogProps {
   allowDefer?: boolean;
 }
 
+/** "A", "A and B", "A, B and C" - the warning names who is already grouped. */
+function formatNames(names: string[]): string {
+  if (names.length === 0) return 'These people';
+  if (names.length === 1) return names[0]!;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]!}`;
+}
+
 export function RosterConfirmDialog({
   title,
   preview,
@@ -172,6 +179,37 @@ export function RosterConfirmDialog({
       <section className={styles.previewBox} aria-label="Message preview">
         <p className={styles.bubble}>{preview.body}</p>
       </section>
+      {/* A LIVE group with exactly these members already exists (spec 5). This
+          block adds itself ABOVE the recipient list and changes nothing below
+          it: no button moves, nothing is refused, and there is nothing to
+          acknowledge - the operator reads it and decides. Absent when the
+          server found no match AND when it could not tell; the dialog cannot
+          distinguish those, by design, because both mean "say nothing". */}
+      {preview.duplicateOf !== undefined ? (
+        <div className={styles.duplicateWarning} role="status">
+          <p>
+            <strong>{formatNames(preview.duplicateOf.memberNames)}</strong>{' '}
+            {preview.duplicateOf.partition === 'connecting'
+              ? 'already have a relay group being connected.'
+              : 'already have an open relay group.'}
+          </p>
+          <p>
+            {preview.duplicateOf.partition === 'connecting'
+              ? 'That group is still waiting on a number, and this one will get a second - so they would end up with two numbers for one conversation and no way to tell which one you are watching.'
+              : 'This group will get its own separate number, so they would have two numbers for one conversation and no way to tell which one you are watching.'}
+          </p>
+          {/* NEW TAB, and deliberately not the dialog's primary action:
+              navigating this tab away would discard the half-built group the
+              operator is standing in, which is worse than the duplicate. */}
+          <a
+            href={`/conversations/${preview.duplicateOf.conversationId}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View the existing group
+          </a>
+        </div>
+      ) : null}
       <ul className={styles.recipients} aria-label="Recipients">
         {preview.recipients.map((r, i) => (
           <RecipientRow key={`${r.name ?? 'unnamed'}-${i}`} recipient={r} />

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
+import { OUTBOUND_MMS_MAX_MEDIA_PER_MESSAGE } from '../src/lib/outboundMediaLimits.js';
 import {
   CircuitBreakerOpenError,
   ContactDeletedError,
@@ -208,15 +209,48 @@ describe('POST /api/conversations/:conversationId/messages (attachmentKeys)', ()
     expect(calls).toHaveLength(0);
   });
 
-  it('400s attachments_too_large when the summed size exceeds the total cap', async () => {
+  // 2026-08-20: a summed overage is no longer a refusal - it SPLITS. What still
+  // refuses is ONE file too big for any single message, which batching cannot
+  // rescue (in practice a GIF; jpeg/png are transcoded to the target first).
+  it('400s attachments_too_large when a SINGLE attachment exceeds the per-message cap', async () => {
     const { app, calls } = makeMmsApp({
-      'uploads/a': { contentType: 'image/png', size: 4 * 1024 * 1024 },
-      'uploads/b': { contentType: 'image/png', size: 2 * 1024 * 1024 },
+      'uploads/a': { contentType: 'image/gif', size: 4 * 1024 * 1024 },
     });
-    const res = await send(app, { attachmentKeys: ['uploads/a', 'uploads/b'] });
+    const res = await send(app, { attachmentKeys: ['uploads/a'] });
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'attachments_too_large' });
     expect(calls).toHaveLength(0);
+  });
+
+  it('SPLITS an over-budget send across messages instead of refusing it', async () => {
+    // The prod shape that got silently dropped: 7 attachments, 2.93MB total.
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    // UPLOAD_KEY_PATTERN only admits hex + dashes.
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    const objects = Object.fromEntries(
+      sizes.map((size, i) => [key(i), { contentType: 'image/jpeg', size }]),
+    );
+    const { app, calls } = makeMmsApp(objects);
+    const res = await send(app, {
+      body: 'here are the photos',
+      attachmentKeys: sizes.map((_, i) => key(i)),
+    });
+
+    expect(res.status).toBe(201);
+    expect(calls.length).toBeGreaterThan(1);
+    // Every message is inside the carrier budget on its own...
+    for (const call of calls) {
+      expect(call.attachments?.length ?? 0).toBeLessThanOrEqual(
+        OUTBOUND_MMS_MAX_MEDIA_PER_MESSAGE,
+      );
+    }
+    // ...every attachment went out exactly once, in order...
+    expect(calls.flatMap((c) => (c.attachments ?? []).map((a) => a.s3Key))).toEqual(
+      sizes.map((_, i) => key(i)),
+    );
+    // ...and the typed body rode only the FIRST one.
+    expect(calls[0]?.body).toBe('here are the photos');
+    expect(calls.slice(1).every((c) => c.body === undefined)).toBe(true);
   });
 
   it('400s unsupported_attachment_type when the stored type is not allowlisted', async () => {

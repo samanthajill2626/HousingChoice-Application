@@ -22,6 +22,7 @@ import type { Semaphore } from '../lib/semaphore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { isInlineMediaType, isTwilioDeliverableType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
 import { renditionFor } from '../lib/mmsRenditions.js';
+import { planMmsBatches } from '../lib/mmsBatching.js';
 import {
   OUTBOUND_MMS_MAX_MEDIA,
   OUTBOUND_MMS_MAX_TOTAL_BYTES,
@@ -439,19 +440,29 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
  * us at an arbitrary bucket key); at most OUTBOUND_MMS_MAX_MEDIA; each
  * HeadObject'd (missing -> unknown_attachment) with its stored type checked
  * against TWILIO_DELIVERABLE_MMS_TYPES (the 12300 root-cause guard: only
- * jpeg/png/gif may reach Twilio, even if confirm was bypassed) and sizes
- * summed under the carrier total cap - measured over the DELIVERABLE rendition
- * objects, exactly what goes to Twilio. `originalKeys` (index-aligned, from
- * confirm) ride onto each attachment as `originalKey` (RCS-forward, spec Sec
- * 5). Returns the attachments on success, or a {status, error} the caller maps
- * straight to the HTTP response. Presigning is the caller's job (per-attempt):
- * 1:1 presigns now; relay presigns per leg in the fan-out. Exported for tests.
+ * jpeg/png/gif may reach Twilio, even if confirm was bypassed). Sizes are
+ * measured over the DELIVERABLE rendition objects - exactly what goes to Twilio
+ * - and returned index-aligned so the caller can BATCH the send (planMmsBatches)
+ * instead of posting one over-budget message. `originalKeys` (index-aligned,
+ * from confirm) ride onto each attachment as `originalKey` (RCS-forward, spec
+ * Sec 5). Returns the attachments on success, or a {status, error} the caller
+ * maps straight to the HTTP response. Presigning is the caller's job
+ * (per-attempt): 1:1 presigns now; relay presigns per leg in the fan-out.
+ *
+ * NOTE (2026-08-20): the summed-bytes refusal that used to live here is GONE.
+ * A send over the per-message budget is now split across messages rather than
+ * refused - see outboundMediaLimits.ts for why the budget moved. What still
+ * refuses is ONE attachment too big to fit any message on its own, which
+ * batching cannot rescue.
  */
 export async function resolveAttachmentKeys(
   keys: string[],
   originalKeys: string[] | undefined,
   mediaStore: MediaStore | undefined,
-): Promise<{ ok: true; attachments: MediaAttachment[] } | { ok: false; status: number; error: string }> {
+): Promise<
+  | { ok: true; attachments: MediaAttachment[]; sizes: number[] }
+  | { ok: false; status: number; error: string }
+> {
   if (keys.length > OUTBOUND_MMS_MAX_MEDIA) {
     return { ok: false, status: 400, error: 'too_many_attachments' };
   }
@@ -471,7 +482,7 @@ export async function resolveAttachmentKeys(
     return { ok: false, status: 503, error: 'media_storage_unavailable' };
   }
   const attachments: MediaAttachment[] = [];
-  let totalBytes = 0;
+  const sizes: number[] = [];
   for (let i = 0; i < keys.length; i++) {
     const s3Key = keys[i]!;
     const meta = await mediaStore.head(s3Key);
@@ -483,14 +494,20 @@ export async function resolveAttachmentKeys(
     if (!isTwilioDeliverableType(contentType)) {
       return { ok: false, status: 400, error: 'unsupported_attachment_type' };
     }
-    totalBytes += meta.size ?? 0;
+    const size = meta.size ?? 0;
+    // Batching splits a big SEND, but it cannot split one big FILE. A single
+    // deliverable over the per-message budget would ride out as an over-budget
+    // message and be dropped by the carrier without a receipt, so refuse it
+    // where the sender can still see the refusal. In practice this is a GIF
+    // (never transcoded) - a jpeg/png is already shrunk to the transcode target.
+    if (size > OUTBOUND_MMS_MAX_TOTAL_BYTES) {
+      return { ok: false, status: 400, error: 'attachments_too_large' };
+    }
+    sizes.push(size);
     const originalKey = originalKeys?.[i];
     attachments.push({ s3Key, contentType, ...(originalKey !== undefined && { originalKey }) });
   }
-  if (totalBytes > OUTBOUND_MMS_MAX_TOTAL_BYTES) {
-    return { ok: false, status: 400, error: 'attachments_too_large' };
-  }
-  return { ok: true, attachments };
+  return { ok: true, attachments, sizes };
 }
 
 export function createApiRouter(deps: ApiRouterDeps = {}): Router {
@@ -1194,6 +1211,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // (HeadObject each, deliverable-type guard, total-size cap). Presign happens
     // per attempt below (1:1 now; relay per leg in the fan-out).
     let attachments: MediaAttachment[] | undefined;
+    let attachmentSizes: number[] | undefined;
     if (attachmentKeys !== undefined) {
       const resolved = await resolveAttachmentKeys(attachmentKeys, attachmentOriginalKeys, mediaStore);
       if (!resolved.ok) {
@@ -1201,6 +1219,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         return;
       }
       attachments = resolved.attachments;
+      attachmentSizes = resolved.sizes;
     }
 
     // Relay branch: fetch the conversation to decide. A miss falls through to
@@ -1210,6 +1229,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // the presigned URLs here - they would expire before a long roster/retry).
     const conversation = await conversations.getById(conversationId);
     if (conversation?.type === 'relay_group') {
+      // A relay send is ONE hub message fanned out per leg, so it cannot simply
+      // loop like the 1:1 path below - splitting it means a hub message and a
+      // fan-out job per batch. Until that is built (see
+      // relay-outbound-mms-not-batched), hold the line the 1:1 path now holds by
+      // batching: refuse a relay send that will not fit ONE carrier-sized
+      // message, rather than handing the carrier something it will discard
+      // without a receipt.
+      if (attachments !== undefined && attachments.length > 0) {
+        const plan = planMmsBatches(
+          attachments.map((a, i) => ({ attachment: a, sizeBytes: attachmentSizes?.[i] ?? 0 })),
+        );
+        if (plan.batches.length > 1) {
+          res.status(400).json({ error: 'attachments_too_large' });
+          return;
+        }
+      }
       await sendRelayTeamMessage(req, res, conversation, body, mediaUrls, attachments);
       return;
     }
@@ -1247,37 +1282,86 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
 
-    // 1:1: presign each durable key FRESH (per-attempt rule) into the adapter
-    // mediaUrls; merge any legacy raw mediaUrls behind them. Presigned URLs are
-    // bearer tokens - never logged here (s3Key/count only).
-    let outboundMediaUrls = mediaUrls;
-    if (attachments !== undefined && mediaStore) {
-      const presigned = await Promise.all(
-        attachments.map((a) => mediaStore.presign(renditionFor('mms', a).s3Key, PRESIGN_TTL_SECONDS)),
-      );
-      outboundMediaUrls = [...presigned, ...(mediaUrls ?? [])];
+    // 1:1: split the attachments into carrier-sized batches, then send ONE
+    // message per batch. Most sends are a single batch and behave exactly as
+    // before; a big photo drop becomes several messages instead of one
+    // over-budget message the carrier discards without telling anyone
+    // (docs/issues/outbound-mms-stalls-at-sent-with-no-receipt.md).
+    const batches =
+      attachments !== undefined && attachments.length > 0
+        ? planMmsBatches(
+            attachments.map((a, i) => ({ attachment: a, sizeBytes: attachmentSizes?.[i] ?? 0 })),
+          ).batches
+        : [];
+    // Text-only (or legacy raw mediaUrls): one pass, no attachments.
+    const passes = batches.length > 0 ? batches : [[]];
+    if (batches.length > 1) {
       log.info(
-        { conversationId, attachmentCount: attachments.length, s3Keys: attachments.map((a) => a.s3Key) },
-        'outbound send: presigned attachments',
+        { conversationId, attachmentCount: attachments?.length, messageCount: batches.length },
+        'outbound send: attachments split across several messages to fit the carrier budget',
       );
     }
 
-    try {
-      const outcome = await sendMessage({
-        conversationId,
-        ...(body !== undefined && { body }),
-        ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
-        ...(attachments !== undefined && { attachments }),
-        automated: false,
-      });
-      res.status(201).json(outcome);
-    } catch (err) {
-      if (err instanceof SendRefusedError) {
-        res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
-        return;
+    let first: Awaited<ReturnType<typeof sendMessage>> | undefined;
+    for (let i = 0; i < passes.length; i++) {
+      const batch = passes[i]!;
+      const batchAttachments = batch.map((b) => b.attachment);
+      // Presign each durable key FRESH (per-attempt rule) into the adapter
+      // mediaUrls. Presigned URLs are bearer tokens - never logged (s3Key only).
+      let outboundMediaUrls = i === 0 ? mediaUrls : undefined;
+      if (batchAttachments.length > 0 && mediaStore) {
+        const presigned = await Promise.all(
+          batchAttachments.map((a) =>
+            mediaStore.presign(renditionFor('mms', a).s3Key, PRESIGN_TTL_SECONDS),
+          ),
+        );
+        outboundMediaUrls = [...presigned, ...(i === 0 ? (mediaUrls ?? []) : [])];
+        log.info(
+          {
+            conversationId,
+            attachmentCount: batchAttachments.length,
+            s3Keys: batchAttachments.map((a) => a.s3Key),
+          },
+          'outbound send: presigned attachments',
+        );
       }
-      throw err; // Express 5 forwards async throws to the error handler.
+      try {
+        const outcome = await sendMessage({
+          conversationId,
+          // The typed body rides the FIRST message only - repeating it under
+          // every batch would read as the sender saying the same thing 3 times.
+          ...(i === 0 && body !== undefined && { body }),
+          ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
+          ...(batchAttachments.length > 0 && { attachments: batchAttachments }),
+          automated: false,
+        });
+        if (i === 0) first = outcome;
+      } catch (err) {
+        // The FIRST batch keeps the original contract exactly: nothing was sent,
+        // so the caller gets the refusal/error. A LATER batch failing means some
+        // messages ARE already out - answering with an error would tell the
+        // sender nothing went when part of it did. Log it loudly and return what
+        // did send; the timeline is the honest record either way.
+        if (i > 0) {
+          log.error(
+            {
+              conversationId,
+              batchIndex: i,
+              batchCount: passes.length,
+              err: { name: err instanceof Error ? err.name : 'unknown' },
+            },
+            'outbound send: a follow-on attachment batch FAILED after earlier batches were sent',
+          );
+          break;
+        }
+        if (err instanceof SendRefusedError) {
+          res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
+          return;
+        }
+        throw err; // Express 5 forwards async throws to the error handler.
+      }
     }
+    res.status(201).json(first);
   });
 
   // POST /api/conversations/:conversationId/email  { to, cc?, subject, body, attachmentKeys? }

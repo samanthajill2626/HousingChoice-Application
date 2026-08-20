@@ -208,8 +208,12 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   ).toBeGreaterThan(0);
   expect(introBody.startsWith(introHead), introBody).toBeTruthy();
   expect(introBody.endsWith(introTail), introBody).toBeTruthy();
-  expect(introBody).toContain(TENANT_NAME);
-  expect(introBody).toContain(LANDLORD_NAME);
+  // FIRST names only (founder decision 2026-08-20) - the intro reads
+  // "connected with Tasha and Marcus", never "Tasha Nguyen".
+  expect(introBody).toContain(TENANT_NAME.split(' ')[0]!);
+  expect(introBody).toContain(LANDLORD_NAME.split(' ')[0]!);
+  expect(introBody).not.toContain(TENANT_NAME);
+  expect(introBody).not.toContain(LANDLORD_NAME);
   // The preview names people and NEVER prints a phone number (spec 6.2).
   expect(introBody).not.toContain(TENANT_PHONE);
   expect(introBody).not.toContain(LANDLORD_PHONE);

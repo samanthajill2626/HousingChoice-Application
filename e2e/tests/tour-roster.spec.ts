@@ -267,9 +267,14 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     ).toBeGreaterThan(0);
     expect(introBody.startsWith(introHead), introBody).toBeTruthy();
     expect(introBody.endsWith(introTail), introBody).toBeTruthy();
-    expect(introBody).toContain(tenant.name);
-    expect(introBody).toContain(owner.name);
-    expect(introBody).not.toContain(pm.name);
+    // FIRST names only (founder decision 2026-08-20): the intro reads
+    // "connected with <tenant> and <owner>", never their full names.
+    expect(introBody).toContain(tenant.name.split(' ')[0]!);
+    expect(introBody).toContain(owner.name.split(' ')[0]!);
+    // The PM is NOT on this roster. Assert the FIRST name is absent, not the
+    // full one - now that no full name ever appears in an intro, the old
+    // full-name check would pass no matter who was in the group.
+    expect(introBody).not.toContain(pm.name.split(' ')[0]!);
     // The region holds exactly one <p> (the bubble), so this is an exact match.
     await expect(confirm.getByRole('region', { name: 'Message preview' })).toHaveText(introBody);
 

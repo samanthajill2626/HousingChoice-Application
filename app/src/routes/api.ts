@@ -63,6 +63,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { createContactsRepo, isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -213,6 +214,8 @@ const EMAIL_REFUSAL_STATUS: Record<EmailSendRefusedError['code'], number> = {
 
 /** Page-size bounds shared by the inbox and thread endpoints. */
 const DEFAULT_PAGE_LIMIT = 50;
+/** Bound on ids per /unread-counts parameter (each costs a fan-out). */
+const MAX_UNREAD_IDS = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
@@ -1838,6 +1841,65 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       },
     };
   }
+
+
+  // GET /api/unread-counts?contactIds=a,b&conversationIds=x,y
+  // Unread totals for a NAMED set of people and threads.
+  //
+  // WHY: the tour + placement channel rails need unread for the 2-5 people on
+  // ONE roster. They used to read the whole inbox and sum client-side - O(inbox)
+  // work for an O(people) question, and while GET /api/conversations could not
+  // page they saw only the newest 50 open threads, so a rail's dot silently read
+  // zero for anyone whose thread had gone quiet.
+  //
+  // Registered at the TOP level, NOT under /conversations/: a literal segment
+  // there would be captured by GET /conversations/:conversationId (the same trap
+  // documented for `vocabulary` on the contacts router).
+  //
+  // Semantics deliberately mirror the client-side sumUnread this replaces: a
+  // relay_group or group_text NEVER counts toward a 1:1 total, and a contact's
+  // threads resolve across every phone AND email they own (conversationsForContact).
+  // A contact with two numbers therefore has two 1:1 threads and they are SUMMED.
+  router.get('/unread-counts', async (req, res) => {
+    const ids = (raw: unknown): string[] =>
+      typeof raw === 'string' ? raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0) : [];
+    const contactIds = ids(req.query['contactIds']);
+    const conversationIds = ids(req.query['conversationIds']);
+
+    // Each contact id costs a phone/email fan-out, so the list is bounded - an
+    // open-ended one turns a single request into arbitrary work.
+    if (contactIds.length > MAX_UNREAD_IDS || conversationIds.length > MAX_UNREAD_IDS) {
+      res.status(400).json({ error: `at most ${MAX_UNREAD_IDS} ids per parameter` });
+      return;
+    }
+
+    const byContact: Record<string, number> = {};
+    const byConversation: Record<string, number> = {};
+
+    await Promise.all([
+      ...contactIds.map(async (contactId) => {
+        // An id that resolves to nothing still answers 0: the caller renders a
+        // badge per requested id, and a MISSING key is indistinguishable from a
+        // failed lookup.
+        byContact[contactId] = 0;
+        const contact = await contacts.getById(contactId);
+        if (!contact || contact.phone_ref === true) return;
+        const threads = await conversationsForContact(contact, conversations);
+        byContact[contactId] = threads.reduce(
+          (total, c) =>
+            c.type !== 'relay_group' && c.type !== 'group_text' ? total + (c.unread_count ?? 0) : total,
+          0,
+        );
+      }),
+      ...conversationIds.map(async (conversationId) => {
+        byConversation[conversationId] = 0;
+        const c = await conversations.getById(conversationId);
+        if (c) byConversation[conversationId] = c.unread_count ?? 0;
+      }),
+    ]);
+
+    res.json({ byContact, byConversation });
+  });
 
   // GET /api/conversations?status=open&limit=50&cursor=...
   // THE inbox (M1.2): ONE DynamoDB Query on the byLastActivity GSI,

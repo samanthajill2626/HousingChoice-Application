@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary, EventStreamHandlers, PlacementItem } from '../../api/index.js';
 
-const getAllConversations = vi.fn();
+const getUnreadCounts = vi.fn();
 const markConversationRead = vi.fn();
 const markInboxRead = vi.fn();
 const noteRowsCleared = vi.fn();
@@ -33,7 +33,7 @@ vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
+    getUnreadCounts: (...a: unknown[]) => getUnreadCounts(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
@@ -173,8 +173,33 @@ function MarkReadChild({
   return <span />;
 }
 
+
+/** FIXTURE PLUMBING ONLY. These tests already describe the world as inbox
+ *  summaries; this projects them into the shape GET /api/unread-counts returns,
+ *  so the cases below can keep asserting what they were written to assert
+ *  (mark-read fan-out, badge clears, SSE refresh).
+ *
+ *  It deliberately does NOT re-test the 1:1 rules - relay_group / group_text
+ *  exclusion and multi-key thread resolution now live SERVER-side and are
+ *  covered in app/test/unreadCountsApi.test.ts. Asserting them against this
+ *  local reimplementation would only prove the test agrees with itself. */
+function countsFrom(
+  summaries: ConversationSummary[],
+): { byContact: Record<string, number>; byConversation: Record<string, number> } {
+  const byContact: Record<string, number> = {};
+  const byConversation: Record<string, number> = {};
+  for (const s of summaries) {
+    byConversation[s.conversationId] = s.unread_count;
+    if (s.type === 'relay_group' || s.type === 'group_text') continue;
+    for (const p of s.participants ?? []) {
+      if (p.contactId) byContact[p.contactId] = (byContact[p.contactId] ?? 0) + s.unread_count;
+    }
+  }
+  return { byContact, byConversation };
+}
+
 beforeEach(() => {
-  getAllConversations.mockReset();
+  getUnreadCounts.mockReset();
   markConversationRead.mockReset();
   markInboxRead.mockReset();
   noteRowsCleared.mockReset();
@@ -182,20 +207,40 @@ beforeEach(() => {
   streamHandlers = null;
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
-  getAllConversations.mockResolvedValue({ items: [], truncated: false});
+  getUnreadCounts.mockResolvedValue(countsFrom([]));
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('usePlacementChannels', () => {
-  it('resolves the group from group_thread and the 1:1 unread from the inbox', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [
+  // The 1:1 RULES that used to be asserted here - a relay_group never counts
+  // toward a 1:1 tab, a native group_text never does either (one roster matches
+  // every member, so counting it would multiply the same unread across all of
+  // them), and a contact's threads resolve across every phone AND email they own
+  // - now live SERVER-side behind GET /api/unread-counts, and are covered in
+  // app/test/unreadCountsApi.test.ts. They are deliberately NOT re-asserted here:
+  // this file can only reach them through `countsFrom`, its own local stand-in,
+  // so such a test would prove the fixture agrees with itself and nothing more.
+
+  it('asks ONLY about this roster - the people and the group thread, never the inbox', async () => {
+    // The point of the endpoint: an O(people) question costs an O(people) read.
+    getUnreadCounts.mockResolvedValue(countsFrom([]));
+    render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    const arg = getUnreadCounts.mock.calls[0]?.[0] as {
+      contactIds?: string[];
+      conversationIds?: string[];
+    };
+    expect(arg.contactIds).toContain('lord-1');
+    expect(arg.conversationIds).toEqual(['g1']);
+  });
+
+  it('maps the group thread and each roster member unread from the counts read', async () => {
+    getUnreadCounts.mockResolvedValue(countsFrom([
         conv('g1', 'ten-1', 1, 'relay_group'),
         conv('c-ten', 'ten-1', 3, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
-      ],
-      truncated: false,
-    });
+      ]));
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('group')).toHaveTextContent('g1/1');
@@ -204,60 +249,11 @@ describe('usePlacementChannels', () => {
     expect(screen.getByTestId('landlord')).toHaveTextContent('unread:0');
   });
 
-  it('sums unread across ALL the contact non-relay threads (phone- AND email-keyed)', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [
-        conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
-        emailConv('c-ten-email', 'ten-1', 3),
-      ],
-      truncated: false,
-    });
-    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    // The tab dot mirrors the contact's INBOX ROW (2 + 3), not one thread.
-    expect(screen.getByTestId('tenant')).toHaveTextContent('unread:5');
-  });
 
-  it('never counts a relay_group toward a 1:1 tab, even at high unread', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [
-        conv('g1', 'ten-1', 7, 'relay_group'),
-        conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
-      ],
-      truncated: false,
-    });
-    render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    // The group's 7 belongs to the Group tab alone.
-    expect(screen.getByTestId('group')).toHaveTextContent('g1/7');
-    expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2');
-  });
 
-  it('never counts a native group_text toward a 1:1 tab (one roster matches every member)', async () => {
-    // The dangerous case this excludes: a group roster names up to nine
-    // contacts, so counting it would add the SAME unread to every member's 1:1
-    // dot - and no 1:1 mark-read could ever clear it.
-    getAllConversations.mockResolvedValue({
-      items: [
-        {
-          ...conv('gt-1', 'ten-1', 5, 'group_text'),
-          participants: [
-            { contactId: 'ten-1', phone: '+14045550111' },
-            { contactId: 'lord-1', phone: '+14045550112' },
-          ],
-        },
-        conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
-      ],
-      truncated: false,
-    });
-    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
-    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2');
-    expect(screen.getByTestId('landlord')).toHaveTextContent('unread:0');
-  });
 
   it('a channel with no thread resolves to null / zero unread', async () => {
-    getAllConversations.mockResolvedValue({ items: [], truncated: false});
+    getUnreadCounts.mockResolvedValue(countsFrom([]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('tenant')).toHaveTextContent('unread:0');
@@ -265,13 +261,10 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead fans the read out to the CONTACT + zeroes unread; never the single-conversation read', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [
+    getUnreadCounts.mockResolvedValue(countsFrom([
         conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
         emailConv('c-ten-email', 'ten-1', 3),
-      ],
-      truncated: false,
-    });
+      ]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:5'));
     await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
@@ -282,10 +275,7 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead no-ops at unread 0 (the effect re-runs on every render)', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 0, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
@@ -293,10 +283,7 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead no-ops when the contact is unresolved (undefined id)', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 3, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
     await userEvent.click(screen.getByRole('button', { name: 'markTenantUnresolved' }));
@@ -309,10 +296,7 @@ describe('usePlacementChannels', () => {
     // The guard is falsy, not `=== undefined`: PlacementDetail really does build
     // a loading placeholder with tenantId: '' for this hook, so '' has to be
     // rejected too.
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 3, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
     await userEvent.click(screen.getByRole('button', { name: 'markTenantEmptyId' }));
@@ -321,10 +305,7 @@ describe('usePlacementChannels', () => {
   });
 
   it('markGroupRead still marks the SINGLE group conversation read', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('g1', 'ten-1', 4, 'relay_group')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('g1', 'ten-1', 4, 'relay_group')]));
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
     await userEvent.click(screen.getByRole('button', { name: 'markGroup' }));
@@ -336,7 +317,7 @@ describe('usePlacementChannels', () => {
 
   it('setGroupConversationId injects a just-provisioned group thread id (survives a refetch)', async () => {
     // Empty inbox: the group has no thread yet, so a refetch cannot re-resolve one.
-    getAllConversations.mockResolvedValue({ items: [], truncated: false});
+    getUnreadCounts.mockResolvedValue(countsFrom([]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('group')).toHaveTextContent('-/0');
@@ -345,7 +326,7 @@ describe('usePlacementChannels', () => {
 
     // A conversation.updated fires a refetch; the injected id (not on the inbox
     // page) must survive so the freshly-opened thread never unmounts.
-    getAllConversations.mockResolvedValue({ items: [], truncated: false});
+    getUnreadCounts.mockResolvedValue(countsFrom([]));
     act(() =>
       streamHandlers?.onConversationUpdated?.({
         conversationId: 'c-injected',
@@ -359,17 +340,11 @@ describe('usePlacementChannels', () => {
   });
 
   it('a conversation.updated refetches and refreshes unread', async () => {
-    getAllConversations.mockResolvedValueOnce({
-      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValueOnce(countsFrom([conv('c-ten', 'ten-1', 1, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:1'));
 
-    getAllConversations.mockResolvedValueOnce({
-      items: [conv('c-ten', 'ten-1', 5, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValueOnce(countsFrom([conv('c-ten', 'ten-1', 5, 'tenant_1to1')]));
     act(() =>
       streamHandlers?.onConversationUpdated?.({
         conversationId: 'c-ten',
@@ -387,10 +362,7 @@ describe('usePlacementChannels', () => {
 // to the ACTIVE tab, but never for a tab that is not active.
 describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   it('marks the initial ACTIVE tab read on the loading->ready commit (unread>0), exactly once', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 3, 'tenant_1to1')]));
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     // Fires WITHOUT any interaction - the regression the ref-based version missed.
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'ten-1' }));
@@ -400,17 +372,11 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   });
 
   it('marks read AGAIN when an inbound raises unread on the ACTIVE tab', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 1, 'tenant_1to1')]));
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
 
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 4, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 4, 'tenant_1to1')]));
     act(() =>
       streamHandlers?.onConversationUpdated?.({
         conversationId: 'c-ten',
@@ -425,25 +391,19 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   });
 
   it('does NOT mark read a tab that is not active when its unread rises', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [
+    getUnreadCounts.mockResolvedValue(countsFrom([
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
-      ],
-      truncated: false,
-    });
+      ]));
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // Active (tenant) tab loaded at unread 0 -> no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();
 
-    getAllConversations.mockResolvedValue({
-      items: [
+    getUnreadCounts.mockResolvedValue(countsFrom([
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 5, 'landlord_1to1'),
-      ],
-      truncated: false,
-    });
+      ]));
     act(() =>
       streamHandlers?.onConversationUpdated?.({
         conversationId: 'c-lord',
@@ -469,10 +429,7 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
 // two surfaces dedupes instead of double-decrementing.
 describe('usePlacementChannels - nav badge clears', () => {
   it('markGroupRead clears the group by its cv: key', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('g1', 'ten-1', 4, 'relay_group')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('g1', 'ten-1', 4, 'relay_group')]));
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
     await userEvent.click(screen.getByRole('button', { name: 'markGroup' }));
@@ -482,10 +439,7 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('markPersonRead clears the contact by its c: key', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
     await userEvent.click(screen.getByRole('button', { name: 'markTenant' }));
@@ -495,10 +449,7 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('NEVER touches the badge at or below the guards', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 0, 'tenant_1to1')]));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // unread 0, an unresolved contact, an empty id, and a group with no thread.
@@ -511,10 +462,7 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the group mark-read fails', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('g1', 'ten-1', 4, 'relay_group')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('g1', 'ten-1', 4, 'relay_group')]));
     markConversationRead.mockRejectedValue(new Error('nope'));
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
@@ -523,10 +471,7 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the person fan-out fails', async () => {
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')]));
     markInboxRead.mockRejectedValue(new Error('nope'));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
@@ -538,10 +483,7 @@ describe('usePlacementChannels - nav badge clears', () => {
     // A11 in its concrete form: the badge functions flow into markGroupRead /
     // markPersonRead deps, which flow into this hook's returned object, which is
     // MarkReadChild's effect dependency. A churning identity POSTs forever.
-    getAllConversations.mockResolvedValue({
-      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      truncated: false,
-    });
+    getUnreadCounts.mockResolvedValue(countsFrom([conv('c-ten', 'ten-1', 3, 'tenant_1to1')]));
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
     await new Promise((r) => setTimeout(r, 50));

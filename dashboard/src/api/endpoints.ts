@@ -1252,6 +1252,33 @@ export function getContacts(
   });
 }
 
+/** GET /api/unread-counts - unread totals for a NAMED set of people and threads.
+ *
+ *  Use this instead of reading the inbox to count a handful of people: it is
+ *  O(people), not O(inbox). The channel rails used to sweep every conversation
+ *  and sum client-side, which (before `getConversations` could page at all)
+ *  meant summing over the newest 50 of hundreds of open threads.
+ *
+ *  Matches the 1:1 semantics it replaced: relay_group / group_text threads never
+ *  count toward a contact's total, and a contact's threads resolve across every
+ *  phone AND email they own. Ids not found answer 0 rather than being absent, so
+ *  a caller can render a badge per requested id. At most 50 ids per parameter
+ *  (400 beyond that). */
+export async function getUnreadCounts(
+  params: { contactIds?: string[]; conversationIds?: string[] },
+  signal?: AbortSignal,
+): Promise<{ byContact: Record<string, number>; byConversation: Record<string, number> }> {
+  const contactIds = params.contactIds?.filter((id) => id.length > 0) ?? [];
+  const conversationIds = params.conversationIds?.filter((id) => id.length > 0) ?? [];
+  return request('/api/unread-counts', {
+    query: {
+      ...(contactIds.length > 0 && { contactIds: contactIds.join(',') }),
+      ...(conversationIds.length > 0 && { conversationIds: conversationIds.join(',') }),
+    },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
 // --- Whole-list reads -------------------------------------------------------
 // The paged endpoints above return ONE page. Any caller that needs a COMPLETE
 // list - a typeahead's candidate roster, a board, an id->record lookup map -

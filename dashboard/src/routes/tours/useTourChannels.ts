@@ -32,17 +32,15 @@
 // cannot loop.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  getAllConversations,
+  getUnreadCounts,
   markConversationRead,
   markInboxRead,
   useEventStream,
-  type ConversationSummary,
   type ConversationUpdatedEvent,
   type Tour,
 } from '../../api/index.js';
 import { useUnread } from '../../app/UnreadContext.js';
 import { contactClearKey, conversationClearKey } from '../../app/unreadKeys.js';
-import { involvesContact } from '../contact/useContactTimeline.js';
 
 export interface TourGroupChannel {
   /** The resolved conversationId, or null when no group thread exists yet. */
@@ -105,58 +103,43 @@ const REFETCH_DEBOUNCE_MS = 300;
  *  projection memo below recompute on every render). */
 const NO_PEOPLE: PersonChannel[] = [];
 
-/** Total unread across the contact's NON-multi-party conversations on this inbox
- *  page. A relay_group NEVER counts - its unread belongs to the Group tab, and
- *  the 1:1 fan-out read cannot clear it (relay groups front the POOL number, so
- *  the contact's threads never include one). A native group_text is excluded for
- *  a STRONGER reason: it matches by ROSTER, and one group roster matches up to
- *  nine contacts at once, so counting it would add the same unread to every
- *  member's 1:1 dot - a nine-fold over-count no 1:1 mark-read can clear
- *  (exclusion is the only correct handling here, not a preference). An
- *  email-keyed thread is recognised by the participants ROSTER alone:
- *  `participant_email` is not a dashboard field.
- *  Was previously fed the FIRST 50 open conversations only, so a thread off that
- *  page counted as zero unread - by the time it was noticed, prod had 668 open
- *  conversations and the dot was reading 7% of the inbox. It now sees them all. */
-function sumUnread(summaries: ConversationSummary[], contactId: string): number {
-  return summaries.reduce(
-    (total, s) =>
-      s.type !== 'relay_group' &&
-      s.type !== 'group_text' &&
-      involvesContact(s.participants, contactId)
-        ? total + s.unread_count
-        : total,
-    0,
-  );
-}
-
-/** Resolve the channels from a fresh inbox page. The GROUP keeps the
- *  preserve-an-id-we-already-hold merge (a just-provisioned thread is not on the
- *  inbox page yet, and it must never unmount); the 1:1s are pure sums. */
+/** Unread for the channels on this roster, from the targeted counts read.
+ *
+ *  1:1 RULES (enforced SERVER-side now - see GET /api/unread-counts): a
+ *  relay_group never counts toward a 1:1 dot (its unread belongs to the Group
+ *  tab, and the 1:1 fan-out cannot clear it - relay groups front the POOL
+ *  number). A native group_text is excluded for a STRONGER reason: it matches by
+ *  ROSTER, and one roster matches up to nine contacts, so counting it would add
+ *  the same unread to every member's dot - a nine-fold over-count no 1:1
+ *  mark-read can clear.
+ *
+ *  This used to sum a page of inbox summaries client-side. That read the newest
+ *  50 open conversations, so a quiet thread counted as zero; by the time it was
+ *  noticed prod had 668 open threads and the dot reflected 7% of them. Paging
+ *  the whole inbox fixed the count but asked for hundreds of rows to answer a
+ *  question about 2-5 people, so the read is now scoped to the roster instead.
+ *
+ *  The GROUP no longer falls back to a previously-held count when the thread is
+ *  absent: with a complete, targeted answer, "not found" means zero unread we
+ *  can see rather than "off the page" - and the old fallback would pin a stale
+ *  number indefinitely. The conversationId is still preserved either way, so a
+ *  just-provisioned thread never unmounts. */
 function resolveChannels(
   prev: Pick<Committed, 'group' | 'people'>,
   groupThreadId: string | undefined,
   people: PersonChannelInput[],
-  summaries: ConversationSummary[],
+  counts: { byContact: Record<string, number>; byConversation: Record<string, number> },
 ): Pick<Committed, 'group' | 'people'> {
-  const byId = (id: string): ConversationSummary | undefined =>
-    summaries.find((s) => s.conversationId === id);
   const merge = (prevCh: TourGroupChannel, id: string | null): TourGroupChannel => {
-    if (id) {
-      const s = byId(id);
-      return { conversationId: id, unread: s ? s.unread_count : prevCh.unread };
-    }
-    if (prevCh.conversationId) {
-      const s = byId(prevCh.conversationId);
-      return { conversationId: prevCh.conversationId, unread: s ? s.unread_count : prevCh.unread };
-    }
-    return { conversationId: null, unread: 0 };
+    const resolved = id ?? prevCh.conversationId;
+    if (!resolved) return { conversationId: null, unread: 0 };
+    return { conversationId: resolved, unread: counts.byConversation[resolved] ?? 0 };
   };
   return {
     group: merge(prev.group, groupThreadId ?? null),
-    // Falsy id -> 0, never a sum: an empty contactId is a page's loading
+    // Falsy id -> 0, never a lookup: an empty contactId is a page's loading
     // placeholder, not a person whose threads could be counted.
-    people: people.map((p) => ({ ...p, unread: p.contactId ? sumUnread(summaries, p.contactId) : 0 })),
+    people: people.map((p) => ({ ...p, unread: p.contactId ? (counts.byContact[p.contactId] ?? 0) : 0 })),
   };
 }
 
@@ -204,14 +187,23 @@ export function useTourChannels(tour: Tour, people: PersonChannelInput[]): TourC
     abortRef.current = controller;
     const { signal } = controller;
     try {
-      const page = await getAllConversations(signal);
+      // Ask ONLY about the people and thread on this roster - not the whole
+      // inbox. See getUnreadCounts; the server applies the same 1:1 rules the
+      // client-side sum used to.
+      const counts = await getUnreadCounts(
+        {
+          contactIds: peopleInputs.map((p) => p.contactId).filter((id): id is string => Boolean(id)),
+          ...(groupThreadId !== undefined && { conversationIds: [groupThreadId] }),
+        },
+        signal,
+      );
       if (signal.aborted) return;
       setState((prev) => {
         const base =
           prev.forId === tourId
             ? prev
             : { status: 'loading' as const, ...initialChannels(groupThreadId, peopleInputs), forId: tourId };
-        const resolved = resolveChannels(base, groupThreadId, peopleInputs, page.items);
+        const resolved = resolveChannels(base, groupThreadId, peopleInputs, counts);
         return { status: 'ready', ...resolved, forId: tourId };
       });
     } catch (err) {

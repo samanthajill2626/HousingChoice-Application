@@ -30,7 +30,7 @@ const getPlacementHistory = vi.fn();
 // Left-pane comms deps (usePlacementChannels + PlacementConversation). Mocked to
 // keep the conversation pane quiet + deterministic; this suite exercises the
 // header + right pane (the comms hub has its own tests in Task 6).
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
@@ -68,7 +68,7 @@ vi.mock('../../api/index.js', async () => {
     updatePlacement: (...a: unknown[]) => updatePlacement(...a),
     updateUnit: (...a: unknown[]) => updateUnit(...a),
     getPlacementHistory: (...a: unknown[]) => getPlacementHistory(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversation: (...a: unknown[]) => getConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
@@ -171,7 +171,7 @@ beforeEach(() => {
   updatePlacement.mockReset();
   updateUnit.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
-  getConversations.mockReset().mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockReset().mockResolvedValue({ items: [], truncated: false});
   getConversation.mockReset().mockResolvedValue({
     conversationId: 'g1',
     type: 'relay_group',

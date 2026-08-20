@@ -11,7 +11,7 @@ import { ApiError } from '../../api/index.js';
 import type { Contact, ContactTimelinePage } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
 const sendMessage = vi.fn();
 const sendEmail = vi.fn();
@@ -28,7 +28,7 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     sendEmail: (...a: unknown[]) => sendEmail(...a),
@@ -162,7 +162,7 @@ async function typeAndSend(
 
 beforeEach(() => {
   getContactTimeline.mockReset();
-  getConversations.mockReset();
+  getAllConversations.mockReset();
   getConversationMessages.mockReset();
   sendMessage.mockReset();
   sendEmail.mockReset();
@@ -173,7 +173,7 @@ beforeEach(() => {
   // RESOLVED (not 404-rejected): the pane's tests must never fall into the
   // fetch-the-whole-inbox fallback path.
   getContactTimeline.mockResolvedValue(timelinePage([]));
-  getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false });
 });
 afterEach(() => vi.restoreAllMocks());
 

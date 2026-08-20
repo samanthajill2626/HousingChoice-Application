@@ -2,19 +2,19 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { PlacementsPage, Contact, UnitsPage } from '../../api/index.js';
+import type { Contact, FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
-const getPlacements = vi.fn();
-const getUnits = vi.fn();
+const getAllPlacements = vi.fn();
+const getAllUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
 const updateContact = vi.fn();
 const setTenantStatus = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const deleteContact = vi.fn();
 const restoreContact = vi.fn();
 const sendMessage = vi.fn();
@@ -78,15 +78,15 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getContact: (...a: unknown[]) => getContact(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
-    getPlacements: (...a: unknown[]) => getPlacements(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
     setTenantStatus: (...a: unknown[]) => setTenantStatus(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     deleteContact: (...a: unknown[]) => deleteContact(...a),
     restoreContact: (...a: unknown[]) => restoreContact(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
@@ -214,13 +214,13 @@ const UNKNOWN: Contact = {
   phone: '+15550100001',
 };
 
-const CASES: PlacementsPage = {
-  nextCursor: null,
-  placements: [{ placementId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
+const CASES: FetchAllPagesResult<PlacementItem> = {
+  items: [{ placementId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
+  truncated: false,
 };
-const UNITS: UnitsPage = {
-  nextCursor: null,
-  units: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
+const UNITS: FetchAllPagesResult<UnitItem> = {
+  items: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
+  truncated: false,
 };
 
 // One pending suggestion - the fixture the accept/dismiss FAILURE tests drive.
@@ -253,13 +253,13 @@ beforeEach(() => {
   markInboxUnread.mockReset().mockResolvedValue(undefined);
   getContact.mockReset();
   getContactTimeline.mockReset();
-  getConversations.mockReset();
+  getAllConversations.mockReset();
   getConversationMessages.mockReset();
-  getPlacements.mockReset();
-  getUnits.mockReset();
+  getAllPlacements.mockReset();
+  getAllUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
-  getContacts.mockReset();
+  getAllContacts.mockReset();
   sendMessage.mockReset();
   ensureContactConversation.mockReset();
   ensureEmailConversation.mockReset();
@@ -275,10 +275,10 @@ beforeEach(() => {
   getSuggestions.mockResolvedValue([]);
   acceptSuggestion.mockReset();
   dismissSuggestion.mockReset();
-  getPlacements.mockResolvedValue(CASES);
-  getUnits.mockResolvedValue(UNITS);
+  getAllPlacements.mockResolvedValue(CASES);
+  getAllUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-  getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false });
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   // The gallery reads the media index (2026-08-18): an empty first page by default.
   getContactMedia.mockResolvedValue({ media: [] });
@@ -291,7 +291,7 @@ beforeEach(() => {
   // Default: return a roster containing the current contact + OTHER so tests
   // that don't override still work (useContacts fans out to
   // tenant/landlord/partner/unknown).
-  getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
+  getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -806,9 +806,9 @@ describe('ContactDetail', () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getContact.mockResolvedValue(TENANT);
-    getUnits.mockResolvedValue({
-      nextCursor: null,
-      units: [
+    getAllUnits.mockResolvedValue({
+      truncated: false,
+      items: [
         { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
         { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
       ],
@@ -907,7 +907,7 @@ describe('ContactDetail', () => {
       const user = userEvent.setup();
 
       // Roster: TENANT (k1, the contact being edited) + OTHER (z99, Bob Other).
-      getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
+      getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
       getContact.mockResolvedValue(TENANT);
       renderAt('k1');
 
@@ -939,7 +939,7 @@ describe('ContactDetail', () => {
       const user = userEvent.setup();
 
       // Roster includes TENANT itself (Tasha Williams) + OTHER.
-      getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
+      getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
       getContact.mockResolvedValue(TENANT);
       renderAt('k1');
 

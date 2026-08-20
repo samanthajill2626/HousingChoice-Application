@@ -13,7 +13,7 @@ import { useEffect, useState } from 'react';
 import {
   createUnit,
   getContact,
-  getContacts,
+  getAllContacts,
   TOUR_TYPE_LABELS,
   type Contact,
   type TourType,
@@ -93,11 +93,15 @@ export function UnitCreateForm({
     const ac = new AbortController();
     void (async () => {
       try {
-        const page = await getContacts({ type: 'landlord' }, ac.signal);
+        // EVERY page. Landlords fit inside one page today, which is exactly why
+        // this was easy to miss: it would have started dropping candidates
+        // silently at 51, with nothing to distinguish a short list from a
+        // complete one.
+        const { items } = await getAllContacts({ type: 'landlord' }, ac.signal);
         if (ac.signal.aborted) return;
-        setLandlords(page.contacts);
+        setLandlords(items);
         if (landlordId !== undefined) {
-          const hit = page.contacts.find((c) => c.contactId === landlordId);
+          const hit = items.find((c) => c.contactId === landlordId);
           if (hit) setLockedLandlordLabel(landlordLabel(hit));
         }
       } catch {

@@ -7,8 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
-  getPlacements,
-  getConversations,
+  getAllPlacements,
+  getAllConversations,
   getToday,
   getTours,
   useEventStream,
@@ -58,13 +58,15 @@ async function loadToday(
     // failure (and the fallback's own failures) propagates to the error state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
     const [placements, conversations, tours] = await Promise.all([
-      getPlacements(signal),
-      getConversations(signal),
+      // EVERY page - a first-page-only read built the queue from a prefix of the
+      // pipeline and silently dropped whatever sorted later.
+      getAllPlacements(signal),
+      getAllConversations(signal),
       getTours({ from: window.from, to: window.to }, signal),
     ]);
     const items = buildTodayFromSources(
-      placements.placements,
-      conversations.conversations,
+      placements.items,
+      conversations.items,
       now,
       tours,
     );

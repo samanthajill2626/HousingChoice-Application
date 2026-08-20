@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary, EventStreamHandlers, Tour } from '../../api/index.js';
 
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const markConversationRead = vi.fn();
 const markInboxRead = vi.fn();
 const noteRowsCleared = vi.fn();
@@ -31,7 +31,7 @@ vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
@@ -166,7 +166,7 @@ function MarkReadChild({
 }
 
 beforeEach(() => {
-  getConversations.mockReset();
+  getAllConversations.mockReset();
   markConversationRead.mockReset();
   markInboxRead.mockReset();
   noteRowsCleared.mockReset();
@@ -174,19 +174,19 @@ beforeEach(() => {
   streamHandlers = null;
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
-  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false});
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('useTourChannels', () => {
   it('resolves the group from groupThreadId and the 1:1 unread from the inbox', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('g1', 'ten-1', 1, 'relay_group'),
         conv('c-ten', 'ten-1', 3, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe tour={makeTour({ groupThreadId: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -197,12 +197,12 @@ describe('useTourChannels', () => {
   });
 
   it('sums unread across ALL the contact non-relay threads (phone- AND email-keyed)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
         emailConv('c-ten-email', 'ten-1', 3),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -211,12 +211,12 @@ describe('useTourChannels', () => {
   });
 
   it('never counts a relay_group toward a 1:1 tab, even at high unread', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('g1', 'ten-1', 7, 'relay_group'),
         conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe tour={makeTour({ groupThreadId: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -229,8 +229,8 @@ describe('useTourChannels', () => {
     // Byte-identical hazard to the placement twin: a group roster names up to
     // nine contacts, so counting it would add the SAME unread to every member's
     // 1:1 dot, and no 1:1 mark-read could clear it.
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         {
           ...conv('gt-1', 'ten-1', 5, 'group_text'),
           participants: [
@@ -240,7 +240,7 @@ describe('useTourChannels', () => {
         },
         conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -249,7 +249,7 @@ describe('useTourChannels', () => {
   });
 
   it('a channel with no thread resolves to null / zero unread', async () => {
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [], truncated: false});
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('tenant')).toHaveTextContent('unread:0');
@@ -257,12 +257,12 @@ describe('useTourChannels', () => {
   });
 
   it('markPersonRead fans the read out to the CONTACT + zeroes unread; never the single-conversation read', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
         emailConv('c-ten-email', 'ten-1', 3),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:5'));
@@ -274,9 +274,9 @@ describe('useTourChannels', () => {
   });
 
   it('markPersonRead no-ops at unread 0 (the effect re-runs on every render)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -285,9 +285,9 @@ describe('useTourChannels', () => {
   });
 
   it('markPersonRead no-ops when the contact is unresolved (undefined id)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
@@ -300,9 +300,9 @@ describe('useTourChannels', () => {
   it('markPersonRead no-ops on an EMPTY contactId (never POST /api/inbox//read)', async () => {
     // The guard is falsy, not `=== undefined`: the placement twin really does
     // build a loading placeholder with tenantId: '', so '' has to be rejected too.
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
@@ -312,9 +312,9 @@ describe('useTourChannels', () => {
   });
 
   it('markGroupRead still marks the SINGLE group conversation read', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     render(<Probe tour={makeTour({ groupThreadId: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
@@ -334,16 +334,16 @@ describe('useTourChannels', () => {
   });
 
   it('a conversation.updated refetches and refreshes unread', async () => {
-    getConversations.mockResolvedValueOnce({
-      conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValueOnce({
+      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:1'));
 
-    getConversations.mockResolvedValueOnce({
-      conversations: [conv('c-ten', 'ten-1', 5, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValueOnce({
+      items: [conv('c-ten', 'ten-1', 5, 'tenant_1to1')],
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -362,9 +362,9 @@ describe('useTourChannels', () => {
 // and on a later inbound to the ACTIVE tab, but never for a tab that is not active.
 describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => {
   it('marks the initial ACTIVE tab read on the loading->ready commit (unread>0), exactly once', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     // Fires WITHOUT any interaction - the regression the ref-based version missed.
@@ -375,16 +375,16 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
   });
 
   it('marks read AGAIN when an inbound raises unread on the ACTIVE tab', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
 
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 4, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 4, 'tenant_1to1')],
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -400,24 +400,24 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
   });
 
   it('does NOT mark read a tab that is not active when its unread rises', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // Active (tenant) tab loaded at unread 0 -> no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();
 
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 5, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -444,9 +444,9 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
 // two surfaces dedupes instead of double-decrementing.
 describe('useTourChannels - nav badge clears', () => {
   it('markGroupRead clears the group by its cv: key', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     render(<Probe tour={makeTour({ groupThreadId: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
@@ -457,9 +457,9 @@ describe('useTourChannels - nav badge clears', () => {
   });
 
   it('markPersonRead clears the contact by its c: key', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
@@ -470,9 +470,9 @@ describe('useTourChannels - nav badge clears', () => {
   });
 
   it('NEVER touches the badge at or below the guards', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -486,9 +486,9 @@ describe('useTourChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the group mark-read fails', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     markConversationRead.mockRejectedValue(new Error('nope'));
     render(<Probe tour={makeTour({ groupThreadId: 'g1' })} landlordId="lord-1" />);
@@ -498,9 +498,9 @@ describe('useTourChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the person fan-out fails', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      truncated: false,
     });
     markInboxRead.mockRejectedValue(new Error('nope'));
     render(<Probe tour={makeTour()} landlordId="lord-1" />);
@@ -513,9 +513,9 @@ describe('useTourChannels - nav badge clears', () => {
     // A11 in its concrete form: the badge functions flow into markGroupRead /
     // markPersonRead deps, which flow into this hook's returned object, which is
     // MarkReadChild's effect dependency. A churning identity POSTs forever.
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));

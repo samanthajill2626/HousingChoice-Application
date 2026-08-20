@@ -20,7 +20,7 @@ import type { Contact, RosterView, Tour, UnitItem } from '../../api/index.js';
 const getTour = vi.fn();
 const getUnit = vi.fn();
 const getContact = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getTourActivity = vi.fn();
 const getTourReminders = vi.fn();
 const getNoShowCheckinDraft = vi.fn();
@@ -54,7 +54,7 @@ vi.mock('../../api/index.js', async () => {
     getTour: (...a: unknown[]) => getTour(...a),
     getUnit: (...a: unknown[]) => getUnit(...a),
     getContact: (...a: unknown[]) => getContact(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getTourActivity: (...a: unknown[]) => getTourActivity(...a),
     getTourReminders: (...a: unknown[]) => getTourReminders(...a),
     getNoShowCheckinDraft: (...a: unknown[]) => getNoShowCheckinDraft(...a),
@@ -201,7 +201,7 @@ beforeEach(() => {
   getContact.mockImplementation((id: string) =>
     Promise.resolve(id === 'landlord-1' ? landlordContact() : tenantContact()),
   );
-  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false});
   getTourActivity.mockResolvedValue([]);
   getTourReminders.mockResolvedValue({ reminders: [] });
   getConversationMessages.mockResolvedValue([]);
@@ -389,7 +389,7 @@ describe('TourDetail - kebab guards', () => {
 
   it('scheduled: Reschedule + Cancel + Mark no-show (no Open group when a group exists)', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: 'g1' }));
-    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [conv('g1', 'tenant-1', 0, 'relay_group')], truncated: false});
     renderDetail();
     await waitLoaded();
     await openKebab();
@@ -425,7 +425,7 @@ describe('TourDetail - kebab guards', () => {
     getTour.mockResolvedValue(
       makeTour({ status: 'closed', groupThreadId: 'g1', outcome: 'not_a_fit', moveForward: false }),
     );
-    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [conv('g1', 'tenant-1', 0, 'relay_group')], truncated: false});
     renderDetail();
     await waitLoaded();
     expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
@@ -798,9 +798,9 @@ describe('TourDetail - close the relay group after a terminal outcome (relay num
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: 'g1' }));
     patchTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: 'g1' }));
     getConversation.mockResolvedValue(OPEN_GROUP);
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'tenant-1', 0, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'tenant-1', 0, 'relay_group')],
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
@@ -848,7 +848,7 @@ describe('TourDetail - right column cards', () => {
 
   it('landlord-led WITH a group routes reminders to the group', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'landlord_led', groupThreadId: 'g1' }));
-    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [conv('g1', 'tenant-1', 0, 'relay_group')], truncated: false});
     renderDetail();
     await waitLoaded();
     expect(screen.getByText('reminders -> group')).toBeInTheDocument();
@@ -1086,22 +1086,22 @@ describe('TourDetail - the 1:1 tabs FOLLOW the roster payload', () => {
 describe('TourDetail - channel switcher', () => {
   it('a self-guided tour (no group) defaults to the Tenant tab and never auto-switches', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-tenant', 'tenant-1'), conv('c-landlord', 'landlord-1', 0, 'landlord_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-tenant', 'tenant-1'), conv('c-landlord', 'landlord-1', 0, 'landlord_1to1')],
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
     expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute('aria-selected', 'false');
     // Let all the channel fetches settle; the active tab must NOT have moved.
-    await waitFor(() => expect(getConversations).toHaveBeenCalled());
+    await waitFor(() => expect(getAllConversations).toHaveBeenCalled());
     expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('a tour WITH a group defaults to the Group tab', async () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
-    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [conv('g1', 'tenant-1', 0, 'relay_group')], truncated: false});
     renderDetail();
     await waitLoaded();
     expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute('aria-selected', 'true');
@@ -1109,12 +1109,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('shows an unread dot on a non-active channel and loads ONLY the active tab feed', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 2, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
@@ -1141,12 +1141,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('viewing an unread 1:1 tab marks the CONTACT read (inbox fan-out) - never one conversation', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 2, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
@@ -1163,12 +1163,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('composer targets the ACTIVE tab, before and after switching', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
@@ -1193,12 +1193,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('a draft typed on Tenant does NOT carry to Landlord on a tab switch (no wrong-party send) (MAJOR 1)', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
@@ -1235,12 +1235,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('the INITIAL active tab auto-marks-read when it loads with unread, no click (MAJOR 2)', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 3),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
@@ -1256,12 +1256,12 @@ describe('TourDetail - channel switcher', () => {
 
   it('composer footer: the group tab names the WHOLE roster; 1:1 tabs show the reply number', async () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('g1', 'tenant-1', 0, 'relay_group'),
         conv('c-tenant', 'tenant-1', 0),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     getConversationMembers.mockResolvedValue([
       { contactId: 'tenant-1', phone: '+14045550111', name: 'Ann' },
@@ -1291,9 +1291,9 @@ describe('TourDetail - channel switcher', () => {
 describe('TourDetail - tour milestones interleave into the conversation panes', () => {
   it('the 1:1 transcript shows the lifecycle pins from the PERSON feed; "Comms only" hides them', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-tenant', 'tenant-1', 0)],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-tenant', 'tenant-1', 0)],
+      truncated: false,
     });
     // A 1:1 tab is the contact-keyed pane now, so its pins arrive on the PERSON
     // timeline (the server writes a dual-party event per tour milestone) - there
@@ -1339,9 +1339,9 @@ describe('TourDetail - tour milestones interleave into the conversation panes', 
 
   it('the GROUP transcript shows the pins too (with deep links kept)', async () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'tenant-1', 0, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'tenant-1', 0, 'relay_group')],
+      truncated: false,
     });
     getTourActivity.mockResolvedValue([
       { id: '2026-07-02T00:00:00Z#1', at: '2026-07-02T00:00:00Z', type: 'tour_group_opened', conversationId: 'g1' },
@@ -1361,12 +1361,12 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
   // same hard-block ConsentCaptureModal as the contact page and retries.
   it('a refused 1:1 send opens the consent modal; recording consent retries and clears the draft', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     sendMessage
       .mockRejectedValueOnce(new ApiError(409, 'contact_no_consent', 'contact_no_consent'))
@@ -1404,12 +1404,12 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
 
   it('Cancel aborts: no consent PATCH, no retry, the draft stays in the box', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 0),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     sendMessage.mockRejectedValue(new ApiError(409, 'contact_no_consent', 'contact_no_consent'));
     renderDetail();
@@ -1449,7 +1449,7 @@ describe('TourDetail - conversation empty states', () => {
 
   it('a 1:1 with no thread shows the "with <name>" empty state + creates on first send', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [], truncated: false});
     ensureContactConversation.mockResolvedValue('c-new');
     sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
@@ -1512,12 +1512,12 @@ describe('TourDetail - mobile', () => {
     // operator never saw (there is no mark-unread anywhere in the product).
     stubNarrow(true);
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 3),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();
@@ -1542,12 +1542,12 @@ describe('TourDetail - mobile', () => {
     // The same stub, resolving WIDE - the desktop contract MF1 had to keep.
     stubNarrow(false);
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-tenant', 'tenant-1', 3),
         conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     renderDetail();
     await waitLoaded();

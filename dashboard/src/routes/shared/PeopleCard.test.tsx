@@ -36,7 +36,7 @@ const removeTourRosterLiveMember = vi.fn();
 const previewTourRosterAdd = vi.fn();
 const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const cancelTourRosterAction = vi.fn();
 const applyTourRosterActionNow = vi.fn();
 const dismissTourRosterAction = vi.fn();
@@ -53,7 +53,7 @@ vi.mock('../../api/index.js', async () => {
     previewTourRosterAdd: (...a: unknown[]) => previewTourRosterAdd(...a),
     addConversationMember: (...a: unknown[]) => addConversationMember(...a),
     removeConversationMember: (...a: unknown[]) => removeConversationMember(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     cancelTourRosterAction: (...a: unknown[]) => cancelTourRosterAction(...a),
     applyTourRosterActionNow: (...a: unknown[]) => applyTourRosterActionNow(...a),
     dismissTourRosterAction: (...a: unknown[]) => dismissTourRosterAction(...a),
@@ -105,7 +105,7 @@ function renderCard(over: Partial<PeopleCardProps> = {}): {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: [], truncated: false});
 });
 
 /** The rendered roster rows, in payload order. */
@@ -518,10 +518,10 @@ describe('PeopleCard - edit mode', () => {
   });
 
   it('adds ANY contact through the committed-pick search', async () => {
-    getContacts.mockImplementation((params: { type: string }) =>
+    getAllContacts.mockImplementation((params: { type: string }) =>
       Promise.resolve({
-        contacts: params.type === 'landlord' ? [pmContact()] : [],
-        nextCursor: null,
+        items: params.type === 'landlord' ? [pmContact()] : [],
+        truncated: false,
       }),
     );
     addTourRosterMember.mockResolvedValue(view());

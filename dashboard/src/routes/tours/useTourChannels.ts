@@ -32,7 +32,7 @@
 // cannot loop.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  getConversations,
+  getAllConversations,
   markConversationRead,
   markInboxRead,
   useEventStream,
@@ -115,8 +115,9 @@ const NO_PEOPLE: PersonChannel[] = [];
  *  (exclusion is the only correct handling here, not a preference). An
  *  email-keyed thread is recognised by the participants ROSTER alone:
  *  `participant_email` is not a dashboard field.
- *  HONEST LIMITATION: the inbox page is the first 50 OPEN conversations, so a
- *  thread off that page is invisible to the dot. */
+ *  Was previously fed the FIRST 50 open conversations only, so a thread off that
+ *  page counted as zero unread - by the time it was noticed, prod had 668 open
+ *  conversations and the dot was reading 7% of the inbox. It now sees them all. */
 function sumUnread(summaries: ConversationSummary[], contactId: string): number {
   return summaries.reduce(
     (total, s) =>
@@ -203,14 +204,14 @@ export function useTourChannels(tour: Tour, people: PersonChannelInput[]): TourC
     abortRef.current = controller;
     const { signal } = controller;
     try {
-      const page = await getConversations(signal);
+      const page = await getAllConversations(signal);
       if (signal.aborted) return;
       setState((prev) => {
         const base =
           prev.forId === tourId
             ? prev
             : { status: 'loading' as const, ...initialChannels(groupThreadId, peopleInputs), forId: tourId };
-        const resolved = resolveChannels(base, groupThreadId, peopleInputs, page.conversations);
+        const resolved = resolveChannels(base, groupThreadId, peopleInputs, page.items);
         return { status: 'ready', ...resolved, forId: tourId };
       });
     } catch (err) {

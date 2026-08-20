@@ -2,6 +2,7 @@
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { ApiError, request, requestWithStatus } from './client.js';
+import { fetchAllPages, PAGE_LIMIT, type FetchAllPagesResult } from './paging.js';
 import type {
   AdminUserView,
   AiRunDetailResponse,
@@ -35,6 +36,7 @@ import type {
   ConversationHeader,
   ConversationParticipant,
   ConversationsPage,
+  ConversationSummary,
   GroupMemberRow,
   GroupThreadsPage,
   DevLoginResult,
@@ -136,12 +138,18 @@ export function getToday(
 }
 
 /** GET /api/placements - the placement board (the Today fallback's deadline/tour/attention
- *  source). The server pages; pass `cursor` to fetch the next page (the
- *  placement board pages through ALL of them - see usePlacements). Other callers
- *  (Today / property / contact-file) read only the first page (no cursor). */
-export function getPlacements(signal?: AbortSignal, cursor?: string): Promise<PlacementsPage> {
+ *  source). Returns ONE page; pass `cursor` to fetch the next.
+ *  A caller that needs the WHOLE pipeline must use `getAllPlacements` - a
+ *  first-page-only read silently presents a prefix as the complete board.
+ *  `limit` is 1..MAX_PAGE_LIMIT (100); the server 400s anything outside that
+ *  range rather than clamping. Omitted = 50. */
+export function getPlacements(
+  signal?: AbortSignal,
+  cursor?: string,
+  limit?: string,
+): Promise<PlacementsPage> {
   return request<PlacementsPage>('/api/placements', {
-    query: { cursor },
+    query: { cursor, ...(limit !== undefined && { limit }) },
     ...(signal !== undefined && { signal }),
   });
 }
@@ -482,11 +490,37 @@ export async function setListingStatus(
 }
 
 /** GET /api/conversations - the inbox rows (the Today fallback's unread +
- *  untriaged source). */
-export function getConversations(signal?: AbortSignal): Promise<ConversationsPage> {
+ *  untriaged source). Returns ONE page, newest-activity-first, `status=open` by
+ *  default - `nextCursor` continues the walk.
+ *
+ *  This took a `signal` and NOTHING else for a long time, so it could not page
+ *  even in principle: every caller silently saw the 50 most recently active open
+ *  threads and treated that as the inbox. Use `getAllConversations` when the
+ *  caller needs them all - and prefer a targeted endpoint over either when the
+ *  caller only wants a handful of known threads. */
+export function getConversations(
+  params: { cursor?: string; limit?: string } = {},
+  signal?: AbortSignal,
+): Promise<ConversationsPage> {
   return request<ConversationsPage>('/api/conversations', {
+    query: {
+      ...(params.cursor !== undefined && { cursor: params.cursor }),
+      ...(params.limit !== undefined && { limit: params.limit }),
+    },
     ...(signal !== undefined && { signal }),
   });
+}
+
+/** EVERY open conversation, walking `nextCursor`. */
+export async function getAllConversations(
+  signal?: AbortSignal,
+): Promise<FetchAllPagesResult<ConversationSummary>> {
+  return fetchAllPages(
+    (cursor) =>
+      getConversations({ limit: PAGE_LIMIT, ...(cursor !== undefined && { cursor }) }, signal),
+    (page) => ({ items: page.conversations, nextCursor: page.nextCursor }),
+    { label: 'conversations' },
+  );
 }
 
 /** GET /api/conversations/:id/messages - newest-first page of a conversation's
@@ -914,14 +948,19 @@ export async function createUnit(body: Record<string, unknown>): Promise<UnitIte
 /** GET /api/units - the unit records. The landlord file filters this by
  *  landlordId === contactId to show the landlord's own properties; the property
  *  page reuses it for "Related properties" (same landlord). `deleted: true` returns
- *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them. */
+ *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them.
+ *  Returns ONE page; `nextCursor` continues the walk - prefer `getAllUnits` when
+ *  the caller needs the WHOLE list. `limit` is 1..MAX_PAGE_LIMIT (100); the
+ *  server REJECTS anything outside that range with a 400, it does not clamp.
+ *  Omitted = 50. */
 export function getUnits(
-  params: { deleted?: boolean; cursor?: string } = {},
+  params: { deleted?: boolean; cursor?: string; limit?: string } = {},
   signal?: AbortSignal,
 ): Promise<UnitsPage> {
   return request<UnitsPage>('/api/units', {
     query: {
       ...(params.cursor !== undefined && { cursor: params.cursor }),
+      ...(params.limit !== undefined && { limit: params.limit }),
       ...(params.deleted === true && { deleted: 'true' }),
     },
     ...(signal !== undefined && { signal }),
@@ -1211,6 +1250,67 @@ export function getContacts(
     },
     ...(signal !== undefined && { signal }),
   });
+}
+
+// --- Whole-list reads -------------------------------------------------------
+// The paged endpoints above return ONE page. Any caller that needs a COMPLETE
+// list - a typeahead's candidate roster, a board, an id->record lookup map -
+// uses one of these, never a bare first-page read. See api/paging.ts for what
+// went wrong when each caller decided for itself.
+
+/** EVERY contact of one type, walking `nextCursor`. The candidate roster behind
+ *  the tenant/landlord typeaheads: a first-page-only read offered 50 of 641
+ *  tenants, ordered by `status`, so most of the roster could not be picked. */
+export async function getAllContacts(
+  params: { type: ContactType; deleted?: boolean } ,
+  signal?: AbortSignal,
+): Promise<FetchAllPagesResult<Contact>> {
+  return fetchAllPages(
+    (cursor) =>
+      getContacts(
+        {
+          type: params.type,
+          limit: PAGE_LIMIT,
+          ...(params.deleted === true && { deleted: true }),
+          ...(cursor !== undefined && { cursor }),
+        },
+        signal,
+      ),
+    (page) => ({ items: page.contacts, nextCursor: page.nextCursor }),
+    { label: `contacts:${params.type}` },
+  );
+}
+
+/** EVERY unit, walking `nextCursor`. The property roster behind the unit
+ *  typeaheads and the listings views. */
+export async function getAllUnits(
+  params: { deleted?: boolean } = {},
+  signal?: AbortSignal,
+): Promise<FetchAllPagesResult<UnitItem>> {
+  return fetchAllPages(
+    (cursor) =>
+      getUnits(
+        {
+          limit: PAGE_LIMIT,
+          ...(params.deleted === true && { deleted: true }),
+          ...(cursor !== undefined && { cursor }),
+        },
+        signal,
+      ),
+    (page) => ({ items: page.units, nextCursor: page.nextCursor }),
+    { label: params.deleted === true ? 'units:deleted' : 'units' },
+  );
+}
+
+/** EVERY placement, walking `nextCursor` - the whole pipeline, not a prefix. */
+export async function getAllPlacements(
+  signal?: AbortSignal,
+): Promise<FetchAllPagesResult<PlacementItem>> {
+  return fetchAllPages(
+    (cursor) => getPlacements(signal, cursor, PAGE_LIMIT),
+    (page) => ({ items: page.placements, nextCursor: page.nextCursor }),
+    { label: 'placements' },
+  );
 }
 
 /** GET /api/contacts/:id - the contact record (the detail page header + file).

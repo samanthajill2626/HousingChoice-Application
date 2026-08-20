@@ -15,9 +15,9 @@
 // falls back to the id (honest — never fabricated).
 import { useCallback, useEffect, useState } from 'react';
 import {
-  getPlacements,
-  getContacts,
-  getUnits,
+  getAllContacts,
+  getAllPlacements,
+  getAllUnits,
   useEventStream,
   type PlacementAttention,
   type PlacementItem,
@@ -26,11 +26,6 @@ import {
   type PlacementStage,
   type UnitItem,
 } from '../../api/index.js';
-
-/** Safety cap on cursor-following so a misbehaving server (or a cursor that never
- *  nulls out) can never spin forever. The placement pipeline is small; this is
- *  far above any realistic page count. */
-const MAX_PAGES = 50;
 
 export type PlacementsStatus = 'loading' | 'ready' | 'error';
 
@@ -45,52 +40,22 @@ export interface PlacementsState {
   applyPlacement: (next: PlacementItem) => void;
 }
 
-/** Load ALL pages of the placements board by following nextCursor. A placement board
- *  must show the WHOLE pipeline, so we page until the server stops handing back a
- *  cursor (capped by MAX_PAGES so a never-null cursor can't loop unbounded — a
- *  hit is logged with counts only, never PII). Re-throws AbortError so the
+/** Load the WHOLE placement pipeline. A board that shows a prefix is worse than
+ *  one that shows nothing - it looks complete. Re-throws AbortError so the
  *  effect's catch can bail cleanly. */
 async function loadAllPlacements(signal: AbortSignal): Promise<PlacementItem[]> {
-  const all: PlacementItem[] = [];
-  let cursor: string | undefined;
-  let pages = 0;
-  do {
-    const page = await getPlacements(signal, cursor);
-    all.push(...page.placements);
-    cursor = page.nextCursor ?? undefined;
-    pages += 1;
-    if (pages >= MAX_PAGES && cursor !== undefined) {
-      // Counts only — never log placement/tenant ids or any PII.
-      console.warn(`usePlacements: getPlacements hit the ${MAX_PAGES}-page cap (${all.length} placements loaded); truncating.`);
-      break;
-    }
-  } while (cursor !== undefined);
-  return all;
+  const { items } = await getAllPlacements(signal);
+  return items;
 }
 
-/** Best-effort page-walk of one tenant-contacts view (live or soft-deleted) —
- *  never throws (except AbortError); a failure just means cards fall back to the
- *  tenant id for that view. The Contacts API requires a `type` filter, so we ask
- *  for tenants (the only contacts a placement's tenant can be). */
+/** Best-effort whole-list read of one tenant-contacts view (live or soft-deleted)
+ *  — never throws (except AbortError); a failure just means cards fall back to
+ *  the tenant id for that view. The Contacts API requires a `type` filter, so we
+ *  ask for tenants (the only contacts a placement's tenant can be). */
 async function loadContactPages(deleted: boolean, signal: AbortSignal): Promise<Contact[]> {
   try {
-    const all: Contact[] = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    do {
-      const page = await getContacts(
-        { type: 'tenant', ...(deleted && { deleted: true }), ...(cursor !== undefined && { cursor }) },
-        signal,
-      );
-      all.push(...page.contacts);
-      cursor = page.nextCursor ?? undefined;
-      pages += 1;
-      if (pages >= MAX_PAGES && cursor !== undefined) {
-        console.warn(`usePlacements: getContacts hit the ${MAX_PAGES}-page cap (${all.length} contacts loaded); truncating.`);
-        break;
-      }
-    } while (cursor !== undefined);
-    return all;
+    const { items } = await getAllContacts({ type: 'tenant', deleted }, signal);
+    return items;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
     return [];
@@ -108,25 +73,13 @@ async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
   return [...deleted, ...live];
 }
 
-/** Best-effort page-walk of one units view (live or soft-deleted) for card
+/** Best-effort whole-list read of one units view (live or soft-deleted) for card
  *  property addresses — never throws (except AbortError); a failure falls back
  *  to the unit id for that view. */
 async function loadUnitPages(deleted: boolean, signal: AbortSignal): Promise<UnitItem[]> {
   try {
-    const all: UnitItem[] = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    do {
-      const page = await getUnits({ ...(deleted && { deleted: true }), cursor }, signal);
-      all.push(...page.units);
-      cursor = page.nextCursor ?? undefined;
-      pages += 1;
-      if (pages >= MAX_PAGES && cursor !== undefined) {
-        console.warn(`usePlacements: getUnits hit the ${MAX_PAGES}-page cap (${all.length} units loaded); truncating.`);
-        break;
-      }
-    } while (cursor !== undefined);
-    return all;
+    const { items } = await getAllUnits({ deleted }, signal);
+    return items;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
     return [];

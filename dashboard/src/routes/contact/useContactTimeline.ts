@@ -12,7 +12,7 @@ import {
   ApiError,
   getContactTimeline,
   getConversationMessages,
-  getConversations,
+  getAllConversations,
   useEventStream,
   type Message,
   type SendMessageResult,
@@ -188,7 +188,7 @@ async function loadTimeline(
     // partition; relay groups front a pool number), which is exactly why this
     // filter had no type guard at all - and why it needs one before a future
     // reader change makes the omission load-bearing.
-    const conversations = (await getConversations(signal)).conversations.filter(
+    const conversations = (await getAllConversations(signal)).items.filter(
       (c) =>
         c.type !== 'relay_group' &&
         c.type !== 'group_text' &&

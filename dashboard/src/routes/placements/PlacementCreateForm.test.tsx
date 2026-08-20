@@ -9,16 +9,16 @@ import type { Contact, PlacementItem, UnitItem } from '../../api/index.js';
 // the form calls. Each delegates to a vi.fn() so per-test mockResolvedValue works.
 const createPlacement = vi.fn();
 const getPlacementsBy = vi.fn();
-const getContacts = vi.fn();
-const getUnits = vi.fn();
+const getAllContacts = vi.fn();
+const getAllUnits = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
   };
 });
 
@@ -69,8 +69,8 @@ function setup(props?: Partial<Parameters<typeof PlacementCreateForm>[0]>) {
 beforeEach(() => {
   vi.clearAllMocks();
   // Sensible defaults; individual tests override.
-  getContacts.mockResolvedValue({ contacts: TENANTS, nextCursor: null });
-  getUnits.mockResolvedValue({ units: UNITS, nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false});
+  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false});
   getPlacementsBy.mockResolvedValue([]);
 });
 
@@ -88,27 +88,22 @@ async function pickUnit(user: ReturnType<typeof userEvent.setup>, query: string,
 
 describe('PlacementCreateForm', () => {
   // ── 0: the unit list is the WHOLE portfolio, not the first server page ──
-  it('walks every unit page so a property past page one can be picked', async () => {
-    // /api/units pages at 50; a first-page-only read left later properties
-    // unselectable, so a placement could not be created against them at all.
+  it('offers a property from deep in the roster, not just the first server page', async () => {
+    // The roster arrives ALREADY walked - getAllUnits follows nextCursor, proven
+    // in api/lists.test.ts. What this asserts is the other half: the form
+    // searches the WHOLE roster it was handed, including a property that only
+    // a paged read could have supplied. Before the walk existed, a tour simply
+    // could not be scheduled on any property later in the scan.
     const user = userEvent.setup();
-    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
-      Promise.resolve(
-        params.cursor === undefined
-          ? { units: UNITS, nextCursor: 'page-2' }
-          : {
-              units: [
-                {
-                  unitId: 'unit-0099',
-                  landlordId: 'contact-landlord-0001',
-                  status: 'available',
-                  address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
-                },
-              ],
-              nextCursor: null,
-            },
-      ),
-    );
+    getAllUnits.mockResolvedValue({
+      items: [...UNITS, {
+          unitId: 'unit-0099',
+          landlordId: 'contact-landlord-0001',
+          status: 'available',
+          address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
+        }],
+      truncated: false,
+    });
     setup();
     await screen.findByRole('dialog', { name: 'New placement' });
 
@@ -140,7 +135,7 @@ describe('PlacementCreateForm', () => {
     expect(screen.queryByRole('option', { name: 'Moved in' })).toBeNull();
     expect(screen.queryByRole('option', { name: 'Lost' })).toBeNull();
     // Let the mount fetches settle so their state updates land inside act().
-    await waitFor(() => expect(getContacts).toHaveBeenCalled());
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
   });
 
   // ── 3: tenant picker selects ──

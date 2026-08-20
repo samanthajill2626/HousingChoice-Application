@@ -17,9 +17,9 @@ const restoreUnit = vi.fn();
 const updateUnit = vi.fn();
 const setListingStatus = vi.fn();
 // Used by the "Start placement" dialog (PlacementCreateForm) when opened.
-const getUnits = vi.fn();
+const getAllUnits = vi.fn();
 const getUnit = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
 // Direct-upload trio (unit-photos direct-upload R4): presign -> raw S3 POST -> confirm.
@@ -39,9 +39,9 @@ vi.mock('../../api/index.js', async () => {
     restoreUnit: (...a: unknown[]) => restoreUnit(...a),
     updateUnit: (...a: unknown[]) => updateUnit(...a),
     setListingStatus: (...a: unknown[]) => setListingStatus(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getUnit: (...a: unknown[]) => getUnit(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     presignUnitPhotos: (...a: unknown[]) => presignUnitPhotos(...a),
@@ -960,9 +960,9 @@ describe('ListingDetail', () => {
       ...READY,
       unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
     });
-    getUnits.mockResolvedValue({ units: [], nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: [], truncated: false});
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
-    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+    getAllContacts.mockResolvedValue({ items: [], truncated: false});
     getPlacementsBy.mockResolvedValue([]);
     renderAt();
 
@@ -996,10 +996,10 @@ describe('ListingDetail', () => {
     });
     // ScheduleTourForm's mount fetches: tenant candidates + the unit roster (the
     // roster must contain THIS unit for the pre-commit to take).
-    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
-    getUnits.mockResolvedValue({
-      units: [{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } }],
-      nextCursor: null,
+    getAllContacts.mockResolvedValue({ items: [], truncated: false});
+    getAllUnits.mockResolvedValue({
+      items: [{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } }],
+      truncated: false,
     });
     renderAt();
 
@@ -1021,9 +1021,9 @@ describe('ListingDetail', () => {
       ...READY,
       unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
     });
-    getUnits.mockResolvedValue({ units: [], nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: [], truncated: false});
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
-    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+    getAllContacts.mockResolvedValue({ items: [], truncated: false});
     getPlacementsBy.mockResolvedValue([]);
     renderAt();
 

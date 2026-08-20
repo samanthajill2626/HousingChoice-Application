@@ -57,6 +57,46 @@ export interface BuildAppDeps {
   devRouter?: Router;
 }
 
+/**
+ * Mount prefixes that accept a MUTATING method (POST/PUT/PATCH/DELETE) and are
+ * reachable through CloudFront. Each one MUST have a matching all-methods
+ * `ordered_cache_behavior` in infra/modules/cloudfront/main.tf.
+ *
+ * Why this list exists as a constant: CloudFront's `default_cache_behavior`
+ * allows GET/HEAD/OPTIONS only, so a prefix with no behavior of its own has its
+ * POSTs refused AT THE EDGE - CloudFront returns its own 403 error page and the
+ * request never reaches this process, so nothing appears in our logs. That is
+ * exactly how POST /public/housing-fair stayed broken in dev and prod from M1.5
+ * until 2026-08-20 (see the comment on that Terraform block).
+ *
+ * test/cloudfrontBehaviors.test.ts fails when this list and the Terraform
+ * behaviors drift apart in either direction.
+ */
+export const EDGE_MUTATING_PREFIXES = ['/api', '/webhooks', '/auth', '/public'] as const;
+
+/**
+ * Reserved prefixes that deliberately have NO all-methods CloudFront behavior,
+ * each with the reason it is safe. The guard test requires every reserved
+ * prefix to appear either here or in EDGE_MUTATING_PREFIXES, so adding a new
+ * mount forces a conscious edge decision instead of silently defaulting to
+ * "refused at the edge".
+ */
+export const EDGE_EXEMPT_PREFIXES: Readonly<Record<string, string>> = {
+  '/unit-media': 'read-only; served from S3 by its own GET/HEAD-only behavior',
+  '/internal': 'loopback only - the worker posts via EVENT_BRIDGE_URL, never through the edge',
+  '/__dev': 'structurally absent in deployed envs (dev router is not mounted)',
+};
+
+/**
+ * Every prefix the SPA fallback must not swallow. Derived from the two lists
+ * above so there is ONE place to add a mount, and the guard test can prove the
+ * edge classification covers all of it.
+ */
+export const RESERVED_PREFIXES: readonly string[] = [
+  ...EDGE_MUTATING_PREFIXES,
+  ...Object.keys(EDGE_EXEMPT_PREFIXES),
+];
+
 export function buildApp(deps: BuildAppDeps = {}): Express {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
@@ -236,7 +276,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth', '/public', '/unit-media', '/__dev', '/internal'].some(
+      const reserved = RESERVED_PREFIXES.some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

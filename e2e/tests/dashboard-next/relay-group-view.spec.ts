@@ -155,8 +155,10 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await expect(list.getByRole('listitem')).toHaveCount(3);
   await expect(list.getByText('Leon Abara')).toBeVisible();
   // The join is ANNOUNCED in the thread (2026-07-14 visibility rule): an
-  // "Automated" bubble naming the new member appears via the SSE refetch.
-  await expect(page.getByText('Leon Abara joined this group chat', { exact: false })).toBeVisible({
+  // "Automated" bubble naming the new member appears via the SSE refetch. The
+  // announcement uses the member's FIRST name only (founder decision
+  // 2026-08-20), so this is "Leon", not "Leon Abara".
+  await expect(page.getByText('Leon joined this group chat', { exact: false })).toBeVisible({
     timeout: 15_000,
   });
 

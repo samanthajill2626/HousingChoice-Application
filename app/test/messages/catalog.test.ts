@@ -91,9 +91,16 @@ describe('MESSAGE_CATALOG', () => {
     // failing test behind it, not an accident.
     expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain('Reply STOP');
     expect(MESSAGE_CATALOG['relay.member_added'].default).not.toContain('Reply STOP');
-    // The brand identity half IS kept - a stranger's first text from an unknown
-    // number still says who it is from.
-    expect(MESSAGE_CATALOG['relay.intro'].default).toContain(SMS_BRAND_NAME);
+    // FOUNDER DECISION 2026-08-20: the brand identity is now gone from the group
+    // intro as well, on Sam's explicit instruction. relay.identity has no send
+    // site, so the group intro now carries NEITHER identity NOR opt-out and a
+    // stranger's first text no longer says who it is from. Engineering stated
+    // that exposure and was overruled; asserted (not merely deleted) so putting
+    // the brand back is a deliberate act with a failing test behind it.
+    expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain(SMS_BRAND_NAME);
+    // The housing-authority sentence went with it - updates come from the
+    // landlord, not from Sam.
+    expect(MESSAGE_CATALOG['relay.intro'].default).not.toContain('housing authority');
     // relay.identity still pins the filed brand + opt-out string, untouched.
     expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
   });

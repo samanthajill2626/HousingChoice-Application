@@ -16,7 +16,6 @@ import {
   HELP_REPLY,
   OPT_IN_CONFIRMATION,
   RELAY_INTRO_IDENTITY,
-  SMS_BRAND_NAME,
   STOP_CONFIRMATION,
   WEB_FORM_CONSENT_COPY,
   WELCOME_SMS,
@@ -244,13 +243,25 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // the attribution here so a later reader does not mistake it for a developer
   // oversight and does not "helpfully" restore it without asking.
   //
-  // The identity half is DELIBERATELY KEPT (see relay.identity, which still
-  // pins the filed brand+opt-out string): a stranger's first text from an
-  // unknown number still says who it is from.
+  // FOLLOW-UP FOUNDER DECISION, 2026-08-20: the brand is now gone from
+  // relay.intro too, on Sam's explicit instruction (relayed by Cameron). The
+  // 2026-08-18 note below claimed the identity half was kept "see
+  // relay.identity" - that was already misleading: relay.identity has NO send
+  // site anywhere in the app, so this entry's own "with <brand>" was the ONLY
+  // thing identifying us on a first-contact text. With it removed, the group
+  // intro now carries NEITHER business identity NOR opt-out language, and a
+  // stranger's first text from an unknown number no longer says who it is
+  // from. Engineering stated that exposure; the founder directed it anyway.
+  // Same removal for the housing-authority sentence: updates come from the
+  // landlord, not from Sam.
   //
   // Superseded wording, for reference:
   //   relay.intro        `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`
   //   relay.member_added `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`
+  //   relay.intro (2026-08-18..2026-08-20)
+  //     `Hey, it's Sam with ${SMS_BRAND_NAME}. {members} Use this group text for
+  //      anything that comes up - I'll share updates as I get them from the
+  //      housing authority. It can be a long process, so ask me anything in here!`
   //
   // {members} is the count-plurality / Oxford-list `connection` string, computed
   // in code (jobs/relayFanOut.ts composeIntroBody) and passed in. NOTE it is a
@@ -262,8 +273,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'relay.intro': {
     id: 'relay.intro',
     default:
-      `Hey, it's Sam with ${SMS_BRAND_NAME}. {members} Use this group text for anything that ` +
-      "comes up - I'll share updates as I get them from the housing authority. It can be a " +
+      "Hey, it's Sam. {members} Use this group text for anything that comes up. It can be a " +
       'long process, so ask me anything in here!',
     class: 'operational',
     editable: true,

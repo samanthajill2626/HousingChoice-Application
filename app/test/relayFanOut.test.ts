@@ -646,25 +646,36 @@ describe('relay body/intro composition (M1.7)', () => {
     expect(composeIntroBody([undefined, undefined])).toMatch(/connected with 1 other person/);
   });
 
-  // FOUNDER DECISION 2026-08-18: the intro no longer carries "Reply STOP to opt
-  // out.". It is a first-contact message, so engineering advised keeping the
-  // line (the A2P floor) and was overruled - attribution is in catalog.ts. The
-  // BRAND half survives, so a stranger's first text from an unknown number still
-  // identifies the sender. Asserted, not deleted: putting STOP back should be a
-  // deliberate act that trips a test, never a silent drift.
-  it('every intro identifies the sender and carries NO opt-out line (founder decision)', () => {
+  // FOUNDER DECISIONS 2026-08-18 (opt-out line) and 2026-08-20 (brand): the
+  // intro now carries NEITHER. Both are first-contact messages, so engineering
+  // advised keeping each and was overruled both times - attribution is in
+  // catalog.ts. Asserted, not deleted: restoring either should be a deliberate
+  // act that trips a test, never a silent drift.
+  it('the intro carries NO opt-out line and NO brand identity (founder decisions)', () => {
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
       const body = composeIntroBody(names);
-      expect(body).toContain('HousingChoice');
+      expect(body).not.toContain('HousingChoice');
       expect(body).not.toContain('Reply STOP');
+      // It still says who is texting, by first name.
+      expect(body).toContain("it's Sam");
     }
+  });
+
+  it('the connection sentence uses FIRST names only (founder decision 2026-08-20)', () => {
+    const body = composeIntroBody(['Brenda Morris', 'Sam Whitfield']);
+    expect(body).toContain('Brenda and Sam');
+    expect(body).not.toContain('Morris');
+    expect(body).not.toContain('Whitfield');
   });
 
   it('composeMemberAddedBody names the joiner (neutral fallback), with no opt-out line', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
     expect(body).not.toContain('Reply STOP');
-    expect(body).toContain('Carol Brown joined this group chat.');
-    expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
+    // First name on BOTH halves (2026-08-20) - never "Carol Brown joined ...
+    // connected with ... Carol", which reads like two different people.
+    expect(body).toContain('Carol joined this group chat.');
+    expect(body).toContain("You're now connected with Alice, Bob, and Carol");
+    expect(body).not.toContain('Brown');
     // No name (phone-only member) → neutral label, NEVER a phone.
     expect(composeMemberAddedBody(undefined, ['Alice', undefined])).toContain(
       'A new member joined this group chat.',

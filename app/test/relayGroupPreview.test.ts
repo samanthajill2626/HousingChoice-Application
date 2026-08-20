@@ -244,9 +244,13 @@ describe('POST /api/relay-groups/preview (standalone open preview)', () => {
     });
 
     expect(res.status).toBe(200);
+    // The ROSTER keeps the supplied name whole...
     expect(res.body.recipients[0].name).toBe('Client Supplied');
-    expect(res.body.body).toContain('Client Supplied');
-    expect(res.body.body).not.toContain('Alice Adams');
+    // ...while the intro body renders first names only (founder decision
+    // 2026-08-20). The point of this test is unchanged: the body is built from
+    // the SUPPLIED name, never recomputed from the contact.
+    expect(res.body.body).toContain('Client and Bob');
+    expect(res.body.body).not.toContain('Alice');
   });
 
   it('reports deferred:true with the clamped quiet-end instant on a PINNED clock', async () => {

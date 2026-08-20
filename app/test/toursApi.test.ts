@@ -3705,7 +3705,8 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual(
       [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
     );
-    expect(world.sent[0]!.body).toContain('Casey Worker joined this group chat.');
+    // FIRST name only since 2026-08-20 (founder decision) - not "Casey Worker".
+    expect(world.sent[0]!.body).toContain('Casey joined this group chat.');
   });
 
   it('LIVE add on a CLOSED thread is silent and immediate - never announced, never deferred', async () => {

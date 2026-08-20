@@ -166,13 +166,29 @@ export function composeRelayBody(senderName: string | undefined, body: string): 
 }
 
 /**
+ * FIRST name only, for the connection sentence below. The stored display name is
+ * the "First Last" join (lib/rosterResolution.ts), which read as over-formal in a
+ * group intro: the founder reported 2026-08-20 that a landlord came through as
+ * "First Last" while the tenant came through as a bare first name. That was never
+ * a data difference - most imported tenant contacts simply have no lastName on
+ * file, so the join yields one token and LOOKED right. Everyone gets first names
+ * now, so the two render alike.
+ *
+ * Deliberately accepted: two members sharing a first name are ambiguous here
+ * (founder's call, 2026-08-20 - a natural-sounding intro is worth it).
+ */
+function firstNameOnly(name: string): string {
+  return name.trim().split(/\s+/)[0] ?? name.trim();
+}
+
+/**
  * The "You're now connected with …" connection sentence shared by the intro
- * and the member-added announcement. Uses member display names where known, a
+ * and the member-added announcement. Uses member FIRST names where known, a
  * neutral count phrasing otherwise — NEVER a phone number (PII).
  */
 export function composeConnectionSentence(memberNames: (string | undefined)[]): string {
   const named = memberNames
-    .map((n) => (n && n.trim().length > 0 ? n.trim() : undefined))
+    .map((n) => (n && n.trim().length > 0 ? firstNameOnly(n) : undefined))
     .filter((n): n is string => n !== undefined);
   if (named.length === 0) {
     const others = Math.max(memberNames.length - 1, 0);
@@ -211,9 +227,13 @@ const ANONYMOUS_JOINED_LABEL = 'A new member';
  * Member-added announcement (founder decision 2026-07-14): one body sent to
  * the WHOLE group — the new member's first contact on this number (leading
  * brand + trailing STOP fold in like the intro) doubling as the join notice
- * for everyone else. E.g. "HousingChoice. Carol Brown joined this group
- * chat. You're now connected with Alice, Bob, and Carol Brown on this number.
- * Reply here and everyone in the group sees it. Reply STOP to opt out."
+ * for everyone else. E.g. "Hey! Carol joined this group chat. You're now
+ * connected with Alice, Bob, and Carol on this number. Reply here and everyone
+ * in the group sees it."
+ *
+ * The joiner is named by FIRST name (2026-08-20), matching the connection
+ * sentence - mixing "Carol Brown joined" with "connected with ... Carol" in one
+ * body reads like two different people.
  */
 export function composeMemberAddedBody(
   newMemberName: string | undefined,
@@ -221,7 +241,7 @@ export function composeMemberAddedBody(
 ): string {
   const who =
     newMemberName && newMemberName.trim().length > 0
-      ? newMemberName.trim()
+      ? firstNameOnly(newMemberName)
       : ANONYMOUS_JOINED_LABEL;
   return resolveMessage('relay.member_added', {
     joined: `${who} joined this group chat.`,

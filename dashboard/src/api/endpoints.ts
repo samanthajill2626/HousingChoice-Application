@@ -978,9 +978,11 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
  *  true`) - the server demotes whoever held it, keeping the single-primary
  *  invariant and the `primary_contact` scalar in agreement. The landlord of
  *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
- *  sent. Returns the updated unit with its enriched `contacts` roster. Errors:
- *  404 unit_not_found / contact_not_found; 400 on a bad role or a non-boolean
- *  primaryContact. */
+ *  sent. On an ownerless legacy property, adding a Landlord also claims its
+ *  `landlordId`; an existing different owner is never silently replaced.
+ *  Returns the updated unit with its enriched `contacts` roster. Errors: 409
+ *  landlord_reassignment_required / unit_roster_conflict; 404 unit_not_found /
+ *  contact_not_found; 400 on a bad role or a non-boolean primaryContact. */
 export async function addUnitContact(
   unitId: string,
   input: { contactId: string; role: UnitContact['role']; primaryContact?: boolean },
@@ -998,7 +1000,8 @@ export async function addUnitContact(
  *  clears the primary entirely when the property has no landlordId) - so the
  *  caller must confirm that promotion BEFORE calling (spec 6.1). Errors: 409
  *  cannot_remove_landlord_of_record (the target IS `unit.landlordId` - reassign
- *  the property's landlord first); 404 unit_or_contact_not_found. */
+ *  the property's landlord first) / unit_roster_conflict; 404
+ *  unit_or_contact_not_found. */
 export async function removeUnitContact(unitId: string, contactId: string): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/contacts/${encodeURIComponent(contactId)}`,

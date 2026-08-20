@@ -8,8 +8,8 @@
 // This spec is the end-to-end proof that the editor and the resolver are the
 // same fact, walked over the motivating PM-managed property:
 //
-//   1. add a property manager to the property roster (committed-pick contact
-//      search + role), with the OWNER immovable as the landlord of record
+//   1. prove a Landlord roster role cannot silently replace the OWNER, then add
+//      the same contact as property manager (committed-pick search + role)
 //   2. make the PM the primary contact
 //   3. the TOUR page's People card now resolves to the PM (slice 3 resolution) -
 //      the card the operator reads for "who is on this tour" followed a change
@@ -135,7 +135,27 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     // Picking COMMITS the field (committed-selection typeahead): typing alone
     // never carries a contactId, so nobody can be added by a near-miss.
     await page.getByRole('option', { name: pm.name }).click();
-    await page.getByRole('combobox', { name: 'Role for the new contact' }).selectOption('pm');
+
+    // A generic roster label must not silently transfer ownership. The same
+    // editor can claim an ownerless legacy property, but this property already
+    // has one, so Landlord requires the explicit reassignment flow.
+    const role = page.getByRole('combobox', { name: 'Role for the new contact' });
+    await role.selectOption('landlord');
+    await page.getByRole('button', { name: 'Add contact to this property' }).click();
+    await expect(page.getByRole('alert')).toHaveText(
+      'This property already has a landlord of record - reassign it before choosing Landlord.',
+    );
+    const afterRefusal = (await (
+      await req.get(`${NEXT}/api/units/${unitId}`)
+    ).json()) as { unit: { landlordId: string; contacts?: Array<{ contactId: string }> } };
+    expect(afterRefusal.unit.landlordId).toBe(owner.contactId);
+    expect(
+      (afterRefusal.unit.contacts ?? []).some((contact) => contact.contactId === pm.contactId),
+    ).toBe(false);
+
+    // The failed write leaves the form intact, so choosing the intended PM role
+    // and retrying adds the roster relationship without changing ownership.
+    await role.selectOption('pm');
     await page.getByRole('button', { name: 'Add contact to this property' }).click();
 
     // Persisted ON CLICK: the PM is now a roster row with its own controls.

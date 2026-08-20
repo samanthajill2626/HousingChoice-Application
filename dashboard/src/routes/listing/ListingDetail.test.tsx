@@ -1246,6 +1246,55 @@ describe('ListingDetail - Contacts card edit mode', () => {
     );
   });
 
+  it('refuses to silently replace the landlord of record when adding a Landlord contact', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact.mockRejectedValue(
+      new ApiError(409, 'landlord_reassignment_required', 'conflict'),
+    );
+    getUnit.mockResolvedValue(ROSTER_UNIT);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+    await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Role for the new contact' }),
+      'landlord',
+    );
+    await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', {
+      contactId: 'pm9',
+      role: 'landlord',
+      primaryContact: false,
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This property already has a landlord of record - reassign it before choosing Landlord.',
+    );
+    expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
+  });
+
+  it('asks the operator to retry when repeated concurrent roster writes exhaust retries', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact.mockRejectedValue(new ApiError(409, 'unit_roster_conflict', 'conflict'));
+    getUnit.mockResolvedValue(ROSTER_UNIT);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+    await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+    await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The property contacts changed - try that change again.',
+    );
+    expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
+  });
+
   it('make primary contact re-POSTs the row with primaryContact: true, role preserved', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);

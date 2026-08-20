@@ -47,6 +47,8 @@ import {
   CannotRemoveLandlordOfRecordError,
   createUnitsRepo,
   isDeleted,
+  LandlordReassignmentRequiredError,
+  RosterWriteConflictError,
   unitContacts,
   UNIT_CONTACT_ROLES,
   type ListUnitsOpts,
@@ -977,8 +979,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
   // keeps the primary_contact scalar (the property's default contact - relay
-  // groups and masked calls) consistent. 404 unknown unit /
-  // unknown contact; 400 bad role / primaryContact; audit unit_contact_added.
+  // groups and masked calls) consistent. A Landlord role claims an ownerless
+  // legacy property; 409 landlord_reassignment_required when a different owner
+  // already exists, or unit_roster_conflict after repeated write races. 404
+  // unknown/disappeared unit or unknown contact; 400 bad role / primaryContact;
+  // audit unit_contact_added after successful writes only.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const body = req.body;
@@ -1023,13 +1028,30 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const name = displayNameOfContact(contact);
     const company = typeof contact['company'] === 'string' ? (contact['company'] as string) : undefined;
 
-    const updated = await units.addContact(unitId, {
-      contactId,
-      role,
-      primaryContact,
-      ...(name !== undefined && { name }),
-      ...(company !== undefined && { company }),
-    });
+    let updated: UnitItem;
+    try {
+      updated = await units.addContact(unitId, {
+        contactId,
+        role,
+        primaryContact,
+        ...(name !== undefined && { name }),
+        ...(company !== undefined && { company }),
+      });
+    } catch (err) {
+      if (err instanceof LandlordReassignmentRequiredError) {
+        res.status(409).json({ error: 'landlord_reassignment_required' });
+        return;
+      }
+      if (err instanceof RosterWriteConflictError) {
+        res.status(409).json({ error: 'unit_roster_conflict' });
+        return;
+      }
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      throw err;
+    }
     await audit.append(`units#${unitId}`, 'unit_contact_added', {
       actor: req.user?.userId,
       contactId,
@@ -1042,8 +1064,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) → { unit }. 404
   // unknown unit / contact-not-on-roster; 409 removing the landlord of record
-  // (cannot_remove_landlord_of_record — reassign landlordId first); audit
-  // unit_contact_removed.
+  // (cannot_remove_landlord_of_record — reassign landlordId first) or exhausted
+  // optimistic retries (unit_roster_conflict); audit unit_contact_removed.
   router.delete('/:unitId/contacts/:contactId', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const contactId = String(req.params['contactId'] ?? '');
@@ -1053,6 +1075,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     } catch (err) {
       if (err instanceof CannotRemoveLandlordOfRecordError) {
         res.status(409).json({ error: 'cannot_remove_landlord_of_record' });
+        return;
+      }
+      if (err instanceof RosterWriteConflictError) {
+        res.status(409).json({ error: 'unit_roster_conflict' });
         return;
       }
       if (err instanceof ConditionalCheckFailedException) {

@@ -5,9 +5,10 @@
 //   GET    /api/units/:id/related    → { related: RelatedUnit[] }
 // Plus the back-compat roster for a roster-less unit and the audit trail.
 import request from 'supertest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { describe, expect, it } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import type { UnitItem } from '../src/repos/unitsRepo.js';
+import { RosterWriteConflictError, type UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -185,6 +186,85 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
     });
     expect(world.auditEvents).toContainEqual(
       expect.objectContaining({ entityKey: 'units#u-3', event_type: 'unit_contact_added' }),
+    );
+  });
+
+  it('assigns landlordId when a landlord role is added to an unowned property', async () => {
+    const { app, world } = makeWebhookHarness();
+    const unit = seedUnit(world, 'u-unowned');
+    delete (unit as Partial<UnitItem>).landlordId;
+    seedContact(world, 'c-new-landlord', { firstName: 'New', lastName: 'Landlord' });
+
+    const res = await request(app)
+      .post('/api/units/u-unowned/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactId: 'c-new-landlord', role: 'landlord' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.unit.landlordId).toBe('c-new-landlord');
+    expect(world.units.get('u-unowned')?.landlordId).toBe('c-new-landlord');
+  });
+
+  it('409s instead of silently replacing an existing landlord of record', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-owned', { landlordId: 'c-current-landlord' });
+    seedContact(world, 'c-different-landlord');
+
+    const res = await request(app)
+      .post('/api/units/u-owned/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactId: 'c-different-landlord', role: 'landlord' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('landlord_reassignment_required');
+    expect(world.units.get('u-owned')?.landlordId).toBe('c-current-landlord');
+    expect(world.units.get('u-owned')?.contacts).toBeUndefined();
+    expect(world.auditEvents).not.toContainEqual(
+      expect.objectContaining({ entityKey: 'units#u-owned', event_type: 'unit_contact_added' }),
+    );
+  });
+
+  it('404s when the unit disappears between the route precheck and roster write', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-disappearing');
+    seedContact(world, 'c-property-manager');
+    world.unitsRepo.addContact = async () => {
+      throw new ConditionalCheckFailedException({ message: 'unit disappeared', $metadata: {} });
+    };
+
+    const res = await request(app)
+      .post('/api/units/u-disappearing/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactId: 'c-property-manager', role: 'pm' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('unit_not_found');
+    expect(world.auditEvents).not.toContainEqual(
+      expect.objectContaining({ entityKey: 'units#u-disappearing', event_type: 'unit_contact_added' }),
+    );
+  });
+
+  it('409s with a retryable code when roster write contention exhausts retries', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-contended');
+    seedContact(world, 'c-property-manager');
+    world.unitsRepo.addContact = async () => {
+      throw new RosterWriteConflictError();
+    };
+
+    const res = await request(app)
+      .post('/api/units/u-contended/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactId: 'c-property-manager', role: 'pm' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('unit_roster_conflict');
+    expect(world.auditEvents).not.toContainEqual(
+      expect.objectContaining({ entityKey: 'units#u-contended', event_type: 'unit_contact_added' }),
     );
   });
 

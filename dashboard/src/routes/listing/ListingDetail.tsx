@@ -106,11 +106,18 @@ const ADD_ROW_KEY = 'add-contact';
  *  reassigns the property's landlord first (spec 6.1 / D2). */
 const LANDLORD_OF_RECORD_REASON = "Landlord of record - reassign the property's landlord first";
 
-/** The ONE conflict these endpoints raise: the row we tried to remove is (now)
- *  the landlord of record. Rendered inline ON the row, and the card refetches so
- *  the row settles into the state that won the race (spec 6.1). */
+/** The row we tried to remove is (now) the landlord of record. Rendered inline
+ *  ON the row, and the card refetches so the row settles into the state that won
+ *  the race (spec 6.1). */
 const ROSTER_CONFLICT_COPY =
   "That contact is the landlord of record now - reassign the property's landlord first.";
+
+/** Adding a second Landlord label must not silently replace the property's
+ *  actual landlordId. Point the operator to the explicit reassignment flow. */
+const LANDLORD_REASSIGNMENT_COPY =
+  'This property already has a landlord of record - reassign it before choosing Landlord.';
+
+const ROSTER_RETRY_COPY = 'The property contacts changed - try that change again.';
 
 // Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
 // path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in
@@ -393,7 +400,11 @@ export function ListingDetail(): React.JSX.Element {
         setRosterError({
           key,
           message: conflict
-            ? ROSTER_CONFLICT_COPY
+            ? err.code === 'landlord_reassignment_required'
+              ? LANDLORD_REASSIGNMENT_COPY
+              : err.code === 'unit_roster_conflict'
+                ? ROSTER_RETRY_COPY
+              : ROSTER_CONFLICT_COPY
             : "Couldn't save that change - please try again.",
         });
         if (!conflict) return;

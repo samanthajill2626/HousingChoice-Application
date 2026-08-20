@@ -10,6 +10,7 @@
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -66,6 +67,169 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     // A non-primaryContact add leaves the landlord as the ☎ primary + scalar.
     expect(roster.find((c) => c.contactId === 'c-pm-1')?.primaryContact).toBe(false);
     expect(updated.primary_contact).toBe('c-ll-1');
+  });
+
+  it('addContact claims an unowned unit when the new roster role is landlord', async () => {
+    const created = await units.create({ landlordId: 'c-temporary', status: 'available' });
+    await units.update(created.unitId, { landlordId: null });
+
+    const updated = await units.addContact(created.unitId, {
+      contactId: 'c-new-landlord',
+      role: 'landlord',
+    });
+
+    expect(updated.landlordId).toBe('c-new-landlord');
+    expect(updated.contacts).toContainEqual({
+      contactId: 'c-new-landlord',
+      role: 'landlord',
+      primaryContact: false,
+    });
+    const owned = await units.listByLandlord('c-new-landlord');
+    expect(owned.items.map((unit) => unit.unitId)).toContain(created.unitId);
+  });
+
+  it('addContact refuses to replace an existing landlord of record through a roster role', async () => {
+    const created = await units.create({ landlordId: 'c-current-landlord', status: 'available' });
+
+    await expect(
+      units.addContact(created.unitId, {
+        contactId: 'c-different-landlord',
+        role: 'landlord',
+      }),
+    ).rejects.toMatchObject({ name: 'LandlordReassignmentRequiredError' });
+
+    const unchanged = await units.getById(created.unitId);
+    expect(unchanged?.landlordId).toBe('c-current-landlord');
+    expect(unchanged?.contacts).toBeUndefined();
+  });
+
+  it('allows only one landlord claim when two roster writes race on an unowned unit', async () => {
+    const created = await units.create({ landlordId: 'c-temporary', status: 'available' });
+    await units.update(created.unitId, { landlordId: null });
+
+    let releaseReads = (): void => {};
+    const bothReadsFinished = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    let reads = 0;
+    const gatedDoc = Object.create(doc) as typeof doc;
+    gatedDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
+      const result = await doc.send(command);
+      if (command instanceof GetCommand && command.input.Key?.['unitId'] === created.unitId) {
+        reads += 1;
+        if (reads === 2) releaseReads();
+        await bothReadsFinished;
+      }
+      return result;
+    }) as typeof doc.send;
+    const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
+
+    const outcomes = await Promise.allSettled([
+      racingUnits.addContact(created.unitId, { contactId: 'c-racer-one', role: 'landlord' }),
+      racingUnits.addContact(created.unitId, { contactId: 'c-racer-two', role: 'landlord' }),
+    ]);
+
+    expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(outcomes.find((result) => result.status === 'rejected')).toMatchObject({
+      reason: { name: 'LandlordReassignmentRequiredError' },
+    });
+    const stored = await units.getById(created.unitId);
+    expect(['c-racer-one', 'c-racer-two']).toContain(stored?.landlordId);
+    expect(stored?.contacts).toHaveLength(1);
+    expect(stored?.contacts?.[0]?.contactId).toBe(stored?.landlordId);
+  });
+
+  it('preserves both rows when a landlord claim races a non-landlord roster add', async () => {
+    const created = await units.create({ landlordId: 'c-temporary', status: 'available' });
+    await units.update(created.unitId, { landlordId: null });
+
+    let releaseReads = (): void => {};
+    const bothReadsFinished = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    let reads = 0;
+    const gatedDoc = Object.create(doc) as typeof doc;
+    gatedDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
+      const result = await doc.send(command);
+      if (command instanceof GetCommand && command.input.Key?.['unitId'] === created.unitId) {
+        reads += 1;
+        if (reads === 2) releaseReads();
+        await bothReadsFinished;
+      }
+      return result;
+    }) as typeof doc.send;
+    const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
+
+    await Promise.all([
+      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }),
+      racingUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }),
+    ]);
+
+    const stored = await units.getById(created.unitId);
+    expect(stored?.landlordId).toBe('c-new-landlord');
+    expect(stored?.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ contactId: 'c-new-landlord', role: 'landlord' }),
+        expect.objectContaining({ contactId: 'c-property-manager', role: 'pm' }),
+      ]),
+    );
+    expect(stored?.contacts).toHaveLength(2);
+  });
+
+  it('preserves the landlord row when a claim races a roster removal', async () => {
+    const created = await units.create({ landlordId: 'c-temporary', status: 'available' });
+    await units.update(created.unitId, {
+      landlordId: null,
+      contacts: [{ contactId: 'c-property-manager', role: 'pm', primaryContact: false }],
+    });
+
+    let releaseReads = (): void => {};
+    const bothReadsFinished = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    let reads = 0;
+    const gatedDoc = Object.create(doc) as typeof doc;
+    gatedDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
+      const result = await doc.send(command);
+      if (command instanceof GetCommand && command.input.Key?.['unitId'] === created.unitId) {
+        reads += 1;
+        if (reads === 2) releaseReads();
+        await bothReadsFinished;
+      }
+      return result;
+    }) as typeof doc.send;
+    const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
+
+    await Promise.all([
+      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }),
+      racingUnits.removeContact(created.unitId, 'c-property-manager'),
+    ]);
+
+    const stored = await units.getById(created.unitId);
+    expect(stored?.landlordId).toBe('c-new-landlord');
+    expect(stored?.contacts).toEqual([
+      { contactId: 'c-new-landlord', role: 'landlord', primaryContact: false },
+    ]);
+  });
+
+  it('bounds optimistic roster retries under sustained contention', async () => {
+    const created = await units.create({ landlordId: 'c-landlord', status: 'available' });
+    let updateAttempts = 0;
+    const contendedDoc = Object.create(doc) as typeof doc;
+    contendedDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
+      if (command instanceof UpdateCommand) {
+        updateAttempts += 1;
+        throw new ConditionalCheckFailedException({ message: 'raced again', $metadata: {} });
+      }
+      return doc.send(command);
+    }) as typeof doc.send;
+    const contendedUnits = createUnitsRepo({ doc: contendedDoc, env: testEnv, logger });
+
+    await expect(
+      contendedUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }),
+    ).rejects.toMatchObject({ name: 'RosterWriteConflictError' });
+    expect(updateAttempts).toBe(3);
   });
 
   it('addContact with primaryContact demotes others (single-primaryContact) and updates the scalar', async () => {

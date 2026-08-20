@@ -109,6 +109,28 @@ export class CannotRemoveLandlordOfRecordError extends Error {
 }
 
 /**
+ * Thrown by addContact when a different landlord of record already owns the
+ * unit. A roster role must never silently transfer ownership; reassignment is a
+ * separate, explicit operation.
+ */
+export class LandlordReassignmentRequiredError extends Error {
+  constructor(message = "property already has a landlord of record; reassign landlordId first") {
+    super(message);
+    this.name = 'LandlordReassignmentRequiredError';
+  }
+}
+
+/** An optimistic roster mutation lost too many consecutive write races. */
+export class RosterWriteConflictError extends Error {
+  constructor(message = 'property contacts changed repeatedly; retry the roster change') {
+    super(message);
+    this.name = 'RosterWriteConflictError';
+  }
+}
+
+const ROSTER_WRITE_MAX_ATTEMPTS = 3;
+
+/**
  * The contractual + commonly read attributes; items stay flexible documents
  * (only unitId + the three GSI keys are contractual). All property facts are
  * optional — a unit can be created as a stub and filled in over time, exactly
@@ -337,6 +359,11 @@ export interface UnitsRepo {
    * (unitId, contactId): an already-present contact has its role/primaryContact/
    * name/company updated in place. Maintains AT MOST ONE primaryContact across
    * the roster (when this contact is primaryContact, every other is demoted).
+   * Adding role `landlord` to an ownerless legacy unit claims `landlordId` in
+   * the same conditional write as contacts[]; a different existing or racing
+   * owner throws LandlordReassignmentRequiredError instead of being replaced.
+   * All roster writes optimistically compare landlordId + contacts[], retry up
+   * to three times, then throw RosterWriteConflictError under sustained races.
    * When the roster's primaryContact changes, the unit's `primary_contact`
    * scalar (the property's default contact - relay groups and masked calls) is
    * kept consistent = the primary contact's contactId. Persists contacts[] +
@@ -362,7 +389,8 @@ export interface UnitsRepo {
    * promoted to the lone primaryContact and the scalar points at it; with NO
    * `landlordId`, both are cleared (the scalar is REMOVEd, never left dangling at
    * the removed contact, and no row stays primaryContact). Persists contacts[] +
-   * the scalar. Returns the unit.
+   * the scalar. Uses the same bounded optimistic roster guard as addContact.
+   * Returns the unit.
    */
   removeContact(unitId: string, contactId: string): Promise<UnitItem>;
   /**
@@ -433,6 +461,70 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       items: (Items ?? []) as UnitItem[],
       ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
     };
+  }
+
+  /**
+   * Persist one read-modify-write roster mutation only while BOTH ownership and
+   * the stored roster still match the caller's read. This keeps landlordId and
+   * contacts[] structurally consistent across concurrent add/remove/claim
+   * operations; callers re-read and retry a failed optimistic condition.
+   */
+  async function updateRosterIfCurrent(
+    unit: UnitItem,
+    patch: Record<string, unknown>,
+  ): Promise<UnitItem> {
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+    let i = 0;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      const nameKey = `#k${i}`;
+      names[nameKey] = key;
+      if (value === null) {
+        removes.push(nameKey);
+      } else {
+        const valueKey = `:v${i}`;
+        values[valueKey] = value;
+        sets.push(`${nameKey} = ${valueKey}`);
+      }
+      i += 1;
+    }
+    names['#updatedAt'] = 'updated_at';
+    values[':updatedAt'] = new Date().toISOString();
+    sets.push('#updatedAt = :updatedAt');
+
+    const conditions = ['attribute_exists(unitId)'];
+    names['#expectedLandlordId'] = 'landlordId';
+    if (Object.prototype.hasOwnProperty.call(unit, 'landlordId')) {
+      values[':expectedLandlordId'] = unit.landlordId;
+      conditions.push('#expectedLandlordId = :expectedLandlordId');
+    } else {
+      conditions.push('attribute_not_exists(#expectedLandlordId)');
+    }
+    names['#expectedContacts'] = 'contacts';
+    if (Object.prototype.hasOwnProperty.call(unit, 'contacts')) {
+      values[':expectedContacts'] = unit.contacts;
+      conditions.push('#expectedContacts = :expectedContacts');
+    } else {
+      conditions.push('attribute_not_exists(#expectedContacts)');
+    }
+
+    const clauses = [`SET ${sets.join(', ')}`];
+    if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+    const { Attributes } = await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { unitId: unit.unitId },
+        UpdateExpression: clauses.join(' '),
+        ConditionExpression: conditions.join(' AND '),
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return Attributes as UnitItem;
   }
 
   return {
@@ -564,118 +656,192 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     },
 
     async addContact(unitId, contact) {
-      const unit = await this.getById(unitId);
-      if (!unit) {
-        throw new ConditionalCheckFailedException({
-          message: `unit ${unitId} not found`,
-          $metadata: {},
-        });
-      }
-      // Seed the roster from the legacy landlordId when absent (so the primary
-      // landlord is always represented), then upsert this contact by contactId.
-      const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const existing = roster.find((c) => c.contactId === contact.contactId);
-      // The owning landlord's role is STRUCTURAL: a row for the unit's
-      // landlordId is always 'landlord', regardless of the supplied role — a
-      // non-'landlord' add must never overwrite it (BE3/C3 FIX C).
-      const isLandlordOfRecord =
-        typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
-      const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
-      const next: UnitContact = {
-        contactId: contact.contactId,
-        role,
-        primaryContact: contact.primaryContact === true,
-        ...(contact.name !== undefined ? { name: contact.name } : {}),
-        ...(contact.company !== undefined ? { company: contact.company } : {}),
+      let attempts = 0;
+      const write = async (): Promise<UnitItem> => {
+        attempts += 1;
+        const unit = await this.getById(unitId);
+        if (!unit) {
+          throw new ConditionalCheckFailedException({
+            message: `unit ${unitId} not found`,
+            $metadata: {},
+          });
+        }
+        // A sparse byLandlord GSI permits only a real string key or NO attribute;
+        // ownerless therefore means landlordId is structurally absent, not an
+        // empty/null/malformed value.
+        const hasLandlordId = Object.prototype.hasOwnProperty.call(unit, 'landlordId');
+        const landlordId =
+          hasLandlordId && typeof unit.landlordId === 'string' && unit.landlordId.length > 0
+            ? unit.landlordId
+            : undefined;
+        const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
+        if (
+          contact.role === 'landlord' &&
+          !claimsVacantLandlord &&
+          contact.contactId !== landlordId
+        ) {
+          throw new LandlordReassignmentRequiredError();
+        }
+        // Seed the roster from the legacy landlordId when absent (so the primary
+        // landlord is always represented), then upsert this contact by contactId.
+        const roster = unitContacts(unit).map((c) => ({ ...c }));
+        const existing = roster.find((c) => c.contactId === contact.contactId);
+        // The owning landlord's role is STRUCTURAL: a row for the unit's
+        // landlordId is always 'landlord', regardless of the supplied role — a
+        // non-'landlord' add must never overwrite it (BE3/C3 FIX C).
+        const isLandlordOfRecord =
+          claimsVacantLandlord || contact.contactId === landlordId;
+        const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
+        const next: UnitContact = {
+          contactId: contact.contactId,
+          role,
+          primaryContact: contact.primaryContact === true,
+          ...(contact.name !== undefined ? { name: contact.name } : {}),
+          ...(contact.company !== undefined ? { company: contact.company } : {}),
+        };
+        if (existing) {
+          existing.role = next.role; // pinned to 'landlord' for the owning landlord
+          existing.primaryContact = next.primaryContact;
+          // Denormalized fields: update when supplied, preserve otherwise.
+          if (contact.name !== undefined) existing.name = contact.name;
+          if (contact.company !== undefined) existing.company = contact.company;
+        } else {
+          roster.push(next);
+        }
+
+        // EXACTLY-ONE-primaryContact: when this contact is the primary, demote every
+        // other. (When it isn't, leave any existing primary as-is — a roster may
+        // legitimately have its primary on another row.)
+        if (next.primaryContact) {
+          for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
+        }
+
+        // Keep the `primary_contact` scalar (the property's default contact -
+        // relay groups and masked calls; today it is also the contactId the
+        // masked-call landlord leg dials, see routes/webhooks/voice.ts) consistent
+        // with the roster's primaryContact. Only rewrite it when there IS a primary
+        // on the roster; never blank it here (a roster-less unit keeps routing to
+        // the legacy landlordId fallback in the bridge).
+        const primary = roster.find((c) => c.primaryContact);
+        const patch: Record<string, unknown> = { contacts: roster };
+        if (claimsVacantLandlord) patch['landlordId'] = contact.contactId;
+        if (primary !== undefined) patch['primary_contact'] = primary.contactId;
+
+        let updated: UnitItem;
+        try {
+          updated = await updateRosterIfCurrent(unit, patch);
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          const current = await this.getById(unitId);
+          if (current === undefined) throw err;
+          const currentHasLandlordId = Object.prototype.hasOwnProperty.call(
+            current,
+            'landlordId',
+          );
+          if (
+            contact.role === 'landlord' &&
+            currentHasLandlordId &&
+            current.landlordId !== contact.contactId
+          ) {
+            throw new LandlordReassignmentRequiredError();
+          }
+          if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) {
+            throw new RosterWriteConflictError();
+          }
+          // Ownership or contacts[] changed after our read. Re-run from the
+          // current item so no concurrent roster row is lost.
+          return write();
+        }
+        log.info(
+          {
+            unitId,
+            contactId: contact.contactId,
+            rosterSize: roster.length,
+            primaryContact: next.primaryContact,
+          },
+          'unit contact added',
+        );
+        return updated;
       };
-      if (existing) {
-        existing.role = next.role; // pinned to 'landlord' for the owning landlord
-        existing.primaryContact = next.primaryContact;
-        // Denormalized fields: update when supplied, preserve otherwise.
-        if (contact.name !== undefined) existing.name = contact.name;
-        if (contact.company !== undefined) existing.company = contact.company;
-      } else {
-        roster.push(next);
-      }
-
-      // EXACTLY-ONE-primaryContact: when this contact is the primary, demote every
-      // other. (When it isn't, leave any existing primary as-is — a roster may
-      // legitimately have its primary on another row.)
-      if (next.primaryContact) {
-        for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
-      }
-
-      // Keep the `primary_contact` scalar (the property's default contact -
-      // relay groups and masked calls; today it is also the contactId the
-      // masked-call landlord leg dials, see routes/webhooks/voice.ts) consistent
-      // with the roster's primaryContact. Only rewrite it when there IS a primary
-      // on the roster; never blank it here (a roster-less unit keeps routing to
-      // the legacy landlordId fallback in the bridge).
-      const primary = roster.find((c) => c.primaryContact);
-      const patch: Record<string, unknown> = { contacts: roster };
-      if (primary !== undefined) patch['primary_contact'] = primary.contactId;
-
-      const updated = await this.update(unitId, patch);
-      log.info(
-        { unitId, contactId: contact.contactId, rosterSize: roster.length, primaryContact: next.primaryContact },
-        'unit contact added',
-      );
-      return updated;
+      return write();
     },
 
     async removeContact(unitId, contactId) {
-      const unit = await this.getById(unitId);
-      if (!unit) {
-        throw new ConditionalCheckFailedException({
-          message: `unit ${unitId} not found`,
-          $metadata: {},
-        });
-      }
-      // The landlord of record (legacy landlordId) must remain in the roster —
-      // reassign landlordId first (typed error → route 409).
-      if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
-        throw new CannotRemoveLandlordOfRecordError();
-      }
-      const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const target = roster.find((c) => c.contactId === contactId);
-      if (!target) {
-        // Not on the roster (route 404). Mirrors the contacts removePhone 404.
-        throw new ConditionalCheckFailedException({
-          message: `unit ${unitId} has no roster contact ${contactId}`,
-          $metadata: {},
-        });
-      }
-      const removedWasPrimaryContact = target.primaryContact;
-      const next = roster.filter((c) => c.contactId !== contactId);
-
-      const patch: Record<string, unknown> = { contacts: next };
-      // When the removed contact was the ☎ primary, keep the roster flag and the
-      // scalar `primary_contact` in AGREEMENT (BE3/C3 FIX B) — a frontend
-      // deriving "which is the ☎ primary" from either source must get the same
-      // answer, and the scalar must never dangle at the removed contact.
-      if (removedWasPrimaryContact) {
-        const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
-        if (landlordId.length > 0) {
-          // Promote the landlord row to the ☎ primary (exactly one) and point
-          // the scalar at it. The landlord can't be removed (guarded above), so
-          // its row is still present in `next`.
-          for (const c of next) c.primaryContact = c.contactId === landlordId;
-          patch['primary_contact'] = landlordId;
-        } else {
-          // No landlord to fall back to: clear the scalar (never leave it
-          // dangling at the removed contact) and leave the roster with no ☎
-          // primary. null → UpdateExpression REMOVE (see update()).
-          for (const c of next) c.primaryContact = false;
-          patch['primary_contact'] = null;
+      let attempts = 0;
+      const write = async (): Promise<UnitItem> => {
+        attempts += 1;
+        const unit = await this.getById(unitId);
+        if (!unit) {
+          throw new ConditionalCheckFailedException({
+            message: `unit ${unitId} not found`,
+            $metadata: {},
+          });
         }
-      }
+        // The landlord of record (legacy landlordId) must remain in the roster —
+        // reassign landlordId first (typed error → route 409).
+        if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
+          throw new CannotRemoveLandlordOfRecordError();
+        }
+        const roster = unitContacts(unit).map((c) => ({ ...c }));
+        const target = roster.find((c) => c.contactId === contactId);
+        if (!target) {
+          // Not on the roster (route 404). Mirrors the contacts removePhone 404.
+          throw new ConditionalCheckFailedException({
+            message: `unit ${unitId} has no roster contact ${contactId}`,
+            $metadata: {},
+          });
+        }
+        const removedWasPrimaryContact = target.primaryContact;
+        const next = roster.filter((c) => c.contactId !== contactId);
 
-      const updated = await this.update(unitId, patch);
-      log.info(
-        { unitId, contactId, rosterSize: next.length, removedPrimaryContact: removedWasPrimaryContact },
-        'unit contact removed',
-      );
-      return updated;
+        const patch: Record<string, unknown> = { contacts: next };
+        // When the removed contact was the ☎ primary, keep the roster flag and the
+        // scalar `primary_contact` in AGREEMENT (BE3/C3 FIX B) — a frontend
+        // deriving "which is the ☎ primary" from either source must get the same
+        // answer, and the scalar must never dangle at the removed contact.
+        if (removedWasPrimaryContact) {
+          const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
+          if (landlordId.length > 0) {
+            // Promote the landlord row to the ☎ primary (exactly one) and point
+            // the scalar at it. The landlord can't be removed (guarded above), so
+            // its row is still present in `next`.
+            for (const c of next) c.primaryContact = c.contactId === landlordId;
+            patch['primary_contact'] = landlordId;
+          } else {
+            // No landlord to fall back to: clear the scalar (never leave it
+            // dangling at the removed contact) and leave the roster with no ☎
+            // primary. null → UpdateExpression REMOVE (see update()).
+            for (const c of next) c.primaryContact = false;
+            patch['primary_contact'] = null;
+          }
+        }
+
+        let updated: UnitItem;
+        try {
+          updated = await updateRosterIfCurrent(unit, patch);
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          const current = await this.getById(unitId);
+          if (current === undefined) throw err;
+          if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) {
+            throw new RosterWriteConflictError();
+          }
+          // Ownership or contacts[] changed after our read. Re-run from the
+          // current item so the removal applies without erasing the winner.
+          return write();
+        }
+        log.info(
+          {
+            unitId,
+            contactId,
+            rosterSize: next.length,
+            removedPrimaryContact: removedWasPrimaryContact,
+          },
+          'unit contact removed',
+        );
+        return updated;
+      };
+      return write();
     },
 
     async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {

@@ -96,6 +96,7 @@ import {
 import {
   CannotRemoveLandlordOfRecordError,
   isDeleted as isUnitDeleted,
+  LandlordReassignmentRequiredError,
   unitContacts,
   type UnitContact,
   type UnitItem,
@@ -2149,12 +2150,25 @@ export function createFakeWorld(): FakeWorld {
       // consistent with the roster's ☎ primary.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
+      const hasLandlordId = Object.prototype.hasOwnProperty.call(unit, 'landlordId');
+      const landlordId =
+        hasLandlordId && typeof unit.landlordId === 'string' && unit.landlordId.length > 0
+          ? unit.landlordId
+          : undefined;
+      const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
+      if (
+        contact.role === 'landlord' &&
+        !claimsVacantLandlord &&
+        contact.contactId !== landlordId
+      ) {
+        throw new LandlordReassignmentRequiredError();
+      }
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
       const primaryContact = contact.primaryContact === true;
       // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
       const isLandlordOfRecord =
-        typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
+        claimsVacantLandlord || contact.contactId === landlordId;
       const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
       if (existing) {
         existing.role = role;
@@ -2175,6 +2189,7 @@ export function createFakeWorld(): FakeWorld {
         for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
       }
       unit.contacts = roster;
+      if (claimsVacantLandlord) unit.landlordId = contact.contactId;
       const primary = roster.find((c) => c.primaryContact);
       if (primary !== undefined) unit.primary_contact = primary.contactId;
       unit.updated_at = new Date().toISOString();

@@ -2233,12 +2233,21 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // carries the tapped one to /quick-reply as `#action=<id>`, where the sheet
     // resolves it back to this body and sends it with no further tap. A
     // settings-read failure must not block the push — fall back to no actions.
+    //
+    // FILTER BEFORE SLICING, and keep the RAW index. Settings validation rejects
+    // '' but accepts a whitespace-only reply, and the quick-reply sheet trims
+    // and drops blanks — so slicing first could ship a button titled '   ' whose
+    // action id resolves to nothing on tap (a press that sends NOTHING), and
+    // could spend both action slots on blanks while a real reply goes
+    // unsurfaced. The index must stay the RAW one so 'qr-<n>' still names the
+    // same entry the sheet indexes.
     let actions: { action: string; title: string }[] = [];
     try {
       const orgSettings = await settings.getOrgSettings();
       actions = orgSettings.quickReplies
-        .slice(0, 2)
-        .map((title, i) => ({ action: `qr-${i}`, title }));
+        .map((title, i) => ({ action: `qr-${i}`, title: title.trim() }))
+        .filter((a) => a.title.length > 0)
+        .slice(0, 2);
     } catch (err) {
       log.warn({ err, callSid }, 'founder triage: reading quick-replies for the missed push failed — no actions');
     }

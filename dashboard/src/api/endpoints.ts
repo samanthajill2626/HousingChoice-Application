@@ -761,6 +761,26 @@ export async function getConversation(
   return res.conversation;
 }
 
+/** GET /api/calls/:callId → { call, conversation }. `callId` is the Twilio
+ *  CallSid; the server resolves it via the SID pointer and answers with the call
+ *  entry plus the conversation it belongs to. `conversation` is null when the
+ *  call is real but its thread is gone - a distinct state from a 404, which
+ *  means the CallSid names no call at all.
+ *
+ *  This is the AUTHORITATIVE callId -> conversation mapping, and the quick-reply
+ *  sheet uses it as such: the missed-call deep link is a URL, so a conversation
+ *  taken from that URL would let any link name the recipient of a real SMS. The
+ *  server's record of the call is the only trustworthy source. */
+export async function getCall(
+  callId: string,
+  signal?: AbortSignal,
+): Promise<{ call: Record<string, unknown>; conversation: ConversationHeader | null }> {
+  return request<{ call: Record<string, unknown>; conversation: ConversationHeader | null }>(
+    `/api/calls/${encodeURIComponent(callId)}`,
+    { ...(signal !== undefined && { signal }) },
+  );
+}
+
 /** GET /api/conversations/:id/members → { members }. The relay group's current
  *  roster (unwrapped). 404 relay_group_not_found for a non-relay / missing id. */
 export async function getConversationMembers(

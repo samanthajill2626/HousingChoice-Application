@@ -596,6 +596,46 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.sent).toHaveLength(0); // intake gate: details already on file
   });
 
+  it('missed-call push SKIPS blank quick replies but keeps their RAW index in the action id', async () => {
+    // Settings validation rejects '' but accepts a whitespace-only reply, and
+    // the quick-reply sheet trims and drops blanks. Slicing before filtering
+    // would ship a button titled '   ' whose id resolves to nothing on tap - a
+    // press that sends NOTHING - and here would spend both action slots on
+    // blanks while the only real reply went unsurfaced. The surviving id must
+    // still be the RAW index, because that is what the sheet looks up.
+    world.settings.quickReplies = ['   ', '  ', 'Sorry I missed you'];
+    const app = await seedRingingBridge();
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    const missed = world.pushSends.find((p) => p.notification.kind === 'missed_call');
+    const actions = missed!.notification.payload.actions as { action: string; title: string }[];
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.title).toBe('Sorry I missed you');
+    expect(actions[0]!.action).toBe('qr-2'); // RAW index, not the display position
+  });
+
+  it('missed-call push carries NO actions when every quick reply is blank', async () => {
+    world.settings.quickReplies = ['   '];
+    const app = await seedRingingBridge();
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    const missed = world.pushSends.find((p) => p.notification.kind === 'missed_call');
+    expect(missed).toBeDefined();
+    // The key is OMITTED rather than an empty array - a notification with zero
+    // action buttons is the honest shape.
+    expect(missed!.notification.payload.actions).toBeUndefined();
+  });
+
   it('no-answer from a caller we hold NOTHING on → auto-text sent once', async () => {
     const app = await seedRingingBridge(); // blank unknown caller
 

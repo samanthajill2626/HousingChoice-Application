@@ -60,15 +60,21 @@ describe('public/sw.js mirror carries the missed-call quick-reply routing', () =
   // missed-call tap keeps landing on the conversation and the Android action
   // buttons keep doing nothing - silently, and exactly like the regression this
   // feature exists to undo.
-  it('has the missed_call branch gated on BOTH ids', () => {
-    expect(swSource).toContain(
-      "if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {",
-    );
+  it('has the missed_call branch, gated on the callId', () => {
+    expect(swSource).toContain("if (d.kind === 'missed_call' && isPlausibleId(d.callId)) {");
   });
 
-  it('builds the quick-reply target with the conversation in the query', () => {
-    expect(swSource).toContain('`/quick-reply/${encodeURIComponent(d.callId)}` +');
-    expect(swSource).toContain('`?conversationId=${encodeURIComponent(d.conversationId)}`;');
+  it('builds the quick-reply target from the callId ALONE', () => {
+    expect(swSource).toContain('const path = `/quick-reply/${encodeURIComponent(d.callId)}`;');
+    // The target must never name a recipient - see the note in src/sw/route.ts.
+    expect(swSource).not.toContain('conversationId=$');
+  });
+
+  it('keeps isPlausibleId byte-identical in effect to the module (incl. DEL)', () => {
+    // A pre-existing one-character drift: the module rejected \x7f and the
+    // mirror did not, which is exactly the silent divergence this file exists
+    // to prevent.
+    expect(swSource).toContain('\\x00-\\x1f\\x7f]');
   });
 
   it('carries a PLAUSIBLE action id as the #action hash, and drops any other', () => {

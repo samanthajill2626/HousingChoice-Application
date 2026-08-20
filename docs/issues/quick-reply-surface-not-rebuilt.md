@@ -74,16 +74,37 @@ fails a test instead of shipping tested-but-dead routing.
 
 Three deliberate departures from the original CO2 shape:
 
-  - The conversation travels in the QUERY (the push payload already carries it),
-    so the sheet needs no `GET /api/calls/:callId` round trip on the one screen
-    where latency is most visible.
+  - The deep link names a CALL and nothing else. The sheet resolves the
+    recipient through `GET /api/calls/:callId`, never from the URL. A first draft
+    passed `?conversationId=` (the push payload already carries it) to save a
+    round trip; review caught that it saved nothing - that call REPLACES the
+    conversation-header fetch rather than adding to it - while creating a new
+    property: a plain URL that fires a real SMS on arrival with no user gesture,
+    naming any recipient it liked. Do not reintroduce it.
   - No undo (Cameron, 2026-08-20). An SMS cannot be recalled, so a delayed send
     with an Undo bar buys an illusion at the cost of a whole edge case. Tapping
-    sends; the sheet names the recipient above the buttons instead.
+    sends; the sheet names the recipient above the buttons instead, and the
+    recipient/replies/conversation live in ONE state value so it can never label
+    the next caller's replies with the last caller's name.
   - The `missedCallAutoText` is NOT offered as a tap target. It may already have
     fired on this same call, and re-sending it would text the caller the
     identical message twice. The zero-tap auto-text path itself is untouched.
 
+Also fixed here, both found in review:
+
+  - `voice.ts` sliced the quick replies to 2 BEFORE dropping blanks, so a
+    whitespace-only template shipped an Android button that resolved to nothing
+    on tap - a press that sent silence - and could consume both action slots
+    while a real reply went unsurfaced. Now filter-then-slice, keeping the raw
+    index the action id encodes.
+  - An `#action=` id the current settings no longer cover used to be a silent
+    no-op, visually identical to a successful send. It now says so.
+
 Verification is unit tests plus a manual device check: push notifications are
 not drivable in the Playwright harness, so there is no e2e coverage of the
 notification tap - only of the route once open.
+
+Filed, not fixed here (all pre-existing, all wider than this branch):
+[`oauth-return-drops-deep-link`](oauth-return-drops-deep-link.md),
+[`sw-mirror-test-pins-literals-not-behaviour`](sw-mirror-test-pins-literals-not-behaviour.md),
+[`missed-call-push-fans-out-duplicate-replies`](missed-call-push-fans-out-duplicate-replies.md).

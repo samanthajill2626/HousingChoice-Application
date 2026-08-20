@@ -187,21 +187,24 @@ function isPlausibleId(id) {
     typeof id === 'string' &&
     id.length > 0 &&
     id.length <= 256 &&
-    !/[/\\:\s\x00-\x1f]/.test(id)
+    // \x7f (DEL) is in the module's class too - it was missing here, which made
+    // "VERBATIM MIRROR" false for one character. Harmless in practice (DEL
+    // percent-encodes and the path stays single-segment) but the two must agree.
+    !/[/\\:\s\x00-\x1f\x7f]/.test(id)
   );
 }
 
 /* Resolve a same-origin, allow-listed in-app PATH from the untrusted payload.
- * A missed call deep-links to the one-tap quick-reply sheet; an Android
- * action-button tap rides along as `#action=<id>` so that reply sends with no
- * further tap, while a plain tap (iOS, where actions are unsupported) lands on
- * the same sheet and waits. Everything else routes to the conversation. */
+ * A missed call deep-links to the one-tap quick-reply sheet, addressed by callId
+ * ALONE (the sheet resolves the recipient server-side - nothing here may name
+ * one); an Android action-button tap rides along as `#action=<id>` so that reply
+ * sends with no further tap, while a plain tap (iOS, where actions are
+ * unsupported) lands on the same sheet and waits. Everything else routes to the
+ * conversation. */
 function resolveSafePath(data, action) {
   const d = data || {};
-  if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {
-    const path =
-      `/quick-reply/${encodeURIComponent(d.callId)}` +
-      `?conversationId=${encodeURIComponent(d.conversationId)}`;
+  if (d.kind === 'missed_call' && isPlausibleId(d.callId)) {
+    const path = `/quick-reply/${encodeURIComponent(d.callId)}`;
     // The action id is as untrusted as the ids - same plausibility gate, and an
     // implausible one is DROPPED rather than carried.
     return isPlausibleId(action) ? `${path}#action=${encodeURIComponent(action)}` : path;

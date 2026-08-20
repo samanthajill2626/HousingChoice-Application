@@ -46,51 +46,54 @@ describe('resolveSafePath', () => {
     );
   });
 
-  it('routes a MISSED CALL to the quick-reply sheet, carrying the conversation', () => {
-    // The conversation rides in the query so the sheet can send without a
-    // second lookup; callId stays in the path because it names the call.
+  it('routes a MISSED CALL to the quick-reply sheet, by callId ALONE', () => {
+    // The target must never name a recipient: the sheet sends a real SMS on
+    // arrival, and it resolves who to from the server's record of the call. A
+    // conversation in this path or its query would let any link the founder
+    // opens pick the recipient - so even though the payload HAS one, it is
+    // deliberately not carried.
     expect(
       resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }),
-    ).toBe('/quick-reply/CA123?conversationId=conv-9');
+    ).toBe('/quick-reply/CA123');
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA123' })).toBe('/quick-reply/CA123');
   });
 
   it('carries an action-button id as the #action hash - the one-tap path', () => {
     expect(
       resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }, 'qr-0'),
-    ).toBe('/quick-reply/CA123?conversationId=conv-9#action=qr-0');
+    ).toBe('/quick-reply/CA123#action=qr-0');
   });
 
   it('DROPS an implausible action id rather than carrying it into the hash', () => {
     // The action is as untrusted as the ids. A dropped action just means the
     // sheet waits for a tap - never that a hostile value reaches the URL.
     expect(
-      resolveSafePath(
-        { kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' },
-        'javascript:alert(1)',
-      ),
-    ).toBe('/quick-reply/CA123?conversationId=conv-9');
-    expect(
-      resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }, ''),
-    ).toBe('/quick-reply/CA123?conversationId=conv-9');
+      resolveSafePath({ kind: 'missed_call', callId: 'CA123' }, 'javascript:alert(1)'),
+    ).toBe('/quick-reply/CA123');
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA123' }, '')).toBe(
+      '/quick-reply/CA123',
+    );
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA123' }, 'a b')).toBe(
+      '/quick-reply/CA123',
+    );
   });
 
-  it('URL-encodes both ids it embeds in the quick-reply target', () => {
-    expect(
-      resolveSafePath({ kind: 'missed_call', callId: 'CA%1', conversationId: 'c&2' }),
-    ).toBe('/quick-reply/CA%251?conversationId=c%262');
+  it('URL-encodes the callId and the action it embeds', () => {
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA%1' })).toBe('/quick-reply/CA%251');
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA1' }, 'qr%1')).toBe(
+      '/quick-reply/CA1#action=qr%251',
+    );
   });
 
-  it('a missed call missing either id falls back to the conversation, then to /', () => {
-    // No callId - there is no sheet to open, but the thread is still real.
+  it('a missed call with no usable callId falls back to the conversation, then to /', () => {
     expect(resolveSafePath({ kind: 'missed_call', conversationId: 'conv-9' })).toBe(
       '/conversations/conv-9',
     );
-    // No conversation - nothing to reply into at all.
-    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA123' })).toBe('/');
     // An implausible callId must not smuggle a path segment into the target.
     expect(
       resolveSafePath({ kind: 'missed_call', callId: '../../etc', conversationId: 'conv-9' }),
     ).toBe('/conversations/conv-9');
+    expect(resolveSafePath({ kind: 'missed_call' })).toBe('/');
   });
 
   it('routes a VOICEMAIL to the conversation - only missed calls get the sheet', () => {
@@ -152,12 +155,12 @@ describe('assertSameOriginPath - the LAST gate before navigation', () => {
     expect(assertSameOriginPath('/auth/callback?code=stolen', ORIGIN)).toBe('/');
   });
 
-  it('admits the quick-reply path, keeping its query and hash intact', () => {
-    // The query carries the conversation and the hash carries the action id -
-    // both are load-bearing, so the gate must not strip them.
-    expect(
-      assertSameOriginPath('/quick-reply/CA123?conversationId=conv-9#action=qr-0', ORIGIN),
-    ).toBe('/quick-reply/CA123?conversationId=conv-9#action=qr-0');
+  it('admits the quick-reply path, keeping the action hash intact', () => {
+    // The hash carries the action id and is load-bearing, so the gate must not
+    // strip it.
+    expect(assertSameOriginPath('/quick-reply/CA123#action=qr-0', ORIGIN)).toBe(
+      '/quick-reply/CA123#action=qr-0',
+    );
     expect(assertSameOriginPath('/quick-reply/CA123', ORIGIN)).toBe('/quick-reply/CA123');
   });
 

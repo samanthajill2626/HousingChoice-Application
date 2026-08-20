@@ -24,11 +24,14 @@
 // router sent `missed_call` to the caller's conversation because the quick-reply
 // surface had not been rebuilt (docs/issues/quick-reply-surface-not-rebuilt.md).
 // That surface now exists again at routes/quickReply, so the branch is back:
-// `missed_call` deep-links to `/quick-reply/<callId>?conversationId=<id>`, and
-// an Android action-button tap rides along as `#action=<id>` so the sheet sends
-// that canned reply with no further tap. The conversation travels in the query
-// because the push payload already carries it (routes/webhooks/voice.ts) - the
-// sheet needs no GET /api/calls round trip to know where to send.
+// `missed_call` deep-links to `/quick-reply/<callId>`, and an Android
+// action-button tap rides along as `#action=<id>` so the sheet sends that canned
+// reply with no further tap.
+//
+// The target names a CALL and nothing else. The sheet sends a real SMS on
+// arrival with no user gesture, so it resolves the recipient server-side from
+// the callId; putting a conversation id in this path or its query would make
+// any link the founder opens able to choose who gets texted.
 
 /** The push payload fields this router reads (a subset of the pushed JSON). */
 export interface NotificationRouteData {
@@ -72,15 +75,13 @@ export function resolveSafePath(
 ): string {
   const d = data ?? {};
 
-  // A MISSED CALL deep-links to the one-tap quick-reply sheet. `callId` names
-  // the call (and keys the sheet's send-once latch); the conversation rides in
-  // the query so the sheet can send without a second lookup. BOTH ids must be
-  // plausible - a missed-call payload short of either falls through to the
-  // conversation target below, which is still a real place to land.
-  if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {
-    const path =
-      `/quick-reply/${encodeURIComponent(d.callId)}` +
-      `?conversationId=${encodeURIComponent(d.conversationId)}`;
+  // A MISSED CALL deep-links to the one-tap quick-reply sheet, addressed by
+  // callId ALONE. The conversation is deliberately NOT carried here: the sheet
+  // sends a real SMS on arrival, so it resolves the recipient from the server's
+  // record of the call (GET /api/calls/:callId) rather than from a URL that
+  // anyone could hand the founder. Nothing in this path names a recipient.
+  if (d.kind === 'missed_call' && isPlausibleId(d.callId)) {
+    const path = `/quick-reply/${encodeURIComponent(d.callId)}`;
     // The action id comes from the same untrusted payload as the ids, so it goes
     // through the same plausibility gate and is URL-encoded. An implausible
     // action is DROPPED rather than carried: the sheet then waits for a tap.

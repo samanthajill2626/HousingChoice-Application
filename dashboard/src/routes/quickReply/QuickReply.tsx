@@ -1,5 +1,4 @@
-// QuickReply - the ONE-TAP missed-call reply sheet at
-// '/quick-reply/:callId?conversationId=<id>'.
+// QuickReply - the ONE-TAP missed-call reply sheet at '/quick-reply/:callId'.
 //
 // This is the deep-link target of the missed-call push (PHASE1_CHANGE_ORDER_2
 // founder triage): the founder taps the notification and lands here on the
@@ -10,27 +9,31 @@
 // notification actions, so there the plain tap lands here and the reply is the
 // second tap; that asymmetry is inherent to the platform, not a gap here.
 //
-// WHY THE CONVERSATION IS IN THE QUERY. The push payload already carries
-// conversationId beside callId (app/src/routes/webhooks/voice.ts), so the worker
-// hands it straight to this view. That skips a GET /api/calls/:callId round trip
-// on the one screen where latency is most visible - the founder is standing
-// there having just missed a call. callId stays in the path because it names the
-// call and keys the send-once latch below.
+// THE URL NAMES A CALL, NEVER A RECIPIENT. The conversation is resolved from
+// GET /api/calls/:callId - the server's own record of the call - and NOT from
+// anything the URL carries. That distinction is the whole security posture of
+// this view: it sends a real SMS on arrival with no user gesture, so a
+// conversation id taken from the URL would let any link the founder can be made
+// to open choose who gets texted. A CallSid that names no call gets a dead end,
+// not a send. (An earlier draft passed the conversation in the query to save a
+// round trip; it saved nothing - this call replaces the header fetch rather than
+// adding to it - and it bought a URL-triggered send. Do not reintroduce it.)
 //
 // THE SEND IS FINAL. There is no undo (deliberate - Cameron 2026-08-20): an SMS
 // cannot be recalled, so a delayed send with an Undo bar would buy an illusion
 // at the cost of a whole edge case. Tapping sends. The sheet therefore shows who
-// the reply is going to BEFORE the buttons.
+// the reply is going to BEFORE the buttons, and the recipient travels in the
+// same state object as the replies so it can never name a stale caller.
 //
 // The zero-tap missed-call auto-text is a separate, server-side path (the
 // call.missedAutoText job) and is untouched by this view. It is deliberately NOT
 // offered as an option here: it may already have fired for this same call, and
 // re-sending it would text the caller the identical message twice.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ApiError,
-  getConversation,
+  getCall,
   getSettings,
   sendMessage,
   type ConversationHeader,
@@ -46,8 +49,7 @@ import {
 import styles from './QuickReply.module.css';
 
 /** Where the reply is going, for the founder to read before tapping. A resolved
- *  contact name when we have one, else the caller's number, else nothing (the
- *  header fetch is decoration - it must never block the send). */
+ *  contact name when we have one, else the caller's number, else nothing. */
 function recipientLabel(conversation: ConversationHeader): string | undefined {
   const named = conversation.participants?.find(
     (p) => typeof p.name === 'string' && p.name.length > 0,
@@ -58,6 +60,24 @@ function recipientLabel(conversation: ConversationHeader): string | undefined {
   return formatPhoneDisplay(phone);
 }
 
+/** What the callId resolved to. `ready` carries the conversation, the recipient
+ *  label and the replies as ONE value: they are read together on every render,
+ *  so holding them separately would let a reload show the previous caller's name
+ *  above the next caller's replies. */
+type Target =
+  | { kind: 'loading' }
+  | {
+      kind: 'ready';
+      conversationId: string;
+      recipient: string | undefined;
+      options: QuickReplyOption[];
+    }
+  /** The CallSid names no call we hold. */
+  | { kind: 'no_call' }
+  /** A real call whose thread is gone - nothing to reply into. */
+  | { kind: 'no_conversation' }
+  | { kind: 'error'; message: string };
+
 /** The send lifecycle for this view. */
 type SendState =
   | { phase: 'idle' }
@@ -67,53 +87,66 @@ type SendState =
 
 export function QuickReply(): React.JSX.Element {
   const { callId } = useParams<{ callId: string }>();
-  const [searchParams] = useSearchParams();
-  const conversationId = searchParams.get('conversationId') ?? undefined;
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  const [options, setOptions] = useState<QuickReplyOption[] | undefined>(undefined);
-  const [recipient, setRecipient] = useState<string | undefined>(undefined);
-  const [loadError, setLoadError] = useState<string | undefined>(undefined);
-  const [reloadNonce, setReloadNonce] = useState(0);
+  const [target, setTarget] = useState<Target>({ kind: 'loading' });
   const [send, setSend] = useState<SendState>({ phase: 'idle' });
+  /** An '#action=' id that named no reply we can send - surfaced, never silent. */
+  const [unmatchedAction, setUnmatchedAction] = useState<string | undefined>(undefined);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
-  // Load the canned replies (required) and the thread header (decoration). A
-  // header failure is swallowed on purpose: not knowing the caller's name is a
-  // worse screen than not being able to reply at all, but it is not a blocker.
-  // With no conversation there is nothing to send into, so nothing is fetched -
-  // that dead end renders from the URL alone.
+  // Resolve the call and load the canned replies together. Both are required
+  // before anything can be sent, and both land in one setState so the rendered
+  // recipient and the rendered replies always describe the same call.
   useEffect(() => {
-    if (conversationId === undefined) return undefined;
+    if (callId === undefined) {
+      setTarget({ kind: 'no_call' });
+      return undefined;
+    }
     const controller = new AbortController();
     let alive = true;
-    setOptions(undefined);
-    setLoadError(undefined);
+    setTarget({ kind: 'loading' });
+    setSend({ phase: 'idle' });
+    setUnmatchedAction(undefined);
     void (async () => {
       try {
-        const [settings, conversation] = await Promise.all([
+        const [settings, call] = await Promise.all([
           getSettings(controller.signal),
-          conversationId === undefined
-            ? Promise.resolve(undefined)
-            : getConversation(conversationId, controller.signal).catch(() => undefined),
+          getCall(callId, controller.signal),
         ]);
         if (!alive) return;
-        setOptions(buildQuickReplyOptions(settings.settings.quickReplies));
-        setRecipient(conversation === undefined ? undefined : recipientLabel(conversation));
+        if (call.conversation === null) {
+          setTarget({ kind: 'no_conversation' });
+          return;
+        }
+        setTarget({
+          kind: 'ready',
+          conversationId: call.conversation.conversationId,
+          recipient: recipientLabel(call.conversation),
+          options: buildQuickReplyOptions(settings.settings.quickReplies),
+        });
       } catch (err) {
         if (!alive || controller.signal.aborted) return;
-        setLoadError(
-          err instanceof ApiError ? err.message : "Couldn't load your quick replies.",
-        );
+        if (err instanceof ApiError && err.status === 404) {
+          setTarget({ kind: 'no_call' });
+          return;
+        }
+        setTarget({
+          kind: 'error',
+          message: err instanceof ApiError ? err.message : "Couldn't load this missed call.",
+        });
       }
     })();
     return () => {
       alive = false;
       controller.abort();
     };
-  }, [conversationId, reloadNonce]);
+  }, [callId, reloadNonce]);
 
   const doSend = useCallback(
-    async (body: string): Promise<void> => {
-      if (conversationId === undefined || body.length === 0) return;
+    async (conversationId: string, body: string): Promise<void> => {
+      if (body.length === 0) return;
       setSend({ phase: 'sending', body });
       try {
         // Sends from the business number automatically (resolved server-side).
@@ -127,77 +160,83 @@ export function QuickReply(): React.JSX.Element {
         });
       }
     },
-    [conversationId],
+    [],
   );
 
   // The Android action-button path: send the named reply on arrival, ONCE.
   //
-  // The hash is read here rather than held in state, and the latch is keyed by
-  // callId, so the whole thing is one atomic step per call. That matters because
-  // the worker navigates an already-open client to a second missed call's
-  // deep-link without remounting this component - only :callId changes. A latch
-  // keyed by anything else would either swallow the second call's auto-send or,
-  // worse, fire the FIRST call's action into the second call's thread.
+  // The latch is a ref keyed by callId, set BEFORE the send and regardless of
+  // whether the id resolved. A ref rather than state because StrictMode
+  // double-invokes this effect in development and a ref survives that; keyed by
+  // callId rather than by mount because the whole point is "one auto-send per
+  // call", which is the guarantee that has to hold no matter how the component
+  // is scheduled.
   //
-  // The latch is set before the send and regardless of whether the id resolved,
-  // so a stale id (settings edited between push and tap) degrades to a manual
-  // tap instead of retrying. The hash is stripped at the same moment it is
-  // consumed, so a pull-to-refresh cannot replay the send.
+  // The hash is cleared through the router (not raw history.replaceState, which
+  // would discard the router's own history entry state), so a pull-to-refresh
+  // cannot replay the send.
   const autoSentForRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (options === undefined || conversationId === undefined || callId === undefined) return;
+    if (target.kind !== 'ready' || callId === undefined) return;
     if (autoSentForRef.current === callId) return;
     autoSentForRef.current = callId;
 
-    const action = parseActionHash(window.location.hash);
+    const action = parseActionHash(location.hash);
     if (action === null) return;
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    const matched = optionForAction(options, action);
-    if (matched === undefined) return;
-    void doSend(matched.body);
-  }, [options, conversationId, callId, doSend]);
+    navigate({ hash: '' }, { replace: true });
+
+    const matched = optionForAction(target.options, action);
+    if (matched === undefined) {
+      // NEVER silent. The founder pressed a labelled button; if we cannot map it
+      // back to a reply (settings edited since the push, a blank template) they
+      // have to be told, or they walk away believing a text went out.
+      setUnmatchedAction(action);
+      return;
+    }
+    void doSend(target.conversationId, matched.body);
+  }, [target, callId, location.hash, navigate, doSend]);
 
   return (
     <section className={styles.page} aria-labelledby="quick-reply-heading">
       <h1 id="quick-reply-heading" className={styles.heading}>
         Quick reply
       </h1>
-      <p className={styles.lede}>
-        {recipient === undefined
-          ? 'Missed call. Tap a reply to text them back now.'
-          : `Missed call from ${recipient}. Tap a reply to text them back now.`}
-      </p>
+      <p className={styles.lede}>{lede()}</p>
       {renderBody()}
     </section>
   );
 
-  function renderBody(): React.JSX.Element {
-    // No conversation to reply into. The worker only ever sends us here with
-    // one, so this is a hand-typed URL or a stale worker - say so plainly rather
-    // than inventing a thread.
-    if (conversationId === undefined) {
-      return (
-        <div className={styles.block} role="alert">
-          <p className={styles.errorText}>
-            We couldn&apos;t tell which conversation this call belongs to
-            {callId === undefined ? '' : ` (call ${callId})`}.
-          </p>
-          <Link className={styles.link} to="/inbox">
-            Open the inbox
-          </Link>
-        </div>
-      );
-    }
+  function lede(): string {
+    if (target.kind !== 'ready') return 'Replying to a missed call.';
+    return target.recipient === undefined
+      ? 'Missed call. Tap a reply to text them back now.'
+      : `Missed call from ${target.recipient}. Tap a reply to text them back now.`;
+  }
 
+  function deadEnd(message: string): React.JSX.Element {
+    return (
+      <div className={styles.block} role="alert">
+        <p className={styles.errorText}>{message}</p>
+        <Link className={styles.link} to="/inbox">
+          Open the inbox
+        </Link>
+      </div>
+    );
+  }
+
+  function renderBody(): React.JSX.Element {
     // The reply landed. Terminal - the buttons are gone, because a second tap
     // here would be a second text nobody asked for.
-    if (send.phase === 'sent') {
+    if (send.phase === 'sent' && target.kind === 'ready') {
       return (
         <div className={styles.block}>
           <p className={styles.sentHeading}>Sent</p>
           <p className={styles.sentBody}>{send.body}</p>
           <div className={styles.links}>
-            <Link className={styles.link} to={`/conversations/${encodeURIComponent(conversationId)}`}>
+            <Link
+              className={styles.link}
+              to={`/conversations/${encodeURIComponent(target.conversationId)}`}
+            >
               Open the conversation
             </Link>
             <Link className={styles.link} to="/inbox">
@@ -208,10 +247,30 @@ export function QuickReply(): React.JSX.Element {
       );
     }
 
-    if (loadError !== undefined) {
+    if (target.kind === 'loading') {
+      return <Spinner center label="Loading your quick replies" />;
+    }
+
+    // The CallSid names no call we hold. Only a hand-typed URL or a worker
+    // holding a notification for a call that has since been purged gets here.
+    if (target.kind === 'no_call') {
+      return deadEnd(
+        callId === undefined
+          ? "We couldn't tell which call this is."
+          : `We couldn't find that call (${callId}).`,
+      );
+    }
+
+    if (target.kind === 'no_conversation') {
+      return deadEnd(
+        "That call isn't linked to a conversation, so there's nothing to reply to here.",
+      );
+    }
+
+    if (target.kind === 'error') {
       return (
         <div className={styles.block} role="alert">
-          <p className={styles.errorText}>{loadError}</p>
+          <p className={styles.errorText}>{target.message}</p>
           <Button variant="secondary" onClick={() => setReloadNonce((n) => n + 1)}>
             Retry
           </Button>
@@ -219,11 +278,7 @@ export function QuickReply(): React.JSX.Element {
       );
     }
 
-    if (options === undefined) {
-      return <Spinner center label="Loading your quick replies" />;
-    }
-
-    if (options.length === 0) {
+    if (target.options.length === 0) {
       return (
         <div className={styles.block}>
           <p className={styles.empty}>
@@ -234,7 +289,10 @@ export function QuickReply(): React.JSX.Element {
             <Link className={styles.link} to="/settings/templates">
               Set up quick replies
             </Link>
-            <Link className={styles.link} to={`/conversations/${encodeURIComponent(conversationId)}`}>
+            <Link
+              className={styles.link}
+              to={`/conversations/${encodeURIComponent(target.conversationId)}`}
+            >
               Open the conversation
             </Link>
           </div>
@@ -243,15 +301,21 @@ export function QuickReply(): React.JSX.Element {
     }
 
     const sending = send.phase === 'sending';
+    const conversationId = target.conversationId;
     return (
       <div className={styles.block}>
+        {unmatchedAction !== undefined ? (
+          <p className={styles.errorText} role="alert">
+            That quick reply is no longer set up, so nothing was sent. Pick one below.
+          </p>
+        ) : null}
         {send.phase === 'failed' ? (
           <p className={styles.errorText} role="alert">
             {send.message} Tap again to retry.
           </p>
         ) : null}
         <ul className={styles.replies}>
-          {options.map((option) => (
+          {target.options.map((option) => (
             <li key={option.index}>
               <Button
                 block
@@ -259,14 +323,17 @@ export function QuickReply(): React.JSX.Element {
                 size="lg"
                 disabled={sending}
                 loading={sending && send.body === option.body}
-                onClick={() => void doSend(option.body)}
+                onClick={() => void doSend(conversationId, option.body)}
               >
                 {option.body}
               </Button>
             </li>
           ))}
         </ul>
-        <Link className={styles.link} to={`/conversations/${encodeURIComponent(conversationId)}`}>
+        <Link
+          className={styles.link}
+          to={`/conversations/${encodeURIComponent(conversationId)}`}
+        >
           Open the conversation instead
         </Link>
       </div>

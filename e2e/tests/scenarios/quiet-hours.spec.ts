@@ -70,8 +70,21 @@ const ORG_TZ = 'America/New_York';
 const EM_DASH = String.fromCharCode(0x2014);
 
 /** The deferral note as RENDERED by RemindersPanel: quiet hours is a WAIT, not a
- *  skip - if this ever reverts to "Will be skipped" the promise is broken. */
+ *  skip - if this ever reverts to "Will be skipped" the promise is broken.
+ *
+ *  UNREACHABLE ON A TOUR RUNG SINCE 2026-08-20 and kept deliberately: the
+ *  manual-only hold-back outranks quiet hours in the shared precedence ladder,
+ *  so every auto-armed rung now chips PAUSED_NOTE instead (see below). This
+ *  constant stays as the assertion the specs return to the moment
+ *  MANUAL_ONLY_REMINDER_KINDS is emptied. The wait-vs-skip wording itself is
+ *  still covered at unit level (app/test/tourRemindersApi.test.ts, which drives
+ *  the route with the hold-back off). */
 const QUIET_NOTE = `Will wait ${EM_DASH} quiet hours`;
+
+/** What an auto-armed rung actually chips today: the manual-only hold-back
+ *  (founder decision 2026-08-20). Neither a skip nor a timed wait - the rung
+ *  stays pending and sendable, and only a person releases it. */
+const PAUSED_NOTE = `Paused ${EM_DASH} send manually`;
 
 /** The product default window (settingsRepo DEFAULT_ORG_SETTINGS) with the
  *  feature OFF - the lean seed's posture, and what this file restores. */
@@ -286,10 +299,16 @@ test('(2) Defer + release: a due rung WAITS inside the window, then sends once i
   // ...the rung is STILL pending (the backstop never claimed it)...
   await flow.openTourReminders();
   await flow.expectReminderRung('day_before', 'upcoming');
-  // ...and the panel says so honestly: a WAIT, not a skip.
-  await expect(reminderRow(page, 'day_before').getByText(QUIET_NOTE)).toBeVisible({
-    timeout: 15_000,
-  });
+  // ...and the panel says so honestly. Since the 2026-08-20 hold-back that note
+  // is the PAUSE, not the wait: the rung really is held by quiet hours right now
+  // (the tick above proved it - the dev tick seam runs with the hold-back off),
+  // but what the operator needs to know is the thing that outlasts the window.
+  // Telling them "Will wait" would promise a release at quiet-end that is not
+  // coming while the ladder is paused, so `paused` outranks `quiet_hours` and
+  // the negative assertion below pins that ordering in a real browser.
+  const dayBeforeRow = reminderRow(page, 'day_before');
+  await expect(dayBeforeRow.getByText(PAUSED_NOTE)).toBeVisible({ timeout: 15_000 });
+  await expect(dayBeforeRow.getByText(QUIET_NOTE)).toHaveCount(0);
 
   // Tick again 5h later: still past the rung, now org-locally OUTSIDE the window
   // (and still before morning_of, so nothing supersedes it) -> it fires for real.
@@ -315,10 +334,15 @@ test('(3) Send now: a human send goes out immediately, even inside the quiet win
   await flow.openTourReminders();
   const row = reminderRow(page, 'day_before');
 
-  // The automated send WOULD wait right now (the wall clock is in the window)...
-  await expect(row.getByText(QUIET_NOTE)).toBeVisible({ timeout: 15_000 });
+  // The automated send is not coming right now - the wall clock is in the
+  // window AND the ladder is paused (2026-08-20). The panel names the pause,
+  // which is the reason that outlasts the window; QUIET_NOTE is asserted absent
+  // so this stays a proof of the precedence, not just of some note being there.
+  await expect(row.getByText(PAUSED_NOTE)).toBeVisible({ timeout: 15_000 });
+  await expect(row.getByText(QUIET_NOTE)).toHaveCount(0);
 
-  // ...and Send now overrides exactly that: human sends bypass quiet hours.
+  // ...and Send now overrides exactly that: human sends bypass quiet hours AND
+  // the pause - the whole point of leaving a held-back rung pending.
   // Per-rung accessible name (worklist A10) - a bare "Send now" would collide.
   await row.getByRole('button', { name: 'Send Day before reminder now' }).click();
 

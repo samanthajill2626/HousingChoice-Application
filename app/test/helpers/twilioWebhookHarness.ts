@@ -3739,6 +3739,8 @@ export interface HarnessOptions {
    * to observe the quiet-hours / opt-out previews, which `paused` outranks.
    */
   tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
+  /** As above, for the placement-nudge ladder (held back since 2026-08-18). */
+  placementNudgeManualOnlyKinds?: ReadonlySet<NudgeKind>;
 }
 
 export interface Harness {
@@ -3896,6 +3898,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // suites pass an empty set so `paused` does not mask what they assert.
       ...(opts.tourReminderManualOnlyKinds !== undefined && {
         tourReminderManualOnlyKinds: opts.tourReminderManualOnlyKinds,
+      }),
+      ...(opts.placementNudgeManualOnlyKinds !== undefined && {
+        placementNudgeManualOnlyKinds: opts.placementNudgeManualOnlyKinds,
       }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair

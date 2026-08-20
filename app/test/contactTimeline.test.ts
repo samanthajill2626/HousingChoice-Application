@@ -15,7 +15,9 @@ import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type Fa
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createContactTimelineRouter } from '../src/routes/contactTimeline.js';
 import { MANUAL_ONLY_REMINDER_KINDS } from '../src/jobs/tourReminders.js';
+import { MANUAL_ONLY_NUDGE_KINDS } from '../src/jobs/placementNudges.js';
 import type { ReminderKind } from '../src/repos/tourRemindersRepo.js';
+import type { NudgeKind } from '../src/repos/placementNudgesRepo.js';
 import { resolveMessage } from '../src/messages/index.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
@@ -1047,6 +1049,8 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     // `paused` outranks quiet hours - so the default would mask every estimate
     // these cases exist to prove. The hold-back has its own cases below.
     manualOnlyReminderKinds: ReadonlySet<ReminderKind> = new Set(),
+    // The nudge ladder's hold-back, off by default for the same reason.
+    manualOnlyNudgeKinds: ReadonlySet<NudgeKind> = new Set(),
   ): { world: FakeWorld; app: Express } {
     const world = createFakeWorld();
     const logger = createLogger({ destination: createLogCapture().stream });
@@ -1069,6 +1073,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       placementsRepo: world.placementsRepo,
       unitsRepo: world.unitsRepo,
       manualOnlyReminderKinds,
+      manualOnlyNudgeKinds,
     });
     const app = express();
     app.use('/api/contacts', router);
@@ -1170,9 +1175,37 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up[0]!.suppression).toEqual({ reason: 'paused' });
   });
 
-  it('leaves PLACEMENT NUDGE cards untouched by the tour hold-back', async () => {
-    // The tour pause must not leak onto the other ladder: nudges have their own
-    // (2026-08-18) hold-back, which this route does not preview.
+  it('marks a paused NUDGE rung `paused` under the PRODUCTION hold-back', async () => {
+    // The other ladder, held back since 2026-08-18. Its cards had the same
+    // "sending shortly" lie until the tour pause brought the machinery in.
+    const { world, app } = makeGatherHarness(undefined, new Set(), MANUAL_ONLY_NUDGE_KINDS);
+    const phone = '+15550600033';
+    world.contacts.push({ contactId: 'ct-nudge-paused', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-nudge-paused', phone, 'tenant_1to1');
+    // receipt_check, NOT approval_check: this walk surfaces only the rungs whose
+    // recipient is the TENANT, and approval_check goes to the landlord - seeding
+    // one here would leave the bucket empty and pass every assertion vacuously.
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-nudge-paused',
+      unitId: 'u-nudge-paused',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-nudge-paused/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'paused' });
+  });
+
+  it('the two ladders hold back independently: a paused TOUR rung leaves nudges alone', async () => {
+    // The tour pause must not leak onto the other ladder (and vice versa) - two
+    // independent sets, two independent decisions.
     const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
     const phone = '+15550600032';
     world.contacts.push({ contactId: 'ct-nudge', type: 'tenant', status: 'active', phone });
@@ -1180,20 +1213,22 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const placement = await world.placementsRepo.create({
       tenantId: 'ct-nudge',
       unitId: 'u-nudge',
-      stage: 'awaiting_approval',
+      stage: 'awaiting_receipt',
     });
     await world.placementNudgesRepo.create({
       placementId: placement.placementId,
-      kind: 'approval_check',
+      kind: 'receipt_check',
       dueAt: '2099-01-09T10:00:00.000Z',
     });
 
     const res = await request(app).get('/api/contacts/ct-nudge/timeline');
     expect(res.status).toBe(200);
     const up = res.body.upcoming as Array<Record<string, unknown>>;
-    for (const item of up) {
-      expect(item.suppression).toBeUndefined();
-    }
+    // A real nudge card, NOT an empty bucket - otherwise "nothing is paused"
+    // would be true for the wrong reason.
+    expect(up).toHaveLength(1);
+    expect(up[0]!.source).toBe('placement_nudge');
+    expect(up[0]!.suppression).toBeUndefined();
   });
 
   it('reads the org window ONLY when the gather runs: no settings read and NO timezone on a kinds=message request', async () => {

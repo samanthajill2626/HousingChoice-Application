@@ -81,7 +81,7 @@ import {
   MANUAL_ONLY_REMINDER_KINDS,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
-import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
+import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS } from '../jobs/placementNudges.js';
 import { resolveMessage } from '../messages/index.js';
 import {
   type ReminderKind,
@@ -113,6 +113,9 @@ export interface ContactTimelineRouterDeps {
    * routes/tourReminders.ts for why the quiet-hours suites pass an empty set.
    */
   manualOnlyReminderKinds?: ReadonlySet<ReminderKind>;
+  /** As above, for the placement-nudge ladder. Defaults to
+   *  MANUAL_ONLY_NUDGE_KINDS. */
+  manualOnlyNudgeKinds?: ReadonlySet<NudgeKind>;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
@@ -753,6 +756,9 @@ async function gatherUpcoming(params: {
   timezone: string;
   /** Reminder kinds held back from automatic sending (the manual-only pause). */
   manualOnlyReminderKinds: ReadonlySet<ReminderKind>;
+  /** Nudge kinds held back from automatic sending (the OTHER manual-only pause,
+   *  2026-08-18 - an independent list on an independent ladder). */
+  manualOnlyNudgeKinds: ReadonlySet<NudgeKind>;
   log: Logger;
 }): Promise<TimelineScheduled[]> {
   const {
@@ -763,6 +769,7 @@ async function gatherUpcoming(params: {
     quietFor,
     timezone,
     manualOnlyReminderKinds,
+    manualOnlyNudgeKinds,
     log,
   } = params;
   const contactId = contact.contactId;
@@ -810,7 +817,16 @@ async function gatherUpcoming(params: {
       if (row.sentAt !== undefined || row.canceledAt !== undefined) continue; // upcoming only
       const info = NUDGE_RUNG_BY_KIND.get(row.kind);
       if (info === undefined || info.recipient !== recipient) continue; // scope to this recipient
-      const suppression = suppressionFor(conv, placement.stage !== info.stage, row.dueAt);
+      // Manual-only hold-back on the OTHER ladder (2026-08-18): same reasoning
+      // as the tour walk below - a rung the poll will never claim must not
+      // advertise a fire time here. Derived from the nudge kinds, which are
+      // independent of the tour hold-back.
+      const suppression = suppressionFor(
+        conv,
+        placement.stage !== info.stage,
+        row.dueAt,
+        manualOnlyNudgeKinds.has(row.kind),
+      );
       items.push({
         kind: 'scheduled',
         id: `sched#placement_nudge#${row.nudgeId}`,
@@ -962,6 +978,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const manualOnlyReminderKinds = deps.manualOnlyReminderKinds ?? MANUAL_ONLY_REMINDER_KINDS;
+  const manualOnlyNudgeKinds = deps.manualOnlyNudgeKinds ?? MANUAL_ONLY_NUDGE_KINDS;
 
   // Scheduled-send gather repos (Part B): used ONLY when ALL are injected — we
   // deliberately do NOT default-construct them (a default would open a live
@@ -1177,6 +1194,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
             (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
           timezone: window.timezone,
           manualOnlyReminderKinds,
+          manualOnlyNudgeKinds,
           log,
         });
       } catch (err) {

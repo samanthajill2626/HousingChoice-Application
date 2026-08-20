@@ -97,7 +97,11 @@ import {
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
-import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
+import {
+  createPlacementNudgesRepo,
+  type NudgeKind,
+  type PlacementNudgesRepo,
+} from '../repos/placementNudgesRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import {
@@ -383,6 +387,9 @@ export interface ApiRouterDeps {
    * would otherwise make that preview unobservable.
    */
   tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
+  /** The same seam for the placement-nudge ladder (held back since 2026-08-18).
+   *  Production leaves it undefined and takes MANUAL_ONLY_NUDGE_KINDS. */
+  placementNudgeManualOnlyKinds?: ReadonlySet<NudgeKind>;
 }
 
 // --- Inbox cursor (opaque to clients) ---------------------------------------
@@ -812,6 +819,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourReminderManualOnlyKinds !== undefined && {
         manualOnlyReminderKinds: deps.tourReminderManualOnlyKinds,
       }),
+      ...(deps.placementNudgeManualOnlyKinds !== undefined && {
+        manualOnlyNudgeKinds: deps.placementNudgeManualOnlyKinds,
+      }),
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
@@ -1036,6 +1046,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       placementNudgesRepo: placementNudges,
+      ...(deps.placementNudgeManualOnlyKinds !== undefined && {
+        manualOnlyKinds: deps.placementNudgeManualOnlyKinds,
+      }),
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       // Quiet hours (spec 2026-08-03): the nudge view's FIRST suppression
       // estimate reads the org window through the SAME repo the armers use.

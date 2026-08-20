@@ -67,12 +67,8 @@ const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, stri
   manual_mode: 'manual mode',
   stale_stage: 'stage moved on',
   quiet_hours: 'quiet hours',
-  // The nudge ROUTE does not emit `paused` today, so this label is currently
-  // unreachable here - it exists because the reason union is shared with the
-  // tour rungs. The application nudges have been manual-only since 2026-08-18
-  // and their pending rungs still chip "sending shortly"; wiring this reason
-  // through routes/placementNudges.ts is the one-line fix for that.
-  // TODO(manual-only-nudge-chip-still-says-sending-shortly).
+  // The manual-only hold-back (2026-08-18): the rung is armed and sendable, the
+  // poll just will not send it. suppressionLead pairs this with "Paused".
   paused: 'send manually',
 };
 
@@ -288,10 +284,14 @@ export function DeadlinesNudgesCard({
                   </div>
                   {suppression !== undefined ? (
                     // Quiet hours is a calm "sends later", not a problem - muted
-                    // tone; every real suppression stays amber.
+                    // tone; every real suppression stays amber. `paused` takes
+                    // the muted tone for the same reason and one more: while the
+                    // ladder is held back EVERY armed rung carries this line, and
+                    // a card that is amber always stops reading as a warning.
                     <p
                       className={
-                        nudge.suppression?.reason === 'quiet_hours'
+                        nudge.suppression?.reason === 'quiet_hours' ||
+                        nudge.suppression?.reason === 'paused'
                           ? styles.suppressionMuted
                           : styles.suppression
                       }

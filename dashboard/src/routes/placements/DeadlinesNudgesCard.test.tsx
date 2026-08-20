@@ -249,11 +249,38 @@ describe('DeadlinesNudgesCard - suppression', () => {
     expect(screen.queryByText(/Will be skipped/)).toBeNull();
   });
 
-  it('reads every other suppression reason as a skip', () => {
+  it('reads a drop reason as a skip', () => {
     renderCard({
       nudges: [nudge({ nudgeId: 'n-s', suppression: { reason: 'stale_stage' } })],
     });
     expect(screen.getByText('Will be skipped - stage moved on')).toBeInTheDocument();
+  });
+
+  // Manual-only hold-back (2026-08-18): neither a drop nor a timed wait. The
+  // rung stays pending and sendable and only a person releases it, so it must
+  // borrow neither wording - and must never keep the "sending shortly" chip,
+  // which is what it did before the estimate was wired through.
+  it('reads a paused rung as "Paused - send manually", never as skipped or waiting', () => {
+    renderCard({
+      nudges: [nudge({ nudgeId: 'n-p', suppression: { reason: 'paused' } })],
+    });
+    expect(screen.getByText('Paused - send manually')).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).toBeNull();
+    expect(screen.queryByText(/Will wait/)).toBeNull();
+  });
+
+  it('keeps Send now on a paused rung (the whole point of leaving it pending)', () => {
+    renderCard({
+      nudges: [
+        nudge({
+          nudgeId: 'n-p2',
+          kind: 'receipt_check',
+          state: 'upcoming',
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    });
+    expect(screen.getByRole('button', { name: /Send .* nudge now/i })).toBeEnabled();
   });
 
   it('renders no suppression line when the rung carries none', () => {

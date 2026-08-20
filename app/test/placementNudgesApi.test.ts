@@ -24,6 +24,8 @@ import type {
 } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { MANUAL_ONLY_NUDGE_KINDS, NUDGE_RUNGS } from '../src/jobs/placementNudges.js';
+import type { PlacementStage } from '../src/lib/statusModel.js';
 import {
   isoHoursFromNow,
   quietWindowAroundNow,
@@ -108,6 +110,29 @@ function seedNudge(
  * `dueAt`, and return the placementId. One placement per rung keeps each
  * quiet-hours case a clean read of that rung's own dueAt.
  */
+/**
+ * A harness whose nudge route applies NO manual-only hold-back.
+ *
+ * Every nudge kind has been held back since 2026-08-18 (founder decision), and
+ * `paused` outranks quiet hours in the shared precedence ladder - so under the
+ * production default every upcoming rung chips `paused` and the quiet-hours
+ * formula these cases exist to prove becomes unobservable. They switch the
+ * hold-back off; the hold-back has its own cases ("manual-only hold-back").
+ */
+/** kind -> the stage that arms it, derived from NUDGE_RUNGS (stage -> rung) so a
+ *  rung seeded for a kind always sits on its OWN stage - a mismatch would report
+ *  the harder stale_stage reason and mask what the case is asserting. */
+const STAGE_FOR_KIND = Object.fromEntries(
+  (Object.entries(NUDGE_RUNGS) as Array<[PlacementStage, { kind: NudgeKind }]>).map(
+    ([stage, rung]) => [rung.kind, stage],
+  ),
+) as Record<NudgeKind, PlacementStage>;
+
+const NO_MANUAL_HOLD_BACK: ReadonlySet<NudgeKind> = new Set();
+function previewHarness(): ReturnType<typeof makeWebhookHarness> {
+  return makeWebhookHarness({ placementNudgeManualOnlyKinds: NO_MANUAL_HOLD_BACK });
+}
+
 async function seedQuietNudge(world: FakeWorld, suffix: string, dueAt: string): Promise<string> {
   const placementId = await seedPlacement(world, {
     tenantId: `contact-nudge-quiet-${suffix}`,
@@ -216,7 +241,7 @@ describe('GET /api/placements/:placementId/nudges', () => {
   // not of the server wall clock. The window stub is still computed from the
   // current time; a fixed 21:00-08:00 fixture would be time-of-day dependent.
   it('carries a quiet_hours suppression estimate on a rung due inside a window occurrence', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const placementId = await seedPlacement(world, {
       tenantId: 'contact-nudge-quiet-1',
@@ -265,7 +290,7 @@ describe('GET /api/placements/:placementId/nudges', () => {
   // rung due days from now will not wait for tonight's window - while a rung
   // already due IS being held by the fire-time backstop right now.
   it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     // Three days out at a time of day outside EVERY occurrence of the window.
     const far = await seedQuietNudge(world, 'far', isoHoursFromNow(3 * 24 + 6));
@@ -281,7 +306,7 @@ describe('GET /api/placements/:placementId/nudges', () => {
   // tonight WILL be deferred, so it must chip even though the clock is outside
   // the window - exactly when staff are looking at the card.
   it('outside the window, still chips a rung due inside tonight occurrence', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     const tonight = await seedQuietNudge(world, 'tonight', isoHoursFromNow(4));
     const before = await seedQuietNudge(world, 'before', isoHoursFromNow(1));
@@ -295,7 +320,7 @@ describe('GET /api/placements/:placementId/nudges', () => {
   // in-window dueAt must not chip it via the rung-time disjunct; only a rung
   // still in the FUTURE reads its own dueAt against the window.
   it('outside the window, an OVERDUE rung with an in-window dueAt is not chipped', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     // Overdue, and its wall time sits inside a PAST occurrence of the window
     // (-20h = the same wall time as +4h): the poller already released it when
@@ -306,7 +331,7 @@ describe('GET /api/placements/:placementId/nudges', () => {
   });
 
   it('carries NO suppression when quiet hours are disabled', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     world.settings.quietHoursEnabled = false;
     const placementId = await seedPlacement(world, {
       tenantId: 'contact-nudge-quiet-2',
@@ -324,6 +349,62 @@ describe('GET /api/placements/:placementId/nudges', () => {
     expect(res.status).toBe(200);
     const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
     expect(nudge?.suppression).toBeUndefined();
+  });
+
+  // Manual-only hold-back (founder decision 2026-08-18). These run on the
+  // PRODUCTION default - no previewHarness - because the hold-back is the thing
+  // under test. Before this, a held-back rung came back with no estimate at all
+  // and the card chipped "sending shortly" forever
+  // (docs/issues/manual-only-nudge-chip-still-says-sending-shortly.md).
+  describe('manual-only hold-back', () => {
+    it('chips an upcoming rung `paused` instead of leaving it to read "sending shortly"', async () => {
+      const { app, world } = makeWebhookHarness();
+      // Past due and still pending - the exact shape that produced the lie.
+      const placementId = await seedQuietNudge(world, 'paused-1', isoHoursFromNow(-6));
+
+      expect(await suppressionOf(app, placementId)).toEqual({ reason: 'paused' });
+    });
+
+    it('every armed rung kind is covered, so no rung is left chipping a false fire time', async () => {
+      // Guards the pairing itself: a kind added to the ladder but missed by the
+      // hold-back set would silently go back to promising a send.
+      const { app, world } = makeWebhookHarness();
+      for (const kind of MANUAL_ONLY_NUDGE_KINDS) {
+        const stage = STAGE_FOR_KIND[kind];
+        const placementId = await seedPlacement(world, {
+          tenantId: `contact-nudge-paused-${kind}`,
+          unitId: `unit-nudge-paused-${kind}`,
+          stage,
+        });
+        seedNudge(world, {
+          nudgeId: `nudge-paused-${kind}`,
+          placementId,
+          kind,
+          dueAt: isoHoursFromNow(-6),
+        });
+        expect(await suppressionOf(app, placementId), `${kind} not chipped paused`).toEqual({
+          reason: 'paused',
+        });
+      }
+    });
+
+    it('a terminal rung still carries no estimate at all', async () => {
+      const { app, world } = makeWebhookHarness();
+      const placementId = await seedPlacement(world, {
+        tenantId: 'contact-nudge-paused-sent',
+        unitId: 'unit-nudge-paused-sent',
+        stage: 'awaiting_receipt',
+      });
+      seedNudge(world, {
+        nudgeId: 'nudge-paused-sent',
+        placementId,
+        kind: 'receipt_check',
+        dueAt: isoHoursFromNow(-6),
+        sentAt: isoHoursFromNow(-5),
+      });
+
+      expect(await suppressionOf(app, placementId)).toBeUndefined();
+    });
   });
 
   it('stale_stage outranks quiet_hours on a rung whose placement has moved on', async () => {

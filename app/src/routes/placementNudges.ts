@@ -55,6 +55,7 @@ import { isQuietTime } from '../lib/quietHours.js';
 import type { PlacementStage } from '../lib/statusModel.js';
 import {
   forceSendNudge,
+  MANUAL_ONLY_NUDGE_KINDS,
   NUDGE_RUNGS,
   type RunDuePlacementNudgesDeps,
 } from '../jobs/placementNudges.js';
@@ -90,6 +91,17 @@ export interface PlacementNudgesRouterDeps {
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
+   * Rung kinds the POLL holds back, mirrored here so an upcoming rung the poll
+   * will never claim chips `paused` instead of "sending shortly". Defaults to
+   * MANUAL_ONLY_NUDGE_KINDS.
+   *
+   * Test seam: `paused` outranks quiet hours, so with the production default
+   * every upcoming rung chips `paused` and the quiet-hours preview becomes
+   * unobservable. The quiet-hours cases pass an EMPTY set - the same posture the
+   * dev tick route takes for the poll.
+   */
+  manualOnlyKinds?: ReadonlySet<NudgeKind>;
   // ---- Send-now deps (quiet-hours spec section 7) --------------------------
   // The force-send reuses the poll's resolve/claim/send path, so this router
   // needs the poll's recipient + send deps too. All optional with factory
@@ -187,6 +199,7 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
   const nudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const manualOnlyKinds = deps.manualOnlyKinds ?? MANUAL_ONLY_NUDGE_KINDS;
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
@@ -387,6 +400,15 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
         contactOptOut: undefined,
         aiMode: undefined,
         staleStage: rungStage !== undefined && rungStage !== placement.stage,
+        // Manual-only hold-back (founder decision 2026-08-18): these rungs are
+        // LEFT PENDING by the poll so Send now keeps working, which means they
+        // sit past their dueAt forever - and without this the card chipped the
+        // amber "sending shortly" for a send that was never coming
+        // (docs/issues/manual-only-nudge-chip-still-says-sending-shortly.md).
+        // Ranked below stale_stage on purpose: "stage moved on" tells the
+        // operator this chase no longer applies, which is more useful than
+        // "send manually" when they are deciding whether to press the button.
+        paused: manualOnlyKinds.has(row.kind),
         quietNow: quietFor(row.dueAt),
       });
     };

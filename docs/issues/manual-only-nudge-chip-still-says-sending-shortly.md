@@ -3,9 +3,10 @@ id: manual-only-nudge-chip-still-says-sending-shortly
 title: "Manual-only application nudges still chip 'sending shortly' forever - the placement card promises a send that will never happen"
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-20
+resolved: 2026-08-20
 refs: app/src/routes/placementNudges.ts, dashboard/src/routes/placements/DeadlinesNudgesCard.tsx:64
 ---
 
@@ -37,3 +38,21 @@ it as "Paused - send manually".
 Check the contact-page Upcoming bucket in the same change:
 `routes/contactTimeline.ts` previews both ladders, and its nudge walk has the
 same gap (its tour walk was fixed on 2026-08-20).
+
+**Resolution (2026-08-20).** Fixed as described, on Cameron's go, alongside the
+tour-reminder pause that built the machinery.
+
+- `routes/placementNudges.ts` derives `paused` from `MANUAL_ONLY_NUDGE_KINDS`
+  and passes it to `evaluateScheduledSendSuppression`. Ranked BELOW
+  `stale_stage`: "stage moved on" tells the operator the chase no longer
+  applies, which is the more useful thing to know with the Send now button in
+  front of them.
+- `routes/contactTimeline.ts` does the same on its nudge walk, so the contact
+  page and the placement hub cannot disagree. The two ladders hold back
+  independently - separate sets, separate decisions - and a test pins that.
+- `DeadlinesNudgesCard` renders it muted rather than amber: while the ladder is
+  paused EVERY armed rung carries the line, and a card that is always amber
+  stops reading as a warning.
+- Both read routes take a `manualOnlyKinds` test seam, because `paused`
+  outranks quiet hours and would otherwise make the quiet-hours preview suites
+  unobservable.

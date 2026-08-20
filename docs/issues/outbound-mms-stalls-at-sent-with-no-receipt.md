@@ -46,7 +46,7 @@ delivery limits. Compounding it, `PASSTHROUGH_MAX_BYTES` was 1 MB, so an image
 under that was forwarded untouched: three ~920 KB PNG screenshots passed
 straight through and accounted for 2.7 MB of the 2.93 MB by themselves.
 
-**Resolution (2026-08-20).** Three commits on `fix/mms-carrier-size`:
+**Resolution (2026-08-20).** Three changes on `fix/mms-carrier-size`:
 
 1. **Never build an over-budget message.** Per-message total 5 MB -> 1 MB (under
    the 1.53 MB observed to deliver); passthrough 1 MB -> 250 KB so a screenshot

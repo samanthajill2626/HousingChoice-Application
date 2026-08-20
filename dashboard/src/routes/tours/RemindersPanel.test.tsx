@@ -221,6 +221,28 @@ describe('RemindersPanel', () => {
     );
     expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Will wait/i)).not.toBeInTheDocument();
+    // The CHIP must agree with the note. A row that chips "sending shortly"
+    // while the line under it says "Paused" is the contradiction this whole
+    // change exists to remove - and the chip is the part people read first.
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+  });
+
+  it('a paused rung that is still in the FUTURE does not promise "sends in Nh" either', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          dueAt: '2099-01-09T10:00:00Z',
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Paused')).toBeInTheDocument());
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
   it('keeps Send now on a paused rung (the whole point of leaving it pending)', async () => {

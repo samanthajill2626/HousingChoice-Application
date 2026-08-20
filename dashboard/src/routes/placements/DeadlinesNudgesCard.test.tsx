@@ -267,6 +267,10 @@ describe('DeadlinesNudgesCard - suppression', () => {
     expect(screen.getByText('Paused - send manually')).toBeInTheDocument();
     expect(screen.queryByText(/Will be skipped/)).toBeNull();
     expect(screen.queryByText(/Will wait/)).toBeNull();
+    // The CHIP must agree with the note - no fire time for a rung nothing will
+    // fire (the contradiction Cameron hit on the tour panel, 2026-08-20).
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly|sends in/i)).toBeNull();
   });
 
   it('keeps Send now on a paused rung (the whole point of leaving it pending)', () => {

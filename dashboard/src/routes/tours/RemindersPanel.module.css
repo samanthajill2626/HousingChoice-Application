@@ -126,6 +126,17 @@
   color: var(--c-text-muted);
 }
 
+/* Held back from automatic sending (manual-only hold-back). Deliberately NOT
+ * the amber "upcoming" tone: nothing is going to fire this rung, so it must not
+ * sit in the same visual bucket as one that will. Muted like `.canceled`,
+ * because while a ladder is paused EVERY rung carries this and an always-amber
+ * panel stops reading as a warning at all. It is still actionable (Send now
+ * lives on the same row), so it is not the danger tone either. */
+.paused {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
 /* Retired unsent by the poll (claim-skip) — the DeliveryBadge danger tone
  * (amber bg + danger text), NOT muted: a reminder that never reached the
  * tenant deserves attention, unlike a deliberate cancel, and must read

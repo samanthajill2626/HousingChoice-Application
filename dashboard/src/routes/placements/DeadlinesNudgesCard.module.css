@@ -157,6 +157,16 @@
   color: var(--c-text-muted);
 }
 
+/* Held back from automatic sending (manual-only hold-back) - mirrors the
+ * RemindersPanel `.paused` tone. Muted, not amber: nothing is going to fire
+ * this rung, so it must not share the bucket with one that will, and while the
+ * ladder is paused EVERY rung carries it. Still actionable (Send now sits on
+ * the same row), so not the danger tone either. */
+.paused {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
 /* Retired unsent by the poll (claim-skip) — the RemindersPanel skipped tone
  * (amber bg + danger text), NOT muted: a nudge that never reached its
  * recipient deserves attention, unlike a deliberate cancel, and must read

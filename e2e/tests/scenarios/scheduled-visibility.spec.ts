@@ -145,8 +145,11 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   const dayBefore = tourReminderBody('day_before', tourReminderContext(unit, times));
 
   // BEFORE any tick: the day_before rung is a pinned Upcoming item on the tenant's
-  // timeline — its body, a "Tour reminder" tag, and a "sends in Nh · <abs>" line.
-  // (The immediate confirmation rung rides the same section as "sending shortly".)
+  // timeline — its body, a "Tour reminder" tag, and an honest state line. Since
+  // the 2026-08-20 hold-back that line reads "Paused" rather than a fire time:
+  // the rung is armed and sendable, but nothing will fire it on its own. The
+  // tick below still drives it, because the dev tick seam runs with the
+  // hold-back off (see routes/dev.ts).
   await flow.expectUpcomingItem(tenantId, {
     bodyContains: dayBefore,
     source: 'tour_reminder',

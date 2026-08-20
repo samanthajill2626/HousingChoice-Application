@@ -45,6 +45,19 @@ function fireTimeLabel(at: string, now: number, timezone?: string): string {
   return [sendRelative(at, now), dateTime(at, timezone)].filter(Boolean).join(' - ');
 }
 
+/** Every string this line can carry is a PROMISE that the message goes out at a
+ *  time. A held-back rung (manual-only hold-back) breaks that promise, so it gets
+ *  the state instead of a time - "sending shortly" or "sends in 6 days" over a
+ *  line reading "Paused" is a card arguing with itself. */
+function scheduledLabel(
+  item: TimelineScheduled,
+  now: number,
+  timezone?: string,
+): string {
+  if (item.suppression?.reason === 'paused') return 'Paused';
+  return fireTimeLabel(item.at, now, timezone);
+}
+
 export function ScheduledCard({
   item,
   now = Date.now(),
@@ -62,7 +75,15 @@ export function ScheduledCard({
   // skipped" for every reason that really drops the message.
   const suppression =
     item.suppression !== undefined
-      ? suppressionNote(item.suppression.reason, SUPPRESSION_COPY[item.suppression.reason])
+      ? suppressionNote(
+          item.suppression.reason,
+          // `?? reason` (the RemindersPanel / DeadlinesNudgesCard posture): this
+          // was the one caller without a fallback, and a reason the running
+          // bundle does not know rendered the literal "Will be skipped -
+          // undefined" on a real card. A raw reason string is ugly; "undefined"
+          // is broken. Reachable whenever a client is older than its API.
+          SUPPRESSION_COPY[item.suppression.reason] ?? item.suppression.reason,
+        )
       : undefined;
 
   return (
@@ -71,7 +92,7 @@ export function ScheduledCard({
         <span className={styles.scheduledClock} aria-hidden="true">
           🕐
         </span>
-        <span className={styles.scheduledFire}>{fireTimeLabel(item.at, now, timezone)}</span>
+        <span className={styles.scheduledFire}>{scheduledLabel(item, now, timezone)}</span>
         <span className={styles.scheduledTag}>{SOURCE_TAG[item.source]}</span>
       </div>
       <div className={styles.scheduledBody}>{item.body}</div>

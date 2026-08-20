@@ -107,6 +107,15 @@ function StateChip({
       </span>
     );
   }
+  // Held back from automatic sending (manual-only hold-back): the rung is armed
+  // and sendable, but NOTHING is going to fire it. The fire-time wording below
+  // is a promise, so it must not be reached here - a chip reading "sending
+  // shortly" above a line reading "Paused" is precisely the perpetual-"sending
+  // shortly" lie this feature exists to end, and the chip is what gets read
+  // first. The note underneath carries the "send manually" half.
+  if (rung.suppression?.reason === 'paused') {
+    return <span className={`${styles.chip} ${styles.paused}`}>Paused</span>;
+  }
   // upcoming — amber, with the relative FIRE time. These are reminders that WILL
   // be sent, so the wording is "sends in Nh" / "sending shortly" (mirrors the
   // contact-timeline ScheduledCard), NOT the "due in"/"overdue" used for deadlines.

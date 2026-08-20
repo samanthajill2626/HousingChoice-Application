@@ -94,6 +94,12 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
       </span>
     );
   }
+  // Held back from automatic sending (manual-only hold-back): armed and
+  // sendable, but nothing is going to fire it - so it must not chip a fire time
+  // it will not honour. Same rule as the tour reminder chip.
+  if (nudge.suppression?.reason === 'paused') {
+    return <span className={`${styles.chip} ${styles.paused}`}>Paused</span>;
+  }
   // upcoming - amber, with the relative FIRE time ("sends in Nh" / "sending
   // shortly"), the same wording the tour reminder chip + the contact-timeline
   // ScheduledCard use for a message that WILL be sent.

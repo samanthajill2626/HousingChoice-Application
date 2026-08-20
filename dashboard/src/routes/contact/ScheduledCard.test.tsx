@@ -27,6 +27,51 @@ describe('ScheduledCard', () => {
     expect(screen.getByText('Reminder: your tour is tomorrow at 2pm.')).toBeInTheDocument();
   });
 
+  // Manual-only hold-back (2026-08-20): every fire-time string this card renders
+  // is a PROMISE the message goes out then. A held-back rung breaks it, so the
+  // line must carry the state instead - a card reading "sends in 6 days" above
+  // "Paused - send manually" argues with itself (Cameron hit exactly that).
+  it('renders a paused rung as "Paused", never a fire time it will not honour', () => {
+    render(
+      <ScheduledCard item={{ ...BASE, suppression: { reason: 'paused' } }} now={NOW} />,
+    );
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+    expect(screen.queryByText(/sends in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+    // suppressionNote joins with an EM dash (the placements card is the one
+    // surface that composes its own note with a plain hyphen).
+    expect(screen.getByText(/Paused . send manually/)).toBeInTheDocument();
+  });
+
+  it('a paused rung already PAST its fire time does not say "sending shortly"', () => {
+    render(
+      <ScheduledCard
+        item={{ ...BASE, at: '2026-06-18T09:00:00Z', suppression: { reason: 'paused' } }}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+    expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
+  });
+
+  // A client older than its API rendered the literal "Will be skipped -
+  // undefined" on a real card. The label lookup now falls back to the raw
+  // reason: ugly, but never broken.
+  it('an unknown suppression reason degrades to the raw reason, never "undefined"', () => {
+    render(
+      <ScheduledCard
+        item={{
+          ...BASE,
+          // A reason this bundle predates - the shape a newer API can send.
+          suppression: { reason: 'some_future_reason' as never },
+        }}
+        now={NOW}
+      />,
+    );
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+    expect(screen.getByText(/some_future_reason/)).toBeInTheDocument();
+  });
+
   it('renders the absolute fire time in the zone the body was composed in', () => {
     // Spec D8: the body now quotes an ORG-local time, so the absolute half of
     // the fire line must use the SAME zone or the card contradicts itself.

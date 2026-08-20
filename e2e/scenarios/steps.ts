@@ -3270,9 +3270,10 @@ export class Scenario {
   //     + a "Next" tag), and an armed-but-will-be-skipped note.
   //   - Part B: the pinned "Upcoming scheduled messages" region on a contact's
   //     1:1 timeline — each not-yet-sent tour reminder / placement nudge as a card
-  //     carrying its body, a source tag ("Tour reminder"/"Nudge"), a fire-time
-  //     line ("sends in Nh · <abs>" future, "sending shortly" due-now), and — when
-  //     suppressed — an amber "Will be skipped — <reason>".
+  //     carrying its body, a source tag ("Tour reminder"/"Nudge"), a state line
+  //     ("sends in Nh · <abs>" future, "sending shortly" due-now, "Paused" while
+  //     a ladder is held back), and — when suppressed — an amber "Will be
+  //     skipped — <reason>".
   // All accessibility-first; the deterministic tick seams drive future→sent.
 
   /** The active contact's id (captured on create/triage) — so a scheduled-message
@@ -3302,10 +3303,16 @@ export class Scenario {
     return step(`App: an Upcoming ${tag} item ("…${opts.bodyContains}…") on the contact`, async () => {
       const card = await this.gotoUpcomingCard(contactId, opts.bodyContains);
       await expect(card.getByText(tag, { exact: true })).toBeVisible();
-      // The fire-time line is the ONLY node whose text STARTS with "sends"/"sending
-      // shortly" (the head div leads with the clock glyph, so an anchored regex
-      // isolates the fire span from its container).
-      await expect(card.getByText(/^sends |^sending shortly/)).toBeVisible();
+      // The state line is the ONLY node whose text STARTS with one of these (the
+      // head div leads with the clock glyph, so an anchored regex isolates that
+      // span from its container).
+      //
+      // "Paused" joined the set with the manual-only hold-back (2026-08-20):
+      // both ladders are held back today, so a card that promised "sends in Nh"
+      // would be lying. The verb asserts the card carries an honest SCHEDULED
+      // STATE - a fire time when one is coming, the pause when it is not - which
+      // is what it always meant; only the reachable strings changed.
+      await expect(card.getByText(/^sends |^sending shortly$|^Paused$/)).toBeVisible();
     });
   }
 

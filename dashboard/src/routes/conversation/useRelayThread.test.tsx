@@ -20,12 +20,38 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useRelayThread } from './useRelayThread.js';
+import { toTimelineMessage, useRelayThread } from './useRelayThread.js';
 
 // Instants are built from a base epoch + i minutes so no fixture can produce an
 // impossible clock reading like 10:60.
 const BASE_MS = Date.parse('2026-08-13T10:00:00.000Z');
 const MINUTE = 60_000;
+
+describe('toTimelineMessage - import provenance', () => {
+  // A converted carrier group text carries pre-go-live history whose rows the
+  // importer stamped `sent` with no receipt behind it. The multi-party mapper
+  // has to carry the stamp through, or the group view keeps flagging every
+  // historical bubble "Sent - not confirmed" after the 1:1 timeline stopped.
+  const base = {
+    conversationId: 'c1',
+    tsMsgId: '2026-03-01T10:00:00.000Z#SM1',
+    provider_ts: '2026-03-01T10:00:00.000Z',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    body: 'history',
+    delivery_status: 'sent',
+  };
+
+  it('carries imported:true off the raw stored row', () => {
+    const m = { ...base, imported_from: 'quo-airtable-import' } as unknown as Message;
+    expect(toTimelineMessage(m)?.imported).toBe(true);
+  });
+
+  it('leaves imported ABSENT on a row we sent ourselves', () => {
+    expect(toTimelineMessage(base as unknown as Message)?.imported).toBeUndefined();
+  });
+});
 
 function message(seq: number): Message {
   return {

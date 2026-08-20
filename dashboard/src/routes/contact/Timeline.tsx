@@ -564,8 +564,17 @@ function MessageBubble({
   // The timestamp goes in so a `sent` that never advanced stops reading as
   // "Sent" once it has gone quiet - a carrier that discards a message sends no
   // receipt and no error, so the age of the row is the ONLY signal there is.
+  //
+  // WITHHELD on an IMPORTED row. That cue means "we expected a delivery receipt
+  // and never got one", which is only ever true of a message we sent through the
+  // carrier ourselves. Imported history predates that: the export carries no
+  // per-message receipts, so the importer writes a flat `sent` and every one of
+  // those rows is permanently past the staleness budget. Omitting the timestamp
+  // is the documented way to ask presentDeliveryStatus for the plain label - the
+  // pure function needs no import-specific branch. A stored terminal status
+  // (failed/undelivered) is the source's own fact and still renders.
   const delivery = outbound
-    ? presentDeliveryStatus(msg.delivery_status, Date.parse(msg.at))
+    ? presentDeliveryStatus(msg.delivery_status, msg.imported === true ? undefined : Date.parse(msg.at))
     : null;
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
 

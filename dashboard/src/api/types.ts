@@ -2226,6 +2226,10 @@ export interface TimelineMessage extends TimelineBase {
   /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline
    *  hides the superseded predecessor so a delivered retry replaces it. */
   retry_of?: string;
+  /** Pre-go-live history carried in by the importer rather than sent by us.
+   *  Present ONLY when true. The bubble suppresses the age-derived
+   *  "Sent - not confirmed" cue on it - see the Timeline call site. */
+  imported?: boolean;
   fromPhone?: string;
   toPhone?: string; // which number this used
   // --- Email channel v1 (A6/B7): present only on a type:'email' item --------

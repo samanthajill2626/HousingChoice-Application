@@ -187,6 +187,11 @@ interface TimelineMessage extends TimelineBase {
    *  from a CLOSED relay group, the closed group's conversationId - the client
    *  renders a "via the closed group chat" provenance badge. Absent otherwise. */
   via_closed_group?: string;
+  /** This row is pre-go-live history carried in by the importer, not something we
+   *  sent. Present ONLY when true. The client suppresses the age-derived
+   *  "Sent - not confirmed" cue on it: the importer writes `sent` because the
+   *  export has no per-message receipts, so there was never a receipt to miss. */
+  imported?: boolean;
 }
 interface TimelineCall extends TimelineBase {
   kind: 'call';
@@ -416,6 +421,11 @@ function toTimelineMessage(
     ...(m.retry_of !== undefined && { retry_of: m.retry_of }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
     ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
+    // `imported_from` is an undeclared rider the importer PUTs on the item
+    // (lib/import/apply.ts), same as `call_duration_seconds` above - hence the
+    // bracket read. Projected as a bare boolean: the client needs only "did we
+    // send this", never which export it came from.
+    ...(typeof m['imported_from'] === 'string' && { imported: true }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
     // Email channel v1: subject + addresses + sanitized HTML (body is the trimmed

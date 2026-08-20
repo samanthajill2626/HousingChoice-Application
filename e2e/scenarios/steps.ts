@@ -1825,7 +1825,11 @@ export class Scenario {
   expectGroupIntros(members: Contact[]): Promise<void> {
     const pool = this.requireActiveTourGroup().poolNumber;
     return step('App sends the group intros (naming everyone connected)', async () => {
-      const names = members.map(displayNameOf);
+      // FIRST names: the connection sentence has named people by first name
+      // since the founder decision of 2026-08-20 (a landlord came through as
+      // "First Last" beside a bare-first-name tenant). displayNameOf here would
+      // assert a full name the intro no longer contains.
+      const names = members.map((m) => m.firstName);
       for (const member of members) {
         await expect
           .poll(

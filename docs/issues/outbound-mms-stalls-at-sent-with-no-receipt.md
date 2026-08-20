@@ -3,10 +3,11 @@ id: outbound-mms-stalls-at-sent-with-no-receipt
 title: An oversized outbound MMS is dropped by the carrier and shows as "sent" forever
 type: bug
 severity: high
-status: open
+status: resolved
 area: app
 created: 2026-08-20
-refs: app/src/lib/outboundMediaLimits.ts, app/src/lib/mediaTypes.ts, app/src/adapters/messaging.ts
+resolved: 2026-08-20
+refs: app/src/lib/outboundMediaLimits.ts, app/src/lib/mmsBatching.ts, app/src/routes/api.ts, dashboard/src/routes/contact/deliveryStatus.ts
 ---
 
 **Problem.** A 2.93 MB outbound MMS is accepted by Twilio, handed to the
@@ -39,23 +40,30 @@ Two 7-attachment, 1.53 MB messages delivered to T-Mobile numbers, one of them
 five minutes before the first failure. The failing recipient is also T-Mobile.
 Same carrier, same attachment count, ~2x the bytes, opposite outcome.
 
-**Why our limits allowed it.** `OUTBOUND_MMS_MAX_TOTAL_BYTES` is 5 MB and
-`OUTBOUND_MMS_MAX_MEDIA` is 10 - those are Twilio's API ceilings, not carrier
-delivery limits. Compounding it, `PASSTHROUGH_MAX_BYTES` is 1 MB, so an image
-under that is forwarded untouched: three ~920 KB PNG screenshots passed straight
-through and accounted for 2.7 MB of the 2.93 MB by themselves.
+**Why our limits allowed it.** `OUTBOUND_MMS_MAX_TOTAL_BYTES` was 5 MB and
+`OUTBOUND_MMS_MAX_MEDIA` 10 - those are Twilio's API ceilings, not carrier
+delivery limits. Compounding it, `PASSTHROUGH_MAX_BYTES` was 1 MB, so an image
+under that was forwarded untouched: three ~920 KB PNG screenshots passed
+straight through and accounted for 2.7 MB of the 2.93 MB by themselves.
 
-**Suggested fix.** Two parts, both needed:
+**Resolution (2026-08-20).** Three commits on `fix/mms-carrier-size`:
 
-1. Size the send to carrier reality rather than Twilio's ceiling. Cap the total
-   payload per message well under the 1.53 MB observed to deliver, transcode
-   instead of passing through near-1 MB images, and split a set of attachments
-   across MULTIPLE messages so that every message fits under the cap on its own
-   - rather than refusing the send or silently truncating the set.
-2. Surface a stalled send. A message still at `sent` after some bounded interval
-   should stop reading as delivered in the dashboard, so staff can resend or
-   fall back to a link. Today the only signal is the recipient saying nothing
-   arrived.
+1. **Never build an over-budget message.** Per-message total 5 MB -> 1 MB (under
+   the 1.53 MB observed to deliver); passthrough 1 MB -> 250 KB so a screenshot
+   is transcoded like anything else; per-file transcode target 1.5 MB -> 250 KB
+   at the same 1600px edge; new `OUTBOUND_MMS_MAX_MEDIA_PER_MESSAGE` of 4.
+2. **Split rather than refuse.** Tightening alone would have blocked the
+   founder's ordinary 7-9 photo send. `planMmsBatches` packs a send into as many
+   carrier-sized messages as it takes, preserving the sender's order; the 1:1
+   route and the relay route each send one message per batch with the typed body
+   on the first. Splitting the relay path required `sendRelayTeamMessage` to
+   return its outcome instead of writing the HTTP response. A single file too
+   big for any one message still refuses, where the sender can see it.
+3. **Stop claiming delivery we do not have.** An outbound row still at `sent`
+   after 15 minutes presents as "Sent - not confirmed", derived at render time
+   from the row's own timestamp - no job, no schema, no backfill, and it
+   self-corrects if a late receipt lands. Deliberately not marked a failure: no
+   receipt is not proof of non-delivery, and a Retry there could double-send.
 
-Related: [[mms-uploads-no-lifecycle-orphans]],
-[[shared-transcode-gate-couples-mms-and-photo-availability]].
+Not covered: there is still no way to re-send just the attachments that did not
+land, because we cannot tell which ones did.

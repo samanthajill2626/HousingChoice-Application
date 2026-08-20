@@ -264,6 +264,113 @@ describe('POST /api/conversations/:conversationId/messages (attachmentKeys)', ()
   });
 });
 
+// A RELAY-group send splits the same way the 1:1 path does. It matters more
+// here: the fan-out re-presigns and sends the WHOLE attachment set to each
+// member separately, so an over-budget payload is not dropped once - it is
+// dropped once per member, each with no receipt and no error code.
+describe('POST /api/conversations/:conversationId/messages (relay group, attachment batching)', () => {
+  function makeRelayMmsApp(heads: Record<string, { contentType?: string; size?: number }>) {
+    /** Every hub message the route persisted - one per batch. */
+    const appended: { attachmentCount: number; body?: string }[] = [];
+    const mediaStore = {
+      async head(key: string) {
+        return heads[key];
+      },
+      async presign(key: string) {
+        return `https://s3.local/${key}?X-Amz-Signature=sig`;
+      },
+      async getStream() {
+        return undefined;
+      },
+      async put() {
+        /* unused */
+      },
+    } as unknown as import('../src/adapters/mediaStore.js').MediaStore;
+    const app = buildApp({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: {
+          async getById() {
+            return {
+              conversationId: 'conv-relay',
+              type: 'relay_group',
+              status: 'open',
+              pool_number: '+15550199999',
+              participants: [
+                { contactId: 'c-alice', phone: '+15550100001', name: 'Alice' },
+                { contactId: 'c-bob', phone: '+15550100002', name: 'Bob' },
+              ],
+            };
+          },
+          async touchLastActivity() {
+            return undefined;
+          },
+        } as unknown as ConversationsRepo,
+        messagesRepo: {
+          async append(input: { mediaAttachments?: unknown[]; body?: string }) {
+            appended.push({
+              attachmentCount: input.mediaAttachments?.length ?? 0,
+              ...(input.body !== undefined && { body: input.body }),
+            });
+            return { tsMsgId: `2026-08-20T10:00:0${appended.length}.000Z#team-${appended.length}` };
+          },
+        } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
+        auditRepo: {
+          async append() {
+            /* noop */
+          },
+        } as unknown as import('../src/repos/auditRepo.js').AuditRepo,
+        mediaStore,
+      },
+    });
+    return { app, appended };
+  }
+
+  const relaySend = (
+    app: ReturnType<typeof makeRelayMmsApp>['app'],
+    payload: Record<string, unknown>,
+  ) =>
+    request(app)
+      .post('/api/conversations/conv-relay/messages')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(payload);
+
+  it('SPLITS an over-budget relay send into several hub messages instead of refusing', async () => {
+    // The prod shape: 7 attachments, 2.93MB total.
+    const sizes = [58_101, 929_757, 76_934, 918_527, 923_368, 73_092, 89_528];
+    const key = (i: number): string => `uploads/deadbee${i}`;
+    const heads = Object.fromEntries(
+      sizes.map((size, i) => [key(i), { contentType: 'image/jpeg', size }]),
+    );
+    const { app, appended } = makeRelayMmsApp(heads);
+
+    const res = await relaySend(app, {
+      body: 'photos from the walkthrough',
+      attachmentKeys: sizes.map((_, i) => key(i)),
+    });
+
+    expect(res.status).toBe(201);
+    // One hub message per batch - each fans out on its own.
+    expect(appended.length).toBeGreaterThan(1);
+    expect(appended.reduce((n, a) => n + a.attachmentCount, 0)).toBe(sizes.length);
+    // The typed body rides the FIRST hub message only.
+    expect(appended[0]?.body).toBe('photos from the walkthrough');
+    expect(appended.slice(1).every((a) => a.body === undefined)).toBe(true);
+  });
+
+  it('leaves a send that already fits as ONE hub message', async () => {
+    const heads = { 'uploads/deadbeef': { contentType: 'image/jpeg', size: 120_000 } };
+    const { app, appended } = makeRelayMmsApp(heads);
+    const res = await relaySend(app, { body: 'one photo', attachmentKeys: ['uploads/deadbeef'] });
+    expect(res.status).toBe(201);
+    expect(appended).toHaveLength(1);
+    expect(appended[0]?.attachmentCount).toBe(1);
+  });
+});
+
 // POST /api/conversations/:id/messages/:providerSid/retry — re-send a FAILED
 // outbound message, stamping retry_of so the timeline collapses the stale bubble.
 describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', () => {

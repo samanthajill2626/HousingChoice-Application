@@ -455,6 +455,19 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
  * refuses is ONE attachment too big to fit any message on its own, which
  * batching cannot rescue.
  */
+/** What a relay team send reports back; the route turns it into the response. */
+type RelayTeamSendResult =
+  | {
+      ok: true;
+      payload: {
+        conversationId: string;
+        providerSid: string;
+        tsMsgId: string;
+        status: 'queued' | 'queued_pending';
+      };
+    }
+  | { ok: false; status: number; error: string };
+
 export async function resolveAttachmentKeys(
   keys: string[],
   originalKeys: string[] | undefined,
@@ -1229,23 +1242,57 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // the presigned URLs here - they would expire before a long roster/retry).
     const conversation = await conversations.getById(conversationId);
     if (conversation?.type === 'relay_group') {
-      // A relay send is ONE hub message fanned out per leg, so it cannot simply
-      // loop like the 1:1 path below - splitting it means a hub message and a
-      // fan-out job per batch. Until that is built (see
-      // relay-outbound-mms-not-batched), hold the line the 1:1 path now holds by
-      // batching: refuse a relay send that will not fit ONE carrier-sized
-      // message, rather than handing the carrier something it will discard
-      // without a receipt.
-      if (attachments !== undefined && attachments.length > 0) {
-        const plan = planMmsBatches(
-          attachments.map((a, i) => ({ attachment: a, sizeBytes: attachmentSizes?.[i] ?? 0 })),
+      // A relay send is a hub message plus a fan-out that re-presigns and sends
+      // the WHOLE attachment set to each member separately - so an over-budget
+      // payload is not dropped once, it is dropped once per member. Split it the
+      // same way the 1:1 path does: one hub message + one fan-out per batch,
+      // body on the first only. The members really do receive several texts, so
+      // several bubbles is the honest picture (founder's call, 2026-08-20).
+      const relayBatches =
+        attachments !== undefined && attachments.length > 0
+          ? planMmsBatches(
+              attachments.map((a, i) => ({ attachment: a, sizeBytes: attachmentSizes?.[i] ?? 0 })),
+            ).batches
+          : [];
+      const relayPasses = relayBatches.length > 0 ? relayBatches : [[]];
+      if (relayBatches.length > 1) {
+        log.info(
+          { conversationId, attachmentCount: attachments?.length, messageCount: relayBatches.length },
+          'relay team send: attachments split across several messages to fit the carrier budget',
         );
-        if (plan.batches.length > 1) {
-          res.status(400).json({ error: 'attachments_too_large' });
-          return;
+      }
+      let firstRelay: RelayTeamSendResult | undefined;
+      for (let i = 0; i < relayPasses.length; i++) {
+        const batchAttachments = relayPasses[i]!.map((b) => b.attachment);
+        const outcome = await sendRelayTeamMessage(
+          req,
+          conversation,
+          // Body on the FIRST message only - repeating it under every batch
+          // would read as the sender saying the same thing several times.
+          i === 0 ? body : undefined,
+          i === 0 ? mediaUrls : undefined,
+          batchAttachments.length > 0 ? batchAttachments : undefined,
+        );
+        if (i === 0) {
+          firstRelay = outcome;
+          // A refusal on the FIRST batch means nothing was sent: answer with it,
+          // exactly as before this was ever batched.
+          if (!outcome.ok) {
+            res.status(outcome.status).json({ error: outcome.error });
+            return;
+          }
+        } else if (!outcome.ok) {
+          // Later batches: earlier messages ARE already out and fanning out.
+          // Reporting an error would tell the sender nothing went when part of
+          // it did. Log loudly and answer with what did send.
+          log.error(
+            { conversationId, batchIndex: i, batchCount: relayPasses.length, error: outcome.error },
+            'relay team send: a follow-on attachment batch was REFUSED after earlier batches were sent',
+          );
+          break;
         }
       }
-      await sendRelayTeamMessage(req, res, conversation, body, mediaUrls, attachments);
+      res.status(201).json(firstRelay?.ok === true ? firstRelay.payload : undefined);
       return;
     }
 
@@ -1567,15 +1614,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
    * FROM the pool number (no member is the sender → none is excluded; the
    * per-recipient prefix is the neutral team label, never a phone). Returns the
    * same { conversationId, providerSid, tsMsgId, status } shape as the 1:1 send.
+   *
+   * RETURNS its outcome rather than writing the response (2026-08-20). It used
+   * to take `res` and answer directly, which made it callable exactly once per
+   * request - and a photo drop too big for one carrier-sized message has to be
+   * sent as SEVERAL relay sends (planMmsBatches). The route owns the response
+   * now; every refusal that used to be a `res.status(...)` here is a
+   * `{ ok: false, status, error }` the caller maps straight through, so the
+   * status codes and error strings are unchanged.
    */
   async function sendRelayTeamMessage(
     req: import('express').Request,
-    res: import('express').Response,
     conversation: ConversationItem,
     bodyText: string | undefined,
     mediaUrlList: string[] | undefined,
     attachments: MediaAttachment[] | undefined,
-  ): Promise<void> {
+  ): Promise<RelayTeamSendResult> {
     const conversationId = conversation.conversationId;
 
     // Connect-when-ready intercept (T7): a CONNECTING relay group has no pool
@@ -1638,25 +1692,25 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         { conversationId, memberCount: connectingRoster.length, actor: (req as AuthedRequest).user?.userId },
         'relay team message QUEUED on a connecting group - deferred until the number registers',
       );
-      res.status(201).json({
-        conversationId,
-        providerSid: queuedSid,
-        tsMsgId: queuedAppended.tsMsgId,
-        status: 'queued_pending',
-      });
-      return;
+      return {
+        ok: true,
+        payload: {
+          conversationId,
+          providerSid: queuedSid,
+          tsMsgId: queuedAppended.tsMsgId,
+          status: 'queued_pending',
+        },
+      };
     }
 
     if (conversation.status !== 'open') {
-      res.status(409).json({ error: 'relay_closed' });
-      return;
+      return { ok: false, status: 409, error: 'relay_closed' };
     }
     const poolNumber = conversation.pool_number;
     if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
       // An open relay always carries a pool number; missing one is an anomaly.
       log.error({ conversationId }, 'relay team send: open relay has no pool number — refusing');
-      res.status(409).json({ error: 'relay_closed' });
-      return;
+      return { ok: false, status: 409, error: 'relay_closed' };
     }
 
     // Seed every current member's delivery slot to 'queued' (member key =
@@ -1740,12 +1794,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       { conversationId, memberCount: roster.length, actor: (req as AuthedRequest).user?.userId },
       'relay team message persisted + fanned out',
     );
-    res.status(201).json({
-      conversationId,
-      providerSid,
-      tsMsgId: appended.tsMsgId,
-      status: 'queued',
-    });
+    return {
+      ok: true,
+      payload: {
+        conversationId,
+        providerSid,
+        tsMsgId: appended.tsMsgId,
+        status: 'queued',
+      },
+    };
   }
 
   // GET /api/conversations?status=open&limit=50&cursor=...

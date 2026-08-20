@@ -133,12 +133,23 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
-  # API + webhooks + auth: fully dynamic, all methods, nothing cached, full
-  # viewer request forwarded (minus Host, which must be the origin's own
+  # API + webhooks + auth + public: fully dynamic, all methods, nothing cached,
+  # full viewer request forwarded (minus Host, which must be the origin's own
   # hostname). /auth/* is here for POST /auth/logout — the default behavior
   # below only allows GET/HEAD/OPTIONS (M1.3).
+  #
+  # *** EVERY app prefix that accepts a mutating method MUST be listed here. ***
+  # A prefix with no behavior of its own falls through to default_cache_behavior
+  # (GET/HEAD/OPTIONS only) and CloudFront answers its POSTs with its own 403
+  # error page - the request never reaches the origin, so no app log records it.
+  # /public/* was missing from this list from the M0.4b baseline until 2026-08-20:
+  # the public router shipped at M1.5 and nobody extended the list, so POST
+  # /public/housing-fair (the /join intake AND the flyer "I'm interested" form,
+  # which share one endpoint) 403'd at the edge in dev and prod alike.
+  # Cross-check this list against the mounts in app/src/app.ts whenever either
+  # side changes; a new mutating prefix is silently dead at the edge otherwise.
   dynamic "ordered_cache_behavior" {
-    for_each = ["/api/*", "/webhooks/*", "/auth/*"]
+    for_each = ["/api/*", "/webhooks/*", "/auth/*", "/public/*"]
     content {
       path_pattern             = ordered_cache_behavior.value
       target_origin_id         = local.origin_id

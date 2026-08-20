@@ -1,13 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { PlacementsPage, ConversationsPage, TodayResponse } from '../../api/index.js';
+import type { ConversationSummary, ConversationsPage, FetchAllPagesResult, PlacementItem, PlacementsPage, TodayResponse } from '../../api/index.js';
 
 // Mock the api barrel: stub the three fetchers + capture the SSE handlers so the
 // test can drive a live event. ApiError is re-exported real.
 const getToday = vi.fn();
-const getPlacements = vi.fn();
-const getConversations = vi.fn();
+const getAllPlacements = vi.fn();
+const getAllConversations = vi.fn();
 const getTours = vi.fn();
 let lastHandlers: { onPlacementUpdated?: () => void; onConversationUpdated?: () => void } = {};
 
@@ -16,8 +16,8 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getToday: (...a: unknown[]) => getToday(...a),
-    getPlacements: (...a: unknown[]) => getPlacements(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getTours: (...a: unknown[]) => getTours(...a),
     useEventStream: (handlers: typeof lastHandlers) => {
       lastHandlers = handlers;
@@ -46,9 +46,8 @@ const TODAY: TodayResponse = {
   ],
 };
 
-const CASES: PlacementsPage = {
-  nextCursor: null,
-  placements: [
+const CASES: FetchAllPagesResult<PlacementItem> = {
+  items: [
     {
       placementId: 'k9',
       tenantId: 'Fallback Tenant',
@@ -58,13 +57,14 @@ const CASES: PlacementsPage = {
       next_deadline_at: '2999-01-01T00:00:00Z',
     },
   ],
+  truncated: false,
 };
-const CONVERSATIONS: ConversationsPage = { nextCursor: null, conversations: [] };
+const CONVERSATIONS: FetchAllPagesResult<ConversationSummary> = { items: [], truncated: false };
 
 beforeEach(() => {
   getToday.mockReset();
-  getPlacements.mockReset();
-  getConversations.mockReset();
+  getAllPlacements.mockReset();
+  getAllConversations.mockReset();
   getTours.mockReset();
   getTours.mockResolvedValue([]); // fallback default: no tours today
   lastHandlers = {};
@@ -81,7 +81,7 @@ describe('useToday', () => {
     expect(screen.getByTestId('source')).toHaveTextContent('server');
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
-    expect(getPlacements).not.toHaveBeenCalled();
+    expect(getAllPlacements).not.toHaveBeenCalled();
     // The browser owns "today": the server call carries the operator's LOCAL
     // calendar day (YYYY-MM-DD) AND its local-day boundary instants (the
     // toursFrom/toursTo window for the Tour-entity tours_today group).
@@ -97,8 +97,8 @@ describe('useToday', () => {
 
   it('falls back to placements+conversations+tours on a 404', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getPlacements.mockResolvedValue(CASES);
-    getConversations.mockResolvedValue(CONVERSATIONS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('source')).toHaveTextContent('fallback');
@@ -113,8 +113,8 @@ describe('useToday', () => {
 
   it('fallback folds a Tour entity scheduled today into tours_today', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getPlacements.mockResolvedValue({ nextCursor: null, placements: [] });
-    getConversations.mockResolvedValue(CONVERSATIONS);
+    getAllPlacements.mockResolvedValue({ items: [], truncated: false });
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
     const now = new Date();
     const twoPmLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 0, 0);
     getTours.mockResolvedValue([
@@ -136,8 +136,8 @@ describe('useToday', () => {
 
   it('surfaces error status when the fallback itself fails', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getPlacements.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
-    getConversations.mockResolvedValue(CONVERSATIONS);
+    getAllPlacements.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
   });
@@ -146,7 +146,7 @@ describe('useToday', () => {
     getToday.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
-    expect(getPlacements).not.toHaveBeenCalled();
+    expect(getAllPlacements).not.toHaveBeenCalled();
   });
 
   it('refetches when a placement.updated event arrives', async () => {

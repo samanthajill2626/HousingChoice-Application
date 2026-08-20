@@ -31,7 +31,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact, ContactTimelinePage, Tour } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
 const sendMessage = vi.fn();
 const ensureContactConversation = vi.fn();
@@ -41,7 +41,7 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
@@ -170,7 +170,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
-  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false});
   getConversationMessages.mockResolvedValue([]);
   sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
   ensureContactConversation.mockResolvedValue('c-new');

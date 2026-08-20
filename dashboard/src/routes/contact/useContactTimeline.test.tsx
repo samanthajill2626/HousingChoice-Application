@@ -1,14 +1,10 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type {
-  ContactTimelinePage,
-  ConversationsPage,
-  Message,
-} from '../../api/index.js';
+import type { ContactTimelinePage, ConversationSummary, ConversationsPage, FetchAllPagesResult, Message } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
 let lastHandlers: {
   onMessagePersisted?: () => void;
@@ -20,7 +16,7 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     useEventStream: (handlers: typeof lastHandlers) => {
       lastHandlers = handlers;
@@ -79,9 +75,8 @@ function msg(partial: Partial<Message> & Pick<Message, 'tsMsgId'>): Message {
   };
 }
 
-const CONVERSATIONS: ConversationsPage = {
-  nextCursor: null,
-  conversations: [
+const CONVERSATIONS: FetchAllPagesResult<ConversationSummary> = {
+  items: [
     {
       conversationId: 'c1',
       type: 'tenant_1to1',
@@ -105,11 +100,12 @@ const CONVERSATIONS: ConversationsPage = {
       participant_display_name: null,
     },
   ],
+  truncated: false,
 };
 
 beforeEach(() => {
   getContactTimeline.mockReset();
-  getConversations.mockReset();
+  getAllConversations.mockReset();
   getConversationMessages.mockReset();
   lastHandlers = {};
 });
@@ -130,7 +126,7 @@ describe('useContactTimeline', () => {
 
   it('falls back to conversations (filtered to the contact) on a 404', async () => {
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getConversations.mockResolvedValue(CONVERSATIONS);
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
     // Only c1 (the contact's conversation) should be fetched.
     getConversationMessages.mockImplementation((cid: string) =>
       cid === 'c1' ? Promise.resolve([msg({ tsMsgId: 'm1', body: 'real seeded' })]) : Promise.resolve([]),
@@ -149,10 +145,10 @@ describe('useContactTimeline', () => {
     // The roster match alone would accept it (the contact IS on the roster), and
     // the whole group transcript would land in this member's 1:1 timeline.
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getConversations.mockResolvedValue({
-      nextCursor: null,
-      conversations: [
-        ...CONVERSATIONS.conversations,
+    getAllConversations.mockResolvedValue({
+      truncated: false,
+      items: [
+        ...CONVERSATIONS.items,
         {
           conversationId: 'gt-1',
           type: 'group_text',
@@ -178,7 +174,7 @@ describe('useContactTimeline', () => {
           participant_display_name: null,
         },
       ],
-    } as ConversationsPage);
+    } as FetchAllPagesResult<ConversationSummary>);
     getConversationMessages.mockResolvedValue([]);
 
     render(<Probe contactId="k1" />);
@@ -213,7 +209,7 @@ describe('useContactTimeline', () => {
 
   it('defaults upcoming to [] on the 404 fallback path', async () => {
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getConversations.mockResolvedValue(CONVERSATIONS);
+    getAllConversations.mockResolvedValue(CONVERSATIONS);
     getConversationMessages.mockResolvedValue([]);
 
     render(<Probe contactId="k1" />);
@@ -550,7 +546,7 @@ describe('useContactTimeline paging', () => {
 
   it('reports no older history on the assembled fallback path', async () => {
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null } as ConversationsPage);
+    getAllConversations.mockResolvedValue({ items: [], truncated: false });
     render(<PagingProbe contactId="p1" />);
     await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
@@ -571,7 +567,7 @@ describe('useContactTimeline paging', () => {
     // The endpoint is rolled back (or the contact is soft-deleted and the route
     // answers 404 contact_not_found), so the SSE refetch assembles the fallback.
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null } as ConversationsPage);
+    getAllConversations.mockResolvedValue({ items: [], truncated: false });
     act(() => {
       lastHandlers.onMessagePersisted?.();
     });

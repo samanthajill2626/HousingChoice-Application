@@ -8,11 +8,11 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
+import type { FetchAllPagesResult, Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
-const getUnits = vi.fn();
-const getContacts = vi.fn();
+const getAllUnits = vi.fn();
+const getAllContacts = vi.fn();
 const getContact = vi.fn();
 const createBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
@@ -23,8 +23,8 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getUnit: (...a: unknown[]) => getUnit(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     createBroadcast: (...a: unknown[]) => createBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
@@ -47,7 +47,7 @@ function unit(over: Partial<UnitItem> = {}): UnitItem {
   };
 }
 
-const emptyContacts: ContactsPage = { contacts: [], nextCursor: null };
+const emptyContacts: FetchAllPagesResult<Contact> = { items: [], truncated: false };
 
 const seedTenant: Contact = {
   contactId: 'c-seed',
@@ -57,14 +57,14 @@ const seedTenant: Contact = {
   phone: '+14040000001',
 };
 
-const pickableUnits: UnitsPage = {
-  units: [
+const pickableUnits: FetchAllPagesResult<UnitItem> = {
+  items: [
     unit({
       unitId: 'u-1',
       address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
     }),
   ],
-  nextCursor: null,
+  truncated: false,
 };
 
 function renderComposer(search = ''): ReturnType<typeof render> {
@@ -80,8 +80,8 @@ function renderComposer(search = ''): ReturnType<typeof render> {
 
 beforeEach(() => {
   getUnit.mockReset().mockResolvedValue(unit());
-  getUnits.mockReset().mockResolvedValue(pickableUnits);
-  getContacts.mockReset().mockResolvedValue(emptyContacts);
+  getAllUnits.mockReset().mockResolvedValue(pickableUnits);
+  getAllContacts.mockReset().mockResolvedValue(emptyContacts);
   getContact.mockReset().mockResolvedValue(seedTenant);
   createBroadcast
     .mockReset()
@@ -434,7 +434,7 @@ describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
     renderComposer('?unitId=unit-0001');
     await waitFor(() => expect(getUnit).toHaveBeenCalledWith('unit-0001', expect.anything()));
     expect(screen.queryByRole('combobox', { name: 'Property' })).not.toBeInTheDocument();
-    expect(getUnits).not.toHaveBeenCalled();
+    expect(getAllUnits).not.toHaveBeenCalled();
   });
 
   it('a picker-attached property reaches the preview step (effectiveUnitId, not the empty ?unitId)', async () => {
@@ -527,7 +527,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   }
 
   it('browses the first 12 of a 100-property portfolio and says how many there are', async () => {
-    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
     renderComposer();
     await screen.findByRole('combobox', { name: 'Property' });
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
@@ -536,7 +536,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('"Load more" reveals the next batch of properties', async () => {
     const user = userEvent.setup();
-    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
 
@@ -546,7 +546,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   });
 
   it('hides "Load more" once every property is on screen', async () => {
-    getUnits.mockResolvedValue({ units: manyUnits(8), nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: manyUnits(8), truncated: false});
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(8));
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
@@ -560,7 +560,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
       unitId: 'u-findme',
       address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
     });
-    getUnits.mockResolvedValue({ units, nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: units, truncated: false });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
 
@@ -571,7 +571,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('a new query re-opens the browse list at 12 rather than keeping the revealed count', async () => {
     const user = userEvent.setup();
-    getUnits.mockResolvedValue({ units: manyUnits(100), nextCursor: null });
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
     await user.click(screen.getByRole('button', { name: 'Load more' }));
@@ -583,23 +583,22 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
     expect(propertyRows()).toHaveLength(12);
   });
 
-  it('walks every page of GET /api/units so a page-two property is pickable', async () => {
+  it('can pick a property that only a paged read could have supplied', async () => {
+    // getAllUnits arrives already walked (api/lists.test.ts proves the walk).
+    // Here: a roster larger than one server page stays fully searchable, because
+    // the picker filters this array CLIENT-side - a unit missing from it is not
+    // merely unbrowsable but unfindable.
     const user = userEvent.setup();
-    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
-      Promise.resolve(
-        params.cursor === undefined
-          ? { units: manyUnits(50), nextCursor: 'cursor-page-2' }
-          : {
-              units: [
-                unit({
-                  unitId: 'u-findme',
-                  address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
-                }),
-              ],
-              nextCursor: null,
-            },
-      ),
-    );
+    getAllUnits.mockResolvedValue({
+      items: [
+        ...manyUnits(50),
+        unit({
+          unitId: 'u-findme',
+          address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
+        }),
+      ],
+      truncated: false,
+    });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
     // 50 first-page + 1 second-page property — the walk completed.

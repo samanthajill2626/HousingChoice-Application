@@ -1,10 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { PlacementsPage, UnitsPage } from '../../api/index.js';
+import type { FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
-const getPlacements = vi.fn();
-const getUnits = vi.fn();
+const getAllPlacements = vi.fn();
+const getAllUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactRelayGroups = vi.fn();
 
@@ -12,8 +12,8 @@ vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getPlacements: (...a: unknown[]) => getPlacements(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
   };
@@ -40,18 +40,18 @@ function Probe({ contactId }: { contactId: string }): React.JSX.Element {
   );
 }
 
-const CASES: PlacementsPage = {
-  nextCursor: null,
-  placements: [{ placementId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
+const CASES: FetchAllPagesResult<PlacementItem> = {
+  items: [{ placementId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
+  truncated: false,
 };
-const UNITS: UnitsPage = {
-  nextCursor: null,
-  units: [{ unitId: 'u1', landlordId: 'k1', status: 'available' }],
+const UNITS: FetchAllPagesResult<UnitItem> = {
+  items: [{ unitId: 'u1', landlordId: 'k1', status: 'available' }],
+  truncated: false,
 };
 
 beforeEach(() => {
-  getPlacements.mockReset();
-  getUnits.mockReset();
+  getAllPlacements.mockReset();
+  getAllUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactRelayGroups.mockReset();
 });
@@ -59,8 +59,8 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('useContactFile', () => {
   it('loads placements + units and marks C4/C5 + relay-groups pending on a 404', async () => {
-    getPlacements.mockResolvedValue(CASES);
-    getUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
@@ -73,19 +73,19 @@ describe('useContactFile', () => {
     expect(screen.getByTestId('groups').textContent).toBe('pending');
   });
 
-  it('walks every unit page so a landlord past page one still gets their properties', async () => {
-    // The server pages /api/units at 50. The contact file's units back the
-    // landlord's "Properties" panel AND the per-unit tours fan-out, so a
-    // first-page-only read dropped both for anyone whose properties sat later
-    // in the scan.
-    getPlacements.mockResolvedValue(CASES);
-    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
-      Promise.resolve(
-        params.cursor === undefined
-          ? { units: [{ unitId: 'u1', landlordId: 'k1', status: 'available' }], nextCursor: 'page-2' }
-          : { units: [{ unitId: 'u2', landlordId: 'k1', status: 'available' }], nextCursor: null },
-      ),
-    );
+  it('keeps every property a landlord owns, not just the first server page', async () => {
+    // The contact file's units back the landlord's "Properties" panel AND the
+    // per-unit tours fan-out, so a first-page-only read dropped both for anyone
+    // whose properties sat later in the scan. getAllUnits now hands over the
+    // whole walked roster (api/lists.test.ts proves the walk).
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue({
+      items: [
+        { unitId: 'u1', landlordId: 'k1', status: 'available' },
+        { unitId: 'u2', landlordId: 'k1', status: 'available' },
+      ],
+      truncated: false,
+    });
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
@@ -96,8 +96,8 @@ describe('useContactFile', () => {
   });
 
   it('marks C4/C5 + relay-groups ready when those endpoints answer', async () => {
-    getPlacements.mockResolvedValue(CASES);
-    getUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockResolvedValue([]);
     getContactRelayGroups.mockResolvedValue([
       {
@@ -124,8 +124,8 @@ describe('useContactFile', () => {
     // standalone relay-group create) has no SSE handler here, so the page needs
     // a way to ask for the rows again - and the panes must keep rendering the
     // rows they already have while it is in flight.
-    getPlacements.mockResolvedValue(CASES);
-    getUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockResolvedValueOnce([]).mockResolvedValue([
       {
@@ -158,8 +158,8 @@ describe('useContactFile', () => {
     // fail. Its failure surface is wide (placements + every /api/units page +,
     // on a landlord file, one getTours per owned unit), so this is not exotic.
     // A stale card is what the card was before the refetch existed.
-    getPlacements.mockResolvedValueOnce(CASES).mockRejectedValue(new ApiError(500, 'boom', 'x'));
-    getUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValueOnce(CASES).mockRejectedValue(new ApiError(500, 'boom', 'x'));
+    getAllUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockResolvedValue([
       {
@@ -177,7 +177,7 @@ describe('useContactFile', () => {
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
 
     fireEvent.click(screen.getByRole('button', { name: 'refetch file' }));
-    await waitFor(() => expect(getPlacements).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getAllPlacements).toHaveBeenCalledTimes(2));
 
     // The refetch failed and the file is merely STALE: same status, same rows.
     expect(screen.getByTestId('status').textContent).toBe('ready');
@@ -187,8 +187,8 @@ describe('useContactFile', () => {
   });
 
   it('surfaces an error when placements fail', async () => {
-    getPlacements.mockRejectedValue(new ApiError(500, 'boom', 'x'));
-    getUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockRejectedValue(new ApiError(500, 'boom', 'x'));
+    getAllUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 

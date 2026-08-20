@@ -27,6 +27,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 
 /**
@@ -1273,15 +1274,15 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async findByParticipantPhone(phone) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          IndexName: 'byParticipantPhone',
-          KeyConditionExpression: 'participant_phone = :p',
-          ExpressionAttributeValues: { ':p': phone },
-        }),
-      );
-      return (Items as ConversationItem[] | undefined) ?? [];
+      // Paged to exhaustion: this backs conversationsForContact, which the
+      // unread-count read and the contact file both depend on, so a dropped
+      // LastEvaluatedKey would silently lose a person's older threads.
+      return queryAll<ConversationItem>(doc, {
+        TableName: table,
+        IndexName: 'byParticipantPhone',
+        KeyConditionExpression: 'participant_phone = :p',
+        ExpressionAttributeValues: { ':p': phone },
+      });
     },
 
     // --- Email channel v1 (the claim arbiter + reply tokens) -----------------
@@ -1386,15 +1387,13 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async findByParticipantEmail(email) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          IndexName: 'byParticipantEmail',
-          KeyConditionExpression: 'participant_email = :e',
-          ExpressionAttributeValues: { ':e': email },
-        }),
-      );
-      return (Items as ConversationItem[] | undefined) ?? [];
+      // Paged to exhaustion (see findByParticipantPhone).
+      return queryAll<ConversationItem>(doc, {
+        TableName: table,
+        IndexName: 'byParticipantEmail',
+        KeyConditionExpression: 'participant_email = :e',
+        ExpressionAttributeValues: { ':e': email },
+      });
     },
 
     async getReplyToken(conversationId) {

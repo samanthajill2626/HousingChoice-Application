@@ -31,6 +31,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
@@ -217,15 +218,16 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
     hashKeyName: string,
     hashKeyValue: string,
   ): Promise<TourItem[]> {
-    const input: QueryCommandInput = {
+    // Paged to exhaustion: a single Query answers with at most 1 MB, and
+    // dropping LastEvaluatedKey here silently hid a tenant's or a unit's later
+    // tours. (listByStatus below already walked; this shared helper did not.)
+    return queryAll<TourItem>(doc, {
       TableName: table,
       IndexName: indexName,
       KeyConditionExpression: '#hk = :hv',
       ExpressionAttributeNames: { '#hk': hashKeyName },
       ExpressionAttributeValues: { ':hv': hashKeyValue },
-    };
-    const { Items } = await doc.send(new QueryCommand(input));
-    return (Items ?? []) as TourItem[];
+    });
   }
 
   return {

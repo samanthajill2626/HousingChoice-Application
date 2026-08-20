@@ -2,9 +2,9 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlacementUpdatedEvent, EventStreamHandlers } from '../../api/index.js';
 
-const getPlacements = vi.fn();
-const getContacts = vi.fn();
-const getUnits = vi.fn();
+const getAllPlacements = vi.fn();
+const getAllContacts = vi.fn();
+const getAllUnits = vi.fn();
 // Capture the handlers usePlacements registers so a test can fire a placement.updated event.
 let streamHandlers: EventStreamHandlers | null = null;
 
@@ -12,9 +12,9 @@ vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getPlacements: (...a: unknown[]) => getPlacements(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers = h;
     },
@@ -47,20 +47,20 @@ function Probe(): React.JSX.Element {
 }
 
 beforeEach(() => {
-  getPlacements.mockReset();
-  getContacts.mockReset();
-  getUnits.mockReset();
+  getAllPlacements.mockReset();
+  getAllContacts.mockReset();
+  getAllUnits.mockReset();
   streamHandlers = null;
-  getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
-  getUnits.mockResolvedValue({ units: [], nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: [], truncated: false});
+  getAllUnits.mockResolvedValue({ items: [], truncated: false});
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('usePlacements', () => {
   it('loads placements into a ready state', async () => {
-    getPlacements.mockResolvedValue({
-      placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
-      nextCursor: null,
+    getAllPlacements.mockResolvedValue({
+      items: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
+      truncated: false,
     });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -69,15 +69,15 @@ describe('usePlacements', () => {
   });
 
   it('goes to error when the placements fetch fails', async () => {
-    getPlacements.mockRejectedValue(new Error('boom'));
+    getAllPlacements.mockRejectedValue(new Error('boom'));
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
   });
 
   it('repositions a card on a placement.updated SSE event (patches the stage in place)', async () => {
-    getPlacements.mockResolvedValue({
-      placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
-      nextCursor: null,
+    getAllPlacements.mockResolvedValue({
+      items: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
+      truncated: false,
     });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('stage')).toHaveTextContent('collect_rta'));
@@ -100,8 +100,8 @@ describe('usePlacements', () => {
   });
 
   it('M2: an SSE event flips attention on and clears a deadline (null)', async () => {
-    getPlacements.mockResolvedValue({
-      placements: [
+    getAllPlacements.mockResolvedValue({
+      items: [
         {
           placementId: 'c1',
           tenantId: 't1',
@@ -111,7 +111,7 @@ describe('usePlacements', () => {
           next_deadline_at: '2026-06-25T00:00:00Z',
         },
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -143,34 +143,34 @@ describe('usePlacements', () => {
     // A closed placement outlives its tenant/unit: both were soft-deleted after
     // move-in/loss. The lookup maps must still carry them so the ledger shows
     // names, not raw ids. On a (defensive) id collision the LIVE record wins.
-    getPlacements.mockResolvedValue({
-      placements: [{ placementId: 'c1', tenantId: 't-del', unitId: 'u-del', stage: 'moved_in' }],
-      nextCursor: null,
+    getAllPlacements.mockResolvedValue({
+      items: [{ placementId: 'c1', tenantId: 't-del', unitId: 'u-del', stage: 'moved_in' }],
+      truncated: false,
     });
-    getContacts.mockImplementation((params: { deleted?: boolean }) =>
+    getAllContacts.mockImplementation((params: { deleted?: boolean }) =>
       params.deleted === true
         ? Promise.resolve({
-            contacts: [
+            items: [
               { contactId: 't-del', type: 'tenant', firstName: 'Dora', lastName: 'Departed' },
               // Defensive collision: a deleted record sharing a live id must LOSE.
               { contactId: 't1', type: 'tenant', firstName: 'Stale', lastName: 'Copy' },
             ],
-            nextCursor: null,
+            truncated: false,
           })
         : Promise.resolve({
-            contacts: [{ contactId: 't1', type: 'tenant', firstName: 'Alice', lastName: 'Live' }],
-            nextCursor: null,
+            items: [{ contactId: 't1', type: 'tenant', firstName: 'Alice', lastName: 'Live' }],
+            truncated: false,
           }),
     );
-    getUnits.mockImplementation((params: { deleted?: boolean }) =>
+    getAllUnits.mockImplementation((params: { deleted?: boolean }) =>
       params?.deleted === true
         ? Promise.resolve({
-            units: [{ unitId: 'u-del', address: { line1: '789 Gone St' } }],
-            nextCursor: null,
+            items: [{ unitId: 'u-del', address: { line1: '789 Gone St' } }],
+            truncated: false,
           })
         : Promise.resolve({
-            units: [{ unitId: 'u1', address: { line1: '123 Live Ave' } }],
-            nextCursor: null,
+            items: [{ unitId: 'u1', address: { line1: '123 Live Ave' } }],
+            truncated: false,
           }),
     );
     render(<Probe />);
@@ -185,25 +185,20 @@ describe('usePlacements', () => {
     expect(lines).toContain('123 Live Ave'); // live unit present
   });
 
-  it('M3: pages through ALL placements (page-2 placements appear on the board)', async () => {
-    getPlacements.mockImplementation((_signal: unknown, cursor?: string) =>
-      cursor === undefined
-        ? Promise.resolve({
-            placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
-            nextCursor: 'CUR2',
-          })
-        : Promise.resolve({
-            placements: [{ placementId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'determine_rent' }],
-            nextCursor: null,
-          }),
-    );
+  it('M3: shows the WHOLE pipeline the walk returns, not a first-page prefix', async () => {
+    // The cursor walk itself lives in getAllPlacements (api/lists.test.ts). The
+    // board's own job is to render everything it is handed - a board that shows
+    // a prefix is worse than one that shows nothing, because it looks complete.
+    getAllPlacements.mockResolvedValue({
+      items: [
+        { placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' },
+        { placementId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'determine_rent' },
+      ],
+      truncated: false,
+    });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    // Both the page-1 AND the page-2 placement are present.
     expect(screen.getByTestId('count')).toHaveTextContent('2');
     expect(screen.getByTestId('ids')).toHaveTextContent('c1,c2');
-    // The second call followed the cursor.
-    expect(getPlacements).toHaveBeenCalledTimes(2);
-    expect(getPlacements).toHaveBeenLastCalledWith(expect.anything(), 'CUR2');
   });
 });

@@ -11,7 +11,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
-  getPlacements,
+  getAllPlacements,
+  getAllUnits,
   getContact,
   getTours,
   getUnit,
@@ -27,7 +28,7 @@ import {
   type UnitActivityEvent,
   type UnitItem,
 } from '../../api/index.js';
-import { getAllUnitPages } from '../listings/useListings.js';
+
 import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
 
 /** Same `media` array (order-sensitive; undefined treated as empty)? Used to
@@ -176,8 +177,10 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           // Related fallback: a first-page-only read left a sibling property
           // later in the scan out of the card entirely. BE3's /related endpoint
           // still supersedes this derivation when it answers.
-          getAllUnitPages(false, signal),
-          getPlacements(signal),
+          getAllUnits({}, signal),
+          // EVERY page too: this feeds placementsOnUnit, so a first-page-only
+          // read hid deals on this property once the board outgrew one page.
+          getAllPlacements(signal),
           loadSlice((s) => getUnitRelated(unitId, s), signal),
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
           loadSlice((s) => getUnitSimilar(unitId, s), signal),
@@ -195,7 +198,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         // derived same-landlord list (real data → 'ready', not 'pending').
         const related: Slice<RelatedUnit> =
           relatedSlice.status === 'pending'
-            ? { status: 'ready', rows: relatedByLandlord(units, unit) }
+            ? { status: 'ready', rows: relatedByLandlord(units.items, unit) }
             : relatedSlice;
 
         setState({
@@ -203,7 +206,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           unit,
           landlord,
           roster: listingRoster(unit, landlord),
-          placementsOnUnit: placementsOnUnit(placements.placements, unitId),
+          placementsOnUnit: placementsOnUnit(placements.items, unitId),
           related,
           recipients,
           similar,

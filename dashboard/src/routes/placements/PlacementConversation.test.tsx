@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact, ContactTimelinePage, PlacementItem } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversationScheduled = vi.fn();
 const getConversation = vi.fn();
@@ -32,7 +32,7 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversationScheduled: (...a: unknown[]) => getConversationScheduled(...a),
     getConversation: (...a: unknown[]) => getConversation(...a),
@@ -140,7 +140,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
-  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false});
   getConversationMessages.mockResolvedValue([]);
   // The endpoint returns the whole ENVELOPE now (rows + the composing zone).
   getConversationScheduled.mockResolvedValue({ scheduled: [] });

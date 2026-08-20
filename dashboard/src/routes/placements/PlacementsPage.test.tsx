@@ -9,16 +9,16 @@ const usePlacements = vi.fn<() => PlacementsState>();
 vi.mock('./usePlacements.js', () => ({ usePlacements: () => usePlacements() }));
 
 const transitionPlacement = vi.fn();
-const getContacts = vi.fn();
-const getUnits = vi.fn();
+const getAllContacts = vi.fn();
+const getAllUnits = vi.fn();
 const getPlacementsBy = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
   };
 });
@@ -53,11 +53,11 @@ function renderPage(initialEntry = '/placements'): void {
 beforeEach(() => {
   usePlacements.mockReset();
   transitionPlacement.mockReset();
-  getContacts.mockReset();
-  getUnits.mockReset();
+  getAllContacts.mockReset();
+  getAllUnits.mockReset();
   getPlacementsBy.mockReset();
-  getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
-  getUnits.mockResolvedValue({ units: [], nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: [], truncated: false});
+  getAllUnits.mockResolvedValue({ items: [], truncated: false});
   getPlacementsBy.mockResolvedValue([]);
 });
 afterEach(() => vi.restoreAllMocks());

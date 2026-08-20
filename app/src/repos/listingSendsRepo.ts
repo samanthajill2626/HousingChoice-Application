@@ -24,6 +24,7 @@
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { TourSignal } from '../lib/listingSendTour.js';
 import type { RepoDeps } from './conversationsRepo.js';
@@ -179,27 +180,25 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
     getByKey,
 
     async listByUnit(unitId) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          KeyConditionExpression: 'unitId = :u',
-          ExpressionAttributeValues: { ':u': unitId },
-        }),
-      );
-      return (Items ?? []) as ListingSendItem[];
+      // Paged to exhaustion - one Query caps at 1 MB, and a busy property's
+      // older sends would otherwise vanish from the "Sent to tenants" card.
+      return queryAll<ListingSendItem>(doc, {
+        TableName: table,
+        KeyConditionExpression: 'unitId = :u',
+        ExpressionAttributeValues: { ':u': unitId },
+      });
     },
 
     async listByContact(contactId) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          IndexName: 'byContact',
-          KeyConditionExpression: 'contactId = :c',
-          ExpressionAttributeValues: { ':c': contactId },
-          ScanIndexForward: false, // newest-first by sentAt
-        }),
-      );
-      return (Items ?? []) as ListingSendItem[];
+      // Paged to exhaustion (see listByUnit). Ordering is preserved: each page
+      // continues the same newest-first index walk.
+      return queryAll<ListingSendItem>(doc, {
+        TableName: table,
+        IndexName: 'byContact',
+        KeyConditionExpression: 'contactId = :c',
+        ExpressionAttributeValues: { ':c': contactId },
+        ScanIndexForward: false, // newest-first by sentAt
+      });
     },
   };
 }

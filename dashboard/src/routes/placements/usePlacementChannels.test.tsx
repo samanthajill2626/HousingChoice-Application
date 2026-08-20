@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary, EventStreamHandlers, PlacementItem } from '../../api/index.js';
 
-const getConversations = vi.fn();
+const getAllConversations = vi.fn();
 const markConversationRead = vi.fn();
 const markInboxRead = vi.fn();
 const noteRowsCleared = vi.fn();
@@ -33,7 +33,7 @@ vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getConversations: (...a: unknown[]) => getConversations(...a),
+    getAllConversations: (...a: unknown[]) => getAllConversations(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
@@ -174,7 +174,7 @@ function MarkReadChild({
 }
 
 beforeEach(() => {
-  getConversations.mockReset();
+  getAllConversations.mockReset();
   markConversationRead.mockReset();
   markInboxRead.mockReset();
   noteRowsCleared.mockReset();
@@ -182,19 +182,19 @@ beforeEach(() => {
   streamHandlers = null;
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
-  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getAllConversations.mockResolvedValue({ items: [], truncated: false});
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('usePlacementChannels', () => {
   it('resolves the group from group_thread and the 1:1 unread from the inbox', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('g1', 'ten-1', 1, 'relay_group'),
         conv('c-ten', 'ten-1', 3, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -205,12 +205,12 @@ describe('usePlacementChannels', () => {
   });
 
   it('sums unread across ALL the contact non-relay threads (phone- AND email-keyed)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
         emailConv('c-ten-email', 'ten-1', 3),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -219,12 +219,12 @@ describe('usePlacementChannels', () => {
   });
 
   it('never counts a relay_group toward a 1:1 tab, even at high unread', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('g1', 'ten-1', 7, 'relay_group'),
         conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -237,8 +237,8 @@ describe('usePlacementChannels', () => {
     // The dangerous case this excludes: a group roster names up to nine
     // contacts, so counting it would add the SAME unread to every member's 1:1
     // dot - and no 1:1 mark-read could ever clear it.
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         {
           ...conv('gt-1', 'ten-1', 5, 'group_text'),
           participants: [
@@ -248,7 +248,7 @@ describe('usePlacementChannels', () => {
         },
         conv('c-ten', 'ten-1', 2, 'tenant_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -257,7 +257,7 @@ describe('usePlacementChannels', () => {
   });
 
   it('a channel with no thread resolves to null / zero unread', async () => {
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [], truncated: false});
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('tenant')).toHaveTextContent('unread:0');
@@ -265,12 +265,12 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead fans the read out to the CONTACT + zeroes unread; never the single-conversation read', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1'),
         emailConv('c-ten-email', 'ten-1', 3),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:5'));
@@ -282,9 +282,9 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead no-ops at unread 0 (the effect re-runs on every render)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -293,9 +293,9 @@ describe('usePlacementChannels', () => {
   });
 
   it('markPersonRead no-ops when the contact is unresolved (undefined id)', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
@@ -309,9 +309,9 @@ describe('usePlacementChannels', () => {
     // The guard is falsy, not `=== undefined`: PlacementDetail really does build
     // a loading placeholder with tenantId: '' for this hook, so '' has to be
     // rejected too.
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
@@ -321,9 +321,9 @@ describe('usePlacementChannels', () => {
   });
 
   it('markGroupRead still marks the SINGLE group conversation read', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
@@ -336,7 +336,7 @@ describe('usePlacementChannels', () => {
 
   it('setGroupConversationId injects a just-provisioned group thread id (survives a refetch)', async () => {
     // Empty inbox: the group has no thread yet, so a refetch cannot re-resolve one.
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [], truncated: false});
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('group')).toHaveTextContent('-/0');
@@ -345,7 +345,7 @@ describe('usePlacementChannels', () => {
 
     // A conversation.updated fires a refetch; the injected id (not on the inbox
     // page) must survive so the freshly-opened thread never unmounts.
-    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    getAllConversations.mockResolvedValue({ items: [], truncated: false});
     act(() =>
       streamHandlers?.onConversationUpdated?.({
         conversationId: 'c-injected',
@@ -359,16 +359,16 @@ describe('usePlacementChannels', () => {
   });
 
   it('a conversation.updated refetches and refreshes unread', async () => {
-    getConversations.mockResolvedValueOnce({
-      conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValueOnce({
+      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:1'));
 
-    getConversations.mockResolvedValueOnce({
-      conversations: [conv('c-ten', 'ten-1', 5, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValueOnce({
+      items: [conv('c-ten', 'ten-1', 5, 'tenant_1to1')],
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -387,9 +387,9 @@ describe('usePlacementChannels', () => {
 // to the ACTIVE tab, but never for a tab that is not active.
 describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   it('marks the initial ACTIVE tab read on the loading->ready commit (unread>0), exactly once', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     // Fires WITHOUT any interaction - the regression the ref-based version missed.
@@ -400,16 +400,16 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   });
 
   it('marks read AGAIN when an inbound raises unread on the ACTIVE tab', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
 
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 4, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 4, 'tenant_1to1')],
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -425,24 +425,24 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
   });
 
   it('does NOT mark read a tab that is not active when its unread rises', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 0, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // Active (tenant) tab loaded at unread 0 -> no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();
 
-    getConversations.mockResolvedValue({
-      conversations: [
+    getAllConversations.mockResolvedValue({
+      items: [
         conv('c-ten', 'ten-1', 0, 'tenant_1to1'),
         conv('c-lord', 'lord-1', 5, 'landlord_1to1'),
       ],
-      nextCursor: null,
+      truncated: false,
     });
     act(() =>
       streamHandlers?.onConversationUpdated?.({
@@ -469,9 +469,9 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
 // two surfaces dedupes instead of double-decrementing.
 describe('usePlacementChannels - nav badge clears', () => {
   it('markGroupRead clears the group by its cv: key', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('g1/4'));
@@ -482,9 +482,9 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('markPersonRead clears the contact by its c: key', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:2'));
@@ -495,9 +495,9 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('NEVER touches the badge at or below the guards', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 0, 'tenant_1to1')],
+      truncated: false,
     });
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -511,9 +511,9 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the group mark-read fails', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('g1', 'ten-1', 4, 'relay_group')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('g1', 'ten-1', 4, 'relay_group')],
+      truncated: false,
     });
     markConversationRead.mockRejectedValue(new Error('nope'));
     render(<Probe placement={makePlacement({ group_thread: 'g1' })} landlordId="lord-1" />);
@@ -523,9 +523,9 @@ describe('usePlacementChannels - nav badge clears', () => {
   });
 
   it('rolls the badge clear back when the person fan-out fails', async () => {
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten-sms', 'ten-1', 2, 'tenant_1to1')],
+      truncated: false,
     });
     markInboxRead.mockRejectedValue(new Error('nope'));
     render(<Probe placement={makePlacement()} landlordId="lord-1" />);
@@ -538,9 +538,9 @@ describe('usePlacementChannels - nav badge clears', () => {
     // A11 in its concrete form: the badge functions flow into markGroupRead /
     // markPersonRead deps, which flow into this hook's returned object, which is
     // MarkReadChild's effect dependency. A churning identity POSTs forever.
-    getConversations.mockResolvedValue({
-      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
-      nextCursor: null,
+    getAllConversations.mockResolvedValue({
+      items: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      truncated: false,
     });
     render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));

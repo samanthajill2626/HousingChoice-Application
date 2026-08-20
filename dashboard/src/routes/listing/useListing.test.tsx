@@ -1,11 +1,11 @@
 import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { PlacementsPage, Contact, UnitItem, UnitsPage } from '../../api/index.js';
+import type { Contact, FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
-const getUnits = vi.fn();
-const getPlacements = vi.fn();
+const getAllUnits = vi.fn();
+const getAllPlacements = vi.fn();
 const getContact = vi.fn();
 const getUnitRelated = vi.fn();
 const getUnitRecipients = vi.fn();
@@ -18,8 +18,8 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getUnit: (...a: unknown[]) => getUnit(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
-    getPlacements: (...a: unknown[]) => getPlacements(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
+    getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     getUnitRelated: (...a: unknown[]) => getUnitRelated(...a),
     getUnitRecipients: (...a: unknown[]) => getUnitRecipients(...a),
@@ -55,20 +55,20 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
 }
 
 const UNIT: UnitItem = { unitId: 'u1', landlordId: 'll1', status: 'available' };
-const UNITS: UnitsPage = {
-  nextCursor: null,
-  units: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }],
+const UNITS: FetchAllPagesResult<UnitItem> = {
+  items: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }],
+  truncated: false,
 };
-const CASES: PlacementsPage = {
-  nextCursor: null,
-  placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
+const CASES: FetchAllPagesResult<PlacementItem> = {
+  items: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
+  truncated: false,
 };
 const LANDLORD: Contact = { contactId: 'll1', type: 'landlord', firstName: 'James' } as Contact;
 
 beforeEach(() => {
   getUnit.mockReset();
-  getUnits.mockReset();
-  getPlacements.mockReset();
+  getAllUnits.mockReset();
+  getAllPlacements.mockReset();
   getContact.mockReset();
   getUnitRelated.mockReset();
   getUnitRecipients.mockReset();
@@ -82,8 +82,8 @@ afterEach(() => vi.restoreAllMocks());
 describe('useListing', () => {
   it('assembles real panels and degrades C4/C6 to pending; related falls back', async () => {
     getUnit.mockResolvedValue(UNIT);
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -106,19 +106,17 @@ describe('useListing', () => {
     expect(screen.getByTestId('activity').textContent).toBe('pending');
   });
 
-  it('walks every unit page so the same-landlord fallback sees past page one', async () => {
-    // The server pages /api/units at 50. A sibling property on page two used to
-    // be invisible to the derived Related list, so a landlord with a large
-    // portfolio saw an empty "Related properties" card.
+  it('derives Related from the WHOLE portfolio, not just the first server page', async () => {
+    // getAllUnits arrives already walked (api/lists.test.ts proves the walk). A
+    // sibling property that only a paged read could supply used to be invisible
+    // to the derived Related list, so a landlord with a large portfolio saw an
+    // empty "Related properties" card.
     getUnit.mockResolvedValue(UNIT);
-    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
-      Promise.resolve(
-        params.cursor === undefined
-          ? { units: [UNIT], nextCursor: 'page-2' }
-          : { units: [{ unitId: 'u-sibling', landlordId: 'll1', status: 'available' }], nextCursor: null },
-      ),
-    );
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue({
+      items: [UNIT, { unitId: 'u-sibling', landlordId: 'll1', status: 'available' }],
+      truncated: false,
+    });
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -134,8 +132,8 @@ describe('useListing', () => {
 
   it('uses the live /related endpoint when it answers', async () => {
     getUnit.mockResolvedValue(UNIT);
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockResolvedValue([
       { unitId: 'u9', status: 'available', relation: 'same_property', label: 'Duplex' },
@@ -159,8 +157,8 @@ describe('useListing', () => {
 
   it('loads tours by unitId, unbooked first then newest; a 404 degrades to pending', async () => {
     getUnit.mockResolvedValue(UNIT);
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
@@ -197,8 +195,8 @@ describe('useListing', () => {
       ],
     };
     getUnit.mockResolvedValue(withPhotos);
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
@@ -247,8 +245,8 @@ describe('useListing', () => {
 
   it('errors when the unit itself fails to load', async () => {
     getUnit.mockRejectedValue(new ApiError(500, 'boom', 'x'));
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
@@ -262,8 +260,8 @@ describe('useListing', () => {
 
   it('tolerates a 404 on the landlord contact (roster still falls back id-only)', async () => {
     getUnit.mockResolvedValue(UNIT);
-    getUnits.mockResolvedValue(UNITS);
-    getPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
     getContact.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));

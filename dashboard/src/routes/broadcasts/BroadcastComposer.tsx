@@ -19,7 +19,8 @@ import { useSearchParams } from 'react-router-dom';
 import {
   ApiError,
   getContact,
-  getContacts,
+  getAllContacts,
+  getAllUnits,
   getUnit,
   previewBroadcast,
   LISTING_STATUS_LABELS,
@@ -33,7 +34,6 @@ import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { shortAddress } from '../listing/listingFormat.js';
-import { getAllUnitPages } from '../listings/useListings.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
@@ -145,15 +145,15 @@ export function BroadcastComposer(): React.JSX.Element {
   }, [seedContactId]);
 
   // Property-picker candidates - only when the entry point did not fix a unit.
-  // EVERY page is walked (getAllUnitPages): the server pages at 50, and a
+  // EVERY page is walked (getAllUnits): the server pages at 50, and a
   // one-shot first page left the rest of a real portfolio unpickable - not just
   // unbrowsable, but unfindable by search too, since the search filters this
   // array client-side.
   useEffect(() => {
     if (unitId !== undefined) return; // fixed by the entry point
     const controller = new AbortController();
-    getAllUnitPages(false, controller.signal)
-      .then(setUnitCandidates)
+    getAllUnits({}, controller.signal)
+      .then(({ items }) => setUnitCandidates(items))
       .catch(() => {
         /* candidate load failed - the picker just has nothing to suggest */
       });
@@ -214,12 +214,16 @@ export function BroadcastComposer(): React.JSX.Element {
     setFilter((prev) => (prev.bedroomSize === undefined ? { ...prev, bedroomSize: beds } : prev));
   }, [audienceEnabled, unit]);
 
-  // Load tenant candidates once (first page; the search filters client-side).
+  // Load tenant candidates once. EVERY page, for the same reason the property
+  // picker above walks them: the search filters this array CLIENT-side, so a
+  // tenant missing from it is not merely unbrowsable but unfindable.
+  // (This list backs the manual "add a tenant" box only - a broadcast's actual
+  // audience is resolved server-side by audienceResolution, which pages.)
   useEffect(() => {
     const controller = new AbortController();
-    getContacts({ type: 'tenant' }, controller.signal)
-      .then((page) => {
-        setTenants(page.contacts);
+    getAllContacts({ type: 'tenant' }, controller.signal)
+      .then(({ items }) => {
+        setTenants(items);
         setTenantsLoading(false);
       })
       .catch(() => setTenantsLoading(false));

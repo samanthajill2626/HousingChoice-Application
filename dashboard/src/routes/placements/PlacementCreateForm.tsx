@@ -15,7 +15,8 @@ import { Link } from 'react-router-dom';
 import {
   createPlacement,
   getContact,
-  getContacts,
+  getAllContacts,
+  getAllUnits,
   getPlacementsBy,
   getUnit,
   PLACEMENT_STAGES,
@@ -34,7 +35,6 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { getAllUnitPages } from '../listings/useListings.js';
 import styles from './PlacementCreateForm.module.css';
 
 export interface PlacementCreateFormProps {
@@ -119,11 +119,14 @@ export function PlacementCreateForm({
     // looked up from the list (with getContact as a fallback).
     void (async () => {
       try {
-        const page = await getContacts({ type: 'tenant' }, ac.signal);
+        // EVERY page: the server pages /api/contacts at 50 and orders the type
+        // partition by `status`, so a first-page-only read left most of the
+        // tenant roster unpickable (the same defect the unit side already fixed).
+        const { items } = await getAllContacts({ type: 'tenant' }, ac.signal);
         if (ac.signal.aborted) return;
-        setTenants(page.contacts);
+        setTenants(items);
         if (tenantId !== undefined) {
-          const hit = page.contacts.find((c) => c.contactId === tenantId);
+          const hit = items.find((c) => c.contactId === tenantId);
           if (hit) setLockedTenantLabel(tenantLabel(hit));
         }
       } catch {
@@ -136,7 +139,7 @@ export function PlacementCreateForm({
         // EVERY page (the server pages /api/units at 50) - a first-page-only
         // read left properties later in the scan unselectable, so no placement
         // could be created against them.
-        const all = await getAllUnitPages(false, ac.signal);
+        const { items: all } = await getAllUnits({}, ac.signal);
         if (ac.signal.aborted) return;
         setUnits(all);
         if (unitId !== undefined) {

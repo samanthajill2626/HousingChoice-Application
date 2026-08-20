@@ -32,8 +32,9 @@
 import { useEffect, useState } from 'react';
 import {
   createTour,
+  getAllContacts,
+  getAllUnits,
   getContact,
-  getContacts,
   TOUR_TYPE_LABELS,
   type Contact,
   type Tour,
@@ -48,7 +49,6 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, unitLabel, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
-import { getAllUnitPages } from '../listings/useListings.js';
 import { tourTimeWarning } from './tourTime.js';
 import styles from './ScheduleTourForm.module.css';
 
@@ -170,13 +170,17 @@ export function ScheduleTourForm({
 
     // Always fetch tenants so the picker works AND a locked tenant label can be
     // looked up from the list (with getContact as a fallback).
+    // EVERY page: the server pages /api/contacts at 50 and DynamoDB orders the
+    // type partition by `status`, so a first-page-only read offered 50 of 641
+    // tenants - `searching` sorts last, which made nearly every active tenant
+    // unpickable and a tour unschedulable from this side of the form.
     void (async () => {
       try {
-        const page = await getContacts({ type: 'tenant' }, ac.signal);
+        const { items } = await getAllContacts({ type: 'tenant' }, ac.signal);
         if (ac.signal.aborted) return;
-        setTenants(page.contacts);
+        setTenants(items);
         if (tenantId !== undefined) {
-          const hit = page.contacts.find((c) => c.contactId === tenantId);
+          const hit = items.find((c) => c.contactId === tenantId);
           if (hit) setLockedTenantLabel(tenantLabel(hit));
         }
       } catch {
@@ -189,7 +193,7 @@ export function ScheduleTourForm({
         // EVERY page (the server pages /api/units at 50) - a first-page-only
         // read made properties later in the scan unpickable, so a tour could
         // not be scheduled on them at all.
-        const all = await getAllUnitPages(false, ac.signal);
+        const { items: all } = await getAllUnits({}, ac.signal);
         if (ac.signal.aborted) return;
         setUnits(all);
         // Pre-commit the unit side to the caller's suggestion — but only while

@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
-  getPlacements,
+  getAllPlacements,
+  getAllUnits,
   getContactListingsSent,
   getContactGroupThreads,
   getContactRelayGroups,
@@ -19,7 +20,6 @@ import {
   type Tour,
   type UnitItem,
 } from '../../api/index.js';
-import { getAllUnitPages } from '../listings/useListings.js';
 
 /** A slice that may not be live yet: 'loading' → 'pending' (404) | T[] (ready). */
 export type Slice<T> =
@@ -133,12 +133,14 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         let groupThreadsTruncated = false;
         const [placements, units, listingsSent, relayGroups, groupThreads] =
           await Promise.all([
-          getPlacements(signal),
+          // EVERY page: this backs the Placements panel, so a first-page-only
+          // read dropped this person's deals once the board outgrew one page.
+          getAllPlacements(signal),
           // EVERY page (the server pages /api/units at 50): these units back the
           // landlord's Properties panel AND the per-unit tours fan-out below, so
           // a first-page-only read silently dropped both for anyone whose
           // properties sat later in the scan.
-          getAllUnitPages(false, signal),
+          getAllUnits({}, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
           loadSlice((s) => getContactRelayGroups(contactId, s), signal),
           loadSlice(async (s) => {
@@ -162,7 +164,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
             // Best-effort — tours degrade to empty if the API is unavailable
           }
         } else if (opts.contactType === 'landlord') {
-          const myUnitIds = units
+          const myUnitIds = units.items
             .filter((u) => u.landlordId === contactId)
             .map((u) => u.unitId);
           try {
@@ -178,8 +180,8 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         if (signal.aborted) return;
         setState({
           status: 'ready',
-          placements: placements.placements,
-          units,
+          placements: placements.items,
+          units: units.items,
           tours,
           listingsSent,
           relayGroups,

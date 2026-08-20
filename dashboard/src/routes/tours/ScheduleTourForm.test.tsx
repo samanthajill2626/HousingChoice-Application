@@ -13,16 +13,16 @@ import type { Contact, Tour, UnitItem } from '../../api/index.js';
 // Mock the api barrel: spread the real module, override only what the form
 // calls. Each delegates to a vi.fn() so per-test mockResolvedValue works.
 const createTour = vi.fn();
-const getContacts = vi.fn();
-const getUnits = vi.fn();
+const getAllContacts = vi.fn();
+const getAllUnits = vi.fn();
 const getContact = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     createTour: (...a: unknown[]) => createTour(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
-    getUnits: (...a: unknown[]) => getUnits(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
+    getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getContact: (...a: unknown[]) => getContact(...a),
   };
 });
@@ -95,8 +95,8 @@ function setup(props?: Partial<Parameters<typeof ScheduleTourForm>[0]>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getContacts.mockResolvedValue({ contacts: TENANTS, nextCursor: null });
-  getUnits.mockResolvedValue({ units: UNITS, nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false});
+  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false});
   // The locked-label fallback is best-effort; reject so the list lookup wins.
   getContact.mockRejectedValue(new ApiError(404, 'not_found', 'not_found'));
 });
@@ -126,29 +126,55 @@ function localDatetime(msFromNow: number): string {
 const DAY = 24 * 3_600_000;
 
 describe('ScheduleTourForm', () => {
-  // ── 0: the property list is the WHOLE portfolio, not the first server page ──
-  it('walks every unit page so a property past page one can be picked', async () => {
-    // /api/units pages at 50. A first-page-only read meant a tour simply could
-    // not be scheduled on any property later in the scan - the typeahead never
-    // offered it.
+  // ── 0a: the TENANT list is the whole roster, not the first server page ──
+  it('offers a tenant from deep in the roster, not just the first server page', async () => {
+    // THE BUG THIS FORM SHIPPED WITH. /api/contacts pages at 50 and DynamoDB
+    // orders the type partition by `status`, where `searching` sorts LAST - so
+    // in production 591 of 641 tenants, including nearly every active one, were
+    // absent from this picker and could not be given a tour from this side of
+    // the form. The property side had already been fixed; the tenant side had
+    // no equivalent test, which is why it stayed broken.
     const user = userEvent.setup();
-    getUnits.mockImplementation((params: { cursor?: string } = {}) =>
-      Promise.resolve(
-        params.cursor === undefined
-          ? { units: UNITS, nextCursor: 'page-2' }
-          : {
-              units: [
-                {
-                  unitId: 'unit-0099',
-                  landlordId: 'contact-landlord-0001',
-                  status: 'available',
-                  address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
-                },
-              ],
-              nextCursor: null,
-            },
-      ),
+    getAllContacts.mockResolvedValue({
+      items: [
+        ...TENANTS,
+        {
+          contactId: 'contact-tenant-0099',
+          type: 'tenant',
+          firstName: 'Pagetwo',
+          lastName: 'Tenant',
+          status: 'searching',
+        },
+      ],
+      truncated: false,
+    });
+    setup();
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    await user.type(screen.getByRole('combobox', { name: 'Tenant' }), 'Pagetwo');
+    await user.click(await screen.findByRole('option', { name: /Pagetwo Tenant/ }));
+    expect((screen.getByRole('combobox', { name: 'Tenant' }) as HTMLInputElement).value).toMatch(
+      /Pagetwo Tenant/,
     );
+  });
+
+  // ── 0: the property list is the WHOLE portfolio, not the first server page ──
+  it('offers a property from deep in the roster, not just the first server page', async () => {
+    // The roster arrives ALREADY walked - getAllUnits follows nextCursor, proven
+    // in api/lists.test.ts. What this asserts is the other half: the form
+    // searches the WHOLE roster it was handed, including a property that only
+    // a paged read could have supplied. Before the walk existed, a tour simply
+    // could not be scheduled on any property later in the scan.
+    const user = userEvent.setup();
+    getAllUnits.mockResolvedValue({
+      items: [...UNITS, {
+          unitId: 'unit-0099',
+          landlordId: 'contact-landlord-0001',
+          status: 'available',
+          address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
+        }],
+      truncated: false,
+    });
     setup();
     await screen.findByRole('dialog', { name: 'Schedule a tour' });
 

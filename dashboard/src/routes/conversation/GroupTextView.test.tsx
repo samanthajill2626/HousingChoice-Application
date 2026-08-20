@@ -20,7 +20,7 @@ const getConversationScheduled = vi.fn();
 const markConversationRead = vi.fn();
 const markConversationUnread = vi.fn();
 const sendMessageMock = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
 // `sse` is a DISPATCHER, not a single-slot capture. Production registers every
@@ -60,7 +60,7 @@ vi.mock('../../api/index.js', async () => {
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markConversationUnread: (...a: unknown[]) => markConversationUnread(...a),
     sendMessage: (...a: unknown[]) => sendMessageMock(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     useEventStream: (h: EventStreamHandlers) => {
       if (h.onMessagePersisted !== undefined) {
         messagePersistedHandlers.add(h.onMessagePersisted as (e: unknown) => void);
@@ -139,7 +139,7 @@ beforeEach(() => {
     tsMsgId: '2026-06-17T11:00:00.000Z#IMsent1',
     status: 'queued',
   });
-  getContacts.mockReset().mockResolvedValue({ nextCursor: null, contacts: [] });
+  getAllContacts.mockReset().mockResolvedValue({ items: [], truncated: false });
   getGroupMembers.mockResolvedValue([ANN, MARCUS]);
   getConversation.mockResolvedValue(groupHeader());
 });

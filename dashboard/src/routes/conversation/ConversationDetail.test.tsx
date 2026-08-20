@@ -18,7 +18,7 @@ const removeConversationMember = vi.fn();
 const closeConversation = vi.fn();
 const markConversationRead = vi.fn();
 const markConversationUnread = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
 
@@ -52,7 +52,7 @@ vi.mock('../../api/index.js', async () => {
     closeConversation: (...a: unknown[]) => closeConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markConversationUnread: (...a: unknown[]) => markConversationUnread(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     useEventStream: (h: { onConversationUpdated?: (e: unknown) => void }) => {
       if (h.onConversationUpdated !== undefined) conversationUpdatedHandlers.add(h.onConversationUpdated);
     },
@@ -126,7 +126,7 @@ beforeEach(() => {
   removeConversationMember.mockReset();
   closeConversation.mockReset();
   markConversationRead.mockReset();
-  getContacts.mockReset();
+  getAllContacts.mockReset();
   getConversationScheduled.mockReset();
   getConversationMessages.mockResolvedValue([]);
   // The endpoint returns the whole ENVELOPE now (rows + the composing zone).
@@ -135,8 +135,8 @@ beforeEach(() => {
   markConversationRead.mockResolvedValue(undefined);
   // useContacts('all') fans out per type; return the candidate for tenants only
   // (so the search field yields exactly one option).
-  getContacts.mockImplementation((params: { type?: string } = {}) =>
-    Promise.resolve({ nextCursor: null, contacts: params.type === 'tenant' ? [CANDIDATE] : [] }),
+  getAllContacts.mockImplementation((params: { type?: string } = {}) =>
+    Promise.resolve({ items: params.type === 'tenant' ? [CANDIDATE] : [], truncated: false }),
   );
 });
 afterEach(() => {

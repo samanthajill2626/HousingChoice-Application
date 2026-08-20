@@ -8,14 +8,14 @@ import type { Contact, UnitItem } from '../../api/index.js';
 // Mock the api barrel: spread the real module, override only the functions the
 // form calls. Each delegates to a vi.fn() so per-test mockResolvedValue works.
 const createUnit = vi.fn();
-const getContacts = vi.fn();
+const getAllContacts = vi.fn();
 const getContact = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     createUnit: (...a: unknown[]) => createUnit(...a),
-    getContacts: (...a: unknown[]) => getContacts(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     getContact: (...a: unknown[]) => getContact(...a),
   };
 });
@@ -50,7 +50,7 @@ function setup(props?: Partial<Parameters<typeof UnitCreateForm>[0]>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getContacts.mockResolvedValue({ contacts: LANDLORDS, nextCursor: null });
+  getAllContacts.mockResolvedValue({ items: LANDLORDS, truncated: false});
   getContact.mockResolvedValue(LANDLORDS[0]);
 });
 
@@ -98,7 +98,7 @@ describe('UnitCreateForm', () => {
     await user.click(await screen.findByRole('option', { name: /Rosa Kim/ }));
     expect(create()).toBeEnabled();
     // Let mount fetches settle.
-    await waitFor(() => expect(getContacts).toHaveBeenCalled());
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
   });
 
   // ── 4: submit posts landlordId + coerced fields, then calls onCreated ──

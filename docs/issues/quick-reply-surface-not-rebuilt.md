@@ -3,10 +3,11 @@ id: quick-reply-surface-not-rebuilt
 title: One-tap quick replies are dead - the quick-reply sheet was never rebuilt
 type: bug
 severity: high
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-15
-refs: dashboard/src/sw/route.ts, dashboard/public/sw.js, app/src/routes/webhooks/voice.ts:1810
+resolved: 2026-08-20
+refs: dashboard/src/routes/quickReply/QuickReply.tsx, dashboard/src/sw/route.ts, dashboard/public/sw.js, app/src/routes/webhooks/voice.ts:1810
 ---
 
 **Problem.** CO2 founder triage (PHASE1_CHANGE_ORDER_2.md) specified that a
@@ -61,3 +62,28 @@ consuming `#action=<id>` against `OrgSettings.quickReplies` (the same list
 and put `/quick-reply/<id>` back in the `assertSameOriginPath` allow-list -
 `route.test.ts` has a case asserting that path is currently REFUSED, which will
 need inverting at the same time.
+
+**Resolution (2026-08-20).** Built fresh in `dashboard/src/routes/quickReply/`
+(NOT restored from the legacy workspace - the rebuilt dashboard has none of the
+primitives that view was built on). `resolveSafePath` routes `missed_call` to
+`/quick-reply/<callId>?conversationId=<id>`, appending `#action=<id>` for an
+Android action-button tap; the path is back on the `assertSameOriginPath`
+allow-list and both `route.test.ts` cases are inverted. `mirror.test.ts` now
+pins the new `public/sw.js` lines as exact fragments, so a forgotten mirror
+fails a test instead of shipping tested-but-dead routing.
+
+Three deliberate departures from the original CO2 shape:
+
+  - The conversation travels in the QUERY (the push payload already carries it),
+    so the sheet needs no `GET /api/calls/:callId` round trip on the one screen
+    where latency is most visible.
+  - No undo (Cameron, 2026-08-20). An SMS cannot be recalled, so a delayed send
+    with an Undo bar buys an illusion at the cost of a whole edge case. Tapping
+    sends; the sheet names the recipient above the buttons instead.
+  - The `missedCallAutoText` is NOT offered as a tap target. It may already have
+    fired on this same call, and re-sending it would text the caller the
+    identical message twice. The zero-tap auto-text path itself is untouched.
+
+Verification is unit tests plus a manual device check: push notifications are
+not drivable in the Playwright harness, so there is no e2e coverage of the
+notification tap - only of the route once open.

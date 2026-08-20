@@ -1,0 +1,91 @@
+/* QuickReply - the missed-call one-tap reply sheet. Tokens only.
+ * Deliberately narrow and large-tapped: this screen is reached from a phone
+ * notification, usually one-handed, immediately after a missed call. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 480px;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.lede {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+/* The canned replies. Full-width lg buttons so each is a comfortable thumb
+ * target; the body text wraps rather than truncating - the founder is agreeing
+ * to send exactly these words, so all of them have to be readable. */
+.replies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.replies button {
+  text-align: left;
+  white-space: normal;
+  height: auto;
+  padding-block: var(--sp-3);
+}
+
+.sentHeading {
+  margin: 0;
+  color: var(--c-success);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.sentBody {
+  margin: 0;
+  width: 100%;
+  padding: var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-md);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.empty {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.link {
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}

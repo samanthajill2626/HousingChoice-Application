@@ -53,3 +53,33 @@ describe('public/sw.js mirror carries the inbound-message-push changes', () => {
     expect(swSource).toContain("url.pathname === '/email'");
   });
 });
+
+describe('public/sw.js mirror carries the missed-call quick-reply routing', () => {
+  // The one-tap sheet is USELESS if only the TS module learned about it: the
+  // mirror is what the phone runs, so a forgotten copy here means every
+  // missed-call tap keeps landing on the conversation and the Android action
+  // buttons keep doing nothing - silently, and exactly like the regression this
+  // feature exists to undo.
+  it('has the missed_call branch gated on BOTH ids', () => {
+    expect(swSource).toContain(
+      "if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {",
+    );
+  });
+
+  it('builds the quick-reply target with the conversation in the query', () => {
+    expect(swSource).toContain('`/quick-reply/${encodeURIComponent(d.callId)}` +');
+    expect(swSource).toContain('`?conversationId=${encodeURIComponent(d.conversationId)}`;');
+  });
+
+  it('carries a PLAUSIBLE action id as the #action hash, and drops any other', () => {
+    expect(swSource).toContain(
+      'return isPlausibleId(action) ? `${path}#action=${encodeURIComponent(action)}` : path;',
+    );
+    // The retired `void action;` line meant the worker ignored action buttons.
+    expect(swSource).not.toContain('void action;');
+  });
+
+  it('allowlists the single-segment quick-reply path', () => {
+    expect(swSource).toContain('/^\\/quick-reply\\/[^/]+$/.test(url.pathname)');
+  });
+});

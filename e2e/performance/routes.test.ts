@@ -349,7 +349,18 @@ describe('route registry completeness', () => {
       .filter((path) => ['/team', '/templates', '/notifications', '/voice', '/system', '/ai-runs', '/numbers'].includes(path))
       .map((path) => `/settings${path}`);
     const rawPaths = [...relative.filter((path) => !settingsChildren.some((child) => child.endsWith(path))), ...settingsChildren, ...indexPath];
-    const excluded = new Set(['/p/:unitId', '/join', '/broadcasts/new', '/settings', '*']);
+    // Routes the page profiler deliberately does not measure. `/quick-reply/:callId`
+    // joins them because it is not reachable by navigation at all: it is the
+    // missed-call push deep-link, and it needs a live Twilio CallSid plus the
+    // conversation in the query before it renders anything to time.
+    const excluded = new Set([
+      '/p/:unitId',
+      '/join',
+      '/broadcasts/new',
+      '/quick-reply/:callId',
+      '/settings',
+      '*',
+    ]);
     expect([...new Set(rawPaths)].filter((path) => !excluded.has(path)).sort())
       .toEqual([...EXPECTED_KEYS.filter((key) => !key.startsWith('inbox-')), '/inbox'].sort());
     expect(appSource).toContain('{allNavTargets()');

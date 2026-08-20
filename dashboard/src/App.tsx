@@ -41,6 +41,7 @@ import { FlyerPage } from './routes/public/FlyerPage.js';
 import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
 import { TourDetail } from './routes/tours/TourDetail.js';
 import { ToursPage } from './routes/tours/ToursPage.js';
+import { QuickReply } from './routes/quickReply/QuickReply.js';
 
 /** /settings index → the first tab visible for the viewer's role (admin → Team,
  *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
@@ -239,6 +240,14 @@ function AuthedApp(): React.JSX.Element {
             {/* The property detail page. The static /listings list route above
                 ranks above this dynamic segment. */}
             <Route path="listings/:unitId" element={<ListingDetail />} />
+
+            {/* The missed-call ONE-TAP quick reply (CO2 founder triage), the
+                deep-link target of the missed-call push. :callId is the Twilio
+                CallSid; ?conversationId= is the thread to reply into; an Android
+                action-button tap arrives as #action=qr-<n> and sends on arrival.
+                The service worker's allow-list (src/sw/route.ts) must stay in
+                step with this path. */}
+            <Route path="quick-reply/:callId" element={<QuickReply />} />
 
             <Route path="*" element={<Placeholder title="Not found" />} />
           </Route>

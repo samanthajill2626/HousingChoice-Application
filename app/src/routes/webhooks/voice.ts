@@ -2229,9 +2229,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
 
     // Quick-replies → up to 2 notification actions (sw.js slices to 2 anyway).
-    // The action ids (qr-0 / qr-1) are what the SW forwards so /quick-reply can
-    // pre-select the chosen canned reply. A settings-read failure must not block
-    // the push — fall back to no actions.
+    // The action ids (qr-0 / qr-1) index the RAW quickReplies array; the SW
+    // carries the tapped one to /quick-reply as `#action=<id>`, where the sheet
+    // resolves it back to this body and sends it with no further tap. A
+    // settings-read failure must not block the push — fall back to no actions.
     let actions: { action: string; title: string }[] = [];
     try {
       const orgSettings = await settings.getOrgSettings();

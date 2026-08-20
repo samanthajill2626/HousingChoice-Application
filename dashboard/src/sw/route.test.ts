@@ -46,19 +46,56 @@ describe('resolveSafePath', () => {
     );
   });
 
-  it('routes a MISSED CALL to the conversation too - the quick-reply surface does not exist', () => {
-    // The original routed to /quick-reply/<callId>. That route was never
-    // rebuilt, so sending a tap there would land on the NotFound catch-all.
-    // The push payload carries conversationId alongside callId precisely so
-    // this has a real destination.
+  it('routes a MISSED CALL to the quick-reply sheet, carrying the conversation', () => {
+    // The conversation rides in the query so the sheet can send without a
+    // second lookup; callId stays in the path because it names the call.
     expect(
       resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }),
+    ).toBe('/quick-reply/CA123?conversationId=conv-9');
+  });
+
+  it('carries an action-button id as the #action hash - the one-tap path', () => {
+    expect(
+      resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }, 'qr-0'),
+    ).toBe('/quick-reply/CA123?conversationId=conv-9#action=qr-0');
+  });
+
+  it('DROPS an implausible action id rather than carrying it into the hash', () => {
+    // The action is as untrusted as the ids. A dropped action just means the
+    // sheet waits for a tap - never that a hostile value reaches the URL.
+    expect(
+      resolveSafePath(
+        { kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' },
+        'javascript:alert(1)',
+      ),
+    ).toBe('/quick-reply/CA123?conversationId=conv-9');
+    expect(
+      resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }, ''),
+    ).toBe('/quick-reply/CA123?conversationId=conv-9');
+  });
+
+  it('URL-encodes both ids it embeds in the quick-reply target', () => {
+    expect(
+      resolveSafePath({ kind: 'missed_call', callId: 'CA%1', conversationId: 'c&2' }),
+    ).toBe('/quick-reply/CA%251?conversationId=c%262');
+  });
+
+  it('a missed call missing either id falls back to the conversation, then to /', () => {
+    // No callId - there is no sheet to open, but the thread is still real.
+    expect(resolveSafePath({ kind: 'missed_call', conversationId: 'conv-9' })).toBe(
+      '/conversations/conv-9',
+    );
+    // No conversation - nothing to reply into at all.
+    expect(resolveSafePath({ kind: 'missed_call', callId: 'CA123' })).toBe('/');
+    // An implausible callId must not smuggle a path segment into the target.
+    expect(
+      resolveSafePath({ kind: 'missed_call', callId: '../../etc', conversationId: 'conv-9' }),
     ).toBe('/conversations/conv-9');
   });
 
-  it('ignores the action id rather than routing on it', () => {
+  it('routes a VOICEMAIL to the conversation - only missed calls get the sheet', () => {
     expect(
-      resolveSafePath({ kind: 'missed_call', callId: 'CA123', conversationId: 'conv-9' }, 'qr-0'),
+      resolveSafePath({ kind: 'voicemail', callId: 'CA123', conversationId: 'conv-9' }),
     ).toBe('/conversations/conv-9');
   });
 
@@ -115,8 +152,20 @@ describe('assertSameOriginPath - the LAST gate before navigation', () => {
     expect(assertSameOriginPath('/auth/callback?code=stolen', ORIGIN)).toBe('/');
   });
 
-  it('REFUSES the retired quick-reply path so a stale worker cannot 404 a user', () => {
-    expect(assertSameOriginPath('/quick-reply/CA123', ORIGIN)).toBe('/');
+  it('admits the quick-reply path, keeping its query and hash intact', () => {
+    // The query carries the conversation and the hash carries the action id -
+    // both are load-bearing, so the gate must not strip them.
+    expect(
+      assertSameOriginPath('/quick-reply/CA123?conversationId=conv-9#action=qr-0', ORIGIN),
+    ).toBe('/quick-reply/CA123?conversationId=conv-9#action=qr-0');
+    expect(assertSameOriginPath('/quick-reply/CA123', ORIGIN)).toBe('/quick-reply/CA123');
+  });
+
+  it('REFUSES a deeper path riding in under the quick-reply prefix', () => {
+    // Single-segment only: an allowed prefix must not become an open door.
+    expect(assertSameOriginPath('/quick-reply/CA123/anything', ORIGIN)).toBe('/');
+    expect(assertSameOriginPath('/quick-reply', ORIGIN)).toBe('/');
+    expect(assertSameOriginPath('/quick-reply/', ORIGIN)).toBe('/');
   });
 
   it('allowlist admits exact /email only', () => {

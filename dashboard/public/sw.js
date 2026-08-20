@@ -21,11 +21,11 @@
  *   - push: show a notification from the pushed JSON. On Android, render the
  *     provided action buttons; iOS ignores actions and the tap deep-links.
  *   - notificationclick: focus/open the PWA and route to
- *     /conversations/<conversationId> - for message AND missed-call pushes
- *     alike, or to /email for an unmatched-email push (no conversation
- *     exists). The original /quick-reply/<callId> deep link was dropped on
- *     restore because that surface was never rebuilt (see src/sw/route.ts).
- *     See PHASE1_CHANGE_ORDER_2.md for the original triage intent.
+ *     /quick-reply/<callId> for a missed call (the one-tap canned-reply sheet;
+ *     an action-button tap adds #action=<id> so it sends without another tap),
+ *     /conversations/<conversationId> for a message or voicemail, or /email for
+ *     an unmatched-email push (no conversation exists). See
+ *     PHASE1_CHANGE_ORDER_2.md for the founder-triage intent.
  *
  * Pushed payload shape (server sends JSON):
  *   { title, body,
@@ -192,14 +192,20 @@ function isPlausibleId(id) {
 }
 
 /* Resolve a same-origin, allow-listed in-app PATH from the untrusted payload.
- * Action-button clicks (Android) and plain taps (iOS) both route to the same
- * destination: the caller's CONVERSATION. The original `/quick-reply/<callId>`
- * target was removed on restore (2026-08-15) because that surface was never
- * rebuilt - see the header note in src/sw/route.ts. `action` is accepted and
- * ignored so re-adding the branch later is a pure addition. */
+ * A missed call deep-links to the one-tap quick-reply sheet; an Android
+ * action-button tap rides along as `#action=<id>` so that reply sends with no
+ * further tap, while a plain tap (iOS, where actions are unsupported) lands on
+ * the same sheet and waits. Everything else routes to the conversation. */
 function resolveSafePath(data, action) {
   const d = data || {};
-  void action;
+  if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {
+    const path =
+      `/quick-reply/${encodeURIComponent(d.callId)}` +
+      `?conversationId=${encodeURIComponent(d.conversationId)}`;
+    // The action id is as untrusted as the ids - same plausibility gate, and an
+    // implausible one is DROPPED rather than carried.
+    return isPlausibleId(action) ? `${path}#action=${encodeURIComponent(action)}` : path;
+  }
   if (isPlausibleId(d.conversationId)) {
     return `/conversations/${encodeURIComponent(d.conversationId)}`;
   }
@@ -214,8 +220,9 @@ function resolveSafePath(data, action) {
 
 /* Last gate before navigate/openWindow: assert same-origin + allow-listed path,
  * else fall back to '/'. The allow-list mirrors routes that ACTUALLY EXIST in
- * App.tsx: '/', '/email', '/conversations/<id>'. '/email' is an EXACT match on
- * purpose - '/email/quarantine' is a separate tab and never a push target. */
+ * App.tsx: '/', '/email', '/quick-reply/<callId>', '/conversations/<id>'.
+ * '/email' is an EXACT match on purpose - '/email/quarantine' is a separate tab
+ * and never a push target. Both dynamic patterns are single-segment. */
 function assertSameOriginPath(path, origin) {
   try {
     const url = new URL(path, origin);
@@ -223,6 +230,7 @@ function assertSameOriginPath(path, origin) {
     if (
       url.pathname === '/' ||
       url.pathname === '/email' ||
+      /^\/quick-reply\/[^/]+$/.test(url.pathname) ||
       /^\/conversations\/[^/]+$/.test(url.pathname)
     ) {
       return `${url.pathname}${url.search}${url.hash}`;

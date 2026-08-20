@@ -9,7 +9,8 @@
 // fixed same-origin allow-list of paths:
 //     '/'                         (fallback)
 //     '/email'                    (unmatched_email; EXACT match, not a prefix)
-//     '/conversations/<id>'       (message, missed_call, voicemail)
+//     '/quick-reply/<callId>'     (missed_call)
+//     '/conversations/<id>'       (message, voicemail)
 // ids are validated as plausible (no slashes, no scheme/control chars) and
 // URL-encoded; anything off-list or unparseable falls back to '/'.
 //
@@ -19,17 +20,15 @@
 // pointing here. THIS module is the source of truth and is unit-tested
 // (route.test.ts); keep the two in sync.
 //
-// RESTORED 2026-08-15 with the missed-call target CHANGED. The original routed
-// `missed_call` to `/quick-reply/<callId>` (plus an `#action=` hash for Android
-// action buttons). That surface existed in the legacy dashboard and was NOT
-// rebuilt - the current router has no `quick-reply` route at all, so the old
-// target would land every missed-call tap on the NotFound catch-all. The push
-// payload carries `conversationId` alongside `callId`
-// (routes/webhooks/voice.ts), so a missed-call tap now opens the caller's
-// conversation, which is a real destination and the thread the call entry lives
-// in. Action-button taps degrade to the same place rather than auto-sending a
-// canned reply. Tracked in docs/issues/quick-reply-surface-not-rebuilt.md;
-// re-add the branch here AND in sw.js when that surface returns.
+// MISSED-CALL TARGET, 2026-08-20. Between the dashboard rebuild and now, this
+// router sent `missed_call` to the caller's conversation because the quick-reply
+// surface had not been rebuilt (docs/issues/quick-reply-surface-not-rebuilt.md).
+// That surface now exists again at routes/quickReply, so the branch is back:
+// `missed_call` deep-links to `/quick-reply/<callId>?conversationId=<id>`, and
+// an Android action-button tap rides along as `#action=<id>` so the sheet sends
+// that canned reply with no further tap. The conversation travels in the query
+// because the push payload already carries it (routes/webhooks/voice.ts) - the
+// sheet needs no GET /api/calls round trip to know where to send.
 
 /** The push payload fields this router reads (a subset of the pushed JSON). */
 export interface NotificationRouteData {
@@ -64,20 +63,30 @@ export function isPlausibleId(id: unknown): id is string {
  * path. Falls back to '/' for anything it cannot map safely.
  *
  * @param data   the notification's routing data (kind + ids)
- * @param action the action-button id (Android) tapped, if any — appended as a
- *               URL hash so the quick-reply view can pre-select/auto-send it.
+ * @param action the action-button id (Android) tapped, if any - appended as a
+ *               URL hash so the quick-reply view can auto-send that reply.
  */
 export function resolveSafePath(
   data: NotificationRouteData | null | undefined,
-  _action?: string | null,
+  action?: string | null,
 ): string {
   const d = data ?? {};
 
-  // `missed_call` deliberately shares the conversation target below: the
-  // quick-reply surface does not exist in this dashboard (see the header note),
-  // and routing to a path with no route is worse than routing to the thread.
-  // `_action` is retained in the signature so re-adding the quick-reply branch
-  // later is a pure addition, not a call-site change.
+  // A MISSED CALL deep-links to the one-tap quick-reply sheet. `callId` names
+  // the call (and keys the sheet's send-once latch); the conversation rides in
+  // the query so the sheet can send without a second lookup. BOTH ids must be
+  // plausible - a missed-call payload short of either falls through to the
+  // conversation target below, which is still a real place to land.
+  if (d.kind === 'missed_call' && isPlausibleId(d.callId) && isPlausibleId(d.conversationId)) {
+    const path =
+      `/quick-reply/${encodeURIComponent(d.callId)}` +
+      `?conversationId=${encodeURIComponent(d.conversationId)}`;
+    // The action id comes from the same untrusted payload as the ids, so it goes
+    // through the same plausibility gate and is URL-encoded. An implausible
+    // action is DROPPED rather than carried: the sheet then waits for a tap.
+    return isPlausibleId(action) ? `${path}#action=${encodeURIComponent(action)}` : path;
+  }
+
   if (isPlausibleId(d.conversationId)) {
     return `/conversations/${encodeURIComponent(d.conversationId)}`;
   }
@@ -103,13 +112,16 @@ export function assertSameOriginPath(path: string, origin: string): string {
     const url = new URL(path, origin);
     if (url.origin !== origin) return '/';
     // Allow-list mirrors routes that ACTUALLY EXIST in App.tsx: '/', '/email',
-    // '/conversations/<id>'. `/quick-reply/` was removed with the branch above -
-    // leaving it here would let a path with no route pass the last gate.
-    // '/email' is an EXACT match on purpose: '/email/quarantine' is a separate
-    // tab and never a push target.
+    // '/quick-reply/<callId>', '/conversations/<id>'. Nothing goes on this list
+    // that does not resolve to a real route - a path with no route would pass
+    // the last gate and land the user on the NotFound catch-all. '/email' is an
+    // EXACT match on purpose: '/email/quarantine' is a separate tab and never a
+    // push target. Both dynamic patterns are single-segment ([^/]+), so a
+    // deeper path cannot ride in under an allowed prefix.
     if (
       url.pathname === '/' ||
       url.pathname === '/email' ||
+      /^\/quick-reply\/[^/]+$/.test(url.pathname) ||
       /^\/conversations\/[^/]+$/.test(url.pathname)
     ) {
       // Re-serialise as a leading-'/' path (drop any host the candidate carried).

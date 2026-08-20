@@ -3,8 +3,9 @@
  * (TWO_PANE_BREAKPOINT_PX) - below it the dialog is a phone-width sheet and its
  * actions stack (spec 6.7). */
 
-/* The message preview reads as a TEXT, not as body copy: it is the literal SMS
- * the group receives, so it gets a bubble. */
+/* The message preview. READ-ONLY (add-member) it reads as a TEXT rather than as
+ * body copy - it is the literal SMS the group receives, so it gets a bubble.
+ * EDITABLE (relay-open) it reads as a field instead; see .bubbleInput. */
 .previewBox {
   margin: 0 0 var(--sp-3);
 }
@@ -110,15 +111,19 @@
   }
 }
 
-/* The editable intro (relay-open surfaces only). Sized and coloured like the
-   read-only .bubble it replaces, so turning editing on does not restyle the
-   dialog - it just makes the same text typable. */
+/* The editable intro (relay-open surfaces only). It is styled as a FIELD, not as
+   a bubble: the first version reused .bubble's outgoing-message blue, which is
+   the app's own visual shorthand for "a text that was sent" - so a box the
+   operator was meant to type in read as a read-only transcript of one. Matches
+   the broadcast composer's textarea (routes/broadcasts/MessageEditor.module.css)
+   because that is the same job - a message you are writing, not one you are
+   reading back. */
 .editLabel {
   display: block;
   margin-bottom: var(--sp-1);
   font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--c-text-muted);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
 }
 
 .bubbleInput {
@@ -126,18 +131,27 @@
   width: 100%;
   box-sizing: border-box;
   padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
-  background: var(--c-bubble-out-bg);
-  border: 1px solid var(--c-bubble-out-border);
-  color: inherit;
-  font: inherit;
-  line-height: 1.4;
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
   resize: vertical;
+}
+
+/* Keyboard users need to see where they are - the previous version had no focus
+   treatment at all. */
+.bubbleInput:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 0;
+  border-color: var(--c-brand);
 }
 
 .charCount {
   margin: var(--sp-1) 0 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   color: var(--c-text-muted);
   text-align: right;
 }

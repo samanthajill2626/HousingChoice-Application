@@ -65,6 +65,13 @@ export function toTimelineMessage(m: Message): TimelineMessage | null {
     ...(retryOf !== undefined && { retry_of: retryOf }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
     ...(typeof m.relay_sender_key === 'string' && { relay_sender_key: m.relay_sender_key }),
+    // A converted carrier group text carries pre-go-live history. The importer
+    // stamps `imported_from` on the stored row and GET /conversations/:id/messages
+    // returns the row as-is, so the stamp is already on the wire - carry it so
+    // the bubble suppresses the age-derived "Sent - not confirmed" cue here
+    // exactly as it does on the 1:1 timeline (the server projects the same
+    // boolean in routes/contactTimeline.ts).
+    ...(typeof m['imported_from'] === 'string' && { imported: true }),
   };
 }
 

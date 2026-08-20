@@ -302,6 +302,28 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(retry.retry_of).toBe(failedTsMsgId); // the retry points back at it
   });
 
+  it('emits imported:true only on a row the importer stamped', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await seedMessage('conv-a', '2026-03-01T10:00:00.000Z', 'SM-old', {
+      direction: 'outbound',
+      body: 'history',
+    });
+    await seedMessage('conv-a', '2026-06-16T10:00:00.000Z', 'SM-ours', {
+      direction: 'outbound',
+      body: 'ours',
+    });
+    // `imported_from` is an undeclared rider the importer PUTs on the item
+    // (lib/import/apply.ts), so the fake world is stamped the same way.
+    const historical = world.messages.find((m) => m.provider_sid === 'SM-old')!;
+    (historical as Record<string, unknown>)['imported_from'] = 'quo-airtable-import';
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const items = res.body.items as Array<{ tsMsgId: string; imported?: boolean }>;
+    expect(items.find((i) => i.tsMsgId.endsWith('#SM-old'))!.imported).toBe(true);
+    expect(items.find((i) => i.tsMsgId.endsWith('#SM-ours'))!.imported).toBeUndefined();
+  });
+
   it('derives fromPhone/toPhone from the contact own number + our number only', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);

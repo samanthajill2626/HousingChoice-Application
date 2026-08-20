@@ -584,6 +584,25 @@ describe('Timeline', () => {
     expect(screen.getByText(/Sent - not confirmed/)).toBeInTheDocument();
   });
 
+  it('an IMPORTED message reads a plain "Sent" no matter how old it is', () => {
+    // Pre-go-live history carried in from the Quo/Airtable export. The importer
+    // writes `sent` because the export has no per-message receipts - there was
+    // never a receipt to miss, so the unconfirmed cue would flag every historical
+    // message in the thread as a possible drop.
+    renderTimeline({ items: [{ ...MESSAGE_OUT, imported: true }] });
+    expect(screen.getByText('Sent')).toBeInTheDocument();
+    expect(screen.queryByText(/not confirmed/)).not.toBeInTheDocument();
+  });
+
+  it('still flags an imported row that genuinely failed', () => {
+    // `imported` suppresses only the age-derived cue. A stored terminal status is
+    // the source's own fact and keeps rendering.
+    renderTimeline({
+      items: [{ ...MESSAGE_OUT, imported: true, delivery_status: 'failed', error_code: '30007' }],
+    });
+    expect(screen.getByText(/Failed - Carrier filtered the message/)).toBeInTheDocument();
+  });
+
   it('shows NO delivery status on an inbound bubble (delivery state is outbound-only)', () => {
     renderTimeline({ items: [MESSAGE_IN] }); // inbound, even though it carries a status
     expect(screen.queryByText('Delivered')).not.toBeInTheDocument();

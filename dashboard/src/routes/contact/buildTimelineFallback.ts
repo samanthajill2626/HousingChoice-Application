@@ -90,6 +90,11 @@ export function buildTimelineFallback(
         // into this 1:1 carries the closed group's id - keep it so the badge renders
         // on the fallback path too (the server timeline already serializes it).
         ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
+        // Import provenance, same as the server timeline projects it: a row the
+        // importer stamped never had a delivery receipt to miss, so the bubble
+        // must not age it into "Sent - not confirmed". Kept in step with
+        // routes/contactTimeline.ts so the fallback renders identically.
+        ...(typeof m['imported_from'] === 'string' && { imported: true }),
       };
       items.push(item);
     }

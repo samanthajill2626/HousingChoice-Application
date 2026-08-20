@@ -386,12 +386,20 @@ export type PlacementRelayOpenResult =
  *  immediately despite quiet hours. */
 export async function provisionPlacementRelay(
   placementId: string,
-  opts: { force?: boolean } = {},
+  opts: {
+    force?: boolean;
+    /** Operator-edited intro copy; absent leaves the server composing the default. */
+    introBody?: string;
+  } = {},
 ): Promise<PlacementRelayOpenResult> {
   const res = await requestWithStatus<
     { conversation: { conversationId: string }; placement: PlacementItem } | RosterView
   >(`/api/placements/${encodeURIComponent(placementId)}/relay`, {
     method: 'POST',
+    // Omit the key entirely when the preview was untouched - never introBody:
+    // undefined.
+    ...(opts.introBody !== undefined &&
+      opts.introBody.length > 0 && { body: { introBody: opts.introBody } }),
     ...(opts.force === true && { query: { force: 'send_now' } }),
   });
   if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
@@ -2469,15 +2477,24 @@ export type TourRelayOpenResult =
  *  "Send now anyway" (`?force=send_now`). */
 export async function createTourRelay(
   tourId: string,
-  opts: { members?: Array<{ phone: string; contactId?: string; name?: string }>; force?: boolean } = {},
+  opts: {
+    members?: Array<{ phone: string; contactId?: string; name?: string }>;
+    force?: boolean;
+    /** Operator-edited intro copy; absent leaves the server composing the default. */
+    introBody?: string;
+  } = {},
 ): Promise<TourRelayOpenResult> {
   const res = await requestWithStatus<{ tour: Tour; conversation: unknown } | RosterView>(
     `/api/tours/${encodeURIComponent(tourId)}/relay`,
     {
       method: 'POST',
-      // Omit the members key entirely when not given (server auto-resolves) -
-      // never send members: undefined.
-      body: opts.members !== undefined ? { members: opts.members } : {},
+      // Omit either key entirely when not given (the server auto-resolves the
+      // roster and composes the intro) - never send members/introBody: undefined.
+      body: {
+        ...(opts.members !== undefined && { members: opts.members }),
+        ...(opts.introBody !== undefined &&
+          opts.introBody.length > 0 && { introBody: opts.introBody }),
+      },
       ...(opts.force === true && { query: { force: 'send_now' } }),
     },
   );
@@ -2519,12 +2536,19 @@ export async function previewRelayGroup(
 export async function createRelayGroup(
   members: RelayGroupMemberInput[],
   tag?: string,
+  /** Operator-edited intro copy. Sent ONLY when the confirm dialog's preview was
+   *  actually changed; absent leaves the server composing the default. */
+  introBody?: string,
 ): Promise<{ conversation: ConversationHeader }> {
   return request<{ conversation: ConversationHeader }>('/api/relay-groups', {
     method: 'POST',
     // Omit the tag key entirely when there is nothing to stamp - never send
-    // tag: undefined, and never an empty string.
-    body: { members, ...(tag !== undefined && tag.length > 0 && { tag }) },
+    // tag: undefined, and never an empty string. Same rule for introBody.
+    body: {
+      members,
+      ...(tag !== undefined && tag.length > 0 && { tag }),
+      ...(introBody !== undefined && introBody.length > 0 && { introBody }),
+    },
   });
 }
 

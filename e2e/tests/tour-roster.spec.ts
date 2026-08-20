@@ -275,8 +275,11 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // full one - now that no full name ever appears in an intro, the old
     // full-name check would pass no matter who was in the group.
     expect(introBody).not.toContain(pm.name.split(' ')[0]!);
-    // The region holds exactly one <p> (the bubble), so this is an exact match.
-    await expect(confirm.getByRole('region', { name: 'Message preview' })).toHaveText(introBody);
+    // The preview is an EDITABLE field now (2026-08-20): the server's body is
+    // what the operator sees pre-filled, so assert the textarea's VALUE.
+    await expect(
+      confirm.getByRole('region', { name: 'Message preview' }).getByRole('textbox'),
+    ).toHaveValue(introBody);
 
     const recipients = confirm.getByRole('list', { name: 'Recipients' });
     await expect(recipients.getByText(tenant.name)).toBeVisible();

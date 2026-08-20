@@ -193,7 +193,10 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   // server's; it is pinned against the relay.intro catalog default's own shell
   // around {members} plus who the sentence names, so an edit to the copy moves
   // the expectation and the UI together.
-  const introBody = ((await previewRegion.textContent()) ?? '').trim();
+  // The preview is an EDITABLE field on the relay-open surfaces (2026-08-20), so
+  // the message lives in the textarea's VALUE - textContent() here would return
+  // the field label and the character counter, not the message.
+  const introBody = (await previewRegion.getByRole('textbox').inputValue()).trim();
   const [introHead = '', introTail = ''] =
     MESSAGE_CATALOG['relay.intro'].default.split('{members}');
   // BOTH halves must be non-empty or the matchers they feed are vacuous:
@@ -222,6 +225,15 @@ test('Contact file: create a relay group, land CONNECTING, then open it and deli
   await expect(recipients.getByText(TENANT_NAME)).toBeVisible();
   await expect(recipients.getByText(LANDLORD_NAME)).toBeVisible();
   await expect(confirm.getByText('2 recipients will receive this.')).toBeVisible();
+
+  // The preview is EDITABLE here (2026-08-20): the founder adjusts the intro per
+  // group - names the property, says who the landlord is - without a code
+  // change. jsdom cannot prove the real field accepts typing, so do it here:
+  // append to the server-composed text and confirm the box actually took it.
+  const introField = previewRegion.getByRole('textbox');
+  await expect(introField).toBeEditable();
+  await introField.fill(`${introBody} Moving into 1428 Oak St SE!`);
+  await expect(introField).toHaveValue(`${introBody} Moving into 1428 Oak St SE!`);
 
   // --- Act 3: confirm. The create answers CONNECTING, so the flow must NOT
   //     navigate: it re-mounts the picker modal carrying the result panel. ---

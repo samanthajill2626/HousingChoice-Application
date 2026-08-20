@@ -294,7 +294,7 @@ export async function tourOpenDeferralRefusal(
 export async function openTourGroup(
   deps: OpenTourGroupDeps,
   tour: TourItem,
-  opts: { actor?: string; members?: ConversationParticipant[] } = {},
+  opts: { actor?: string; members?: ConversationParticipant[]; introBody?: string } = {},
 ): Promise<OpenTourGroupResult> {
   const { log } = deps;
   const tourId = tour.tourId;
@@ -356,6 +356,7 @@ export async function openTourGroup(
         owner: { type: 'tour', id: tourId },
         ...(actor !== undefined && { actor }),
         ...(postalCode !== undefined && { postalCode }),
+        ...(opts.introBody !== undefined && { introBody: opts.introBody }),
       },
     );
   } catch (err) {
@@ -588,7 +589,7 @@ export async function placementOpenDeferralRefusal(
 export async function openPlacementGroup(
   deps: OpenPlacementGroupDeps,
   item: PlacementItem,
-  opts: { actor?: string } = {},
+  opts: { actor?: string; introBody?: string } = {},
 ): Promise<OpenPlacementGroupResult> {
   const { log } = deps;
   const placementId = item.placementId;
@@ -657,6 +658,7 @@ export async function openPlacementGroup(
         ...(tag !== undefined && { tag }),
         ...(actor !== undefined && { actor }),
         ...(postalCode !== undefined && { postalCode }),
+        ...(opts.introBody !== undefined && { introBody: opts.introBody }),
       },
     );
   } catch (err) {

@@ -220,6 +220,19 @@ export interface ConversationItem {
    * NOT in any key/GSI — owner is metadata only (same rule as placementId).
    */
   owner?: { type: 'tour' | 'placement' | null; id?: string };
+  /**
+   * Operator-edited group-intro copy (relay_group only, 2026-08-20). Present
+   * ONLY when the operator changed the previewed text in the confirm dialog
+   * before creating the group; absent means relayFanOut composes the intro from
+   * the catalog exactly as before. Read once, by the intro announcement.
+   *
+   * FOUNDER DECISION: this is free operator text on a FIRST-CONTACT message. It
+   * carries no brand and no opt-out line, matching the catalog default the
+   * founder already directed (see relay.intro in messages/catalog.ts) - length
+   * is the only constraint enforced. Do not add opt-out validation here without
+   * asking her; it was removed on purpose.
+   */
+  intro_body?: string;
   created_at: string;
   /** Circuit-breaker minute bucket (`YYYY-MM-DDTHH:mm`, UTC). */
   outbound_minute_bucket?: string;
@@ -731,6 +744,16 @@ export interface ConversationsRepo {
     placementId?: string;
     /** Generalized owner (Task 5). Takes precedence over `placementId`. */
     owner?: RelayOwner;
+    /**
+     * Operator-edited intro copy, captured in the confirm dialog at create time
+     * (2026-08-20). Absent => relayFanOut composes the intro from the catalog as
+     * before. It is stored on the CONVERSATION rather than ridden in on the job
+     * payload deliberately: a `connecting` group has no number yet and sends its
+     * intro only once relay.numberReady fires, and quiet hours can defer an
+     * intro further still, so the edited text has to outlive the request that
+     * typed it.
+     */
+    introBody?: string;
   }): Promise<ConversationItem>;
   /**
    * Re-parent a relay_group conversation to a new owner (Task 5).
@@ -1819,7 +1842,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
     // --- Relay groups (M1.7 / Task 5 owner generalization) ----------------
 
-    async createRelayGroup({ poolNumber, members, tag, placementId, owner }) {
+    async createRelayGroup({ poolNumber, members, tag, placementId, owner, introBody }) {
       const now = new Date().toISOString();
       // Resolve canonical owner: explicit `owner` wins; fall back to legacy
       // `placementId`; fall back to standalone (unowned).
@@ -1871,6 +1894,10 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
         // Canonical owner field (new rows always carry this).
         ...(resolvedOwner.type !== null && { owner: resolvedOwner }),
+        // Operator-edited intro copy (2026-08-20). Written only when the
+        // operator actually changed the previewed text, so an untouched preview
+        // leaves the attribute absent and relayFanOut composes as it always has.
+        ...(introBody !== undefined && introBody.length > 0 && { intro_body: introBody }),
       };
       await doc.send(
         new PutCommand({

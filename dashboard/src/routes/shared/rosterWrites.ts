@@ -204,3 +204,12 @@ export function refusalMessage(err: unknown): string {
 export function threadExistsNote(scope: 'tour' | 'placement'): string {
   return `A relay group was just opened for this ${scope} - that change was not applied. Try it again to notify the group.`;
 }
+
+/**
+ * Longest an operator-edited group intro may be. MIRRORS
+ * RELAY_INTRO_MAX_CHARS in app/src/lib/relayIntroBody.ts, which is the
+ * ENFORCING side - this copy exists so the textarea can cap typing and show a
+ * counter rather than letting someone write 900 characters and meet a 400 on
+ * confirm. If the server's cap moves, move this with it.
+ */
+export const RELAY_INTRO_MAX_CHARS = 480;

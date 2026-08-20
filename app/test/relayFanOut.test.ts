@@ -532,6 +532,38 @@ describe('relay.fanOut (M1.7)', () => {
     }
   });
 
+  // Operator-edited intro (2026-08-20). The confirm dialog stores what the
+  // operator typed on the CONVERSATION - not on the job payload - because a
+  // connecting group sends its intro only once relay.numberReady fires, and
+  // quiet hours can defer it further. So the job reads it back off the row.
+  it('relay.intro sends the OPERATOR-EDITED body verbatim when one was stored', async () => {
+    const edited =
+      "Hi Alice, this is Sam. Putting you in a group text with Bob. We're excited to have you move into 12 Peachtree St!";
+    seedRelay(world, { intro_body: edited });
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
+    // Verbatim to EVERY member - not merged with the composed copy, not
+    // re-wrapped, and the composed sentence is gone entirely.
+    for (const sent of world.sent) {
+      expect(sent.body).toBe(edited);
+      expect(sent.body).not.toContain("You're now connected with");
+    }
+  });
+
+  it('relay.intro falls back to the composed default when the stored body is blank', async () => {
+    // Defensive: a legacy/hand-edited row carrying an empty string must not send
+    // a blank first-contact text.
+    seedRelay(world, { intro_body: '' });
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+    expect(world.sent.length).toBeGreaterThan(0);
+    for (const sent of world.sent) {
+      expect(sent.body).toContain("You're now connected with");
+    }
+  });
+
   // Founder decision 2026-07-14: everything sent into a relay group must be
   // visible in its dashboard thread — the intro persists as a SYSTEM row.
   it('relay.intro PERSISTS one system announcement row with per-member delivery slots', async () => {

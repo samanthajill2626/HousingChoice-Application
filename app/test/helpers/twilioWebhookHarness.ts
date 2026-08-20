@@ -678,7 +678,7 @@ export function createFakeWorld(): FakeWorld {
     },
 
     // --- Relay groups (M1.7 / Task 5 owner generalization) ---
-    async createRelayGroup({ poolNumber, members, tag, placementId, owner }) {
+    async createRelayGroup({ poolNumber, members, tag, placementId, owner, introBody }) {
       const now = new Date().toISOString();
       // Resolve owner (mirrors conversationsRepo.ts logic).
       const resolvedOwner: { type: 'tour' | 'placement' | null; id?: string } =
@@ -711,6 +711,9 @@ export function createFakeWorld(): FakeWorld {
         ...(tag !== undefined && { placement_tag: tag }),
         ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
         ...(resolvedOwner.type !== null && { owner: resolvedOwner }),
+        // Operator-edited intro (2026-08-20) - same write rule as the real repo:
+        // stored only when non-empty, so an untouched preview leaves it absent.
+        ...(introBody !== undefined && introBody.length > 0 && { intro_body: introBody }),
       };
       conversations.set(item.conversationId, item);
       return item;

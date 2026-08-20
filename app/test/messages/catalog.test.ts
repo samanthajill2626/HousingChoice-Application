@@ -2,6 +2,7 @@
 // requiresOptOut default keeps opt-out language; token/vars declarations agree.
 import { describe, expect, it } from 'vitest';
 import { MESSAGE_CATALOG, type MessageDef, type MessageId } from '../../src/messages/catalog.js';
+import { resolveMessage } from '../../src/messages/resolve.js';
 import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
   FOUNDER_MISSED_CALL_AUTOTEXT,
@@ -50,6 +51,22 @@ describe('MESSAGE_CATALOG', () => {
         expect(inDefault.has(v), `declared var {${v}} unused in non-editable ${id}`).toBe(true);
       }
     }
+  });
+
+  // relay-intro-editable-but-never-overridden: an entry may only claim to be
+  // operator-editable if an operator override can actually REACH the send. For
+  // the two relay entries it cannot - nothing stores one, settingsToOverrides
+  // does not map one, and the relayFanOut composers call resolveMessage with no
+  // overrides argument. Pinned so that flipping the flag back without doing the
+  // wiring trips a test instead of silently re-advertising a dead capability.
+  it('the relay announcements do NOT claim to be operator-editable (nothing can override them)', () => {
+    expect(MESSAGE_CATALOG['relay.intro'].editable).toBe(false);
+    expect(MESSAGE_CATALOG['relay.member_added'].editable).toBe(false);
+    // The guard that gives the flag its meaning: a non-editable entry ignores an
+    // override even when one IS handed to the resolver.
+    expect(
+      resolveMessage('relay.intro', { members: 'M.' }, { 'relay.intro': 'OVERRIDDEN' }),
+    ).toBe(MESSAGE_CATALOG['relay.intro'].default.replace('{members}', 'M.'));
   });
 
   it('every editable + requiresOptOut default keeps opt-out language (the A2P floor)', () => {

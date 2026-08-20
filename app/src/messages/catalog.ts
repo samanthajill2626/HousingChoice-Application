@@ -270,13 +270,27 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // "Sam" is hardcoded, accepted by Cameron 2026-08-18 while she is the only
   // person opening groups. Revisit if that changes - the greeting would name
   // the wrong person. TODO(founder-message-template-updates-owed).
+  // editable:false is NOT a demotion - it is this entry finally telling the
+  // truth (2026-08-20, relay-intro-editable-but-never-overridden). Three things
+  // all have to exist for an operator override to reach a send, and for the two
+  // relay entries NONE of them do: OrgSettings has no field to store one,
+  // settingsToOverrides maps only welcomeText + missedCallAutoText, and
+  // composeIntroBody calls resolveMessage with no overrides argument at all.
+  // Marked editable:true it advertised a capability nothing in the system could
+  // honor, and - worse - the day someone adds the generic messageOverrides map
+  // to settingsToOverrides, this entry would go on being ignored silently,
+  // because the missing overrides argument in composeIntroBody is a SECOND
+  // break. Flipping the flag makes that impossible to reintroduce by accident:
+  // wiring the override means changing this line, and changing this line means
+  // reading this comment. Wiring it for real is a separate, still-wanted piece
+  // of work - the founder does want to edit this copy herself.
   'relay.intro': {
     id: 'relay.intro',
     default:
       "Hey, it's Sam. {members} Use this group text for anything that comes up. It can be a " +
       'long process, so ask me anything in here!',
     class: 'operational',
-    editable: true,
+    editable: false,
     channel: 'sms',
     vars: ['members'],
   },
@@ -286,11 +300,13 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // founder's wording also wanted the new member's ROLE ("who is
   // tenant/landlord/property manager"); there is no role token on this job, so
   // it is left out rather than faked. TODO(founder-message-template-updates-owed).
+  // editable:false for the same reason as relay.intro above - composeMemberAdded-
+  // Body passes no overrides either, and nothing can store one.
   'relay.member_added': {
     id: 'relay.member_added',
     default: 'Hey! {joined} {members}',
     class: 'operational',
-    editable: true,
+    editable: false,
     channel: 'sms',
     vars: ['joined', 'members'],
   },

@@ -109,3 +109,35 @@
     width: 100%;
   }
 }
+
+/* The editable intro (relay-open surfaces only). Sized and coloured like the
+   read-only .bubble it replaces, so turning editing on does not restyle the
+   dialog - it just makes the same text typable. */
+.editLabel {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--c-text-muted);
+}
+
+.bubbleInput {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--c-bubble-out-bg);
+  border: 1px solid var(--c-bubble-out-border);
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.charCount {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+  text-align: right;
+}

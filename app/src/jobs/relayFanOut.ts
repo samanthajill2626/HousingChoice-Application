@@ -625,7 +625,19 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     // conversation (unusable → logged no-op, matching the old intro behavior).
     const conversation = await conversations.getById(payload.relayConversationId);
     const roster = (conversation?.participants ?? []) as ConversationParticipant[];
-    const body = composeIntroBody(roster.map((m) => m.name));
+    // An operator who EDITED the previewed intro gets exactly what they typed
+    // (2026-08-20). Untouched, the attribute is absent and we compose from the
+    // roster as always - which is the better default, because the roster can
+    // still change between the preview and this job, and a composed body follows
+    // it while a pinned one cannot. Edited text wins anyway: a human chose it.
+    const edited = typeof conversation?.intro_body === 'string' ? conversation.intro_body : '';
+    const body = edited.length > 0 ? edited : composeIntroBody(roster.map((m) => m.name));
+    if (edited.length > 0) {
+      log.info(
+        { conversationId: payload.relayConversationId },
+        'relay intro: sending the operator-edited body, not the composed default',
+      );
+    }
     await sendRelayAnnouncement(
       {
         conversationsRepo: conversations,

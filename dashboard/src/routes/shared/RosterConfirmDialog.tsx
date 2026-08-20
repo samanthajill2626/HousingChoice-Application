@@ -23,11 +23,11 @@
 // once a thread exists and preview-add 409s `no_thread` before one, and both
 // must refetch rather than open a dialog. So the dialog only ever receives a
 // preview that really is previewable.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { RosterPreview, RosterPreviewRecipient } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
-import { quietClockLabel, refusalMessage } from './rosterWrites.js';
+import { quietClockLabel, refusalMessage, RELAY_INTRO_MAX_CHARS } from './rosterWrites.js';
 import styles from './RosterConfirmDialog.module.css';
 
 /** Why a listed recipient will not receive this send. */
@@ -49,10 +49,12 @@ export interface RosterConfirmDialogProps {
    *  Used only inside quiet hours. */
   deferLabel: string;
   /** Run the action. `force` is true ONLY for "Send now anyway" - the caller
-   *  passes it to the endpoint as `?force=send_now`. Resolves -> the dialog
-   *  closes; rejects -> its message renders inline and the dialog STAYS OPEN
-   *  (nothing was sent). */
-  onConfirm: (force: boolean) => Promise<void>;
+   *  passes it to the endpoint as `?force=send_now`. `introBody` is present ONLY
+   *  when `editableBody` is on AND the operator actually changed the previewed
+   *  text; the caller posts it as `introBody`. Resolves -> the dialog closes;
+   *  rejects -> its message renders inline and the dialog STAYS OPEN (nothing
+   *  was sent). */
+  onConfirm: (force: boolean, introBody?: string) => Promise<void>;
   /** Cancel, dismiss, or a successful confirm - the caller clears its state. */
   onClose: () => void;
   /** False when the confirming endpoint CANNOT defer (a standalone relay create
@@ -65,6 +67,19 @@ export interface RosterConfirmDialogProps {
    *  needs a pending row that carries its own member list, since a standalone
    *  group has no roster stored anywhere until it is created. */
   allowDefer?: boolean;
+  /**
+   * Let the operator EDIT the previewed message before it goes out (2026-08-20).
+   * On for the three relay-OPEN surfaces, where the message is the group intro
+   * and the founder wants to adjust it per group (name the property, say who the
+   * landlord is) without a code change.
+   *
+   * Off by default, and deliberately NOT on for the add-member surfaces: their
+   * endpoints do not accept an edited body, so an editable box there would take
+   * the operator's typing and silently discard it - the exact defect
+   * relay-intro-editable-but-never-overridden was filed for. Turn this on only
+   * together with an endpoint that honors it.
+   */
+  editableBody?: boolean;
 }
 
 /** "A", "A and B", "A, B and C" - the warning names who is already grouped. */
@@ -82,15 +97,29 @@ export function RosterConfirmDialog({
   onConfirm,
   onClose,
   allowDefer = true,
+  editableBody = false,
 }: RosterConfirmDialogProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Seeded from the server-composed preview. Re-seeded if the preview itself
+  // changes (a re-preview behind an open dialog), which would otherwise leave
+  // the operator editing text the server no longer proposes.
+  const [draft, setDraft] = useState(preview.body);
+  useEffect(() => {
+    setDraft(preview.body);
+  }, [preview.body]);
 
   const run = (force: boolean): void => {
     if (busy) return;
     setBusy(true);
     setError(null);
-    void onConfirm(force)
+    // Send the body ONLY when it was actually edited. An untouched preview posts
+    // nothing, so the server composes from the roster at send time exactly as it
+    // always has - which is the better default, because the roster can still
+    // change between here and the send and a composed body follows it. Edited
+    // text wins over that, because a human chose it.
+    const edited = editableBody && draft.trim().length > 0 && draft !== preview.body;
+    void onConfirm(force, edited ? draft.trim() : undefined)
       .then(() => onClose())
       .catch((err: unknown) => {
         setError(refusalMessage(err));
@@ -177,7 +206,30 @@ export function RosterConfirmDialog({
       }
     >
       <section className={styles.previewBox} aria-label="Message preview">
-        <p className={styles.bubble}>{preview.body}</p>
+        {editableBody ? (
+          <>
+            {/* A real label, not a placeholder: this is the message that goes to
+                everyone listed below, and it is editable - both facts have to be
+                legible to a screen reader, not just visible. */}
+            <label className={styles.editLabel} htmlFor="roster-intro-body">
+              Message - edit before sending
+            </label>
+            <textarea
+              id="roster-intro-body"
+              className={styles.bubbleInput}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              maxLength={RELAY_INTRO_MAX_CHARS}
+              rows={5}
+              disabled={busy}
+            />
+            <p className={styles.charCount} aria-live="polite">
+              {draft.length} / {RELAY_INTRO_MAX_CHARS}
+            </p>
+          </>
+        ) : (
+          <p className={styles.bubble}>{preview.body}</p>
+        )}
       </section>
       {/* A LIVE group with exactly these members already exists (spec 5). This
           block adds itself ABOVE the recipient list and changes nothing below

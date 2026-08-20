@@ -22,6 +22,7 @@ import { mergeContext } from '../lib/context.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { parseIntroBody } from '../lib/relayIntroBody.js';
 import {
   VoiceCapabilityError,
   createMessagingAdapter,
@@ -321,12 +322,19 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   // send the intro to each member (throttled), return the conversation.
   router.post('/relay-groups', async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId;
-    const body = (req.body ?? {}) as { members?: unknown; tag?: unknown };
+    const body = (req.body ?? {}) as { members?: unknown; tag?: unknown; introBody?: unknown };
     if (!Array.isArray(body.members) || body.members.length === 0) {
       res.status(400).json({ error: 'members (non-empty array) is required' });
       return;
     }
     const tag = typeof body.tag === 'string' && body.tag.length > 0 ? body.tag : undefined;
+    // Operator-edited intro from the confirm dialog. Absent on an untouched
+    // preview, which keeps the composed default.
+    const parsedIntro = parseIntroBody(body.introBody);
+    if ('error' in parsedIntro) {
+      res.status(400).json({ error: parsedIntro.error });
+      return;
+    }
 
     const members: ConversationParticipant[] = [];
     const seenPhones = new Set<string>();
@@ -354,7 +362,12 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     try {
       conversation = await provisionRelayGroup(
         { conversationsRepo: conversations, poolNumbersService: poolNumbers, auditRepo: audit, events, logger: log },
-        { members, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }) },
+        {
+          members,
+          ...(tag !== undefined && { tag }),
+          ...(actor !== undefined && { actor }),
+          ...(parsedIntro.body !== undefined && { introBody: parsedIntro.body }),
+        },
       );
     } catch (err) {
       // Kill-switch refusal (M1.7): live provisioning is off — no number was (or

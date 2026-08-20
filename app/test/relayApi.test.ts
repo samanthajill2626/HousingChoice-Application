@@ -29,6 +29,7 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { RELAY_INTRO_MAX_CHARS } from '../src/lib/relayIntroBody.js';
 
 const ALICE = '+15550100001';
 const BOB = '+15550100002';
@@ -253,6 +254,63 @@ describe('relay-group API (M1.7)', () => {
     // The intro fan-out ran in-process → both members texted FROM the pool.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
+  });
+
+  // Operator-edited intro (2026-08-20), end to end through the real create
+  // route: what the confirm dialog posts is what every member receives.
+  it('POST /api/relay-groups sends an operator-edited introBody instead of the composed default', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const edited = "Hi Alice, it's Sam - putting you in with Bob about 12 Peachtree St.";
+
+    const res = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }],
+        introBody: edited,
+      });
+
+    expect(res.status).toBe(201);
+    // Persisted on the CONVERSATION - it has to outlive the request, because a
+    // connecting group sends its intro only when its number registers.
+    expect(res.body.conversation.intro_body).toBe(edited);
+    expect(world.sent.length).toBeGreaterThan(0);
+    for (const sent of world.sent) {
+      expect(sent.body).toBe(edited);
+    }
+  });
+
+  it('POST /api/relay-groups keeps the composed default when the preview was untouched', async () => {
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    const res = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.conversation.intro_body).toBeUndefined();
+    for (const sent of world.sent) {
+      expect(sent.body).toContain("You're now connected with");
+    }
+  });
+
+  it('POST /api/relay-groups 400s an over-long introBody, creating nothing', async () => {
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    const res = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }],
+        introBody: 'x'.repeat(RELAY_INTRO_MAX_CHARS + 1),
+      });
+
+    expect(res.status).toBe(400);
+    // Refused BEFORE provisioning: no number claimed, nobody texted.
+    expect(world.sent).toHaveLength(0);
   });
 
   it('rejects an empty members list', async () => {

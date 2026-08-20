@@ -28,6 +28,7 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { appEvents, toPlacementUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { parseIntroBody } from '../lib/relayIntroBody.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -1528,8 +1529,17 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       }
     }
 
+    // Operator-edited intro from the confirm dialog (2026-08-20). Absent on an
+    // untouched preview, which keeps the composed default.
+    const parsedIntro = parseIntroBody((req.body ?? {})['introBody']);
+    if ('error' in parsedIntro) {
+      res.status(400).json({ error: parsedIntro.error });
+      return;
+    }
+
     const result = await openPlacementGroup(provisionDeps, item, {
       ...(actor !== undefined && { actor }),
+      ...(parsedIntro.body !== undefined && { introBody: parsedIntro.body }),
     });
     if (!result.ok) {
       res.status(result.refusal.status).json(result.refusal.body);

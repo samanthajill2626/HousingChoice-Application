@@ -64,6 +64,13 @@ export interface ProvisionRelayInput {
    * Atlanta-default ladder.
    */
   postalCode?: string;
+  /**
+   * Operator-edited intro copy from the confirm dialog (2026-08-20). Threaded
+   * straight through to the conversation row - all three open surfaces
+   * (standalone, tour, placement) funnel through here, so this is the ONE place
+   * that has to persist it.
+   */
+  introBody?: string;
 }
 
 /**
@@ -78,7 +85,7 @@ export async function provisionRelayGroup(
   input: ProvisionRelayInput,
 ): Promise<ConversationItem> {
   const { conversationsRepo, poolNumbersService, auditRepo, events, logger } = deps;
-  const { members, tag, placementId, owner, actor, postalCode } = input;
+  const { members, tag, placementId, owner, actor, postalCode, introBody } = input;
 
   // Resolve canonical owner: explicit `owner` wins; fall back to legacy
   // `placementId`; fall back to standalone (unowned).
@@ -109,6 +116,10 @@ export async function provisionRelayGroup(
       members,
       ...(tag !== undefined && { tag }),
       owner: resolvedOwner,
+      // This is the path that most needs the edit persisted: a connecting group
+      // sends its intro only when relay.numberReady fires, minutes or more after
+      // the operator typed it.
+      ...(introBody !== undefined && { introBody }),
     });
     mergeContext({ conversationId: conversation.conversationId });
 
@@ -166,6 +177,7 @@ export async function provisionRelayGroup(
     members,
     ...(tag !== undefined && { tag }),
     owner: resolvedOwner,
+    ...(introBody !== undefined && { introBody }),
   });
   mergeContext({ conversationId: conversation.conversationId });
 

@@ -327,8 +327,11 @@ export function PlacementDetail(): React.JSX.Element {
   // `pending` row is what the card and the [Open relay group] control render as
   // "Opens at 8:00 AM - quiet hours". `force` is "Send now anyway".
   const runOpenGroup = useCallback(
-    async (force: boolean): Promise<void> => {
-      const result = await provisionPlacementRelay(placementId, { force });
+    async (force: boolean, introBody?: string): Promise<void> => {
+      const result = await provisionPlacementRelay(placementId, {
+        force,
+        ...(introBody !== undefined && { introBody }),
+      });
       if (result.deferred) {
         roster.apply(result.roster);
         return;
@@ -743,6 +746,8 @@ export function PlacementDetail(): React.JSX.Element {
           preview={openPreview}
           confirmLabel="Open relay group"
           deferLabel="Open"
+          // The intro is editable here: POST /api/placements/:id/relay accepts introBody.
+          editableBody
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

@@ -381,8 +381,11 @@ function TourDetailLoaded({
   // group] control render as "Opens at 8:00 AM - quiet hours".
   // `force` is the dialog's "Send now anyway" (and the pending banner's
   // "Send now"), which opens immediately despite the window.
-  const runOpenGroup = async (force: boolean): Promise<void> => {
-    const result = await createTourRelay(tourId, { force });
+  const runOpenGroup = async (force: boolean, introBody?: string): Promise<void> => {
+    const result = await createTourRelay(tourId, {
+      force,
+      ...(introBody !== undefined && { introBody }),
+    });
     if (result.deferred) {
       roster.apply(result.roster);
       return;
@@ -789,6 +792,8 @@ function TourDetailLoaded({
           preview={openPreview}
           confirmLabel="Open relay group"
           deferLabel="Open"
+          // The intro is editable here: POST /api/tours/:id/relay accepts introBody.
+          editableBody
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

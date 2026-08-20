@@ -151,14 +151,14 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
     await userEvent.click(screen.getByRole('button', { name: `Open at ${CLOCK}` }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(onConfirm).toHaveBeenCalledTimes(1);
-    expect(onConfirm).toHaveBeenCalledWith(false);
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
   });
 
   it('"Send now anyway" is the ONLY path that forces an immediate send', async () => {
     const { onConfirm, onClose } = renderDialog({ preview: preview(QUIET) });
     await userEvent.click(screen.getByRole('button', { name: 'Send now anyway' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(onConfirm).toHaveBeenCalledWith(true);
+    expect(onConfirm).toHaveBeenCalledWith(true, undefined);
   });
 
   it('falls back to a time-less deferral label when the server sent no quietEndsAt', () => {
@@ -173,7 +173,7 @@ describe('RosterConfirmDialog - quiet hours: the REAL three-button layout (spec 
     expect(screen.queryByText(/Quiet hours/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send now anyway' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
-    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(false, undefined));
   });
 });
 
@@ -238,7 +238,7 @@ describe('RosterConfirmDialog - allowDefer={false} (an endpoint that CANNOT defe
     await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(onConfirm).toHaveBeenCalledTimes(1);
-    expect(onConfirm).toHaveBeenCalledWith(false);
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
   });
 
   it('DEFAULTS to true: an unset prop still renders the three-button quiet layout', () => {
@@ -402,7 +402,7 @@ describe('RosterConfirmDialog - duplicate warning (spec 5)', () => {
   it('does not change the confirm contract - onConfirm still receives only force', async () => {
     const { onConfirm } = renderDialog({ preview: withDuplicate('open') });
     await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
-    expect(onConfirm).toHaveBeenCalledWith(false);
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });
@@ -439,5 +439,75 @@ describe('RosterConfirmDialog - narrow viewport (spec 6.7)', () => {
     expect(inFooter[0]).toHaveAccessibleName('Cancel');
     expect(inFooter[1]).toHaveAccessibleName('Send now anyway');
     expect(inFooter[2]!.textContent).toMatch(/^Open at /);
+  });
+});
+
+// The operator-edited intro (2026-08-20). The founder wanted to adjust the group
+// intro per group - name the property, say who the landlord is - without a code
+// change, so the preview becomes a real editable field on the relay-OPEN
+// surfaces. Everything here is about the same honesty rule as above: what the
+// operator reads is what the group receives.
+describe('RosterConfirmDialog - editable intro', () => {
+  it('is READ-ONLY by default, so an add-member surface cannot silently eat an edit', () => {
+    // The add-member endpoints do not accept an edited body. An editable box
+    // there would take the typing and drop it - the exact defect
+    // relay-intro-editable-but-never-overridden was filed for.
+    renderDialog();
+    expect(screen.queryByRole('textbox', { name: /Message/ })).toBeNull();
+  });
+
+  it('seeds the editable box with the SERVER-composed body', () => {
+    renderDialog({ editableBody: true });
+    expect(screen.getByRole('textbox', { name: /Message/ })).toHaveValue(preview().body);
+  });
+
+  it('sends the edited text when the operator changes it', async () => {
+    const user = userEvent.setup();
+    const { onConfirm } = renderDialog({ editableBody: true });
+    const box = screen.getByRole('textbox', { name: /Message/ });
+
+    await user.clear(box);
+    await user.type(box, 'Hi Tasha, this is Sam - moving into 1428 Oak St SE!');
+    await user.click(screen.getByRole('button', { name: 'Open relay group' }));
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(false, 'Hi Tasha, this is Sam - moving into 1428 Oak St SE!');
+  });
+
+  it('sends NO body when the operator leaves the preview alone', async () => {
+    const user = userEvent.setup();
+    const { onConfirm } = renderDialog({ editableBody: true });
+    await user.click(screen.getByRole('button', { name: 'Open relay group' }));
+
+    // undefined, not the previewed string: an untouched preview must leave the
+    // server composing from the roster at send time, as it always has.
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it('treats a CLEARED box as untouched rather than sending a blank first text', async () => {
+    const user = userEvent.setup();
+    const { onConfirm } = renderDialog({ editableBody: true });
+    await user.clear(screen.getByRole('textbox', { name: /Message/ }));
+    await user.click(screen.getByRole('button', { name: 'Open relay group' }));
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it('carries the edit through the QUIET-HOURS "Send now anyway" path too', async () => {
+    const user = userEvent.setup();
+    const { onConfirm } = renderDialog({
+      editableBody: true,
+      preview: preview({ deferred: true, quietEndsAt: '2026-08-20T12:00:00.000Z' }),
+    });
+    const box = screen.getByRole('textbox', { name: /Message/ });
+    await user.clear(box);
+    await user.type(box, 'Edited during quiet hours');
+    await user.click(screen.getByRole('button', { name: 'Send now anyway' }));
+
+    // force=true AND the edit - the escape hatch must not drop the typing.
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(true, 'Edited during quiet hours');
   });
 });

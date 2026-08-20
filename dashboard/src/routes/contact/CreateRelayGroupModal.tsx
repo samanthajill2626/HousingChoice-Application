@@ -336,7 +336,7 @@ export function CreateRelayGroupModal({
    *  dialog renders it inline and stays open with its confirm re-armed - that
    *  path is the dialog's, not ours, and it is correct: nothing was created.
    *  Every other rejection must NOT take it (see safeToRetry and the header). */
-  const confirmCreate = async (): Promise<void> => {
+  const confirmCreate = async (_force: boolean, introBody?: string): Promise<void> => {
     if (phase.kind !== 'confirming') return;
     const trimmedTag = tag.trim();
     creating.current = true;
@@ -346,6 +346,7 @@ export function CreateRelayGroupModal({
         created = await createRelayGroup(
           phase.members,
           trimmedTag === '' ? undefined : trimmedTag,
+          introBody,
         );
       } catch (err) {
         if (safeToRetry(err)) throw err;
@@ -435,6 +436,8 @@ export function CreateRelayGroupModal({
         // POST /api/relay-groups has no quiet-hours deferral and no owner row to
         // hold a pending action, so the deferral button must not be offered.
         allowDefer={false}
+        // The intro is editable here: POST /api/relay-groups accepts introBody.
+        editableBody
         onConfirm={confirmCreate}
         onClose={leaveConfirm}
       />

@@ -79,6 +79,38 @@ describe('evaluateScheduledSendSuppression precedence', () => {
     expect(evaluateScheduledSendSuppression({ ...base, quietNow: false })).toBeUndefined();
     expect(evaluateScheduledSendSuppression(base)).toBeUndefined();
   });
+
+  // The manual-only hold-back (2026-08-20) sits between the two groups: BELOW
+  // every reason that would also refuse a HUMAN send (a paused rung invites
+  // "Send now", so a refusal the operator is about to hit must be named first),
+  // and ABOVE quiet hours (which promises release at quiet-end - a promise
+  // nothing but a person can keep for a paused rung).
+  it('paused alone', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, paused: true })).toEqual({ reason: 'paused' });
+  });
+  it('paused outranks quiet hours (never "Will wait" for a send that is not coming)', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, paused: true, quietNow: true }))
+      .toEqual({ reason: 'paused' });
+  });
+  it('kill switch outranks paused', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, smsSendingEnabled: false, paused: true }))
+      .toEqual({ reason: 'sms_sending_disabled' });
+  });
+  it('opt-out outranks paused (the operator is told before pressing Send now)', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, contactOptOut: true, paused: true }))
+      .toEqual({ reason: 'contact_opted_out' });
+  });
+  it('manual mode outranks paused', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, aiMode: 'manual', paused: true }))
+      .toEqual({ reason: 'manual_mode' });
+  });
+  it('stale stage outranks paused', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, staleStage: true, paused: true }))
+      .toEqual({ reason: 'stale_stage' });
+  });
+  it('paused false / absent suppresses nothing', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, paused: false })).toBeUndefined();
+  });
 });
 
 // --- M1 regression: sendMessage gate ORDER is unchanged after predicate extraction.

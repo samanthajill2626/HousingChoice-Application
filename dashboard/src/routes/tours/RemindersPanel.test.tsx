@@ -196,6 +196,49 @@ describe('RemindersPanel', () => {
     );
   });
 
+  // Manual-only hold-back (founder decision 2026-08-20): a paused rung is NOT
+  // being dropped and is NOT waiting on a clock, so it must borrow neither the
+  // "Will be skipped" nor the "Will wait" wording - and it must never keep the
+  // "sending shortly" chip, which is the perpetual-lie failure claimSkip exists
+  // to prevent.
+  it('renders a paused rung as "Paused — send manually", never as skipped or waiting', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          // Past its fire time: without the paused note this row would chip
+          // "sending shortly" forever, because the poll will never claim it.
+          dueAt: '2000-01-01T00:00:00Z',
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(/Paused — send manually/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Will be skipped/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Will wait/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps Send now on a paused rung (the whole point of leaving it pending)', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'upcoming',
+          suppression: { reason: 'paused' },
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /Send Day before reminder now/i })).toBeEnabled();
+  });
+
   it('surfaces a fetch error via role="alert"', async () => {
     getTourReminders.mockRejectedValue(new ApiError(500, 'boom', 'boom'));
     render(<RemindersPanel tourId="tour-1" />);

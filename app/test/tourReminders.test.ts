@@ -42,7 +42,9 @@ import {
   armTourReminders,
   cancelTourReminders,
   forceSendReminder,
-  runDueTourReminders,
+  MANUAL_ONLY_REMINDER_KINDS,
+  runDueTourReminders as runDueTourRemindersRaw,
+  type RunDueTourRemindersDeps,
 } from '../src/jobs/tourReminders.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -52,6 +54,20 @@ import {
   quietOffSettingsRepo,
   stubSettingsRepo,
 } from './helpers/settingsStub.js';
+
+// Since 2026-08-20 the poll holds back EVERY auto-armed rung kind by default
+// (founder decision: tour reminders are manual-only). These suites exist to
+// cover the poll's own claim / send / skip / quiet-hours / group-routing
+// behaviour, and with the default hold-back there would be no rung left to
+// drive any of it - every assertion would pass for the wrong reason. So they
+// run the poll with the hold-back switched OFF, and the hold-back itself is
+// asserted on its own below ("manual-only hold-back"). Individual tests may
+// still pass an explicit manualOnlyKinds; the spread order lets theirs win.
+// Mirrors the placementNudges.test.ts wrapper of the same shape.
+const NO_MANUAL_HOLD_BACK: ReadonlySet<ReminderKind> = new Set();
+function runDueTourReminders(now: string, deps: RunDueTourRemindersDeps): Promise<void> {
+  return runDueTourRemindersRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
+}
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -2916,5 +2932,123 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     );
     expect(after?.sentAt).toBeUndefined();
     expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Manual-only hold-back (founder decision 2026-08-20)
+  //
+  // These are the ONLY cases in this file that call the RAW poll - everything
+  // above runs through the local wrapper with the hold-back switched off. The
+  // load-bearing assertion is that a held-back rung is left PENDING rather than
+  // claim-skipped: "Send now" (forceSendReminder) refuses any row that is
+  // already sent/skipped/canceled, so retiring them here would silently disable
+  // the button this change exists to keep.
+  // ---------------------------------------------------------------------------
+  describe('manual-only hold-back (founder decision 2026-08-20)', () => {
+    // seedForceTour arms its row at 2026-02-11T13:00Z, which is AFTER FORCE_NOW
+    // (the force-send suite polls at an instant the row is deliberately NOT due,
+    // so only the human path can move it). These cases need the opposite: the
+    // rung must be genuinely DUE, or "nothing was sent" would prove nothing.
+    // Paired with quietOff so the quiet-hours backstop cannot be the reason
+    // either - the hold-back has to be the only thing standing in the way.
+    const POLL_AFTER_DUE = '2026-02-11T13:01:00.000Z';
+
+    it('holds back every AUTO-ARMED rung kind, and leaves the manual rung alone', () => {
+      // The four armTourReminders writes (REMINDER_KINDS) - all paused.
+      for (const kind of ['confirmation', 'day_before', 'morning_of', 'en_route'] as const) {
+        expect(MANUAL_ONLY_REMINDER_KINDS.has(kind), `${kind} not held back`).toBe(true);
+      }
+      // no_show_checkin was NEVER auto-armed, so it has no business in the set -
+      // its absence is what keeps this a pause of the POLL, not a second manual list.
+      expect(MANUAL_ONLY_REMINDER_KINDS.has('no_show_checkin')).toBe(false);
+    });
+
+    it('a due manual-only rung is NOT sent and is LEFT PENDING (still force-sendable)', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-hold-1',
+        phone: '+15550230001',
+        convId: 'conv-hold-1',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-hold-1',
+        unitId: 'unit-hold-1',
+        kind: 'confirmation',
+      });
+
+      // The real production default - NO manualOnlyKinds override.
+      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+
+      expect(spy.sent).toHaveLength(0);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt, 'must not report a send that never happened').toBeUndefined();
+      expect(after?.skippedAt, 'claim-skipping would break Send now').toBeUndefined();
+      expect(after?.canceledAt).toBeUndefined();
+    });
+
+    it('a held-back rung is still reachable by a human force-send', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-hold-2',
+        phone: '+15550230002',
+        convId: 'conv-hold-2',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-hold-2',
+        unitId: 'unit-hold-2',
+        kind: 'confirmation',
+      });
+
+      await runDueTourRemindersRaw(POLL_AFTER_DUE, deps);
+      expect(spy.sent).toHaveLength(0);
+
+      const result = await forceSendReminder(
+        row.reminderId,
+        tour.tourId,
+        POLL_AFTER_DUE,
+        true,
+        deps,
+      );
+
+      expect(result).toEqual({ outcome: 'sent' });
+      expect(spy.sent).toHaveLength(1);
+      // automated: false - the pause moved the decision to a human, it did not
+      // turn the rung into an automated send by another name.
+      expect(spy.sent[0]!.automated).toBe(false);
+    });
+
+    it('an explicit empty override restores the automatic send (the e2e tick seam)', async () => {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: quietOff };
+      seedForceTenant(rig.world, {
+        contactId: 'contact-hold-3',
+        phone: '+15550230003',
+        convId: 'conv-hold-3',
+        now: SEEDED_AT,
+      });
+      const { tour, row } = await seedForceTour({
+        tenantId: 'contact-hold-3',
+        unitId: 'unit-hold-3',
+        kind: 'confirmation',
+      });
+
+      await runDueTourRemindersRaw(POLL_AFTER_DUE, { ...deps, manualOnlyKinds: new Set() });
+
+      expect(spy.sent).toHaveLength(1);
+      expect(spy.sent[0]!.automated, 'the poll path is still an AUTOMATED send').toBe(true);
+      const after = (await tourReminders.listByTour(tour.tourId)).find(
+        (r) => r.reminderId === row.reminderId,
+      );
+      expect(after?.sentAt).toBe(POLL_AFTER_DUE);
+    });
   });
 });

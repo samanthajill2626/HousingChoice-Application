@@ -359,9 +359,14 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                 {suppression !== undefined ? (
                   // Quiet hours is a calm "sends later", not a problem - muted
                   // tone (Cameron 2026-08-04); every real suppression stays amber.
+                  // `paused` takes the muted tone for the same reason and one
+                  // more: while the ladder is paused EVERY rung of EVERY tour
+                  // carries this line, and an amber panel that is amber always
+                  // stops reading as a warning at all.
                   <p
                     className={
-                      rung.suppression?.reason === 'quiet_hours'
+                      rung.suppression?.reason === 'quiet_hours' ||
+                      rung.suppression?.reason === 'paused'
                         ? styles.suppressionMuted
                         : styles.suppression
                     }

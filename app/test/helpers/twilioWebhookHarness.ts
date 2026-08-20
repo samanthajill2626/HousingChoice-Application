@@ -134,7 +134,11 @@ import {
   type TourItem,
   type ToursRepo,
 } from '../../src/repos/toursRepo.js';
-import { type TourReminderItem, type TourRemindersRepo } from '../../src/repos/tourRemindersRepo.js';
+import {
+  type ReminderKind,
+  type TourReminderItem,
+  type TourRemindersRepo,
+} from '../../src/repos/tourRemindersRepo.js';
 import {
   type NudgeKind,
   type NudgeSkipReason,
@@ -3728,6 +3732,13 @@ export interface HarnessOptions {
    * (2000) of them. Omit for the production budget.
    */
   unreadWalkLimit?: number;
+  /**
+   * The reminder kinds the tour-reminders read route treats as held back from
+   * automatic sending. Omit for the production hold-back
+   * (MANUAL_ONLY_REMINDER_KINDS, founder decision 2026-08-20); pass an EMPTY set
+   * to observe the quiet-hours / opt-out previews, which `paused` outranks.
+   */
+  tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
 }
 
 export interface Harness {
@@ -3881,6 +3892,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // inbox-unread-index: the byUnread scan budget, forwarded to the routers
       // that walk that index (the badge + the unread page).
       ...(opts.unreadWalkLimit !== undefined && { unreadWalkLimit: opts.unreadWalkLimit }),
+      // Manual-only hold-back (2026-08-20): the quiet-hours / opt-out preview
+      // suites pass an empty set so `paused` does not mask what they assert.
+      ...(opts.tourReminderManualOnlyKinds !== undefined && {
+        tourReminderManualOnlyKinds: opts.tourReminderManualOnlyKinds,
+      }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair
     // signup writes the same contacts/conversations/units the authed API reads,

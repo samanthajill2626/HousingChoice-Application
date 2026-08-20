@@ -143,7 +143,11 @@ import {
   createPendingRosterActionsRepo,
   type PendingRosterActionsRepo,
 } from '../repos/pendingRosterActionsRepo.js';
-import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import {
+  createTourRemindersRepo,
+  type ReminderKind,
+  type TourRemindersRepo,
+} from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 import { isOneToOneBucket, isUnreadVisible } from '../lib/unreadFeed.js';
 import { markUnread } from '../lib/markUnread.js';
@@ -371,6 +375,14 @@ export interface ApiRouterDeps {
    * to every router that walks that index.
    */
   unreadWalkLimit?: number;
+  /**
+   * Test seam: the reminder kinds the tour-reminders read route treats as
+   * held back from automatic sending (founder decision 2026-08-20). Production
+   * leaves it undefined and takes MANUAL_ONLY_REMINDER_KINDS; the quiet-hours
+   * route suite passes an EMPTY set, because `paused` outranks quiet hours and
+   * would otherwise make that preview unobservable.
+   */
+  tourReminderManualOnlyKinds?: ReadonlySet<ReminderKind>;
 }
 
 // --- Inbox cursor (opaque to clients) ---------------------------------------
@@ -794,6 +806,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     createContactTimelineRouter({
       logger: deps.logger,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      // ONE seam, forwarded to BOTH surfaces that preview a tour rung's send:
+      // the tour panel and this timeline must never disagree about whether a
+      // rung is paused.
+      ...(deps.tourReminderManualOnlyKinds !== undefined && {
+        manualOnlyReminderKinds: deps.tourReminderManualOnlyKinds,
+      }),
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
@@ -897,6 +915,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.tourReminderManualOnlyKinds !== undefined && {
+        manualOnlyKinds: deps.tourReminderManualOnlyKinds,
+      }),
       conversationsRepo: conversations,
       // ONE unit read, TWO consumers: D11 (contact-rosters) - send-now resolves
       // the tour's roster, whose DEFAULT rung is the property's primary contact

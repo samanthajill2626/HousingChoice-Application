@@ -133,6 +133,41 @@ export const LADDER_ORDER: ReminderKind[] = [
 ];
 
 /**
+ * do-not-remove-without-reading — FOUNDER DECISION, 2026-08-20, TEMPORARY.
+ *
+ * Tour reminders are MANUAL ONLY. The ladder still ARMS every rung on booking
+ * (so the panel keeps showing the schedule, the draft copy, and a working "Send
+ * now"), but the poll never sends one on its own. A human decides when each
+ * reminder goes out.
+ *
+ * This mirrors the application-nudge pause of 2026-08-18
+ * (jobs/placementNudges.ts MANUAL_ONLY_NUDGE_KINDS) and was taken for the same
+ * root reason: automated sends are going out under a founder who does not yet
+ * have a settled model of when the system speaks for her, and an unexpected text
+ * to a tenant or landlord is more expensive than a missed one.
+ *
+ * `confirmation` is INCLUDED (Cameron's explicit call). It is the rung with the
+ * strongest case for staying automatic - the recipient agreed to the tour
+ * seconds earlier - so its inclusion is a deliberate decision, not a side effect
+ * of pausing the ladder.
+ *
+ * `no_show_checkin` is absent because it was never auto-armed in the first place
+ * (see REMINDER_KINDS) - it has always been manual.
+ *
+ * NOT the same thing as emptying REMINDER_KINDS: that would stop the ARMING, and
+ * take the schedule and its copy off the tour page entirely - the opposite of
+ * what was asked for.
+ *
+ * TO RESTORE: empty this set. Nothing else has to change.
+ */
+export const MANUAL_ONLY_REMINDER_KINDS: ReadonlySet<ReminderKind> = new Set<ReminderKind>([
+  'confirmation',
+  'day_before',
+  'morning_of',
+  'en_route',
+]);
+
+/**
  * Read the org quiet-hours window. A settings failure falls back to the
  * DEFAULTS rather than breaking arming/sending (the `resolveWithSettings`
  * posture in messages/resolve.ts) - never to "no quiet hours".
@@ -310,6 +345,13 @@ export async function cancelTourReminders(
 export interface RunDueTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
   /**
+   * Rung kinds the poll must NEVER send automatically. Defaults to
+   * MANUAL_ONLY_REMINDER_KINDS; an explicit set overrides it (the e2e tick
+   * route passes an EMPTY set so the harness can still drive the automatic
+   * path). Mirrors RunDuePlacementNudgesDeps.manualOnlyKinds.
+   */
+  manualOnlyKinds?: ReadonlySet<ReminderKind>;
+  /**
    * Pending roster actions (contact-rosters D7), OPTIONAL: when supplied, a
    * group-eligible rung whose tour has a PENDING open_group WAITS for the open
    * instead of falling back to the tenant 1:1. Omitted (older call sites, unit
@@ -410,7 +452,30 @@ export async function runDueTourReminders(
 ): Promise<void> {
   const log = deps.logger ?? defaultLogger;
 
-  const dueRows = await deps.tourRemindersRepo.listDue(now);
+  const allDueRows = await deps.tourRemindersRepo.listDue(now);
+
+  // MANUAL-ONLY FILTER (founder decision 2026-08-20) - see MANUAL_ONLY_REMINDER_KINDS.
+  // These rows are LEFT PENDING on purpose, NOT claim-skipped: "Send now"
+  // (forceSendReminder) only works on a row that is still pending, so retiring
+  // them here would silently disable the very button this change exists to
+  // preserve. They simply stop being candidates for an automatic send. The
+  // panel chip stays honest via the route's `paused` suppression estimate
+  // (routes/tourReminders.ts), NOT via a skip stamp.
+  //
+  // The filtered array is ALSO what feeds the supersession backstop below (the
+  // `batch` argument), and that is deliberate: supersession retires an EARLIER
+  // rung when a LATER one is releasable in the same batch, so a paused later
+  // rung must not suppress an earlier rung that WILL still send. With every
+  // auto-armed kind paused this is moot today - it matters on a PARTIAL restore.
+  const manualOnly = deps.manualOnlyKinds ?? MANUAL_ONLY_REMINDER_KINDS;
+  const dueRows = allDueRows.filter((r) => !manualOnly.has(r.kind));
+  const heldBack = allDueRows.length - dueRows.length;
+  if (heldBack > 0) {
+    log.info(
+      { heldBack, now },
+      'tour reminder poll: manual-only rungs left pending (no automatic send)',
+    );
+  }
   if (dueRows.length === 0) return;
 
   log.info({ count: dueRows.length, now }, 'tour reminder poll: processing due rows');

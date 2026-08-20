@@ -67,6 +67,13 @@ const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, stri
   manual_mode: 'manual mode',
   stale_stage: 'stage moved on',
   quiet_hours: 'quiet hours',
+  // The nudge ROUTE does not emit `paused` today, so this label is currently
+  // unreachable here - it exists because the reason union is shared with the
+  // tour rungs. The application nudges have been manual-only since 2026-08-18
+  // and their pending rungs still chip "sending shortly"; wiring this reason
+  // through routes/placementNudges.ts is the one-line fix for that.
+  // TODO(manual-only-nudge-chip-still-says-sending-shortly).
+  paused: 'send manually',
 };
 
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */

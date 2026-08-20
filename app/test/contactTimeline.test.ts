@@ -14,6 +14,8 @@ import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createContactTimelineRouter } from '../src/routes/contactTimeline.js';
+import { MANUAL_ONLY_REMINDER_KINDS } from '../src/jobs/tourReminders.js';
+import type { ReminderKind } from '../src/repos/tourRemindersRepo.js';
 import { resolveMessage } from '../src/messages/index.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
@@ -1040,6 +1042,11 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     // reasons regardless of the time of day the suite runs; the quiet cases
     // pass a window-around-now stub explicitly.
     settingsRepo: SettingsReadRepo = quietOffSettingsRepo(),
+    // The manual-only hold-back is OFF by default here for the same reason:
+    // since 2026-08-20 every auto-armed rung kind is paused in production, and
+    // `paused` outranks quiet hours - so the default would mask every estimate
+    // these cases exist to prove. The hold-back has its own cases below.
+    manualOnlyReminderKinds: ReadonlySet<ReminderKind> = new Set(),
   ): { world: FakeWorld; app: Express } {
     const world = createFakeWorld();
     const logger = createLogger({ destination: createLogCapture().stream });
@@ -1061,6 +1068,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       placementNudgesRepo: world.placementNudgesRepo,
       placementsRepo: world.placementsRepo,
       unitsRepo: world.unitsRepo,
+      manualOnlyReminderKinds,
     });
     const app = express();
     app.use('/api/contacts', router);
@@ -1133,6 +1141,59 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     // each card's fire-time label renders in the zone its body quotes rather
     // than in whatever zone the navigator's browser happens to sit in.
     expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
+  });
+
+  // Manual-only hold-back (founder decision 2026-08-20): the contact page's
+  // Upcoming cards must agree with the tour panel. A rung the poll will never
+  // claim cannot advertise "sends in 3h" here while the panel calls it paused.
+  it('marks a paused tour rung `paused` under the PRODUCTION hold-back', async () => {
+    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+    const phone = '+15550600031';
+    world.contacts.push({ contactId: 'ct-paused', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-paused', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-paused',
+      unitId: 'u-paused',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-paused/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'paused' });
+  });
+
+  it('leaves PLACEMENT NUDGE cards untouched by the tour hold-back', async () => {
+    // The tour pause must not leak onto the other ladder: nudges have their own
+    // (2026-08-18) hold-back, which this route does not preview.
+    const { world, app } = makeGatherHarness(undefined, MANUAL_ONLY_REMINDER_KINDS);
+    const phone = '+15550600032';
+    world.contacts.push({ contactId: 'ct-nudge', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-nudge', phone, 'tenant_1to1');
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-nudge',
+      unitId: 'u-nudge',
+      stage: 'awaiting_approval',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'approval_check',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-nudge/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    for (const item of up) {
+      expect(item.suppression).toBeUndefined();
+    }
   });
 
   it('reads the org window ONLY when the gather runs: no settings read and NO timezone on a kinds=message request', async () => {

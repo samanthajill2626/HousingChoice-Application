@@ -78,6 +78,7 @@ import type { PlacementStage } from '../lib/statusModel.js';
 import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   resolveUsableGroup,
+  MANUAL_ONLY_REMINDER_KINDS,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
@@ -105,6 +106,13 @@ export interface ContactTimelineRouterDeps {
    *  covers BOTH ladders here (narrow read-only shape, the
    *  `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
+   * Reminder kinds the POLL holds back, mirrored onto this surface's tour rungs
+   * so a rung the poll will never claim chips `paused` here too. Defaults to
+   * MANUAL_ONLY_REMINDER_KINDS. Test seam only - see the twin on
+   * routes/tourReminders.ts for why the quiet-hours suites pass an empty set.
+   */
+  manualOnlyReminderKinds?: ReadonlySet<ReminderKind>;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
@@ -743,9 +751,20 @@ async function gatherUpcoming(params: {
    *  reminder copy renders the tour time in it - never a raw settings.timezone
    *  (spec D8). */
   timezone: string;
+  /** Reminder kinds held back from automatic sending (the manual-only pause). */
+  manualOnlyReminderKinds: ReadonlySet<ReminderKind>;
   log: Logger;
 }): Promise<TimelineScheduled[]> {
-  const { contact, config, conversationsRepo, repos, quietFor, timezone, log } = params;
+  const {
+    contact,
+    config,
+    conversationsRepo,
+    repos,
+    quietFor,
+    timezone,
+    manualOnlyReminderKinds,
+    log,
+  } = params;
   const contactId = contact.contactId;
 
   // Resolve the contact's 1:1 threads the SAME way the pollers do — from the
@@ -764,6 +783,7 @@ async function gatherUpcoming(params: {
     conv: ConversationItem | undefined,
     staleStage: boolean,
     dueAt: string,
+    paused = false,
   ): ScheduledSuppression | undefined =>
     evaluateScheduledSendSuppression({
       smsSendingEnabled: config.smsSendingEnabled,
@@ -771,6 +791,7 @@ async function gatherUpcoming(params: {
       contactOptOut,
       aiMode: conv?.ai_mode,
       staleStage,
+      paused,
       // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator
       // caller, so a deferred rung reads the same here as on the tour /
       // placement panels - including the per-RUNG scoping.
@@ -852,7 +873,18 @@ async function gatherUpcoming(params: {
         if (!routes1to1) return [];
         const address = (await unitOnce(tour.unitId))?.address;
         return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
-          const suppression = suppressionFor(tenantConv, false, row.dueAt);
+          // The manual-only hold-back rides the shared evaluator here too, so a
+          // rung the poll will never pick up cannot chip "sends in 3h" on the
+          // contact page while the tour panel calls it paused. Only the
+          // 1:1-routed tours reach this walk (group-routed ones return [] just
+          // above), so the evaluator always runs - no bare-`paused` fallback is
+          // needed on this surface.
+          const suppression = suppressionFor(
+            tenantConv,
+            false,
+            row.dueAt,
+            manualOnlyReminderKinds.has(row.kind),
+          );
           return {
             kind: 'scheduled',
             id: `sched#tour_reminder#${row.reminderId}`,
@@ -929,6 +961,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const manualOnlyReminderKinds = deps.manualOnlyReminderKinds ?? MANUAL_ONLY_REMINDER_KINDS;
 
   // Scheduled-send gather repos (Part B): used ONLY when ALL are injected — we
   // deliberately do NOT default-construct them (a default would open a live
@@ -1143,6 +1176,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
           quietFor: (dueAt: string) =>
             (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
           timezone: window.timezone,
+          manualOnlyReminderKinds,
           log,
         });
       } catch (err) {

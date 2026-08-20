@@ -25,6 +25,11 @@ const SUPPRESSION_COPY: Readonly<
   stale_stage: 'no longer applies',
   // A DEFERRAL, not a drop - suppressionNote leads this one with "Will wait".
   quiet_hours: 'quiet hours',
+  // Neither a drop nor a timed deferral - suppressionNote leads this one with
+  // "Paused", so it reads "Paused - send manually". Distinct from the
+  // sms_sending_disabled copy above ("SMS sending paused"), which is the
+  // env-wide kill switch rather than this one rung awaiting a person.
+  paused: 'send manually',
 };
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -

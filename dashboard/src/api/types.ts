@@ -1081,7 +1081,8 @@ export type ScheduledSuppressionReason =
   | 'contact_opted_out'
   | 'manual_mode'
   | 'stale_stage'
-  | 'quiet_hours';
+  | 'quiet_hours'
+  | 'paused';
 
 /** The suppression estimate a GET carries on an upcoming rung/card. */
 export interface ScheduledSuppression {
@@ -1091,9 +1092,17 @@ export interface ScheduledSuppression {
 /** The rendered em dash, by code point, so these source lines stay pure ASCII. */
 const EM_DASH = String.fromCharCode(0x2014);
 
-/** "Will wait" for a DEFERRAL, "Will be skipped" for a real drop. */
+/** "Will wait" for a DEFERRAL, "Paused" for an indefinite hold awaiting a human,
+ *  "Will be skipped" for a real drop.
+ *
+ *  `paused` is neither of the other two and must never borrow their wording: the
+ *  rung is not being dropped (it stays pending and sendable) and it is not
+ *  waiting on a clock that will release it (nothing releases it but a person).
+ *  Pairs with the 'send manually' label -> "Paused - send manually". */
 export function suppressionLead(reason: ScheduledSuppressionReason): string {
-  return reason === 'quiet_hours' ? 'Will wait' : 'Will be skipped';
+  if (reason === 'quiet_hours') return 'Will wait';
+  if (reason === 'paused') return 'Paused';
+  return 'Will be skipped';
 }
 
 /** The full staff-facing note, em-dashed like the tour + contact surfaces. (The
@@ -1184,6 +1193,7 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   manual_mode: 'manual mode',
   stale_stage: 'tour no longer at this stage',
   quiet_hours: 'quiet hours',
+  paused: 'send manually',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */

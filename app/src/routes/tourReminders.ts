@@ -65,6 +65,7 @@ import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js'
 import {
   forceSendReminder,
   readQuietHoursWindow,
+  MANUAL_ONLY_REMINDER_KINDS,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
@@ -95,6 +96,17 @@ export interface TourRemindersRouterDeps {
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
+   * Rung kinds the POLL holds back, mirrored here so an upcoming rung the poll
+   * will never claim chips `paused` instead of "sending shortly". Defaults to
+   * MANUAL_ONLY_REMINDER_KINDS.
+   *
+   * Test seam: `paused` outranks quiet hours, so with the production default
+   * every upcoming rung chips `paused` and the quiet-hours preview below becomes
+   * unobservable. The quiet-hours suite passes an EMPTY set to keep exercising
+   * that formula - the same posture the dev tick route takes for the poll.
+   */
+  manualOnlyKinds?: ReadonlySet<ReminderKind>;
   // ---- Send-now deps (quiet-hours spec section 7) --------------------------
   // The force-send reuses the poll's resolve/claim/send path, so this router
   // needs the poll's send-side deps too. All optional with factory defaults,
@@ -150,6 +162,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const manualOnlyKinds = deps.manualOnlyKinds ?? MANUAL_ONLY_REMINDER_KINDS;
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
@@ -410,7 +423,9 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // unambiguous self_guided route (Task 4 tightens the group case). A
     // non-self_guided tour never gets an estimate here.
     const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
-    let suppressionOf: ((dueAt: string) => ScheduledSuppression | undefined) | undefined;
+    let suppressionOf:
+      | ((dueAt: string, paused: boolean) => ScheduledSuppression | undefined)
+      | undefined;
     if (tour.tourType === 'self_guided' && hasUpcoming) {
       // Quiet hours (spec 2026-08-03): unlike the state-dependent reasons
       // (opt-out, manual mode), a rung's quiet-ness is a function of the RUNG's
@@ -441,16 +456,37 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // per-row. Stored dueAts are already normalized ISO, so `<=` compares
       // them lexicographically against the normalized nowIso.
       const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
-      suppressionOf = (dueAt: string): ScheduledSuppression | undefined =>
-        evaluate((dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso));
+      suppressionOf = (dueAt: string, paused: boolean): ScheduledSuppression | undefined =>
+        evaluate(
+          (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
+          paused,
+        );
     }
 
     const tally = newComposeFailTally();
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
         const state = stateOf(row);
+        // The manual-only hold-back is a property of the KIND, so it is known
+        // for EVERY tour - including the group-routed ones `suppressionOf`
+        // never covers (it needs no recipient IO). Without the second branch a
+        // landlord_led / pm_team panel would keep chipping "sending shortly"
+        // for a rung the poll will never pick up: the perpetual-"sending
+        // shortly" lie claimSkip exists to prevent.
+        //
+        // Where an estimate IS computed, `paused` goes THROUGH the shared
+        // evaluator rather than around it, so a harder reason (opt-out, kill
+        // switch, manual mode) still wins - see scheduledSendSuppression.ts for
+        // why that ordering is the honest one.
+        const paused = manualOnlyKinds.has(row.kind);
         const suppression =
-          state === 'upcoming' && suppressionOf !== undefined ? suppressionOf(row.dueAt) : undefined;
+          state !== 'upcoming'
+            ? undefined
+            : suppressionOf !== undefined
+              ? suppressionOf(row.dueAt, paused)
+              : paused
+                ? ({ reason: 'paused' } as const)
+                : undefined;
         const view: TourReminderView = {
           reminderId: row.reminderId,
           kind: row.kind,
@@ -532,7 +568,7 @@ async function resolveTenantSuppression(
   config: AppConfig,
   contacts: ContactsRepo,
   conversations: ConversationsRepo,
-): Promise<(quietNow: boolean) => ScheduledSuppression | undefined> {
+): Promise<(quietNow: boolean, paused: boolean) => ScheduledSuppression | undefined> {
   const contact = await contacts.getById(tour.tenantId);
   const phone = contact?.phone;
   const convs =
@@ -541,12 +577,13 @@ async function resolveTenantSuppression(
       : [];
   const conv = convs.find((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
 
-  return (quietNow: boolean) =>
+  return (quietNow: boolean, paused: boolean) =>
     evaluateScheduledSendSuppression({
       smsSendingEnabled: config.smsSendingEnabled,
       convOptOut: conv?.sms_opt_out,
       contactOptOut: contact?.sms_opt_out === true,
       aiMode: conv?.ai_mode,
       quietNow,
+      paused,
     });
 }

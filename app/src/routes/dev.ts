@@ -417,7 +417,25 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       }
       nowIso = new Date(body.now).toISOString();
     }
-    await runDueTourReminders(nowIso, tourReminderDeps());
+    // DELIBERATE DIVERGENCE FROM PRODUCTION - read before trusting a tick.
+    //
+    // Production holds every auto-armed reminder kind back
+    // (MANUAL_ONLY_REMINDER_KINDS, founder decision 2026-08-20), so the real
+    // poll sends nothing on its own. This dev/e2e seam switches that off: its
+    // entire job is to drive the send machinery deterministically, and
+    // inheriting the hold-back would turn every tick into a silent no-op and
+    // drop the whole reminder send path out of e2e coverage for as long as
+    // "temporary" lasts. Mirrors the placement-nudge tick below exactly.
+    //
+    // SO: a green tick proves the machinery works, NOT that the reminder would
+    // go out in production today - there it waits for a human. Applied HERE
+    // rather than in tourReminderDeps() so an injected test/e2e deps object
+    // cannot silently miss it. Delete this when the hold-back is lifted; do not
+    // leave a permanent dev/prod fork.
+    await runDueTourReminders(nowIso, {
+      ...tourReminderDeps(),
+      manualOnlyKinds: new Set(),
+    });
     log.info({ now: nowIso }, 'dev tour-reminder tick ran');
     res.status(200).json({ ok: true, now: nowIso });
   });

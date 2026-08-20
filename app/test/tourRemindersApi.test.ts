@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import {
-  runDueTourReminders,
+  runDueTourReminders as runDueTourRemindersRaw,
   type RunDueTourRemindersDeps,
 } from '../src/jobs/tourReminders.js';
 import type {
@@ -148,6 +148,32 @@ async function seedQuietTour(world: FakeWorld, suffix: string, phone: string): P
   return created.tourId;
 }
 
+/**
+ * A harness whose tour-reminders route applies NO manual-only hold-back.
+ *
+ * Since 2026-08-20 every auto-armed rung kind is held back (founder decision),
+ * and `paused` outranks quiet hours in the shared precedence ladder - so under
+ * the production default EVERY upcoming rung chips `paused` and the estimates
+ * these cases exist to prove become unobservable. They are testing the route's
+ * per-row quiet-hours formula and its opt-out/kill-switch preview, not the
+ * hold-back, so they switch the hold-back off; the hold-back has its own cases
+ * ("manual-only hold-back" below). Same posture the dev tick route takes for
+ * the poll, and the wrapper tourReminders.test.ts uses for runDueTourReminders.
+ */
+const NO_MANUAL_HOLD_BACK: ReadonlySet<ReminderKind> = new Set();
+function previewHarness(): ReturnType<typeof makeWebhookHarness> {
+  return makeWebhookHarness({ tourReminderManualOnlyKinds: NO_MANUAL_HOLD_BACK });
+}
+
+/**
+ * The poll with the hold-back switched off - the cases below drive a real send
+ * to compare it against the GET preview, and the production default would send
+ * nothing. See the twin wrapper in tourReminders.test.ts.
+ */
+function runDueTourReminders(now: string, deps: RunDueTourRemindersDeps): Promise<void> {
+  return runDueTourRemindersRaw(now, { manualOnlyKinds: NO_MANUAL_HOLD_BACK, ...deps });
+}
+
 describe('GET /api/tours/:tourId/reminders', () => {
   it('returns each rung sorted by dueAt asc with state + body, and next = earliest upcoming', async () => {
     const { app, world } = makeWebhookHarness();
@@ -221,8 +247,15 @@ describe('GET /api/tours/:tourId/reminders', () => {
           timezone: world.settings.timezone,
         }),
       );
-      // No suppression estimate on a non-self_guided tour (Task 2 scope).
-      expect(r.suppression).toBeUndefined();
+      // A non-self_guided tour still gets no RECIPIENT-state estimate (Task 2
+      // scope: that preview needs 1:1 routing). Since the 2026-08-20 hold-back
+      // its UPCOMING rungs do carry `paused`, which is derived from the kind and
+      // needs no recipient IO - a terminal rung carries nothing either way.
+      if (r.state === 'upcoming') {
+        expect(r.suppression).toEqual({ reason: 'paused' });
+      } else {
+        expect(r.suppression).toBeUndefined();
+      }
     }
 
     // sentAt / canceledAt surfaced on the respective rungs.
@@ -279,7 +312,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('carries a contact_opted_out suppression estimate on an upcoming 1:1 (self_guided) rung', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
 
     const tenantPhone = '+15550600001';
     const tenantId = 'contact-optout-1';
@@ -333,7 +366,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // still built from the current time (never a fixed 21:00-08:00, which would
   // make these cases pass or fail depending on when the suite runs).
   it('carries a quiet_hours suppression estimate for a rung due inside a window occurrence', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const tourId = await seedQuietTour(world, 'view-1', '+15550600011');
     // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
@@ -356,7 +389,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // Friday afternoon will not wait for anything, so it must NOT be chipped -
   // while a rung already due IS being held by the fire-time backstop right now.
   it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const tourId = await seedQuietTour(world, 'view-5', '+15550600015');
     // Three days out at a time of day outside EVERY occurrence of the window.
@@ -391,7 +424,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // tonight WILL be deferred, so it must chip even though the clock is outside
   // the window - exactly when staff are looking at the panel.
   it('outside the window, still chips a rung due inside tonight occurrence', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     const tourId = await seedQuietTour(world, 'view-6', '+15550600016');
     seedReminder(world, {
@@ -424,7 +457,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   // in-window dueAt must not chip it via the rung-time disjunct; only a rung
   // still in the FUTURE reads its own dueAt against the window.
   it('outside the window, an OVERDUE rung with an in-window dueAt is not chipped', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAwayFromNow());
     const tourId = await seedQuietTour(world, 'view-7', '+15550600017');
     // Overdue, and its wall time sits inside a PAST occurrence of the window
@@ -446,7 +479,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     world.settings.quietHoursEnabled = false;
 
     const tenantPhone = '+15550600012';
@@ -489,7 +522,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
   });
 
   it('a harder reason still outranks quiet hours (opted-out tenant inside the window)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = previewHarness();
     Object.assign(world.settings, quietWindowAroundNow());
 
     const tenantPhone = '+15550600013';
@@ -532,6 +565,100 @@ describe('GET /api/tours/:tourId/reminders', () => {
       (r) => r.state === 'upcoming',
     );
     expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
+  // Manual-only hold-back (founder decision 2026-08-20). These run on the
+  // PRODUCTION default - no previewHarness - because the hold-back is the thing
+  // under test.
+  describe('manual-only hold-back', () => {
+    it('chips an upcoming rung `paused` instead of leaving it to read "sending shortly"', async () => {
+      const { app, world } = makeWebhookHarness();
+      const tourId = await seedQuietTour(world, 'paused-1', '+15550600021');
+      seedReminder(world, {
+        reminderId: 'rem-paused-1',
+        tourId,
+        kind: 'day_before',
+        // Already past due: the poll will never claim it, so without `paused`
+        // the panel would chip "sending shortly" forever.
+        dueAt: isoHoursFromNow(-4),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const upcoming = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'upcoming');
+      expect(upcoming?.suppression).toEqual({ reason: 'paused' });
+    });
+
+    it('chips a GROUP-routed tour too, where no recipient-state estimate is computed', async () => {
+      const { app, world } = makeWebhookHarness();
+      // landlord_led: resolveTenantSuppression never runs for this shape, so
+      // `paused` is the ONLY estimate the route can produce - and the one that
+      // keeps these panels honest.
+      const created = await world.toursRepo.create({
+        tenantId: 'contact-paused-group',
+        unitId: 'unit-paused-group',
+        scheduledAt: '2099-01-10T10:00:00.000Z',
+        tourType: 'landlord_led',
+      });
+      seedReminder(world, {
+        reminderId: 'rem-paused-group',
+        tourId: created.tourId,
+        kind: 'en_route',
+        dueAt: isoHoursFromNow(-1),
+      });
+
+      const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const upcoming = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'upcoming');
+      expect(upcoming?.suppression).toEqual({ reason: 'paused' });
+    });
+
+    it('a HARDER reason still outranks the pause (an opted-out tenant is named, not hidden)', async () => {
+      // The pause invites "Send now". A send-now to an opted-out contact is
+      // refused, so the operator has to be told the real reason up front rather
+      // than being sent into that refusal.
+      const { app, world } = makeWebhookHarness();
+      const phone = '+15550600022';
+      const tourId = await seedQuietTour(world, 'paused-2', phone);
+      const tenant = world.contacts.find((c) => c.contactId === 'contact-quiet-paused-2');
+      if (tenant !== undefined) tenant.sms_opt_out = true;
+      seedReminder(world, {
+        reminderId: 'rem-paused-2',
+        tourId,
+        kind: 'day_before',
+        dueAt: isoHoursFromNow(24),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const upcoming = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'upcoming');
+      expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
+    });
+
+    it('a terminal rung carries no estimate at all', async () => {
+      const { app, world } = makeWebhookHarness();
+      const tourId = await seedQuietTour(world, 'paused-3', '+15550600023');
+      seedReminder(world, {
+        reminderId: 'rem-paused-3',
+        tourId,
+        kind: 'confirmation',
+        dueAt: isoHoursFromNow(-48),
+        sentAt: isoHoursFromNow(-47),
+      });
+
+      const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+      expect(res.status).toBe(200);
+      const sent = (
+        res.body.reminders as { state: string; suppression?: { reason: string } }[]
+      ).find((r) => r.state === 'sent');
+      expect(sent?.suppression).toBeUndefined();
+    });
   });
 
   it('returns 404 for an unknown tour id', async () => {

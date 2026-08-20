@@ -561,7 +561,12 @@ function MessageBubble({
 
   // Delivery state is meaningful only for OUTBOUND; seed/legacy rows (no status)
   // show no chip. Failures expose a reason (when error_code is present) + Retry.
-  const delivery = outbound ? presentDeliveryStatus(msg.delivery_status) : null;
+  // The timestamp goes in so a `sent` that never advanced stops reading as
+  // "Sent" once it has gone quiet - a carrier that discards a message sends no
+  // receipt and no error, so the age of the row is the ONLY signal there is.
+  const delivery = outbound
+    ? presentDeliveryStatus(msg.delivery_status, Date.parse(msg.at))
+    : null;
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because

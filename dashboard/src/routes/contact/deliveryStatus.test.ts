@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { presentDeliveryStatus, presentRelayDelivery, deliveryReason } from './deliveryStatus.js';
+import {
+  presentDeliveryStatus,
+  presentRelayDelivery,
+  deliveryReason,
+  STALE_SENT_AFTER_MS,
+} from './deliveryStatus.js';
 
 describe('presentDeliveryStatus', () => {
   it('maps each delivery status to label / tone / isFailure', () => {
@@ -165,5 +170,47 @@ describe('deliveryReason', () => {
       expect(typeof reason).toBe('string');
       expect(reason).toBe(`Delivery failed (error ${code})`);
     }
+  });
+});
+
+describe('presentDeliveryStatus - a `sent` that never advanced', () => {
+  const T0 = Date.parse('2026-08-19T21:28:59.000Z');
+
+  it('still reads "Sent" while a receipt could plausibly still arrive', () => {
+    expect(presentDeliveryStatus('sent', T0, T0 + 60_000)).toEqual({
+      label: 'Sent',
+      tone: 'info',
+      isFailure: false,
+    });
+  });
+
+  it('stops implying delivery once it has gone quiet', () => {
+    expect(presentDeliveryStatus('sent', T0, T0 + STALE_SENT_AFTER_MS)).toEqual({
+      label: 'Sent - not confirmed',
+      tone: 'danger',
+      // NOT a failure: no receipt is not proof of non-delivery, and a Retry here
+      // could double-send a message that actually landed.
+      isFailure: false,
+    });
+  });
+
+  it('leaves every OTHER status alone no matter how old', () => {
+    const old = T0 + STALE_SENT_AFTER_MS * 100;
+    expect(presentDeliveryStatus('delivered', T0, old)?.label).toBe('Delivered');
+    expect(presentDeliveryStatus('queued', T0, old)?.label).toBe('Sending…');
+    expect(presentDeliveryStatus('failed', T0, old)?.label).toBe('Failed');
+  });
+
+  it('behaves exactly as before when no timestamp is supplied', () => {
+    expect(presentDeliveryStatus('sent')).toEqual({
+      label: 'Sent',
+      tone: 'info',
+      isFailure: false,
+    });
+  });
+
+  it('ignores an unparseable timestamp rather than crying stale', () => {
+    // Date.parse of a malformed `at` yields NaN.
+    expect(presentDeliveryStatus('sent', Number.NaN, T0)?.label).toBe('Sent');
   });
 });

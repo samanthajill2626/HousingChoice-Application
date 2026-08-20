@@ -571,8 +571,17 @@ describe('Timeline', () => {
   });
 
   it('shows the delivery status on an OUTBOUND bubble', () => {
-    renderTimeline({ items: [MESSAGE_OUT] }); // delivery_status: 'sent'
+    // A JUST-sent message still reads "Sent" - it may yet be confirmed.
+    renderTimeline({ items: [{ ...MESSAGE_OUT, at: new Date().toISOString() }] });
     expect(screen.getByText('Sent')).toBeInTheDocument();
+  });
+
+  it('a `sent` bubble that has gone quiet stops implying it was delivered', () => {
+    // MESSAGE_OUT is dated 2026-06-08 and still sits at `sent`. A carrier that
+    // discards a message returns no receipt and no error code, so the age of the
+    // row is the only signal there is - "Sent" would read as "it arrived".
+    renderTimeline({ items: [MESSAGE_OUT] });
+    expect(screen.getByText(/Sent - not confirmed/)).toBeInTheDocument();
   });
 
   it('shows NO delivery status on an inbound bubble (delivery state is outbound-only)', () => {

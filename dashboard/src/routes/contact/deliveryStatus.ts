@@ -47,14 +47,55 @@ const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
 };
 
 /**
+ * How long an outbound message may sit at `sent` before the chip stops implying
+ * it landed. Twilio returns a terminal receipt within seconds to a couple of
+ * minutes when it returns one at all; 15 minutes is well past that.
+ */
+export const STALE_SENT_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * `sent` that never advanced. An over-budget MMS is discarded by the carrier
+ * with NO receipt and NO error code (docs/issues/
+ * outbound-mms-stalls-at-sent-with-no-receipt.md), so the row sits at `sent`
+ * forever and the old chip read "Sent" - indistinguishable from a message that
+ * actually arrived. That is exactly how the 2026-08-19 drop went unnoticed.
+ *
+ * Deliberately NOT `isFailure`: no receipt is not proof of failure, the message
+ * may well have landed, and marking it failed would offer a Retry that could
+ * double-send. It reads as danger so it draws the eye, and says plainly that we
+ * do not know. No `reason` either - the label already says it, and the bubble
+ * renders a reason INLINE, where a sentence of guidance would swamp the chip.
+ */
+const STALE_SENT_PRESENTATION: DeliveryPresentation = {
+  label: 'Sent - not confirmed',
+  tone: 'danger',
+  isFailure: false,
+};
+
+/**
  * Map a delivery status to its label/tone/failure-flag, or `null` when there is no
  * status to show (undefined — seed/legacy rows; or an unrecognized value). Returning
  * null keeps the bubble clean instead of inventing a false "Sending…"/failure cue.
+ *
+ * `sentAtMs` (the message's timestamp) is optional: pass it and a `sent` row that
+ * has gone quiet for STALE_SENT_AFTER_MS presents as unconfirmed instead of
+ * "Sent". Omit it and behavior is exactly as before. `nowMs` is injectable for
+ * tests.
  */
 export function presentDeliveryStatus(
   status: DeliveryStatus | undefined,
+  sentAtMs?: number,
+  nowMs: number = Date.now(),
 ): DeliveryPresentation | null {
   if (status === undefined) return null;
+  if (
+    status === 'sent' &&
+    sentAtMs !== undefined &&
+    Number.isFinite(sentAtMs) &&
+    nowMs - sentAtMs >= STALE_SENT_AFTER_MS
+  ) {
+    return STALE_SENT_PRESENTATION;
+  }
   return STATUS_PRESENTATION[status] ?? null;
 }
 

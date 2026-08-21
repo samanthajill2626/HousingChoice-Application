@@ -3,12 +3,47 @@ id: npm-test-dynamodb-local-contention
 title: npm test is not reliably green - four integration suites fail nondeterministically under shared DynamoDB Local contention
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/test-infra
 created: 2026-08-05
 updated: 2026-08-21
-refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts:153, app/scripts/db-update-gsis.ts:152, app/vitest.config.ts:16
+resolved: 2026-08-21
+refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts, app/scripts/db-update-gsis.ts, app/vitest.config.ts
 ---
+
+**RESOLVED 2026-08-21 (`fix/test-suite-hardening`). All four suites.**
+
+| suite | cause | fix |
+|---|---|---|
+| C `seedProfile` | global timeout too low | already fixed before this work (60s global + 240s per-test) |
+| D `seedLive` | same class | already fixed (120s per-test budgets) |
+| A `groupCrossCheck` | **a TTL time bomb, not contention** - see below | `cleanupMs` injected, plus `DYNAMO_DISABLE_TTL` for the whole class |
+| B `unreadIndexRepo` | DynamoDB Local `InternalFailure` on `UpdateTable` under load, which the AWS SDK's retry policy does not cover | bounded retry in `db-update-gsis.ts` |
+
+**The headline: A was never contention.** `expires_at` is a real TTL that
+`ensureTable` enables, and services derive it from their INJECTED clock. The
+file pinned `T0 = 2026-08-11` with a 7-day window, so from **2026-08-18** every
+dedupe marker it wrote was born already expired, and DynamoDB Local's reaper
+deleted it mid-test. A second claim of the same messageSid then found nothing
+and reported itself fresh. The suite had been stable for months and started
+rotting on a date - which is why it read as load flakiness for three days, and
+why the first entry in this issue's own evidence is 2026-08-18.
+
+Evidence, measured rather than assumed:
+
+| | that test alone | whole file | full `npm test` |
+|---|---|---|---|
+| before | 9 pass / 1 fail of 10 | 3 pass / 2 fail of 5 | 1 failing file |
+| after | 12 / 12 | 8 / 8 | **320 passed, 0 failed** |
+
+Then verified under the contention this issue is named for: a full `npm run e2e`
+(251 passed) with three concurrent `npm test` runs against the same containers -
+**e2e green, and 3/3 unit runs green.**
+
+The category was closed too, not just the instance: `DYNAMO_DISABLE_TTL=1` in
+`app/vitest.config.ts` disables the reaper for every vitest run, immunising all
+~60 `ensureTable` call sites and every future suite - including
+`aiRunsRepo.integration.test.ts`, whose identical fuse was set for 2026-11-04.
 
 <!--
   MERGED 2026-08-21. Four separately filed issues, one root cause and one cost.

@@ -1603,6 +1603,21 @@ export function createFakeWorld(): FakeWorld {
     if (idx >= 0) contacts.splice(idx, 1);
   };
 
+  /**
+   * MODELS THE REAL DISPLAY PROJECTION. `getDisplayById` / `getDisplaysByIds`
+   * return ONLY contactId/firstName/lastName/phone against DynamoDB, so a
+   * caller that reads anything else (roster `company`, the send path's fences)
+   * must fail HERE too - a fake that returned whole items would let that ship
+   * green and break in production. Shared by both so the two cannot drift
+   * (adversarial review r1 finding 4).
+   */
+  const projectDisplay = (contact: ContactItem) => ({
+    contactId: contact.contactId,
+    ...(contact.firstName !== undefined && { firstName: contact.firstName }),
+    ...(contact.lastName !== undefined && { lastName: contact.lastName }),
+    ...(typeof contact.phone === 'string' && { phone: contact.phone }),
+  });
+
   const contactsRepo: ContactsRepo = {
     async findByPhone(phone) {
       const hit = contacts.find((c) => c.phone === phone);
@@ -1628,25 +1643,15 @@ export function createFakeWorld(): FakeWorld {
       return contacts.find((c) => c.contactId === contactId);
     },
     async getDisplayById(contactId) {
-      return contacts.find((c) => c.contactId === contactId);
+      const hit = contacts.find((c) => c.contactId === contactId);
+      return hit === undefined ? undefined : projectDisplay(hit);
     },
     async getDisplaysByIds(contactIds) {
       const wanted = new Set(contactIds);
       return new Map(
         contacts
           .filter((contact) => wanted.has(contact.contactId))
-          // MODELS THE PROJECTION: the real BatchGet returns ONLY these fields,
-          // so a caller that reads anything else (roster `company`, the send
-          // path's fences) fails here exactly as it would against DynamoDB.
-          .map((contact) => [
-            contact.contactId,
-            {
-              contactId: contact.contactId,
-              ...(contact.firstName !== undefined && { firstName: contact.firstName }),
-              ...(contact.lastName !== undefined && { lastName: contact.lastName }),
-              ...(typeof contact.phone === 'string' && { phone: contact.phone }),
-            },
-          ] as const),
+          .map((contact) => [contact.contactId, projectDisplay(contact)] as const),
       );
     },
     async getManyByIds(contactIds) {

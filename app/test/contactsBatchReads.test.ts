@@ -159,6 +159,12 @@ describe('contact read amplification - property (unit) routes', () => {
     expect(res.body.recipients).toHaveLength(N);
     expect(reads.getById).not.toHaveBeenCalled();
     expect(reads.getDisplaysByIds).toHaveBeenCalledTimes(1);
+    // Pin the RENDERED name too (adversarial review r1 finding 6): a call-count
+    // assertion alone would still pass if the enrichment loop were deleted.
+    const row = (res.body.recipients as Array<Record<string, unknown>>).find(
+      (r) => r['contactId'] === tenants[5],
+    );
+    expect(row).toMatchObject({ tenantName: 'First5 Last5' });
   });
 
   it('placements tenant names batch: one display batch, zero per-row getById', async () => {
@@ -189,6 +195,10 @@ describe('contact read amplification - property (unit) routes', () => {
     expect(res.status).toBe(200);
     expect(reads.getById).not.toHaveBeenCalled();
     expect(reads.getDisplaysByIds).toHaveBeenCalledTimes(1);
+    const row = (res.body.placements as Array<Record<string, unknown>>).find(
+      (p) => p['tenantId'] === tenants[5],
+    );
+    expect(row).toMatchObject({ tenantName: 'First5 Last5' });
   });
 
   it('activity contactName enrichment batches: one display batch, zero per-row getById', async () => {
@@ -215,6 +225,10 @@ describe('contact read amplification - property (unit) routes', () => {
     expect(res.status).toBe(200);
     expect(reads.getById).not.toHaveBeenCalled();
     expect(reads.getDisplaysByIds).toHaveBeenCalledTimes(1);
+    const named = (res.body.events as Array<Record<string, unknown>>).filter(
+      (e) => e['contactName'] !== undefined,
+    );
+    expect(named).toHaveLength(N);
   });
 
   it('a batch failure degrades the page instead of 500ing it (blast radius is the whole chunk)', async () => {

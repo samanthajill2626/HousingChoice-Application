@@ -214,8 +214,10 @@ function trimmedField(value: unknown): string | undefined {
  *   this also stops pulling whole contact documents over the wire.
  * - phone#<E164> keys: phone comes from the key (no lookup).
  * - deleted/unresolvable contacts: omit the fields (never leak the raw key);
- *   the dashboard falls back to today's "Tenant" label. A failed batch degrades
- *   the SAME way for every row rather than one row at a time.
+ *   the dashboard falls back to today's "Tenant" label. A partial batch (keys
+ *   the table never served) degrades the same way - identity is a label here,
+ *   so a short map is survivable. There is NO catch: a rejected read still
+ *   500s this endpoint, exactly as a rejected getById did.
  * Cost is bounded by MAX_BROADCAST_RECIPIENTS, only on this endpoint (no cache).
  */
 async function enrichRecipients(
@@ -641,7 +643,15 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // is simply absent from the map and drops exactly as an undefined getById
       // did, so the fences, de-dupe, contactKey convention, empty -> 400, and cap
       // below are unchanged.
-      const byId = await contacts.getManyByIds(selection.ids);
+      //
+      // requireComplete is LOAD-BEARING here (adversarial review r1 finding 1).
+      // A short map has two causes - the contact does not exist, or we failed to
+      // read it - and only the first may drop a recipient. Without this flag a
+      // throttled BatchGet would quietly shrink the send and still report 200,
+      // which is exactly what the truncated-audience branch below refuses to do.
+      // Throwing leaves the broadcast a DRAFT the operator can re-send, which is
+      // what the pre-batch getById fan-out did when a read failed.
+      const byId = await contacts.getManyByIds(selection.ids, { requireComplete: true });
       const fetched = selection.ids.map((id) => byId.get(id));
       const survivors: Array<{ contactId?: string; phone: string }> = [];
       for (const contact of fetched) {

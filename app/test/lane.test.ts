@@ -203,13 +203,33 @@ describe('lane.mjs', () => {
       expect(result.ownerToken).toBe(parentToken);
     });
 
-    it('refuses an E2E_LANE held by another live owner', async () => {
+    it('DESCRIBES a lane held by another owner instead of throwing', async () => {
+      // Regression, 2026-08-21: this used to throw, and it cost a 70-spec e2e
+      // run. Playwright re-loads its config in every test WORKER, and each
+      // worker re-runs lane.mjs just to learn the ports. A worker must never be
+      // able to fail the suite over ownership of the lane its OWN session
+      // holds. Reporting ownerToken: null lets the launcher - the only process
+      // that boots a stack - be the one that refuses.
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '6';
       delete process.env['E2E_LANE_TOKEN'];
-      await expect(resolveLane({ probe: allFreeProbe, lease: fakeLease([6]) })).rejects.toThrow(
-        /held by another live run/i,
-      );
+      const result = await resolveLane({ probe: allFreeProbe, lease: fakeLease([6]) });
+      expect(result.lane).toBe(6);
+      expect(result.ownerToken).toBeNull();
+    });
+
+    it('a worker inheriting BOTH the lane and the token adopts it cleanly', async () => {
+      // The shape of a real Playwright worker: E2E_LANE and E2E_LANE_TOKEN are
+      // both inherited from the config process, and the session already holds
+      // the lease. It must resolve, not contend.
+      const { resolveLane } = await getLane();
+      const lease = freeLease();
+      const sessionToken = lease.reserve(6)!;
+      process.env['E2E_LANE'] = '6';
+      process.env['E2E_LANE_TOKEN'] = sessionToken;
+      const result = await resolveLane({ probe: allFreeProbe, lease });
+      expect(result.lane).toBe(6);
+      expect(result.ownerToken).toBe(sessionToken);
     });
 
     it('returns correct ports for overridden lane', async () => {

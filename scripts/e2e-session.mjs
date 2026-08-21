@@ -525,18 +525,26 @@ async function main() {
   // a pid that is already gone. This launcher is the long-lived process, so it
   // takes ownership under the same token - and from here `holdsLane` is what
   // authorises anything destructive (port reaps, table drops).
-  if (ownerToken !== null && ownerToken !== undefined) {
-    if (!claimLane(lane, ownerToken, { appCommit: gitSha || null })) {
-      throw new Error(
-        `could not claim lane ${lane}'s lease - another run took it while this session was starting. ` +
-          `Re-run; the resolver will pick a free lane.`,
-      );
-    }
-    if (needsReap === true) {
-      log(`lane ${lane} has ports held by a dead run's orphans - reaping them (we hold the lease)`);
-    }
-  } else {
-    log(`WARNING: no lane lease for lane ${lane} - port reaping is disabled for this session`);
+  // THIS is where a lease refusal belongs - the launcher is the only process
+  // that boots a stack, so it is the only one that has to own the lane.
+  // lane.mjs deliberately reports `ownerToken: null` instead of throwing, so a
+  // Playwright test worker re-reading the config can never fail the suite over
+  // ownership (that mistake cost a 70-spec run on 2026-08-21).
+  if (ownerToken === null || ownerToken === undefined) {
+    throw new Error(
+      `lane ${lane} is held by another live run on this machine, so this session will not start ` +
+        `a second stack on it. Wait for it, run npm run e2e:stop in that worktree, or unset ` +
+        `E2E_LANE and let the resolver pick a free lane.`,
+    );
+  }
+  if (!claimLane(lane, ownerToken, { appCommit: gitSha || null })) {
+    throw new Error(
+      `could not claim lane ${lane}'s lease - another run took it while this session was starting. ` +
+        `Re-run; the resolver will pick a free lane.`,
+    );
+  }
+  if (needsReap === true) {
+    log(`lane ${lane} has ports held by a dead run's orphans - reaping them (we hold the lease)`);
   }
 
   // State becomes visible only after this launcher has proved the lane has no

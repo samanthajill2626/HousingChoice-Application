@@ -75,6 +75,15 @@ const resolvedFakeUrl = `http://127.0.0.1:${laneJson.ports.fake}`;
 const resolvedPublicBaseUrl = `http://127.0.0.1:${laneJson.ports.publicBase}`;
 
 process.env['E2E_LANE'] = String(laneJson.lane);
+// The token MUST travel with the lane, for the same reason the lane itself is
+// exported here: Playwright re-loads this config in EVERY test worker, and each
+// worker re-runs lane.mjs. A worker that inherits E2E_LANE but no token tries to
+// RESERVE the lane its own session already holds, is refused, and fails - which
+// is how the first wired run died, 70 specs deep, with
+// "E2E_LANE=15 is held by another live run". Workers are read-only users of an
+// already-owned lane: with the token they adopt, without it they contend with
+// their own stack.
+process.env['E2E_LANE_TOKEN'] = laneJson.ownerToken ?? '';
 process.env['E2E_APP_URL'] = resolvedAppUrl;
 process.env['E2E_DASHBOARD_URL'] = resolvedDashboardUrl;
 process.env['E2E_FAKE_URL'] = resolvedFakeUrl;

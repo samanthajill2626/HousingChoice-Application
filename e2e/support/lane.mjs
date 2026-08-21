@@ -297,19 +297,18 @@ export async function resolveLane(opts = {}) {
     // ONE process and boot the session in ANOTHER, handing the token down as
     // E2E_LANE_TOKEN. Re-reserving here would refuse our own parent's lease and
     // wedge the standard `npm run e2e` path.
+    // LANE.MJS DESCRIBES; THE LAUNCHER OWNS. A failure to take the lease is
+    // reported as `ownerToken: null`, NOT thrown. Playwright re-loads its config
+    // in every test WORKER, and each worker re-runs this file purely to learn
+    // the lane's ports - a worker must never be able to fail the suite over
+    // ownership of a lane its own session legitimately holds. The refusal lives
+    // in scripts/e2e-session.mjs, which is the only process that actually boots
+    // a stack and therefore the only one that needs to own the lane.
     const inherited = opts.ignoreEnv === true ? undefined : process.env['E2E_LANE_TOKEN'];
-    let ownerToken = null;
-    if (inherited !== undefined && inherited !== '' && lease.holds(n, inherited)) {
-      ownerToken = inherited;
-    } else {
-      ownerToken = lease.reserve(n, { gitDir: identity });
-      if (ownerToken === null) {
-        throw new Error(
-          `E2E_LANE=${n} is held by another live run on this machine. ` +
-            `Wait for it, stop it (npm run e2e:stop in that worktree), or pick a different lane.`,
-        );
-      }
-    }
+    const ownerToken =
+      inherited !== undefined && inherited !== '' && lease.holds(n, inherited)
+        ? inherited // adopt: our own parent reserved this lane and handed it down
+        : lease.reserve(n, { gitDir: identity });
     // Ports may be busy here; we own the lane, so the launcher reaps.
     const needsReap = !(await isLaneFree(n, host, probe));
     return laneResult(n, ownerToken, needsReap);

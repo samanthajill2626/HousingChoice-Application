@@ -3,8 +3,30 @@
 Hand-maintained triage companion to the generated `INDEX.md`. The underscore
 prefix keeps `npm run issues` from treating it as an issue file.
 
-**Built 2026-08-21** against 283 open issues (10 high / 114 med / 159 low), at
-main `95d3d156`.
+**Built 2026-08-21** against 283 open issues, at main `95d3d156`.
+
+**Merge pass, same day.** Seven issue files were deleted outright and their
+content folded into the issue they duplicated - not closed as `resolved`, deleted,
+because a duplicate is not a fixed problem and leaving one as a closed record
+invites re-filing:
+
+| deleted | absorbed into |
+|---|---|
+| `markread-fanout-depends-on-stale-participant-gsi` | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) |
+| `npm-test-red-on-main-dynamodb-local-contention` | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) (renamed - main FLAKES, it is not deterministically red) |
+| `group-cross-check-integration-nondeterminism` | same |
+| `db-update-gsis-integration-flake-under-load` | same |
+| `seed-profile-integration-timeout-flake` | same |
+| `matching-entry-points-picker-click-flake` | [matching-entry-points-property-first-e2e-flake](./matching-entry-points-property-first-e2e-flake.md) |
+| `e2e-lane-probe-bind-toctou` | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) |
+
+Plus [ported-number-not-on-a2p-campaign](./ported-number-not-on-a2p-campaign.md)
+closed as genuinely resolved. Net: 283 -> 276 open, 9 open highs.
+
+**Deliberately NOT merged:** the five `relay-duplicate-*` issues share one file
+and one feature but describe five different defects with five different remedies
+and five recorded design decisions. Same for the three `load-older-*` issues.
+Sharing a file is not being a duplicate.
 
 ## What this is for
 
@@ -42,7 +64,6 @@ SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
 |---|---|---|
 | high | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | anchor - the badge's two amplifications, spec gate on the schema call |
 | high | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - wants `resetUnreadIfUnread` conditional write |
-| med | [markread-fanout-depends-on-stale-participant-gsi](./markread-fanout-depends-on-stale-participant-gsi.md) | **near-duplicate of the second high** - same two fan-outs, same filter, same fix. Close as duplicate or merge |
 | med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | contributor 2 of the badge high - **cheapest, biggest win, sequence FIRST** |
 | med | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | same budget/walk-stop logic |
 | med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | the flag the truncation path emits |
@@ -227,13 +248,9 @@ list. Doing it first makes the second list diagnosable instead of guesswork.
 | sev | issue |
 |---|---|
 | high | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) |
+| med | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) |
 | med | [e2e-lane-tables-stale-schema](./e2e-lane-tables-stale-schema.md) |
-| med | [npm-test-red-on-main-dynamodb-local-contention](./npm-test-red-on-main-dynamodb-local-contention.md) |
-| med | [group-cross-check-integration-nondeterminism](./group-cross-check-integration-nondeterminism.md) |
-| med | [seed-profile-integration-timeout-flake](./seed-profile-integration-timeout-flake.md) |
 | med | [broadcast-fanout-tests-blow-default-hooktimeout](./broadcast-fanout-tests-blow-default-hooktimeout.md) |
-| low | [db-update-gsis-integration-flake-under-load](./db-update-gsis-integration-flake-under-load.md) |
-| low | [e2e-lane-probe-bind-toctou](./e2e-lane-probe-bind-toctou.md) |
 | low | [e2e-lane-cold-start-container-race](./e2e-lane-cold-start-container-race.md) |
 | low | [e2e-session-lane-mismatch](./e2e-session-lane-mismatch.md) |
 
@@ -241,7 +258,6 @@ list. Doing it first makes the second list diagnosable instead of guesswork.
 [tour-reminders-panel-e2e-flake](./tour-reminders-panel-e2e-flake.md),
 [today-heading-locator-substring-collision](./today-heading-locator-substring-collision.md),
 [matching-entry-points-property-first-e2e-flake](./matching-entry-points-property-first-e2e-flake.md),
-[matching-entry-points-picker-click-flake](./matching-entry-points-picker-click-flake.md),
 [inbox-row-appearance-e2e-flake](./inbox-row-appearance-e2e-flake.md),
 [landlord-onboarding-e2e-suite-only-flake](./landlord-onboarding-e2e-suite-only-flake.md),
 [tours-pm-exit-closed-chip-flake](./tours-pm-exit-closed-chip-flake.md),
@@ -260,22 +276,20 @@ recurring-cost win, not just a tidy-up.
 
 ## C7 - A2P, consent, and compliance copy
 
-**Highs:** [a2p-compliance-hardening](./a2p-compliance-hardening.md) (in-progress),
-[ported-number-not-on-a2p-campaign](./ported-number-not-on-a2p-campaign.md) (in-progress, OPS)
+**High:** [a2p-compliance-hardening](./a2p-compliance-hardening.md) (in-progress)
 
 **Shared surface:** `app/src/lib/smsCompliance.ts`, `app/src/messages/catalog.ts`,
 `app/src/services/sendMessage.ts`, `app/src/routes/settings.ts`,
 `dashboard/src/routes/public/IntakeForm.tsx`, `docs/a2p/campaign-resubmission.md`.
 
-`ported-number-not-on-a2p-campaign` is a HUMAN console step, not code - prod is
-already live on +16782842537, so this is likely already satisfied and just needs
-confirming plus the doc item-9 update. **Confirm and close it before planning any
-code here.**
+[`ported-number-not-on-a2p-campaign`](./ported-number-not-on-a2p-campaign.md) was
+the second high here and is **CLOSED 2026-08-21** - Cameron confirmed the ported
+number is on the campaign's Messaging Service. Its only tail is doc-only: naming
+the number in `campaign-resubmission.md` item 9, which the anchor below owns.
 
 | sev | issue | why it rides along |
 |---|---|---|
 | high | [a2p-compliance-hardening](./a2p-compliance-hardening.md) | anchor - P0/P1/P2 already scoped in the file |
-| high | [ported-number-not-on-a2p-campaign](./ported-number-not-on-a2p-campaign.md) | ops confirm + doc update, no code |
 | med | [sms-brand-diverges-from-registered-a2p-brand](./sms-brand-diverges-from-registered-a2p-brand.md) | same re-file decision |
 | med | [call-recording-consent](./call-recording-consent.md) | the voice-side half of the same consent regime |
 | med | [consent-copy-cross-stack-drift](./consent-copy-cross-stack-drift.md) | the copy the P0 work writes, hand-mirrored today |
@@ -337,9 +351,8 @@ property zone, decided once:
 
 ## Suggested order
 
-1. **C7 ops confirm only** - verify the ported number is on the campaign
-   Messaging Service, update campaign doc item 9, close the high. Minutes, and it
-   is a live carrier-filtering risk if it was ever missed.
+1. ~~**C7 ops confirm**~~ - DONE 2026-08-21, `ported-number-not-on-a2p-campaign`
+   closed.
 2. **C6 wave 1** - the lane lease. It is the harness every other mission's gates
    run on; fixing it first makes every later run trustworthy.
 3. **C1** - two highs, and the nav badge is the app's highest-frequency request.

@@ -25,7 +25,8 @@ Provenance points at a load-sensitive flake, not a regression:
   no tours, placements, or status-chip code.
 - The box carried a concurrent persistent e2e-session stack (another agent)
   during the failing run - the same contention pattern as
-  matching-entry-points-picker-click-flake and tour-reminders-panel-e2e-flake.
+  matching-entry-points-property-first-e2e-flake and
+  tour-reminders-panel-e2e-flake.
 
 **Suggested fix.** If it recurs: check whether the close-tour transition's
 chip render is waiting on an SSE/refetch that deserves an explicit wait in the

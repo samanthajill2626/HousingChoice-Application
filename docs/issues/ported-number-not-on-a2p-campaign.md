@@ -3,11 +3,20 @@ id: ported-number-not-on-a2p-campaign
 title: The ported 678 number is not on the A2P campaign's number inventory
 type: bug
 severity: high
-status: in-progress
+status: resolved
 area: ops/a2p
 created: 2026-08-06
+resolved: 2026-08-21
 refs: docs/a2p/campaign-resubmission.md:209, docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md:18
 ---
+
+**Resolution (2026-08-21).** Cameron confirmed the ported number is on the A2P
+campaign's Messaging Service. The step was performed as part of the M1.11 cutover
+run, as planned below; prod has been live on +1 678-284-2537 since, with real
+traffic delivering, which is the delivery confirmation step 2 asks for. Item 3
+(updating `docs/a2p/campaign-resubmission.md` item 9 so the inventory list names
+the ported number) is the only tail, and is doc-only - see
+[`a2p-compliance-hardening`](./a2p-compliance-hardening.md), which owns that doc.
 
 **Problem.** `docs/a2p/campaign-resubmission.md` item 9 ("Number inventory")
 requires that **every number the app can send from** is attached to the campaign's

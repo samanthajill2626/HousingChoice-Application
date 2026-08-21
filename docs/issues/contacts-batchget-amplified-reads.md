@@ -51,25 +51,34 @@ dataset), line numbers re-verified 2026-08-21:
 `resolveSeeds` (broadcasts.ts:340) is sequential too but its own comment notes
 seeds number 1..handful; it is listed for completeness, not as a target.
 
-**Three more fan-outs found while fixing the six above (2026-08-21), NOT yet
-done** - same shape, different files, left out to keep the sweep reviewable.
-These line numbers are stable (the six-site sweep does not touch these files);
-the front-matter `refs:` still points at the six and goes stale when that lands:
+**Other per-row `getById` fan-outs, TRIAGED 2026-08-21 - none of them belong to
+this issue.** A first pass appended three of these as "more of the same". That
+grouped them by CODE SHAPE when the grouping that matters is COST AND RISK; on
+inspection one is not worth doing, one is a drive-by, and one is its own change.
+Corrected here so the next reader does not inherit the mis-grouping:
 
-- `app/src/routes/today.ts:357` `getContact` - a memoized `getById` per unique
-  contact in the Today payload; drives both name hydration and the soft-delete
-  check, so it needs WHOLE items (`getManyByIds`). Two-pass: collect the ids,
-  batch, then walk.
-- `app/src/lib/rosterResolution.ts:633` `nameOf` - one `getById` per pending
-  roster-add row, display-only, so `getDisplaysByIds` fits.
-- `app/src/routes/api.ts:1899` (unread-counts-by-contact rail) - a `Promise.all`
-  fan-out over the requested `contactIds`. Concurrent already, so this is round
-  trips rather than latency; note it reads `phone_ref` / `email_ref`, which the
-  display projection does NOT carry, so it needs `getManyByIds`.
+- `app/src/routes/api.ts:1899` (unread-counts-by-contact rail) - **NOT A
+  TARGET.** Capped at `MAX_UNREAD_IDS` (50, and the route's own comment notes
+  real callers send <= 9) and already concurrent via `Promise.all`. Decisively,
+  that same comment says the id count "is NOT the same as bounding the work: one
+  contact id fans out across every phone and email it owns, and each of those is
+  an exhaustive walk" - so `getById` is not where this endpoint spends. Batching
+  it would remove <= 9 round trips from a request whose cost lives elsewhere.
+- `app/src/lib/rosterResolution.ts:633` `nameOf` - real but tiny: two call
+  sites, N = pending roster-add rows (a handful), display-only so
+  `getDisplaysByIds` fits. DRIVE-BY - fold it into whatever next touches that
+  file rather than scheduling it.
+- `app/src/routes/today.ts:357` `getContact` - the only one with substance, and
+  it is NOT mechanical. Spun out to
+  [`today-contact-hydration-fan-out`](today-contact-hydration-fan-out.md).
 
 `app/src/jobs/broadcastFanOut.ts` resolves one contact per recipient, but that
 job already does per-recipient work; batching there buys much less. Not a
 target.
+
+**On close:** with the six surfaces above batched, this issue is DONE - it did
+what its title says. The front-matter `refs:` still points at the six pre-change
+line numbers and wants updating (or dropping) when that lands.
 
 The messages repo already has the batching precedent
 (`getManyByTsMsgIds`, app/src/repos/messagesRepo.ts:2451 - BatchGetItem chunked

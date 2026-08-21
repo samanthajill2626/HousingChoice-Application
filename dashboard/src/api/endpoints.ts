@@ -2,7 +2,7 @@
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { ApiError, request, requestWithStatus } from './client.js';
-import { fetchAllPages, PAGE_LIMIT, type FetchAllPagesResult } from './paging.js';
+import { fetchAllPages, PAGE_LIMIT } from './paging.js';
 import type {
   AdminUserView,
   AiRunDetailResponse,
@@ -514,7 +514,7 @@ export function getConversations(
 /** EVERY open conversation, walking `nextCursor`. */
 export async function getAllConversations(
   signal?: AbortSignal,
-): Promise<FetchAllPagesResult<ConversationSummary>> {
+): Promise<ConversationSummary[]> {
   return fetchAllPages(
     (cursor) =>
       getConversations({ limit: PAGE_LIMIT, ...(cursor !== undefined && { cursor }) }, signal),
@@ -1291,7 +1291,7 @@ export async function getUnreadCounts(
 export async function getAllContacts(
   params: { type: ContactType; deleted?: boolean } ,
   signal?: AbortSignal,
-): Promise<FetchAllPagesResult<Contact>> {
+): Promise<Contact[]> {
   return fetchAllPages(
     (cursor) =>
       getContacts(
@@ -1313,7 +1313,7 @@ export async function getAllContacts(
 export async function getAllUnits(
   params: { deleted?: boolean } = {},
   signal?: AbortSignal,
-): Promise<FetchAllPagesResult<UnitItem>> {
+): Promise<UnitItem[]> {
   return fetchAllPages(
     (cursor) =>
       getUnits(
@@ -1332,7 +1332,7 @@ export async function getAllUnits(
 /** EVERY placement, walking `nextCursor` - the whole pipeline, not a prefix. */
 export async function getAllPlacements(
   signal?: AbortSignal,
-): Promise<FetchAllPagesResult<PlacementItem>> {
+): Promise<PlacementItem[]> {
   return fetchAllPages(
     (cursor) => getPlacements(signal, cursor, PAGE_LIMIT),
     (page) => ({ items: page.placements, nextCursor: page.nextCursor }),

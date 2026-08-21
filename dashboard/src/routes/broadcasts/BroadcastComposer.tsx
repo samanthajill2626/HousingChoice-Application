@@ -153,7 +153,7 @@ export function BroadcastComposer(): React.JSX.Element {
     if (unitId !== undefined) return; // fixed by the entry point
     const controller = new AbortController();
     getAllUnits({}, controller.signal)
-      .then(({ items }) => setUnitCandidates(items))
+      .then(setUnitCandidates)
       .catch(() => {
         /* candidate load failed - the picker just has nothing to suggest */
       });
@@ -222,7 +222,7 @@ export function BroadcastComposer(): React.JSX.Element {
   useEffect(() => {
     const controller = new AbortController();
     getAllContacts({ type: 'tenant' }, controller.signal)
-      .then(({ items }) => {
+      .then((items) => {
         setTenants(items);
         setTenantsLoading(false);
       })

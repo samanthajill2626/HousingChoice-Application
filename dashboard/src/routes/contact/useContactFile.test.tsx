@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
+import type { PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getAllPlacements = vi.fn();
 const getAllUnits = vi.fn();
@@ -40,14 +40,8 @@ function Probe({ contactId }: { contactId: string }): React.JSX.Element {
   );
 }
 
-const CASES: FetchAllPagesResult<PlacementItem> = {
-  items: [{ placementId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
-  truncated: false,
-};
-const UNITS: FetchAllPagesResult<UnitItem> = {
-  items: [{ unitId: 'u1', landlordId: 'k1', status: 'available' }],
-  truncated: false,
-};
+const CASES: PlacementItem[] = [{ placementId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }];
+const UNITS: UnitItem[] = [{ unitId: 'u1', landlordId: 'k1', status: 'available' }];
 
 beforeEach(() => {
   getAllPlacements.mockReset();
@@ -79,13 +73,10 @@ describe('useContactFile', () => {
     // whose properties sat later in the scan. getAllUnits now hands over the
     // whole walked roster (api/lists.test.ts proves the walk).
     getAllPlacements.mockResolvedValue(CASES);
-    getAllUnits.mockResolvedValue({
-      items: [
+    getAllUnits.mockResolvedValue([
         { unitId: 'u1', landlordId: 'k1', status: 'available' },
         { unitId: 'u2', landlordId: 'k1', status: 'available' },
-      ],
-      truncated: false,
-    });
+      ]);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 

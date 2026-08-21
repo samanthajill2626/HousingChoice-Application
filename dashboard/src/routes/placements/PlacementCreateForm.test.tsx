@@ -69,8 +69,8 @@ function setup(props?: Partial<Parameters<typeof PlacementCreateForm>[0]>) {
 beforeEach(() => {
   vi.clearAllMocks();
   // Sensible defaults; individual tests override.
-  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false });
-  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false });
+  getAllContacts.mockResolvedValue(TENANTS);
+  getAllUnits.mockResolvedValue(UNITS);
   getPlacementsBy.mockResolvedValue([]);
 });
 
@@ -95,15 +95,12 @@ describe('PlacementCreateForm', () => {
     // a paged read could have supplied. Before the walk existed, no placement
     // could be created against any property later in the scan.
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({
-      items: [...UNITS, {
+    getAllUnits.mockResolvedValue([...UNITS, {
           unitId: 'unit-0099',
           landlordId: 'contact-landlord-0001',
           status: 'available',
           address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
-        }],
-      truncated: false,
-    });
+        }]);
     setup();
     await screen.findByRole('dialog', { name: 'New placement' });
 

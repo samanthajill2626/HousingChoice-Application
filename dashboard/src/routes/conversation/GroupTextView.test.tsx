@@ -139,7 +139,7 @@ beforeEach(() => {
     tsMsgId: '2026-06-17T11:00:00.000Z#IMsent1',
     status: 'queued',
   });
-  getAllContacts.mockReset().mockResolvedValue({ items: [], truncated: false });
+  getAllContacts.mockReset().mockResolvedValue([]);
   getGroupMembers.mockResolvedValue([ANN, MARCUS]);
   getConversation.mockResolvedValue(groupHeader());
 });

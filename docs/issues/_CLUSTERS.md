@@ -76,21 +76,23 @@ SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
 | low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice |
 | low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | same inbox row assembly |
 
-**Spin-off, ALREADY IN FLIGHT** on `feat/contacts-batchget` - the mechanical
-`getManyByIds` sweep no longer shares a file with the badge, and someone is
-building it now. Do not open a second branch on it:
-[contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) (med) +
+**Spin-off, DONE** - `feat/contacts-batchget` shipped and merged (`65179d73`,
+2026-08-21); the branch and its worktree are retired.
+[contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) is
+resolved: all six mechanical surfaces are batched.
 [broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md)
-(low) - same function, composing remedies (batch + cache).
+(low) stays open - same function, but the caching half of the remedy.
 
-Per `c0e60882` (2026-08-21) the sweep is **nine** surfaces, not six: `today.ts`
-`getContact`, `rosterResolution.ts` `nameOf`, and the `api.ts`
-unread-counts-by-contact rail were found while batching the first six and are
-NOT yet done. That commit also settles a shape question worth carrying into the
-build - two of the three need WHOLE items (`today.ts` does a soft-delete check;
-`api.ts` reads `phone_ref` / `email_ref`, which a display projection does not
-carry), while `rosterResolution.ts` is display-only. So the repo wants BOTH a
-`getManyByIds` and a `getDisplaysByIds`, not one of them.
+Three further surfaces were found while batching the first six (`c0e60882`) and
+were triaged rather than swept: `today.ts` `getContact` spun out to
+[today-contact-hydration-fan-out](./today-contact-hydration-fan-out.md) (it is
+NOT mechanical), `rosterResolution.ts` `nameOf` is a drive-by to fold into the
+next change touching that file, and the `api.ts` unread-counts-by-contact rail
+remains unswept. The shape lesson survives the branch: two of those three need
+WHOLE items (`today.ts` does a soft-delete check; `api.ts` reads `phone_ref` /
+`email_ref`, which a display projection does not carry) while
+`rosterResolution.ts` is display-only - so the repo wants BOTH `getManyByIds`
+and `getDisplaysByIds`, not one of them.
 
 ---
 

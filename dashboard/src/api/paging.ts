@@ -15,19 +15,19 @@
 // it - never a bare first-page read.
 //
 // A cap hit logs a warning with COUNTS ONLY (never a record id, name, phone, or
-// any other PII - these lists are tenants and landlords) and sets `truncated` on
-// the result.
+// any other PII - these lists are tenants and landlords).
 //
-// HONESTLY: as of 2026-08-20 NO caller reads `truncated` - every one destructures
-// `{ items }`. So at the UI a cap hit is still only a console warning, exactly as
-// it was before this module existed. The flag is the hook for surfacing it, not
-// the surfacing itself; treat "callers should surface this" as work outstanding,
-// not a guarantee delivered. At 50 pages x 100 rows the cap needs 5,000 records,
-// so it is latent rather than live.
+// It does NOT return a "truncated" flag. One existed briefly and no caller ever
+// read it - which made it worse than nothing, because an unread flag makes a
+// problem look handled. It was deleted deliberately: at 50 pages x 100 rows the
+// cap needs 5,000 records, and a client-side typeahead filtering 5,000 rows is
+// already the wrong design well before it is a correctness problem. The remedy
+// at that scale is server-side search, not a "list may be incomplete" banner -
+// see docs/issues/typeahead-scale-needs-server-side-search.md.
 
 /** Page-walk bound. A hard stop so a pathological or never-nulling cursor can
  *  never spin forever. At the 100-row page size below that is 5,000 records per
- *  list - far past Phase-1 scale, and a hit warns rather than truncating quietly. */
+ *  list - far past Phase-1 scale, and a hit WARNS rather than truncating quietly. */
 export const MAX_PAGES = 50;
 
 /** The server's MAX_PAGE_LIMIT. Asking for it halves the round trips a full walk
@@ -35,14 +35,6 @@ export const MAX_PAGES = 50;
  *  accept 1..100 and 400 anything outside that (`parseLimit`) rather than
  *  clamping, so raising this breaks every list view on first load. */
 export const PAGE_LIMIT = '100';
-
-export interface FetchAllPagesResult<TItem> {
-  items: TItem[];
-  /** True when the walk stopped on the page cap with a cursor still outstanding
-   * - the list is a PREFIX. Callers that must not present a partial list as a
-   *  complete one should surface this. */
-  truncated: boolean;
-}
 
 /**
  * Follow `nextCursor` until the endpoint stops handing one back, concatenating
@@ -54,12 +46,15 @@ export interface FetchAllPagesResult<TItem> {
  *
  * Rejections PROPAGATE unchanged - an AbortError from a cancelled effect must
  * reach the caller's catch so it can bail without committing state.
+ *
+ * Returns the concatenated items. A cap hit warns and returns the PREFIX; see
+ * the header for why there is no flag.
  */
 export async function fetchAllPages<TPage, TItem>(
   fetchPage: (cursor?: string) => Promise<TPage>,
   select: (page: TPage) => { items: TItem[]; nextCursor: string | null },
   opts: { label: string; maxPages?: number },
-): Promise<FetchAllPagesResult<TItem>> {
+): Promise<TItem[]> {
   const maxPages = opts.maxPages ?? MAX_PAGES;
   const items: TItem[] = [];
   let cursor: string | undefined;
@@ -79,9 +74,9 @@ export async function fetchAllPages<TPage, TItem>(
       console.warn(
         `fetchAllPages(${opts.label}): hit the ${maxPages}-page cap after ${items.length} records; list truncated`,
       );
-      return { items, truncated: true };
+      return items;
     }
   } while (cursor !== undefined);
 
-  return { items, truncated: false };
+  return items;
 }

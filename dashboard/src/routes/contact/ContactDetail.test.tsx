@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { Contact, FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
+import type { Contact, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -214,14 +214,8 @@ const UNKNOWN: Contact = {
   phone: '+15550100001',
 };
 
-const CASES: FetchAllPagesResult<PlacementItem> = {
-  items: [{ placementId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
-  truncated: false,
-};
-const UNITS: FetchAllPagesResult<UnitItem> = {
-  items: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
-  truncated: false,
-};
+const CASES: PlacementItem[] = [{ placementId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }];
+const UNITS: UnitItem[] = [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }];
 
 // One pending suggestion - the fixture the accept/dismiss FAILURE tests drive.
 const PETS_SUGGESTION = {
@@ -278,7 +272,7 @@ beforeEach(() => {
   getAllPlacements.mockResolvedValue(CASES);
   getAllUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
-  getAllConversations.mockResolvedValue({ items: [], truncated: false });
+  getAllConversations.mockResolvedValue([]);
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   // The gallery reads the media index (2026-08-18): an empty first page by default.
   getContactMedia.mockResolvedValue({ media: [] });
@@ -291,7 +285,7 @@ beforeEach(() => {
   // Default: return a roster containing the current contact + OTHER so tests
   // that don't override still work (useContacts fans out to
   // tenant/landlord/partner/unknown).
-  getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
+  getAllContacts.mockResolvedValue([TENANT, OTHER]);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -806,13 +800,10 @@ describe('ContactDetail', () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getContact.mockResolvedValue(TENANT);
-    getAllUnits.mockResolvedValue({
-      truncated: false,
-      items: [
+    getAllUnits.mockResolvedValue([
         { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
         { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
-      ],
-    });
+      ]);
     // The listings-sent wire order is newest-first by sentAt: u2 is the most
     // recent send, so the dialog should pre-commit to u2's address.
     getContactListingsSent.mockResolvedValue([
@@ -907,7 +898,7 @@ describe('ContactDetail', () => {
       const user = userEvent.setup();
 
       // Roster: TENANT (k1, the contact being edited) + OTHER (z99, Bob Other).
-      getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
+      getAllContacts.mockResolvedValue([TENANT, OTHER]);
       getContact.mockResolvedValue(TENANT);
       renderAt('k1');
 
@@ -939,7 +930,7 @@ describe('ContactDetail', () => {
       const user = userEvent.setup();
 
       // Roster includes TENANT itself (Tasha Williams) + OTHER.
-      getAllContacts.mockResolvedValue({ items: [TENANT, OTHER], truncated: false });
+      getAllContacts.mockResolvedValue([TENANT, OTHER]);
       getContact.mockResolvedValue(TENANT);
       renderAt('k1');
 

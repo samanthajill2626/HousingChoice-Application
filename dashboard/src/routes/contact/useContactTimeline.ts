@@ -188,7 +188,7 @@ async function loadTimeline(
     // groups front a pool number), which is exactly why this filter had no type
     // guard at all - and why it needs one before a future reader change makes
     // the omission load-bearing.
-    const conversations = (await getAllConversations(signal)).items.filter(
+    const conversations = (await getAllConversations(signal)).filter(
       (c) =>
         c.type !== 'relay_group' &&
         c.type !== 'group_text' &&

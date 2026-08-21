@@ -93,7 +93,7 @@ function renderTab(props: ContactCommsTabProps) {
 beforeEach(() => {
   vi.clearAllMocks();
   getContactTimeline.mockResolvedValue(page([]));
-  getAllConversations.mockResolvedValue({ items: [], truncated: false });
+  getAllConversations.mockResolvedValue([]);
   getConversationMessages.mockResolvedValue([]);
   sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
 });

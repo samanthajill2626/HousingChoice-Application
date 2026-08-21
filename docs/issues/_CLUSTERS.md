@@ -76,12 +76,21 @@ SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
 | low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice |
 | low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | same inbox row assembly |
 
-**Spin-off, genuinely separate mission** - the mechanical `getManyByIds` sweep no
-longer shares a file with the badge. It lives in `broadcasts.ts` / `units.ts`,
-where every surface IS keyed by `contactId` and so IS batchable:
+**Spin-off, ALREADY IN FLIGHT** on `feat/contacts-batchget` - the mechanical
+`getManyByIds` sweep no longer shares a file with the badge, and someone is
+building it now. Do not open a second branch on it:
 [contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) (med) +
-[broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md) (low)
-- same function, composing remedies (batch + cache).
+[broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md)
+(low) - same function, composing remedies (batch + cache).
+
+Per `c0e60882` (2026-08-21) the sweep is **nine** surfaces, not six: `today.ts`
+`getContact`, `rosterResolution.ts` `nameOf`, and the `api.ts`
+unread-counts-by-contact rail were found while batching the first six and are
+NOT yet done. That commit also settles a shape question worth carrying into the
+build - two of the three need WHOLE items (`today.ts` does a soft-delete check;
+`api.ts` reads `phone_ref` / `email_ref`, which a display projection does not
+carry), while `rosterResolution.ts` is display-only. So the repo wants BOTH a
+`getManyByIds` and a `getDisplaysByIds`, not one of them.
 
 ---
 

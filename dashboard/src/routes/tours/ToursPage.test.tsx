@@ -49,8 +49,8 @@ vi.mock('../listings/useListings.js', () => ({
 
 // The "+ New tour" dialog (ScheduleTourForm) fetches its own typeahead
 // candidates from the api barrel - stub those so opening it stays offline.
-const getAllContacts = vi.fn(() => Promise.resolve({ items: [], truncated: false }));
-const getAllUnits = vi.fn(() => Promise.resolve({ items: [], truncated: false }));
+const getAllContacts = vi.fn(() => Promise.resolve([]));
+const getAllUnits = vi.fn(() => Promise.resolve([]));
 const createTour = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');

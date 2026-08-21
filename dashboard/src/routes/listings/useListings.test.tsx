@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FetchAllPagesResult, UnitItem, UnitsPage } from '../../api/index.js';
+import type { UnitItem, UnitsPage } from '../../api/index.js';
 
 const getAllUnits = vi.fn();
 
@@ -24,10 +24,7 @@ function Probe({ deleted }: { deleted?: boolean } = {}): React.JSX.Element {
   );
 }
 
-const UNITS: FetchAllPagesResult<UnitItem> = {
-  items: [{ unitId: 'u1', landlordId: 'l1', status: 'available' }],
-  truncated: false,
-};
+const UNITS: UnitItem[] = [{ unitId: 'u1', landlordId: 'l1', status: 'available' }];
 
 beforeEach(() => {
   getAllUnits.mockReset();

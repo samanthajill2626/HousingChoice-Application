@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { ContactTimelinePage, ConversationSummary, ConversationsPage, FetchAllPagesResult, Message } from '../../api/index.js';
+import type { ContactTimelinePage, ConversationSummary, ConversationsPage, Message } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
 const getAllConversations = vi.fn();
@@ -75,8 +75,7 @@ function msg(partial: Partial<Message> & Pick<Message, 'tsMsgId'>): Message {
   };
 }
 
-const CONVERSATIONS: FetchAllPagesResult<ConversationSummary> = {
-  items: [
+const CONVERSATIONS: ConversationSummary[] = [
     {
       conversationId: 'c1',
       type: 'tenant_1to1',
@@ -99,9 +98,7 @@ const CONVERSATIONS: FetchAllPagesResult<ConversationSummary> = {
       sms_opt_out: false,
       participant_display_name: null,
     },
-  ],
-  truncated: false,
-};
+  ];
 
 beforeEach(() => {
   getContactTimeline.mockReset();
@@ -145,10 +142,8 @@ describe('useContactTimeline', () => {
     // The roster match alone would accept it (the contact IS on the roster), and
     // the whole group transcript would land in this member's 1:1 timeline.
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getAllConversations.mockResolvedValue({
-      truncated: false,
-      items: [
-        ...CONVERSATIONS.items,
+    getAllConversations.mockResolvedValue([
+        ...CONVERSATIONS,
         {
           conversationId: 'gt-1',
           type: 'group_text',
@@ -173,8 +168,7 @@ describe('useContactTimeline', () => {
           sms_opt_out: false,
           participant_display_name: null,
         },
-      ],
-    } as FetchAllPagesResult<ConversationSummary>);
+      ] as ConversationSummary[]);
     getConversationMessages.mockResolvedValue([]);
 
     render(<Probe contactId="k1" />);
@@ -546,7 +540,7 @@ describe('useContactTimeline paging', () => {
 
   it('reports no older history on the assembled fallback path', async () => {
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getAllConversations.mockResolvedValue({ items: [], truncated: false });
+    getAllConversations.mockResolvedValue([]);
     render(<PagingProbe contactId="p1" />);
     await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
@@ -567,7 +561,7 @@ describe('useContactTimeline paging', () => {
     // The endpoint is rolled back (or the contact is soft-deleted and the route
     // answers 404 contact_not_found), so the SSE refetch assembles the fallback.
     getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
-    getAllConversations.mockResolvedValue({ items: [], truncated: false });
+    getAllConversations.mockResolvedValue([]);
     act(() => {
       lastHandlers.onMessagePersisted?.();
     });

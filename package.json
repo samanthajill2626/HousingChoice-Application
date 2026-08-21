@@ -64,7 +64,8 @@
     "twilio:events": "node scripts/twilioEventsSink.mjs",
     "plan": "node scripts/tf.mjs plan",
     "apply": "node scripts/tf.mjs apply",
-    "drift": "node scripts/tf.mjs drift"
+    "drift": "node scripts/tf.mjs drift",
+    "smoke": "npm run build -w @housingchoice/app && node --experimental-import-meta-resolve scripts/smoke-dist.mjs"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",

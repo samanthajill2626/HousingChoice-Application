@@ -167,6 +167,52 @@ both:
    produce either colour and proves less than the recipe implies. Compare the
    failing FILE against a base run - that is what still holds - and re-run alone
    more than once before drawing a conclusion.
+
+   ### Investigation 2026-08-21 (`fix/test-suite-hardening`) - read this before
+   ### re-investigating, it rules out three things
+
+   **Fixed, but NOT the cause.** The file shares ONE table and ONE deadline
+   partition across all 26 tests; `harness()` gives each a unique rail and
+   `sweep()` filters only the RESULT, while `sweepCrossCheckDeadlines` is global
+   and reads `listDueRows(..., SWEEP_BATCH)` with `SWEEP_BATCH = 50`. Leftover
+   pending rows therefore accumulate and a later test's sweep can spend its
+   batch on other tests' rows. Real hazard, now closed by an `afterEach` drain.
+   Measured effect: **4 pass / 1 fail of 5 WITH the drain, 3 pass / 2 fail of 5
+   WITHOUT.** At n=5 that is noise - the leak was real but is not what is
+   failing.
+
+   **The surviving failure, reproduced and instrumented.** `a DUPLICATE
+   redelivery of the same IM SID is deduped` fails **1 in 10 runs with that test
+   as the ONLY test running, on a clean table.** Instrumenting
+   `claimCrossCheckEvent` caught it in the act:
+
+   ```
+   [probe] claimCrossCheckEvent sid=IMCH0000000001c9cb203850a242cfaaa60b1 -> fresh=true
+   [probe] claimCrossCheckEvent sid=IMCH0000000001c9cb203850a242cfaaa60b1 -> fresh=true
+   ```
+
+   Byte-identical SID, both claims fresh. That should be impossible:
+   `groupCrossCheckMarkerPk` is `groupim#<sid>` (deterministic, no timestamp)
+   and the write is a `PutCommand` with
+   `ConditionExpression: attribute_not_exists(conversationId)` catching
+   `ConditionalCheckFailedException`.
+
+   **Three probes, all CLEAN - do not repeat them:**
+
+   | probe | rounds | double-fresh |
+   |---|---|---|
+   | `claimCrossCheckEvent` twice, one warm table | 300 | 0 |
+   | `claimCrossCheckEvent` twice, FRESH table per round | 30 | 0 |
+   | full `recordConversationEvent` twice via the real service, as the test does | 40 | 0 |
+
+   So it reproduces INSIDE vitest and not outside it, and it is not the
+   conditional write in isolation, not table freshness, and not the service path
+   itself. Next place to look is therefore the vitest environment or concurrent
+   load rather than this code path: worker pooling, the shared document client
+   across harnesses, or a second process touching the same access key while the
+   suite runs. Note the whole file's table lives under ONE
+   `testAccessKeyId()` database, which is shared with every other integration
+   suite in the worktree.
 2. **B** - `93ca271b` did NOT cure it. It stayed green on the 2026-08-21
    baseline but reproduced later the same day on `fix/e2e-harness-determinism`
    @`8b3dcfe2`, immediately after an 18-minute `npm run e2e` had hammered the

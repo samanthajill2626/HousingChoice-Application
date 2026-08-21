@@ -1852,22 +1852,41 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // page they saw only the newest 50 open threads, so a rail's dot silently read
   // zero for anyone whose thread had gone quiet.
   //
-  // Registered at the TOP level, NOT under /conversations/: a literal segment
-  // there would be captured by GET /conversations/:conversationId (the same trap
-  // documented for `vocabulary` on the contacts router).
+  // Registered at the TOP level rather than under /conversations/. Express
+  // matches in registration order, so a literal /conversations/unread-counts
+  // registered before /conversations/:conversationId would ALSO have worked -
+  // that is how `vocabulary` handles it on the contacts router. This is a
+  // placement preference (the resource is not a conversation), not a necessity.
   //
-  // Semantics deliberately mirror the client-side sumUnread this replaces: a
-  // relay_group or group_text NEVER counts toward a 1:1 total, and a contact's
-  // threads resolve across every phone AND email they own (conversationsForContact).
-  // A contact with two numbers therefore has two 1:1 threads and they are SUMMED.
+  // A contact's threads resolve across every phone AND email they own
+  // (conversationsForContact), so a contact with two numbers has two 1:1 threads
+  // and they are SUMMED.
+  //
+  // VISIBILITY IS `isUnreadVisible` - the SAME predicate the nav badge counts by
+  // (lib/unreadFeed.ts). That shared predicate is load-bearing, not tidiness: the
+  // rails call markPersonRead / markGroupRead, which decrement a nav-badge row
+  // whenever the tab shows unread. If this route counted a thread the badge does
+  // not (a CLOSED 1:1 is the live case - `isUnreadVisible` requires status
+  // 'open'), clicking that tab would decrement a row that was never counted and
+  // under-count the badge. markGroupRead documents that hazard for relay groups;
+  // routing both through one predicate is what keeps the 1:1 side honest.
+  //
+  // It also subsumes the relay_group / group_text rules: neither can reach a 1:1
+  // total here (they are excluded below), and a group_text cannot be returned by
+  // conversationsForContact at all - a group_text carries neither
+  // participant_phone nor participant_email (lib/contactThreads.ts, spec 4.2).
+  // The type guard below is therefore defence-in-depth, NOT the load-bearing
+  // filter the client-side sum needed when it matched by roster over the inbox.
   router.get('/unread-counts', async (req, res) => {
     const ids = (raw: unknown): string[] =>
       typeof raw === 'string' ? raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0) : [];
     const contactIds = ids(req.query['contactIds']);
     const conversationIds = ids(req.query['conversationIds']);
 
-    // Each contact id costs a phone/email fan-out, so the list is bounded - an
-    // open-ended one turns a single request into arbitrary work.
+    // Bounds the number of ids, which is NOT the same as bounding the work: one
+    // contact id fans out across every phone and email it owns, and each of
+    // those is an exhaustive walk. This is an ergonomic guard against an
+    // open-ended list (real callers send <= 9), not an abuse fence.
     if (contactIds.length > MAX_UNREAD_IDS || conversationIds.length > MAX_UNREAD_IDS) {
       res.status(400).json({ error: `at most ${MAX_UNREAD_IDS} ids per parameter` });
       return;
@@ -1882,19 +1901,38 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         // badge per requested id, and a MISSING key is indistinguishable from a
         // failed lookup.
         byContact[contactId] = 0;
-        const contact = await contacts.getById(contactId);
-        if (!contact || contact.phone_ref === true) return;
+        // BEST-EFFORT per id, matching the precedent for this exact fan-out
+        // (routes/inbox.ts wraps conversationsForContact the same way): one
+        // unlucky contact must not 500 the request and blank EVERY dot on the
+        // rail, group included.
+        try {
+          const contact = await contacts.getById(contactId);
+          // Pointer items live in the contacts table and getById really can
+          // return one. `email_ref` is the documented `phone_ref` analog
+          // (contactsRepo.ts) - guarding only phone_ref let an email-pointer id
+          // answer a real count for a row that is not a contact.
+          if (!contact || contact.phone_ref === true || contact.email_ref === true) return;
+          if (isDeleted(contact)) return;
         const threads = await conversationsForContact(contact, conversations);
         byContact[contactId] = threads.reduce(
           (total, c) =>
-            c.type !== 'relay_group' && c.type !== 'group_text' ? total + (c.unread_count ?? 0) : total,
+            c.type !== 'relay_group' && c.type !== 'group_text' && isUnreadVisible(c)
+              ? total + (c.unread_count ?? 0)
+              : total,
           0,
         );
+        } catch (err) {
+          log.warn({ err, contactId }, 'unread-counts: per-contact resolve failed (best-effort)');
+        }
       }),
       ...conversationIds.map(async (conversationId) => {
+        // Same predicate, same reason: markGroupRead decrements a badge row off
+        // this number. `isUnreadVisible` allows a relay group at 'open' OR
+        // 'connecting' (a just-provisioned group is connecting), which is
+        // exactly the set the group rail can act on.
         byConversation[conversationId] = 0;
         const c = await conversations.getById(conversationId);
-        if (c) byConversation[conversationId] = c.unread_count ?? 0;
+        if (c && isUnreadVisible(c)) byConversation[conversationId] = c.unread_count ?? 0;
       }),
     ]);
 

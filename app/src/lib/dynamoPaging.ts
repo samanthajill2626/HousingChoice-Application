@@ -12,6 +12,7 @@
 // for the CLIENT (a route serving `nextCursor`) must keep doing that instead -
 // this helper is for internal reads that are logically "all of them".
 import { QueryCommand, type DynamoDBDocumentClient, type QueryCommandInput } from '@aws-sdk/lib-dynamodb';
+import { logger as defaultLogger, type Logger } from './logger.js';
 
 /** Safety cap so a pathological or never-nulling cursor cannot loop forever.
  *  At 1 MB per page this is far past any per-entity result set. */
@@ -27,9 +28,10 @@ const DEFAULT_MAX_PAGES = 100;
 export async function queryAll<T>(
   doc: DynamoDBDocumentClient,
   input: QueryCommandInput,
-  opts: { maxPages?: number } = {},
+  opts: { maxPages?: number; logger?: Logger } = {},
 ): Promise<T[]> {
   const maxPages = opts.maxPages ?? DEFAULT_MAX_PAGES;
+  const log = opts.logger ?? defaultLogger;
   const out: T[] = [];
   let startKey = input.ExclusiveStartKey;
   let pages = 0;
@@ -45,5 +47,14 @@ export async function queryAll<T>(
     pages += 1;
   } while (startKey !== undefined && pages < maxPages);
 
+  if (startKey !== undefined) {
+    // A cap hit here would otherwise be EXACTLY the silent truncation this
+    // module's header condemns - a short answer that looks like a whole one.
+    // Counts and the index only; never a row, an id, or any PII.
+    log.warn(
+      { index: input.IndexName ?? '(table)', table: input.TableName, maxPages, returned: out.length },
+      'queryAll hit the page cap - the result is a PREFIX, not the whole query',
+    );
+  }
   return out;
 }

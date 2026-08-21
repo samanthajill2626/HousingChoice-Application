@@ -1,4 +1,4 @@
-// GET /api/unread-counts — unread totals for a NAMED set of contacts and
+// GET /api/unread-counts - unread totals for a NAMED set of contacts and
 // conversations.
 //
 // Replaces a whole-inbox sweep. The tour/placement channel rails needed unread
@@ -42,10 +42,15 @@ function makeApp(opts: {
   byPhone?: Record<string, ConversationItem[]>;
   byEmail?: Record<string, ConversationItem[]>;
   conversationsById?: Record<string, ConversationItem>;
+  /** contactId whose lookup THROWS, to exercise the best-effort path. */
+  throwForContact?: string;
 }) {
   const contactsById = new Map((opts.contacts ?? []).map((c) => [c.contactId, c]));
   const contactsRepo = {
     async getById(id: string) {
+      if (opts.throwForContact !== undefined && id === opts.throwForContact) {
+        throw new Error('simulated repo failure');
+      }
       return contactsById.get(id);
     },
   } as unknown as ContactsRepo;
@@ -107,6 +112,85 @@ describe('GET /api/unread-counts', () => {
     });
     const res = await get(app, '?contactIds=k1');
     expect(res.body.byContact).toEqual({ k1: 1 });
+  });
+
+  it('does NOT count a CLOSED 1:1 - the nav badge does not, and the rail decrements it', async () => {
+    // REGRESSION (adversarial review, 2026-08-20). The client-side sum this
+    // replaced read GET /api/conversations, which is status=open ALWAYS
+    // (CONVERSATION_STATUSES). conversationsForContact applies no status filter,
+    // so the first cut of this route silently counted closed threads.
+    //
+    // Not merely a wrong number: markPersonRead decrements a nav-badge row
+    // whenever the tab shows unread, and isUnreadVisible (lib/unreadFeed.ts)
+    // requires status 'open' for a 1:1 - so the badge never counted that row.
+    // Clicking the tab would decrement a row that was never counted. The
+    // markGroupRead comment documents this hazard for relay groups; counting by
+    // the SAME predicate is what keeps the 1:1 side honest.
+    const app = makeApp({
+      contacts: [contact({ contactId: 'k1', phone: '+14045550111' })],
+      byPhone: {
+        '+14045550111': [
+          conv({ conversationId: 'c-open', unread_count: 2 }),
+          conv({ conversationId: 'c-closed', unread_count: 9, status: 'closed' }),
+        ],
+      },
+    });
+    const res = await get(app, '?contactIds=k1');
+    expect(res.body.byContact).toEqual({ k1: 2 });
+  });
+
+  it('does not count a CLOSED thread named directly either', async () => {
+    const app = makeApp({
+      conversationsById: {
+        g1: conv({ conversationId: 'g1', type: 'relay_group', unread_count: 7, status: 'closed' }),
+      },
+    });
+    const res = await get(app, '?conversationIds=g1');
+    expect(res.body.byConversation).toEqual({ g1: 0 });
+  });
+
+  it('DOES count a CONNECTING relay group - the rail can act on it', async () => {
+    // isUnreadVisible allows a relay group at 'open' OR 'connecting'; a
+    // just-provisioned group is connecting, and its dot must work.
+    const app = makeApp({
+      conversationsById: {
+        g1: conv({ conversationId: 'g1', type: 'relay_group', unread_count: 3, status: 'connecting' }),
+      },
+    });
+    const res = await get(app, '?conversationIds=g1');
+    expect(res.body.byConversation).toEqual({ g1: 3 });
+  });
+
+  it('caps conversationIds too, not just contactIds', async () => {
+    const tooMany = Array.from({ length: 51 }, (_, i) => `g${i}`).join(',');
+    const res = await get(makeApp({}), `?conversationIds=${tooMany}`);
+    expect(res.status).toBe(400);
+  });
+
+  it('skips pointer items and soft-deleted contacts rather than answering for them', async () => {
+    const app = makeApp({
+      contacts: [
+        contact({ contactId: 'p-phone', phone: '+14045550111', phone_ref: true } as never),
+        contact({ contactId: 'p-email', phone: '+14045550111', email_ref: true } as never),
+        contact({ contactId: 'gone', phone: '+14045550111', deleted_at: '2026-01-01T00:00:00Z' } as never),
+      ],
+      byPhone: { '+14045550111': [conv({ conversationId: 'c-a', unread_count: 5 })] },
+    });
+    const res = await get(app, '?contactIds=p-phone,p-email,gone');
+    expect(res.body.byContact).toEqual({ 'p-phone': 0, 'p-email': 0, gone: 0 });
+  });
+
+  it('one failing contact does not blank the whole rail', async () => {
+    // routes/inbox.ts wraps this same fan-out best-effort; a 500 here would put
+    // both channel hooks into `status: error` and remove EVERY dot at once.
+    const app = makeApp({
+      contacts: [contact({ contactId: 'ok', phone: '+14045550111' })],
+      byPhone: { '+14045550111': [conv({ conversationId: 'c-a', unread_count: 2 })] },
+      throwForContact: 'boom',
+    });
+    const res = await get(app, '?contactIds=ok,boom');
+    expect(res.status).toBe(200);
+    expect(res.body.byContact).toEqual({ ok: 2, boom: 0 });
   });
 
   it('resolves threads keyed by EMAIL as well as by phone, deduped by id', async () => {

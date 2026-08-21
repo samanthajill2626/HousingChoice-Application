@@ -92,8 +92,8 @@ describe('PlacementCreateForm', () => {
     // The roster arrives ALREADY walked - getAllUnits follows nextCursor, proven
     // in api/lists.test.ts. What this asserts is the other half: the form
     // searches the WHOLE roster it was handed, including a property that only
-    // a paged read could have supplied. Before the walk existed, a tour simply
-    // could not be scheduled on any property later in the scan.
+    // a paged read could have supplied. Before the walk existed, no placement
+    // could be created against any property later in the scan.
     const user = userEvent.setup();
     getAllUnits.mockResolvedValue({
       items: [...UNITS, {

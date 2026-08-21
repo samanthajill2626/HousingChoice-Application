@@ -184,6 +184,13 @@ export function usePlacementChannels(
   }));
 
   const abortRef = useRef<AbortController | null>(null);
+  // The group id currently ON SCREEN, which is NOT always the one the record
+  // carries: opening a relay group injects the fresh id via
+  // setGroupConversationId, and on the placement side the record is not
+  // refetched, so `group_thread` stays undefined indefinitely. The counts read
+  // must ASK about the id it is going to READ - otherwise the answer omits it
+  // and `?? 0` silently pins the group dot at zero for the life of the page.
+  const shownGroupIdRef = useRef<string | null>(null);
 
   const fetchNow = useCallback(async () => {
     abortRef.current?.abort();
@@ -197,7 +204,14 @@ export function usePlacementChannels(
       const counts = await getUnreadCounts(
         {
           contactIds: peopleInputs.map((p) => p.contactId).filter((id): id is string => Boolean(id)),
-          ...(groupThreadId !== undefined && { conversationIds: [groupThreadId] }),
+          // BOTH: the record's thread and whatever the rail is showing.
+          ...(((): { conversationIds?: string[] } => {
+            const ids = [groupThreadId, shownGroupIdRef.current].filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            );
+            const unique = [...new Set(ids)];
+            return unique.length > 0 ? { conversationIds: unique } : {};
+          })()),
         },
         signal,
       );
@@ -212,6 +226,7 @@ export function usePlacementChannels(
                 forId: placementId,
               };
         const resolved = resolveChannels(base, groupThreadId, peopleInputs, counts);
+        shownGroupIdRef.current = resolved.group.conversationId;
         return { status: 'ready', ...resolved, forId: placementId };
       });
     } catch (err) {
@@ -257,6 +272,9 @@ export function usePlacementChannels(
 
   const setGroupConversationId = useCallback(
     (conversationId: string) => {
+      // Record it for the NEXT counts read too. Without this the injected id is
+      // read but never asked about, and its unread stays 0 forever.
+      shownGroupIdRef.current = conversationId;
       setState((prev) =>
         prev.forId !== placementId ? prev : { ...prev, group: { conversationId, unread: 0 } },
       );

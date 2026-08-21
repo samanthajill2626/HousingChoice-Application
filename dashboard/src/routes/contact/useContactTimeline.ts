@@ -177,17 +177,17 @@ async function loadTimeline(
     // state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
 
-    // NOTE: reads only the FIRST inbox page (no nextCursor paging). A
-    // transitional limitation — BE2's /timeline supersedes this entirely, and a
-    // single contact's threads almost always fit one page.
+    // NOTE: this walks EVERY page of the open inbox (getAllConversations). It
+    // used to read only the first page - a transitional limitation that is gone.
+    // BE2's /timeline still supersedes this fallback entirely.
     // MULTI-PARTY THREADS ARE EXCLUDED BY TYPE, not left to the roster match.
     // `involvesContact` matches any roster entry, and a multi-party roster names
     // up to nine contacts - so a group thread reaching this fallback would pull
-    // the WHOLE group transcript into one member's 1:1 timeline. The 50-row
-    // inbox page cannot return one today (group texts live in their own
-    // partition; relay groups front a pool number), which is exactly why this
-    // filter had no type guard at all - and why it needs one before a future
-    // reader change makes the omission load-bearing.
+    // the WHOLE group transcript into one member's 1:1 timeline. The inbox
+    // cannot return one today (group texts live in their own partition; relay
+    // groups front a pool number), which is exactly why this filter had no type
+    // guard at all - and why it needs one before a future reader change makes
+    // the omission load-bearing.
     const conversations = (await getAllConversations(signal)).items.filter(
       (c) =>
         c.type !== 'relay_group' &&

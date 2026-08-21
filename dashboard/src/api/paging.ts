@@ -1,4 +1,4 @@
-// paging — THE cursor walk for every paged list endpoint.
+// paging - THE cursor walk for every paged list endpoint.
 //
 // WHY THIS EXISTS: the server pages every list endpoint (`nextCursor`), and for
 // a long time each caller decided for itself whether to follow it. Three
@@ -13,9 +13,16 @@
 // list. So the rule is ONE walker, and any caller that needs a whole list uses
 // it - never a bare first-page read.
 //
-// A cap hit is NOT a silent truncation: `truncated` comes back to the caller and
-// a warning is logged with COUNTS ONLY (never a record id, name, phone, or any
-// other PII - these lists are tenants and landlords).
+// A cap hit logs a warning with COUNTS ONLY (never a record id, name, phone, or
+// any other PII - these lists are tenants and landlords) and sets `truncated` on
+// the result.
+//
+// HONESTLY: as of 2026-08-20 NO caller reads `truncated` - every one destructures
+// `{ items }`. So at the UI a cap hit is still only a console warning, exactly as
+// it was before this module existed. The flag is the hook for surfacing it, not
+// the surfacing itself; treat "callers should surface this" as work outstanding,
+// not a guarantee delivered. At 50 pages x 100 rows the cap needs 5,000 records,
+// so it is latent rather than live.
 
 /** Page-walk bound. A hard stop so a pathological or never-nulling cursor can
  *  never spin forever. At the 100-row page size below that is 5,000 records per
@@ -31,7 +38,7 @@ export const PAGE_LIMIT = '100';
 export interface FetchAllPagesResult<TItem> {
   items: TItem[];
   /** True when the walk stopped on the page cap with a cursor still outstanding
-   *  - the list is a PREFIX. Callers that must not present a partial list as a
+   * - the list is a PREFIX. Callers that must not present a partial list as a
    *  complete one should surface this. */
   truncated: boolean;
 }

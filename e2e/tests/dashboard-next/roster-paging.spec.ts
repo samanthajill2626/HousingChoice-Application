@@ -21,7 +21,13 @@ import { expectTodayReady } from '../../support/today.js';
 // WHY IT CLEANS UP: the lean world is byte-stable and shared with every other
 // spec (see tour-roster.spec.ts). Leaving 60 extra tenants behind would change
 // what any other spec sees. Everything minted here is soft-deleted in a
-// `finally`, which drops it back out of the default list scope.
+// `finally`.
+//
+// Precisely: that restores the DEFAULT list scope, which is what other specs
+// read. It does NOT restore the world - the rows and their phone numbers
+// persist, and the Contacts "Deleted" view grows by 60 per run. A spec that
+// asserts on the deleted view, or a lane kept alive across many runs, will
+// notice.
 //
 // WHY THE TARGET IS DISCOVERED, NOT HARD-CODED: which tenant lands past position
 // 50 depends on generated contactIds. Rather than guess, the spec asks the
@@ -104,7 +110,13 @@ test.describe('tenant roster paging', () => {
       // that sorts LAST in the type partition, so these land at the far end of
       // the GSI exactly the way the production roster did.
       const stamp = `${Date.now()}`.slice(-6);
-      const created = await Promise.all(
+      // Each id is recorded THE MOMENT it exists, never collected at the end.
+      // With `minted.push(...await Promise.all(...))` a single failed POST
+      // rejects the batch, `minted` stays empty, and the `finally` cleans up
+      // nothing - leaving up to 59 tenants in a lane that every other spec
+      // shares. A phone collision against a soft-deleted contact from an earlier
+      // run (they keep their numbers) is a live trigger for exactly that.
+      await Promise.all(
         Array.from({ length: EXTRA_TENANTS }, async (_unused, i) => {
           const res = await req.post(`${dashboardUrl}/api/contacts`, {
             data: {
@@ -116,11 +128,10 @@ test.describe('tenant roster paging', () => {
               voucherSize: 2,
             },
           });
+          if (res.ok()) minted.push(((await res.json()) as { contact: Contact }).contact.contactId);
           expect(res.ok(), await res.text()).toBeTruthy();
-          return ((await res.json()) as { contact: Contact }).contact.contactId;
         }),
       );
-      minted.push(...created);
 
       const [pageOne, everyone] = await Promise.all([tenantPageOne(req), allTenants(req)]);
 
@@ -168,6 +179,9 @@ test.describe('tenant roster paging', () => {
       // NEVER throws: this runs in a `finally`, so an error raised here would
       // REPLACE whatever the test was actually failing on. A cleanup problem is
       // worth knowing about, but not at the cost of hiding the real failure.
+      // `request.delete` resolves on a non-2xx rather than throwing, so the
+      // catch is for transport faults only - a REFUSED delete is silent here by
+      // construction. Accepted: this must not mask the real failure.
       await Promise.all(
         minted.map(async (contactId) => {
           try {

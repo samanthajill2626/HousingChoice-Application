@@ -601,7 +601,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
     });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
-    // 50 first-page + 1 second-page property — the walk completed.
+    // 51 properties - more than one server page could have supplied.
     expect(screen.getByText(/Showing 12 of 51/)).toBeInTheDocument();
 
     await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Findme');

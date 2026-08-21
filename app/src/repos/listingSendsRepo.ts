@@ -21,7 +21,7 @@
 // attrs (contactId, sentAt) are contractual (lib/tables.ts).
 //
 // PII (doc section 9): NEVER log names/phones -- IDs/type only.
-import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { queryAll } from '../lib/dynamoPaging.js';

@@ -1,11 +1,11 @@
-// useContacts — the Contacts list views' data hook. Fetches the contact records
+// useContacts - the Contacts list views' data hook. Fetches the contact records
 // for the active filter and returns a small { status, contacts } state. The
 // server REQUIRES a `type` filter on GET /api/contacts (unless an exact phone
 // lookup), so:
-//   - 'tenant' / 'landlord' / 'unknown' fetch that type directly;
-//   - 'all' fans out across every audience type and merges.
-// EVERY page per type is walked (getAllContacts → api/paging.ts): this hook
-// also feeds the id→contact lookup maps (Tours rows, the property page's
+// - 'tenant' / 'landlord' / 'unknown' fetch that type directly;
+// - 'all' fans out across every audience type and merges.
+// EVERY page per type is walked (getAllContacts -> api/paging.ts): this hook
+// also feeds the id -> contact lookup maps (Tours rows, the property page's
 // placements card, edit-form relationship candidates), where a first-page-only
 // load rendered raw contact IDs for anything past page one.
 import { useEffect, useState } from 'react';
@@ -44,7 +44,7 @@ export function useContacts(filter: ContactsFilter): ContactsState {
   // `forFilter` records which filter the committed state describes. On a filter
   // change we DERIVE "loading" during render until the new fetch commits, rather
   // than resetting to loading with a synchronous setState in the effect (which
-  // the React Compiler flags as a cascading render — set-state-in-effect). Same
+  // the React Compiler flags as a cascading render - set-state-in-effect). Same
   // observed UX: the previous list is hidden and the spinner shows immediately.
   const [state, setState] = useState<ContactsState & { forFilter: ContactsFilter }>({
     status: 'loading',
@@ -79,7 +79,7 @@ export function useContacts(filter: ContactsFilter): ContactsState {
     return () => controller.abort();
   }, [filter]);
 
-  // Committed state is for the previous filter → the new fetch is in flight.
+  // Committed state is for the previous filter -> the new fetch is in flight.
   if (state.forFilter !== filter) return { status: 'loading', contacts: [] };
   return { status: state.status, contacts: state.contacts };
 }

@@ -315,6 +315,41 @@ describe('usePlacementChannels', () => {
     expect(screen.getByTestId('group')).toHaveTextContent('g1/0');
   });
 
+  it('an INJECTED group thread gets its unread refreshed - it is asked about, not assumed 0', async () => {
+    // REGRESSION (adversarial review, 2026-08-20). The rail reads
+    // `byConversation[resolved]` where `resolved` can come from the injected id,
+    // but the request only named `groupThreadId`. On the placement side the
+    // record is never refetched after an open, so `group_thread` stays undefined
+    // forever: the injected id was READ but never ASKED about, `?? 0` applied,
+    // and the group dot was pinned at zero for the life of the page.
+    //
+    // The all-zeros fixture in the sibling test cannot see this - every
+    // observable is 0 on both sides of the refetch. This one gives the injected
+    // thread real unread, so it fails if that id drops out of the request.
+    getUnreadCounts.mockResolvedValue(countsFrom([]));
+    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    await userEvent.click(screen.getByRole('button', { name: 'inject' }));
+    expect(screen.getByTestId('group')).toHaveTextContent('c-injected/0');
+
+    // The thread now has unread. A refetch must SEE it.
+    getUnreadCounts.mockResolvedValue({ byContact: {}, byConversation: { 'c-injected': 4 } });
+    act(() =>
+      streamHandlers?.onConversationUpdated?.({
+        conversationId: 'c-injected',
+        last_activity_at: '2026-07-06T00:00:00Z',
+        unread_count: 4,
+        type: 'relay_group',
+        participant_display_name: null,
+      }),
+    );
+    await waitFor(() => expect(screen.getByTestId('group')).toHaveTextContent('c-injected/4'));
+
+    // ...and it must have been ASKED about, not merely echoed back.
+    const lastArg = getUnreadCounts.mock.calls.at(-1)?.[0] as { conversationIds?: string[] };
+    expect(lastArg.conversationIds).toContain('c-injected');
+  });
+
   it('setGroupConversationId injects a just-provisioned group thread id (survives a refetch)', async () => {
     // Empty inbox: the group has no thread yet, so a refetch cannot re-resolve one.
     getUnreadCounts.mockResolvedValue(countsFrom([]));

@@ -126,7 +126,7 @@ function localDatetime(msFromNow: number): string {
 const DAY = 24 * 3_600_000;
 
 describe('ScheduleTourForm', () => {
-  // ── 0a: the TENANT list is the whole roster, not the first server page ──
+  // 0a: the TENANT list is the whole roster, not the first server page.
   it('offers a tenant from deep in the roster, not just the first server page', async () => {
     // THE BUG THIS FORM SHIPPED WITH. /api/contacts pages at 50 and DynamoDB
     // orders the type partition by `status`, where `searching` sorts LAST - so

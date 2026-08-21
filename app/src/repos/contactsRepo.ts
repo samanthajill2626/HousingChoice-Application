@@ -440,6 +440,29 @@ export class EmptyIndexKeyError extends Error {
   }
 }
 
+/**
+ * A batch read could not fetch every key it was asked for - DynamoDB left keys
+ * in `UnprocessedKeys` past the retries, or a chunk's request failed. Raised
+ * ONLY for callers that passed `requireComplete`, because for them a short map
+ * is a wrong ANSWER rather than a thin one: the broadcast send path would
+ * silently drop the unread tenants from the send.
+ *
+ * This is emphatically NOT "a contact was not found" - a key the table answered
+ * with no row is a complete read of an absent contact, and never raises this.
+ */
+export class IncompleteBatchReadError extends Error {
+  constructor(
+    public readonly unprocessed: number,
+    public readonly requested: number,
+  ) {
+    super(
+      `contacts batch read incomplete: ${unprocessed} of ${requested} keys unread ` +
+        'after retries; the caller requires a complete read',
+    );
+    this.name = 'IncompleteBatchReadError';
+  }
+}
+
 /** One page of a contacts list query (opaque cursor handled at the route). */
 export interface ContactsPage {
   items: ContactItem[];
@@ -474,6 +497,23 @@ export interface ContactsRepo {
   getDisplayById(contactId: string): Promise<ContactDisplayItem | undefined>;
   /** Batch-read display fields by primary key. Missing ids are absent from the map. */
   getDisplaysByIds(contactIds: string[]): Promise<Map<string, ContactDisplayItem>>;
+  /**
+   * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
+   * callers that read attributes outside the display projection (roster
+   * `company`; the broadcast send path's `type`/`sms_opt_out`/`sms_unreachable`
+   * re-fence). Prefer `getDisplaysByIds` when only a label is needed: same round
+   * trips, far less data. Missing ids are absent from the map, exactly like
+   * `getById` returning undefined - callers keep their own not-found handling.
+   *
+   * `requireComplete` throws IncompleteBatchReadError when the read could not
+   * fetch every key (throttle/failure), rather than returning a short map. Pass
+   * it when an absent key changes an OUTCOME rather than a label - a send that
+   * silently skips tenants is not the same bug as a row without a name.
+   */
+  getManyByIds(
+    contactIds: string[],
+    opts?: { requireComplete?: boolean },
+  ): Promise<Map<string, ContactItem>>;
   /**
    * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
    * optionally narrowed by status (the (type=unknown, status=needs_review)
@@ -644,6 +684,86 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     }));
     return Item as ContactItem | undefined;
   };
+
+  /**
+   * Shared BatchGetItem walk for the two by-primary-key batch reads. Chunks at
+   * the 100-key BatchGetItem limit and retries `UnprocessedKeys` (DynamoDB
+   * returns them on throttle or a 16MB response) with the same backoff the
+   * messages repo uses.
+   *
+   * A key we FAILED TO READ is not the same fact as a contact that DOES NOT
+   * EXIST, even though a short map represents both (adversarial review r1
+   * finding 1). Which one a caller can tolerate is the caller's call:
+   *
+   * - DEFAULT (best-effort): keys still unprocessed after the retries, and any
+   *   chunk whose request throws outright, are counted and DROPPED. The caller
+   *   gets a short map. Right for display enrichment - a row renders without a
+   *   name. Chunks that already succeeded are KEPT (r1 finding 2): one late
+   *   throttle must not discard names we already paid for.
+   * - `requireComplete`: an incomplete READ throws IncompleteBatchReadError.
+   *   For callers where an absent key changes an outcome rather than a label -
+   *   the broadcast send path, where it means a tenant never gets the message.
+   *   A genuinely missing row is NOT incomplete and never throws.
+   *
+   * NOTE: base-table primary keys ONLY. BatchGetItem cannot read a GSI, so this
+   * is no help to findByPhone/findByEmail (see
+   * docs/issues/unread-badge-request-round-trip-cost.md).
+   */
+  const batchGetByIds = async <T extends { contactId: string }>(
+    contactIds: string[],
+    opts: {
+      /** MUST project `contactId` - the returned map is keyed on it. */
+      projection?: { ProjectionExpression: string; ExpressionAttributeNames: Record<string, string> };
+      requireComplete?: boolean;
+    } = {},
+  ): Promise<Map<string, T>> => {
+    const found = new Map<string, T>();
+    // BatchGetItem REJECTS a request carrying duplicate keys, and several
+    // callers legitimately present the same id twice (a roster row, a tenant
+    // sent to N times). De-duping here is load-bearing, not tidiness.
+    const uniqueIds = [...new Set(contactIds)];
+    let unprocessed = 0;
+    for (let i = 0; i < uniqueIds.length; i += 100) {
+      let keys = uniqueIds.slice(i, i + 100).map((contactId) => ({ contactId }));
+      try {
+        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+          }
+          const response = await doc.send(
+            new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...opts.projection } } }),
+          );
+          for (const item of (response.Responses?.[table] ?? []) as T[]) {
+            found.set(item.contactId, item);
+          }
+          keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ contactId: string }>;
+        }
+      } catch (err) {
+        // A thrown chunk is an unread chunk - same fact as unprocessed keys, so
+        // it takes the same path. Rethrow only where short is not survivable.
+        if (opts.requireComplete === true) throw err;
+        log.warn({ err, chunkKeys: keys.length }, 'contacts: BatchGet chunk failed - keys dropped');
+      }
+      unprocessed += keys.length;
+    }
+    if (unprocessed > 0) {
+      const detail = { unprocessed, requested: uniqueIds.length, projected: opts.projection !== undefined };
+      if (opts.requireComplete === true) throw new IncompleteBatchReadError(unprocessed, uniqueIds.length);
+      log.warn(detail, 'contacts: BatchGet left keys unprocessed after retries');
+    }
+    return found;
+  };
+
+  /** The display projection, shared by getDisplayById and getDisplaysByIds. */
+  const DISPLAY_PROJECTION = {
+    ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
+    ExpressionAttributeNames: {
+      '#contactId': 'contactId',
+      '#firstName': 'firstName',
+      '#lastName': 'lastName',
+      '#phone': 'phone',
+    },
+  } as const;
 
   /** Load a contact or throw the same conditional error update() throws. */
   const requireContact = async (contactId: string): Promise<ContactItem> => {
@@ -850,58 +970,17 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
     async getDisplayById(contactId) {
       const response = await doc.send(
-        new GetCommand({
-          TableName: table,
-          Key: { contactId },
-          ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
-          ExpressionAttributeNames: {
-            '#contactId': 'contactId',
-            '#firstName': 'firstName',
-            '#lastName': 'lastName',
-            '#phone': 'phone',
-          },
-        }),
+        new GetCommand({ TableName: table, Key: { contactId }, ...DISPLAY_PROJECTION }),
       );
       return response.Item as ContactDisplayItem | undefined;
     },
 
     async getDisplaysByIds(contactIds) {
-      const found = new Map<string, ContactDisplayItem>();
-      const uniqueIds = [...new Set(contactIds)];
-      let unprocessed = 0;
-      for (let i = 0; i < uniqueIds.length; i += 100) {
-        let keys = uniqueIds.slice(i, i + 100).map((contactId) => ({ contactId }));
-        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
-          if (attempt > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
-          }
-          const response = await doc.send(
-            new BatchGetCommand({
-              RequestItems: {
-                [table]: {
-                  Keys: keys,
-                  ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
-                  ExpressionAttributeNames: {
-                    '#contactId': 'contactId',
-                    '#firstName': 'firstName',
-                    '#lastName': 'lastName',
-                    '#phone': 'phone',
-                  },
-                },
-              },
-            }),
-          );
-          for (const item of (response.Responses?.[table] ?? []) as ContactDisplayItem[]) {
-            found.set(item.contactId, item);
-          }
-          keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ contactId: string }>;
-        }
-        unprocessed += keys.length;
-      }
-      if (unprocessed > 0) {
-        log.warn({ unprocessed }, 'contacts: BatchGet left keys unprocessed after retries');
-      }
-      return found;
+      return batchGetByIds<ContactDisplayItem>(contactIds, { projection: DISPLAY_PROJECTION });
+    },
+
+    async getManyByIds(contactIds, opts) {
+      return batchGetByIds<ContactItem>(contactIds, { requireComplete: opts?.requireComplete });
     },
 
     async listByType(type, opts = {}) {

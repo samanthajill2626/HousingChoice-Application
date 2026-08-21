@@ -110,7 +110,16 @@ function isUnitContactRole(value: unknown): value is UnitContact['role'] {
  * firstName/lastName (joined + trimmed). HONEST — undefined when no name is
  * known (never invents one); the roster row then has no `name`.
  */
-function displayNameOfContact(contact: ContactItem): string | undefined {
+// Takes the MINIMAL shape both contact reads satisfy - a whole ContactItem
+// (getById / getManyByIds) and the ContactDisplayItem projection
+// (getDisplayById / getDisplaysByIds). `contactId` is here only as the anchor
+// that keeps TypeScript's weak-type check honest; the name comes from the two
+// optional fields.
+function displayNameOfContact(contact: {
+  contactId: string;
+  firstName?: unknown;
+  lastName?: unknown;
+}): string | undefined {
   // Part-wise trim BEFORE the join (legacy padded parts must not render an
   // interior gap; new writes arrive trimmed via trimJsonBody).
   const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
@@ -338,16 +347,16 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    */
   async function enrichRoster(unit: UnitItem): Promise<UnitContact[]> {
     const roster = unitContacts(unit);
-    const byId = new Map<string, ContactItem | undefined>();
-    for (const row of roster) {
-      if (byId.has(row.contactId)) continue;
-      try {
-        byId.set(row.contactId, await contacts.getById(row.contactId));
-      } catch (err) {
-        // Never 500 the roster on a contact-lookup failure.
-        log.warn({ unitId: unit.unitId, contactId: row.contactId, err }, 'roster enrich: contact lookup failed (best-effort)');
-        byId.set(row.contactId, undefined);
-      }
+    // ONE BatchGet for the whole roster (was one getById per row). WHOLE items,
+    // not the display projection: the rows below also read `company`.
+    let byId = new Map<string, ContactItem>();
+    try {
+      byId = await contacts.getManyByIds(roster.map((row) => row.contactId));
+    } catch (err) {
+      // Never 500 the roster on a contact-lookup failure. The blast radius is
+      // now the whole batch rather than one row - every row simply serves
+      // un-enriched, which is the same degradation the per-row catch gave.
+      log.warn({ unitId: unit.unitId, err }, 'roster enrich: contact lookup failed (best-effort)');
     }
     return roster.map((row) => {
       const contact = byId.get(row.contactId);
@@ -950,20 +959,20 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     } catch (err) {
       log.warn({ err, unitId }, 'recipients tour-chip hydration failed (best-effort)');
     }
-    // Denormalize each recipient's display name (same contacts join the roster
-    // uses). Best-effort like the tour join: a failed lookup serves the row
-    // nameless (the dashboard falls back to the id) - never a 500. Lookups are
-    // deduped by contactId so a tenant sent to N times costs one read.
+    // Denormalize each recipient's display name. ONE BatchGet of the display
+    // projection for the whole page (was one getById per unique recipient, with
+    // no route-level cap); the batch de-dupes ids, so a tenant sent to N times
+    // still costs one read. Best-effort like the tour join: a missing id is
+    // simply absent from the map and a failed batch leaves the map empty, so
+    // rows serve nameless (the dashboard falls back to the id) - never a 500.
     const namesByContact = new Map<string, string | undefined>();
-    for (const row of rows) {
-      if (namesByContact.has(row.contactId)) continue;
-      try {
-        const contact = await contacts.getById(row.contactId);
-        namesByContact.set(row.contactId, contact ? displayNameOfContact(contact) : undefined);
-      } catch (err) {
-        log.warn({ err, unitId, contactId: row.contactId }, 'recipients name hydration failed (best-effort)');
-        namesByContact.set(row.contactId, undefined);
+    try {
+      const displays = await contacts.getDisplaysByIds(rows.map((row) => row.contactId));
+      for (const [contactId, contact] of displays) {
+        namesByContact.set(contactId, displayNameOfContact(contact));
       }
+    } catch (err) {
+      log.warn({ err, unitId }, 'recipients name hydration failed (best-effort)');
     }
     res.json({
       recipients: rows.map((row) => {
@@ -1154,15 +1163,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // Resolve tenant names at read time, deduped per tenantId (a unit's placements
     // are few but may share a tenant). A missing/failed lookup → tenantName null.
     const nameByTenant = new Map<string, string | null>();
-    for (const c of items) {
-      if (nameByTenant.has(c.tenantId)) continue;
-      try {
-        const contact = await contacts.getById(c.tenantId);
-        nameByTenant.set(c.tenantId, contact ? (displayNameOfContact(contact) ?? null) : null);
-      } catch (err) {
-        log.warn({ unitId, tenantId: c.tenantId, err }, 'unit placements: tenant lookup failed (best-effort)');
-        nameByTenant.set(c.tenantId, null);
+    try {
+      const displays = await contacts.getDisplaysByIds(items.map((c) => c.tenantId));
+      for (const [tenantId, contact] of displays) {
+        nameByTenant.set(tenantId, displayNameOfContact(contact) ?? null);
       }
+    } catch (err) {
+      log.warn({ unitId, err }, 'unit placements: tenant lookup failed (best-effort)');
     }
     const enriched = items.map((c: PlacementItem) => ({
       ...c,
@@ -1250,18 +1257,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // lookup leaves contactName absent (the client falls back to the id) and
     // NEVER 500s — same posture as /placements' tenantName.
     const nameByContact = new Map<string, string | undefined>();
-    for (const e of events) {
-      if (e.contactId === undefined || nameByContact.has(e.contactId)) continue;
-      try {
-        const contact = await contacts.getById(e.contactId);
-        nameByContact.set(e.contactId, contact ? displayNameOfContact(contact) : undefined);
-      } catch (err) {
-        log.warn(
-          { unitId, contactId: e.contactId, err },
-          'unit activity: contact lookup failed (best-effort)',
-        );
-        nameByContact.set(e.contactId, undefined);
+    try {
+      const wanted = events.flatMap((e) => (e.contactId === undefined ? [] : [e.contactId]));
+      for (const [contactId, contact] of await contacts.getDisplaysByIds(wanted)) {
+        nameByContact.set(contactId, displayNameOfContact(contact));
       }
+    } catch (err) {
+      log.warn({ unitId, err }, 'unit activity: contact lookup failed (best-effort)');
     }
     for (const e of events) {
       const name = e.contactId !== undefined ? nameByContact.get(e.contactId) : undefined;

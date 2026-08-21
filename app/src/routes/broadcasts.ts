@@ -41,7 +41,11 @@ import {
   type BroadcastStatus,
 } from '../repos/broadcastsRepo.js';
 import { createUnitsRepo, SHAREABLE_STATUSES, isDeleted, type UnitsRepo } from '../repos/unitsRepo.js';
-import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import {
+  createContactsRepo,
+  type ContactDisplayItem,
+  type ContactsRepo,
+} from '../repos/contactsRepo.js';
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
@@ -195,24 +199,25 @@ interface EnrichedRecipient extends BroadcastRecipient {
   phone?: string;
 }
 
-/** Bounded-concurrency getById fan-out (mirrors the send route's selection fetch). */
-const RESULTS_FETCH_CONCURRENCY = 50;
-
-/** Optional-string reader off a flexible ContactItem attribute (trimmed). */
-function trimmedField(contact: ContactItem, field: string): string | undefined {
-  const v = contact[field];
-  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+/** Optional-string reader off a flexible contact attribute (trimmed). */
+function trimmedField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 /**
  * S5: enrich each recipients-map entry with OPTIONAL raw firstName/lastName/
  * phone so the results view can show the tenant's name + number (and keep
  * linking to /contacts/:id).
- * - contactId keys: contacts.getById, chunked at RESULTS_FETCH_CONCURRENCY
- *   (same pattern as the send route's explicit-selection fetch).
+ * - contactId keys: ONE contacts.getDisplaysByIds BatchGet for the whole map
+ *   (was a getById per recipient, chunked 50-wide - up to ~1,500 reads on a
+ *   capped send). The display projection is EXACTLY the three fields below, so
+ *   this also stops pulling whole contact documents over the wire.
  * - phone#<E164> keys: phone comes from the key (no lookup).
  * - deleted/unresolvable contacts: omit the fields (never leak the raw key);
- *   the dashboard falls back to today's "Tenant" label.
+ *   the dashboard falls back to today's "Tenant" label. A partial batch (keys
+ *   the table never served) degrades the same way - identity is a label here,
+ *   so a short map is survivable. There is NO catch: a rejected read still
+ *   500s this endpoint, exactly as a rejected getById did.
  * Cost is bounded by MAX_BROADCAST_RECIPIENTS, only on this endpoint (no cache).
  */
 async function enrichRecipients(
@@ -221,14 +226,9 @@ async function enrichRecipients(
 ): Promise<Record<string, EnrichedRecipient>> {
   const keys = Object.keys(recipients);
   const contactIdKeys = keys.filter((k) => !k.startsWith('phone#'));
-  const resolvedById = new Map<string, ContactItem>();
-  for (let i = 0; i < contactIdKeys.length; i += RESULTS_FETCH_CONCURRENCY) {
-    const chunk = contactIdKeys.slice(i, i + RESULTS_FETCH_CONCURRENCY);
-    const fetched = await Promise.all(chunk.map((id) => contacts.getById(id)));
-    for (let j = 0; j < chunk.length; j += 1) {
-      const contact = fetched[j];
-      if (contact) resolvedById.set(chunk[j]!, contact);
-    }
+  let resolvedById = new Map<string, ContactDisplayItem>();
+  if (contactIdKeys.length > 0) {
+    resolvedById = await contacts.getDisplaysByIds(contactIdKeys);
   }
   const out: Record<string, EnrichedRecipient> = {};
   for (const key of keys) {
@@ -244,8 +244,8 @@ async function enrichRecipients(
       out[key] = { ...slot };
       continue;
     }
-    const firstName = trimmedField(contact, 'firstName');
-    const lastName = trimmedField(contact, 'lastName');
+    const firstName = trimmedField(contact.firstName);
+    const lastName = trimmedField(contact.lastName);
     const phone = typeof contact.phone === 'string' && contact.phone.length > 0 ? contact.phone : undefined;
     out[key] = {
       ...slot,
@@ -635,20 +635,24 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
 
     if (selection !== undefined) {
       // (a) Explicit selection. Build recipients from THIS set — re-fence each.
-      // contactsRepo has no batch-get, so resolve the ids with a BOUNDED-
-      // CONCURRENCY fan-out: chunk the ids and Promise.all each chunk, capping
-      // in-flight getById round-trips at FETCH_CONCURRENCY. The raw list is
-      // already capped at MAX_BROADCAST_RECIPIENTS pre-fetch (parse guard), so
-      // this only trims request latency (sequential awaits were 7-15s on a
-      // 1500-id send) — it does NOT change which contacts survive. The fences,
-      // de-dupe, contactKey convention, empty→400, and cap below are identical.
-      const FETCH_CONCURRENCY = 50;
-      const fetched: Array<Awaited<ReturnType<typeof contacts.getById>>> = [];
-      for (let i = 0; i < selection.ids.length; i += FETCH_CONCURRENCY) {
-        const chunk = selection.ids.slice(i, i + FETCH_CONCURRENCY);
-        const resolved = await Promise.all(chunk.map((id) => contacts.getById(id)));
-        for (const contact of resolved) fetched.push(contact);
-      }
+      // ONE getManyByIds BatchGet resolves the whole selection (was a 50-wide
+      // getById fan-out; sequential awaits before that were 7-15s on a 1500-id
+      // send). WHOLE items, not the display projection: the fences below read
+      // `type` and both suppression flags. The raw list is already capped at
+      // MAX_BROADCAST_RECIPIENTS pre-fetch (parse guard). An id with no contact
+      // is simply absent from the map and drops exactly as an undefined getById
+      // did, so the fences, de-dupe, contactKey convention, empty -> 400, and cap
+      // below are unchanged.
+      //
+      // requireComplete is LOAD-BEARING here (adversarial review r1 finding 1).
+      // A short map has two causes - the contact does not exist, or we failed to
+      // read it - and only the first may drop a recipient. Without this flag a
+      // throttled BatchGet would quietly shrink the send and still report 200,
+      // which is exactly what the truncated-audience branch below refuses to do.
+      // Throwing leaves the broadcast a DRAFT the operator can re-send, which is
+      // what the pre-batch getById fan-out did when a read failed.
+      const byId = await contacts.getManyByIds(selection.ids, { requireComplete: true });
+      const fetched = selection.ids.map((id) => byId.get(id));
       const survivors: Array<{ contactId?: string; phone: string }> = [];
       for (const contact of fetched) {
         if (!contact) continue; // unknown id — drop

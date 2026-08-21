@@ -233,6 +233,9 @@ function makeSendFakes(
     getDisplaysByIds: async (ids) => new Map(
       contact !== undefined && ids.includes(contact.contactId) ? [[contact.contactId, contact]] : [],
     ),
+    getManyByIds: async (ids) => new Map(
+      contact !== undefined && ids.includes(contact.contactId) ? [[contact.contactId, contact]] : [],
+    ),
     listByType: async () => ({ items: [] }),
     listByHousingAuthority: async () => ({ items: [] }),
     create: async (input) => ({ ...input, contactId: input.contactId ?? 'contact-sm-1' }),

@@ -3,11 +3,12 @@ id: contacts-batchget-amplified-reads
 title: Per-contact Gets amplify reads on broadcast results, property recipients, and property activity
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-16
 updated: 2026-08-21
-refs: app/src/repos/contactsRepo.ts:833, app/src/routes/broadcasts.ts:227, app/src/routes/broadcasts.ts:649, app/src/routes/units.ts:343, app/src/routes/units.ts:959, app/src/routes/units.ts:1134, app/src/routes/units.ts:1230
+resolved: 2026-08-21
+refs: app/src/repos/contactsRepo.ts:751, app/src/repos/contactsRepo.ts:978, app/src/routes/broadcasts.ts:231, app/src/routes/broadcasts.ts:654, app/src/routes/units.ts:354, app/src/routes/units.ts:970, app/src/routes/units.ts:1167, app/src/routes/units.ts:1262
 ---
 
 **SCOPE CORRECTED 2026-08-21.** This issue previously also owned the unread
@@ -77,8 +78,7 @@ job already does per-recipient work; batching there buys much less. Not a
 target.
 
 **On close:** with the six surfaces above batched, this issue is DONE - it did
-what its title says. The front-matter `refs:` still points at the six pre-change
-line numbers and wants updating (or dropping) when that lands.
+what its title says.
 
 The messages repo already has the batching precedent
 (`getManyByTsMsgIds`, app/src/repos/messagesRepo.ts:2451 - BatchGetItem chunked
@@ -101,3 +101,48 @@ discovered in production.
 Acceptance is round-trip COUNT, not wall-clock: local DynamoDB timings are
 emulator-bound and scale with table size regardless of what a query returns.
 Prove the reduction with call-count assertions.
+
+**Resolution (2026-08-21).** Branch `feat/contacts-batchget`. All six surfaces
+batched; `refs:` above now points at the post-change lines.
+
+The sweep was smaller than this issue assumed, because contactsRepo ALREADY had
+a BatchGet: `getDisplaysByIds`, projecting exactly
+contactId/firstName/lastName/phone, with a single caller. FOUR of the six sites
+read nothing outside that projection and now reuse it - same round-trip saving,
+and they stop pulling whole contact documents over the wire. Only TWO needed the
+new `getManyByIds` (whole items): the unit roster reads `company`, and the
+broadcast selection send re-fences on `type` plus both suppression flags. Both
+batch reads share one `batchGetByIds` helper - 100-key chunks, UnprocessedKeys
+retry with backoff - rather than duplicating the messages-repo walk.
+
+`resolveSeeds` (broadcasts.ts) was deliberately left alone: seeds number
+1..handful.
+
+**The one real defect this produced, caught by adversarial review and fixed
+before merge - worth carrying forward to any similar conversion.** Batching
+changes what ABSENCE means. Per-item, a missing row returns undefined and a
+failed read THROWS: two facts, two signals. Batched, both become "key not in the
+Map": one signal, two facts. The first cut dropped keys left in
+`UnprocessedKeys` after retries and returned a short map, so a throttled read on
+the broadcast SEND path would have silently texted fewer tenants than the
+operator selected and still answered 200 - while the pre-batch fan-out would
+have thrown, 500'd, and left a re-sendable draft. The endpoint had already
+written down the correct rule twenty lines away, where it refuses a truncated
+audience because "sending would silently under-deliver". Fixed with
+`IncompleteBatchReadError` and `getManyByIds(ids, { requireComplete })`, passed
+by the send path and nothing else; a genuinely absent row is a COMPLETE read of
+a missing contact and still never throws. Also from that review: a chunk that
+throws mid-walk no longer discards the chunks that already succeeded.
+
+The accepted trade in the paragraph above still stands and is now pinned in a
+test rather than left to be discovered: a failed batch blanks every name in its
+chunk instead of one row's.
+
+Tests assert round-trip COUNT as this issue asked (`app/test/contactsBatchReads.test.ts`),
+plus the absence semantics (`app/test/contactsBatchIncomplete.test.ts`) and a
+101-key chunking case against DynamoDB Local. Gates green twice, before and
+after the review fix wave: typecheck 0, `npm test` 0 (9,001 tests), `npm run
+e2e` 0 (251 passed).
+
+Still open, spun out of this issue rather than folded into it:
+[`today-contact-hydration-fan-out`](today-contact-hydration-fan-out.md).

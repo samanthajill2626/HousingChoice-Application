@@ -70,6 +70,9 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
     async getDisplaysByIds() {
       return new Map();
     },
+    async getManyByIds() {
+      return new Map();
+    },
     async create() {
       throw new Error('unused');
     },

@@ -452,6 +452,14 @@ function shutdown(code = 0) {
   // Release the lane so the next run can take it immediately rather than
   // waiting for pid-liveness to notice we are gone. Compares on the token, so
   // a late shutdown can never free a lane someone else has since claimed.
+  //
+  // BEST-EFFORT, and deliberately so. This runs on a signal-driven shutdown and
+  // on `npm run e2e:stop`, but NOT when Playwright tears its webServer down by
+  // tree-kill (measured on Windows, 2026-08-21: a clean 251-spec run left the
+  // lease behind). That is the case pid-liveness staleness exists for - the
+  // very next resolve sees a `held` record with a dead pid and reclaims it,
+  // which is exactly what happened on the following run. Releasing is an
+  // optimisation that skips one reclaim; correctness never depends on it.
   if (ownerToken !== null && ownerToken !== undefined && releaseLane(lane, ownerToken)) {
     log(`released lane ${lane}`);
   }

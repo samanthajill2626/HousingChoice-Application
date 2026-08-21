@@ -49,6 +49,16 @@ session ADOPTS rather than refusing its own parent's lease.
 Absorbed `e2e-lane-probe-bind-toctou` (see the merge note above); its
 bump-and-retry remedy remains the cheap partial for a real bind failure.
 
+**Release is BEST-EFFORT, by design.** The launcher releases on a signal-driven
+shutdown and `npm run e2e:stop`, but NOT when Playwright tears its webServer
+down by tree-kill - measured on Windows, where a clean 251-spec run left the
+lease behind. Correctness does not depend on it: the next resolve finds a `held`
+record with a dead pid and reclaims it. Verified twice on real wreckage, once
+after a failed run and once after a clean one. Releasing just skips a reclaim.
+
+**Verified end to end:** `npm run e2e` 251 passed (18.4m), including a boot that
+reclaimed a dead run's lane rather than skipping it.
+
 **Problem.** The shared E2E harness chooses a lane with a free-port probe and
 later starts the lane services. Two worktrees can select the same free lane
 during that gap. The general launcher also reaps processes holding the dashboard

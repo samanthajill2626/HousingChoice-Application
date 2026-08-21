@@ -1,13 +1,29 @@
 ---
 id: tour-reminders-panel-e2e-flake
-title: "scheduled-visibility.spec.ts Part A (Reminders panel armed ladder) fails DETERMINISTICALLY when the suite runs before 08:00 org-local - the morning_of rung is legitimately never armed"
+title: "scheduled-visibility.spec.ts Reminders panel - a rare rung-visibility timing flake (the 08:00 wall-clock half is CLOSED)"
 type: bug
-severity: med
+severity: low
 status: open
 area: e2e
 created: 2026-07-10
-updated: 2026-08-05
+updated: 2026-08-21
 refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:103, e2e/tests/scenarios/scheduled-visibility.spec.ts:132, e2e/scenarios/steps.ts:3242
+
+<!--
+  TITLE CORRECTED 2026-08-21. It still advertised the DETERMINISTIC 08:00
+  wall-clock failure, which `150fbfa4` closed on 2026-08-05 ("full-ladder
+  assertions book a 14:00-local tour - kills the 00:00-08:00 wall-clock flake").
+  The stale title actively misled a reader on 2026-08-21 into declaring that
+  AGENTS.md's "re-run once" rule could never clear this issue - a claim that was
+  wrong, and that came from reading the title instead of the body directly
+  below it. Severity dropped med -> low to match the real remaining scope.
+-->
+
+**Remaining scope: a rare timing flake, and re-running IS the right response.**
+Two sightings, 2026-07-10 and 2026-08-03, both a Reminders-panel rung not
+visible inside its 10s budget under full-suite load, both on branches with zero
+intersection with tours. Not reproduced since 2026-08-05 across a 204-pass gate
+run and four per-file runs.
 ---
 
 **Update (2026-08-05, feat/tour-reminder-details).** Status of the two halves:

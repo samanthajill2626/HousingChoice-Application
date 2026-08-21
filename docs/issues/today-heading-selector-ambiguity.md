@@ -7,8 +7,34 @@ status: resolved
 area: e2e
 created: 2026-08-19
 resolved: 2026-08-19
-refs: e2e/support/today.ts
+updated: 2026-08-21
+refs: e2e/support/today.ts, e2e/support/selectors.md
 ---
+
+<!--
+  MERGED 2026-08-21. `today-heading-locator-substring-collision` (med, filed
+  2026-08-05) described this same defect from the other end - it enumerated 33
+  non-exact call sites and proposed `exact: true` plus "consider hoisting one
+  shared helper". This issue IS that hoist. Its file was deleted and the two
+  stragglers it still covered were fixed; do not re-file it.
+-->
+
+**Two stragglers swept 2026-08-21 (`fix/test-suite-hardening`).** The 2026-08-19
+migration moved 61 assertions onto `expectTodayReady`, but two specs written in
+double quotes escaped the sweep and still hand-rolled the substring-matching
+form:
+
+- `e2e/tests/dashboard-next/ai-run-log.spec.ts:23`
+- `e2e/tests/dashboard-next/manual-extraction-trigger.spec.ts:42`
+
+Both now call the helper. A repo-wide grep confirms no non-exact `Today` heading
+locator survives in `e2e/` - the only remaining textual matches are
+`support/today.ts`'s own header and the `selectors.md` row, both of which quote
+the WRONG form deliberately as the thing not to write.
+
+That is the same lesson the header already records, one turn later: a
+find-and-fix sweep is only as complete as the pattern it searched for, and these
+two differed by nothing but quote style.
 
 **Problem.** The dashboard sign-in readiness check is written as
 

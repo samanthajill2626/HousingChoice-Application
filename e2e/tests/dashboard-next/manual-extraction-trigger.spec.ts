@@ -21,6 +21,7 @@ import {
 import { extractionTick } from "../../fixtures/extraction.js";
 import { postInboundSms } from "../../fixtures/fakeTwilio.js";
 import { reseed } from "../../fixtures/reseed.js";
+import { expectTodayReady } from "../../support/today.js";
 
 const NEXT = process.env["E2E_DASHBOARD_URL"] ?? "http://127.0.0.1:5174";
 
@@ -39,7 +40,7 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
   });
   expect(res.ok()).toBeTruthy();
   await page.goto(`${NEXT}/`);
-  await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
+  await expectTodayReady(page);
 }
 
 let sequence = 0;

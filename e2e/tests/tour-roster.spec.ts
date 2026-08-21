@@ -72,7 +72,7 @@ async function devLogin(page: Page): Promise<void> {
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   // `exact` on purpose: the home page also renders an <h2>Tours today</h2> the
   // moment any tour is scheduled for the current day, and a substring 'Today'
-  // matches both (docs/issues/today-heading-locator-substring-collision.md).
+  // matches both (docs/issues/today-heading-selector-ambiguity.md).
   await expectTodayReady(page);
 }
 

@@ -69,8 +69,8 @@ function setup(props?: Partial<Parameters<typeof PlacementCreateForm>[0]>) {
 beforeEach(() => {
   vi.clearAllMocks();
   // Sensible defaults; individual tests override.
-  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false});
-  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false});
+  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false });
+  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false });
   getPlacementsBy.mockResolvedValue([]);
 });
 

@@ -140,7 +140,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
-  getAllConversations.mockResolvedValue({ items: [], truncated: false});
+  getAllConversations.mockResolvedValue({ items: [], truncated: false });
   getConversationMessages.mockResolvedValue([]);
   // The endpoint returns the whole ENVELOPE now (rows + the composing zone).
   getConversationScheduled.mockResolvedValue({ scheduled: [] });

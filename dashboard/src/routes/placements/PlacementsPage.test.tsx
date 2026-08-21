@@ -56,8 +56,8 @@ beforeEach(() => {
   getAllContacts.mockReset();
   getAllUnits.mockReset();
   getPlacementsBy.mockReset();
-  getAllContacts.mockResolvedValue({ items: [], truncated: false});
-  getAllUnits.mockResolvedValue({ items: [], truncated: false});
+  getAllContacts.mockResolvedValue({ items: [], truncated: false });
+  getAllUnits.mockResolvedValue({ items: [], truncated: false });
   getPlacementsBy.mockResolvedValue([]);
 });
 afterEach(() => vi.restoreAllMocks());

@@ -95,8 +95,8 @@ function setup(props?: Partial<Parameters<typeof ScheduleTourForm>[0]>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false});
-  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false});
+  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false });
+  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false });
   // The locked-label fallback is best-effort; reject so the list lookup wins.
   getContact.mockRejectedValue(new ApiError(404, 'not_found', 'not_found'));
 });

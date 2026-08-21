@@ -170,7 +170,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
-  getAllConversations.mockResolvedValue({ items: [], truncated: false});
+  getAllConversations.mockResolvedValue({ items: [], truncated: false });
   getConversationMessages.mockResolvedValue([]);
   sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
   ensureContactConversation.mockResolvedValue('c-new');

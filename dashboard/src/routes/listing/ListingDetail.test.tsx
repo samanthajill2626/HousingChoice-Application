@@ -960,9 +960,9 @@ describe('ListingDetail', () => {
       ...READY,
       unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
     });
-    getAllUnits.mockResolvedValue({ items: [], truncated: false});
+    getAllUnits.mockResolvedValue({ items: [], truncated: false });
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
-    getAllContacts.mockResolvedValue({ items: [], truncated: false});
+    getAllContacts.mockResolvedValue({ items: [], truncated: false });
     getPlacementsBy.mockResolvedValue([]);
     renderAt();
 
@@ -996,7 +996,7 @@ describe('ListingDetail', () => {
     });
     // ScheduleTourForm's mount fetches: tenant candidates + the unit roster (the
     // roster must contain THIS unit for the pre-commit to take).
-    getAllContacts.mockResolvedValue({ items: [], truncated: false});
+    getAllContacts.mockResolvedValue({ items: [], truncated: false });
     getAllUnits.mockResolvedValue({
       items: [{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } }],
       truncated: false,
@@ -1021,9 +1021,9 @@ describe('ListingDetail', () => {
       ...READY,
       unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
     });
-    getAllUnits.mockResolvedValue({ items: [], truncated: false});
+    getAllUnits.mockResolvedValue({ items: [], truncated: false });
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
-    getAllContacts.mockResolvedValue({ items: [], truncated: false});
+    getAllContacts.mockResolvedValue({ items: [], truncated: false });
     getPlacementsBy.mockResolvedValue([]);
     renderAt();
 

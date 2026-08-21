@@ -171,7 +171,7 @@ beforeEach(() => {
   updatePlacement.mockReset();
   updateUnit.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
-  getAllConversations.mockReset().mockResolvedValue({ items: [], truncated: false});
+  getAllConversations.mockReset().mockResolvedValue({ items: [], truncated: false });
   getConversation.mockReset().mockResolvedValue({
     conversationId: 'g1',
     type: 'relay_group',

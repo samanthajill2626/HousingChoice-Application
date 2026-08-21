@@ -527,7 +527,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   }
 
   it('browses the first 12 of a 100-property portfolio and says how many there are', async () => {
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
     renderComposer();
     await screen.findByRole('combobox', { name: 'Property' });
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
@@ -536,7 +536,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('"Load more" reveals the next batch of properties', async () => {
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
 
@@ -546,7 +546,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   });
 
   it('hides "Load more" once every property is on screen', async () => {
-    getAllUnits.mockResolvedValue({ items: manyUnits(8), truncated: false});
+    getAllUnits.mockResolvedValue({ items: manyUnits(8), truncated: false });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(8));
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
@@ -571,7 +571,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('a new query re-opens the browse list at 12 rather than keeping the revealed count', async () => {
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false});
+    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
     await user.click(screen.getByRole('button', { name: 'Load more' }));

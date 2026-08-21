@@ -51,8 +51,8 @@ beforeEach(() => {
   getAllContacts.mockReset();
   getAllUnits.mockReset();
   streamHandlers = null;
-  getAllContacts.mockResolvedValue({ items: [], truncated: false});
-  getAllUnits.mockResolvedValue({ items: [], truncated: false});
+  getAllContacts.mockResolvedValue({ items: [], truncated: false });
+  getAllUnits.mockResolvedValue({ items: [], truncated: false });
 });
 afterEach(() => vi.restoreAllMocks());
 

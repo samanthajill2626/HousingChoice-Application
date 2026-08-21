@@ -105,7 +105,7 @@ function renderCard(over: Partial<PeopleCardProps> = {}): {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAllContacts.mockResolvedValue({ items: [], truncated: false});
+  getAllContacts.mockResolvedValue({ items: [], truncated: false });
 });
 
 /** The rendered roster rows, in payload order. */

@@ -50,7 +50,7 @@ function setup(props?: Partial<Parameters<typeof UnitCreateForm>[0]>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAllContacts.mockResolvedValue({ items: LANDLORDS, truncated: false});
+  getAllContacts.mockResolvedValue({ items: LANDLORDS, truncated: false });
   getContact.mockResolvedValue(LANDLORDS[0]);
 });
 

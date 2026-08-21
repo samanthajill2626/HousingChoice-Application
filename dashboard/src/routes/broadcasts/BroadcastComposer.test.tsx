@@ -8,7 +8,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { FetchAllPagesResult, Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
+import type { Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -47,7 +47,7 @@ function unit(over: Partial<UnitItem> = {}): UnitItem {
   };
 }
 
-const emptyContacts: FetchAllPagesResult<Contact> = { items: [], truncated: false };
+const emptyContacts: Contact[] = [];
 
 const seedTenant: Contact = {
   contactId: 'c-seed',
@@ -57,15 +57,12 @@ const seedTenant: Contact = {
   phone: '+14040000001',
 };
 
-const pickableUnits: FetchAllPagesResult<UnitItem> = {
-  items: [
+const pickableUnits: UnitItem[] = [
     unit({
       unitId: 'u-1',
       address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
     }),
-  ],
-  truncated: false,
-};
+  ];
 
 function renderComposer(search = ''): ReturnType<typeof render> {
   return render(
@@ -527,7 +524,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   }
 
   it('browses the first 12 of a 100-property portfolio and says how many there are', async () => {
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
+    getAllUnits.mockResolvedValue(manyUnits(100));
     renderComposer();
     await screen.findByRole('combobox', { name: 'Property' });
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
@@ -536,7 +533,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('"Load more" reveals the next batch of properties', async () => {
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
+    getAllUnits.mockResolvedValue(manyUnits(100));
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
 
@@ -546,7 +543,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   });
 
   it('hides "Load more" once every property is on screen', async () => {
-    getAllUnits.mockResolvedValue({ items: manyUnits(8), truncated: false });
+    getAllUnits.mockResolvedValue(manyUnits(8));
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(8));
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
@@ -560,7 +557,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
       unitId: 'u-findme',
       address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
     });
-    getAllUnits.mockResolvedValue({ items: units, truncated: false });
+    getAllUnits.mockResolvedValue(units);
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
 
@@ -571,7 +568,7 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
 
   it('a new query re-opens the browse list at 12 rather than keeping the revealed count', async () => {
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({ items: manyUnits(100), truncated: false });
+    getAllUnits.mockResolvedValue(manyUnits(100));
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
     await user.click(screen.getByRole('button', { name: 'Load more' }));
@@ -589,16 +586,13 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
     // the picker filters this array CLIENT-side - a unit missing from it is not
     // merely unbrowsable but unfindable.
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({
-      items: [
+    getAllUnits.mockResolvedValue([
         ...manyUnits(50),
         unit({
           unitId: 'u-findme',
           address: { line1: '900 Findme Ave', city: 'Atlanta', state: 'GA', zip: '30310' },
         }),
-      ],
-      truncated: false,
-    });
+      ]);
     renderComposer();
     await waitFor(() => expect(propertyRows()).toHaveLength(12));
     // 51 properties - more than one server page could have supplied.

@@ -173,7 +173,7 @@ beforeEach(() => {
   // RESOLVED (not 404-rejected): the pane's tests must never fall into the
   // fetch-the-whole-inbox fallback path.
   getContactTimeline.mockResolvedValue(timelinePage([]));
-  getAllConversations.mockResolvedValue({ items: [], truncated: false });
+  getAllConversations.mockResolvedValue([]);
 });
 afterEach(() => vi.restoreAllMocks());
 

@@ -164,7 +164,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
             // Best-effort — tours degrade to empty if the API is unavailable
           }
         } else if (opts.contactType === 'landlord') {
-          const myUnitIds = units.items
+          const myUnitIds = units
             .filter((u) => u.landlordId === contactId)
             .map((u) => u.unitId);
           try {
@@ -180,8 +180,8 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         if (signal.aborted) return;
         setState({
           status: 'ready',
-          placements: placements.items,
-          units: units.items,
+          placements,
+          units,
           tours,
           listingsSent,
           relayGroups,

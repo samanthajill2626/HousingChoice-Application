@@ -105,7 +105,7 @@ function renderCard(over: Partial<PeopleCardProps> = {}): {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAllContacts.mockResolvedValue({ items: [], truncated: false });
+  getAllContacts.mockResolvedValue([]);
 });
 
 /** The rendered roster rows, in payload order. */
@@ -519,10 +519,7 @@ describe('PeopleCard - edit mode', () => {
 
   it('adds ANY contact through the committed-pick search', async () => {
     getAllContacts.mockImplementation((params: { type: string }) =>
-      Promise.resolve({
-        items: params.type === 'landlord' ? [pmContact()] : [],
-        truncated: false,
-      }),
+      Promise.resolve(params.type === 'landlord' ? [pmContact()] : []),
     );
     addTourRosterMember.mockResolvedValue(view());
     await renderEditing({ roster: view({ members: [view().members[0]!] }) });

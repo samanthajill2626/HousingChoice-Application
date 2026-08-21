@@ -176,7 +176,7 @@ export function ScheduleTourForm({
     // unpickable and a tour unschedulable from this side of the form.
     void (async () => {
       try {
-        const { items } = await getAllContacts({ type: 'tenant' }, ac.signal);
+        const items = await getAllContacts({ type: 'tenant' }, ac.signal);
         if (ac.signal.aborted) return;
         setTenants(items);
         if (tenantId !== undefined) {
@@ -193,7 +193,7 @@ export function ScheduleTourForm({
         // EVERY page (the server pages /api/units at 50) - a first-page-only
         // read made properties later in the scan unpickable, so a tour could
         // not be scheduled on them at all.
-        const { items: all } = await getAllUnits({}, ac.signal);
+        const all = await getAllUnits({}, ac.signal);
         if (ac.signal.aborted) return;
         setUnits(all);
         // Pre-commit the unit side to the caller's suggestion — but only while

@@ -44,8 +44,7 @@ export interface PlacementsState {
  *  one that shows nothing - it looks complete. Re-throws AbortError so the
  *  effect's catch can bail cleanly. */
 async function loadAllPlacements(signal: AbortSignal): Promise<PlacementItem[]> {
-  const { items } = await getAllPlacements(signal);
-  return items;
+  return getAllPlacements(signal);
 }
 
 /** Best-effort whole-list read of one tenant-contacts view (live or soft-deleted)
@@ -54,8 +53,7 @@ async function loadAllPlacements(signal: AbortSignal): Promise<PlacementItem[]> 
  *  ask for tenants (the only contacts a placement's tenant can be). */
 async function loadContactPages(deleted: boolean, signal: AbortSignal): Promise<Contact[]> {
   try {
-    const { items } = await getAllContacts({ type: 'tenant', deleted }, signal);
-    return items;
+    return await getAllContacts({ type: 'tenant', deleted }, signal);
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
     return [];
@@ -78,8 +76,7 @@ async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
  *  to the unit id for that view. */
 async function loadUnitPages(deleted: boolean, signal: AbortSignal): Promise<UnitItem[]> {
   try {
-    const { items } = await getAllUnits({ deleted }, signal);
-    return items;
+    return await getAllUnits({ deleted }, signal);
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
     return [];

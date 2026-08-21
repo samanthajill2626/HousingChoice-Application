@@ -52,15 +52,17 @@ dataset), line numbers re-verified 2026-08-21:
 seeds number 1..handful; it is listed for completeness, not as a target.
 
 **Three more fan-outs found while fixing the six above (2026-08-21), NOT yet
-done** - same shape, different files, left out to keep the sweep reviewable:
+done** - same shape, different files, left out to keep the sweep reviewable.
+These line numbers are stable (the six-site sweep does not touch these files);
+the front-matter `refs:` still points at the six and goes stale when that lands:
 
-- `app/src/routes/today.ts` `getContact` - a memoized `getById` per unique
+- `app/src/routes/today.ts:357` `getContact` - a memoized `getById` per unique
   contact in the Today payload; drives both name hydration and the soft-delete
   check, so it needs WHOLE items (`getManyByIds`). Two-pass: collect the ids,
   batch, then walk.
-- `app/src/lib/rosterResolution.ts` `nameOf` - one `getById` per pending
+- `app/src/lib/rosterResolution.ts:633` `nameOf` - one `getById` per pending
   roster-add row, display-only, so `getDisplaysByIds` fits.
-- `app/src/routes/api.ts` (unread-counts-by-contact rail) - a `Promise.all`
+- `app/src/routes/api.ts:1899` (unread-counts-by-contact rail) - a `Promise.all`
   fan-out over the requested `contactIds`. Concurrent already, so this is round
   trips rather than latency; note it reads `phone_ref` / `email_ref`, which the
   display projection does NOT carry, so it needs `getManyByIds`.

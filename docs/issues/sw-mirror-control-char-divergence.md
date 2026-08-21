@@ -3,11 +3,32 @@ id: sw-mirror-control-char-divergence
 title: public/sw.js isPlausibleId omits the DEL character src/sw/route.ts rejects - the tested module and the shipped worker disagree
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard/sw
 created: 2026-08-16
-refs: dashboard/public/sw.js:190, dashboard/src/sw/route.ts:44, dashboard/src/sw/mirror.test.ts
+resolved: 2026-08-21
+refs: dashboard/public/sw.js:193, dashboard/src/sw/route.ts:46, dashboard/src/sw/mirror.test.ts
 ---
+
+**Resolution (2026-08-21).** Two halves, and the second is the one that matters.
+
+The divergence itself was repaired on `fix/quick-reply-surface`:
+`dashboard/public/sw.js:193` now reads `!/[/\\:\s\x00-\x1f\x7f]/.test(id)`,
+with `\x7f` present and a comment recording why.
+
+But that fix came with another literal PIN, which is the same mechanism that let
+this survive from `26a01b9f` to 2026-08-16 in the first place. So
+`mirror.test.ts` was rewritten to compare the two copies BEHAVIOURALLY - it
+lifts the mirror's functions out of the classic worker and runs them against the
+modules over a shared input table, with DEL present as an explicit
+`\u007F` escape (the test carries no raw control bytes, matching the
+convention route.ts sets for itself).
+
+Proven by re-introducing this exact bug: dropping `\x7f` from the mirror's class
+now fails 2 of the 10 cases. Under the old pins it passed.
+
+See [`sw-mirror-test-pins-literals-not-behaviour`](./sw-mirror-test-pins-literals-not-behaviour.md)
+for the mechanism and the other two probes.
 
 **Problem.** `dashboard/public/sw.js` is a hand-maintained VERBATIM MIRROR of
 the tested ES modules `dashboard/src/sw/route.ts` and

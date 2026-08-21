@@ -205,14 +205,55 @@ both:
    | `claimCrossCheckEvent` twice, FRESH table per round | 30 | 0 |
    | full `recordConversationEvent` twice via the real service, as the test does | 40 | 0 |
 
-   So it reproduces INSIDE vitest and not outside it, and it is not the
-   conditional write in isolation, not table freshness, and not the service path
-   itself. Next place to look is therefore the vitest environment or concurrent
-   load rather than this code path: worker pooling, the shared document client
-   across harnesses, or a second process touching the same access key while the
-   suite runs. Note the whole file's table lives under ONE
-   `testAccessKeyId()` database, which is shared with every other integration
-   suite in the worktree.
+   **ROOT CAUSE FOUND - a TTL time bomb, not contention at all.** The three
+   probes were clean because every one of them wrote a FUTURE `expires_at`
+   (`Date.now() + 3600`). The test does not.
+
+   - `expires_at` is a REAL TTL: `ensureTable` turns it on
+     (`dynamoAdmin.enableTtlIfNeeded`) and DynamoDB Local really does reap.
+   - The service derives it from the INJECTED clock:
+     `cleanupAt(from) = (from + cleanupMs) / 1000`.
+   - The file pins `T0 = 2026-08-11` and the default window is 7 days
+     (`GROUP_CROSSCHECK_CLEANUP_MS`), so every marker it writes carries
+     `expires_at = 2026-08-18`.
+
+   **From 2026-08-18 onward every marker is born already expired.** The reaper
+   deletes it at some unpredictable point mid-test, so a second claim of the
+   same `messageSid` finds nothing and reports itself FRESH - precisely what
+   "a DUPLICATE redelivery ... is deduped" asserts against.
+
+   That is a TIME BOMB, not a race. This file was fine until 2026-08-18 and
+   started rotting on its own, which matches when the reports began (the first
+   entry in this issue's own evidence is 2026-08-18). It also explains the
+   otherwise-impossible instrumented result of two identical claims both
+   returning fresh, and why it reproduced with the file running ALONE.
+
+   **Fix:** inject `cleanupMs` (an existing, previously unused dep seam) so the
+   markers outlive any run. Measured:
+
+   | | that test alone | whole file |
+   |---|---|---|
+   | before | 9 pass / 1 fail of 10 | 3 pass / 2 fail of 5 |
+   | after the drain only | - | 4 pass / 1 fail of 5 |
+   | after drain + TTL fix | **12 / 12** | **8 / 8** |
+
+   ### The same fuse is armed elsewhere, dated
+
+   Any integration test that pins a PAST clock and writes a TTL-bearing row has
+   this bug, and it fails on a schedule rather than under load. TTL-bearing
+   tables: `messages`, `matches`, `unmatched_email`, and the ai-runs table.
+
+   **`app/test/aiRunsRepo.integration.test.ts` is the next one to go off.** It
+   pins `startedAt: '2026-08-06T10:00:00.000Z'` and `RUN_TTL_DAYS = 90`, so its
+   rows carry `expires_at = 2026-11-04`. It is fine today and will begin flaking
+   **on or after 2026-11-04** with the same signature. Fix it before then, or
+   better, stop enabling TTL on integration-test tables at all - the reaper is
+   pure hazard there, and no test asserts reaping behaviour (the ai-runs suite
+   asserts the ATTRIBUTE VALUE, which does not need TTL enabled).
+
+   `app/test/groupReceipts.test.ts` and `app/test/mediaMirrorJob.test.ts` also
+   pin 2026 clocks but run entirely in memory, so they have no reaper and are
+   safe.
 2. **B** - `93ca271b` did NOT cure it. It stayed green on the 2026-08-21
    baseline but reproduced later the same day on `fix/e2e-harness-determinism`
    @`8b3dcfe2`, immediately after an 18-minute `npm run e2e` had hammered the

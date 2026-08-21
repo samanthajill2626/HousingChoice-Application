@@ -166,6 +166,27 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
       businessNumber: BUSINESS,
       logger: log as never,
       now: () => new Date(clock),
+      // THE DEDUPE MARKERS MUST OUTLIVE THE RUN. `expires_at` is a REAL TTL -
+      // ensureTable turns it on (dynamoAdmin.enableTtlIfNeeded) and DynamoDB
+      // Local really does reap - but the service derives it from the INJECTED
+      // clock: cleanupAt(from) = (from + cleanupMs) / 1000.
+      //
+      // T0 is hardcoded 2026-08-11 and the default window is 7 days
+      // (GROUP_CROSSCHECK_CLEANUP_MS), so from 2026-08-18 onward every marker
+      // this file writes is born ALREADY EXPIRED. The reaper then deletes it at
+      // some unpredictable point mid-test, and a second claim of the same
+      // messageSid finds nothing and reports itself FRESH - which is exactly
+      // what "a DUPLICATE redelivery ... is deduped" asserts against.
+      //
+      // That is a TIME BOMB, not a race: this file was fine until 2026-08-18
+      // and started rotting on its own, which matches when the flake reports
+      // began. Any integration test that pins a past clock AND writes a
+      // TTL-bearing row has the same fuse.
+      //
+      // 100 years keeps every marker alive regardless of when the suite runs,
+      // and nothing here asserts on cleanup behaviour.
+      // See docs/issues/npm-test-dynamodb-local-contention.md.
+      cleanupMs: 100 * 365 * 24 * 60 * 60 * 1000,
     });
     let imSeq = 0;
     return {

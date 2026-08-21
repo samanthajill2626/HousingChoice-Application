@@ -3,6 +3,7 @@ id: member-add-burn-first-residuals
 title: Member-add burn-first ordering has two benign residuals (false 409 on racing identical adds; crash window can wedge one phone for one group)
 type: debt
 severity: low
+status: open
 area: app
 created: 2026-07-17
 refs: app/src/routes/relayGroups.ts:280

@@ -2,7 +2,7 @@
 id: voice-transcribed-names-unreliable
 title: Names heard via voice transcription are not trustworthy enough for direct writes
 type: decision
-severity: medium
+severity: med
 status: open
 area: app
 created: 2026-07-20

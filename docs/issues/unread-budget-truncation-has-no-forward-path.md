@@ -103,7 +103,7 @@ At the production budget this needs roughly 2000 invisible residents ahead of
 the first visible row, so it is not an everyday state. The accrual paths that
 get there are [`inbound-reflags-closed-relay-group`](./inbound-reflags-closed-relay-group.md)
 and the mark-read half of
-[`markread-fanout-depends-on-stale-participant-gsi`](./markread-fanout-depends-on-stale-participant-gsi.md);
+[`mark-read-fanout-stale-gsi-skip`](./mark-read-fanout-stale-gsi-skip.md);
 the delete-side accrual was closed in the fix wave.
 
 NOT IN SCOPE HERE: that Retry is ineffective on a truncated page was a KNOWN,

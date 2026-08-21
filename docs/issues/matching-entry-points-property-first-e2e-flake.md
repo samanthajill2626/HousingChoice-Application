@@ -6,8 +6,17 @@ severity: med
 status: open
 area: e2e
 created: 2026-07-21
+updated: 2026-08-21
 refs: e2e/tests/dashboard-next/matching-entry-points.spec.ts:265, dashboard/src/routes/broadcasts/BroadcastComposer.tsx
 ---
+
+<!--
+  MERGED 2026-08-21. `matching-entry-points-picker-click-flake` (low, filed the
+  same day by a different mission) described this same spec line, this same
+  interception signature, and this same fix. Its file was deleted and its
+  distinct content - the verbatim failure text and the third sighting, which
+  disproves the load-only theory - folded in below. Do not re-file it.
+-->
 
 **Problem.** The "Matching page 'Send a property': property-first step" test
 (matching-entry-points.spec.ts:265) fails intermittently with a stable
@@ -19,6 +28,17 @@ never closed) when the click lands. The spec itself documents the overlay
 hazard ("Dismiss the typeahead dropdown (it overlays the list)"), and the
 plausible mechanism is a race: the fill() fires a search request, Escape closes
 the list, then the late search RESPONSE re-opens it.
+
+The verbatim signature to match sightings against:
+
+```
+locator.click: Test timeout of 30000ms exceeded
+- waiting for getByRole('button', { name: /887058 Matching Entry/ })
+  - locator resolved to <button class="_unitRow_...">
+- <li role="option" ... class="_option_...">887058 Matching Entry Ave...</li>
+  from <div class="_pickerField_...">... subtree intercepts pointer events
+- retrying click action
+```
 
 Evidence (2026-07-21, unit-media-cloudfront gate runs, all same signature):
 
@@ -33,8 +53,22 @@ Evidence (2026-07-21, unit-media-cloudfront gate runs, all same signature):
   reminder-count predicate misses only under full-suite load), needing
   repeated solo-evidence runs.
 
+Further sightings from the merged issue, on unrelated branches (the picker
+surface untouched by all of them), confirming it is not any one branch's
+regression:
+
+- unit-photo-transcode gate battery: failed 2x and passed 3x on the SAME tree
+  within one hour; base commit `6d8eec0c` passes the test solo.
+- final gate battery on the merged tip `f16285d4`: failed in the full run,
+  passed 3/3 solo minutes later.
+- planner gates on `0fd65de4`: **reproduced once in a SOLO 3-spec run.** This is
+  the important one - the overlay race is INTRINSIC, not merely load-amplified,
+  so "it only fails under full-suite load" is not a safe assumption when
+  adjudicating a gate.
+
 This is gate noise for every branch: a red full-suite run that is nobody's
-regression.
+regression. A real user can hit the same overlay, so the component-side fix
+below is worth more than the spec-side one.
 
 **Suggested fix.** Two independent hardenings, either sufficient:
 

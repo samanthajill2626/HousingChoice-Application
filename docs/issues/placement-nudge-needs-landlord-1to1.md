@@ -1,11 +1,12 @@
 ---
 id: placement-nudge-needs-landlord-1to1
 title: Landlord placement nudges silently skip when the landlord has no 1:1 conversation
-type: limitation
+type: bug
 severity: low
 status: resolved
 area: app
 created: 2026-07-03
+resolved: 2026-07-03
 refs: app/src/jobs/placementNudges.ts, app/src/jobs/tourReminders.ts, e2e/tests/scenarios/post-tour-application.spec.ts
 ---
 

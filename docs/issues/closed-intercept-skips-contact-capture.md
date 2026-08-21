@@ -3,6 +3,7 @@ id: closed-intercept-skips-contact-capture
 title: Closed-group late-text intercept skips contact auto-capture, so a contact-less sender's 1:1 thread is unreachable from the inbox
 type: debt
 severity: low
+status: open
 area: app
 created: 2026-07-17
 refs: app/src/routes/webhooks/twilio.ts:456, app/src/routes/webhooks/twilio.ts:934

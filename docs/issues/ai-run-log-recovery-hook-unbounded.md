@@ -2,7 +2,7 @@
 id: ai-run-log-recovery-hook-unbounded
 title: Abandoned-resolution recovery on the suggestions GET has no cap or deadline
 type: debt
-severity: medium
+severity: med
 status: resolved
 area: app
 created: 2026-08-09

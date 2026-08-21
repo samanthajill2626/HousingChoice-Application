@@ -338,7 +338,8 @@ the contact page.
 
 **Both fan-in routes depend on the eventually-consistent participant GSIs**
 (`byParticipantPhone` / `byParticipantEmail`), whose lag is an open filed defect
-(`docs/issues/markread-fanout-depends-on-stale-participant-gsi.md`). A fan-OUT
+(`docs/issues/mark-read-fanout-stale-gsi-skip.md`, which absorbed the separately
+filed `markread-fanout-depends-on-stale-participant-gsi` on 2026-08-21). A fan-OUT
 degrades gracefully under it; a fan-IN "pick exactly one" does not. Two
 consequences, both accepted rather than engineered around (the inbox reader
 carries a lag discriminator and a one-shot retry for this, `inbox.ts:976-1041`;

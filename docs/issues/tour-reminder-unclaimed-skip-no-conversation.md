@@ -2,7 +2,7 @@
 id: tour-reminder-unclaimed-skip-no-conversation
 title: "Tour reminder rungs for tenants without a 1:1 conversation are skipped WITHOUT being claimed - due forever, panel says 'sending shortly' indefinitely"
 type: bug
-severity: medium
+severity: med
 status: resolved
 area: app
 created: 2026-07-13

@@ -49,4 +49,6 @@ out of scope for a feature branch's fix wave. Filed here for the human to rule
 on.
 
 Related: [`dynamodb-local-cross-worktree-test-contention`](./dynamodb-local-cross-worktree-test-contention.md),
-[`db-update-gsis-integration-flake-under-load`](./db-update-gsis-integration-flake-under-load.md).
+[`npm-test-dynamodb-local-contention`](./npm-test-dynamodb-local-contention.md)
+(which absorbed the separately filed `db-update-gsis-integration-flake-under-load`
+on 2026-08-21).

@@ -112,6 +112,55 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect(found.get(second.contactId)).toEqual({ contactId: second.contactId, firstName: 'Grace' });
   });
 
+  it('getManyByIds batch-reads WHOLE items, de-dupes ids, and omits missing ones', async () => {
+    const first = await contacts.create({
+      type: 'landlord',
+      firstName: 'Ida',
+      email: 'ida.batch-whole@example.com',
+      company: 'Keystone Properties',
+    });
+    const second = await contacts.create({ type: 'tenant', firstName: 'Jo', status: 'searching' });
+
+    const found = await contacts.getManyByIds([
+      first.contactId,
+      'contact-missing',
+      first.contactId,
+      second.contactId,
+    ]);
+
+    expect([...found.keys()].sort()).toEqual([first.contactId, second.contactId].sort());
+    // WHOLE items - the attributes the display projection drops are exactly why
+    // this method exists (the unit roster reads `company`, the broadcast send
+    // path re-fences on `type`).
+    expect(found.get(first.contactId)).toMatchObject({
+      contactId: first.contactId,
+      type: 'landlord',
+      firstName: 'Ida',
+      company: 'Keystone Properties',
+    });
+    expect(found.get(second.contactId)).toMatchObject({ type: 'tenant', status: 'searching' });
+  });
+
+  it('getManyByIds pages past the 100-key BatchGetItem limit', async () => {
+    // 101 ids forces a second chunk; the map must carry every created contact.
+    const created = await Promise.all(
+      Array.from({ length: 101 }, (_, i) =>
+        contacts.create({ type: 'tenant', firstName: `Batch${i}` }),
+      ),
+    );
+
+    const found = await contacts.getManyByIds(created.map((c) => c.contactId));
+
+    expect(found.size).toBe(101);
+    for (const contact of created) {
+      expect(found.get(contact.contactId)?.firstName).toBe(contact.firstName);
+    }
+  });
+
+  it('getManyByIds returns an empty map for no ids without calling DynamoDB', async () => {
+    expect(await contacts.getManyByIds([])).toEqual(new Map());
+  });
+
   it('addPhone seeds phones[] from the scalar, attaches a second number via a pointer, and findByPhone resolves the owner', async () => {
     const A = nextPhone();
     const B = nextPhone();

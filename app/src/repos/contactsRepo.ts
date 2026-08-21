@@ -475,6 +475,15 @@ export interface ContactsRepo {
   /** Batch-read display fields by primary key. Missing ids are absent from the map. */
   getDisplaysByIds(contactIds: string[]): Promise<Map<string, ContactDisplayItem>>;
   /**
+   * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
+   * callers that read attributes outside the display projection (roster
+   * `company`; the broadcast send path's `type`/`sms_opt_out`/`sms_unreachable`
+   * re-fence). Prefer `getDisplaysByIds` when only a label is needed: same round
+   * trips, far less data. Missing ids are absent from the map, exactly like
+   * `getById` returning undefined - callers keep their own not-found handling.
+   */
+  getManyByIds(contactIds: string[]): Promise<Map<string, ContactItem>>;
+  /**
    * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
    * optionally narrowed by status (the (type=unknown, status=needs_review)
    * partition IS the triage queue). ONE Query per page — never a Scan.
@@ -644,6 +653,59 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     }));
     return Item as ContactItem | undefined;
   };
+
+  /**
+   * Shared BatchGetItem walk for the two by-primary-key batch reads. Chunks at
+   * the 100-key BatchGetItem limit and retries `UnprocessedKeys` (DynamoDB
+   * returns them on throttle or a 16MB response) with the same backoff the
+   * messages repo uses. Keys still unprocessed after the retries are WARNed and
+   * dropped, so a caller sees a short map rather than a throw - every consumer
+   * of these reads is best-effort display enrichment or a re-fence that treats
+   * a missing contact as "does not qualify".
+   *
+   * NOTE: base-table primary keys ONLY. BatchGetItem cannot read a GSI, so this
+   * is no help to findByPhone/findByEmail (see
+   * docs/issues/unread-badge-request-round-trip-cost.md).
+   */
+  const batchGetByIds = async <T extends { contactId: string }>(
+    contactIds: string[],
+    projection?: { ProjectionExpression: string; ExpressionAttributeNames: Record<string, string> },
+  ): Promise<Map<string, T>> => {
+    const found = new Map<string, T>();
+    const uniqueIds = [...new Set(contactIds)];
+    let unprocessed = 0;
+    for (let i = 0; i < uniqueIds.length; i += 100) {
+      let keys = uniqueIds.slice(i, i + 100).map((contactId) => ({ contactId }));
+      for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+        }
+        const response = await doc.send(
+          new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...projection } } }),
+        );
+        for (const item of (response.Responses?.[table] ?? []) as T[]) {
+          found.set(item.contactId, item);
+        }
+        keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ contactId: string }>;
+      }
+      unprocessed += keys.length;
+    }
+    if (unprocessed > 0) {
+      log.warn({ unprocessed }, 'contacts: BatchGet left keys unprocessed after retries');
+    }
+    return found;
+  };
+
+  /** The display projection, shared by getDisplayById and getDisplaysByIds. */
+  const DISPLAY_PROJECTION = {
+    ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
+    ExpressionAttributeNames: {
+      '#contactId': 'contactId',
+      '#firstName': 'firstName',
+      '#lastName': 'lastName',
+      '#phone': 'phone',
+    },
+  } as const;
 
   /** Load a contact or throw the same conditional error update() throws. */
   const requireContact = async (contactId: string): Promise<ContactItem> => {
@@ -850,58 +912,17 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
     async getDisplayById(contactId) {
       const response = await doc.send(
-        new GetCommand({
-          TableName: table,
-          Key: { contactId },
-          ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
-          ExpressionAttributeNames: {
-            '#contactId': 'contactId',
-            '#firstName': 'firstName',
-            '#lastName': 'lastName',
-            '#phone': 'phone',
-          },
-        }),
+        new GetCommand({ TableName: table, Key: { contactId }, ...DISPLAY_PROJECTION }),
       );
       return response.Item as ContactDisplayItem | undefined;
     },
 
     async getDisplaysByIds(contactIds) {
-      const found = new Map<string, ContactDisplayItem>();
-      const uniqueIds = [...new Set(contactIds)];
-      let unprocessed = 0;
-      for (let i = 0; i < uniqueIds.length; i += 100) {
-        let keys = uniqueIds.slice(i, i + 100).map((contactId) => ({ contactId }));
-        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
-          if (attempt > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
-          }
-          const response = await doc.send(
-            new BatchGetCommand({
-              RequestItems: {
-                [table]: {
-                  Keys: keys,
-                  ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
-                  ExpressionAttributeNames: {
-                    '#contactId': 'contactId',
-                    '#firstName': 'firstName',
-                    '#lastName': 'lastName',
-                    '#phone': 'phone',
-                  },
-                },
-              },
-            }),
-          );
-          for (const item of (response.Responses?.[table] ?? []) as ContactDisplayItem[]) {
-            found.set(item.contactId, item);
-          }
-          keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ contactId: string }>;
-        }
-        unprocessed += keys.length;
-      }
-      if (unprocessed > 0) {
-        log.warn({ unprocessed }, 'contacts: BatchGet left keys unprocessed after retries');
-      }
-      return found;
+      return batchGetByIds<ContactDisplayItem>(contactIds, DISPLAY_PROJECTION);
+    },
+
+    async getManyByIds(contactIds) {
+      return batchGetByIds<ContactItem>(contactIds);
     },
 
     async listByType(type, opts = {}) {

@@ -75,6 +75,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
         contacts.filter((contact) => wanted.has(contact.contactId)).map((contact) => [contact.contactId, contact]),
       );
     },
+    async getManyByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts.filter((contact) => wanted.has(contact.contactId)).map((contact) => [contact.contactId, contact]),
+      );
+    },
     async createIfAbsent(item) {
       if (contacts.some((c) => c.contactId === item.contactId)) return false;
       contacts.push({ ...item });

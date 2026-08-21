@@ -1635,6 +1635,25 @@ export function createFakeWorld(): FakeWorld {
       return new Map(
         contacts
           .filter((contact) => wanted.has(contact.contactId))
+          // MODELS THE PROJECTION: the real BatchGet returns ONLY these fields,
+          // so a caller that reads anything else (roster `company`, the send
+          // path's fences) fails here exactly as it would against DynamoDB.
+          .map((contact) => [
+            contact.contactId,
+            {
+              contactId: contact.contactId,
+              ...(contact.firstName !== undefined && { firstName: contact.firstName }),
+              ...(contact.lastName !== undefined && { lastName: contact.lastName }),
+              ...(typeof contact.phone === 'string' && { phone: contact.phone }),
+            },
+          ] as const),
+      );
+    },
+    async getManyByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts
+          .filter((contact) => wanted.has(contact.contactId))
           .map((contact) => [contact.contactId, contact] as const),
       );
     },

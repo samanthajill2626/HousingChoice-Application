@@ -51,6 +51,24 @@ dataset), line numbers re-verified 2026-08-21:
 `resolveSeeds` (broadcasts.ts:340) is sequential too but its own comment notes
 seeds number 1..handful; it is listed for completeness, not as a target.
 
+**Three more fan-outs found while fixing the six above (2026-08-21), NOT yet
+done** - same shape, different files, left out to keep the sweep reviewable:
+
+- `app/src/routes/today.ts` `getContact` - a memoized `getById` per unique
+  contact in the Today payload; drives both name hydration and the soft-delete
+  check, so it needs WHOLE items (`getManyByIds`). Two-pass: collect the ids,
+  batch, then walk.
+- `app/src/lib/rosterResolution.ts` `nameOf` - one `getById` per pending
+  roster-add row, display-only, so `getDisplaysByIds` fits.
+- `app/src/routes/api.ts` (unread-counts-by-contact rail) - a `Promise.all`
+  fan-out over the requested `contactIds`. Concurrent already, so this is round
+  trips rather than latency; note it reads `phone_ref` / `email_ref`, which the
+  display projection does NOT carry, so it needs `getManyByIds`.
+
+`app/src/jobs/broadcastFanOut.ts` resolves one contact per recipient, but that
+job already does per-recipient work; batching there buys much less. Not a
+target.
+
 The messages repo already has the batching precedent
 (`getManyByTsMsgIds`, app/src/repos/messagesRepo.ts:2451 - BatchGetItem chunked
 at 100 keys with an UnprocessedKeys retry loop and backoff). The contacts base

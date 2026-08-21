@@ -32,6 +32,32 @@ is not deterministic. Main flakes. That distinction matters because a
 deterministic red can be waited out, while a flake means every gate result on
 every branch has to be adjudicated by hand.
 
+**Baseline 2026-08-21** (`fix/e2e-harness-determinism` @ `e0fb96e1`, before any
+edit on that branch, otherwise-idle box):
+
+```
+app        1 failed | 317 passed | 1 skipped (319 files) - 5654 tests passed
+dashboard  168 passed (2524 tests)
+e2e        17 passed (469 tests)
+fake-twilio 33 passed (225 tests)
+scripts    13 passed (109 tests)
+```
+
+The single failure was suite A below. That run is the reference point for this
+issue: **only A currently reproduces.**
+
+**Two of the four suites are already remediated** - verified in the same
+worktree, and the reason this issue shrank rather than grew:
+
+- **C (`seedProfile`) is FIXED.** The record said it crossed
+  `testTimeout: 15_000` at `app/vitest.config.ts:16`. That config now reads
+  `testTimeout: 60_000` (line 27), and the named test carries its own
+  `240_000` budget at `seedProfile.integration.test.ts:138`.
+- **D (`seedLive`) is FIXED.** Both heavy cases carry `120_000` budgets.
+
+They are kept described below because the evidence is still the best record of
+the failure class, not because they are open work.
+
 **Why it matters.** While this holds, "green" means nothing on its own. Every
 branch has to compare its failure set against a base-commit run before the gate
 can be read - slow, and exactly the condition under which a real regression gets
@@ -112,18 +138,18 @@ both:
   database per run`. Suite B was expected to be cured by that; re-check whether
   it still recurs post-93ca271b before designing anything for it.
 
-**Suggested fix.** Cheapest first; they are independent and can land separately:
+**Suggested fix.** C and D are done (per-test budgets, above). What remains:
 
-1. **C and D** - give the two heavy seed round-trips an explicit per-test timeout
-   (the vitest third argument, e.g. `60_000`) rather than raising the global one.
-   The global 15s is a useful upper bound for the ~3.5k fast tests. Cheap, no
-   infrastructure change, closes two of the four.
-2. **B** - confirm whether `93ca271b` already cured it. If it recurs, either
-   serialize the schema-mutating lane away from the other integration suites, or
-   retry `UpdateTable` on `InternalFailure`.
-3. **A** - make the ordering/window assertions robust to latency: explicit waits
-   on state rather than call-order spies, or widened windows.
-4. **Structural, if 1-3 are not enough** - establish whether these suites can
+1. **A** - the only suite reproducing as of the 2026-08-21 baseline, so it is
+   the whole of this issue's live scope. Make the ordering/window assertions
+   robust to latency: explicit waits on state rather than call-order spies, or
+   widened windows. The failing case on that baseline was "a filing for a
+   DIFFERENT author does not clear this author event".
+2. **B** - confirm whether `93ca271b` already cured it; it did NOT reproduce on
+   the 2026-08-21 baseline. If it recurs, either serialize the schema-mutating
+   lane away from the other integration suites, or retry `UpdateTable` on
+   `InternalFailure`.
+3. **Structural, if 1-2 are not enough** - establish whether these suites can
    share a DynamoDB Local container with the rest of the suite at all. Give them
    a throwaway table prefix per run (some of this already exists) and confirm no
    cross-suite table reuse remains; or serialize them; or pin the container

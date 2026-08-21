@@ -122,8 +122,17 @@ describe('share-broadcast API (M1.8a)', () => {
   });
 
   afterEach(async () => {
-    await queueAdapter.settle();
-    _resetForTests();
+    // The reset lives in `finally` so a slow drain can never poison the NEXT
+    // test. Before this, a settle() that blew the hook budget skipped
+    // _resetForTests() entirely, and the following tests inherited the poisoned
+    // module state and failed with unrelated-looking errors ("expected 500 to
+    // be 200") - one real cause reported as three failures. See
+    // docs/issues/broadcast-fanout-tests-blow-default-hooktimeout.md.
+    try {
+      await queueAdapter.settle();
+    } finally {
+      _resetForTests();
+    }
   });
 
   it('POST /api/broadcasts creates a draft + estimates the audience', async () => {

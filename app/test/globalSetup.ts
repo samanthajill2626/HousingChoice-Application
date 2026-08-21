@@ -11,10 +11,10 @@
 // worktree key auto-creates the tables (idempotent — ensureTable skips
 // existing). No manual db:create step needed.
 //
-// Fail-soft: if DynamoDB Local is unreachable (Docker down), a clear
-// console.warn is emitted and setup returns — pure-unit test runs are
-// unaffected. Integration tests that actually need the DB will skip or fail
-// naturally via their own endpoint-reachability checks.
+// FAIL-LOUD (changed 2026-08-21): if DynamoDB Local is unreachable this THROWS
+// and the run stops. It used to warn and continue, which meant `npm test` could
+// exit 0 while 631 tests across 46 `skipIf(!reachable)` suites never ran. Set
+// ALLOW_SKIP_DYNAMO_TESTS=1 for a deliberate unit-only pass.
 //
 // Local-only guard: we refuse (skip with a console.warn) for any non-localhost
 // endpoint. The guard is the point — this setup NEVER creates tables against
@@ -46,15 +46,44 @@ export async function ensureKeyedLocalTables(opts: {
     return;
   }
 
-  // Reachability probe — if Docker is down, warn and bail so pure-unit runs pass.
+  // Reachability probe. FAILS THE RUN by default when DynamoDB Local is down.
+  //
+  // This used to warn and return, which made `npm test` a liar: 46 suites carry
+  // `describe.skipIf(!reachable)`, so with Docker down **631 tests silently do
+  // not run and the gate still exits 0**. `npm test` is one of the three
+  // required completion gates (AGENTS.md), and a gate that quietly omits a
+  // third of the app suite is worse than one that fails - it is the shape that
+  // lets a real regression through while everything looks green.
+  //
+  // Docker is already a hard requirement of this repo (e2e needs it, and
+  // AGENTS.md says so), so requiring it for the integration lane costs nobody
+  // anything they did not already have. What changes is that the cost of NOT
+  // having it is now visible.
+  //
+  // Deliberately an opt-OUT, not an opt-in: someone running a focused unit-only
+  // pass can set ALLOW_SKIP_DYNAMO_TESTS=1 and take responsibility for the gap.
+  // The default is to tell the truth.
+  //
+  // See docs/issues/unread-index-integration-coverage-requires-local-dynamo.md.
   try {
     await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
   } catch {
-    console.warn(
-      `[globalSetup] DynamoDB Local not reachable at ${endpoint} — skipping table bootstrap. ` +
-        `Integration tests will fail until Docker is running (npm run db:start).`,
+    if (process.env.ALLOW_SKIP_DYNAMO_TESTS === '1') {
+      console.warn(
+        `[globalSetup] DynamoDB Local not reachable at ${endpoint}, and ` +
+          `ALLOW_SKIP_DYNAMO_TESTS=1 is set. SKIPPING the integration lane: ` +
+          `631 tests across 46 suites will NOT run, and a green result does not ` +
+          `cover them.`,
+      );
+      return;
+    }
+    throw new Error(
+      `DynamoDB Local is not reachable at ${endpoint}, so the integration lane ` +
+        `cannot run - 46 suites (~631 tests) would silently skip and this gate ` +
+        `would still report green.\n\n` +
+        `  Fix:  npm run db:start\n` +
+        `  Or:   ALLOW_SKIP_DYNAMO_TESTS=1 npm test   (unit-only, and you own the gap)\n`,
     );
-    return;
   }
 
   // Set the credentials so createDynamoClient() (called by createAllTables)

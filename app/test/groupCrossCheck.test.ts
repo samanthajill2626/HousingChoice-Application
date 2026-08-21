@@ -25,7 +25,7 @@
 // and asserts on the alarms carrying that rail - no cross-test isolation needed,
 // and the assertions stay true no matter what else is in flight.
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -80,6 +80,58 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
     doc.destroy();
     client.destroy();
   }, 120_000);
+
+  // ---------------------------------------------------------------------------
+  // TEST ISOLATION - why this drain exists
+  // ---------------------------------------------------------------------------
+  // Every test in this file shares ONE table and, more importantly, ONE deadline
+  // partition. `harness()` gives each test a unique `rail` and `sweep()` filters
+  // the RESULT to that rail - so the ASSERTIONS are isolated, but the EFFECTS
+  // are not: `sweepCrossCheckDeadlines` is global, and it reads
+  // `listDueRows(partition, through, SWEEP_BATCH)` with SWEEP_BATCH = 50
+  // (app/src/services/groupCrossCheck.ts:157).
+  //
+  // So an unresolved pending row left by test 3 is still sitting in the
+  // partition when test 20 sweeps. As they accumulate toward 50, a later test's
+  // sweep can spend its whole batch on OTHER tests' rows and never reach its
+  // own - its expected alarm never appears, or a `toEqual([])` passes for the
+  // wrong reason. Which rows are left over depends on how far each earlier
+  // sweep got, so the failing CASE moves between runs.
+  //
+  // That is the nondeterminism recorded in
+  // docs/issues/npm-test-dynamodb-local-contention.md as "suite A", and it is
+  // ALSO why that suite fails when run ALONE, which container contention alone
+  // could never explain: the file poisons itself, and load only changes how
+  // fast. One test already worked around it by hand
+  // ("resolve it so it does not leak into a later sweep").
+  //
+  // Draining after every test restores real isolation: each test starts from an
+  // empty partition, so no test's outcome depends on which tests ran before it.
+  // FAR_FUTURE is past every deadline any test in this file can create, and the
+  // loop keeps going until a sweep comes back empty, because one sweep only
+  // clears up to SWEEP_BATCH rows.
+  const FAR_FUTURE = '2099-01-01T00:00:00.000Z';
+  const drainer = createGroupCrossCheck({
+    messagesRepo: createMessagesRepo({ doc, env: testEnv }),
+    settingsRepo: {
+      async putGroupTimestamp() {},
+      async getGroupTimestamp() {
+        return undefined;
+      },
+    } as never,
+    businessNumber: BUSINESS,
+    logger: { info() {}, warn() {}, error() {}, debug() {} } as never,
+    now: () => new Date(FAR_FUTURE),
+  });
+
+  afterEach(async () => {
+    // Bounded: SWEEP_BATCH is 50 and no test creates anything like 500 rows, so
+    // ten passes is a generous ceiling that still cannot hang the suite.
+    for (let pass = 0; pass < 10; pass += 1) {
+      const outcome = await drainer.sweepCrossCheckDeadlines(FAR_FUTURE);
+      if (outcome.alarms.length === 0) return;
+    }
+  }, 60_000);
 
   let seq = 0;
   /**

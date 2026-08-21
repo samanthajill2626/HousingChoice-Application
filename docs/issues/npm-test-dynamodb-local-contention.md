@@ -140,11 +140,33 @@ both:
 
 **Suggested fix.** C and D are done (per-test budgets, above). What remains:
 
-1. **A** - the only suite reproducing as of the 2026-08-21 baseline, so it is
-   the whole of this issue's live scope. Make the ordering/window assertions
-   robust to latency: explicit waits on state rather than call-order spies, or
-   widened windows. The failing case on that baseline was "a filing for a
-   DIFFERENT author does not clear this author event".
+1. **A** - the most persistent suite, and the evidence now points at the TESTS,
+   not only the container. Make the ordering/window assertions robust to
+   latency: explicit waits on state rather than call-order spies, or widened
+   windows.
+
+   **A FAILS ALONE, sometimes** (new, 2026-08-21). The framing above - and the
+   repo's standing adjudication recipe - assume these files "pass when run in
+   isolation". For suite A that is not reliably true. Four consecutive
+   observations on `fix/e2e-harness-determinism` @`1a9811d9`:
+
+   | run | result | failing case |
+   |---|---|---|
+   | baseline full suite (pre-edit) | FAIL | `matching, in both delivery orders > a filing for a DIFFERENT author does not clear this author event` |
+   | post-merge full suite | FAIL | `the grace deadline and the alarm > a would-be alarm whose classic filing DID land is reconciled QUIETLY, not alarmed` |
+   | file ALONE | FAIL (1 of 26) | - |
+   | file ALONE, immediately after | PASS (26/26) | - |
+
+   So the failing CASE varies run to run (as recorded), but isolation is not a
+   reliable green either. A purely container-contention story cannot explain a
+   solo failure on an otherwise-idle box, which means suite A carries genuine
+   latency-dependent assertions - the spy-order and window predicates remedy 1
+   already suspects. Treat remedy 1 as the primary fix for A, not a fallback.
+
+   **Consequence for gate adjudication:** for THIS file, "re-run it alone" can
+   produce either colour and proves less than the recipe implies. Compare the
+   failing FILE against a base run - that is what still holds - and re-run alone
+   more than once before drawing a conclusion.
 2. **B** - `93ca271b` did NOT cure it. It stayed green on the 2026-08-21
    baseline but reproduced later the same day on `fix/e2e-harness-determinism`
    @`8b3dcfe2`, immediately after an 18-minute `npm run e2e` had hammered the

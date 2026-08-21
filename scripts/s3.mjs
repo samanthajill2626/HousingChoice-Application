@@ -63,6 +63,29 @@ async function waitForHealthy(timeoutMs = 30_000) {
   throw new Error(`MinIO did not become healthy at ${url} within ${timeoutMs}ms`);
 }
 
+/**
+ * Did `docker run` fail because a CONCURRENT starter got there first? Both
+ * messages mean the container we wanted now exists, which is success for us.
+ */
+function isStartRaceError(err) {
+  const text = `${err?.stderr ?? ''}${err?.message ?? ''}`.toLowerCase();
+  return (
+    text.includes('is already in use by container')
+    || text.includes('conflict. the container name')
+    || text.includes('port is already allocated')
+    || text.includes('address already in use')
+  );
+}
+
+/** `docker start`, tolerating a racing starter that already started it. */
+async function startExisting() {
+  try {
+    await docker('start', CONTAINER_NAME);
+  } catch (err) {
+    if (!isStartRaceError(err)) throw err;
+  }
+}
+
 /** Idempotent start: running -> no-op; stopped -> start; absent -> run. */
 export async function ensureS3Started() {
   await assertDaemonUp();
@@ -71,16 +94,26 @@ export async function ensureS3Started() {
     console.log(`s3:start — ${CONTAINER_NAME} already running`);
   } else if (state === 'stopped') {
     console.log(`s3:start — starting existing container ${CONTAINER_NAME}`);
-    await docker('start', CONTAINER_NAME);
+    await startExisting();
   } else {
     console.log(`s3:start — creating container ${CONTAINER_NAME} (ephemeral; data lost on docker rm)`);
-    await docker(
-      'run', '-d', '--name', CONTAINER_NAME,
-      '-p', '9000:9000', '-p', '9001:9001',
-      '-e', `MINIO_ROOT_USER=${MINIO_ROOT_USER}`,
-      '-e', `MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}`,
-      'minio/minio', 'server', '/data', '--console-address', ':9001',
-    );
+    try {
+      await docker(
+        'run', '-d', '--name', CONTAINER_NAME,
+        '-p', '9000:9000', '-p', '9001:9001',
+        '-e', `MINIO_ROOT_USER=${MINIO_ROOT_USER}`,
+        '-e', `MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}`,
+        'minio/minio', 'server', '/data', '--console-address', ':9001',
+      );
+    } catch (err) {
+      // Another cold starter won the race - see the twin comment in db.mjs.
+      // This is the container that actually hung in the observed incident:
+      // one lane's session stalled at "ensuring MinIO" while its neighbour was
+      // mid-`docker run`. See docs/issues/e2e-lane-cold-start-container-race.md.
+      if (!isStartRaceError(err)) throw err;
+      console.log(`s3:start — another starter created ${CONTAINER_NAME} first; waiting for it`);
+      if ((await containerState()) === 'stopped') await startExisting();
+    }
   }
   await waitForHealthy();
   console.log(`s3:start — MinIO ready at ${LOCAL_S3_ENDPOINT} (console :9001)`);

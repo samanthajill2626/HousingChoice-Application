@@ -11,10 +11,8 @@ import {
   leasePathFor,
   newOwnerToken,
   readLease,
-  readSchemaHash,
   releaseLane,
   reserveLane,
-  stampSchemaHash,
 } from './laneLease.mjs';
 
 // These tests exercise the REAL filesystem, deliberately: the mutual exclusion
@@ -197,15 +195,16 @@ describe('laneLease - hold and release', () => {
 
   it('releases on the TOKEN, not on the exact bytes we wrote', () => {
     // The token is the ownership proof, and the record legitimately changes
-    // shape under us: reserve -> claim rewrites state/pid/claimedAt, and
-    // stampSchemaHash rewrites it again. A release that compared whole bytes
-    // against what reserve wrote could never release a lane that was claimed,
-    // which is every real lane.
+    // shape under us: reserve -> claim rewrites state, pid and claimedAt. A
+    // release that compared whole bytes against what reserve wrote could never
+    // release a lane that had been claimed - which is every real lane.
     const lane = freshLane();
     const token = reserveLane(lane)!;
+    const reservedBytes = readFileSync(leasePathFor(lane), 'utf8');
     claimLane(lane, token);
-    stampSchemaHash(lane, token, 'sha-9999');
-    expect(JSON.parse(readFileSync(leasePathFor(lane), 'utf8')).ownerToken).toBe(token);
+    const claimedBytes = readFileSync(leasePathFor(lane), 'utf8');
+    expect(claimedBytes).not.toBe(reservedBytes);
+    expect(JSON.parse(claimedBytes).ownerToken).toBe(token);
     expect(releaseLane(lane, token)).toBe(true);
     expect(existsSync(leasePathFor(lane))).toBe(false);
   });
@@ -221,23 +220,6 @@ describe('laneLease - hold and release', () => {
     expect(releaseLane(lane, ourToken)).toBe(false);
     expect(existsSync(leasePathFor(lane))).toBe(true);
     expect(holdsLane(lane, theirToken)).toBe(true);
-  });
-});
-
-describe('laneLease - schema fingerprint', () => {
-  it('round-trips a schema hash for the lease holder', () => {
-    const lane = freshLane();
-    const token = reserveLane(lane)!;
-    expect(readSchemaHash(lane)).toBeNull();
-    expect(stampSchemaHash(lane, token, 'sha-1234')).toBe(true);
-    expect(readSchemaHash(lane)).toBe('sha-1234');
-  });
-
-  it('refuses to stamp a lane we do not hold', () => {
-    const lane = freshLane();
-    reserveLane(lane);
-    expect(stampSchemaHash(lane, newOwnerToken(), 'sha-1234')).toBe(false);
-    expect(readSchemaHash(lane)).toBeNull();
   });
 });
 

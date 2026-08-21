@@ -21,8 +21,6 @@ export interface LaneLeaseRecord {
   claimedAt?: string;
   gitDir?: string | null;
   appCommit?: string | null;
-  /** Fingerprint of the table/GSI schema this lane's tables were built at. */
-  schemaHash?: string;
 }
 
 export interface ReserveLaneOpts {
@@ -87,8 +85,3 @@ export function holdsLane(lane: number, ownerToken: string | null | undefined): 
 /** Release a lane we hold. Never removes someone else's lease. */
 export function releaseLane(lane: number, ownerToken: string | null | undefined): boolean;
 
-/** Record the table-schema fingerprint this lane's tables were built at. */
-export function stampSchemaHash(lane: number, ownerToken: string, schemaHash: string): boolean;
-
-/** The schema fingerprint recorded for this lane, or null. */
-export function readSchemaHash(lane: number): string | null;

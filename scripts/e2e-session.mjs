@@ -556,6 +556,21 @@ async function main() {
   await ensureS3Started();
   log('creating tables + media bucket + seeding…');
   await runOnce('db-create', ['--import', 'tsx', path.join('app', 'scripts', 'db-create.ts')]);
+  // RETROFIT MISSING GSIs before seeding. `db-create`'s ensureTable is
+  // CREATE-ONLY: on ResourceInUseException it reports 'exists' and touches
+  // nothing, so a lane whose tables predate a new GSI in lib/tables.ts never
+  // gains that index - forever. The symptom is environment drift wearing a
+  // regression's clothes: on 2026-07-21 a schema-adding day made lanes 15 and
+  // 16 fail a BROAD ~20-spec cluster, deterministic on those lanes, green on a
+  // fresh one, costing ~5 full-suite runs before anyone suspected the lane.
+  //
+  // db:update-gsis is the no-data-loss remedy built for exactly this: it diffs
+  // each live table against its TableSpec and CREATEs only what is missing,
+  // one index per UpdateTable as DynamoDB requires. Idempotent - a lane that is
+  // already current reports `ok` and is left alone - and hard-gated to a
+  // localhost endpoint, so it can never touch a deployed table.
+  // See docs/issues/e2e-lane-tables-stale-schema.md.
+  await runOnce('db-update-gsis', ['--import', 'tsx', path.join('app', 'scripts', 'db-update-gsis.ts')]);
   await runOnce('s3-create', ['--import', 'tsx', path.join('app', 'scripts', 's3-create.ts')]);
   await runOnce('db-seed', ['--import', 'tsx', path.join('app', 'scripts', 'db-seed.ts')]);
 
@@ -588,6 +603,11 @@ async function main() {
   await cleanSlate();
 
   log(`ready — app :${ports.app} (${appUrl}), web :${ports.dashboard} (${dashboardUrl}), fake-twilio :${ports.fake} (${fakeUrl}), MinIO :9000 (MESSAGING_DRIVER=twilio → fake)`);
+  // Filtered runs (`npx playwright test <file>` from e2e/) now REUSE this
+  // session automatically - playwright.config.ts prefers a live lane.json. The
+  // explicit export is still printed as the manual override, and because an
+  // agent reading this log should be able to see which lane to watch.
+  log(`filtered runs reuse this session automatically; to force it: E2E_LANE=${lane}`);
 
   sendProfilerReady(
     activeProfilerOwnerToken,

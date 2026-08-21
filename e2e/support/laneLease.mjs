@@ -318,34 +318,10 @@ export function releaseLane(lane, ownerToken) {
   return removeIfUnchanged(lane, existing.raw);
 }
 
-/**
- * Persist the lane's table-schema fingerprint alongside the lease, so a boot
- * can tell whether this lane's DynamoDB tables predate a GSI change.
- * See docs/issues/e2e-lane-tables-stale-schema.md.
- * @param {number} lane
- * @param {string} ownerToken
- * @param {string} schemaHash
- * @returns {boolean}
- */
-export function stampSchemaHash(lane, ownerToken, schemaHash) {
-  if (!holdsLane(lane, ownerToken)) return false;
-  const existing = readLease(lane);
-  if (existing === null) return false;
-  try {
-    writeFileSync(leasePathFor(lane), JSON.stringify({ ...existing.record, schemaHash }, null, 2));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The schema fingerprint recorded for this lane, or null if none/unknown.
- * @param {number} lane
- * @returns {string | null}
- */
-export function readSchemaHash(lane) {
-  const existing = readLease(lane);
-  const value = existing?.record?.schemaHash;
-  return typeof value === 'string' ? value : null;
-}
+// NOTE: an earlier draft carried stampSchemaHash/readSchemaHash here, to let a
+// boot detect that a lane's tables predated a GSI change. They were removed
+// unused: the repo already ships `db:update-gsis`, which diffs each live table
+// against its TableSpec and adds only what is missing, with no data loss. The
+// stale-lane fix is to CALL that in the e2e boot path (scripts/e2e-session.mjs)
+// - a fingerprint cache in front of it would add a second source of truth about
+// schema currency, and the one that can be wrong.

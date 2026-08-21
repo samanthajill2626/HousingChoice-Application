@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app
 created: 2026-07-09
-refs: app/src/routes/broadcasts.ts:206, dashboard/src/routes/broadcasts/useBroadcastResults.ts:46
+updated: 2026-08-21
+refs: app/src/routes/broadcasts.ts:227, dashboard/src/routes/broadcasts/useBroadcastResults.ts:46
 ---
 
 **Problem (review note, 2026-07-09 - spec-accepted cost, tracked so it is not
@@ -24,6 +25,13 @@ the contact's CURRENT phone (fresh getById), not the number the message was
 actually sent to. If a contact's number changes after the send, the results
 row shows the new number though delivery went to the old one. phone#<E164>
 keys are unaffected (the phone IS the key).
+
+**Related (2026-08-21).** The same function is also a batching target -
+[`contacts-batchget-amplified-reads`](contacts-batchget-amplified-reads.md)
+switches its per-id `getById` fan-out to a chunked BatchGet. The two remedies
+compose and neither subsumes the other: batching cuts the reads per GET (~1,500
+-> ~15 round trips), caching cuts the number of GETs that pay at all. Do the
+batching first; re-judge whether the cache is still worth it afterwards.
 
 **Suggested fix.** A per-request memo is already implicit (one resolve per GET);
 add a short-TTL (say 30s) in-process cache keyed by contactId, or resolve the

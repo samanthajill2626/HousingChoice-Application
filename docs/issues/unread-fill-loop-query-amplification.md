@@ -9,6 +9,14 @@ created: 2026-08-16
 refs: app/src/lib/unreadFeed.ts, app/src/routes/inbox.ts
 ---
 
+**SCOPED INTO A MISSION 2026-08-21.** This is one of the two amplifications
+inside the same badge request; the other is the per-item contact lookup. They
+are sequenced together at
+[`unread-badge-request-round-trip-cost`](unread-badge-request-round-trip-cost.md),
+which calls for fixing THIS one first: it is the cheaper change and the larger
+reduction, and the contact-lookup cost should be re-measured against the fixed
+loop before anything is designed for it.
+
 **Problem.** Filed from the spec-conformance review of
 `feat/inbox-unread-index` (findings 2 and 5, both measured against the real
 `aggregateInbox`).

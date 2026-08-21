@@ -39,6 +39,25 @@ export default defineConfig({
     env: {
       AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? testAccessKeyId(),
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? 'local',
+      // NO TTL REAPER IN TESTS. Services derive `expires_at` from their
+      // INJECTED clock, so any suite that pins a past date writes rows that are
+      // born already expired - and DynamoDB Local really does reap them, on its
+      // own schedule, mid-test. The failure is intermittent and only starts on
+      // the date the pinned clock plus the retention window falls behind real
+      // time, which makes it look like load flakiness for as long as it takes
+      // someone to do the arithmetic.
+      //
+      // groupCrossCheck lost that bet on 2026-08-18 (pinned 2026-08-11, 7-day
+      // window) and aiRunsRepo.integration is set to lose it on 2026-11-04
+      // (pinned 2026-08-06, 90-day window). Setting this once here immunises
+      // every integration suite, including the ones nobody has written yet -
+      // ~60 ensureTable call sites that would otherwise each have to remember.
+      //
+      // Nothing asserts that TTL is ENABLED on a live table, so this costs the
+      // suite nothing. db:create, the e2e lanes and every deployed path leave
+      // the flag unset and keep the reaper.
+      // See docs/issues/npm-test-dynamodb-local-contention.md.
+      DYNAMO_DISABLE_TTL: '1',
     },
     // Auto-bootstrap the hc-local- tables under the active test key before
     // any test runs. Fail-soft: if Docker is down the setup warns and returns;

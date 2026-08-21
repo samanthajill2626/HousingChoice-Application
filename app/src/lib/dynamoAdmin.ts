@@ -81,6 +81,7 @@ export async function ensureTable(
   client: DynamoDBClient,
   spec: TableSpec,
   physicalName: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<EnsureTableResult> {
   let result: EnsureTableResult = 'created';
   try {
@@ -90,7 +91,30 @@ export async function ensureTable(
     if (!(err instanceof ResourceInUseException)) throw err;
     result = 'exists';
   }
-  if (spec.ttlAttribute) {
+  // TTL IS A TIME BOMB IN TESTS, so it is opt-OUT-able for them.
+  //
+  // A test that pins a PAST clock and writes a TTL-bearing row is writing a row
+  // that is born already expired, because services derive `expires_at` from
+  // their injected clock. DynamoDB Local really does reap, on its own schedule,
+  // so the row vanishes mid-test and an assertion about its continued existence
+  // fails - intermittently, and only from the date the pinned clock plus the
+  // retention window falls behind real time.
+  //
+  // That is not hypothetical. groupCrossCheck.test.ts pinned 2026-08-11 with a
+  // 7-day window, so from 2026-08-18 its dedupe markers were born expired and
+  // "a DUPLICATE redelivery is deduped" began failing ~10% of runs - a suite
+  // that had been stable for months started rotting on a date, and it was
+  // misfiled as container contention for three days.
+  // aiRunsRepo.integration.test.ts has the identical fuse set for 2026-11-04.
+  //
+  // No test anywhere asserts that TTL is ENABLED on a live table (the ai-runs
+  // suite asserts the attribute VALUE, which does not need the reaper), so the
+  // reaper buys tests nothing and costs them this. It stays ON everywhere else:
+  // db:create, e2e lanes and every deployed path leave the flag unset.
+  //
+  // See docs/issues/npm-test-dynamodb-local-contention.md.
+  const ttlDisabled = env['DYNAMO_DISABLE_TTL'] === '1';
+  if (spec.ttlAttribute && !ttlDisabled) {
     await enableTtlIfNeeded(client, physicalName, spec.ttlAttribute);
   }
   return result;

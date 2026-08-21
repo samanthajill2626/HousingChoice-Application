@@ -51,6 +51,48 @@ export function gsiAttributeDefinitions(gsi: GsiSpec): AttributeDefinition[] {
   return attrs.map((attr) => ({ AttributeName: attr.name, AttributeType: attr.type }));
 }
 
+/**
+ * Send an UpdateTable, retrying DynamoDB Local's `InternalFailure`.
+ *
+ * LOCAL-ONLY HAZARD, not an API contract issue. Under concurrent load the
+ * DynamoDB Local container answers UpdateTable with:
+ *
+ *   InternalFailure: The request processing has failed because of an unknown
+ *   error, exception or failure.
+ *
+ * It is the container buckling, not a rejected request - the same call succeeds
+ * moments later, and running the suite alone is green. The AWS SDK's default
+ * retry policy does NOT cover this code, so it escapes to the caller and fails
+ * whatever gate is running. That is suite B of
+ * docs/issues/npm-test-dynamodb-local-contention.md, and it is one of the two
+ * reasons `npm test` could not be trusted.
+ *
+ * Retrying is safe here specifically because this path is idempotent by
+ * construction: `ensureGsis` re-reads the live index set and only creates what
+ * is missing, so a retry of a call that actually succeeded finds the index
+ * present and does nothing. Against real AWS this code is never reached
+ * (hard-gated to a localhost endpoint), so the retry cannot mask a production
+ * fault.
+ */
+async function sendWithInternalFailureRetry(
+  client: DynamoDBClient,
+  build: () => UpdateTableCommand,
+  attempts = 4,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await client.send(build());
+      return;
+    } catch (err) {
+      const name = (err as { name?: string }).name ?? '';
+      const retryable = name === 'InternalFailure' || name === 'InternalServerError';
+      if (!retryable || attempt >= attempts) throw err;
+      // Linear backoff: the container needs a moment, not an exponential one.
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+    }
+  }
+}
+
 export interface EnsureGsisResult {
   /** `<table>.<index>` for every index this run created. */
   added: string[];
@@ -149,7 +191,7 @@ export async function ensureGsis(
     // ONE create per UpdateTable call, and the new INDEX (not just the table)
     // must finish before the next create is accepted.
     for (const gsi of missing) {
-      await client.send(
+      await sendWithInternalFailureRetry(client, () =>
         new UpdateTableCommand({
           TableName: physicalName,
           AttributeDefinitions: gsiAttributeDefinitions(gsi),

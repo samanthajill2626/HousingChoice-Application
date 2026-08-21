@@ -15,6 +15,7 @@ import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
 import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 import { defaultProbe } from '../e2e/support/lane.mjs';
+import { claimLane, holdsLane, releaseLane } from '../e2e/support/laneLease.mjs';
 import {
   assertProfilerPingIdentity,
   profilerOwnerToken as parseProfilerOwnerToken,
@@ -49,7 +50,7 @@ const laneMjs = path.join(repoRoot, 'e2e', 'support', 'lane.mjs');
 const laneJson = JSON.parse(
   execFileSync(process.execPath, [laneMjs], { encoding: 'utf8' }).trim(),
 );
-const { lane, ports, tablePrefix, mediaBucket, accessKeyId } = laneJson;
+const { lane, ports, tablePrefix, mediaBucket, accessKeyId, ownerToken, needsReap } = laneJson;
 
 // Derive all per-lane URLs. 127.0.0.1 everywhere — NEVER bare 'localhost'
 // (Vite/localhost can resolve to IPv6 ::1 while the free-probe + other services
@@ -71,6 +72,9 @@ function laneStateText() {
       tablePrefix,
       mediaBucket,
       accessKeyId,
+      // Recorded so `npm run e2e:stop` can RELEASE the lane rather than leave
+      // it waiting on pid-liveness to notice this launcher is gone.
+      ownerToken: ownerToken ?? null,
     },
     null,
     2,
@@ -282,6 +286,20 @@ async function prepareOwnedPort(port, label) {
     }
     return;
   }
+  // killPort tree-kills EVERY pid listening on this port, with no check that
+  // the process is ours. That is safe only because holding this lane's lease
+  // proves no other live run owns it - anything still on these ports is an
+  // orphan of a dead run. Without that proof we must not kill: the process
+  // could be a neighbouring worktree's Vite, mid-suite.
+  // See docs/issues/e2e-lane-allocation-cross-worktree-race.md.
+  if (!holdsLane(lane, ownerToken)) {
+    if (await defaultProbe(port, '127.0.0.1')) return; // free anyway - nothing to do
+    throw new Error(
+      `lane ${lane} ${label} port :${port} is held, and this launcher does not hold lane ${lane}'s ` +
+        `lease - refusing to kill a process it cannot account for. ` +
+        `Run npm run e2e:stop here, or let the resolver pick another lane.`,
+    );
+  }
   const reaped = killPort(port);
   if (reaped.length) log(`reaped orphan(s) holding :${port} before start: ${reaped.join(', ')}`);
 }
@@ -431,6 +449,20 @@ function shutdown(code = 0) {
   log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
   removeOwnedSessionState({ pidFile, launcherPid: process.pid });
+  // Release the lane so the next run can take it immediately rather than
+  // waiting for pid-liveness to notice we are gone. Compares on the token, so
+  // a late shutdown can never free a lane someone else has since claimed.
+  //
+  // BEST-EFFORT, and deliberately so. This runs on a signal-driven shutdown and
+  // on `npm run e2e:stop`, but NOT when Playwright tears its webServer down by
+  // tree-kill (measured on Windows, 2026-08-21: a clean 251-spec run left the
+  // lease behind). That is the case pid-liveness staleness exists for - the
+  // very next resolve sees a `held` record with a dead pid and reclaims it,
+  // which is exactly what happened on the following run. Releasing is an
+  // optimisation that skips one reclaim; correctness never depends on it.
+  if (ownerToken !== null && ownerToken !== undefined && releaseLane(lane, ownerToken)) {
+    log(`released lane ${lane}`);
+  }
   setTimeout(() => process.exit(code), 500);
 }
 
@@ -496,6 +528,33 @@ async function main() {
     }
   }
 
+  // CLAIM the lane lease. The resolver that picked this lane was a short-lived
+  // child (execFileSync of lane.mjs, above), so its reservation is stamped with
+  // a pid that is already gone. This launcher is the long-lived process, so it
+  // takes ownership under the same token - and from here `holdsLane` is what
+  // authorises anything destructive (port reaps, table drops).
+  // THIS is where a lease refusal belongs - the launcher is the only process
+  // that boots a stack, so it is the only one that has to own the lane.
+  // lane.mjs deliberately reports `ownerToken: null` instead of throwing, so a
+  // Playwright test worker re-reading the config can never fail the suite over
+  // ownership (that mistake cost a 70-spec run on 2026-08-21).
+  if (ownerToken === null || ownerToken === undefined) {
+    throw new Error(
+      `lane ${lane} is held by another live run on this machine, so this session will not start ` +
+        `a second stack on it. Wait for it, run npm run e2e:stop in that worktree, or unset ` +
+        `E2E_LANE and let the resolver pick a free lane.`,
+    );
+  }
+  if (!claimLane(lane, ownerToken, { appCommit: gitSha || null })) {
+    throw new Error(
+      `could not claim lane ${lane}'s lease - another run took it while this session was starting. ` +
+        `Re-run; the resolver will pick a free lane.`,
+    );
+  }
+  if (needsReap === true) {
+    log(`lane ${lane} has ports held by a dead run's orphans - reaping them (we hold the lease)`);
+  }
+
   // State becomes visible only after this launcher has proved the lane has no
   // live session marker and every profiler-owned port is free.
   writeOwnedSessionState();
@@ -513,6 +572,21 @@ async function main() {
   await ensureS3Started();
   log('creating tables + media bucket + seeding…');
   await runOnce('db-create', ['--import', 'tsx', path.join('app', 'scripts', 'db-create.ts')]);
+  // RETROFIT MISSING GSIs before seeding. `db-create`'s ensureTable is
+  // CREATE-ONLY: on ResourceInUseException it reports 'exists' and touches
+  // nothing, so a lane whose tables predate a new GSI in lib/tables.ts never
+  // gains that index - forever. The symptom is environment drift wearing a
+  // regression's clothes: on 2026-07-21 a schema-adding day made lanes 15 and
+  // 16 fail a BROAD ~20-spec cluster, deterministic on those lanes, green on a
+  // fresh one, costing ~5 full-suite runs before anyone suspected the lane.
+  //
+  // db:update-gsis is the no-data-loss remedy built for exactly this: it diffs
+  // each live table against its TableSpec and CREATEs only what is missing,
+  // one index per UpdateTable as DynamoDB requires. Idempotent - a lane that is
+  // already current reports `ok` and is left alone - and hard-gated to a
+  // localhost endpoint, so it can never touch a deployed table.
+  // See docs/issues/e2e-lane-tables-stale-schema.md.
+  await runOnce('db-update-gsis', ['--import', 'tsx', path.join('app', 'scripts', 'db-update-gsis.ts')]);
   await runOnce('s3-create', ['--import', 'tsx', path.join('app', 'scripts', 's3-create.ts')]);
   await runOnce('db-seed', ['--import', 'tsx', path.join('app', 'scripts', 'db-seed.ts')]);
 
@@ -545,6 +619,11 @@ async function main() {
   await cleanSlate();
 
   log(`ready — app :${ports.app} (${appUrl}), web :${ports.dashboard} (${dashboardUrl}), fake-twilio :${ports.fake} (${fakeUrl}), MinIO :9000 (MESSAGING_DRIVER=twilio → fake)`);
+  // Filtered runs (`npx playwright test <file>` from e2e/) now REUSE this
+  // session automatically - playwright.config.ts prefers a live lane.json. The
+  // explicit export is still printed as the manual override, and because an
+  // agent reading this log should be able to see which lane to watch.
+  log(`filtered runs reuse this session automatically; to force it: E2E_LANE=${lane}`);
 
   sendProfilerReady(
     activeProfilerOwnerToken,

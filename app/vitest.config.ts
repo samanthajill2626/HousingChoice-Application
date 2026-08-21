@@ -25,6 +25,17 @@ export default defineConfig({
     // starving whoever asks last, not a hang, so the budget is what has to
     // move. Serializing instead costs 2min -> 5min for every future run.
     testTimeout: 60_000,
+    // hookTimeout MUST move with testTimeout. Vitest defaults hooks to 10s, and
+    // raising only testTimeout left the heaviest cleanup in the suite on the
+    // SHORTER budget: broadcastApi.test.ts seeds 60+ recipients, defers the
+    // fan-out into InProcessOutboundQueueAdapter, and drains it in afterEach -
+    // the slowest thing in the file, running on 10s while its tests had 60s.
+    // That failed on main, not just on branches (proved detached at d59bd76b).
+    // Note this class is NOT the DynamoDB Local contention issue: these tests
+    // use an in-memory FakeWorld and never touch the container, so the
+    // per-access-key isolation above does nothing for them.
+    // See docs/issues/broadcast-fanout-tests-blow-default-hooktimeout.md.
+    hookTimeout: 60_000,
     env: {
       AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? testAccessKeyId(),
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? 'local',

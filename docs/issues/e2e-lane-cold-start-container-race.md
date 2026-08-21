@@ -3,11 +3,29 @@ id: e2e-lane-cold-start-container-race
 title: Concurrent e2e sessions race to docker-run the shared DynamoDB/MinIO containers from cold
 type: debt
 severity: low
-status: open
+status: resolved
 area: infra
 created: 2026-07-01
-refs: scripts/e2e-session.mjs, scripts/db.mjs, scripts/s3.mjs
+resolved: 2026-08-21
+refs: scripts/db.mjs, scripts/s3.mjs
 ---
+
+**Resolution (2026-08-21, `fix/e2e-harness-determinism`).** `ensureDbStarted`
+and `ensureS3Started` now treat a losing `docker run` as success rather than a
+boot failure. Both classify the conflict (`is already in use by container`,
+`Conflict. The container name`, `port is already allocated`, `address already in
+use`) and fall through to the readiness wait they already had - the same posture
+as their existing `already running` branch, extended to cover the
+in-flight-start window. `docker start` gets the same tolerance, for two starters
+that both saw `stopped`.
+
+Chose this over the suggested lockfile: the containers are already idempotent by
+name, so the conflict IS the signal that another starter won, and there is
+nothing left to serialize. A lock would add a file that can be orphaned to fix a
+race the daemon already arbitrates.
+
+The warm-first workaround in `e2e/README.md` remains good practice (it avoids
+the wait entirely) but is no longer required for correctness.
 
 **Problem.** E2E port-lane isolation lets multiple worktrees run `npm run e2e`
 concurrently on distinct per-lane ports (verified: two lanes coexist fine once the

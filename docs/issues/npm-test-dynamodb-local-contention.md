@@ -32,6 +32,32 @@ is not deterministic. Main flakes. That distinction matters because a
 deterministic red can be waited out, while a flake means every gate result on
 every branch has to be adjudicated by hand.
 
+**Baseline 2026-08-21** (`fix/e2e-harness-determinism` @ `e0fb96e1`, before any
+edit on that branch, otherwise-idle box):
+
+```
+app        1 failed | 317 passed | 1 skipped (319 files) - 5654 tests passed
+dashboard  168 passed (2524 tests)
+e2e        17 passed (469 tests)
+fake-twilio 33 passed (225 tests)
+scripts    13 passed (109 tests)
+```
+
+The single failure was suite A below. That run is the reference point for this
+issue: **only A currently reproduces.**
+
+**Two of the four suites are already remediated** - verified in the same
+worktree, and the reason this issue shrank rather than grew:
+
+- **C (`seedProfile`) is FIXED.** The record said it crossed
+  `testTimeout: 15_000` at `app/vitest.config.ts:16`. That config now reads
+  `testTimeout: 60_000` (line 27), and the named test carries its own
+  `240_000` budget at `seedProfile.integration.test.ts:138`.
+- **D (`seedLive`) is FIXED.** Both heavy cases carry `120_000` budgets.
+
+They are kept described below because the evidence is still the best record of
+the failure class, not because they are open work.
+
 **Why it matters.** While this holds, "green" means nothing on its own. Every
 branch has to compare its failure set against a base-commit run before the gate
 can be read - slow, and exactly the condition under which a real regression gets
@@ -112,18 +138,65 @@ both:
   database per run`. Suite B was expected to be cured by that; re-check whether
   it still recurs post-93ca271b before designing anything for it.
 
-**Suggested fix.** Cheapest first; they are independent and can land separately:
+**Suggested fix.** C and D are done (per-test budgets, above). What remains:
 
-1. **C and D** - give the two heavy seed round-trips an explicit per-test timeout
-   (the vitest third argument, e.g. `60_000`) rather than raising the global one.
-   The global 15s is a useful upper bound for the ~3.5k fast tests. Cheap, no
-   infrastructure change, closes two of the four.
-2. **B** - confirm whether `93ca271b` already cured it. If it recurs, either
-   serialize the schema-mutating lane away from the other integration suites, or
-   retry `UpdateTable` on `InternalFailure`.
-3. **A** - make the ordering/window assertions robust to latency: explicit waits
-   on state rather than call-order spies, or widened windows.
-4. **Structural, if 1-3 are not enough** - establish whether these suites can
+1. **A** - the most persistent suite, and the evidence now points at the TESTS,
+   not only the container. Make the ordering/window assertions robust to
+   latency: explicit waits on state rather than call-order spies, or widened
+   windows.
+
+   **A FAILS ALONE, sometimes** (new, 2026-08-21). The framing above - and the
+   repo's standing adjudication recipe - assume these files "pass when run in
+   isolation". For suite A that is not reliably true. Four consecutive
+   observations on `fix/e2e-harness-determinism` @`1a9811d9`:
+
+   | run | result | failing case |
+   |---|---|---|
+   | baseline full suite (pre-edit) | FAIL | `matching, in both delivery orders > a filing for a DIFFERENT author does not clear this author event` |
+   | post-merge full suite | FAIL | `the grace deadline and the alarm > a would-be alarm whose classic filing DID land is reconciled QUIETLY, not alarmed` |
+   | file ALONE | FAIL (1 of 26) | - |
+   | file ALONE, immediately after | PASS (26/26) | - |
+
+   So the failing CASE varies run to run (as recorded), but isolation is not a
+   reliable green either. A purely container-contention story cannot explain a
+   solo failure on an otherwise-idle box, which means suite A carries genuine
+   latency-dependent assertions - the spy-order and window predicates remedy 1
+   already suspects. Treat remedy 1 as the primary fix for A, not a fallback.
+
+   **Consequence for gate adjudication:** for THIS file, "re-run it alone" can
+   produce either colour and proves less than the recipe implies. Compare the
+   failing FILE against a base run - that is what still holds - and re-run alone
+   more than once before drawing a conclusion.
+2. **B** - `93ca271b` did NOT cure it. It stayed green on the 2026-08-21
+   baseline but reproduced later the same day on `fix/e2e-harness-determinism`
+   @`8b3dcfe2`, immediately after an 18-minute `npm run e2e` had hammered the
+   shared container (which had also been up 25+ hours - both documented
+   degradation conditions at once):
+
+   ```
+   FAIL test/unreadIndexRepo.integration.test.ts > db:update-gsis ... > adds the missing GSI in place
+     InternalFailure: The request processing has failed because of an unknown error
+     at ensureGsis scripts/db-update-gsis.ts:152
+   FAIL ... > a SECOND run reports nothing to do (idempotent)
+     Test timed out in 60000ms
+   ```
+
+   The second failure is a CASCADE of the first, not an independent one: the
+   failed `UpdateTable` leaves the table mid-update, so the idempotency case
+   waits out its whole budget. Re-run of that file ALONE immediately after:
+   23/23 green in 1.089s - against a 60s timeout in the suite.
+
+   Remedy unchanged: serialize the schema-mutating lane away from the other
+   integration suites, or retry `UpdateTable` on `InternalFailure`. The retry is
+   the cheaper of the two and this evidence argues for it - `InternalFailure` is
+   DynamoDB Local buckling under concurrent load, not a real API error.
+
+   **Note for whoever picks this up:** the failing FILE varies between runs. The
+   2026-08-21 baseline failed A and not B; the run above failed B and not A.
+   That is the whole reason this issue is one umbrella rather than per-suite
+   tickets, and the reason gate adjudication compares FILES against a base run
+   rather than expecting a fixed set.
+3. **Structural, if 1-2 are not enough** - establish whether these suites can
    share a DynamoDB Local container with the rest of the suite at all. Give them
    a throwaway table prefix per run (some of this already exists) and confirm no
    cross-suite table reuse remains; or serialize them; or pin the container

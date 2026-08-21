@@ -3,10 +3,11 @@ id: e2e-lane-allocation-cross-worktree-race
 title: E2E lane allocation is not atomic across worktrees
 type: debt
 severity: high
-status: open
+status: resolved
 area: e2e
 created: 2026-08-12
 updated: 2026-08-21
+resolved: 2026-08-21
 refs: e2e/support/lane.mjs:152, e2e/support/lane.mjs:206, e2e/support/lane.mjs:231, scripts/e2e-session.mjs
 ---
 
@@ -18,6 +19,45 @@ refs: e2e/support/lane.mjs:152, e2e/support/lane.mjs:206, e2e/support/lane.mjs:2
   `e2e-lane-cold-start-container-race` (the shared DynamoDB/MinIO containers,
   not the lane ports).
 -->
+
+**Resolution (2026-08-21, `fix/e2e-harness-determinism`).** A machine-global
+lane lease in `e2e/support/laneLease.mjs`
+(`os.tmpdir()/hc-e2e-lanes/lane-<L>.json`), with mutual exclusion from one
+syscall - `writeFileSync(..., { flag: 'wx' })` - plus pid-liveness staleness and
+compare-before-delete reclaim.
+
+The selection rule inverted, which is the part worth knowing:
+**ownership decides the lane, the port probe only says whether cleanup is
+needed.** Acquiring the lease PROVES no live owner exists, so a lane whose ports
+are busy is kept and its orphans reaped, instead of being skipped. That also
+closed a leak nobody had filed: a lane held by a dead run's orphans used to be
+skipped run after run and never reclaimed. Bumping now happens for exactly one
+reason - another worktree holds the lease.
+
+`killPort` (which tree-kills every pid on a port with no ownership check) is
+gated on `holdsLane`. Unable to prove ownership on a held port, the launcher
+refuses and says why rather than killing what it cannot account for.
+
+The trap, recorded because it would silently reintroduce the bug: `lane.mjs` is
+spawned as a SHORT-LIVED child by both `playwright.config.ts` and
+`e2e-session.mjs`, so the resolving process always exits. A lease stamped with
+its pid is stale on arrival. Hence two phases - `reserve` (ephemeral, grace
+window wider than Playwright's 180s `webServer.timeout`) then `claim` (the
+long-lived launcher) - with the token handed down as `E2E_LANE_TOKEN` so the
+session ADOPTS rather than refusing its own parent's lease.
+
+Absorbed `e2e-lane-probe-bind-toctou` (see the merge note above); its
+bump-and-retry remedy remains the cheap partial for a real bind failure.
+
+**Release is BEST-EFFORT, by design.** The launcher releases on a signal-driven
+shutdown and `npm run e2e:stop`, but NOT when Playwright tears its webServer
+down by tree-kill - measured on Windows, where a clean 251-spec run left the
+lease behind. Correctness does not depend on it: the next resolve finds a `held`
+record with a dead pid and reclaims it. Verified twice on real wreckage, once
+after a failed run and once after a clean one. Releasing just skips a reclaim.
+
+**Verified end to end:** `npm run e2e` 251 passed (18.4m), including a boot that
+reclaimed a dead run's lane rather than skipping it.
 
 **Problem.** The shared E2E harness chooses a lane with a free-port probe and
 later starts the lane services. Two worktrees can select the same free lane

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { killTree, killPort, isAlive } from './lib/killTree.mjs';
 import { inspectSessionLiveness } from './lib/sessionState.mjs';
+import { releaseLane } from '../e2e/support/laneLease.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
@@ -121,6 +122,20 @@ if (laneJson?.accessKeyId && laneJson?.tablePrefix) {
     process.stdout.write(
       `[e2e-stop] lane table cleanup skipped (harmless, tables persist): ${String(err)}\n`,
     );
+  }
+}
+
+// Release the lane lease so the next run can take this lane immediately instead
+// of waiting for pid-liveness to notice the launcher is gone. Compares on the
+// token, so stopping a stale session can never free a lane another worktree has
+// since claimed.
+if (laneJson !== null && typeof laneJson.ownerToken === 'string') {
+  try {
+    if (releaseLane(laneJson.lane, laneJson.ownerToken)) {
+      process.stdout.write(`[e2e-stop] released lane ${laneJson.lane} lease\n`);
+    }
+  } catch (err) {
+    process.stdout.write(`[e2e-stop] lane lease release skipped (harmless): ${String(err)}\n`);
   }
 }
 

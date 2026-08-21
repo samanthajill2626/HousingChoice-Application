@@ -73,6 +73,36 @@ const allFreeProbe = async () => true;
 /** Probe that reports all ports as held */
 const allBusyProbe = async () => false;
 
+/**
+ * An in-memory stand-in for the machine-global lane lease.
+ *
+ * MUST be injected into every resolveLane() call in this file. The real lease
+ * writes to os.tmpdir()/hc-e2e-lanes, so a unit test using it would RESERVE
+ * real lanes on the developer's machine - `npm test` could then steal a lane
+ * out from under a live `npm run e2e` in a neighbouring worktree. Lease
+ * semantics are covered by e2e/support/laneLease.test.ts against the real
+ * filesystem; this file is about lane SELECTION.
+ *
+ * @param held - lanes to report as owned by someone else (never acquirable)
+ */
+function fakeLease(held: number[] = []) {
+  const busy = new Set(held);
+  const tokens = new Map<number, string>();
+  return {
+    reserve: (lane: number) => {
+      if (busy.has(lane)) return null;
+      const token = lane.toString(16).padStart(32, '0');
+      tokens.set(lane, token);
+      return token;
+    },
+    holds: (lane: number, token: string | null | undefined) =>
+      token !== null && token !== undefined && tokens.get(lane) === token,
+  };
+}
+
+/** The common case: every lane is unowned and acquirable. */
+const freeLease = () => fakeLease();
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -131,8 +161,8 @@ describe('lane.mjs', () => {
 
     it('resolveLane returns the same lane on repeated calls (no env, no held ports)', async () => {
       const { resolveLane } = await getLane();
-      const a = await resolveLane({ probe: allFreeProbe });
-      const b = await resolveLane({ probe: allFreeProbe });
+      const a = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
+      const b = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
       expect(a.lane).toBe(b.lane);
     });
   });
@@ -142,20 +172,70 @@ describe('lane.mjs', () => {
   // -------------------------------------------------------------------------
 
   describe('E2E_LANE override', () => {
-    it('honors E2E_LANE=3 and returns lane 3 without probing', async () => {
+    it('honors E2E_LANE=3 whatever the probe says - the probe only sets needsReap', async () => {
+      // CHANGED with the lane lease. The override used to skip probing entirely.
+      // It now probes, but NOT to choose the lane: E2E_LANE is still obeyed
+      // exactly. The probe answers a different question - are there orphans on
+      // this lane's ports that the launcher should reap?
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '3';
-      const probeCallCount = vi.fn(async () => true);
-      const result = await resolveLane({ probe: probeCallCount });
+      const busy = vi.fn(async () => false);
+      const result = await resolveLane({ probe: busy, lease: freeLease() });
       expect(result.lane).toBe(3);
-      // override skips free-probe entirely
-      expect(probeCallCount).not.toHaveBeenCalled();
+      expect(result.needsReap).toBe(true);
+
+      const free = vi.fn(async () => true);
+      const clean = await resolveLane({ probe: free, lease: freeLease() });
+      expect(clean.lane).toBe(3);
+      expect(clean.needsReap).toBe(false);
+    });
+
+    it('adopts an inherited E2E_LANE_TOKEN instead of re-reserving', async () => {
+      // The standard `npm run e2e` path: playwright.config.ts reserves the lane
+      // in one process and hands the token to the session in another. Without
+      // adoption the session would refuse its own parent's lease.
+      const { resolveLane } = await getLane();
+      const lease = freeLease();
+      const parentToken = lease.reserve(4)!;
+      process.env['E2E_LANE'] = '4';
+      process.env['E2E_LANE_TOKEN'] = parentToken;
+      const result = await resolveLane({ probe: allFreeProbe, lease });
+      expect(result.ownerToken).toBe(parentToken);
+    });
+
+    it('DESCRIBES a lane held by another owner instead of throwing', async () => {
+      // Regression, 2026-08-21: this used to throw, and it cost a 70-spec e2e
+      // run. Playwright re-loads its config in every test WORKER, and each
+      // worker re-runs lane.mjs just to learn the ports. A worker must never be
+      // able to fail the suite over ownership of the lane its OWN session
+      // holds. Reporting ownerToken: null lets the launcher - the only process
+      // that boots a stack - be the one that refuses.
+      const { resolveLane } = await getLane();
+      process.env['E2E_LANE'] = '6';
+      delete process.env['E2E_LANE_TOKEN'];
+      const result = await resolveLane({ probe: allFreeProbe, lease: fakeLease([6]) });
+      expect(result.lane).toBe(6);
+      expect(result.ownerToken).toBeNull();
+    });
+
+    it('a worker inheriting BOTH the lane and the token adopts it cleanly', async () => {
+      // The shape of a real Playwright worker: E2E_LANE and E2E_LANE_TOKEN are
+      // both inherited from the config process, and the session already holds
+      // the lease. It must resolve, not contend.
+      const { resolveLane } = await getLane();
+      const lease = freeLease();
+      const sessionToken = lease.reserve(6)!;
+      process.env['E2E_LANE'] = '6';
+      process.env['E2E_LANE_TOKEN'] = sessionToken;
+      const result = await resolveLane({ probe: allFreeProbe, lease });
+      expect(result.lane).toBe(6);
+      expect(result.ownerToken).toBe(sessionToken);
     });
 
     it('returns correct ports for overridden lane', async () => {
       const { resolveLane, portsForLane } = await getLane();
       process.env['E2E_LANE'] = '5';
-      const result = await resolveLane({ probe: allFreeProbe });
+      const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
       const expected = portsForLane(5);
       expect(result.ports).toEqual(expected);
     });
@@ -163,7 +243,7 @@ describe('lane.mjs', () => {
     it('returns correct tablePrefix and mediaBucket for overridden lane', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '7';
-      const result = await resolveLane({ probe: allFreeProbe });
+      const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
       expect(result.tablePrefix).toBe('hc-local-7-');
       expect(result.mediaBucket).toBe('hc-local-media-7');
     });
@@ -177,31 +257,31 @@ describe('lane.mjs', () => {
     it('rejects E2E_LANE=0 with a clear error mentioning lane 0 is forbidden', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '0';
-      await expect(resolveLane({ probe: allFreeProbe })).rejects.toThrow(/0.*forbidden|forbidden.*0/i);
+      await expect(resolveLane({ probe: allFreeProbe, lease: freeLease() })).rejects.toThrow(/0.*forbidden|forbidden.*0/i);
     });
 
     it('rejects E2E_LANE=0 with a clear error', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '0';
-      await expect(resolveLane({ probe: allFreeProbe })).rejects.toThrow(/E2E_LANE/);
+      await expect(resolveLane({ probe: allFreeProbe, lease: freeLease() })).rejects.toThrow(/E2E_LANE/);
     });
 
     it('rejects E2E_LANE=17 (above MAX_LANES)', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '17';
-      await expect(resolveLane({ probe: allFreeProbe })).rejects.toThrow(/E2E_LANE/);
+      await expect(resolveLane({ probe: allFreeProbe, lease: freeLease() })).rejects.toThrow(/E2E_LANE/);
     });
 
     it('rejects E2E_LANE=-1 (negative)', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '-1';
-      await expect(resolveLane({ probe: allFreeProbe })).rejects.toThrow(/E2E_LANE/);
+      await expect(resolveLane({ probe: allFreeProbe, lease: freeLease() })).rejects.toThrow(/E2E_LANE/);
     });
 
     it('rejects E2E_LANE=abc (non-numeric)', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = 'abc';
-      await expect(resolveLane({ probe: allFreeProbe })).rejects.toThrow(/E2E_LANE/);
+      await expect(resolveLane({ probe: allFreeProbe, lease: freeLease() })).rejects.toThrow(/E2E_LANE/);
     });
   });
 
@@ -209,56 +289,55 @@ describe('lane.mjs', () => {
   // 4. Free-probe: pre-bind a port, assert bumps to next free lane
   // -------------------------------------------------------------------------
 
-  describe('free-probe', () => {
-    it('bumps past a lane whose block has a held port (using a real TCP listener)', async () => {
-      const { resolveLane, hashToLane, portsForLane, MAX_LANES } = await getLane();
+  describe('lane selection - ownership is the gate, the probe is a hint', () => {
+    it('KEEPS a lane whose ports are busy when nobody owns it, and asks for a reap', async () => {
+      // THE BEHAVIOUR CHANGE. This used to bump to the next lane. Bumping is
+      // what leaked lanes: a worktree that died left orphans on its ports, the
+      // probe skipped that lane run after run, and nothing ever reclaimed it.
+      // Acquiring the lease PROVES no live owner exists, so those orphans are
+      // reclaimable and the lane is usable.
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const preferred = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
 
-      // Compute the preferred lane for this worktree (no env override)
-      // We do this by computing the hash the same way the module does, but
-      // since we can't call worktreeIdentity() directly, we instead use a
-      // probe mock that tracks which lanes were probed.
-      //
-      // Strategy: use a controlled probe that marks lane 1 as busy (one port
-      // held) and everything else free, then assert the result is NOT lane 1.
-      const busyLane = 1;
-      const busyPorts = portsForLane(busyLane);
-      // Mark the app port of lane 1 as busy
-      const controlledProbe = async (port: number) => {
-        if (port === busyPorts.app) return false; // lane 1 app port is held
-        return true;
-      };
-
-      // Force hash to prefer lane 1 by setting... we can't control the
-      // worktree identity, so instead: inject a probe that says lane 1 is
-      // busy and all other lanes are free. Assert we don't get lane 1.
-      const result = await resolveLane({ probe: controlledProbe });
-      expect(result.lane).not.toBe(busyLane);
+      const result = await resolveLane({ probe: allBusyProbe, lease: freeLease() });
+      expect(result.lane).toBe(preferred.lane);
+      expect(result.needsReap).toBe(true);
     });
 
-    it('bumps using a real TCP listener on a computed port', async () => {
-      const { resolveLane, portsForLane, MAX_LANES } = await getLane();
+    it('bumps past a lane whose lease a live owner holds', async () => {
+      // The ONLY reason to bump now: someone else is genuinely working there.
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const preferred = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
 
-      // We need to find the preferred lane for this worktree. We use the
-      // approach: let the resolver run with allFreeProbe first to discover
-      // the preferred lane, then bind one of its ports and re-run.
-      const preferred = await resolveLane({ probe: allFreeProbe });
-      const prefLane = preferred.lane;
+      const result = await resolveLane({
+        probe: allFreeProbe,
+        lease: fakeLease([preferred.lane]),
+      });
+      expect(result.lane).not.toBe(preferred.lane);
+      expect(result.needsReap).toBe(false);
+    });
 
-      // Find the next lane (wrapping) to know what we expect after bumping
-      const nextLane = (prefLane % MAX_LANES) + 1;
-
-      // Actually bind the app port of the preferred lane
-      const appPort = preferred.ports.app;
-      const server = await bindPort(appPort);
-
+    it('does not bump for a REAL held port when the lane is unowned', async () => {
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const preferred = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
+      const server = await bindPort(preferred.ports.app);
       try {
-        // Now resolve with a real probe — the preferred lane's app port is held
-        const result = await resolveLane();
-        // Should have bumped to a different lane
-        expect(result.lane).not.toBe(prefLane);
+        const result = await resolveLane({ lease: freeLease() });
+        expect(result.lane).toBe(preferred.lane);
+        expect(result.needsReap).toBe(true);
       } finally {
         await server.close();
       }
+    });
+
+    it('surfaces the owner token so the launcher can claim and later release', async () => {
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
+      expect(result.ownerToken).toMatch(/^[a-f0-9]{32}$/);
     });
   });
 
@@ -274,7 +353,7 @@ describe('lane.mjs', () => {
       // Check all lanes 1..MAX_LANES via the free probe override
       for (let l = 1; l <= MAX_LANES; l++) {
         process.env['E2E_LANE'] = String(l);
-        const result = await resolveLane({ probe: allFreeProbe });
+        const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
         for (const port of Object.values(result.ports)) {
           expect(FORBIDDEN).not.toContain(port);
         }
@@ -309,18 +388,32 @@ describe('lane.mjs', () => {
   // -------------------------------------------------------------------------
 
   describe('cap exceeded', () => {
-    it('throws a clear actionable error when all lanes are busy', async () => {
+    // Exhaustion is now about OWNERSHIP, not ports. Busy ports on an unowned
+    // lane are reclaimable, so they can no longer exhaust the resolver - only
+    // sixteen genuinely live owners can.
+    const allLanesHeld = () => fakeLease(Array.from({ length: 16 }, (_, i) => i + 1));
+
+    it('throws a clear actionable error when every lane has a LIVE owner', async () => {
       const { resolveLane } = await getLane();
       delete process.env['E2E_LANE'];
-      await expect(resolveLane({ probe: allBusyProbe })).rejects.toThrow(
-        /all e2e lanes 1\.\.16 are busy/i,
+      await expect(resolveLane({ probe: allFreeProbe, lease: allLanesHeld() })).rejects.toThrow(
+        /all e2e lanes 1\.\.16 have a LIVE owner/i,
       );
     });
 
-    it('error message mentions setting E2E_LANE', async () => {
+    it('error message points at e2e:stop and says dead owners self-heal', async () => {
       const { resolveLane } = await getLane();
       delete process.env['E2E_LANE'];
-      await expect(resolveLane({ probe: allBusyProbe })).rejects.toThrow(/E2E_LANE/);
+      await expect(resolveLane({ probe: allFreeProbe, lease: allLanesHeld() })).rejects.toThrow(
+        /e2e:stop[\s\S]*reclaimed automatically/i,
+      );
+    });
+
+    it('busy ports alone NEVER exhaust the resolver any more', async () => {
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const result = await resolveLane({ probe: allBusyProbe, lease: freeLease() });
+      expect(result.needsReap).toBe(true);
     });
   });
 
@@ -353,7 +446,7 @@ describe('lane.mjs', () => {
       const { resolveLane, MAX_LANES } = await getLane();
       for (let l = 1; l <= MAX_LANES; l++) {
         process.env['E2E_LANE'] = String(l);
-        const result = await resolveLane({ probe: allFreeProbe });
+        const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
         expect(result.tablePrefix).toBe(`hc-local-${l}-`);
         expect(result.mediaBucket).toBe(`hc-local-media-${l}`);
       }
@@ -377,14 +470,14 @@ describe('lane.mjs', () => {
     it('resolveLane returns accessKeyId matching the lane (E2E_LANE override branch)', async () => {
       const { resolveLane } = await getLane();
       process.env['E2E_LANE'] = '4';
-      const result = await resolveLane({ probe: allFreeProbe });
+      const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
       expect(result.accessKeyId).toBe('hclane4');
     });
 
     it('resolveLane returns accessKeyId matching the lane (free-probe branch)', async () => {
       const { resolveLane } = await getLane();
       delete process.env['E2E_LANE'];
-      const result = await resolveLane({ probe: allFreeProbe });
+      const result = await resolveLane({ probe: allFreeProbe, lease: freeLease() });
       expect(result.accessKeyId).toBe(`hclane${result.lane}`);
     });
 

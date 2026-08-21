@@ -77,6 +77,11 @@ export interface LifecycleLane {
   tablePrefix: string;
   mediaBucket: string;
   accessKeyId: string;
+  /**
+   * The lane lease resolveLane reserved. Optional because the injected test
+   * doubles predate it; the real resolver always supplies one.
+   */
+  ownerToken?: string | null;
 }
 
 export interface LifecycleChild {
@@ -569,6 +574,12 @@ export async function startOwnedHermeticLifecycle(
           ...process.env,
           E2E_LANE: String(lane.lane),
           E2E_PROFILER_OWNER_TOKEN: ownerToken,
+          // Same handoff as playwright.config.ts: we reserved the lane lease in
+          // THIS process but the session is the long-lived owner, so pass the
+          // token down for it to adopt and claim. Distinct from
+          // E2E_PROFILER_OWNER_TOKEN, which proves the child app is OURS; this
+          // one proves the LANE is ours.
+          ...(lane.ownerToken ? { E2E_LANE_TOKEN: lane.ownerToken } : {}),
         },
         detached: ownedLauncherDetached(),
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],

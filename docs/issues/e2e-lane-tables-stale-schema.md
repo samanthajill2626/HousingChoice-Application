@@ -3,11 +3,34 @@ id: e2e-lane-tables-stale-schema
 title: e2e lane DynamoDB tables persist with stale schemas — db:create never retrofits new GSIs
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-07-02
-refs: app/scripts (db:create ensure-exists path), e2e/support/lane.mjs
+resolved: 2026-08-21
+refs: scripts/e2e-session.mjs, app/scripts/db-update-gsis.ts, app/scripts/db-create.ts
 ---
+
+**Resolution (2026-08-21, `fix/e2e-harness-determinism`).** The e2e boot now
+runs `db:update-gsis` between `db-create` and `db-seed`.
+
+No new mechanism was needed - the remedy already existed and simply was not on
+this path. `db:update-gsis` diffs each live table against its `TableSpec` and
+creates only the missing indexes, one per `UpdateTable` as DynamoDB requires.
+No data loss (unlike `db:create --reset`), idempotent (a current lane reports
+`ok`), and hard-gated to a localhost endpoint so it can never touch a deployed
+table.
+
+Deliberately NOT the suggested-fix alternative: a per-lane schema hash was
+drafted (the lane lease even carried `stampSchemaHash`/`readSchemaHash` for a
+while) and then removed unused. A cached fingerprint is a second source of truth
+about schema currency, and the one that can be wrong, in front of a diff that is
+already cheap and exact.
+
+Verified on a lane that already had all 22 tables from a previous run - the
+stale-lane shape - where `db:create` reported `exists ... skipped` for every one
+and `db:update-gsis` then reported `0 index(es) added, 22 table(s) already
+current`. The index-adding path is covered by the `db:update-gsis` cases in
+`app/test/unreadIndexRepo.integration.test.ts`.
 
 **Problem.** Lane stores in the shared DynamoDB Local container persist across
 runs, and `db:create` ensures tables by EXISTENCE only ("exists hc-local-<L>-…

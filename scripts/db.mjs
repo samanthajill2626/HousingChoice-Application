@@ -28,6 +28,30 @@ async function docker(...args) {
   return execFileAsync('docker', args);
 }
 
+/**
+ * Did `docker run` fail because a CONCURRENT starter got there first, rather
+ * than for a real reason? Both messages mean "the thing you asked for now
+ * exists" - which is success for our purposes.
+ */
+function isStartRaceError(err) {
+  const text = `${err?.stderr ?? ''}${err?.message ?? ''}`.toLowerCase();
+  return (
+    text.includes('is already in use by container')
+    || text.includes('conflict. the container name')
+    || text.includes('port is already allocated')
+    || text.includes('address already in use')
+  );
+}
+
+/** `docker start`, tolerating a racing starter that already started it. */
+async function startExisting() {
+  try {
+    await docker('start', CONTAINER_NAME);
+  } catch (err) {
+    if (!isStartRaceError(err)) throw err;
+  }
+}
+
 async function assertDaemonUp() {
   try {
     await docker('version', '--format', '{{.Server.Version}}');
@@ -151,13 +175,28 @@ export async function ensureDbStarted() {
     }
   } else if (state === 'stopped') {
     console.log(`db:start — starting existing container ${CONTAINER_NAME}`);
-    await docker('start', CONTAINER_NAME);
+    await startExisting();
   } else {
     console.log(`db:start — creating container ${CONTAINER_NAME} (in-memory; data resets on stop)`);
-    await docker(
-      'run', '-d', '--name', CONTAINER_NAME, '-p', '8000:8000',
-      'amazon/dynamodb-local', '-jar', 'DynamoDBLocal.jar', '-inMemory',
-    );
+    try {
+      await docker(
+        'run', '-d', '--name', CONTAINER_NAME, '-p', '8000:8000',
+        'amazon/dynamodb-local', '-jar', 'DynamoDBLocal.jar', '-inMemory',
+      );
+    } catch (err) {
+      // ANOTHER STARTER WON. Two e2e sessions starting from COLD at the same
+      // instant both see 'absent' and both `docker run` the same container
+      // name; the loser used to fail its whole boot on a name/port conflict
+      // (observed: one lane hung at "ensuring MinIO" while the other was
+      // mid-run). The container the winner created is exactly what we wanted,
+      // so treat the conflict as success and fall through to waitForEndpoint -
+      // the same posture as the 'already running' branch above, extended to
+      // cover the in-flight-start window.
+      // See docs/issues/e2e-lane-cold-start-container-race.md.
+      if (!isStartRaceError(err)) throw err;
+      console.log(`db:start — another starter created ${CONTAINER_NAME} first; waiting for it`);
+      if ((await containerState()) === 'stopped') await startExisting();
+    }
   }
   await waitForEndpoint(LOCAL_ENDPOINT);
   console.log(`db:start — DynamoDB Local ready at ${LOCAL_ENDPOINT}`);

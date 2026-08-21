@@ -3,11 +3,28 @@ id: broadcast-fanout-tests-blow-default-hooktimeout
 title: broadcastApi fan-out tests blow the 10s DEFAULT hookTimeout - red on main under load
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-06
-refs: app/test/broadcastApi.test.ts:124, app/vitest.config.ts:14, app/src/adapters/scheduler.ts:137
+resolved: 2026-08-21
+refs: app/test/broadcastApi.test.ts:124, app/vitest.config.ts:27, app/src/adapters/scheduler.ts:137
 ---
+
+**Resolution (2026-08-21, `fix/e2e-harness-determinism`).** Both halves of the
+suggested fix, since they address different failures:
+
+- `app/vitest.config.ts` now sets `hookTimeout: 60_000` beside `testTimeout`,
+  with a comment that the two must move together. (The issue cites the old
+  `testTimeout: 15_000` at line 14; the global had since been raised to 60s,
+  which widened the gap rather than closing it - hooks were still on Vitest's
+  10s default while the tests they clean up after had 60s.)
+- The `afterEach` reset moved into a `finally`, so a drain that blows its budget
+  can no longer skip `_resetForTests()` and poison the following tests. That was
+  the cascade the issue describes: one real cause reported as three failures,
+  the extra two looking like unrelated `expected 500 to be 200`.
+
+`broadcastApi.test.ts` 65 passed alone; the full `npm test` was green (318 app
+files, up from a baseline with one failing file).
 
 **Problem.** `app/test/broadcastApi.test.ts` fails on a slow-enough machine, and it fails
 on **main**, not just on a feature branch. Observed 2026-08-06 in the

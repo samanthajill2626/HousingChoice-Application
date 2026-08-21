@@ -1,10 +1,54 @@
 import { defineConfig, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import { holdsLane } from './support/laneLease.mjs';
+
 // The hermetic dev loop lives at the repo root, one level up from e2e/.
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+
+// ---------------------------------------------------------------------------
+// Reuse a LIVE e2e:session's lane instead of free-probing a second one.
+// ---------------------------------------------------------------------------
+// The documented inner loop is `npm run e2e:session` + a filtered
+// `npx playwright test <file>`. Those did not compose: this config resolved its
+// OWN lane, landed one lane over, and booted a SECOND full stack while a warm
+// session sat idle - ~40-60s of boot per filtered run, and an agent watching
+// the session's log saw no traffic and concluded the run was wedged.
+//
+// e2e/.artifacts/lane.json is per-worktree, which is exactly right here: we are
+// asking "is THIS worktree running a session?", not arbitrating between
+// worktrees. Both proofs are required - a live launcher pid AND a lease that
+// still matches - so a crashed session's stale lane.json cannot capture a run.
+// See docs/issues/e2e-session-lane-mismatch.md.
+function liveSessionLane(): { lane: number; ownerToken: string | null } | null {
+  try {
+    const state = JSON.parse(
+      readFileSync(path.join(repoRoot, 'e2e', '.artifacts', 'lane.json'), 'utf8'),
+    ) as { lane?: number; launcherPid?: number; ownerToken?: string | null };
+    if (!Number.isInteger(state.lane) || !Number.isInteger(state.launcherPid)) return null;
+    try {
+      process.kill(state.launcherPid!, 0); // throws ESRCH when the launcher is gone
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null;
+    }
+    if (typeof state.ownerToken !== 'string' || !holdsLane(state.lane!, state.ownerToken)) return null;
+    return { lane: state.lane!, ownerToken: state.ownerToken };
+  } catch {
+    return null;
+  }
+}
+
+const reusable = process.env['E2E_LANE'] ? null : liveSessionLane();
+if (reusable !== null) {
+  process.env['E2E_LANE'] = String(reusable.lane);
+  process.env['E2E_LANE_TOKEN'] = reusable.ownerToken ?? '';
+  process.stdout.write(
+    `[playwright] reusing the live e2e:session on lane ${reusable.lane} (set E2E_LANE to override)\n`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Lane resolution — synchronous, happens at config load before webServer boots.
@@ -19,6 +63,8 @@ const laneJson = JSON.parse(execFileSync(process.execPath, [laneMjs], { encoding
   tablePrefix: string;
   mediaBucket: string;
   accessKeyId: string;
+  ownerToken: string | null;
+  needsReap: boolean;
 };
 
 // Expose resolved URLs to test workers (fixtures in Task 3 read these).
@@ -29,6 +75,15 @@ const resolvedFakeUrl = `http://127.0.0.1:${laneJson.ports.fake}`;
 const resolvedPublicBaseUrl = `http://127.0.0.1:${laneJson.ports.publicBase}`;
 
 process.env['E2E_LANE'] = String(laneJson.lane);
+// The token MUST travel with the lane, for the same reason the lane itself is
+// exported here: Playwright re-loads this config in EVERY test worker, and each
+// worker re-runs lane.mjs. A worker that inherits E2E_LANE but no token tries to
+// RESERVE the lane its own session already holds, is refused, and fails - which
+// is how the first wired run died, 70 specs deep, with
+// "E2E_LANE=15 is held by another live run". Workers are read-only users of an
+// already-owned lane: with the token they adopt, without it they contend with
+// their own stack.
+process.env['E2E_LANE_TOKEN'] = laneJson.ownerToken ?? '';
 process.env['E2E_APP_URL'] = resolvedAppUrl;
 process.env['E2E_DASHBOARD_URL'] = resolvedDashboardUrl;
 process.env['E2E_FAKE_URL'] = resolvedFakeUrl;
@@ -94,6 +149,12 @@ export default defineConfig({
     command: `node scripts/e2e-session.mjs`,
     env: {
       E2E_LANE: String(laneJson.lane),
+      // The lane lease this config RESERVED, handed to the session so it can
+      // ADOPT rather than re-reserve. This process exits long before the suite
+      // ends, so it can never be the lease holder itself - the session claims
+      // it and becomes the owner. Without this the session would refuse its own
+      // parent's lease and no `npm run e2e` would boot.
+      ...(laneJson.ownerToken ? { E2E_LANE_TOKEN: laneJson.ownerToken } : {}),
     },
     cwd: repoRoot,
     // Readiness gate: the launcher only logs 'ready' after db:start/create/seed

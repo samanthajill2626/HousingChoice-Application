@@ -3,11 +3,30 @@ id: e2e-session-lane-mismatch
 title: A filtered playwright run does not reuse the live e2e:session stack - it free-probes the NEXT lane and boots its own
 type: debt
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-05
-refs: e2e/playwright.config.ts, scripts/
+resolved: 2026-08-21
+refs: e2e/playwright.config.ts, scripts/e2e-session.mjs
 ---
+
+**Resolution (2026-08-21, `fix/e2e-harness-determinism`).** `playwright.config.ts`
+now prefers a live session's lane before free-probing, so a filtered
+`npx playwright test <file>` reuses the warm `e2e:session` stack instead of
+booting a second one.
+
+Reuse requires BOTH proofs: the launcher pid in `e2e/.artifacts/lane.json` is
+alive, AND the lane lease still matches its recorded owner token. Either alone
+is insufficient - a crashed session leaves a stale `lane.json` that would
+otherwise capture every later run onto a dead lane.
+
+Reading the per-worktree `lane.json` is correct here, and is NOT the mistake
+[`e2e-lane-allocation-cross-worktree-race`](./e2e-lane-allocation-cross-worktree-race.md)
+was about: the question is "is THIS worktree running a session", which is
+exactly what a per-worktree artifact answers. Cross-worktree arbitration stays
+with the machine-global lease.
+
+An explicit `E2E_LANE` still wins, and the session's ready banner names it.
 
 **Problem.** The documented interactive inner loop (`npm run e2e:session` +
 filtered `npx playwright test <file>` from `e2e/`) does not compose: the

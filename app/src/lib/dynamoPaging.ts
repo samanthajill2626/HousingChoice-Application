@@ -4,7 +4,8 @@
 // WHY THIS EXISTS: a Query answers with at most 1 MB of items and a
 // LastEvaluatedKey when more remain. Several repo methods dropped that key and
 // returned the first page as if it were everything - the same silent-truncation
-// class that made the tenant typeahead offer 50 of 641 tenants. A per-entity
+// class that made the tenant typeahead offer 50 of the 641 tenants prod held on
+// 2026-08-20. A per-entity
 // query (one tenant's tours, one unit's sends) only bites at 1 MB, so the defect
 // hides for a long time and then appears as quietly missing rows.
 //

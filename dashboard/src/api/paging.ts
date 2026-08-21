@@ -5,7 +5,8 @@
 // hand-rolled walkers drifted apart (caps of 40/40/50, only one asking for the
 // 100-row page), and every OTHER caller silently read page one and treated it
 // as the whole list. That shipped: the Schedule-a-tour tenant picker offered 50
-// of 641 tenants, because DynamoDB returns the `byTypeStatus` partition ordered
+// of the 641 tenants prod held on 2026-08-20, because DynamoDB returns the
+// `byTypeStatus` partition ordered
 // by `status` and `searching` sorts last - so 92% of the roster, including
 // nearly every active tenant, was unpickable.
 //

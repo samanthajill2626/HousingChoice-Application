@@ -1286,7 +1286,7 @@ export async function getUnreadCounts(
 // went wrong when each caller decided for itself.
 
 /** EVERY contact of one type, walking `nextCursor`. The candidate roster behind
- *  the tenant/landlord typeaheads: a first-page-only read offered 50 of 641
+ *  the tenant/landlord typeaheads: a first-page-only read offered 50 of the 641
  *  tenants, ordered by `status`, so most of the roster could not be picked. */
 export async function getAllContacts(
   params: { type: ContactType; deleted?: boolean } ,

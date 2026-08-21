@@ -130,7 +130,7 @@ describe('ScheduleTourForm', () => {
   it('offers a tenant from deep in the roster, not just the first server page', async () => {
     // THE BUG THIS FORM SHIPPED WITH. /api/contacts pages at 50 and DynamoDB
     // orders the type partition by `status`, where `searching` sorts LAST - so
-    // in production 591 of 641 tenants, including nearly every active one, were
+    // in production on 2026-08-20, 591 of 641 tenants, including nearly every active one, were
     // absent from this picker and could not be given a tour from this side of
     // the form. The property side had already been fixed; the tenant side had
     // no equivalent test, which is why it stayed broken.

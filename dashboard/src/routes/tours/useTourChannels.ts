@@ -115,7 +115,7 @@ const NO_PEOPLE: PersonChannel[] = [];
  *
  *  This used to sum a page of inbox summaries client-side. That read the newest
  *  50 open conversations, so a quiet thread counted as zero; by the time it was
- *  noticed prod had 668 open threads and the dot reflected 7% of them. Paging
+ *  noticed prod had 668 open threads (2026-08-20) and the dot reflected 7% of them. Paging
  *  the whole inbox fixed the count but asked for hundreds of rows to answer a
  *  question about 2-5 people, so the read is now scoped to the roster instead.
  *

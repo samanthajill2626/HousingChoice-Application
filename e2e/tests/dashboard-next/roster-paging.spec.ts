@@ -6,7 +6,7 @@ import { expectTodayReady } from '../../support/today.js';
 //
 // GET /api/contacts pages at 50, and the byTypeStatus GSI's range key is
 // `status`, so DynamoDB returns the tenant partition ORDERED BY STATUS. In
-// production `searching` sorted last, which put 591 of 641 tenants - nearly
+// production (measured 2026-08-20) `searching` sorted last, which put 591 of 641 tenants - nearly
 // every active one - past the first page. The Schedule-a-tour tenant typeahead
 // read only that first page, so those tenants could not be picked and a tour
 // could not be booked from that side of the form.

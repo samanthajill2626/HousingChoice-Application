@@ -171,7 +171,7 @@ export function ScheduleTourForm({
     // Always fetch tenants so the picker works AND a locked tenant label can be
     // looked up from the list (with getContact as a fallback).
     // EVERY page: the server pages /api/contacts at 50 and DynamoDB orders the
-    // type partition by `status`, so a first-page-only read offered 50 of 641
+    // type partition by `status`, so a first-page-only read offered 50 of the 641
     // tenants - `searching` sorts last, which made nearly every active tenant
     // unpickable and a tour unschedulable from this side of the form.
     void (async () => {

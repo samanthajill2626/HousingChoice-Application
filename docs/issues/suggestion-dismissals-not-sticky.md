@@ -2,7 +2,7 @@
 id: suggestion-dismissals-not-sticky
 title: Dismissed AI suggestions come back on every re-run while the source content is in the window
 type: bug
-severity: medium
+severity: med
 status: resolved
 area: app
 created: 2026-07-21

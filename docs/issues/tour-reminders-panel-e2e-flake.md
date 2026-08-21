@@ -2,7 +2,7 @@
 id: tour-reminders-panel-e2e-flake
 title: "scheduled-visibility.spec.ts Part A (Reminders panel armed ladder) fails DETERMINISTICALLY when the suite runs before 08:00 org-local - the morning_of rung is legitimately never armed"
 type: bug
-severity: medium
+severity: med
 status: open
 area: e2e
 created: 2026-07-10

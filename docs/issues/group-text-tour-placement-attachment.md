@@ -2,7 +2,7 @@
 id: group-text-tour-placement-attachment
 title: Attach native group_text threads to tours/placements the way relay groups attach
 type: improvement
-severity: medium
+severity: med
 status: open
 area: dashboard/comms
 created: 2026-08-10

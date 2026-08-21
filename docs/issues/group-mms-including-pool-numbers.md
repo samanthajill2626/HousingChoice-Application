@@ -2,7 +2,7 @@
 id: group-mms-including-pool-numbers
 title: A carrier group MMS that includes a relay pool number is handled by the relay branch with the group envelope dropped
 type: improvement
-severity: medium
+severity: med
 status: open
 area: app/messaging
 created: 2026-08-10

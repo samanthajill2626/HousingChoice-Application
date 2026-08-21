@@ -171,15 +171,16 @@ That class overrides only these existing custom properties for its descendants:
 | `--c-nav-border` | `#d1a11b` | Nav dividers and flyout border |
 | `--c-nav-focus-ring` | `#174ea6` | Opaque blue nav-only focus outline |
 
-The root nav-focus token aliases today's focus color so production stays visually
-unchanged. General tokens such as `--c-bg`, `--c-surface`, `--c-brand`,
-`--c-danger`, type-dot colors, and `--c-focus-ring` are not overridden. Component
-CSS explicitly applies `--c-nav-focus-ring` to every focusable element on a nav
-field: the sidebar/drawer `.brand`, every `.link` (including child links), the
-collapse toggle, drawer close control, and account trigger. The mobile
+General tokens such as `--c-bg`, `--c-surface`, `--c-brand`, `--c-danger`,
+type-dot colors, and `--c-focus-ring` are not overridden. The nav-focus token is
+defined only by the non-production shell class, and component rules scoped below
+that class explicitly apply it to every focusable element on a nav field: the
+sidebar/drawer `.brand`, every `.link` (including child links), the collapse
+toggle, drawer close control, and account trigger. Production therefore retains
+its exact existing global link focus and control focus rules. The mobile
 `.topbarBrand` and hamburger remain on the white top bar and continue to use the
-general focus rule. This confines the change to existing nav chrome while
-preserving semantic meaning and focus visibility.
+general focus rule. This confines the change to existing non-production nav
+chrome while preserving semantic meaning and focus visibility.
 
 Because the desktop sidebar, collapsed rail, collapsed Contacts child flyout,
 and mobile drawer are all descendants of the same shell and consume nav tokens,
@@ -424,8 +425,9 @@ There is no user, role, contact, message, or persistence dependency in this flow
 - Existing AppFrame navigation, account, collapse, drawer, focus, push reconcile,
   and sign-out tests remain green.
 - A focused stylesheet contract test reads `AppFrame.module.css` as source and
-  fails unless `.brand`, every `.link`, the collapse control, drawer-close
-  control, and account trigger explicitly consume `--c-nav-focus-ring`. This is
+  fails unless non-production-scoped rules for `.brand`, every `.link`, the
+  collapse control, drawer-close control, and account trigger explicitly consume
+  `--c-nav-focus-ring`, while the production rules remain unchanged. This is
   required because dashboard Vitest runs with CSS disabled and render tests alone
   cannot prove the reader wiring.
 - Notification projection expects the runtime main-icon selector and unchanged

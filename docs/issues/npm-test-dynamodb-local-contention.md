@@ -21,7 +21,7 @@ refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.tes
   on 2026-08-20 - main FLAKES, it is not deterministically red.
 -->
 
-**Problem.** `npm test` - one of the three required completion gates - is not
+**Problem.** `npm test` - one of the required completion gates - is not
 reliably green, on `main` or on any branch. Four integration suites fail
 nondeterministically, all of them DynamoDB Local suites, all of them green when
 run alone. The failing CASES vary run to run while the failing FILES stay stable:

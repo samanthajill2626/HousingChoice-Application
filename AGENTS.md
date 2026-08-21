@@ -116,12 +116,27 @@ commands from the feature worktree:
 
 1. `npm run typecheck`
 2. `npm test`
-3. `npm run e2e`
+3. `npm run smoke`
+4. `npm run e2e`
 
 `npm run typecheck` is a separate required gate. Vitest and Playwright run through
 esbuild/tsx, which strip types without checking them. Never pipe a gate command; a
 pipe can hide the real exit code. Use a hard outer timeout for a suite that can wedge,
 then inspect/filter its captured output after the command finishes.
+
+`npm run smoke` is a separate required gate for the same reason, one layer down:
+tsx/esbuild resolve imports like a BUNDLER, while production runs the real `tsc`
+output under plain `node dist/`, whose ESM loader is stricter. Nothing in gates
+1, 2 or 4 can see that gap - the email channel once shipped a directory import
+that passed every suite and crash-looped the deploy. The smoke builds the app
+workspace and proves every import in the COMPILED output resolves the way Node
+will. It needs no Docker, no ports and no network, and takes about a second.
+
+`npm test` requires DynamoDB Local (`npm run db:start`) and now FAILS rather than
+skipping without it: 46 suites self-skip on an unreachable endpoint, so a
+Docker-less run used to omit ~631 tests and still exit 0. Use
+`ALLOW_SKIP_DYNAMO_TESTS=1` only for a deliberate unit-only pass - it is not a
+completion gate.
 
 If `main` has advanced and syncing could conflict with active work, ask before doing
 the sync. Never merge a feature branch into `main` without explicit human approval.

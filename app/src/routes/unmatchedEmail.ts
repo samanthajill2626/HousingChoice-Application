@@ -338,7 +338,7 @@ export function createUnmatchedEmailRouter(deps: UnmatchedEmailRouterDeps = {}):
         ...(row.spam_verdict !== undefined && { spamVerdict: row.spam_verdict }),
         ...(row.virus_verdict !== undefined && { virusVerdict: row.virus_verdict }),
       },
-      { reingest: true },
+      { reingest: true, receivedAt: row.received_at },
     );
 
     if (result.outcome === 'threaded' && result.conversationId !== undefined) {

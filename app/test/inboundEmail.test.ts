@@ -921,6 +921,32 @@ describe('tier 7: unmatched', () => {
     expect(relinked.outcome).toBe('threaded');
     expect(w.append).toHaveBeenCalledTimes(1);
   });
+
+  it('reingest keeps the original message time without moving conversation activity backward', async () => {
+    const originalReceivedAt = '2026-07-20T10:00:00.000Z';
+    const w = makeWorld({
+      conversations: [
+        {
+          conversationId: 'conv-existing',
+          participant_email: 'alice@example.com',
+          last_activity_at: NOW,
+        },
+      ],
+    });
+
+    const relinked = await ingestInboundEmail(notice(), w.deps, {
+      reingest: true,
+      receivedAt: originalReceivedAt,
+    });
+
+    expect(relinked.tsMsgId).toBe(`${originalReceivedAt}#in-1@example.com`);
+    expect(w.appended[0]!.providerTs).toBe(originalReceivedAt);
+    expect(w.touchLastActivity).toHaveBeenCalledWith(
+      'conv-existing',
+      'A plain text body',
+      NOW,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

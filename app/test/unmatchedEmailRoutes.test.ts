@@ -381,10 +381,11 @@ describe('POST /api/unmatched-email/:id/link', () => {
 
     // The address was attached to the contact BEFORE the re-ingest.
     expect(await contacts.findByEmail('pat@example.com')).toMatchObject({ contactId: 'c-1' });
-    // The re-ingest got the stored raw ref + verdicts AND the reingest flag.
+    // The re-ingest got the stored raw ref + verdicts AND the original receipt
+    // time, so filing this message later cannot move it forward in the timeline.
     expect(reingest).toHaveBeenCalledWith(
       { bucket: 'inbound-bucket', key: 'raw/key-1', spamVerdict: 'PASS' },
-      { reingest: true },
+      { reingest: true, receivedAt: '2026-07-20T10:00:00.000Z' },
     );
     // Row flipped to linked with provenance; SSE emitted.
     const row = await repo.getById(unmatchedId);
@@ -535,7 +536,10 @@ describe('POST /api/unmatched-email/:id/create-contact', () => {
       email: 'pat@example.com',
       status: 'active', // the type-scoped manual-create default (non-tenant/landlord)
     });
-    expect(reingest).toHaveBeenCalledWith(expect.anything(), { reingest: true });
+    expect(reingest).toHaveBeenCalledWith(expect.anything(), {
+      reingest: true,
+      receivedAt: '2026-07-20T10:00:00.000Z',
+    });
     const row = await repo.getById(unmatchedId);
     expect(row?.status).toBe('linked');
     expect(row?.linked_contact_id).toBe(contactId);

@@ -68,6 +68,15 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
 
     // (c) The row IS in the Unmatched tab.
     await flow.expectUnmatchedRow(/stranger\.caller/);
+    const unmatchedRes = await page.request.get(`${NEXT}/api/unmatched-email?limit=50`);
+    expect(unmatchedRes.status(), await unmatchedRes.text()).toBe(200);
+    const unmatchedBody = (await unmatchedRes.json()) as {
+      rows: Array<{ from: { address: string }; received_at: string }>;
+    };
+    const originalReceivedAt = unmatchedBody.rows.find(
+      (row) => row.from.address === STRANGER,
+    )?.received_at;
+    expect(originalReceivedAt).toBeDefined();
 
     // (d) Link-to-contact: pick Tasha in the committed-state typeahead, link. The row
     //     actions are pointer-events:none until the row is hovered (revealed on
@@ -96,6 +105,20 @@ test.describe('Email triage - unmatched, quarantine, and inert HTML', () => {
     //     now carries the sender's address (a To option in the email composer).
     await page.waitForURL(`**/contacts/${TASHA_ID}`, { timeout: 15_000 });
     await flow.expectEmailInTimeline(/Question about a listing/);
+    const timelineRes = await page.request.get(
+      `${NEXT}/api/contacts/${TASHA_ID}/timeline?kinds=message&limit=50`,
+    );
+    expect(timelineRes.status(), await timelineRes.text()).toBe(200);
+    const timelineBody = (await timelineRes.json()) as {
+      items: Array<{ kind: string; type?: string; subject?: string; at: string }>;
+    };
+    const linkedEmail = timelineBody.items.find(
+      (item) =>
+        item.kind === 'message' &&
+        item.type === 'email' &&
+        item.subject === 'Question about a listing',
+    );
+    expect(linkedEmail?.at).toBe(originalReceivedAt);
     await page.getByRole('group', { name: 'Message channel' }).getByRole('button', { name: 'Email' }).click();
     await expect(page.getByLabel('To').locator('option', { hasText: STRANGER })).toHaveCount(1);
   });

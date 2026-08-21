@@ -242,6 +242,11 @@ export interface IngestOptions {
    * Level-2 rfc dedupe still applies, so a double-link cannot double-thread.
    */
   reingest?: boolean;
+  /**
+   * The receipt time recorded on B3's unmatched row. Re-ingest must preserve
+   * this instant so filing old mail does not move it forward in the timeline.
+   */
+  receivedAt?: string;
 }
 
 /** Strip RFC angle brackets: `<id@host>` -> `id@host` (pointers use BARE ids). */
@@ -424,7 +429,10 @@ export async function ingestInboundEmail(
   const now = deps.now ?? (() => new Date());
   const parse = deps.parseMime ?? parseInboundMime;
   const { bucket, key } = notice;
-  const receivedAt = now().toISOString();
+  const receivedAt = opts.receivedAt ?? now().toISOString();
+  // Filing historical unmatched mail must retain its original message time,
+  // but the inbox activity touch remains a present-time filing action.
+  const activityAt = opts.receivedAt === undefined ? receivedAt : now().toISOString();
   const objMarkerId = `email#obj#${createHash('sha256').update(`${bucket}/${key}`).digest('hex')}`;
 
   // The object marker is a FAST-PATH dedupe, claimed ONLY after a terminal
@@ -742,7 +750,7 @@ export async function ingestInboundEmail(
       touched = await deps.conversations.touchLastActivity(
         conversationId,
         bodyText.length > 0 ? bodyText : undefined,
-        providerTs,
+        activityAt,
       );
     } catch (err) {
       log.error(

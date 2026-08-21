@@ -21,6 +21,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import { holdsLane, reserveLane } from './laneLease.mjs';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -216,22 +218,68 @@ async function isLaneFree(lane, host, probe) {
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {{ lane: number, ports: { app: number, dashboard: number, fake: number, publicBase: number }, tablePrefix: string, mediaBucket: string, accessKeyId: string }} LaneResult
+ * @typedef {{ lane: number, ports: { app: number, dashboard: number, fake: number, publicBase: number }, tablePrefix: string, mediaBucket: string, accessKeyId: string, ownerToken: string | null, needsReap: boolean }} LaneResult
  */
+
+/** The real lease, injectable so unit tests never touch the machine registry. */
+const defaultLease = { reserve: reserveLane, holds: holdsLane };
+
+/**
+ * Build the descriptor for a lane we have taken.
+ * @param {number} lane
+ * @param {string | null} ownerToken
+ * @param {boolean} needsReap
+ * @returns {LaneResult}
+ */
+function laneResult(lane, ownerToken, needsReap) {
+  const ports = portsForLane(lane);
+  assertNotForbidden(ports, lane);
+  return {
+    lane,
+    ports,
+    tablePrefix: `hc-local-${lane}-`,
+    mediaBucket: `hc-local-media-${lane}`,
+    accessKeyId: laneAccessKeyId(lane),
+    ownerToken,
+    needsReap,
+  };
+}
 
 /**
  * Resolve the e2e lane for this worktree.
+ *
+ * OWNERSHIP IS THE GATE; THE PORT PROBE IS A HINT.
+ * -----------------------------------------------
+ * This used to select the first lane whose four ports probed FREE. That reads
+ * "port busy" as one undifferentiated fact, which has two costs:
+ *
+ *   1. A lane whose owner died leaves orphans holding its ports. The probe
+ *      skips it, run after run, and the lane leaks - nothing ever reclaims it.
+ *   2. "Free" was never proof the lane was unowned, so the launcher's
+ *      killPort() reap could tree-kill a NEIGHBOURING worktree's live Vite.
+ *
+ * With a machine-global lease those become two distinguishable cases:
+ *
+ *   - lease NOT acquirable -> a live owner is working here. Skip, touch nothing.
+ *   - lease acquired       -> nobody owns this lane. Any process on its ports
+ *                             is provably an orphan, so keep the lane and tell
+ *                             the launcher to reap (`needsReap`).
+ *
+ * See docs/issues/e2e-lane-allocation-cross-worktree-race.md.
  *
  * @param {{
  *   probe?: (port: number, host: string) => Promise<boolean>,
  *   host?: string,
  *   ignoreEnv?: boolean,
+ *   lease?: { reserve: (lane: number, opts?: any) => string | null, holds: (lane: number, token: string | null | undefined) => boolean },
  * }=} opts
  * @returns {Promise<LaneResult>}
  */
 export async function resolveLane(opts = {}) {
   const probe = opts.probe ?? defaultProbe;
   const host = opts.host ?? '127.0.0.1';
+  const lease = opts.lease ?? defaultLease;
+  const identity = worktreeIdentity();
 
   // --- E2E_LANE override ---
   const envLane = opts.ignoreEnv === true ? undefined : process.env['E2E_LANE'];
@@ -244,40 +292,46 @@ export async function resolveLane(opts = {}) {
           `E2E_LANE=0 is explicitly forbidden — lane 0 is the dev stack (ports 8080/5174/8889/5173).`,
       );
     }
-    const ports = portsForLane(n);
-    assertNotForbidden(ports, n);
-    return {
-      lane: n,
-      ports,
-      tablePrefix: `hc-local-${n}-`,
-      mediaBucket: `hc-local-media-${n}`,
-      accessKeyId: laneAccessKeyId(n),
-    };
+
+    // ADOPT, don't re-reserve. Playwright (and the profiler) resolve the lane in
+    // ONE process and boot the session in ANOTHER, handing the token down as
+    // E2E_LANE_TOKEN. Re-reserving here would refuse our own parent's lease and
+    // wedge the standard `npm run e2e` path.
+    const inherited = opts.ignoreEnv === true ? undefined : process.env['E2E_LANE_TOKEN'];
+    let ownerToken = null;
+    if (inherited !== undefined && inherited !== '' && lease.holds(n, inherited)) {
+      ownerToken = inherited;
+    } else {
+      ownerToken = lease.reserve(n, { gitDir: identity });
+      if (ownerToken === null) {
+        throw new Error(
+          `E2E_LANE=${n} is held by another live run on this machine. ` +
+            `Wait for it, stop it (npm run e2e:stop in that worktree), or pick a different lane.`,
+        );
+      }
+    }
+    // Ports may be busy here; we own the lane, so the launcher reaps.
+    const needsReap = !(await isLaneFree(n, host, probe));
+    return laneResult(n, ownerToken, needsReap);
   }
 
-  // --- Hash-derived preferred lane + free-probe ---
-  const identity = worktreeIdentity();
+  // --- Hash-derived preferred lane + ownership walk ---
   const preferred = hashToLane(identity);
 
-  // Walk from preferred lane, wrapping around, until we find a free one.
   for (let i = 0; i < MAX_LANES; i++) {
     const lane = ((preferred - 1 + i) % MAX_LANES) + 1; // stays in [1..MAX_LANES]
-    if (await isLaneFree(lane, host, probe)) {
-      const ports = portsForLane(lane);
-      assertNotForbidden(ports, lane);
-      return {
-        lane,
-        ports,
-        tablePrefix: `hc-local-${lane}-`,
-        mediaBucket: `hc-local-media-${lane}`,
-        accessKeyId: laneAccessKeyId(lane),
-      };
-    }
+    const ownerToken = lease.reserve(lane, { gitDir: identity });
+    if (ownerToken === null) continue; // a live owner holds it - leave them alone
+    // We hold the lease, so nothing on these ports has an owner. Busy ports are
+    // orphans of a dead run: keep the lane and reap them rather than leaking it.
+    const needsReap = !(await isLaneFree(lane, host, probe));
+    return laneResult(lane, ownerToken, needsReap);
   }
 
   throw new Error(
-    `e2e lane resolver: all e2e lanes 1..${MAX_LANES} are busy — every lane has at least one port held. ` +
-      `Free a running stack (npm run e2e:stop) or explicitly pick a lane with E2E_LANE=<n> (1..${MAX_LANES}).`,
+    `e2e lane resolver: all e2e lanes 1..${MAX_LANES} have a LIVE owner on this machine. ` +
+      `Stop a running stack (npm run e2e:stop in that worktree) or wait for one to finish. ` +
+      `Held lanes are listed under the lease directory; a lane whose owner died is reclaimed automatically.`,
   );
 }
 

@@ -15,6 +15,7 @@ import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
 import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 import { defaultProbe } from '../e2e/support/lane.mjs';
+import { claimLane, holdsLane, releaseLane } from '../e2e/support/laneLease.mjs';
 import {
   assertProfilerPingIdentity,
   profilerOwnerToken as parseProfilerOwnerToken,
@@ -49,7 +50,7 @@ const laneMjs = path.join(repoRoot, 'e2e', 'support', 'lane.mjs');
 const laneJson = JSON.parse(
   execFileSync(process.execPath, [laneMjs], { encoding: 'utf8' }).trim(),
 );
-const { lane, ports, tablePrefix, mediaBucket, accessKeyId } = laneJson;
+const { lane, ports, tablePrefix, mediaBucket, accessKeyId, ownerToken, needsReap } = laneJson;
 
 // Derive all per-lane URLs. 127.0.0.1 everywhere — NEVER bare 'localhost'
 // (Vite/localhost can resolve to IPv6 ::1 while the free-probe + other services
@@ -71,6 +72,9 @@ function laneStateText() {
       tablePrefix,
       mediaBucket,
       accessKeyId,
+      // Recorded so `npm run e2e:stop` can RELEASE the lane rather than leave
+      // it waiting on pid-liveness to notice this launcher is gone.
+      ownerToken: ownerToken ?? null,
     },
     null,
     2,
@@ -282,6 +286,20 @@ async function prepareOwnedPort(port, label) {
     }
     return;
   }
+  // killPort tree-kills EVERY pid listening on this port, with no check that
+  // the process is ours. That is safe only because holding this lane's lease
+  // proves no other live run owns it - anything still on these ports is an
+  // orphan of a dead run. Without that proof we must not kill: the process
+  // could be a neighbouring worktree's Vite, mid-suite.
+  // See docs/issues/e2e-lane-allocation-cross-worktree-race.md.
+  if (!holdsLane(lane, ownerToken)) {
+    if (await defaultProbe(port, '127.0.0.1')) return; // free anyway - nothing to do
+    throw new Error(
+      `lane ${lane} ${label} port :${port} is held, and this launcher does not hold lane ${lane}'s ` +
+        `lease - refusing to kill a process it cannot account for. ` +
+        `Run npm run e2e:stop here, or let the resolver pick another lane.`,
+    );
+  }
   const reaped = killPort(port);
   if (reaped.length) log(`reaped orphan(s) holding :${port} before start: ${reaped.join(', ')}`);
 }
@@ -431,6 +449,12 @@ function shutdown(code = 0) {
   log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
   removeOwnedSessionState({ pidFile, launcherPid: process.pid });
+  // Release the lane so the next run can take it immediately rather than
+  // waiting for pid-liveness to notice we are gone. Compares on the token, so
+  // a late shutdown can never free a lane someone else has since claimed.
+  if (ownerToken !== null && ownerToken !== undefined && releaseLane(lane, ownerToken)) {
+    log(`released lane ${lane}`);
+  }
   setTimeout(() => process.exit(code), 500);
 }
 
@@ -494,6 +518,25 @@ async function main() {
         throw new Error(`profiler_${label}_port_occupied`);
       }
     }
+  }
+
+  // CLAIM the lane lease. The resolver that picked this lane was a short-lived
+  // child (execFileSync of lane.mjs, above), so its reservation is stamped with
+  // a pid that is already gone. This launcher is the long-lived process, so it
+  // takes ownership under the same token - and from here `holdsLane` is what
+  // authorises anything destructive (port reaps, table drops).
+  if (ownerToken !== null && ownerToken !== undefined) {
+    if (!claimLane(lane, ownerToken, { appCommit: gitSha || null })) {
+      throw new Error(
+        `could not claim lane ${lane}'s lease - another run took it while this session was starting. ` +
+          `Re-run; the resolver will pick a free lane.`,
+      );
+    }
+    if (needsReap === true) {
+      log(`lane ${lane} has ports held by a dead run's orphans - reaping them (we hold the lease)`);
+    }
+  } else {
+    log(`WARNING: no lane lease for lane ${lane} - port reaping is disabled for this session`);
   }
 
   // State becomes visible only after this launcher has proved the lane has no

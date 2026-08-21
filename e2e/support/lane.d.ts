@@ -28,6 +28,23 @@ export interface LaneResult {
   mediaBucket: string;
   /** DynamoDB Local access key = this lane's own local database, e.g. "hclane3" */
   accessKeyId: string;
+  /**
+   * The lane lease this call reserved (or adopted). Hand it to the long-lived
+   * launcher, which claims it; `holdsLane` with this token is what authorises
+   * anything destructive. null only when leasing was disabled by injection.
+   */
+  ownerToken: string | null;
+  /**
+   * Ports on this lane are held even though we now own its lease - i.e. they
+   * belong to a dead run's orphans and the launcher should reap them.
+   */
+  needsReap: boolean;
+}
+
+/** Injectable lane lease, so unit tests never touch the machine registry. */
+export interface LaneLeasePort {
+  reserve(lane: number, opts?: { gitDir?: string }): string | null;
+  holds(lane: number, token: string | null | undefined): boolean;
 }
 
 /** Injectable port-availability probe (default: net.createServer bind test). */
@@ -45,8 +62,15 @@ export interface ResolveLaneOpts {
    * Must match the host the e2e stack services bind on.
    */
   host?: string;
-  /** Ignore an inherited E2E_LANE and always select through the free probe. */
+  /** Ignore an inherited E2E_LANE (and E2E_LANE_TOKEN) and always select fresh. */
   ignoreEnv?: boolean;
+  /**
+   * Inject a lane lease. Defaults to the real machine-global one in
+   * laneLease.mjs. Unit tests MUST inject a fake: the real lease reserves
+   * lanes in os.tmpdir(), so a test using it could steal a lane from a live
+   * e2e run in another worktree.
+   */
+  lease?: LaneLeasePort;
 }
 
 /**

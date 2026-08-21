@@ -19,6 +19,8 @@ const laneJson = JSON.parse(execFileSync(process.execPath, [laneMjs], { encoding
   tablePrefix: string;
   mediaBucket: string;
   accessKeyId: string;
+  ownerToken: string | null;
+  needsReap: boolean;
 };
 
 // Expose resolved URLs to test workers (fixtures in Task 3 read these).
@@ -94,6 +96,12 @@ export default defineConfig({
     command: `node scripts/e2e-session.mjs`,
     env: {
       E2E_LANE: String(laneJson.lane),
+      // The lane lease this config RESERVED, handed to the session so it can
+      // ADOPT rather than re-reserve. This process exits long before the suite
+      // ends, so it can never be the lease holder itself - the session claims
+      // it and becomes the owner. Without this the session would refuse its own
+      // parent's lease and no `npm run e2e` would boot.
+      ...(laneJson.ownerToken ? { E2E_LANE_TOKEN: laneJson.ownerToken } : {}),
     },
     cwd: repoRoot,
     // Readiness gate: the launcher only logs 'ready' after db:start/create/seed

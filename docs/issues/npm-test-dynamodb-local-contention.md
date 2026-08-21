@@ -145,10 +145,35 @@ both:
    robust to latency: explicit waits on state rather than call-order spies, or
    widened windows. The failing case on that baseline was "a filing for a
    DIFFERENT author does not clear this author event".
-2. **B** - confirm whether `93ca271b` already cured it; it did NOT reproduce on
-   the 2026-08-21 baseline. If it recurs, either serialize the schema-mutating
-   lane away from the other integration suites, or retry `UpdateTable` on
-   `InternalFailure`.
+2. **B** - `93ca271b` did NOT cure it. It stayed green on the 2026-08-21
+   baseline but reproduced later the same day on `fix/e2e-harness-determinism`
+   @`8b3dcfe2`, immediately after an 18-minute `npm run e2e` had hammered the
+   shared container (which had also been up 25+ hours - both documented
+   degradation conditions at once):
+
+   ```
+   FAIL test/unreadIndexRepo.integration.test.ts > db:update-gsis ... > adds the missing GSI in place
+     InternalFailure: The request processing has failed because of an unknown error
+     at ensureGsis scripts/db-update-gsis.ts:152
+   FAIL ... > a SECOND run reports nothing to do (idempotent)
+     Test timed out in 60000ms
+   ```
+
+   The second failure is a CASCADE of the first, not an independent one: the
+   failed `UpdateTable` leaves the table mid-update, so the idempotency case
+   waits out its whole budget. Re-run of that file ALONE immediately after:
+   23/23 green in 1.089s - against a 60s timeout in the suite.
+
+   Remedy unchanged: serialize the schema-mutating lane away from the other
+   integration suites, or retry `UpdateTable` on `InternalFailure`. The retry is
+   the cheaper of the two and this evidence argues for it - `InternalFailure` is
+   DynamoDB Local buckling under concurrent load, not a real API error.
+
+   **Note for whoever picks this up:** the failing FILE varies between runs. The
+   2026-08-21 baseline failed A and not B; the run above failed B and not A.
+   That is the whole reason this issue is one umbrella rather than per-suite
+   tickets, and the reason gate adjudication compares FILES against a base run
+   rather than expecting a fixed set.
 3. **Structural, if 1-2 are not enough** - establish whether these suites can
    share a DynamoDB Local container with the rest of the suite at all. Give them
    a throwaway table prefix per run (some of this already exists) and confirm no

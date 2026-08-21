@@ -122,7 +122,7 @@ export function PlacementCreateForm({
         // EVERY page: the server pages /api/contacts at 50 and orders the type
         // partition by `status`, so a first-page-only read left most of the
         // tenant roster unpickable (the same defect the unit side already fixed).
-        const { items } = await getAllContacts({ type: 'tenant' }, ac.signal);
+        const items = await getAllContacts({ type: 'tenant' }, ac.signal);
         if (ac.signal.aborted) return;
         setTenants(items);
         if (tenantId !== undefined) {
@@ -139,7 +139,7 @@ export function PlacementCreateForm({
         // EVERY page (the server pages /api/units at 50) - a first-page-only
         // read left properties later in the scan unselectable, so no placement
         // could be created against them.
-        const { items: all } = await getAllUnits({}, ac.signal);
+        const all = await getAllUnits({}, ac.signal);
         if (ac.signal.aborted) return;
         setUnits(all);
         if (unitId !== undefined) {

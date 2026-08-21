@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, ContactType, FetchAllPagesResult } from '../../api/index.js';
+import type { Contact, ContactType } from '../../api/index.js';
 
 const getAllContacts = vi.fn();
 
@@ -25,8 +25,8 @@ function Probe({ filter }: { filter: ContactsFilter }): React.JSX.Element {
   );
 }
 
-function page(...contacts: Contact[]): FetchAllPagesResult<Contact> {
-  return { items: contacts, truncated: false };
+function page(...contacts: Contact[]): Contact[] {
+  return contacts;
 }
 
 beforeEach(() => {

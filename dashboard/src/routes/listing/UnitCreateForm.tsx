@@ -97,7 +97,7 @@ export function UnitCreateForm({
         // this was easy to miss: it would have started dropping candidates
         // silently at 51, with nothing to distinguish a short list from a
         // complete one.
-        const { items } = await getAllContacts({ type: 'landlord' }, ac.signal);
+        const items = await getAllContacts({ type: 'landlord' }, ac.signal);
         if (ac.signal.aborted) return;
         setLandlords(items);
         if (landlordId !== undefined) {

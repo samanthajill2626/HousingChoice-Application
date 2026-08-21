@@ -65,8 +65,8 @@ async function loadToday(
       getTours({ from: window.from, to: window.to }, signal),
     ]);
     const items = buildTodayFromSources(
-      placements.items,
-      conversations.items,
+      placements,
+      conversations,
       now,
       tours,
     );

@@ -32,7 +32,7 @@ export function useListings(deleted = false): ListingsState {
 
     (async () => {
       try {
-        const { items: units } = await getAllUnits({ deleted }, signal);
+        const units = await getAllUnits({ deleted }, signal);
         if (signal.aborted) return;
         setState({ status: 'ready', units, forDeleted: deleted });
       } catch (err) {

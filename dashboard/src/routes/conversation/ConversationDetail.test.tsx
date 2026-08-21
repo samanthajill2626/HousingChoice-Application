@@ -136,7 +136,7 @@ beforeEach(() => {
   // useContacts('all') fans out per type; return the candidate for tenants only
   // (so the search field yields exactly one option).
   getAllContacts.mockImplementation((params: { type?: string } = {}) =>
-    Promise.resolve({ items: params.type === 'tenant' ? [CANDIDATE] : [], truncated: false }),
+    Promise.resolve(params.type === 'tenant' ? [CANDIDATE] : []),
   );
 });
 afterEach(() => {

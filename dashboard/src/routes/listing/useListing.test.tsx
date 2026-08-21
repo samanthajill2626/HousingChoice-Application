@@ -1,7 +1,7 @@
 import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { Contact, FetchAllPagesResult, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
+import type { Contact, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -55,14 +55,8 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
 }
 
 const UNIT: UnitItem = { unitId: 'u1', landlordId: 'll1', status: 'available' };
-const UNITS: FetchAllPagesResult<UnitItem> = {
-  items: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }],
-  truncated: false,
-};
-const CASES: FetchAllPagesResult<PlacementItem> = {
-  items: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
-  truncated: false,
-};
+const UNITS: UnitItem[] = [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }];
+const CASES: PlacementItem[] = [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }];
 const LANDLORD: Contact = { contactId: 'll1', type: 'landlord', firstName: 'James' } as Contact;
 
 beforeEach(() => {
@@ -112,10 +106,7 @@ describe('useListing', () => {
     // to the derived Related list, so a landlord with a large portfolio saw an
     // empty "Related properties" card.
     getUnit.mockResolvedValue(UNIT);
-    getAllUnits.mockResolvedValue({
-      items: [UNIT, { unitId: 'u-sibling', landlordId: 'll1', status: 'available' }],
-      truncated: false,
-    });
+    getAllUnits.mockResolvedValue([UNIT, { unitId: 'u-sibling', landlordId: 'll1', status: 'available' }]);
     getAllPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));

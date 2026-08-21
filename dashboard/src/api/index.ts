@@ -3,6 +3,6 @@
 export * from './types.js';
 export { ApiError } from './client.js';
 export * from './endpoints.js';
-export { fetchAllPages, MAX_PAGES, PAGE_LIMIT, type FetchAllPagesResult } from './paging.js';
+export { fetchAllPages, MAX_PAGES, PAGE_LIMIT } from './paging.js';
 export { useEventStream, type EventStreamHandlers } from './useEventStream.js';
 export { EventStreamProvider } from './EventStreamProvider.js';

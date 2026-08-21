@@ -26,10 +26,9 @@ describe('whole-list read wrappers', () => {
       .mockResolvedValueOnce({ contacts: [{ contactId: 'c1' }], nextCursor: 'n1' })
       .mockResolvedValueOnce({ contacts: [{ contactId: 'c2' }], nextCursor: null });
 
-    const res = await getAllContacts({ type: 'tenant' });
+    const items = await getAllContacts({ type: 'tenant' });
 
-    expect(res.items.map((c) => c.contactId)).toEqual(['c1', 'c2']);
-    expect(res.truncated).toBe(false);
+    expect(items.map((c) => c.contactId)).toEqual(['c1', 'c2']);
     expect(request).toHaveBeenCalledTimes(2);
     // The cursor from page one must be threaded into page two.
     expect(queryOf(0)['cursor']).toBeUndefined();
@@ -60,9 +59,9 @@ describe('whole-list read wrappers', () => {
       .mockResolvedValueOnce({ units: [{ unitId: 'u1' }], nextCursor: 'n1' })
       .mockResolvedValueOnce({ units: [{ unitId: 'u2' }], nextCursor: null });
 
-    const res = await getAllUnits();
+    const items = await getAllUnits();
 
-    expect(res.items.map((u) => u.unitId)).toEqual(['u1', 'u2']);
+    expect(items.map((u) => u.unitId)).toEqual(['u1', 'u2']);
     expect(queryOf(0)['limit']).toBe('100');
     expect(queryOf(1)['cursor']).toBe('n1');
   });
@@ -72,9 +71,9 @@ describe('whole-list read wrappers', () => {
       .mockResolvedValueOnce({ placements: [{ placementId: 'p1' }], nextCursor: 'n1' })
       .mockResolvedValueOnce({ placements: [{ placementId: 'p2' }], nextCursor: null });
 
-    const res = await getAllPlacements();
+    const items = await getAllPlacements();
 
-    expect(res.items.map((p) => p.placementId)).toEqual(['p1', 'p2']);
+    expect(items.map((p) => p.placementId)).toEqual(['p1', 'p2']);
     expect(queryOf(1)['cursor']).toBe('n1');
   });
 
@@ -86,9 +85,9 @@ describe('whole-list read wrappers', () => {
       .mockResolvedValueOnce({ conversations: [{ conversationId: 'v1' }], nextCursor: 'n1' })
       .mockResolvedValueOnce({ conversations: [{ conversationId: 'v2' }], nextCursor: null });
 
-    const res = await getAllConversations();
+    const items = await getAllConversations();
 
-    expect(res.items.map((c) => c.conversationId)).toEqual(['v1', 'v2']);
+    expect(items.map((c) => c.conversationId)).toEqual(['v1', 'v2']);
     expect(queryOf(0)['limit']).toBe('100');
     expect(queryOf(1)['cursor']).toBe('n1');
   });
@@ -100,8 +99,8 @@ describe('whole-list read wrappers', () => {
       .mockResolvedValueOnce({ contacts: [], nextCursor: 'n1' })
       .mockResolvedValueOnce({ contacts: [{ contactId: 'c9' }], nextCursor: null });
 
-    const res = await getAllContacts({ type: 'tenant' });
+    const items = await getAllContacts({ type: 'tenant' });
 
-    expect(res.items.map((c) => c.contactId)).toEqual(['c9']);
+    expect(items.map((c) => c.contactId)).toEqual(['c9']);
   });
 });

@@ -95,8 +95,8 @@ function setup(props?: Partial<Parameters<typeof ScheduleTourForm>[0]>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAllContacts.mockResolvedValue({ items: TENANTS, truncated: false });
-  getAllUnits.mockResolvedValue({ items: UNITS, truncated: false });
+  getAllContacts.mockResolvedValue(TENANTS);
+  getAllUnits.mockResolvedValue(UNITS);
   // The locked-label fallback is best-effort; reject so the list lookup wins.
   getContact.mockRejectedValue(new ApiError(404, 'not_found', 'not_found'));
 });
@@ -135,8 +135,7 @@ describe('ScheduleTourForm', () => {
     // the form. The property side had already been fixed; the tenant side had
     // no equivalent test, which is why it stayed broken.
     const user = userEvent.setup();
-    getAllContacts.mockResolvedValue({
-      items: [
+    getAllContacts.mockResolvedValue([
         ...TENANTS,
         {
           contactId: 'contact-tenant-0099',
@@ -145,9 +144,7 @@ describe('ScheduleTourForm', () => {
           lastName: 'Tenant',
           status: 'searching',
         },
-      ],
-      truncated: false,
-    });
+      ]);
     setup();
     await screen.findByRole('dialog', { name: 'Schedule a tour' });
 
@@ -166,15 +163,12 @@ describe('ScheduleTourForm', () => {
     // a paged read could have supplied. Before the walk existed, a tour simply
     // could not be scheduled on any property later in the scan.
     const user = userEvent.setup();
-    getAllUnits.mockResolvedValue({
-      items: [...UNITS, {
+    getAllUnits.mockResolvedValue([...UNITS, {
           unitId: 'unit-0099',
           landlordId: 'contact-landlord-0001',
           status: 'available',
           address: { line1: '77 Lastpage Ln', city: 'Atlanta', state: 'GA' },
-        }],
-      truncated: false,
-    });
+        }]);
     setup();
     await screen.findByRole('dialog', { name: 'Schedule a tour' });
 

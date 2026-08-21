@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { ConversationSummary, ConversationsPage, FetchAllPagesResult, PlacementItem, PlacementsPage, TodayResponse } from '../../api/index.js';
+import type { ConversationSummary, ConversationsPage, PlacementItem, PlacementsPage, TodayResponse } from '../../api/index.js';
 
 // Mock the api barrel: stub the three fetchers + capture the SSE handlers so the
 // test can drive a live event. ApiError is re-exported real.
@@ -46,8 +46,7 @@ const TODAY: TodayResponse = {
   ],
 };
 
-const CASES: FetchAllPagesResult<PlacementItem> = {
-  items: [
+const CASES: PlacementItem[] = [
     {
       placementId: 'k9',
       tenantId: 'Fallback Tenant',
@@ -56,10 +55,8 @@ const CASES: FetchAllPagesResult<PlacementItem> = {
       next_deadline_type: 'rta_window',
       next_deadline_at: '2999-01-01T00:00:00Z',
     },
-  ],
-  truncated: false,
-};
-const CONVERSATIONS: FetchAllPagesResult<ConversationSummary> = { items: [], truncated: false };
+  ];
+const CONVERSATIONS: ConversationSummary[] = [];
 
 beforeEach(() => {
   getToday.mockReset();
@@ -113,7 +110,7 @@ describe('useToday', () => {
 
   it('fallback folds a Tour entity scheduled today into tours_today', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getAllPlacements.mockResolvedValue({ items: [], truncated: false });
+    getAllPlacements.mockResolvedValue([]);
     getAllConversations.mockResolvedValue(CONVERSATIONS);
     const now = new Date();
     const twoPmLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 0, 0);

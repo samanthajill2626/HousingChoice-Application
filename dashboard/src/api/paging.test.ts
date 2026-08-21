@@ -24,9 +24,8 @@ afterEach(() => vi.restoreAllMocks());
 describe('fetchAllPages', () => {
   it('returns a single page without asking for a cursor', async () => {
     const ep = fakeEndpoint([{ items: [1, 2], nextCursor: null }]);
-    const res = await fetchAllPages(ep.fetch, select, { label: 'test' });
-    expect(res.items).toEqual([1, 2]);
-    expect(res.truncated).toBe(false);
+    const items = await fetchAllPages(ep.fetch, select, { label: 'test' });
+    expect(items).toEqual([1, 2]);
     expect(ep.cursors).toEqual([undefined]);
   });
 
@@ -36,9 +35,8 @@ describe('fetchAllPages', () => {
       { items: [2], nextCursor: 'c2' },
       { items: [3], nextCursor: null },
     ]);
-    const res = await fetchAllPages(ep.fetch, select, { label: 'test' });
-    expect(res.items).toEqual([1, 2, 3]);
-    expect(res.truncated).toBe(false);
+    const items = await fetchAllPages(ep.fetch, select, { label: 'test' });
+    expect(items).toEqual([1, 2, 3]);
     expect(ep.cursors).toEqual([undefined, 'c1', 'c2']);
   });
 
@@ -49,18 +47,16 @@ describe('fetchAllPages', () => {
       { items: [], nextCursor: 'c1' },
       { items: [7], nextCursor: null },
     ]);
-    const res = await fetchAllPages(ep.fetch, select, { label: 'test' });
-    expect(res.items).toEqual([7]);
-    expect(res.truncated).toBe(false);
+    const items = await fetchAllPages(ep.fetch, select, { label: 'test' });
+    expect(items).toEqual([7]);
   });
 
-  it('stops at the page cap and reports truncated rather than looping forever', async () => {
+  it('stops at the page cap and returns the PREFIX rather than looping forever', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // A cursor that never nulls out.
     const ep = fakeEndpoint([{ items: [1], nextCursor: 'forever' }]);
-    const res = await fetchAllPages(ep.fetch, select, { label: 'test', maxPages: 3 });
-    expect(res.items).toEqual([1, 1, 1]);
-    expect(res.truncated).toBe(true);
+    const items = await fetchAllPages(ep.fetch, select, { label: 'test', maxPages: 3 });
+    expect(items).toEqual([1, 1, 1]);
     expect(ep.cursors).toHaveLength(3);
     expect(warn).toHaveBeenCalledTimes(1);
   });
@@ -78,8 +74,7 @@ describe('fetchAllPages', () => {
   it('does not warn when the walk completes inside the cap', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const ep = fakeEndpoint([{ items: [1], nextCursor: null }]);
-    const res = await fetchAllPages(ep.fetch, select, { label: 'test', maxPages: 2 });
-    expect(res.truncated).toBe(false);
+    await fetchAllPages(ep.fetch, select, { label: 'test', maxPages: 2 });
     expect(warn).not.toHaveBeenCalled();
   });
 

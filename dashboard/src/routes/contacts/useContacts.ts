@@ -66,8 +66,8 @@ export function useContacts(filter: ContactsFilter): ContactsState {
         // Merge the per-type lists, de-duping on contactId (a contact only ever
         // has one type, but a defensive de-dupe keeps the list keys unique).
         const byId = new Map<string, Contact>();
-        for (const { items } of perType) {
-          for (const contact of items) byId.set(contact.contactId, contact);
+        for (const list of perType) {
+          for (const contact of list) byId.set(contact.contactId, contact);
         }
         setState({ status: 'ready', contacts: [...byId.values()], forFilter: filter });
       } catch (err) {

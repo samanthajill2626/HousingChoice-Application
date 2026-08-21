@@ -198,7 +198,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         // derived same-landlord list (real data → 'ready', not 'pending').
         const related: Slice<RelatedUnit> =
           relatedSlice.status === 'pending'
-            ? { status: 'ready', rows: relatedByLandlord(units.items, unit) }
+            ? { status: 'ready', rows: relatedByLandlord(units, unit) }
             : relatedSlice;
 
         setState({
@@ -206,7 +206,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           unit,
           landlord,
           roster: listingRoster(unit, landlord),
-          placementsOnUnit: placementsOnUnit(placements.items, unitId),
+          placementsOnUnit: placementsOnUnit(placements, unitId),
           related,
           recipients,
           similar,

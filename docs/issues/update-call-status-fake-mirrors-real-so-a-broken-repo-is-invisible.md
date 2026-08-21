@@ -3,11 +3,49 @@ id: update-call-status-fake-mirrors-real-so-a-broken-repo-is-invisible
 title: The updateCallStatus fake mirrors the real conditional write, so a broken real repo passes the whole suite
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-19
-refs: app/src/repos/messagesRepo.ts, app/test/helpers/twilioWebhookHarness.ts, app/test/messagesRepo.callTranscript.test.ts
+resolved: 2026-08-21
+refs: app/test/updateCallStatus.integration.test.ts, app/src/repos/messagesRepo.ts:2208, app/test/helpers/twilioWebhookHarness.ts:1121
 ---
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).**
+`app/test/updateCallStatus.integration.test.ts` - 8 cases against real DynamoDB
+Local, covering exactly the matrix the ConditionExpression encodes: a forward
+transition commits and stamps its fields, a regressing one is a no-op, a second
+terminal is a no-op, an unknown CallSid is a no-op, nothing transitions into
+`ringing`, and all three arms of the `expectedPriorCallStatuses` narrowing
+(commits when it includes the prior, refuses when it excludes it, and cannot
+WIDEN past what the machine allows).
+
+Deliberately small. The fake keeps carrying the volume of the voice-webhook
+suite; this proves the thing the fake is imitating.
+
+**Re-ran the original mutation probes to prove the test actually bites** - a new
+test that has never failed is worth nothing, which is the whole premise of this
+issue:
+
+| probe: break the REAL repo | before | now |
+|---|---|---|
+| remove the `expectedPriorCallStatuses` narrowing | **GREEN, exit 0** | **1 failed** |
+| remove the forward-only `ConditionExpression` | (untested) | **6 failed** |
+| restore (byte-identical) | - | 8 passed |
+
+The first row is the finding this issue was filed on. It now fails.
+
+**What this does NOT do:** it does not make the fake faithful. The fake still
+hand-mirrors the real semantics and can still drift; what changed is that the
+drift can no longer hide, because the real implementation is now pinned
+independently. Making mirrors self-checking rather than remembered is the wider
+C11 theme - see `sw-mirror-test-pins-literals-not-behaviour` for the same shape
+in the service worker.
+
+The tension the issue flagged - "new DynamoDB Local integration suites are
+exactly what is currently flaking under full-suite load" - was resolved first,
+deliberately: `npm-test-dynamodb-local-contention` was root-caused (a TTL time
+bomb) and fixed before this landed, so this suite is not being added to a
+flaking gate.
 
 **Problem.** Every voice-webhook test drives the FAKE `updateCallStatus` in
 `app/test/helpers/twilioWebhookHarness.ts`, which hand-mirrors the real repo's

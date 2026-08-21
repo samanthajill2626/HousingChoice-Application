@@ -118,10 +118,12 @@ GET /app-identity/config.json
 The response does not expose a user, raw environment name, table prefix, contact,
 secret, or infrastructure identifier. A root-level `EnvironmentIdentityProvider`
 fetches it once and renders only its existing children. The provider wraps both
-the public-route branch and the authenticated/login branch, so `/join`,
+the public-route branch and the authenticated/Login branch, so `/join`,
 `/p/:unitId`, Login, and the staff shell all update the same existing
-`meta[name="theme-color"]` element without making a session request. This
-preserves the deliberate rule that public pages never call `/auth/me`.
+`meta[name="theme-color"]` element. The identity read itself is never a session
+request. The public pages remain outside auth and never call `/auth/me`; the
+catch-all branch retains its existing `/auth/me` probe, whose anonymous 401 is
+what causes `AuthGate` to render Login.
 
 The frontend trusts only the two fixed variants and their expected paired theme
 colors:
@@ -320,9 +322,11 @@ App boot
   -> GET /app-identity/config.json
   -> server classifies config.appEnv and returns a fixed presentation variant
   -> EnvironmentIdentityProvider updates the existing theme-color meta
-  -> public and Login pages stop here without a session request
-  -> authenticated flow independently performs existing GET /auth/me
-  -> AppFrame reads the identity context
+  -> public pages stop here without a session request
+  -> catch-all branch independently performs existing GET /auth/me
+     -> 401: AuthGate renders Login with the already-selected identity
+     -> 200: AuthGate renders the authenticated shell
+  -> AppFrame reads the identity context on the authenticated branch
   -> existing shell gets zero or one CSS module class
   -> existing nav descendants inherit navy or Sunflower tokens
 ```
@@ -468,12 +472,15 @@ A focused accessibility-first E2E spec on the hermetic `local` environment prove
 5. The existing theme-color meta becomes `#f4c542` after authentication.
 6. The runtime manifest reports Sunflower and its icon selector returns the
    non-production asset.
-7. On Login and each public route, the public identity response makes the same
-   existing meta Sunflower without requesting `/auth/me` or rendering a label.
-8. Keyboard focus on the desktop brand, an ordinary link, a child link, collapse
+7. On Login, the public identity response makes the same existing meta Sunflower
+   while the existing `/auth/me` probe retains its 401 behavior and no label is
+   rendered.
+8. On `/join` and `/p/:unitId`, the public identity response makes the existing
+   meta Sunflower without any `/auth/me` request or visible environment label.
+9. Keyboard focus on the desktop brand, an ordinary link, a child link, collapse
    control, and account trigger, plus the mobile drawer-close control, computes
    the locked opaque outline color `rgb(23, 78, 166)`.
-9. No visible environment label/banner exists.
+10. No visible environment label/banner exists.
 
 The feature-mission completion gates remain the bare commands from the isolated
 worktree after the one final sync with current `main`:

@@ -114,12 +114,43 @@ New `e2e/support/laneLease.mjs`. Design:
   retry - converting the residual TOCTOU from "boot fails" to "auto-recover".
   This is the merged `e2e-lane-probe-bind-toctou` remedy.
 
-**The trap to get right.** `E2E_LANE` is how Playwright hands its resolved lane
-to the session it spawns. If the override path acquires a lease, the child
-deadlocks against its own parent's lease. The child must ADOPT, not acquire:
-pass the owner token down as `E2E_LANE_TOKEN`, and treat a matching token as
-"already mine". A lease implementation that does not handle this will look
-correct in a single-process test and wedge the real Playwright path.
+**The trap, and it is worse than "the child must adopt" (corrected while
+reading the code).** `lane.mjs` is not called in-process by anyone who then
+holds the lane. BOTH callers spawn it as a short-lived child and read its
+stdout:
+
+- `e2e/playwright.config.ts:16` - `execFileSync(node, [laneMjs])` at config load
+- `scripts/e2e-session.mjs:49-51` - the same `execFileSync`, again
+
+So the process that resolves the lane **exits immediately**. A lease stamped
+with `process.pid` inside `resolveLane()` is stale by pid-liveness the instant
+it is written, and the next probe would reclaim it from its rightful owner. A
+naive implementation passes every unit test and then hands two worktrees the
+same lane under load - the exact bug this slice exists to fix, reintroduced by
+its own fix.
+
+The lease therefore needs TWO phases:
+
+1. **Reserve** - `lane.mjs` atomically `wx`-creates
+   `{ ownerToken, state: 'reserved', reservedByPid, reservedAt }` and prints
+   `ownerToken` in its JSON. Its pid is expected to die.
+2. **Claim** - the long-lived session launcher rewrites the record to
+   `{ state: 'held', pid: launcherPid }`, but ONLY if the on-disk token matches
+   the one it was handed. That is the handoff.
+
+Staleness differs per state: a `held` lease is reclaimable when its pid is dead;
+a `reserved` lease is reclaimable when its reserver is dead AND it is older than
+a grace window. The window must exceed the gap between reserve and claim -
+Playwright's `webServer.timeout` is 180s, so 120s is too tight for the
+config-load path. Use the webServer timeout as the floor.
+
+Token flow: `lane.mjs` stdout -> `playwright.config.ts` -> `E2E_LANE_TOKEN` in
+`webServer.env` alongside `E2E_LANE` -> `e2e-session.mjs` -> the override branch
+of `resolveLane()` ADOPTS on a token match instead of reserving again.
+
+Release reuses the compare-before-delete idiom `scripts/e2e-stop.mjs:44-47`
+already uses for `session.pid` / `lane.json`: re-read, verify byte-identical to
+what we wrote, then unlink. That is in-repo prior art, not a new pattern.
 
 Generalize `scripts/lib/profilerOwnership.mjs` rather than inventing a second
 token vocabulary - it already has the 32-hex token shape and identity-proof

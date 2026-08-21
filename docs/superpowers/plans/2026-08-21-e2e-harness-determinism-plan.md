@@ -179,11 +179,41 @@ treat docker's "container name already in use" / "port is already allocated" as
 `already running` path each script already has, extended to cover the
 in-flight-start window.
 
-## Gates
+## Gates - RESULTS
 
-From this worktree, bare, at the end: `npm run typecheck`, `npm test`,
-`npm run e2e`. Compare `npm test` failing FILES against the S0 baseline, not
-against zero.
+All three run bare from this worktree, AFTER the single `main` sync
+(`a51afb7d`, clean merge, zero overlapping files, no dependency change):
+
+| gate | result |
+|---|---|
+| `npm run typecheck` | GREEN, five workspaces |
+| `npm test` | 1 failing file - `groupCrossCheck.test.ts` - **identical to the S0 baseline**; 317 passed, 1 skipped; dashboard 168 / e2e 18 / fake-twilio 33 / scripts 13 all green |
+| `npm run e2e` | **251 passed (17.8m), 0 failed** |
+
+`npm test` is adjudicated by FILE against the S0 baseline, per the repo rule,
+not against zero. Same file failing before and after this branch = no
+regression. The failing CASE differed between the two runs, which is that
+suite's documented signature.
+
+Both e2e runs also served as the feature test for S3/S4/S5: lane 15 was
+reclaimed from a dead run's `held` lease on boot, `db:update-gsis` reported
+`0 index(es) added, 22 table(s) already current`, and the ready banner printed
+the reuse line.
+
+### Failures along the way, and what they were
+
+1. **70 specs, `E2E_LANE=15 is held by another live run`.** The adoption trap in
+   the one path not enumerated: Playwright re-loads its config in EVERY test
+   worker. Fixed by exporting the token for workers AND by moving the refusal
+   out of `lane.mjs` into the launcher - lane.mjs DESCRIBES, the launcher OWNS.
+2. **Preflight stale-server abort.** Self-inflicted: a commit landed while the
+   suite was booting, so its session was one commit behind the checkout. The
+   guard was right. Do not commit during an e2e run.
+3. **`unreadIndexRepo.integration` (suite B).** Known flake, re-run alone
+   23/23 green in 1.089s. Recorded in the umbrella issue with its evidence.
+4. **`groupCrossCheck` (suite A).** Same file as baseline. Investigating it
+   produced a genuinely new finding - it fails ALONE sometimes, so isolation is
+   not a reliable green and the suite has real latency-dependent assertions.
 
 `npm run e2e` matters more than usual here - S3 and S5 change how every run
 acquires its lane, so the suite is both the gate and the feature test.

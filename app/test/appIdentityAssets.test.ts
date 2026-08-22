@@ -81,7 +81,7 @@ describe('environment HC icon assets', () => {
         [350, 340],
       ] as const) {
         expect(
-          pixelAtSourceCoordinate(...point),
+      pixelAtSourceCoordinate(point[0], point[1]),
           `${file} foreground sample ${point.join(',')}`,
         ).toEqual(foreground);
       }

@@ -967,6 +967,61 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     });
   });
 
+  // WS3's paging claim, which was previously verified only by code reading.
+  //
+  // The property-audit candidate keys on the RAW audit SK (`<ISO>#<rand>`), so a
+  // page-2 cursor anchored on a property row is handed straight back to
+  // `auditRepo.listByEntity` as a `before` bound. The real repo compares that
+  // LEXICALLY; the in-memory fake used to parse it with `Number(...)`, which is
+  // `NaN` for an ISO SK and silently turned the bound into a no-op - so the fake
+  // could not exercise this path at all, and a regression in it would not have
+  // been caught. The fake now compares lexically too
+  // (twilioWebhookHarness.ts, `listByEntity`); this is the test that proves the
+  // paging works rather than trusting that both sides read the same way.
+  // See docs/issues/audit-fake-before-cursor-fidelity.md.
+  it('pages across a PROPERTY-AUDIT boundary with no dups and no skips', async () => {
+    const h = makeWebhookHarness();
+    const app = h.app;
+    const world = h.world;
+    world.contacts.push({
+      contactId: 'll3',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100013',
+      phones: [{ phone: '+15550100013', primary: true }],
+    });
+    world.units.set('u5', { unitId: 'u5', landlordId: 'll3', status: 'available' });
+
+    // FIVE interleaving lifecycle rows, so a limit of 2 forces every page
+    // boundary to land ON a property-audit row - which is the only shape that
+    // exercises the audit `before` bound.
+    for (let i = 0; i < 5; i += 1) {
+      await world.auditRepo.append('units#u5', 'broadcast_sent', {
+        broadcastId: `bp-${i}`,
+        tenantCount: i + 1,
+      });
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const url: string =
+        cursor === null
+          ? '/api/contacts/ll3/timeline?limit=2'
+          : `/api/contacts/ll3/timeline?limit=2&cursor=${encodeURIComponent(cursor)}`;
+      const res = await authedGet(app, url);
+      expect(res.status).toBe(200);
+      for (const item of res.body.items as Array<{ id: string }>) seen.push(item.id);
+      cursor = res.body.nextCursor;
+      pages += 1;
+    } while (cursor !== null && pages < 10);
+
+    expect(seen).toHaveLength(5); // no skips
+    expect(new Set(seen).size).toBe(5); // no dups
+    expect(pages).toBeGreaterThanOrEqual(3); // really paginated (2+2+1)
+  });
+
   it('shows a landlord tour pin ONCE, sourced from the person feed (not the property audit)', async () => {
     const h = makeWebhookHarness();
     const app = h.app;

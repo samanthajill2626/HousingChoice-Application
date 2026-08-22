@@ -3,9 +3,10 @@ id: tourdetail-composer-footer-suite-flake
 title: TourDetail composer-footer roster test flakes in-suite (pass-alone, pass-on-rerun)
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-07-20
+resolved: 2026-08-21
 refs: dashboard/src/routes/tours/TourDetail.test.tsx
 ---
 
@@ -41,3 +42,18 @@ Sighting 2026-07-26 (feat/dev-live-comms, planner-wave gate run): failed in-suit
 ("composer footer: the group tab names the WHOLE roster..."), passed solo 55/55
 and passed the immediate full-suite rerun (3167/1403/188/106 all green). Diff under
 test was launcher-script + docs only - consistent with the established signature.
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The assertion now waits
+for the whole sentence instead of the prefix.
+
+    expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
+      'Reply sends to everyone in this relay group (Ann, Marcus)');
+
+`findByText(/Reply sends to/)` resolves the moment the footer exists - which is
+BEFORE the roster names arrive, since they come from a separate async
+`getConversationMembers` fetch - and `toHaveTextContent` then asserts
+synchronously against that early snapshot. Under load the names lost the race.
+
+Wrapped in `waitFor`, which retries the whole assertion. That is the shape the
+1:1 half of this very test already used, so the fix is the file agreeing with
+itself. 80/80 green.

@@ -3,9 +3,10 @@ id: conversationdetail-members-mock-suite-flake
 title: ConversationDetail group-view members test flakes in-suite (pass-alone, pass-on-rerun)
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-07-13
+resolved: 2026-08-21
 refs: dashboard/src/routes/conversation/ConversationDetail.test.tsx, dashboard/src/routes/conversation/ConversationDetail.tsx:183
 ---
 
@@ -47,3 +48,23 @@ slice.
 **Third sighting (2026-07-21).** Same shape (getConversationMembers mock undefined -> .then TypeError) in the "HARD-disables the composer when the group is closed" case during the unit-photo-transcode planner gate run (full dashboard suite); passed solo 16/16 immediately after on the same commit (040951e1). Untouched surface.
 
 **Fourth sighting (2026-08-03).** Identical shape and case ("HARD-disables the composer...", `.then` TypeError at ConversationDetail.tsx:193) during the relay-area-code-preference gate run; branch touches zero dashboard files. Solo: 1 file green; immediate full `npm test` re-run: green (221/133/32/13). Still the approved-but-unscheduled module-level default-mock fix.
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The module-level API
+mocks are now built with promise-returning defaults - `vi.fn(async () => [])`
+rather than a bare `vi.fn()`.
+
+Root cause, stated precisely: Vitest 3's `mockReset()` restores the
+implementation passed to `vi.fn(impl)`, but a BARE `vi.fn()` returns `undefined`
+after reset. Verified rather than assumed - a scratch test confirmed both halves.
+So any call landing outside the arranged window (a render during `beforeEach`'s
+reset-then-rearm, or an SSE handler firing after a test's arrangement is gone)
+got `undefined`, and the component died on
+`getConversationMembers(...).then(...)`.
+
+Giving each awaited mock a resolved default makes that window structurally
+unreachable while `beforeEach` still overrides them per test. Applied to every
+mock the component awaits on an effect path, which is the file-wide audit the
+issue asked for rather than a fix for the one named test. 38/38 green.
+
+This one is a genuine fix rather than a re-measurement: the undefined return was
+reachable by construction, not a timing guess.

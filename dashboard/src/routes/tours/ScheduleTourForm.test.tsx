@@ -549,10 +549,25 @@ describe('ScheduleTourForm', () => {
   it('initialUnitId pre-commits the Unit typeahead (read-only + Clear) and derives the tour type', async () => {
     setup({ tenantId: 'contact-tenant-0001', initialUnitId: 'unit-0001' });
 
-    const unitBox = screen.getByRole('combobox', { name: 'Unit' });
-    await waitFor(() => expect(unitBox).toHaveValue('1450 Joseph E. Boone Blvd NW, Atlanta, GA'));
+    // RE-QUERY INSIDE waitFor - never hold the node across the retry.
+    //
+    // This used to capture `unitBox` once before the wait and assert against
+    // that reference. Committing the typeahead flips the input to read-only, and
+    // when React replaces the element rather than mutating it, the captured node
+    // is DETACHED: its value never changes, so `waitFor` retries a doomed
+    // assertion until it times out. The failure looks like "the pre-commit never
+    // happened" and reproduces ~25% of the time, including on an untouched base
+    // (docs/issues/schedule-tour-form-test-flake.md).
+    //
+    // `screen.getByRole` inside the callback re-resolves the live node on every
+    // retry, so a swap is invisible to the assertion.
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue(
+        '1450 Joseph E. Boone Blvd NW, Atlanta, GA',
+      ),
+    );
     // Committed like a hand pick: read-only + a Clear affordance.
-    expect(unitBox).toHaveAttribute('readonly');
+    expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveAttribute('readonly');
     expect(screen.getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
     // Tour type derives from the pre-committed unit's tour_process ("landlord").
     // Wrapped in waitFor: the tour-type derivation reacts to the pre-committed

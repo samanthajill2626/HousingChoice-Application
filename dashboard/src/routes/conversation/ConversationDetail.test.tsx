@@ -8,17 +8,35 @@ import type {
   ConversationParticipant,
 } from '../../api/index.js';
 
-const getConversation = vi.fn();
-const getConversationMembers = vi.fn();
-const getConversationMessages = vi.fn();
-const getConversationScheduled = vi.fn();
+// PROMISE-RETURNING DEFAULTS, not bare vi.fn().
+//
+// ConversationDetail fetches these in mount effects and `.then(...)`s the
+// result. With a bare `vi.fn()`, any call landing OUTSIDE the arranged window -
+// a render triggered while `beforeEach` has reset the mocks but not yet
+// re-armed them, or an SSE handler firing after a test's arrangement is gone -
+// returns `undefined` and the component dies on
+// `getConversationMembers(...).then(...)`. That is the pass-alone /
+// fail-in-suite flake in docs/issues/conversationdetail-members-mock-suite-flake.md,
+// seen twice on trees byte-identical to main.
+//
+// Vitest 3's `mockReset()` restores the implementation passed to `vi.fn(impl)`
+// (verified, not assumed: a bare `vi.fn()` returns undefined after reset, one
+// built with an impl returns that impl). So giving each of these a resolved
+// default makes the undefined window structurally unreachable, while
+// `beforeEach` still overrides them with the per-test arrangement.
+const getConversation = vi.fn(async () => undefined);
+const getConversationMembers = vi.fn(async () => []);
+const getConversationMessages = vi.fn(async () => []);
+const getConversationScheduled = vi.fn(async () => ({ scheduled: [] }));
 const sendMessage = vi.fn();
 const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
 const closeConversation = vi.fn();
-const markConversationRead = vi.fn();
-const markConversationUnread = vi.fn();
-const getAllContacts = vi.fn();
+// Same reasoning as the fetches above: these are awaited on effect paths, so a
+// call outside the arranged window must still hand back a promise.
+const markConversationRead = vi.fn(async () => undefined);
+const markConversationUnread = vi.fn(async () => undefined);
+const getAllContacts = vi.fn(async () => []);
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
 

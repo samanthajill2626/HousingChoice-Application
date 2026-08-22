@@ -3,9 +3,10 @@ id: schedule-tour-form-test-flake
 title: ScheduleTourForm "initialUnitId pre-commits the Unit typeahead" test is flaky
 type: debt
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-07-15
+resolved: 2026-08-21
 refs: dashboard/src/routes/tours/ScheduleTourForm.test.tsx:497
 ---
 
@@ -38,3 +39,23 @@ rather than fixed here (out of scope for unit-photos). A likely fix is to gate
 the assertion on a settled-roster signal first (e.g. await the locked Tenant
 label, as sibling tests do) before asserting the pre-committed unit value, or to
 make the pre-commit effect deterministic w.r.t. the mount fetches.
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The test held a DOM
+node across the retry:
+
+    const unitBox = screen.getByRole('combobox', { name: 'Unit' });
+    await waitFor(() => expect(unitBox).toHaveValue('...'));
+
+Committing the typeahead flips the input to read-only, and when React replaces
+the element rather than mutating it, `unitBox` is a DETACHED node whose value
+never changes - so `waitFor` retries a doomed assertion until it times out. The
+symptom reads as "the pre-commit never happened", which is why the suspected
+cause was recorded as a mount-ordering race; the ordering was fine, the
+reference was stale.
+
+Re-querying with `screen.getByRole` INSIDE the callback re-resolves the live
+node on every retry, so a node swap is invisible to the assertion. The
+follow-up `readonly` assert re-queries too.
+
+Measured: 6 consecutive runs of the file, 6 green (28/28 each), against the
+~25% failure rate recorded above.

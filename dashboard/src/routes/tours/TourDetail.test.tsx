@@ -1272,8 +1272,21 @@ describe('TourDetail - channel switcher', () => {
     await waitLoaded();
     // Group tab (initial): a reply relays to EVERY member — the footer says so
     // and lists the roster (never the old "this contact" single-target copy).
-    expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
-      'Reply sends to everyone in this relay group (Ann, Marcus)',
+    // WAIT FOR THE WHOLE SENTENCE, not just the prefix. `findByText(/Reply
+    // sends to/)` resolves the moment the footer exists - which is BEFORE the
+    // roster names arrive, since they come from a separate async
+    // getConversationMembers fetch - and `toHaveTextContent` then asserts
+    // synchronously against that early snapshot. Under full-suite load the
+    // names lost that race and this failed with "Reply sends to everyone in
+    // this relay group" and no roster, on trees byte-identical to main
+    // (docs/issues/tourdetail-composer-footer-suite-flake.md).
+    //
+    // Retrying the assertion is the fix, and it is the shape the 1:1 half of
+    // this same test already used.
+    await waitFor(() =>
+      expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
+        'Reply sends to everyone in this relay group (Ann, Marcus)',
+      ),
     );
     // Tenant 1:1 tab: the footer names the tenant's number (the contact-page
     // pattern). Byte-for-byte the contact page's own copy now that the shared

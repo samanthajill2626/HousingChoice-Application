@@ -40,6 +40,49 @@ describe.skipIf(!built)('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/html');
     expect(res.text).toContain('HousingChoice');
+    expect(res.text).toContain('href="/app-identity/manifest.webmanifest"');
+    expect(res.text).toContain('rel="icon" href="/app-identity/icon-192.png"');
+    expect(res.text).toContain('rel="apple-touch-icon" href="/app-identity/icon-192.png"');
+    expect(res.text).not.toContain('href="/manifest.webmanifest"');
+    expect(res.text).not.toContain('href="/icons/icon-192.png"');
+  });
+
+  it('serves runtime identity before static files and the SPA fallback', async () => {
+    const config = await request(app)
+      .get('/app-identity/config.json')
+      .set('x-origin-verify', SECRET);
+    expect(config.status).toBe(200);
+    expect(config.headers['content-type']).toContain('application/json');
+    expect(config.headers['cache-control']).toBe('no-store');
+    expect(config.body).toEqual({ variant: 'non-production', themeColor: '#f4c542' });
+
+    const manifest = await request(app)
+      .get('/app-identity/manifest.webmanifest')
+      .set('x-origin-verify', SECRET);
+    expect(manifest.status).toBe(200);
+    expect(manifest.headers['content-type']).toContain('application/manifest+json');
+    expect(manifest.headers['cache-control']).toBe('no-cache');
+    expect(manifest.body.theme_color).toBe('#f4c542');
+    expect(manifest.body.icons.map((icon: { src: string }) => icon.src)).toEqual([
+      '/app-identity/icon-192.png',
+      '/app-identity/icon-512.png',
+      '/app-identity/icon-maskable-512.png',
+    ]);
+
+    const icon = await request(app)
+      .get('/app-identity/icon-192.png')
+      .redirects(0)
+      .set('x-origin-verify', SECRET);
+    expect(icon.status).toBe(307);
+    expect(icon.headers['cache-control']).toBe('no-store');
+    expect(icon.headers.location).toBe('/icons/icon-nonprod-192.png');
+
+    const unknown = await request(app)
+      .get('/app-identity/not-a-real-asset')
+      .set('x-origin-verify', SECRET);
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers['content-type']).toContain('application/json');
+    expect(unknown.text).not.toContain('<div id="root">');
   });
 
   it('SPA-falls back to index.html for unknown GET paths (client-side routes)', async () => {

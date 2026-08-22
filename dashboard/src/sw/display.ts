@@ -96,8 +96,8 @@ export function buildNotificationOptions(data: PushDisplayData | null | undefine
     title: d.title || 'HousingChoice',
     options: {
       body: d.body || '',
-      // The icons ship in the manifest set; reuse the maskable icon.
-      icon: '/icons/icon-192.png',
+      // Select the main artwork from the runtime environment identity.
+      icon: '/app-identity/icon-192.png',
       badge: '/icons/badge-72.png',
       // Carry ONLY the known routing fields to notificationclick - never a
       // payload-supplied url (C1: no open-redirect sink).

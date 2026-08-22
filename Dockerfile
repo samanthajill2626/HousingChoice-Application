@@ -31,18 +31,21 @@ RUN npm run build -w app
 # files with SPA index fallback (DASHBOARD_DIST_DIR below).
 COPY dashboard/index.html dashboard/vite.config.ts dashboard/tsconfig.json ./dashboard/
 COPY dashboard/src ./dashboard/src
-# publicDir - the PWA manifest, service worker and icons. Vite copies these to
-# the dist ROOT, so they must be in the context BEFORE the build. Missing them
-# does not fail the build; it silently ships a dist with no manifest and no
-# sw.js, which the app then answers with the SPA fallback - so the site installs
-# as a browser shortcut and push is impossible. Keep in step with .dockerignore.
+# publicDir owns the service worker, badge, and both static icon destination
+# families. The manifest is runtime-owned by /app-identity. Vite copies public/
+# to the dist root, so it must be in the context before the build. Missing it
+# silently drops the worker and icons. Keep in step with .dockerignore.
 COPY dashboard/public ./dashboard/public
 RUN npm run build -w dashboard
 # Fail the BUILD if the PWA assets did not land, rather than discovering it on a
 # phone. A local `npm run build` cannot catch this - it has the real public/.
-RUN test -f dashboard/dist/manifest.webmanifest \
-  && test -f dashboard/dist/sw.js \
-  && test -f dashboard/dist/icons/icon-192.png
+RUN test -f dashboard/dist/sw.js \
+  && test -f dashboard/dist/icons/icon-192.png \
+  && test -f dashboard/dist/icons/icon-512.png \
+  && test -f dashboard/dist/icons/icon-maskable-512.png \
+  && test -f dashboard/dist/icons/icon-nonprod-192.png \
+  && test -f dashboard/dist/icons/icon-nonprod-512.png \
+  && test -f dashboard/dist/icons/icon-nonprod-maskable-512.png
 
 # ---------- runtime stage ----------
 FROM node:24-slim AS runtime

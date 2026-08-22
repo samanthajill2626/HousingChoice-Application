@@ -6,13 +6,11 @@
     <title>HousingChoice</title>
     <meta name="description" content="Tenant placement, text-first — the HousingChoice navigator workspace." />
     <meta name="theme-color" content="#1f6feb" />
-    <!-- Installability: without this link the browser can only make a plain
-         shortcut, never a standalone PWA - and on iOS an installed PWA is a hard
-         prerequisite for web push existing at all. Restored 2026-08-15 with
-         public/manifest.webmanifest + public/sw.js. -->
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/icons/icon-192.png" />
-    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <!-- Installability uses runtime identity selectors so one image can serve
+         production and non-production. public/sw.js remains the shipped worker. -->
+    <link rel="manifest" href="/app-identity/manifest.webmanifest" />
+    <link rel="icon" href="/app-identity/icon-192.png" />
+    <link rel="apple-touch-icon" href="/app-identity/icon-192.png" />
   </head>
   <body>
     <div id="root"></div>

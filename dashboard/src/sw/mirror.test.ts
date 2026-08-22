@@ -29,6 +29,12 @@ const swPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'public
 const swSource = readFileSync(swPath, 'utf8');
 
 describe('public/sw.js mirror carries the inbound-message-push changes', () => {
+  it('uses runtime identity for the main icon and preserves the monochrome badge', () => {
+    expect(swSource).toContain("icon: '/app-identity/icon-192.png'");
+    expect(swSource).toContain("badge: '/icons/badge-72.png'");
+    expect(swSource).not.toContain("icon: '/icons/icon-192.png'");
+  });
+
   it('has the queue-level unmatched_email tag branch', () => {
     expect(swSource).toContain("if (d.kind === 'unmatched_email') return 'unmatched_email';");
   });

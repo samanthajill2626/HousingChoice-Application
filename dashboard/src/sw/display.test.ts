@@ -58,6 +58,12 @@ describe('notificationTag', () => {
 });
 
 describe('buildNotificationOptions', () => {
+  it('uses runtime identity for the main icon and preserves the monochrome badge', () => {
+    const built = buildNotificationOptions({ kind: 'message', conversationId: 'conv-1' });
+    expect(built.options.icon).toBe('/app-identity/icon-192.png');
+    expect(built.options.badge).toBe('/icons/badge-72.png');
+  });
+
   it('marks pre_ring and missed_call time-sensitive (renotify + requireInteraction), voicemail not', () => {
     const preRing = buildNotificationOptions({ kind: 'pre_ring', callId: 'CA1' });
     const missed = buildNotificationOptions({ kind: 'missed_call', callId: 'CA1' });

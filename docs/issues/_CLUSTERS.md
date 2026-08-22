@@ -76,21 +76,23 @@ SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
 | low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice |
 | low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | same inbox row assembly |
 
-**Spin-off, ALREADY IN FLIGHT** on `feat/contacts-batchget` - the mechanical
-`getManyByIds` sweep no longer shares a file with the badge, and someone is
-building it now. Do not open a second branch on it:
-[contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) (med) +
+**Spin-off, DONE** - `feat/contacts-batchget` shipped and merged (`65179d73`,
+2026-08-21); the branch and its worktree are retired.
+[contacts-batchget-amplified-reads](./contacts-batchget-amplified-reads.md) is
+resolved: all six mechanical surfaces are batched.
 [broadcast-results-enrichment-read-cost](./broadcast-results-enrichment-read-cost.md)
-(low) - same function, composing remedies (batch + cache).
+(low) stays open - same function, but the caching half of the remedy.
 
-Per `c0e60882` (2026-08-21) the sweep is **nine** surfaces, not six: `today.ts`
-`getContact`, `rosterResolution.ts` `nameOf`, and the `api.ts`
-unread-counts-by-contact rail were found while batching the first six and are
-NOT yet done. That commit also settles a shape question worth carrying into the
-build - two of the three need WHOLE items (`today.ts` does a soft-delete check;
-`api.ts` reads `phone_ref` / `email_ref`, which a display projection does not
-carry), while `rosterResolution.ts` is display-only. So the repo wants BOTH a
-`getManyByIds` and a `getDisplaysByIds`, not one of them.
+Three further surfaces were found while batching the first six (`c0e60882`) and
+were triaged rather than swept: `today.ts` `getContact` spun out to
+[today-contact-hydration-fan-out](./today-contact-hydration-fan-out.md) (it is
+NOT mechanical), `rosterResolution.ts` `nameOf` is a drive-by to fold into the
+next change touching that file, and the `api.ts` unread-counts-by-contact rail
+remains unswept. The shape lesson survives the branch: two of those three need
+WHOLE items (`today.ts` does a soft-delete check; `api.ts` reads `phone_ref` /
+`email_ref`, which a display projection does not carry) while
+`rosterResolution.ts` is display-only - so the repo wants BOTH `getManyByIds`
+and `getDisplaysByIds`, not one of them.
 
 ---
 
@@ -252,16 +254,21 @@ The high's fix (an atomic, compare-before-delete lane lease with owner tokens) i
 the same root cause as every "passes alone, fails in suite" item in the first
 list. Doing it first makes the second list diagnosable instead of guesswork.
 
+> **WAVE 1 IS DONE** - `fix/e2e-harness-determinism`, merged `987e39fd`
+> (2026-08-21). Five issues closed; all three gates green; `npm run e2e` 251
+> passed. Only `npm-test-dynamodb-local-contention` remains open from wave 1,
+> and it is now the first step of the C11 campaign below.
+
 **Wave 1 - infra contention (the actual root cause):**
 
-| sev | issue |
-|---|---|
-| high | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) |
-| med | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) |
-| med | [e2e-lane-tables-stale-schema](./e2e-lane-tables-stale-schema.md) |
-| med | [broadcast-fanout-tests-blow-default-hooktimeout](./broadcast-fanout-tests-blow-default-hooktimeout.md) |
-| low | [e2e-lane-cold-start-container-race](./e2e-lane-cold-start-container-race.md) |
-| low | [e2e-session-lane-mismatch](./e2e-session-lane-mismatch.md) |
+| sev | issue | |
+|---|---|---|
+| high | [e2e-lane-allocation-cross-worktree-race](./e2e-lane-allocation-cross-worktree-race.md) | DONE |
+| med | [npm-test-dynamodb-local-contention](./npm-test-dynamodb-local-contention.md) | **OPEN - C11 step 1** |
+| med | [e2e-lane-tables-stale-schema](./e2e-lane-tables-stale-schema.md) | DONE |
+| med | [broadcast-fanout-tests-blow-default-hooktimeout](./broadcast-fanout-tests-blow-default-hooktimeout.md) | DONE |
+| low | [e2e-lane-cold-start-container-race](./e2e-lane-cold-start-container-race.md) | DONE |
+| low | [e2e-session-lane-mismatch](./e2e-session-lane-mismatch.md) | DONE |
 
 **Wave 2 - per-spec determinism (only after wave 1):**
 [tour-reminders-panel-e2e-flake](./tour-reminders-panel-e2e-flake.md),
@@ -280,6 +287,101 @@ Two of these (`tour-reminders-panel-e2e-flake`,
 `conversationdetail-members-mock-suite-flake`) are the AGENTS.md known flakes that
 every mission currently has to re-run and report around. Closing them is a
 recurring-cost win, not just a tidy-up.
+
+**RETRACTED 2026-08-21.** An earlier version of this section claimed
+`tour-reminders-panel-e2e-flake` was NOT a flake but a deterministic pre-08:00
+failure, and that `AGENTS.md`'s "re-run once" rule could therefore never clear
+it. **That was wrong.** The deterministic half was closed on 2026-08-05 by
+`150fbfa4` ("full-ladder assertions book a 14:00-local tour - kills the
+00:00-08:00 wall-clock flake"); the issue's TITLE still advertised it, and the
+claim came from reading that title instead of the body directly beneath it.
+
+The real remaining scope is a rare rung-visibility timing flake, last seen
+2026-08-03. Re-running once IS the correct response, and `AGENTS.md` needs no
+change. The issue title has been corrected and its severity dropped to `low`.
+
+Worth keeping as a caution: a stale issue TITLE is load-bearing. Every triage
+pass in this file reads titles first.
+
+---
+
+## C11 - Test-suite SOUNDNESS: the gate is green and proves less than it looks
+
+**No high, and that is a mis-rating rather than a judgement** - nothing here
+breaks a user flow, so nothing was rated high, but the cost is false confidence
+in every other rating on this board.
+
+**Shared surface:** `app/test/helpers/*` (the fakes), `dashboard/public/sw.js` vs
+`dashboard/src/sw/*`, `app/vitest.config.ts`, the build/gate scripts.
+
+C6 fixed an UNRELIABLE gate - red when nothing is wrong. This is an UNSOUND one -
+**green when something is wrong.** Different cost, different urgency: a flake
+wastes time, unsoundness spends confidence you did not know you had lost.
+
+**One mechanism explains most of it.** Wherever a fake hand-mirrors real
+semantics, the mirror is enforced only by whoever remembers it. Four of these are
+literally that; the last two are the same shape one layer out - the toolchain
+mirroring production, and the fake mirroring the service.
+
+| sev | issue | the evidence, which is DEMONSTRATED not theorised |
+|---|---|---|
+| med | [update-call-status-fake-mirrors-real-so-a-broken-repo-is-invisible](./update-call-status-fake-mirrors-real-so-a-broken-repo-is-invisible.md) | Two mutation probes. Break the FAKE -> red. Break the **REAL repo** -> **green, exit 0.** The logic protects a live call from a redelivered webhook |
+| med | [compiled-dist-boot-unverified](./compiled-dist-boot-unverified.md) | Gates run tsx/esbuild (bundler resolution); prod runs `node dist/` (stricter ESM). The email channel shipped a directory import: all suites green, dev deploy crash-looped, caught only by the deploy health check |
+| med | [sw-mirror-test-pins-literals-not-behaviour](./sw-mirror-test-pins-literals-not-behaviour.md) | `mirror.test.ts` asserts `toContain('<literal>')` and never compares the files. A 1-char divergence lived from `26a01b9f` to 2026-08-20, through the entire life of the test written to prevent it. Found by READING |
+| med | [unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md) | The only suite proving real `byUnread` semantics self-skips with no Docker - and the fake modelled `LastEvaluatedKey` WRONGLY until 2026-08-16, so every call-count assertion was calibrated one round trip short of production |
+| med | [group-text-conversion-unwindowed-log-assert](./group-text-conversion-unwindowed-log-assert.md) | Asserts zero error lines over an UNWINDOWED log tail - passes for reasons unrelated to the spec |
+| low | [relay-duplicate-detection-fake-partition-drift](./relay-duplicate-detection-fake-partition-drift.md) | Fake filters `status`, real repo queries `relay_status`. Fake is strictly MORE permissive, and now drives user-visible confirm-dialog copy |
+| low | [audit-fake-before-cursor-fidelity](./audit-fake-before-cursor-fidelity.md) | Fake treats `before` as a numeric seq; the real SK is a lexical ISO string |
+| low | [sw-mirror-control-char-divergence](./sw-mirror-control-char-divergence.md) | The specific DEL-character instance of the row above |
+| low | [e2e-documentelement-overflow-check-vacuous](./e2e-documentelement-overflow-check-vacuous.md) | Hand-rolled overflow checks are vacuous in this app shell - they cannot fail |
+
+**The remedy shape is the same for all of them:** make the mirror CHECKED rather
+than remembered - a real integration test, a file comparison instead of literal
+pins, a loud or failing skip, a dist boot smoke.
+
+---
+
+## The C6+C11 campaign - sequence and why
+
+Goal, in Cameron's words: the suite **runs properly even under resource
+contention when multiple e2e runs happen at once.** That is the acceptance test,
+and it is deliberately the LAST step rather than an assumption.
+
+**Phase 1 - make contention survivable.** `npm-test-dynamodb-local-contention`:
+suite A (`groupCrossCheck`) latency-robust assertions, suite B retry
+`UpdateTable` on `InternalFailure`.
+*First because everything downstream either adds integration tests or re-runs
+them; doing it later means re-diagnosing every new red.* Suite A is the harder
+half - it fails ALONE sometimes, so the cause is genuine timing assumptions
+(spy-order and window predicates), not only the container.
+
+**Phase 2 - make the gate honest about what it did NOT run.**
+`unread-index-integration-coverage-requires-local-dynamo` (loud/failing skip, or
+boot DynamoDB Local in the gate) and `compiled-dist-boot-unverified` (dist boot
+smoke).
+*Before phase 3, because there is no point adding integration tests to a gate
+that can silently skip them. The dist smoke is independent of DynamoDB entirely
+and closes a whole resolution class cheaply.*
+
+**Phase 3 - close the fakes that lie.** `update-call-status-fake...`, the two
+`sw-mirror-*`, `relay-duplicate-detection-fake-partition-drift`,
+`audit-fake-before-cursor-fidelity`, `group-text-conversion-unwindowed-log-assert`,
+`e2e-documentelement-overflow-check-vacuous`.
+*After phase 1, because the remedy for the first two is MORE DynamoDB Local
+integration tests - exactly what is flaking today. The issues flag this tension
+themselves.*
+
+**Phase 4 - per-spec determinism.** C6 wave 2, all eleven.
+*Last, and deliberately RE-MEASURED first: several ("suite-only", "passes
+alone") may simply stop reproducing once phase 1 lands, since they were filed as
+contention symptoms. Measure which still fail before spending effort on each.*
+Start with the two cheap certainties: `tour-reminders-panel-e2e-flake` (a
+deterministic clock dependency, plus the `AGENTS.md` correction) and
+`today-heading-locator-substring-collision` (a substring-match selector bug).
+
+**Phase 5 - prove it.** Two concurrent full e2e suites from different worktrees,
+both green, plus a `npm test` running against the same containers. That is the
+stated goal and nothing before it demonstrates it.
 
 ---
 

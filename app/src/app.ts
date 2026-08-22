@@ -26,6 +26,7 @@ import { trimJsonBody } from './middleware/trimStrings.js';
 import { createRateLimit } from './middleware/rateLimit.js';
 import { createMediaStore } from './adapters/mediaStore.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
+import { createAppIdentityRouter } from './routes/appIdentity.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
@@ -83,6 +84,7 @@ export const EDGE_MUTATING_PREFIXES = ['/api', '/webhooks', '/auth', '/public'] 
  */
 export const EDGE_EXEMPT_PREFIXES: Readonly<Record<string, string>> = {
   '/unit-media': 'read-only; served from S3 by its own GET/HEAD-only behavior',
+  '/app-identity': 'read-only runtime presentation identity; GET/HEAD only through the default edge behavior',
   '/internal': 'loopback only - the worker posts via EVENT_BRIDGE_URL, never through the edge',
   '/__dev': 'structurally absent in deployed envs (dev router is not mounted)',
 };
@@ -190,6 +192,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     createRateLimit({ max: 1000, windowMs: 60_000, logger: log }),
     createUnitMediaServeRouter({ mediaStore: mediaServeStore, logger: log }),
   );
+  app.use('/app-identity', createAppIdentityRouter({ config }));
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by
   // design (login/callback/logout/me); EVERY /api route including the SSE

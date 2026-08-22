@@ -7,6 +7,7 @@ import {
   type FakeThread,
 } from '../../fixtures/fakeTwilio.js';
 import { dashboardUrl, fakeUrl } from '../../support/urls.js';
+import { expectNoHorizontalOverflow } from '../../support/viewport.js';
 // The single source of truth for automated-message copy. Import the PURE catalog
 // module (no repo/AWS deps) so the media-only relay body is asserted against the
 // catalog default rather than a hard-coded string.
@@ -151,11 +152,15 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     // Its right edge sits within the viewport (not clipped off-screen).
     expect(box!.x + box!.width).toBeLessThanOrEqual(360);
 
-    // The document itself does not scroll horizontally at 360px.
-    const overflowX = await page.evaluate(
-      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-    );
-    expect(overflowX, 'page overflows horizontally at 360px').toBeLessThanOrEqual(1);
+    // Nothing scrolls sideways at 360px. Uses the shared helper, which measures
+    // the routed `<main>` as well as the document - a hand-rolled
+    // documentElement check is VACUOUS in this shell, because AppFrame clamps
+    // the document to the viewport (`html, body, #root { height: 100% }` plus
+    // `.main { min-width: 0 }`) and hands scrolling to an inner
+    // `.content { overflow-y: auto }` box. Wide route content therefore scrolls
+    // INSIDE <main> and the document never moves, so the old assertion here
+    // could not fail. See docs/issues/e2e-documentelement-overflow-check-vacuous.md.
+    await expectNoHorizontalOverflow(page, 'composer at 360px');
   });
 });
 

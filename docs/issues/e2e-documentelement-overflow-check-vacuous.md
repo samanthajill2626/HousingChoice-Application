@@ -3,11 +3,37 @@ id: e2e-documentelement-overflow-check-vacuous
 title: Hand-rolled documentElement overflow checks are vacuous in this app shell - migrate the stragglers onto the shared helper
 type: debt
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-06
+resolved: 2026-08-21
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:150, e2e/support/viewport.ts:72, e2e/tests/roster-quiet-hours.spec.ts:302
 ---
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** Stragglers 1 and 2 are
+migrated and the idiom is now GUARDED so it cannot return.
+
+- **1** - `outbound-mms.spec.ts` now calls `expectNoHorizontalOverflow(page,
+  'composer at 360px')`. Its narrow-viewport claim is real for the first time;
+  the inline expression it replaced could not fail.
+- **2** - `roster-quiet-hours.spec.ts` imports `NARROW_360` / `WIDE_RESTORE`
+  instead of re-typing the byte-identical literals.
+- **The guard** - `e2e/support/viewport.guard.test.ts` fails if
+  `documentElement.scrollWidth` appears anywhere under `e2e/` outside
+  `support/viewport.ts`. Verified by probe: appending the expression to a spec
+  fails the guard naming that file; removing it goes green again.
+
+The guard is the point. Migrating the last copy is a one-time event - the next
+person writing a narrow-viewport spec would reach for the obvious expression and
+get a green assertion that proves nothing. Making it enforceable rather than
+remembered is the same move as `DYNAMO_DISABLE_TTL` and the smoke gate's
+self-check.
+
+**Point 3 deliberately NOT done.** Those are narrow-viewport blocks that assert
+geometry and never claimed anything about overflow, so adding the helper would
+ADD an assertion rather than fix a lie - and, as this issue itself says, "an
+unnecessary assertion on a surface nobody promised is flake surface, not
+coverage". Left to whoever owns those surfaces.
 
 **Problem.** `document.documentElement.scrollWidth -
 document.documentElement.clientWidth` can never be non-zero in the dashboard, so

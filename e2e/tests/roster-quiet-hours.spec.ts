@@ -39,6 +39,7 @@ import { test, expect, type APIRequestContext, type Locator, type Page } from '@
 import { driveConnectingGroupToOpen } from '../fixtures/relayConnect.js';
 import { listThreads, type FakeThread } from '../fixtures/fakeTwilio.js';
 import { expectTodayReady } from '../support/today.js';
+import { NARROW_360, WIDE_RESTORE } from '../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -300,7 +301,7 @@ test.describe('Roster changes during quiet hours', () => {
     await putQuietHours(request, windowAroundNow());
 
     // --- 1. The confirm is the three-button layout, stacked at 360px ---------
-    await page.setViewportSize({ width: 360, height: 800 });
+    await page.setViewportSize(NARROW_360);
     await page.goto(`${NEXT}/tours/${tourId}`);
     await expect(page.getByRole('list', { name: 'Roster' }).getByText(tenant.name)).toBeVisible({
       timeout: 20_000,
@@ -328,7 +329,7 @@ test.describe('Roster changes during quiet hours', () => {
     expect(Math.round(deferBox.width)).toBe(Math.round(cancelBox.width));
 
     // --- 2. Taking the default opens NOTHING --------------------------------
-    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.setViewportSize(WIDE_RESTORE);
     await deferBtn.click();
     await expect(confirm).toHaveCount(0, { timeout: 20_000 });
     await expect(pendingList(page).getByText(/^Opens at .+ - quiet hours$/)).toBeVisible({

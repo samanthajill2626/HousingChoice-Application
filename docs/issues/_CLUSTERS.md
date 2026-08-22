@@ -288,12 +288,20 @@ Two of these (`tour-reminders-panel-e2e-flake`,
 every mission currently has to re-run and report around. Closing them is a
 recurring-cost win, not just a tidy-up.
 
-**CORRECTION worth acting on:** `tour-reminders-panel-e2e-flake` is NOT a flake.
-It fails DETERMINISTICALLY when the suite runs before 08:00 org-local, because
-the `morning_of` rung is legitimately never armed. `AGENTS.md` lists it among the
-known flakes to "re-run once and report both runs" - which can never clear it
-before 08:00, so that instruction costs a wasted re-run on every early-morning
-suite. Fixing the spec should come with an `AGENTS.md` edit.
+**RETRACTED 2026-08-21.** An earlier version of this section claimed
+`tour-reminders-panel-e2e-flake` was NOT a flake but a deterministic pre-08:00
+failure, and that `AGENTS.md`'s "re-run once" rule could therefore never clear
+it. **That was wrong.** The deterministic half was closed on 2026-08-05 by
+`150fbfa4` ("full-ladder assertions book a 14:00-local tour - kills the
+00:00-08:00 wall-clock flake"); the issue's TITLE still advertised it, and the
+claim came from reading that title instead of the body directly beneath it.
+
+The real remaining scope is a rare rung-visibility timing flake, last seen
+2026-08-03. Re-running once IS the correct response, and `AGENTS.md` needs no
+change. The issue title has been corrected and its severity dropped to `low`.
+
+Worth keeping as a caution: a stale issue TITLE is load-bearing. Every triage
+pass in this file reads titles first.
 
 ---
 

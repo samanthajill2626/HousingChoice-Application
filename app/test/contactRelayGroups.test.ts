@@ -74,6 +74,19 @@ describe('GET /api/contacts/:id/relay-groups', () => {
       // A closed relay has RELEASED its pool number (the attribute is cleared).
       ...(status === 'open' && { pool_number: opts.poolNumber ?? POOL }),
       status,
+      // The byRelayStatus GSI HASH, stamped in LOCKSTEP with `status` exactly as
+      // the real writer does (conversationsRepo.ts:1875). It is not optional
+      // decoration: `listRelayGroups` Queries that sparse index and consults
+      // NOTHING else, so a relay row without it is a shape production can never
+      // produce - it would be invisible to every relay read.
+      //
+      // These fixtures omitted it and passed anyway, because the in-memory
+      // double used to filter on `type`+`status` instead. Correcting that double
+      // to read `relay_status` (the field the real GSI reads) turned all eight
+      // of these tests red at once, which is the drift doing exactly what it was
+      // filed to prevent - assertions made against a row the service could not
+      // return. See docs/issues/relay-duplicate-detection-fake-partition-drift.md.
+      relay_status: `relay_group#${status}`,
       last_activity_at: at,
       type: 'relay_group',
       ai_mode: 'manual',

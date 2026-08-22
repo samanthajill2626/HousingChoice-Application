@@ -737,10 +737,29 @@ export function createFakeWorld(): FakeWorld {
       );
     },
     async listRelayGroups(status) {
-      // Mirrors the real repo: one relay status partition, newest-activity-first.
-      // The in-memory walk never pages, so truncated is always false here.
+      // READ THE FIELD THE REAL GSI READS. The real repo Queries the sparse
+      // `byRelayStatus` index, whose HASH is `relay_status`
+      // (`relay_group#<status>`, conversationsRepo.ts:1954-1976) - and nothing
+      // else is consulted. This double used to filter on
+      // `type === 'relay_group' && status === status` instead, which is a
+      // DIFFERENT field, and the two genuinely skew:
+      // `touchLastActivity` stamps `status = 'open'` on any non-`group_text`
+      // conversation that receives activity and never touches `relay_status`
+      // (conversationsRepo.ts:1506-1534, reproduced faithfully by this fake).
+      // So a CLOSED relay group that gets an inbound sits at `status: 'open'`
+      // with `relay_status: 'relay_group#closed'`.
+      //
+      // The old filter therefore made the fake strictly MORE PERMISSIVE than
+      // production: it could return a row the real GSI would never surface, and
+      // never the reverse. That mattered once duplicate detection made
+      // `partition` user-visible - the confirm dialog picks between "already
+      // have an open relay group" and "...being connected" from this value, and
+      // the whole "closed groups are NOT duplicates" rule rests on it. A change
+      // that re-pointed the detector at `conv.status` could have stayed green.
+      // See docs/issues/relay-duplicate-detection-fake-partition-drift.md.
+      const key = `relay_group#${status}`;
       const items = [...conversations.values()]
-        .filter((c) => c.type === 'relay_group' && c.status === status)
+        .filter((c) => c.relay_status === key)
         .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
       return { items, truncated: false };
     },

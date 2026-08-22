@@ -3,11 +3,45 @@ id: relay-duplicate-detection-fake-partition-drift
 title: The in-memory listRelayGroups double filters on status, the real repo queries relay_status
 type: debt
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-08-18
-refs: app/test/helpers/twilioWebhookHarness.ts:731, app/src/repos/conversationsRepo.ts:1928, app/src/repos/conversationsRepo.ts:1506
+resolved: 2026-08-21
+refs: app/test/helpers/twilioWebhookHarness.ts, app/test/relayPartitionFidelity.test.ts, app/test/contactRelayGroups.test.ts, app/src/repos/conversationsRepo.ts:1954
 ---
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The double now filters
+on `relay_status === 'relay_group#<status>'` - the field the real `byRelayStatus`
+GSI hashes on, and the only field the real read consults.
+
+**The predicted fallout arrived immediately, and was the point.** This issue was
+filed rather than fixed because "correcting the fake means re-pointing a read
+that every relay-group test in the suite goes through, and any row whose two
+fields disagree today would change which tests see it". Re-pointing it turned
+**8 tests in `contactRelayGroups.test.ts`** red at once.
+
+Every one was the same cause: that file's relay fixture wrote `status` and
+`type: 'relay_group'` but **never `relay_status`** - a row shape production
+cannot produce, because the real writer stamps both in lockstep
+(`conversationsRepo.ts:1875`). Those eight assertions had been made against a
+row the service could never return. Fixed the FIXTURE (stamp `relay_status` in
+lockstep) rather than loosening the double back.
+
+**New guard: `app/test/relayPartitionFidelity.test.ts`.** Correcting the double
+is a one-time event; nothing stopped the next person re-pointing either side at
+`conv.status`. Three cases pin the two shapes the drift made
+indistinguishable, plus a positive control so they cannot all pass against a
+double that returns nothing:
+
+- a CLOSED group that activity re-stamped `status: 'open'` (the exact
+  `touchLastActivity` skew) must not appear in the open partition, and must
+  appear in the closed one;
+- a relay row with no `relay_status` at all is invisible to every relay read;
+- a correctly-stamped group appears in its own partition, and only there.
+
+Probed: reverting the double to the old `type`+`status` filter fails 2 of the 3
+with `expected [ 'conv-skewed' ] to not include 'conv-skewed'`. Restored, and
+the full app suite is **322 files / 5693 tests green**.
 
 **Problem.** The two implementations of `listRelayGroups` answer the partition
 question from DIFFERENT fields.

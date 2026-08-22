@@ -62,6 +62,24 @@ interface QuietPatch {
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;
+  /**
+   * PINNED, not assumed. This spec formats its window as HH:MM in ORG_TZ, but
+   * the SERVER evaluates those strings in `settings.timezone` - and nothing
+   * here used to write that field, so the two only agreed by default.
+   *
+   * During the 2026-08-05 S6 gate runs the server-computed `dueAt` landed ~2h
+   * off the NY reading of the stored window (end `17:0x` NY -> expected
+   * `21:0xZ`, observed `23:0xZ`). Both deferrals still fired, so nothing failed
+   * for that reason - but a window written in one zone and evaluated in another
+   * puts `now` near the effective EDGE, and a slow run could flip `isQuietTime`
+   * mid-test and turn a deferral flow into an immediate send.
+   *
+   * Writing the zone in the same PUT removes the assumption instead of chasing
+   * where the skew came from (never identified; candidates were a stale lane
+   * settings row or another spec's write racing in).
+   * See docs/issues/roster-quiet-hours-e2e-timezone-skew.md.
+   */
+  timezone: string;
 }
 
 /** "HH:MM" of `at` in the ORG timezone (not the host's) - the shape the API
@@ -88,6 +106,8 @@ function windowAroundNow(): QuietPatch {
     quietHoursEnabled: true,
     quietHoursStart: orgLocalHhMm(new Date(base - 2 * 3_600_000)),
     quietHoursEnd: orgLocalHhMm(new Date(base + 2 * 3_600_000)),
+    // Same zone the HH:MM strings above were formatted in - see QuietPatch.
+    timezone: ORG_TZ,
   };
 }
 

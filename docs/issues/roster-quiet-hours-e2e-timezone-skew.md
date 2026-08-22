@@ -3,9 +3,10 @@ id: roster-quiet-hours-e2e-timezone-skew
 title: roster-quiet-hours e2e window sits on a knife edge - observed dueAt implies a non-NY zone
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-05
+resolved: 2026-08-21
 refs: e2e/tests/roster-quiet-hours.spec.ts:83,app/src/lib/quietHours.ts:39,app/src/repos/settingsRepo.ts:85
 ---
 
@@ -37,3 +38,22 @@ accepts it), or assert the effective zone by reading back the settings and
 computing the window in THAT zone; widen the band if needed. Add a one-line
 log of the stored window + the first `dueAt` so a future skew is visible in
 the run log.
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** `windowAroundNow()` now
+sends `timezone: ORG_TZ` in the same settings PUT as the HH:MM window.
+
+Took the first of the suggested options - pin the zone rather than chase the
+skew. The spec formatted its window in `ORG_TZ` while the SERVER evaluated those
+strings in `settings.timezone`, and nothing here ever wrote that field, so the
+two only agreed BY DEFAULT. Writing it removes the assumption entirely, which is
+worth more than identifying the original ~2h skew (never established; the
+candidates were a stale lane settings row or another spec's write racing in, and
+neither is reachable now that the value is pinned per run).
+
+Deliberately did NOT add the suggested `dueAt` debug log: with the zone pinned
+there is no skew left for it to surface, and an unconditional log line in a spec
+is noise the next reader has to explain away.
+
+Verified: 2 passed. As with any intermittent, a green run is not proof - but the
+mechanism the evidence implicated (window written in one zone, evaluated in
+another) is now impossible rather than unlikely.

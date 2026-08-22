@@ -24,19 +24,27 @@ import type {
 // built with an impl returns that impl). So giving each of these a resolved
 // default makes the undefined window structurally unreachable, while
 // `beforeEach` still overrides them with the per-test arrangement.
-const getConversation = vi.fn(async () => undefined);
-const getConversationMembers = vi.fn(async () => []);
-const getConversationMessages = vi.fn(async () => []);
-const getConversationScheduled = vi.fn(async () => ({ scheduled: [] }));
+//
+// The `(..._a: unknown[]): Promise<unknown>` signature is load-bearing, not
+// noise. `vi.fn(async () => [])` infers a NO-ARGUMENT mock returning `never[]`,
+// which then rejects both the `(...a: unknown[]) => fn(...a)` forwarding in the
+// module factory below and every `mockResolvedValue(<real shape>)` in the
+// arrangements. Vitest strips types, so that shows up only under
+// `npm run typecheck` - which is exactly why it is a separate gate.
+type AnyAsyncMock = (..._a: unknown[]) => Promise<unknown>;
+const getConversation = vi.fn<AnyAsyncMock>(async () => undefined);
+const getConversationMembers = vi.fn<AnyAsyncMock>(async () => []);
+const getConversationMessages = vi.fn<AnyAsyncMock>(async () => []);
+const getConversationScheduled = vi.fn<AnyAsyncMock>(async () => ({ scheduled: [] }));
 const sendMessage = vi.fn();
 const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
 const closeConversation = vi.fn();
 // Same reasoning as the fetches above: these are awaited on effect paths, so a
 // call outside the arranged window must still hand back a promise.
-const markConversationRead = vi.fn(async () => undefined);
-const markConversationUnread = vi.fn(async () => undefined);
-const getAllContacts = vi.fn(async () => []);
+const markConversationRead = vi.fn<AnyAsyncMock>(async () => undefined);
+const markConversationUnread = vi.fn<AnyAsyncMock>(async () => undefined);
+const getAllContacts = vi.fn<AnyAsyncMock>(async () => []);
 const noteRowsCleared = vi.fn();
 const rollbackRowsCleared = vi.fn();
 
@@ -153,9 +161,13 @@ beforeEach(() => {
   markConversationRead.mockResolvedValue(undefined);
   // useContacts('all') fans out per type; return the candidate for tenants only
   // (so the search field yields exactly one option).
-  getAllContacts.mockImplementation((params: { type?: string } = {}) =>
-    Promise.resolve(params.type === 'tenant' ? [CANDIDATE] : []),
-  );
+  // The mock's declared signature is the permissive `(...unknown[]) =>
+  // Promise<unknown>` (see the note at the top), so narrow the argument here
+  // rather than in the declaration - only this arrangement cares about it.
+  getAllContacts.mockImplementation(async (...args: unknown[]) => {
+    const params = (args[0] ?? {}) as { type?: string };
+    return params.type === 'tenant' ? [CANDIDATE] : [];
+  });
 });
 afterEach(() => {
   // UNMOUNT BEFORE RESTORING (fix wave 2). The group view's member effect re-runs

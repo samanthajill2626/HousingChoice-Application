@@ -1,5 +1,4 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { clearLogTail } from '../../fixtures/groupText.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { driveConnectingGroupToOpen, type RelayConversation } from '../../fixtures/relayConnect.js';
 // Single source of truth for the relay intro copy (no drift): the spec reads the
@@ -46,16 +45,21 @@ import { expectTodayReady } from '../../support/today.js';
 // afterAll reseed restores the byte-stable lean baseline the rest of the suite
 // expects - this file may not run last.
 //
-// AND WHY IT CLEARS THE LOG RING. Creating ANY relay group fires the opportunistic
-// stuck-sweep in poolNumbers.provisionForGroup, and `flagStuckConnecting`
-// (poolNumbers.ts:484-499) log.ERRORs one line per connecting group older than
-// relayWarmingMaxWaitMs. The LEAN SEED ships exactly such a group (lean.ts:247-269 -
-// an imported relay group that never gets a number), so this spec's create leaves an
-// ERROR line naming ITS conversationId in the app's retained log ring. That id is
-// group-text-conversion.spec.ts's CONNECTING_ID, and that spec asserts ZERO error
-// lines carrying it over an UNWINDOWED readLogTail (:125-128) - so the line would
-// fail a spec this change has nothing to do with. Observed for real in the first
-// full-suite run of this file. The residue is ours, so we drop it.
+// IT NO LONGER NEEDS TO CLEAR THE LOG RING (2026-08-21). Creating ANY relay group
+// fires the opportunistic stuck-sweep in poolNumbers.provisionForGroup, and
+// `flagStuckConnecting` (poolNumbers.ts:484-499) log.ERRORs one line per connecting
+// group older than relayWarmingMaxWaitMs. The LEAN SEED ships exactly such a group
+// (lean.ts:247-269 - an imported relay group that never gets a number), so this
+// spec's create leaves an ERROR line naming ITS conversationId in the app's
+// retained log ring. That id is group-text-conversion.spec.ts's CONNECTING_ID.
+//
+// That spec used to read an UNWINDOWED log tail, so the line failed a spec this
+// file has nothing to do with, and this file carried a `clearLogTail` in afterAll
+// to clean up after it. That was the wrong end of the problem: the workaround
+// belonged to the caller, and EVERY future relay-creating spec would have had to
+// repeat it. group-text-conversion.spec.ts now windows its assertion to its own
+// second pass (`since`), so the noise cannot reach it and the clear is retired.
+// See docs/issues/group-text-conversion-unwindowed-log-assert.md.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // --- Lean seed identities (app/src/lib/seed/lean.ts:81-150) ------------------
@@ -128,7 +132,6 @@ test.beforeEach(async ({ request }) => {
 // then drop the retained log lines the create's stuck-sweep wrote (see the header).
 test.afterAll(async ({ request }) => {
   await reseedLean(request);
-  await clearLogTail(request);
 });
 
 test('Contact file: create a relay group, land CONNECTING, then open it and deliver the intro', async ({

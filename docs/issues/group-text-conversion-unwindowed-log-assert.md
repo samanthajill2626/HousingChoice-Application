@@ -3,11 +3,40 @@ id: group-text-conversion-unwindowed-log-assert
 title: group-text-conversion.spec.ts asserts zero error lines over an unwindowed log tail
 type: debt
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-08-17
-refs: e2e/tests/dashboard-next/group-text-conversion.spec.ts:125, e2e/fixtures/groupText.ts, app/src/services/poolNumbers.ts:484-521, app/src/lib/seed/lean.ts
+resolved: 2026-08-21
+refs: e2e/tests/dashboard-next/group-text-conversion.spec.ts, e2e/tests/dashboard-next/contact-create-relay-group.spec.ts, app/src/lib/logger.ts:152
 ---
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The assertion is now
+windowed to the spec's own second pass: it stamps `secondPassFrom` immediately
+before the second `sendGroupAsParty` and passes `since` to `readLogTail`. The
+`since` filter compares each line's own `time` (`app/src/lib/logger.ts:152-155`),
+so every earlier file's `flagStuckConnecting` line is timestamped outside the
+window and cannot reach it.
+
+The window is deliberately narrow rather than "since this spec started". The
+claim being made is specific - *the SECOND arrival at an already-converted
+thread does not error* - so the window starts exactly there.
+
+**The `clearLogTail` workaround in `contact-create-relay-group.spec.ts` is
+retired**, along with its now-unused import. That was the wrong end of the
+problem: the residue was blamed on the producer, so the fix lived in the caller
+and every future relay-creating spec would have had to repeat it. The consumer
+now scopes its own assertion.
+
+**Proven both directions** by running the two specs together in path order,
+which is the exact failure shape (workers:1, so path order is run order):
+
+| | result |
+|---|---|
+| windowed (the fix) | **4 passed** |
+| window removed again | **1 failed** - `Received length: 4` |
+
+Four real error lines carrying `CONNECTING_ID` were present in that run and the
+windowed assertion correctly ignored all of them.
 
 **Problem.** Creating ANY relay group fires `poolNumbers.flagStuckConnecting()`,
 which logs one error line per over-age connecting group - and the lean seed

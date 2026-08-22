@@ -111,6 +111,24 @@ test.describe('conversion of an imported connecting relay group', () => {
     // 4) CONVERGENCE. A second arrival at an already-converted thread must be a
     //    no-op plus one message - not a refusal, not a second thread, and not
     //    an error line. This is the re-run semantics the cutover depends on.
+    // WINDOW THE LOG ASSERTION BELOW to this spec's own second pass.
+    //
+    // `readLogTail` used to be read UNWINDOWED here, and that made this spec
+    // fail on other files' legitimate output. Creating ANY relay group fires
+    // `poolNumbers.flagStuckConnecting()` (poolNumbers.ts:521), which logs one
+    // ERROR per over-age connecting group - and the lean seed permanently ships
+    // one whose conversationId IS this spec's CONNECTING_ID. So every
+    // relay-creating spec that path-sorts before this file (workers:1, so path
+    // order is run order) left a line this assertion then blamed on the
+    // conversion, with a cross-file blame that reads like a real regression.
+    //
+    // The claim being made is narrow - "the SECOND arrival at an
+    // already-converted thread does not error" - so the window starts exactly
+    // there. `since` filters on each line's own `time` (logger.ts:152-155), and
+    // earlier files' noise is timestamped before this point.
+    // See docs/issues/group-text-conversion-unwindowed-log-assert.md.
+    const secondPassFrom = new Date().toISOString();
+
     await sendGroupAsParty(request, { from: MARCUS, otherRecipients: [RENEE], body: second });
 
     await page.goto(`${NEXT}/conversations/${CONNECTING_ID}`);
@@ -123,7 +141,7 @@ test.describe('conversion of an imported connecting relay group', () => {
 
     // And nothing complained. A conversion refusal on the second pass is
     // exactly what a non-convergent migration looks like.
-    const errors = await readLogTail(request, { level: 'error' });
+    const errors = await readLogTail(request, { level: 'error', since: secondPassFrom });
     expect(
       errors.filter((l) => String(l['conversationId'] ?? '') === CONNECTING_ID),
     ).toHaveLength(0);

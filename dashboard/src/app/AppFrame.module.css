@@ -7,6 +7,26 @@
   height: 100%;
 }
 
+.nonProduction .sidebar,
+.nonProduction .drawer {
+  --c-nav-bg: #f4c542;
+  --c-nav-brand: #292415;
+  --c-nav-label: #67510e;
+  --c-nav-text: #403714;
+  --c-nav-hover-bg: #e8b72c;
+  --c-nav-active-bg: #dbaa1c;
+  --c-nav-active-text: #201c0d;
+  --c-nav-border: #d1a11b;
+  --c-nav-focus-ring: #174ea6;
+}
+
+.nonProduction .brand:focus-visible,
+.nonProduction .link:focus-visible,
+.nonProduction .collapseToggle:focus-visible,
+.nonProduction .accountTrigger:focus-visible {
+  outline-color: var(--c-nav-focus-ring);
+}
+
 /* --- Left nav (desktop persistent sidebar; becomes a drawer <768px) ------- */
 .sidebar {
   flex: 0 0 var(--nav-width);

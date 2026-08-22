@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Stub the heavy detail pages so these tests exercise ROUTING only (each detail
 // page has its own dedicated render tests). The stubs read the dynamic segment
@@ -13,6 +13,11 @@ vi.mock('./routes/listing/ListingDetail.js', () => ({
 }));
 
 import App from './App.js';
+import {
+  createEnvironmentIdentityLoader,
+  type EnvironmentIdentityLoader,
+} from './app/EnvironmentIdentity.js';
+import { getAppIdentityRaw } from './api/index.js';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +34,11 @@ function mockApi(): void {
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/app-identity/config.json')) {
+        return Promise.resolve(
+          json({ variant: 'non-production', themeColor: '#f4c542' }),
+        );
+      }
       if (url.includes('/auth/me')) {
         return Promise.resolve(json({ userId: 'u1', email: 'va@example.com', role: 'va' }));
       }
@@ -53,20 +63,77 @@ function mockApi(): void {
   );
 }
 
+beforeEach(() => {
+  document.querySelectorAll('meta[name="theme-color"]').forEach((node) => node.remove());
+  const meta = document.createElement('meta');
+  meta.name = 'theme-color';
+  meta.content = '#1f6feb';
+  document.head.append(meta);
+  expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
+});
+
 afterEach(() => {
+  document.querySelectorAll('meta[name="theme-color"]').forEach((node) => node.remove());
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-function renderAt(path: string): void {
+function freshIdentityLoader(): EnvironmentIdentityLoader {
+  return createEnvironmentIdentityLoader(getAppIdentityRaw);
+}
+
+function fetchCalls(): string[] {
+  const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+  return fetchMock.mock.calls.map((call) => String(call[0]));
+}
+
+function renderAt(path: string, loadIdentity = freshIdentityLoader()): void {
   render(
     <MemoryRouter initialEntries={[path]}>
-      <App />
+      <App loadIdentity={loadIdentity} />
     </MemoryRouter>,
   );
 }
 
 describe('App', () => {
+  it.each(['/join', '/p/missing-unit'])('%s stays public and never requests auth', async (path) => {
+    mockApi();
+    renderAt(path, freshIdentityLoader());
+
+    await waitFor(() =>
+      expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+        'content',
+        '#f4c542',
+      ),
+    );
+    expect(fetchCalls().some((url) => url.includes('/app-identity/config.json'))).toBe(true);
+    expect(fetchCalls().some((url) => url.includes('/auth/me'))).toBe(false);
+    expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
+  });
+
+  it('retains the catch-all auth probe before rendering Login', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/app-identity/config.json')) {
+          return Promise.resolve(
+            json({ variant: 'non-production', themeColor: '#f4c542' }),
+          );
+        }
+        if (url.includes('/auth/me')) return Promise.resolve(json({ error: 'unauthorized' }, 401));
+        if (url.includes('/__dev/ping')) return Promise.resolve(json({ error: 'not_found' }, 404));
+        return Promise.resolve(json({ error: 'not_found' }, 404));
+      }),
+    );
+
+    renderAt('/', freshIdentityLoader());
+
+    expect(await screen.findByRole('link', { name: 'Sign in with Google' })).toBeInTheDocument();
+    expect(fetchCalls().some((url) => url.includes('/auth/me'))).toBe(true);
+    expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
+  });
+
   it('renders the HousingChoice shell once authenticated', async () => {
     mockApi();
     renderAt('/');

@@ -17,12 +17,14 @@ import {
 import { Button } from '../ui/index.js';
 import { ChevronIcon, CloseIcon, MenuIcon } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
+import { useEnvironmentIdentity } from './EnvironmentIdentity.js';
 import { NavContents } from './NavContents.js';
 import { useNavChrome } from './useNavChrome.js';
 import styles from './AppFrame.module.css';
 
 export function AppFrame(): React.JSX.Element {
   const { me, refresh } = useAuth();
+  const identity = useEnvironmentIdentity();
   const { collapsed, toggleCollapsed, drawerOpen, openDrawer, closeDrawer, isMobile } =
     useNavChrome();
   const drawerRef = useRef<HTMLElement>(null);
@@ -108,9 +110,13 @@ export function AppFrame(): React.JSX.Element {
   const account = (
     <AccountMenu email={me?.email ?? ''} role={me?.role ?? 'va'} onSignOut={handleSignOut} />
   );
+  const shellClass =
+    identity.variant === 'non-production'
+      ? `${styles.shell} ${styles.nonProduction}`
+      : styles.shell;
 
   return (
-    <div className={styles.shell}>
+    <div className={shellClass}>
       <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ''}`} aria-label="Primary">
         <div className={styles.brandRow}>
           <NavLink to="/" className={styles.brand} end aria-label="HousingChoice home">

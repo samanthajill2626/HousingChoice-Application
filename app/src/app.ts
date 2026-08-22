@@ -193,6 +193,10 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     createUnitMediaServeRouter({ mediaStore: mediaServeStore, logger: log }),
   );
   app.use('/app-identity', createAppIdentityRouter({ config }));
+  app.get('/manifest.webmanifest', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.redirect(307, '/app-identity/manifest.webmanifest');
+  });
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by
   // design (login/callback/logout/me); EVERY /api route including the SSE

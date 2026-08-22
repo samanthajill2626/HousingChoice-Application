@@ -85,6 +85,23 @@ describe.skipIf(!built)('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     expect(unknown.text).not.toContain('<div id="root">');
   });
 
+  it('redirects the legacy root manifest to the runtime manifest without caching', async () => {
+    const res = await request(app)
+      .get('/manifest.webmanifest')
+      .query({ target: 'https://example.com/caller-controlled.webmanifest' })
+      .redirects(0)
+      .set('x-origin-verify', SECRET);
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe('/app-identity/manifest.webmanifest');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['content-type']).not.toContain('text/html');
+    expect(res.text).not.toContain('<div id="root">');
+
+    const missingOriginSecret = await request(app).get('/manifest.webmanifest').redirects(0);
+    expect(missingOriginSecret.status).toBe(403);
+  });
+
   it('SPA-falls back to index.html for unknown GET paths (client-side routes)', async () => {
     const res = await request(app).get('/some/client/route').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);

@@ -118,6 +118,25 @@ test('anonymous and public pages use one runtime identity without widening auth'
     '/app-identity/icon-maskable-512.png',
   ]);
 
+  const legacyManifestResponse = await page.request.get(
+    `${NEXT}/manifest.webmanifest?target=https://example.test/attacker-controlled`,
+    { maxRedirects: 0 },
+  );
+  expect(legacyManifestResponse.status()).toBe(307);
+  expect(legacyManifestResponse.headers()['location']).toBe(
+    '/app-identity/manifest.webmanifest',
+  );
+  expect(legacyManifestResponse.headers()['cache-control']).toBe('no-store');
+  expect(legacyManifestResponse.headers()['content-type']).not.toContain('text/html');
+
+  const manifestSuffixResponse = await page.request.get(
+    `${NEXT}/manifest.webmanifest-extra`,
+    { maxRedirects: 0 },
+  );
+  expect(manifestSuffixResponse.status()).toBe(200);
+  expect(manifestSuffixResponse.headers()['content-type']).toContain('text/html');
+  expect(manifestSuffixResponse.headers()['location']).toBeUndefined();
+
   const selectors = [
     ['/app-identity/icon-192.png', '/icons/icon-nonprod-192.png'],
     ['/app-identity/icon-512.png', '/icons/icon-nonprod-512.png'],

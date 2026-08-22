@@ -121,3 +121,17 @@ describe('/app-identity', () => {
     expect(res.headers['content-type']).not.toContain('text/html');
   });
 });
+
+describe('/manifest.webmanifest', () => {
+  it('redirects legacy clients to the fixed runtime manifest without serving SPA HTML', async () => {
+    const res = await request(appFor('dev'))
+      .get('/manifest.webmanifest?target=https://example.test/attacker-controlled')
+      .set('x-origin-verify', SECRET)
+      .redirects(0);
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe('/app-identity/manifest.webmanifest');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['content-type']).not.toContain('text/html');
+  });
+});

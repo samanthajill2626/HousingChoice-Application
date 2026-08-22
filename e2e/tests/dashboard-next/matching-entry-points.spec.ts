@@ -288,6 +288,23 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // Dismiss the typeahead dropdown (it overlays the list) - the browsable
     // rows below are the click target under test.
     await page.getByRole('combobox', { name: 'Property' }).press('Escape');
+    // WAIT FOR THE DROPDOWN TO ACTUALLY BE GONE before clicking through it.
+    //
+    // Escape only REQUESTS the close. `fill()` fires a search, and when that
+    // response lands after the Escape the list re-opens - so the click below
+    // landed on a `<li role=option>` from the picker's own subtree, which
+    // "intercepts pointer events" over the row, and Playwright retried until
+    // the 30s test budget died. Reproduced on unrelated branches and, once, in
+    // a SOLO 3-spec run, so the race is intrinsic rather than load-only
+    // (docs/issues/matching-entry-points-property-first-e2e-flake.md).
+    //
+    // Asserting the options are gone makes the precondition explicit instead of
+    // hoping the keystroke won the race, and it fails with "the typeahead
+    // dropdown never closed" rather than an opaque click timeout.
+    await expect(
+      page.getByRole('option'),
+      'the typeahead dropdown never closed, so it still overlays the browsable rows',
+    ).toHaveCount(0, { timeout: 10_000 });
     await page.getByRole('button', { name: new RegExp(`${stamp} Matching Entry`) }).click();
 
     // Compose appears: property details resolved, [TenantName] preserved.

@@ -105,8 +105,17 @@ Full setup and lane details: [`e2e/README.md`](e2e/README.md).
 Known flakes must be re-run once before blaming the current change, with both runs
 reported:
 
-- [`tour-reminders-panel-e2e-flake`](docs/issues/tour-reminders-panel-e2e-flake.md)
-- [`conversationdetail-members-mock-suite-flake`](docs/issues/conversationdetail-members-mock-suite-flake.md)
+- [`tour-reminders-panel-e2e-flake`](docs/issues/tour-reminders-panel-e2e-flake.md) -
+  a rare Reminders-panel rung-visibility timeout, last seen 2026-08-03. NOTE the
+  issue's title long advertised a DETERMINISTIC pre-08:00 failure; that half was
+  closed by `150fbfa4` on 2026-08-05 and re-running really is the right response
+  to what remains.
+
+`conversationdetail-members-mock-suite-flake` was on this list and is FIXED
+(2026-08-21): its mocks were bare `vi.fn()`s that returned `undefined` after
+`mockReset`, so the component died on `.then()` of undefined. Not a timing
+flake - a reachable-by-construction defect. If that file fails again, treat it
+as a real regression rather than re-running.
 
 ## Required completion gates
 

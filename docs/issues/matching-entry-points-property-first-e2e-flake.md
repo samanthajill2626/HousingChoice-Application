@@ -3,9 +3,10 @@ id: matching-entry-points-property-first-e2e-flake
 title: matching-entry-points "Send a property" spec flakes - typeahead dropdown intercepts the unit-row click
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-07-21
+resolved: 2026-08-21
 updated: 2026-08-21
 refs: e2e/tests/dashboard-next/matching-entry-points.spec.ts:265, dashboard/src/routes/broadcasts/BroadcastComposer.tsx
 ---
@@ -84,3 +85,30 @@ below is worth more than the spec-side one.
 Until fixed, treat the pass-solo/fail-in-suite pattern with this exact
 intercept signature as this issue, not the branch under test (verify solo
 before blaming a change).
+
+**Resolution (2026-08-21, `fix/test-suite-hardening`).** The spec now WAITS for
+the typeahead dropdown to be gone before clicking through where it was:
+
+    await page.getByRole('combobox', { name: 'Property' }).press('Escape');
+    await expect(page.getByRole('option')).toHaveCount(0, { timeout: 10_000 });
+    await page.getByRole('button', { name: /... Matching Entry/ }).click();
+
+Escape only REQUESTS the close. `fill()` fires a search, and when that response
+lands after the Escape the list re-opens - so the click landed on a
+`<li role=option>` from the picker's own subtree, which intercepts pointer
+events over the row, and Playwright retried until the 30s budget died.
+
+Chose the spec-side hardening of the two the issue offered. The component-side
+fix (a dismissed-at generation counter so a late response cannot re-open the
+list) is the better product change and would help a real user who hits the same
+overlay, but it is a behaviour change to `BroadcastComposer` and this branch is
+test hardening. Recorded here rather than silently dropped - see the original
+"Suggested fix" above, which stays valid as a follow-up.
+
+Asserting the precondition also improves the failure message: it now fails with
+"the typeahead dropdown never closed" instead of an opaque click timeout that
+names the row it could not reach.
+
+Verified: 3 passed. Note this cannot be *proved* by a passing run - the flake
+was intermittent - but the wait removes the only mechanism the evidence ever
+implicated, and the assertion makes a recurrence self-describing.

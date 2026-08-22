@@ -3,13 +3,89 @@ id: npm-test-dynamodb-local-contention
 title: npm test is not reliably green - four integration suites fail nondeterministically under shared DynamoDB Local contention
 type: bug
 severity: med
-status: resolved
+status: open
 area: app/test-infra
 created: 2026-08-05
 updated: 2026-08-21
-resolved: 2026-08-21
+reopened: 2026-08-21
 refs: app/test/groupCrossCheck.test.ts, app/test/unreadIndexRepo.integration.test.ts:561, app/test/seedProfile.integration.test.ts:122, app/test/seedLive.test.ts, app/src/lib/dynamoAdmin.ts, app/scripts/db-update-gsis.ts, app/vitest.config.ts
 ---
+
+**REOPENED 2026-08-21, same day, by a run that contradicts the close below.**
+
+A full `npm test` failed FOUR files at once - `groupCrossCheck`,
+`importApply.integration`, `performanceSeed.integration`, `seedHistory` - with a
+signature that appears NOWHERE in this issue's history:
+
+```
+InternalServerError: This action timed out because it too long waiting for a lock.
+This request will succeed in actual DynamoDB API
+```
+
+That is DynamoDB Local's single SQLite WRITE LOCK - not the `InternalFailure` of
+suite B, and not the TTL reaper of suite A. The other three failed as plain
+timeouts at 60s, 180s and 240s - already-generous budgets, so the lever used last
+time (raise the timeout) is exhausted.
+
+**The mechanism is documented in our own vitest config, and I walked into it.**
+`app/vitest.config.ts` records that per-key isolation stops THIS worktree
+contending with a neighbour, but every integration suite in the worktree shares
+that one key - so one database, one write lock - and that going from 23 to 26
+suites once produced 4 failed runs out of 4, "a DIFFERENT integration suite each
+time... the write lock starving whoever asks last".
+
+There are now **53** such suites, and I added one of them
+(`updateCallStatus.integration.test.ts`) during this very campaign, justifying it
+as safe because "Phase 1 fixed the contention". That was wrong: Phase 1 fixed the
+TTL time bomb and the UpdateTable retry. Neither touches the write lock.
+
+**Not a regression from the branch** - the same four files pass together alone
+(108 tests), and an immediate second full run was 322/322 green. But
+"intermittent" is what this issue has always been about, so closing it while a
+4-file red run is reproducible was premature.
+
+**Remaining scope, and the two candidate fixes:**
+
+1. **Serialize the integration lane.** The config comment already records the
+   whole suite going green under `--no-file-parallelism`, at a cost it puts at
+   2min -> 5min. Targeted version: split `app/vitest.config.ts` into two
+   projects - unit (parallel) and integration (serial) - so only the lock
+   contenders pay.
+2. **Per-FILE access keys.** DynamoDB Local keys a separate database, and
+   therefore a separate write lock, per (accessKeyId, region). Making the key
+   per test FILE rather than per worktree removes the shared lock entirely at no
+   runtime cost. 50 of the 53 suites already mint their own `hc-test-<uuid>-`
+   table prefix and would not notice; the few that read the shared `hc-local-`
+   tables (the reseed-based ones) must keep the worktree key.
+
+**MEASURED 2026-08-21: option 1 is no longer viable.** The 46 integration
+files account for **1990s of the 2350s** total test time in a full app run
+(353 files parsed from the run log). Serializing them therefore costs **>= 33
+minutes wall**, against ~5 minutes for the whole app workspace today (290s
+wall at ~8x effective parallelism).
+
+The config comment's "2min -> 5min" estimate was written when there were 26
+suites. At 46 the cheap remedy has been outgrown, and nobody re-measured it -
+the number just quietly stopped being true, in the same way the TTL fuse and
+the stale issue titles did.
+
+**So option 2 is the only scalable fix.** Per-FILE access keys give each suite
+its own DynamoDB Local database and its own write lock at no runtime cost. The
+shape of the work:
+
+- a vitest `setupFiles` hook can set `AWS_ACCESS_KEY_ID` per test FILE (setup
+  runs once per file), which is the whole mechanism;
+- 50 of the 53 suites already mint their own `hc-test-<uuid>-` prefix and would
+  not notice;
+- the handful that read the SHARED `hc-local-` tables (the reseed-based ones)
+  must keep the worktree key, because `globalSetup` bootstraps those tables
+  once, under that key. Those files need an explicit, greppable opt-in rather
+  than an opt-out list that rots.
+
+That is a self-contained piece of test-infrastructure work with real fallout
+risk across 53 files - the same shape as the relay fixture fallout on this
+branch, but an order of magnitude wider. It wants its own pass, not the tail
+of a long branch.
 
 **RESOLVED 2026-08-21 (`fix/test-suite-hardening`). All four suites.**
 

@@ -307,7 +307,7 @@ describe('writePerformanceReport', () => {
     await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written', exitCode: 0 });
 
     const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
-    expect(summary).toMatchObject({ schemaVersion: 2, registryVersion: 2, workloadVersion: 2 });
+    expect(summary).toMatchObject({ schemaVersion: 2, registryVersion: 3, workloadVersion: 2 });
     expect(summary.environment.comparisonWorkload).toMatchObject({
       contacts: 100,
       activeContacts: 85,

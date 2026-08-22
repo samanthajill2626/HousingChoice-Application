@@ -44,6 +44,7 @@ const THREADS: RouteContractBranch[] = [
 ];
 
 const SHELL_SHAPES = [
+  '/app-identity/config.json?#required',
   '/auth/me?#required',
   '/api/inbox/unread-count?#required#inbox_badge',
   '/api/unmatched-email?filter#required',
@@ -531,6 +532,12 @@ describe('endpoint and write contracts', () => {
       const expectedCold = [...new Set([...SHELL_SHAPES, ...coldDestination])];
       expect(shape(warm), `${route.surfaceId} warm`).toEqual(expectedWarm);
       expect(shape(cold), `${route.surfaceId} cold`).toEqual(expectedCold);
+      expect(shape(cold)[0], `${route.surfaceId} cold identity config position`)
+        .toBe('/app-identity/config.json?#required');
+      expect(shape(cold).filter((value) => value === '/app-identity/config.json?#required'), `${route.surfaceId} cold identity config count`)
+        .toHaveLength(1);
+      expect(shape(warm), `${route.surfaceId} warm identity config absence`)
+        .not.toContain('/app-identity/config.json?#required');
       expect(Object.isFrozen(warm)).toBe(true);
       expect(shape(warm)).not.toEqual(expect.arrayContaining([
         '/auth/me?#required', '/api/events?#required',

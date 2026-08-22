@@ -1,5 +1,5 @@
 export const PERFORMANCE_SCHEMA_VERSION = 2 as const;
-export const PERFORMANCE_REGISTRY_VERSION = 2 as const;
+export const PERFORMANCE_REGISTRY_VERSION = 3 as const;
 export const PERFORMANCE_WORKLOAD_VERSION = 2 as const;
 export const INTERCEPTION_SCOPE_VERSION = 3 as const;
 

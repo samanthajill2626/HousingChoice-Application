@@ -40,6 +40,7 @@ describe('request URL sanitization', () => {
     ['/api/placements/placement-123/nudges/nudge-123/send-now', '/api/placements/:placementId/nudges/:nudgeId/send-now', []],
     ['/api/messages/msg-123/media/2', '/api/messages/:messageId/media/:mediaIndex', []],
     ['/auth/dev-login', '/auth/dev-login', []],
+    ['/app-identity/config.json', '/app-identity/config.json', []],
     ['/__dev/performance/reseed', '/__dev/performance/reseed', []],
   ] as const)('maps %s to a checked-in template', (path, expected, queryKeys) => {
     const result = sanitized(`${ORIGIN}${path}`);
@@ -82,6 +83,24 @@ describe('request URL sanitization', () => {
       endpointTemplate: 'invalid_url',
       queryKeys: [],
       unmatchedApi: false,
+    });
+  });
+
+  it('classifies only the identity config selector as API work', () => {
+    expect(sanitized(`${ORIGIN}/app-identity/config.json`)).toEqual({
+      originClass: 'first_party',
+      resourceClass: 'api',
+      endpointTemplate: '/app-identity/config.json',
+      queryKeys: [],
+      unmatchedApi: false,
+    });
+    expect(sanitized(`${ORIGIN}/app-identity/manifest.webmanifest`)).toMatchObject({
+      resourceClass: 'other',
+      endpointTemplate: 'other',
+    });
+    expect(sanitized(`${ORIGIN}/app-identity/icon-192.png`)).toMatchObject({
+      resourceClass: 'image',
+      endpointTemplate: 'image',
     });
   });
 

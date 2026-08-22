@@ -18,6 +18,7 @@ export interface SanitizedRequestUrl {
 }
 
 const ENDPOINT_TEMPLATES = Object.freeze([
+  '/app-identity/config.json',
   '/auth/dev-login',
   '/auth/login',
   '/auth/logout',
@@ -267,6 +268,7 @@ export function sanitizeRequestUrl(input: SanitizeRequestUrlInput): SanitizedReq
     return {
       originClass: 'first_party',
       resourceClass:
+        url.pathname === '/app-identity/config.json' ||
         url.pathname.startsWith('/api/') ||
         url.pathname.startsWith('/auth/') ||
         url.pathname.startsWith('/__dev/')

@@ -106,37 +106,66 @@ async function expectBadgeAfter(
   else await expect(navBadge(page)).toHaveAttribute('aria-label', expected);
 }
 
-async function expectLinkSpansRow(link: Locator): Promise<void> {
-  const [linkBox, rowBox] = await Promise.all([
-    link.boundingBox(),
-    link.locator('..').boundingBox(),
-  ]);
-  expect(linkBox).not.toBeNull();
-  expect(rowBox).not.toBeNull();
+// GEOMETRY MUST BE POLLED, because the nav rail ANIMATES.
+//
+// AppFrame.module.css:20 gives the rail
+// `transition: flex-basis 0.18s ease, width 0.18s ease`, and collapsing flips
+// the "Expand navigation" button into the DOM immediately - long before the
+// width has finished moving. Both helpers below used to take ONE boundingBox
+// snapshot right after that click, so under full-suite load they measured the
+// rail mid-transition.
+//
+// That is what failed the 2026-08-23 gate run: the badge's right edge read 226
+// against a row edge of 218.27, an ~8px overshoot that is simply the rail still
+// narrowing. The file passes 3/3 alone, which is the signature of a race the
+// machine's speed decides.
+//
+// expect.poll retries the whole measurement until it settles, so a REAL layout
+// bug still fails (it never settles) while an in-flight animation does not.
+const TOLERANCE = 1;
 
-  const tolerance = 1;
-  expect(Math.abs((linkBox?.x ?? 0) - (rowBox?.x ?? 0))).toBeLessThanOrEqual(tolerance);
-  expect(Math.abs((linkBox?.width ?? 0) - (rowBox?.width ?? 0))).toBeLessThanOrEqual(tolerance);
+async function expectLinkSpansRow(link: Locator): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const [linkBox, rowBox] = await Promise.all([
+          link.boundingBox(),
+          link.locator('..').boundingBox(),
+        ]);
+        if (linkBox === null || rowBox === null) return null;
+        return Math.max(
+          Math.abs(linkBox.x - rowBox.x),
+          Math.abs(linkBox.width - rowBox.width),
+        );
+      },
+      { message: 'the active link never settled flush with its nav row' },
+    )
+    .toBeLessThanOrEqual(TOLERANCE);
 }
 
 async function expectBadgeInsideRow(link: Locator): Promise<void> {
   const badge = link.locator('xpath=following-sibling::span[contains(@aria-label, "unread")]');
-  const [badgeBox, rowBox] = await Promise.all([
-    badge.boundingBox(),
-    link.locator('..').boundingBox(),
-  ]);
-  expect(badgeBox).not.toBeNull();
-  expect(rowBox).not.toBeNull();
-
-  const tolerance = 1;
-  expect((badgeBox?.x ?? 0) + tolerance).toBeGreaterThanOrEqual(rowBox?.x ?? 0);
-  expect((badgeBox?.y ?? 0) + tolerance).toBeGreaterThanOrEqual(rowBox?.y ?? 0);
-  expect((badgeBox?.x ?? 0) + (badgeBox?.width ?? 0)).toBeLessThanOrEqual(
-    (rowBox?.x ?? 0) + (rowBox?.width ?? 0) + tolerance,
-  );
-  expect((badgeBox?.y ?? 0) + (badgeBox?.height ?? 0)).toBeLessThanOrEqual(
-    (rowBox?.y ?? 0) + (rowBox?.height ?? 0) + tolerance,
-  );
+  // Polled for the same reason as above. The value is the WORST overhang on any
+  // edge, so one number covers all four claims and the failure message reports
+  // how far outside the row the badge actually sat.
+  await expect
+    .poll(
+      async () => {
+        const [badgeBox, rowBox] = await Promise.all([
+          badge.boundingBox(),
+          link.locator('..').boundingBox(),
+        ]);
+        if (badgeBox === null || rowBox === null) return null;
+        return Math.max(
+          rowBox.x - badgeBox.x,
+          rowBox.y - badgeBox.y,
+          badgeBox.x + badgeBox.width - (rowBox.x + rowBox.width),
+          badgeBox.y + badgeBox.height - (rowBox.y + rowBox.height),
+        );
+      },
+      { message: 'the unread badge never settled inside its nav row' },
+    )
+    .toBeLessThanOrEqual(TOLERANCE);
 }
 
 test.beforeEach(async ({ request }) => {

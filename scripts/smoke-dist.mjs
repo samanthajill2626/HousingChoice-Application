@@ -159,6 +159,22 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
+// FLOOR ASSERTION. "0 specifiers resolved fine" is not a pass, it is a check
+// that ran over nothing - a build emitting import-free output, or an extraction
+// regex that silently stopped matching, would both report OK. The real number is
+// ~1325 across 232 files; 200 is a floor that cannot be hit by a healthy build
+// but catches the whole class of "the check quietly stopped checking".
+// Caught by adversarial review 2026-08-23.
+const FLOOR = 200;
+if (checked < FLOOR) {
+  process.stderr.write(
+    `smoke-dist: only ${checked} import specifier(s) found across ${files.length} file(s), ` +
+      `below the floor of ${FLOOR}. The build output or the specifier extraction is broken - ` +
+      `this is NOT a pass.\n`,
+  );
+  process.exit(1);
+}
+
 process.stdout.write(
   `smoke-dist: OK - ${checked} import specifier(s) across ${files.length} emitted file(s) ` +
     `resolve under plain Node.\n`,

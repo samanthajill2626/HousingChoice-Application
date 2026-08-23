@@ -45,7 +45,9 @@ function tsFiles(dir: string): string[] {
     if (entry === 'node_modules' || entry === '.artifacts') continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) out.push(...tsFiles(full));
-    else if (entry.endsWith('.ts')) out.push(full);
+    // .ts, .tsx and .mjs - a guard that only reads one extension is a guard
+    // with a documented hole. Caught by adversarial review 2026-08-23.
+    else if (/\.(ts|tsx|mjs)$/.test(entry)) out.push(full);
   }
   return out;
 }

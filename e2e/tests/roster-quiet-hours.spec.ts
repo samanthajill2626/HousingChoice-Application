@@ -56,6 +56,13 @@ const QUIET_OFF = {
   quietHoursEnabled: false,
   quietHoursStart: '21:00',
   quietHoursEnd: '08:00',
+  // RESTORE the zone too. `windowAroundNow()` writes `timezone`, the settings
+  // route is a PATCH (`if ('timezone' in b)`), and afterAll runs this - so
+  // without it the spec permanently overwrites lane settings for every later
+  // spec in the run. Inert today only because ORG_TZ equals the repo default;
+  // it becomes a cross-spec landmine the moment anyone changes ORG_TZ to
+  // reproduce a bug. Caught by adversarial review 2026-08-23.
+  timezone: 'America/New_York',
 } as const;
 
 interface QuietPatch {

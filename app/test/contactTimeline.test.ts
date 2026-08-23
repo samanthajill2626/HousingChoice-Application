@@ -975,9 +975,11 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
   // LEXICALLY; the in-memory fake used to parse it with `Number(...)`, which is
   // `NaN` for an ISO SK and silently turned the bound into a no-op - so the fake
   // could not exercise this path at all, and a regression in it would not have
-  // been caught. The fake now compares lexically too
-  // (twilioWebhookHarness.ts, `listByEntity`); this is the test that proves the
-  // paging works rather than trusting that both sides read the same way.
+  // been caught. That `Number(...)` bug was ALREADY fixed before this test
+  // existed - the fake compares lexically today (twilioWebhookHarness.ts,
+  // `listByEntity`). What was missing was any test that exercised the bound:
+  // the file's other paging test walks MESSAGES only, so no page boundary ever
+  // landed on an audit row. This is that test.
   // See docs/issues/audit-fake-before-cursor-fidelity.md.
   it('pages across a PROPERTY-AUDIT boundary with no dups and no skips', async () => {
     const h = makeWebhookHarness();

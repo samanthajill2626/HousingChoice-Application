@@ -67,15 +67,43 @@ export function gsiAttributeDefinitions(gsi: GsiSpec): AttributeDefinition[] {
  * docs/issues/npm-test-dynamodb-local-contention.md, and it is one of the two
  * reasons `npm test` could not be trusted.
  *
- * Retrying is safe here specifically because this path is idempotent by
- * construction: `ensureGsis` re-reads the live index set and only creates what
- * is missing, so a retry of a call that actually succeeded finds the index
- * present and does nothing. Against real AWS this code is never reached
+ * THE RETRY MUST RE-READ, and an earlier version of this comment claimed a
+ * re-read that its own code path never performed. `ensureGsis` reads
+ * `liveIndexNames` ONCE PER TABLE, above the `for (const gsi of missing)` loop -
+ * so a bare re-send inside the loop asks for an index that may already exist.
+ *
+ * That is exactly the case the retry exists for: the server ACCEPTS attempt 1
+ * and only its RESPONSE fails. Attempt 2 then hits an index already being
+ * created and throws `ResourceInUseException: Attempt to change a resource which
+ * is still in use: Index is being created` - which is not retryable, so a run
+ * whose GSI was created successfully failed anyway, blaming a resource conflict.
+ * Reproduced against the container by an adversarial review, 2026-08-23.
+ *
+ * So on a retryable error we DescribeTable first: if the index is now CREATING
+ * or ACTIVE, attempt 1 landed and there is nothing left to do. Only a genuinely
+ * absent index is re-sent. Against real AWS this code is never reached
  * (hard-gated to a localhost endpoint), so the retry cannot mask a production
  * fault.
  */
+async function indexStatus(
+  client: DynamoDBClient,
+  physicalName: string,
+  indexName: string,
+): Promise<string | undefined> {
+  try {
+    const { Table } = await client.send(new DescribeTableCommand({ TableName: physicalName }));
+    return (Table?.GlobalSecondaryIndexes ?? []).find((g) => g.IndexName === indexName)
+      ?.IndexStatus;
+  } catch {
+    // A describe that itself fails tells us nothing; fall through to the retry.
+    return undefined;
+  }
+}
+
 async function sendWithInternalFailureRetry(
   client: DynamoDBClient,
+  physicalName: string,
+  indexName: string,
   build: () => UpdateTableCommand,
   attempts = 4,
 ): Promise<void> {
@@ -87,6 +115,11 @@ async function sendWithInternalFailureRetry(
       const name = (err as { name?: string }).name ?? '';
       const retryable = name === 'InternalFailure' || name === 'InternalServerError';
       if (!retryable || attempt >= attempts) throw err;
+      // Did attempt N actually land? A failed RESPONSE does not mean a failed
+      // REQUEST, and re-sending a create for an index that now exists throws
+      // ResourceInUseException - turning a success into a misleading failure.
+      const status = await indexStatus(client, physicalName, indexName);
+      if (status === 'CREATING' || status === 'ACTIVE') return;
       // Linear backoff: the container needs a moment, not an exponential one.
       await new Promise((resolve) => setTimeout(resolve, attempt * 250));
     }
@@ -191,7 +224,7 @@ export async function ensureGsis(
     // ONE create per UpdateTable call, and the new INDEX (not just the table)
     // must finish before the next create is accepted.
     for (const gsi of missing) {
-      await sendWithInternalFailureRetry(client, () =>
+      await sendWithInternalFailureRetry(client, physicalName, gsi.indexName, () =>
         new UpdateTableCommand({
           TableName: physicalName,
           AttributeDefinitions: gsiAttributeDefinitions(gsi),

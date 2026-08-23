@@ -32,8 +32,69 @@
 // Guards mirror globalSetup exactly: local endpoints only (this must NEVER be
 // able to drop tables against AWS), and fail-soft when Docker is down so
 // pure-unit runs are unaffected.
+import { DeleteTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
+
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
+import { createDynamoClient } from '../src/lib/dynamo.js';
 import { dropAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
+
+/**
+ * Throwaway table families that `dropAllTables` structurally CANNOT see.
+ *
+ * It iterates the TABLES manifest under the DEFAULT `hc-local-` prefix, so it
+ * drops exactly those 23. But ~38 suites mint their own per-run prefix
+ * (`hc-test-<uuid>-`), `performanceSeed.integration.test.ts` uses
+ * `hc-local-<lane>-`, and `seedHistory.test.ts` uses `hc-hist-<uuid>-`. None of
+ * those are in the manifest, so every INTERRUPTED run leaks its tables forever.
+ *
+ * That is not cosmetic. Measured 2026-08-23: a key carrying 116 such tables ran
+ * the app suite in 607s with 9 failures (plain timeouts and SQLite write-lock
+ * errors, ZERO assertion failures); the same commit on an empty key ran in 65s
+ * with 0 failures. A required completion gate was red for pure residue.
+ *
+ * Safe by construction: this sweep runs INSIDE one access key's own database
+ * (DynamoDB Local keys a separate database per accessKeyId), and the whole
+ * teardown is hard-gated to a localhost endpoint. It cannot reach an e2e lane
+ * (different key) or AWS.
+ */
+const RESIDUE_PREFIXES = [
+  /^hc-test-/, // per-suite throwaway prefixes
+  /^hc-hist-/, // seedHistory
+  /^hc-local-\d+-/, // performanceSeed's lane-shaped prefix (NOT plain hc-local-)
+];
+
+/** Delete every residue table under the ACTIVE key. Returns how many went. */
+async function sweepResidueTables(endpoint: string): Promise<number> {
+  const client = createDynamoClient({ endpoint });
+  let removed = 0;
+  try {
+    let exclusiveStartTableName: string | undefined;
+    const doomed: string[] = [];
+    do {
+      const res = await client.send(
+        new ListTablesCommand(
+          exclusiveStartTableName !== undefined ? { ExclusiveStartTableName: exclusiveStartTableName } : {},
+        ),
+      );
+      for (const name of res.TableNames ?? []) {
+        if (RESIDUE_PREFIXES.some((re) => re.test(name))) doomed.push(name);
+      }
+      exclusiveStartTableName = res.LastEvaluatedTableName;
+    } while (exclusiveStartTableName !== undefined);
+
+    for (const name of doomed) {
+      try {
+        await client.send(new DeleteTableCommand({ TableName: name }));
+        removed += 1;
+      } catch {
+        // A table another process is already dropping is not our problem.
+      }
+    }
+  } finally {
+    client.destroy();
+  }
+  return removed;
+}
 
 /**
  * Core logic, exported so tests can call it directly against a throwaway key.
@@ -90,8 +151,14 @@ export async function dropKeyedLocalTables(opts: {
       console.log = origLog;
     }
 
+    // Then the families the manifest cannot see - see RESIDUE_PREFIXES.
+    const swept = await sweepResidueTables(endpoint);
+
     const shortKey = key.length > 12 ? `${key.slice(0, 12)}...` : key;
-    console.log(`[globalTeardown] dropped hc-local- tables (key=${shortKey}): ${dropped}`);
+    console.log(
+      `[globalTeardown] dropped hc-local- tables (key=${shortKey}): ${dropped}` +
+        (swept > 0 ? `, plus ${swept} residue table(s) from interrupted runs` : ''),
+    );
   } catch (err) {
     // Best-effort: a teardown failure must never turn a green run red. The
     // tables simply persist and the next run reuses them, exactly as before.

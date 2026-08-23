@@ -128,8 +128,8 @@ test.beforeEach(async ({ request }) => {
 });
 
 // Restore the lean baseline the rest of the suite expects (this file may not run
-// last, and the group it creates is exactly the Inbox residue documented above),
-// then drop the retained log lines the create's stuck-sweep wrote (see the header).
+// last, and the group it creates is exactly the Inbox residue documented above).
+// The log ring is deliberately NOT cleared any more - see the header.
 test.afterAll(async ({ request }) => {
   await reseedLean(request);
 });

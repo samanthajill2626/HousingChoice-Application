@@ -2,7 +2,7 @@
 id: npm-test-dynamodb-local-contention
 title: npm test is not reliably green - four integration suites fail nondeterministically under shared DynamoDB Local contention
 type: bug
-severity: med
+severity: high
 status: open
 area: app/test-infra
 created: 2026-08-05
@@ -57,6 +57,57 @@ TTL time bomb and the UpdateTable retry. Neither touches the write lock.
    runtime cost. 50 of the 53 suites already mint their own `hc-test-<uuid>-`
    table prefix and would not notice; the few that read the shared `hc-local-`
    tables (the reseed-based ones) must keep the worktree key.
+
+**CORRECTED 2026-08-23 by adversarial review. The measurement below was taken
+on a DEGRADED database and its conclusion does not follow. Read this first.**
+
+Controlled experiment, same commit, same machine, same container - the only
+variable is the access key, and therefore which database inside the container
+is used:
+
+| database | app suite | wall | test time |
+|---|---|---|---|
+| worktree key `hctestij3dce` | **9 files failed** | 607s | 5023s |
+| brand-new key (empty db) | **322 passed, 0 failed** | **65s** | **305s** |
+
+9.3x wall and the gate flips red to green. Cause, measured directly: that
+database held **116 tables** - 50 `hc-test-<uuid>-`, 44 `hc-local-<lane>-`, 22
+`hc-hist-<uuid>-`. `app/test/globalTeardown.ts` drops exactly the 23 plain
+`hc-local-` tables; the other three prefix families are invisible to it and
+survive. A run that COMPLETES cleans up after itself, so the backlog is
+historical residue from interrupted runs.
+
+So:
+
+- **The "1990s of 2350s" figure below is an artefact of that residue**, not of
+  suite count. On a clean database the ENTIRE app suite is 305s of test time.
+- **The ">= 33 minutes" serialization estimate is inflated by roughly the same
+  factor**, and "option 1 is no longer viable" is NOT supported.
+- **The real root cause is cheaper than either option listed below**: sweep
+  the three leaked prefix families at teardown or at `db:start`. That recovers
+  the ~9x without a 53-file refactor.
+
+Per-file access keys remain a good idea for genuine lock isolation - the
+write-lock timeout IS real and did appear - but they are no longer the only
+lever, and the case for them has to be re-argued on clean-database numbers.
+
+**Severity raised med -> high.** `npm test` is a required completion gate that
+can be red for purely environmental reasons, and `AGENTS.md`'s known-flake list
+does not mention it - so an agent who hits this has no sanctioned re-run and
+will either mis-blame their own change or re-run informally. That is exactly
+what happened on `fix/test-suite-hardening` ("green on the SECOND run").
+
+**First diagnostic for anyone who hits this:** re-run under a clean key.
+
+```
+cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run
+```
+
+If that is green, the failure is database residue, not your change.
+
+---
+
+**SUPERSEDED (kept for the record - the reasoning was sound, the input was not):**
 
 **MEASURED 2026-08-21: option 1 is no longer viable.** The 46 integration
 files account for **1990s of the 2350s** total test time in a full app run

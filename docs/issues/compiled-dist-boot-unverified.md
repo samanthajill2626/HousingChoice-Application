@@ -48,10 +48,15 @@ inject `'./lib/nope.js'`      ERR_MODULE_NOT_FOUND                    exit 1
 restored                      OK                                      exit 0
 ```
 
-**Open for the human:** `AGENTS.md` lists three required completion gates
-(typecheck / test / e2e). This should arguably be the fourth - it is ~1s and
-catches a class none of the other three can see. Editing that list is shared
-project law, so it is flagged rather than done.
+**DONE, same day:** Cameron approved adding it, and `aaa9e2fc` made
+`npm run smoke` required completion gate 3 of 4 in `AGENTS.md`
+(typecheck / test / smoke / e2e). It is also listed in `README.md`'s command
+table.
+
+(That commit said it had dropped the stale "three required completion gates"
+phrasing, but it edited the wrong file - the surviving claim was here, in this
+resolved issue, telling every later reader the gate was still optional. Found by
+adversarial review 2026-08-23.)
 
 **Problem.** Every gate (unit, e2e, dev servers) runs TypeScript through
 tsx/esbuild, which resolve imports like a bundler. The deployed container runs

@@ -63,6 +63,18 @@ export default defineConfig({
       // every integration suite, including the ones nobody has written yet -
       // ~60 ensureTable call sites that would otherwise each have to remember.
       //
+      // ACCURATE SCOPE (corrected by adversarial review 2026-08-23): this flag
+      // does not DISABLE TTL, it declines to ENABLE it. On a table that already
+      // has TTL on - from an earlier run under the same key - the reaper keeps
+      // running, and DynamoDB Local reaps a born-expired row in about 2 seconds.
+      // So the immunity is real for a fresh table and NOT retroactive.
+      //
+      // The two known fuses are independently safe regardless: groupCrossCheck
+      // injects cleanupMs, and aiRunsRepo.integration mints a fresh table per
+      // run. The residual is a FUTURE suite that pins a past clock AND uses the
+      // shared hc-local- tables on a machine carrying residue - and one clean
+      // run heals it.
+      //
       // Nothing asserts that TTL is ENABLED on a live table, so this costs the
       // suite nothing. db:create, the e2e lanes and every deployed path leave
       // the flag unset and keep the reaper.

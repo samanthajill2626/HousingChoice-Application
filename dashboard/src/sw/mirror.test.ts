@@ -196,6 +196,23 @@ describe('public/sw.js behaves identically to the modules it cannot import', () 
     { kind: 'nonsense', conversationId: 'conv-4' },
     { callId: 'call-5' },
     { conversationId: 'conv-6' },
+    // AN ALERTING KIND WITH NO ID. Added 2026-08-23 after an adversarial review
+    // proved the list below it was blind to two branches:
+    //
+    //   renotify: alerting && Boolean(tag)  ->  renotify: alerting
+    //   actions: Array.isArray(...) ? ... : undefined  ->  actions: d.actions
+    //
+    // both survived the whole comparison. Every payload above either has an id
+    // (so `tag` is truthy and the `&& Boolean(tag)` guard cannot be observed) or
+    // carries no `actions` at all.
+    //
+    // The renotify guard is the one public/sw.js calls load-bearing: renotify
+    // REQUIRES a tag, and setting it tagless throws. A tagless alerting payload
+    // is the only input that can tell the two spellings apart.
+    { kind: 'message' },
+    // ACTIONS, well-formed and malformed, to exercise the Array.isArray + slice.
+    { kind: 'message', conversationId: 'c', actions: [{ action: 'a' }, { action: 'b' }, { action: 'c' }] },
+    { kind: 'message', conversationId: 'c', actions: 'not-an-array' },
   ];
 
   it('notificationTag agrees', () => {

@@ -9,6 +9,20 @@ created: 2026-07-21
 refs: e2e/tests/scenarios/tours.spec.ts:152
 ---
 
+**Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
+Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)
+then 253 passed (19.0m). This spec passed in BOTH, as did every other issue on
+the C6/C11 flake list. The two failures in run 1 were different specs, both new
+and both filed separately.
+
+Deliberately NOT closed on that. Two green runs cannot prove an intermittent
+failure absent, and this issue's own history is of a spec that passes repeatedly
+and then does not. Recorded so the next person has a dated data point rather
+than a re-measurement to redo - and note the DynamoDB Local contention that
+several of these were filed under has since been fixed, so a recurrence now
+means something different than it did before.
+
+
 **Observation (2026-07-21, during the unit-photo-transcode final gate battery).**
 One full-suite run failed exactly this test:
 

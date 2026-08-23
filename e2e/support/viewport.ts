@@ -9,8 +9,9 @@
  * voice-extraction.spec.ts, placements-page.spec.ts each grew their own), so
  * "no horizontal overflow" meant something slightly different in each file - and
  * one of those dialects (the documentElement one) was measuring a box this shell
- * never lets scroll. TODO(e2e-documentelement-overflow-check-vacuous): the
- * outbound-mms copy still hand-rolls it; migrate it onto these two.
+ * never lets scroll. Every copy is now migrated onto these two helpers, and
+ * `viewport.guard.test.ts` fails if the hand-rolled idiom reappears anywhere
+ * under `e2e/`.
  *
  * Geometry ONLY. These read what the browser actually laid out; they never
  * inspect CSS text or computed styles, because a computed style proves that a

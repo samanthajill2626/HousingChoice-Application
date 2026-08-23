@@ -129,7 +129,13 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
     // ten passes is a generous ceiling that still cannot hang the suite.
     for (let pass = 0; pass < 10; pass += 1) {
       const outcome = await drainer.sweepCrossCheckDeadlines(FAR_FUTURE);
-      if (outcome.alarms.length === 0) return;
+      // EXIT ON `scanned`, NOT `alarms`. A sweep's `reconciledBy` branch
+      // RESOLVES a row and `continue`s without pushing an alarm, so
+      // `scanned > 0 && alarms.length === 0` is reachable - and exiting on
+      // alarms would leave rows in the partition while claiming it was drained.
+      // Harmless today (nothing here approaches SWEEP_BATCH) but the loop
+      // should mean what its comment says. Caught by adversarial review.
+      if (outcome.scanned === 0) return;
     }
   }, 60_000);
 

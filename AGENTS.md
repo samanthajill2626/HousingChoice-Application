@@ -102,6 +102,21 @@ enforces.
 
 Full setup and lane details: [`e2e/README.md`](e2e/README.md).
 
+**FIRST, if `npm test` is red on DynamoDB Local suites:** re-run under a clean
+access key before blaming anything.
+
+```
+cd app && AWS_ACCESS_KEY_ID=hccleanrun001 npx vitest run
+```
+
+A degraded database - leaked `hc-test-*` / `hc-local-<lane>-*` / `hc-hist-*`
+tables from interrupted runs, which `globalTeardown` does not drop - makes the
+app suite ~9x slower and fails ~9 files on plain timeouts and SQLite write-lock
+errors, with ZERO assertion failures. Measured 2026-08-23: 607s and 9 failures
+on a residue-carrying key, 65s and 0 failures on an empty one, same commit. If
+the clean-key run is green, the failure is environmental.
+See [`npm-test-dynamodb-local-contention`](docs/issues/npm-test-dynamodb-local-contention.md).
+
 Known flakes must be re-run once before blaming the current change, with both runs
 reported:
 

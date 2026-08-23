@@ -272,7 +272,7 @@ list. Doing it first makes the second list diagnosable instead of guesswork.
 
 **Wave 2 - per-spec determinism (only after wave 1):**
 [tour-reminders-panel-e2e-flake](./tour-reminders-panel-e2e-flake.md),
-[today-heading-locator-substring-collision](./today-heading-locator-substring-collision.md),
+[today-heading-selector-ambiguity](./today-heading-selector-ambiguity.md),
 [matching-entry-points-property-first-e2e-flake](./matching-entry-points-property-first-e2e-flake.md),
 [inbox-row-appearance-e2e-flake](./inbox-row-appearance-e2e-flake.md),
 [landlord-onboarding-e2e-suite-only-flake](./landlord-onboarding-e2e-suite-only-flake.md),
@@ -377,7 +377,7 @@ alone") may simply stop reproducing once phase 1 lands, since they were filed as
 contention symptoms. Measure which still fail before spending effort on each.*
 Start with the two cheap certainties: `tour-reminders-panel-e2e-flake` (a
 deterministic clock dependency, plus the `AGENTS.md` correction) and
-`today-heading-locator-substring-collision` (a substring-match selector bug).
+`today-heading-selector-ambiguity` (a substring-match selector bug; the older duplicate slug was merged into it).
 
 **Phase 5 - prove it.** Two concurrent full e2e suites from different worktrees,
 both green, plus a `npm test` running against the same containers. That is the

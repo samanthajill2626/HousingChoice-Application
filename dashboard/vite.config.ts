@@ -57,6 +57,10 @@ export default defineConfig({
     proxy: {
       '/api': appProxy,
       '/auth': appProxy,
+      // Runtime identity reads are public, but the app's origin-secret
+      // validator still requires the same trusted proxy header.
+      '/app-identity': appProxy,
+      '^/manifest\\.webmanifest(?:\\?.*)?$': appProxy,
       // Public, unauthenticated backend routes (housing-fair signup + the unit
       // flyer). No session needed, but the app's validator still requires the
       // origin-secret header — so these ride the SAME proxy (same target +

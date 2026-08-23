@@ -234,4 +234,17 @@ describe('behavioural pins kept alongside the comparison', () => {
   it('an off-origin payload can never escape the allow-list', () => {
     expect(route.assertSameOriginPath('https://evil.example/phish', 'https://app.example')).toBe('/');
   });
+
+  // Carried over from main's runtime-identity work when the behavioural rewrite
+  // and `feat(pwa): ship runtime HC identity artwork` met (2026-08-23). That
+  // change edited BOTH copies - dashboard/src/sw/display.ts and
+  // public/sw.js - so `buildNotificationOptions agrees` already compares them.
+  // This is the backstop for the case that agreement cannot catch: both copies
+  // reverted to the old static icon together. The badge stays monochrome and
+  // is deliberately NOT identity-swapped.
+  it('notifications use the runtime identity icon, and the badge stays monochrome', () => {
+    expect(swSource).toContain("icon: '/app-identity/icon-192.png'");
+    expect(swSource).toContain("badge: '/icons/badge-72.png'");
+    expect(swSource).not.toContain("icon: '/icons/icon-192.png'");
+  });
 });

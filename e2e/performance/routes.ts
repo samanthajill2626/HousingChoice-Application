@@ -235,6 +235,7 @@ function crossProduct(
 }
 
 const COLD_SHELL_GETS = Object.freeze([
+  required('/app-identity/config.json'),
   required('/auth/me'),
   // The nav badge reads its own count endpoint: PATH ONLY, no query tuple. The
   // Inbox PAGE keeps /api/inbox?filter&limit (inboxGets below) - the two shapes

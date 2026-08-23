@@ -1,7 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App.js';
+import {
+  createEnvironmentIdentityLoader,
+  type EnvironmentIdentityLoader,
+} from './EnvironmentIdentity.js';
+import styles from './AppFrame.module.css';
 
 // A bare factory: it replaces the WHOLE module and vitest does not type-check it
 // against the real shape, so every field the context gains has to be added here
@@ -16,9 +21,22 @@ vi.mock('./UnreadContext.js', () => ({
   }),
 }));
 
+// AppFrame owns the navigation event, not the async Inbox data lifecycle. Keep
+// the destination inert so drawer-close assertions do not leak route effects.
+vi.mock('../routes/inbox/Inbox.js', () => ({
+  Inbox: () => <h1>Inbox</h1>,
+}));
+
 // Render the whole app authenticated as the seeded VA (mock /auth/me 200), so
 // the AppFrame mounts with a real AuthContext + router.
-function renderAuthedApp(): void {
+function productionLoader(): EnvironmentIdentityLoader {
+  return createEnvironmentIdentityLoader(async () => ({
+    variant: 'production',
+    themeColor: '#1f6feb',
+  }));
+}
+
+function renderAuthedApp(loadIdentity = productionLoader()): void {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (...args: unknown[]) => {
@@ -49,10 +67,19 @@ function renderAuthedApp(): void {
   );
   render(
     <MemoryRouter>
-      <App />
+      <App loadIdentity={loadIdentity} />
     </MemoryRouter>,
   );
 }
+
+beforeEach(() => {
+  document.querySelectorAll('meta[name="theme-color"]').forEach((node) => node.remove());
+  const meta = document.createElement('meta');
+  meta.name = 'theme-color';
+  meta.content = '#1f6feb';
+  document.head.append(meta);
+  expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
+});
 
 // Stub matchMedia so useNavChrome resolves the nav breakpoint. `matches` = "we're
 // below 768px" → drawer mode. Without a stub matchMedia is undefined in jsdom and
@@ -74,12 +101,36 @@ function stubMatchMedia(matches: boolean): void {
 }
 
 afterEach(() => {
+  document.querySelectorAll('meta[name="theme-color"]').forEach((node) => node.remove());
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.localStorage.clear();
 });
 
 describe('AppFrame', () => {
+  it('keeps the existing shell class in production', async () => {
+    renderAuthedApp(productionLoader());
+    const main = await screen.findByRole('main');
+    const shell = main.parentElement?.parentElement;
+    expect(shell).toHaveClass(styles.shell!);
+    expect(shell).not.toHaveClass(styles.nonProduction!);
+  });
+
+  it('adds only the non-production class to the existing shell without visible copy', async () => {
+    const loader = createEnvironmentIdentityLoader(async () => ({
+      variant: 'non-production',
+      themeColor: '#f4c542',
+    }));
+    renderAuthedApp(loader);
+
+    const main = await screen.findByRole('main');
+    await waitFor(() =>
+      expect(main.parentElement?.parentElement).toHaveClass(styles.nonProduction!),
+    );
+    expect(main.parentElement?.parentElement).toHaveClass(styles.shell!);
+    expect(screen.queryByText(/^(DEV|LOCAL|environment)$/i)).not.toBeInTheDocument();
+  });
+
   it('renders the two nav groups with every destination as a link', async () => {
     renderAuthedApp();
     await waitFor(() =>

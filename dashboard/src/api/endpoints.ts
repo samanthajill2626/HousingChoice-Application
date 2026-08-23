@@ -85,6 +85,11 @@ import type {
 
 // --- Auth (/auth) -----------------------------------------------------------
 
+/** GET /app-identity/config.json - public runtime presentation identity. */
+export function getAppIdentityRaw(): Promise<unknown> {
+  return request<unknown>('/app-identity/config.json');
+}
+
 /** GET /auth/me - the current principal, or throws ApiError(401) when anonymous. */
 export function getMe(signal?: AbortSignal): Promise<Me> {
   return request<Me>('/auth/me', { ...(signal !== undefined && { signal }) });

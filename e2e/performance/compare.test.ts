@@ -56,7 +56,7 @@ function sample(
 
 const ENVIRONMENT: ComparisonEnvironment = {
   target: 'hermetic',
-  registryVersion: 2,
+  registryVersion: 3,
   workloadVersion: 2,
   dataSource: 'synthetic_hermetic',
   comparisonWorkload: null,
@@ -243,7 +243,7 @@ describe('compareRuns', () => {
   it.each([
     ['target', { target: 'local' }],
     ['comparison_workload', { comparisonWorkload: { contacts: 101 } }],
-    ['registry_version', { registryVersion: 3 }],
+    ['registry_version', { registryVersion: 4 }],
     ['workload_version', { workloadVersion: 3 }],
     ['data_source', { dataSource: 'existing' }],
     ['route_set', { routeSet: ['/other'] }],

@@ -16,12 +16,10 @@ dashboard/*
 !dashboard/vite.config.ts
 !dashboard/tsconfig.json
 !dashboard/src
-# PWA assets (manifest, service worker, icons). Vite copies publicDir to the
-# dist root, so WITHOUT this line the in-image build silently produces a dist
-# with no manifest and no sw.js - the app then serves the SPA fallback for
-# /manifest.webmanifest and /sw.js, the browser can only make a shortcut, and
-# push cannot work at all. A LOCAL build hides this completely, because the real
-# public/ is present there; only the image build is affected. Cost 2026-08-16.
+# PWA assets: /app-identity owns the runtime manifest, while public/ owns the
+# service worker, notification badge, and both static icon destination families.
+# Vite copies public/ to the dist root; omitting it silently drops those shipped
+# assets. A local build hides this because the real public/ is present there.
 !dashboard/public
 *.md
 .env

@@ -8,6 +8,10 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
+import {
+  EnvironmentIdentityProvider,
+  type EnvironmentIdentityLoader,
+} from './app/EnvironmentIdentity.js';
 import { UnreadProvider } from './app/UnreadContext.js';
 import { EventStreamProvider } from './api/index.js';
 import { Placeholder } from './routes/Placeholder.js';
@@ -86,27 +90,33 @@ const IMPLEMENTED = new Set<string>([
  * housing-fair intake. The trailing `<Route path="/*">` hands everything else
  * to the authed app.
  */
-export default function App(): React.JSX.Element {
+export default function App({
+  loadIdentity,
+}: {
+  loadIdentity?: EnvironmentIdentityLoader;
+}): React.JSX.Element {
   return (
-    <Routes>
-      <Route
-        path="/p/:unitId"
-        element={
-          <PublicLayout>
-            <FlyerPage />
-          </PublicLayout>
-        }
-      />
-      <Route
-        path="/join"
-        element={
-          <PublicLayout>
-            <HousingFairIntake />
-          </PublicLayout>
-        }
-      />
-      <Route path="/*" element={<AuthedApp />} />
-    </Routes>
+    <EnvironmentIdentityProvider loadIdentity={loadIdentity}>
+      <Routes>
+        <Route
+          path="/p/:unitId"
+          element={
+            <PublicLayout>
+              <FlyerPage />
+            </PublicLayout>
+          }
+        />
+        <Route
+          path="/join"
+          element={
+            <PublicLayout>
+              <HousingFairIntake />
+            </PublicLayout>
+          }
+        />
+        <Route path="/*" element={<AuthedApp />} />
+      </Routes>
+    </EnvironmentIdentityProvider>
   );
 }
 

@@ -34,7 +34,9 @@
 // different source, identical behaviour, which is precisely the distinction
 // that matters.
 //
-// See docs/issues/sw-mirror-test-pins-literals-not-behaviour.md.
+// See docs/issues/sw-mirror-test-pins-literals-not-behaviour.md, and
+// docs/issues/sw-mirror-function-list-hand-maintained.md for why the list of
+// functions to compare is derived rather than written down.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,14 +50,62 @@ const here = dirname(fileURLToPath(import.meta.url));
 // so driving vitest from the repo root does not hard-fail at collection time.
 const swSource = readFileSync(join(here, '..', '..', 'public', 'sw.js'), 'utf8');
 
-const MIRRORED = [
-  'isPlausibleId',
-  'resolveSafePath',
+/**
+ * WHAT MUST BE MIRRORED - derived from the modules, never remembered.
+ *
+ * This was a hand-written array of six names, which left a SEVENTH mirrored
+ * function unguarded and the suite green: a weaker version of the exact failure
+ * mode the behavioural rewrite removed, since coverage was again limited to what
+ * somebody thought to enumerate.
+ *
+ * Comparing every function present in BOTH files does not work either - sw.js
+ * legitimately carries worker-only code with no module counterpart
+ * (closeStaleNotifications, focusOrOpen, the push / notificationclick
+ * listeners), so that check would fail permanently on correct code.
+ *
+ * So the direction is inverted: the MODULES are the source of truth for what
+ * must be mirrored, which is what they already claim to be, and the check runs
+ * module -> mirror. Worker-only functions in sw.js are then correctly ignored,
+ * and a new export lands in here for free. Interfaces cost nothing to exclude -
+ * they do not exist at runtime.
+ *
+ * If a module ever exports a function that deliberately must NOT be mirrored,
+ * that has to become an explicit, commented exception here rather than a name
+ * quietly missing from a list.
+ */
+const MODULE_EXPORTS: Record<string, unknown> = { ...route, ...display };
+
+// A name exported by BOTH modules would silently lose one of the two above, and
+// the survivor would be compared twice under one name.
+{
+  const overlap = Object.keys(route).filter((name) => name in display);
+  if (overlap.length > 0) {
+    throw new Error(`route.ts and display.ts both export: ${overlap.join(', ')}`);
+  }
+}
+
+const MIRRORED = Object.keys(MODULE_EXPORTS)
+  .filter((name) => typeof MODULE_EXPORTS[name] === 'function')
+  .sort();
+
+/**
+ * The floor that stops this from passing VACUOUSLY. If the enumeration above
+ * ever yields nothing - a renamed module, a changed import, a bundler that
+ * hands back an empty namespace - every comparison below would silently cover
+ * zero functions and the suite would still be green. Same reasoning as the
+ * import-count floor in scripts/smoke-dist.mjs.
+ *
+ * This is NOT the coverage list: adding a seventh mirrored function does not
+ * require touching it.
+ */
+const MIRRORED_FLOOR = [
   'assertSameOriginPath',
-  'notificationTag',
   'buildNotificationOptions',
+  'isPlausibleId',
+  'notificationTag',
+  'resolveSafePath',
   'staleTagsFor',
-] as const;
+];
 
 /**
  * Extract one top-level `function NAME(...) {...}` by BRACE MATCHING.
@@ -86,22 +136,37 @@ function extractFunction(source: string, name: string): string {
  * standalone - no `self`, no `clients`, no DOM.
  */
 const mirror = (() => {
+  // extractFunction THROWS when a name is missing, so a module export with no
+  // counterpart in sw.js fails this file at collection with that name in the
+  // message. That throw IS the guard against a forgotten mirror.
   const bodies = MIRRORED.map((name) => extractFunction(swSource, name)).join('\n');
   const factory = new Function(`${bodies}\nreturn { ${MIRRORED.join(', ')} };`);
-  return factory() as Record<(typeof MIRRORED)[number], (...args: never[]) => unknown>;
+  return factory() as Record<string, (...args: never[]) => unknown>;
 })();
 
 /** Run both copies over the same inputs and require identical output. */
-function agreeOn(name: (typeof MIRRORED)[number], impl: (...a: never[]) => unknown, cases: unknown[][]): void {
+function agreeOn(name: string, impl: (...a: never[]) => unknown, cases: unknown[][]): void {
+  // `name` was a union of the six literals while the list was hand-written, so
+  // a typo could not compile. Deriving the list costs that check, and this
+  // restores it: a name that is not mirrored fails loudly instead of reading
+  // `undefined(...)`.
+  const fromMirror = mirror[name];
+  if (typeof fromMirror !== 'function') {
+    throw new Error(`agreeOn("${name}"): not a mirrored function - have ${MIRRORED.join(', ')}`);
+  }
   for (const args of cases) {
-    const fromModule = impl(...(args as never[]));
-    const fromMirror = mirror[name](...(args as never[]));
-    expect(fromMirror, `public/sw.js ${name}(${JSON.stringify(args)}) drifted`).toEqual(fromModule);
+    expect(
+      fromMirror(...(args as never[])),
+      `public/sw.js ${name}(${JSON.stringify(args)}) drifted`,
+    ).toEqual(impl(...(args as never[])));
   }
 }
 
 describe('public/sw.js behaves identically to the modules it cannot import', () => {
-  it('exposes every function this test claims to cover', () => {
+  it('derives what must be mirrored from the module exports, not from a list here', () => {
+    // The floor, not the coverage list - see MIRRORED_FLOOR. A seventh export
+    // arrives in MIRRORED automatically and does not belong here.
+    expect(MIRRORED).toEqual(expect.arrayContaining(MIRRORED_FLOOR));
     for (const name of MIRRORED) expect(typeof mirror[name]).toBe('function');
   });
 

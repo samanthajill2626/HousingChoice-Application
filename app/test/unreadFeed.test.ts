@@ -9,10 +9,24 @@
 // implementation can be told apart from a lazy one.
 //
 // The conversations fake WRAPS the shared index model in
-// test/helpers/unreadIndexFake.ts rather than re-deriving one: membership is
-// the FLAG (never the counter) and order is the real
-// (last_activity_at DESC, conversationId DESC) tuple, so a resume across a
-// timestamp tie behaves the way DynamoDB does.
+// test/helpers/unreadIndexFake.ts rather than re-deriving one, so membership is
+// the FLAG here and everywhere else (never the counter).
+//
+// WHAT A TIMESTAMP TIE HERE DOES AND DOES NOT PROVE. This header used to claim
+// the fake's order was "the real (last_activity_at DESC, conversationId DESC)
+// tuple, so a resume across a timestamp tie behaves the way DynamoDB does".
+// Measured 2026-08-23: it does not. DynamoDB orders tied rows by something
+// opaque and key-derived, so at a tie the fake's cut point is not the service's.
+//
+// The tie cases below are still worth their keep - they exercise the SYNTHESIZED
+// FULL KEY cursor, which an index-POSITION cursor could not express at all, and
+// that mechanism is production (unreadFeed.ts:337). Both the fake and the
+// service are internally consistent, so neither duplicates nor skips.
+//
+// What they cannot show is fidelity AT the tie. Do not read "resumes without
+// duplicating or skipping" as evidence about DynamoDB's row order, and do not
+// add an assertion that depends on which tied row lands on which side of a page
+// boundary. See docs/issues/unread-index-fake-tie-order-is-not-the-services.md.
 import { describe, expect, it, vi } from 'vitest';
 import {
   collectUnreadRows,
@@ -206,9 +220,13 @@ function makeMessages(
 
 /**
  * `count` rows in strict index order: BOTH the timestamp and the conversationId
- * descend with the array, so the tuple sort keeps array order even where a
- * deliberate `tie` makes two rows share one `last_activity_at`. Every row
- * resolves to its own contact.
+ * descend with the array, so array order IS index order under the fake's sort.
+ * Every row resolves to its own contact.
+ *
+ * `tie` makes row `tie + 1` share row `tie`'s `last_activity_at`. Read the file
+ * header before relying on that: the fake's tie-break is its OWN rule, not
+ * DynamoDB's, so a tie here exercises the cursor MECHANISM but does not
+ * reproduce the service's row order across the tie.
  */
 function contactSeries(
   count: number,
@@ -765,7 +783,9 @@ describe('collectUnreadRows - capped / consumedAll / truncated', () => {
 
   it('resumes from scanPosition + the seen-set without duplicating or skipping a row', async () => {
     // Rows 29 and 30 share a `last_activity_at`, so the resume crosses a
-    // TIMESTAMP TIE - the case an index-position cursor cannot express.
+    // TIMESTAMP TIE - the case an index-POSITION cursor cannot express, which is
+    // why the cursor is a synthesized full key. The tie proves the MECHANISM,
+    // not the service's ordering across it; see the file header.
     const { items, contacts } = contactSeries(300, 29);
     const firstCalls = emptyCollectCalls();
 

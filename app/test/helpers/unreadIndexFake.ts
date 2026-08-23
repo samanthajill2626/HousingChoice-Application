@@ -12,14 +12,31 @@
 // approximation:
 //   - membership is the FLAG, never the counter (that is what the sparse GSI
 //     keys on, and the two can only disagree if production is broken);
-//   - order is (last_activity_at DESC, conversationId DESC) - a TUPLE, because
-//     equal timestamps are ordinary and the trailing table key is what breaks
-//     the tie;
+//   - order is last_activity_at DESCENDING;
 //   - the resume key is the SYNTHESIZED FULL KEY
 //     { unread_flag, last_activity_at, conversationId }, so a caller can resume
 //     from any item it has seen. An index-POSITION key (`{ idx }`, as
 //     listByLastActivity's fakes use) cannot express that and would quietly
 //     repeat or skip a row at a timestamp tie.
+//
+// WHERE IT KNOWINGLY DIFFERS - TIES. This file used to claim the tie-break was
+// the trailing table key, and called that the real index semantics. Measured
+// against DynamoDB Local on 2026-08-23, it is not: rows sharing one
+// last_activity_at come back in a stable but OPAQUE order that is neither
+// ascending nor descending by conversationId (a..f came back f,b,c,d,e,a,
+// identically across insertion orders and fresh tables). Real DynamoDB does not
+// document an order there either.
+//
+// So this fake breaks ties by conversationId DESC because a fake needs SOME
+// total order - not because the service does. Consequences, both real:
+//   - a test may not assert on the ORDER of rows sharing one last_activity_at;
+//   - resuming from a key INSIDE a tie group returns a different SET here than
+//     in production, so a paging test whose page boundary lands mid-tie is
+//     calibrated against something the service will not do.
+// Keep tied timestamps out of pagination fixtures unless the tie IS the subject.
+// app/test/unreadIndexFakeMirror.integration.test.ts pins both the agreement
+// and this divergence; see
+// docs/issues/unread-index-fake-tie-order-is-not-the-services.md.
 import { UNREAD_FLAG_VALUE, type ConversationItem } from '../../src/repos/conversationsRepo.js';
 
 /**
@@ -54,9 +71,14 @@ export interface UnreadIndexKey extends Record<string, unknown> {
 }
 
 /**
- * Newest-activity-first, ties broken by conversationId descending. Takes the
- * bare (timestamp, id) tuple so a resume KEY - which is not a conversation -
- * can be compared without inventing a partial item.
+ * Newest-activity-first, ties broken by conversationId descending.
+ *
+ * The tie-break is THIS FAKE'S CHOICE, not the service's - see the header. It
+ * exists so the model has a total order and a resume key can be compared;
+ * DynamoDB orders ties by something opaque and key-derived.
+ *
+ * Takes the bare (timestamp, id) tuple so a resume KEY - which is not a
+ * conversation - can be compared without inventing a partial item.
  */
 function compareUnreadDesc(
   a: { last_activity_at: string; conversationId: string },

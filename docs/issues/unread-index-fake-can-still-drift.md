@@ -3,11 +3,42 @@ id: unread-index-fake-can-still-drift
 title: The byUnread in-memory fake can still drift from the real service, and call-count assertions are calibrated against it
 type: debt
 severity: med
-status: open
+status: resolved
 area: app/test-infra
 created: 2026-08-21
-refs: app/test/helpers/unreadIndexFake.ts, app/src/lib/unreadFeed.ts, app/test/unreadIndexRepo.integration.test.ts
+resolved: 2026-08-23
+refs: app/test/helpers/unreadIndexFake.ts, app/src/lib/unreadFeed.ts, app/test/unreadIndexFakeMirror.integration.test.ts
 ---
+
+**Resolution (2026-08-23, `fix/test-hardening-wave2`).** Took the second shape
+below: `app/test/unreadIndexFakeMirror.integration.test.ts` drives the fake and
+the real repo through the SAME requests against DynamoDB Local and requires the
+same answer - rows, order, and the presence AND value of the pagination key. It
+never asserts what the answer should be, only that the two agree, so it cannot
+itself go stale when the semantics are revisited. Eight cases: empty index,
+sparse membership, the EXACT-multiple round trip that started all this, an
+uneven walk compared page by page, a resume from a synthesized key, a start key
+past the end, and a row leaving the index when `unread_flag` is REMOVEd.
+
+**It found a real divergence on its first run**, which is the whole argument for
+comparing instead of asserting. The fake documented its tie-break as the
+service's rule; it is not. Spun out with the measurements as
+[`unread-index-fake-tie-order-is-not-the-services`](./unread-index-fake-tie-order-is-not-the-services.md),
+because it is a defect in its own right rather than a missing test.
+
+**Audited.** `unreadFeed.test.ts` DOES page across a deliberate tie:
+`contactSeries(300, 29)` in "resumes from scanPosition + the seen-set without
+duplicating or skipping a row". Its conclusion survives - the fake and the
+service are each internally consistent, so a resume from a position the caller
+itself read is exact in both, and neither duplicates nor skips. What does not
+survive is the claim its comments made: that the tie reproduced DynamoDB's
+behaviour. It exercises the synthesized-full-key CURSOR, which is genuinely
+production; it says nothing about the service's order across the tie. Both
+comments now say so.
+
+(First pass here reported that parameter as having no caller. It has one -
+`npm run typecheck` caught the removal. Grepping for the word "tie" does not
+find an argument spelled `29`.)
 
 **Problem.** Almost everything on the unread path runs against
 `app/test/helpers/unreadIndexFake.ts`, an in-memory model of the sparse

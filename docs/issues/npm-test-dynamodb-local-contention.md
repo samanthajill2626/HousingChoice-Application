@@ -278,12 +278,31 @@ which is exactly why the load rig was needed to test the fix at all.
   together, the next step is to give them per-file keys too and have the setup
   hook `ensureKeyedLocalTables()` into each - measured at ~200ms per file, and
   it would let `globalSetup`'s shared bootstrap go away entirely.
-- **One database per test file is a new resource shape.** `getHandler()` builds
-  a `JobsRegister` with `Executors.newFixedThreadPool(10)` per database, so ~50
-  databases per worktree implies a much larger thread ceiling in the DynamoDB
-  Local JVM than the previous 1. Threads are created lazily and 64 concurrent
-  databases behaved fine in the probes, but a container serving several
-  worktrees is worth watching.
+- **One database per test file is a new resource shape - measured, and it is
+  affordable.** `getHandler()` builds a `JobsRegister` with
+  `Executors.newFixedThreadPool(10)` per database, and nothing ever evicts a
+  database, so ~50 per worktree is a real step up from 1. Container memory over
+  3 consecutive `npm test -w app` runs from a FRESH container:
+
+  | regime | fresh | run 1 | run 2 | run 3 |
+  |---|---|---|---|---|
+  | per-file keys | 215 MiB | 760 MiB | 930 MiB | 957 MiB |
+  | one shared key | 229 MiB | 660 MiB | 704 MiB | 745 MiB |
+
+  Steady-state cost is about **+210 MiB**, and the per-file arm is levelling off
+  (+545, +170, +27). All six runs exited 0.
+
+  This was measured because the container **was** OOM-killed once during this
+  work (`OOMKilled: true`, exit 137), which failed the `npm test` gate through
+  `globalSetup`'s reachability check - working exactly as intended. That
+  container had been up 3 DAYS accumulating e2e lanes, several worktrees' keys,
+  and ~150 databases created by this investigation's own throwaway probes, each
+  with its own thread pool. The numbers above show ~50 per-file databases are
+  not what fills a 31 GiB Docker VM. The standing advice is unchanged: a
+  long-lived DynamoDB Local container should be restarted periodically
+  (`npm run db:stop && npm run db:start`), and
+  [`dynamodb-local-tables-never-reclaimed`](./dynamodb-local-tables-never-reclaimed.md)
+  already says so.
 - Reopen if a full `npm test` fails a DynamoDB suite that mints its own
   throwaway prefix, on an otherwise-idle box, twice.
 

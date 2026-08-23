@@ -9,6 +9,15 @@ created: 2026-07-02
 refs: app/test/devOutbox.integration.test.ts, e2e/support/lane.mjs, scripts/db.mjs
 ---
 
+> **The mechanism is now on record precisely (2026-08-23).** This file says
+> "per (accessKeyId, region) database and SQLite write lock", which is right but
+> too coarse to reason with. `DynamoDBLocal.jar` was disassembled in
+> [`npm-test-dynamodb-local-contention`](./npm-test-dynamodb-local-contention.md):
+> `SQLiteDBAccess` has TWO locks, both instance fields - a per-TABLE
+> `rowLockTable` and a per-DATABASE `queueLock` that `beginTransaction()` takes
+> untimed and holds until commit. Read that before designing anything against
+> "the write lock": which of the two a change moves decides whether it helps.
+>
 > **Same symptom, SECOND cause (2026-08-16).** If you are here because integration
 > tests time out in a full run and pass solo, check
 > [`dynamodb-local-tables-never-reclaimed`](./dynamodb-local-tables-never-reclaimed.md)

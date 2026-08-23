@@ -121,6 +121,172 @@ The category was closed too, not just the instance: `DYNAMO_DISABLE_TTL=1` in
 ~60 `ensureTable` call sites and every future suite - including
 `aiRunsRepo.integration.test.ts`, whose identical fuse was set for 2026-11-04.
 
+---
+
+## The reopened cause: RESOLVED 2026-08-23 (`fix/dynamo-per-file-keys`)
+
+Each Vitest test FILE now gets its own DynamoDB Local database, and therefore
+its own locks, via a `setupFiles` hook. No shared write lock is left for the
+integration lane to queue on.
+
+### The mechanism, read out of the jar rather than inferred
+
+Every previous entry in this issue reasoned about "the SQLite write lock" from
+timings. That was the wrong level of detail to stop at, and it is why the same
+symptom got three different explanations. `DynamoDBLocal.jar` was disassembled
+instead (`docker cp` + `javap -c`), and the answer is specific:
+
+- `SQLiteDBAccess` carries **two** locks, and both are `private final` INSTANCE
+  fields:
+  - `rowLockTable : ConcurrentMap<String tableName, ReentrantReadWriteLock>`
+  - `queueLock : ReentrantReadWriteLock` - **one per database**
+- `LocalDynamoDBRequestHandler` holds
+  `Map<String dbName, AmazonDynamoDBLocal> dbRequestHandlers` and
+  `getHandler()` builds exactly ONE `SQLiteDBAccess` per database. With
+  `-sharedDb` OFF (ours is off) the map key is the credential-derived database
+  name; with it ON every caller collapses onto the literal
+  `"shared-local-instance"`.
+- `beginTransaction()` does `queueLock.writeLock().lock()` - **untimed** - and
+  holds it until `commitTransaction()` / `rollbackTransaction()`, both of which
+  assert `isWriteLockedByCurrentThread()` before unlocking. Nearly every other
+  data-plane method also takes `queueLock`.
+- Control-plane and data-plane ops take `getLockForTable(t).writeLock()
+  .tryLock(LOCK_WAIT_TIMEOUT_IN_SECONDS, SECONDS)` with
+  `LOCK_WAIT_TIMEOUT_IN_SECONDS = 10`, and on failure throw
+  `INTERNAL_SERVER_ERROR` / `TIME_OUT_WHILE_ACQUIRING_LOCK` - which IS the
+  reported string, verbatim, from `LocalDBClientExceptionMessage`.
+
+So the chain is: a transaction takes the per-DATABASE `queueLock` and holds it;
+anything else that needs `queueLock` blocks while still holding its own
+per-TABLE lock; work queued behind that table lock blows its 10s budget and
+surfaces as `InternalServerError`.
+
+**Because both locks are instance fields of a per-database object, the lock is
+per DATABASE, not per container.** That is the premise the fix rests on, and it
+is settled by construction rather than by a timing argument.
+
+### Two things the record above had wrong
+
+1. **`app/src/repos/messagesRepo.ts` writes EVERY message through a 2-3 item
+   `TransactWriteItems`.** That is why the suites that failed together on
+   2026-08-21 were the message-heavy ones. Transactions were never named as the
+   contended path in this issue; they are the whole of it.
+2. **The `hc-test-<uuid>-` prefixes were never isolating suites from each other
+   on this axis.** They give each suite distinct `rowLockTable` ENTRIES, which
+   are keyed by table name. They do nothing about `queueLock`, which every table
+   in the database shares. This matters for the fix design: per-file keys help
+   all 53 suites, not just the handful that read `hc-local-`.
+
+### The fix
+
+`app/test/setup/dynamoAccessKey.ts`, wired as `setupFiles` in
+`app/vitest.config.ts`. Setup runs once per test FILE, before the file is
+imported and therefore before it constructs any client - the SDK resolves
+credentials at client CONSTRUCTION, so that is the last moment that can still
+choose the database.
+
+- The key is `fileAccessKeyId(testFileId)` from `e2e/support/lane.mjs`:
+  `hcf<djb2(worktreeIdentity + '|' + repoRelativePath)>` in base36. Worktree
+  identity is folded in so two worktrees running the same file still separate.
+- **Deterministic, never random.** DynamoDB Local can neither enumerate nor drop
+  a database, so a per-RUN key would strand one database per run forever - the
+  documented degradation in
+  [`dynamodb-local-cross-worktree-test-contention`](./dynamodb-local-cross-worktree-test-contention.md).
+  Hashing a stable file id bounds it at one database per file.
+- **The opt-in is in the suites, not in a list here.** A suite that reads the
+  shared `hc-local-` tables (which `globalSetup` bootstraps once, under the
+  worktree key) carries the marker `hc:dynamo-lane shared` in its own header and
+  keeps the worktree key. An opt-OUT list inside the hook would rot the moment
+  someone adds suite 54. Only TWO files need it - `devOutbox.integration` and
+  `recordingMessaging.integration` - which is far fewer than this issue assumed;
+  every other suite already mints its own throwaway prefix.
+  `app/test/setup/dynamoAccessKeyGuard.test.ts` asserts the property directly,
+  so a new `hc-local-` suite fails there with an explanation instead of failing
+  later as a `ResourceNotFoundException` somewhere unrelated.
+- An explicitly exported `AWS_ACCESS_KEY_ID` still wins and puts every file back
+  on one key. That is a supported override, and it is how the OLD regime was
+  measured below.
+- `DYNAMO_DISABLE_TTL=1` and the fail-loud reachability check in `globalSetup`
+  are untouched.
+
+### Evidence
+
+**Premise, measured** - identical total work, one database vs many, on the live
+container (throwaway probes, since deleted):
+
+| workload | 1 database | N databases |
+|---|---|---|
+| DDL churn, 16 workers x 23 tables x 4 rounds | 28.6s | 15.3s (16 dbs) |
+| `TransactWriteItems`, 10 workers x 300 | 3.5s (848 tx/s) | 1.8s (1657 tx/s) |
+| 16 tx + 48 put writers, 40s | 181 tx + 528 puts = **709 ops** | 108 tx + 11,810 puts = **11,918 ops** (64 dbs) |
+
+Split beat shared at every concurrency level tried (1, 2, 4, 8, 16 workers).
+
+**The fix, measured.** A load rig hammers the worktree key (8 transaction +
+8 put writers, ~4,500-5,000 transactions and ~5,000 puts per arm) while
+`npm test -w app` runs. OLD exports `AWS_ACCESS_KEY_ID` so every test file lands
+on that same key - exactly the pre-change regime, through the supported
+explicit-key path. NEW is per-file. Same load, same suite, one variable, 3 runs
+each:
+
+| arm | run | result | duration | aggregate test time |
+|---|---|---|---|---|
+| OLD | 1 | **FAIL** - 4 tests in 2 files | 509.0s | 2076s |
+| OLD | 2 | pass | 445.6s | 2643s |
+| OLD | 3 | pass | 452.5s | 2083s |
+| NEW | 1 | pass | 79.8s | 329s |
+| NEW | 2 | pass | 74.9s | 271s |
+| NEW | 3 | pass | 95.5s | 349s |
+
+Every run covered the same work: 324 files, 5712 tests. (OLD skips 9 rather than
+7 because the new guard correctly stands down its two per-file assertions when
+an explicit key has overridden the scheme.)
+
+**Read the duration column, not the pass/fail column.** OLD failed only 1 run in
+3, which is this issue in miniature - the fault is intermittent and a green OLD
+run proves nothing. The wall clock is the deterministic signal: **446-509s
+loaded on one database versus 75-95s on per-file databases, a ~5x difference**,
+and aggregate in-test time drops ~7x (2076-2643s to 271-349s). The suites were
+spending most of their time blocked, not working.
+
+The single OLD failure was `unreadIndexRepo.integration`, both `db:update-gsis`
+cases - **suite B of this issue, reproducing under a load rig instead of by
+luck**. That is the first time it has been made to happen on purpose.
+
+**Unloaded, the change is still a win, not a tax** (`npm test -w app` alone, from
+the baseline runs): 115.9s / 117.6s before, 91.6s after.
+
+**Baseline before any edit** (this worktree, unloaded): 3 full `npm test` runs,
+all green - app 322 passed / 1 skipped, dashboard 168, e2e 19, fake-twilio 33,
+scripts 13. The failure this issue is about does not reproduce on an idle box,
+which is exactly why the load rig was needed to test the fix at all.
+
+### What is NOT fixed, and what would reopen this
+
+- **The exact error string was never reproduced synthetically.** Four probe
+  shapes got individual operations to ~5s of lock wait against the 10s budget
+  without crossing it. The bytecode settles the scoping question the fix depends
+  on; it does not make the timeout summonable on demand. The suite-level A/B
+  above is the reproduction that matters, and it does not produce that string
+  either - it produces the `db:update-gsis` `InternalFailure` of suite B.
+  So the specific 4-file `waiting for a lock` run of 2026-08-21 has NOT been
+  reproduced and cannot be shown directly cured. What is shown is that the
+  resource those four files were contending on no longer exists for 51 of the
+  53 suites.
+- **Two suites still share the worktree database** by design (the marked ones).
+  Two files contending is not 53, but it is not zero. If they ever flake
+  together, the next step is to give them per-file keys too and have the setup
+  hook `ensureKeyedLocalTables()` into each - measured at ~200ms per file, and
+  it would let `globalSetup`'s shared bootstrap go away entirely.
+- **One database per test file is a new resource shape.** `getHandler()` builds
+  a `JobsRegister` with `Executors.newFixedThreadPool(10)` per database, so ~50
+  databases per worktree implies a much larger thread ceiling in the DynamoDB
+  Local JVM than the previous 1. Threads are created lazily and 64 concurrent
+  databases behaved fine in the probes, but a container serving several
+  worktrees is worth watching.
+- Reopen if a full `npm test` fails a DynamoDB suite that mints its own
+  throwaway prefix, on an otherwise-idle box, twice.
+
 <!--
   MERGED 2026-08-21. Four separately filed issues, one root cause and one cost.
   Superseded slugs (do not re-file; they are these suites):

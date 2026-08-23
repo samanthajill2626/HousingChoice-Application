@@ -1,0 +1,222 @@
+// Guards for the per-file DynamoDB Local isolation in
+// app/test/setup/dynamoAccessKey.ts.
+//
+// Each of these has been mutation-probed: the defect it names was reintroduced
+// and the assertion was confirmed to fail. A guard that has never failed is
+// worth nothing.
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  CreateTableCommand,
+  DeleteTableCommand,
+  ListTablesCommand,
+} from '@aws-sdk/client-dynamodb';
+import { describe, expect, it } from 'vitest';
+
+import { fileAccessKeyId, testAccessKeyId } from '../../../e2e/support/lane.mjs';
+import { createDynamoClient } from '../../src/lib/dynamo.js';
+import {
+  accessKeyForTestFile,
+  optsIntoSharedLocalTables,
+  SHARED_LOCAL_TABLES_MARKER,
+  testFileId,
+} from './dynamoAccessKey.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const APP_DIR = path.resolve(HERE, '..', '..');
+const TEST_DIR = path.resolve(APP_DIR, 'test');
+
+const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
+
+async function endpointReachable(): Promise<boolean> {
+  try {
+    await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const reachable = await endpointReachable();
+
+/**
+ * Set when someone exported AWS_ACCESS_KEY_ID - a supported override that puts
+ * every file back on ONE key. The per-file assertions below do not hold in that
+ * regime, and must skip rather than red.
+ */
+const explicitKey = Boolean(process.env.HC_TEST_EXPLICIT_ACCESS_KEY);
+
+/** Every *.test.ts under the app workspace - i.e. everything this hook governs. */
+function allAppTestFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    if (entry === 'node_modules' || entry === 'dist') continue;
+    const full = path.join(dir, entry);
+    if (statSync(full).isDirectory()) allAppTestFiles(full, out);
+    else if (full.endsWith('.test.ts')) out.push(full);
+  }
+  return out;
+}
+
+describe('per-file DynamoDB Local access keys', () => {
+  it('the setup hook actually ran, and pinned THIS file to the key it computes', () => {
+    // The end-to-end proof that setupFiles fires and that the key it computes
+    // is the one the SDK will pick up. Without this, every other assertion here
+    // could pass while the hook never ran at all.
+    //
+    // Asserted through accessKeyForTestFile rather than against the per-file
+    // key directly, because an exported AWS_ACCESS_KEY_ID is a SUPPORTED way to
+    // run this suite (it is how the old shared-key regime was measured), and
+    // pinning the per-file branch unconditionally made that configuration a
+    // false red.
+    expect(process.env.AWS_ACCESS_KEY_ID).toBe(
+      accessKeyForTestFile(fileURLToPath(import.meta.url), {
+        worktreeKey: process.env.HC_TEST_WORKTREE_ACCESS_KEY ?? '',
+        explicitKey: process.env.HC_TEST_EXPLICIT_ACCESS_KEY,
+      }),
+    );
+  });
+
+  it.skipIf(explicitKey)('gives THIS file a key of its own, distinct from the worktree key', () => {
+    // The per-file branch specifically. Skipped only when an explicit key has
+    // deliberately overridden the whole scheme.
+    expect(process.env.AWS_ACCESS_KEY_ID).toBe(
+      fileAccessKeyId(testFileId(fileURLToPath(import.meta.url))),
+    );
+    expect(process.env.AWS_ACCESS_KEY_ID).not.toBe(testAccessKeyId());
+  });
+
+  it('mints a DISTINCT key for every test file in the app workspace', () => {
+    // djb2 is 32-bit. With ~350 files a collision is unlikely but not
+    // impossible, and a collision means two suites silently share a database
+    // and its locks again - the exact bug this hook removes, reappearing for
+    // one arbitrary pair. Enumerate rather than trust the birthday bound.
+    const files = allAppTestFiles(APP_DIR);
+    expect(files.length).toBeGreaterThan(100);
+
+    const byKey = new Map<string, string[]>();
+    for (const f of files) {
+      const key = fileAccessKeyId(testFileId(f));
+      byKey.set(key, [...(byKey.get(key) ?? []), testFileId(f)]);
+    }
+
+    const collisions = [...byKey.entries()].filter(([, fs]) => fs.length > 1);
+    expect(collisions).toEqual([]);
+  });
+
+  it('mints keys DynamoDB Local will accept - alphanumeric only', () => {
+    // Once -sharedDb is off the access key is validated: '-' or '_' raise
+    // UnrecognizedClientException (e2e/support/lane.mjs records the 2026-07-02
+    // verification). Test file ids are full of both, so the hash must swallow
+    // them rather than pass them through.
+    for (const f of allAppTestFiles(APP_DIR)) {
+      expect(fileAccessKeyId(testFileId(f))).toMatch(/^[a-z0-9]+$/i);
+    }
+  });
+
+  it('is deterministic - the same file yields the same key across calls', () => {
+    // Determinism is what bounds growth at one database per FILE. DynamoDB
+    // Local can neither enumerate nor drop a database, so a key that varied
+    // per run would strand one database per run, forever.
+    const f = fileURLToPath(import.meta.url);
+    expect(fileAccessKeyId(testFileId(f))).toBe(fileAccessKeyId(testFileId(f)));
+  });
+
+  it('gives the same file the same id regardless of path casing', () => {
+    const f = fileURLToPath(import.meta.url);
+    expect(testFileId(f.toUpperCase())).toBe(testFileId(f.toLowerCase()));
+  });
+
+  describe('the shared-tables opt-in', () => {
+    it('routes a marked file to the WORKTREE key and an unmarked file to its own', () => {
+      const marked = path.join(TEST_DIR, 'devOutbox.integration.test.ts');
+      const unmarked = path.join(TEST_DIR, 'contactsRepo.integration.test.ts');
+
+      expect(accessKeyForTestFile(marked, { worktreeKey: 'hctestwork' })).toBe('hctestwork');
+      expect(accessKeyForTestFile(unmarked, { worktreeKey: 'hctestwork' })).toBe(
+        fileAccessKeyId(testFileId(unmarked)),
+      );
+    });
+
+    it('lets an explicitly exported AWS_ACCESS_KEY_ID win over both', () => {
+      const unmarked = path.join(TEST_DIR, 'contactsRepo.integration.test.ts');
+      expect(
+        accessKeyForTestFile(unmarked, { worktreeKey: 'hctestwork', explicitKey: 'mine' }),
+      ).toBe('mine');
+    });
+
+    it('every suite using the SHARED hc-local- tables carries the marker', () => {
+      // The rot-proof half. An opt-OUT list inside the hook would go stale the
+      // moment someone adds suite 54; this asserts the property directly, so a
+      // new hc-local- suite fails HERE with an explanation rather than failing
+      // later as ResourceNotFoundException in an unrelated file.
+      const offenders = allAppTestFiles(TEST_DIR)
+        .filter((f) => /TABLE_PREFIX:\s*'hc-local-'/.test(readFileSync(f, 'utf8')))
+        .filter((f) => !optsIntoSharedLocalTables(f))
+        .map((f) => testFileId(f));
+
+      expect(
+        offenders,
+        `These suites read the shared hc-local- tables but do not declare it. ` +
+          `Add the marker "${SHARED_LOCAL_TABLES_MARKER}" to a comment at the top ` +
+          `of each, or give the suite its own hc-test-<uuid>- prefix.`,
+      ).toEqual([]);
+    });
+
+    it('does not mark suites that mint their own throwaway prefix', () => {
+      // The other direction: a stray marker silently drags a suite back onto
+      // the shared key and back into the shared lock, and nothing would fail.
+      const strays = allAppTestFiles(TEST_DIR)
+        .filter((f) => optsIntoSharedLocalTables(f))
+        .filter((f) => /TABLE_PREFIX: `hc-\w+-\$\{randomUUID/.test(readFileSync(f, 'utf8')))
+        .map((f) => testFileId(f));
+
+      expect(strays).toEqual([]);
+    });
+  });
+
+  describe.skipIf(!reachable || explicitKey)('against DynamoDB Local', () => {
+    it('reaches a database no OTHER key can see', async () => {
+      // The claim the whole design rests on, asserted end to end rather than
+      // inferred: a table created under this file's key is invisible under the
+      // worktree key. Distinct database => distinct SQLiteDBAccess => distinct
+      // queueLock, which is the resource that was starving suites.
+      const name = `hc-guard-${Date.now().toString(36)}`;
+
+      // process.env.AWS_ACCESS_KEY_ID is already this file's key (asserted
+      // above), so the default client lands in this file's database.
+      const mine = createDynamoClient({ endpoint });
+
+      const savedKey = process.env.AWS_ACCESS_KEY_ID;
+      process.env.AWS_ACCESS_KEY_ID = testAccessKeyId();
+      const worktree = createDynamoClient({ endpoint });
+      process.env.AWS_ACCESS_KEY_ID = savedKey;
+
+      try {
+        await mine.send(
+          new CreateTableCommand({
+            TableName: name,
+            AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }],
+            KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
+            BillingMode: 'PAY_PER_REQUEST',
+          }),
+        );
+
+        const here = await mine.send(new ListTablesCommand({}));
+        expect(here.TableNames ?? []).toContain(name);
+
+        const there = await worktree.send(new ListTablesCommand({}));
+        expect(there.TableNames ?? []).not.toContain(name);
+      } finally {
+        try {
+          await mine.send(new DeleteTableCommand({ TableName: name }));
+        } catch {
+          /* best effort */
+        }
+        mine.destroy();
+        worktree.destroy();
+      }
+    }, 60_000);
+  });
+});

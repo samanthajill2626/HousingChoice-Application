@@ -2,28 +2,31 @@ import { defineConfig } from 'vitest/config';
 import { testAccessKeyId } from '../e2e/support/lane.mjs';
 
 // DynamoDB Local integration isolation. The shared local container serves a
-// SEPARATE database (and SQLite write lock) per (accessKeyId, region) — see
-// docs/issues/dynamodb-local-cross-worktree-test-contention.md. This config
-// gives THIS worktree's vitest runs their own key (hctest<hash>), so `npm
-// test` no longer serializes behind a neighboring worktree's e2e run (nor
-// behind the dev loop's 'local' store). Respect-if-set: an explicitly
-// exported AWS_ACCESS_KEY_ID still wins.
+// SEPARATE database - with its own locks - per (accessKeyId, region); see
+// docs/issues/dynamodb-local-cross-worktree-test-contention.md.
+//
+// The key is chosen PER TEST FILE, in the `setupFiles` hook below, because a
+// per-WORKTREE key still put all 53 integration suites in one database behind
+// one `queueLock`. app/test/setup/dynamoAccessKey.ts carries the mechanism, the
+// measurements, and the opt-in for the suites that must keep the worktree key.
+// Respect-if-set: an explicitly exported AWS_ACCESS_KEY_ID still wins.
 export default defineConfig({
   test: {
     // Timeouts under cross-worktree load are contention, never hangs — keep a
     // generous budget (belt-and-braces alongside the per-key isolation; this
     // mirrors the feat/tours-sequence mitigation and must survive the merge).
     //
-    // Raised 15s -> 60s (feat/ai-run-log). The per-key isolation above stops
-    // THIS worktree contending with a NEIGHBOR, but every integration suite in
-    // this worktree shares that one key, so they share one DynamoDB Local
-    // database and its single SQLite write lock. This branch took the count
-    // from 23 to 26 (aiRunsRepo, extractionRepo, suggestionResolutionRepo) and
-    // `npm test` then failed 4 runs out of 4 - a DIFFERENT integration suite
+    // Raised 15s -> 60s (feat/ai-run-log), when the key was per-WORKTREE and
+    // every integration suite in the worktree therefore shared one DynamoDB
+    // Local database and its locks. That branch took the count from 23 to 26
+    // and `npm test` failed 4 runs out of 4 - a DIFFERENT integration suite
     // each time, always a 15s timeout, every one green when run alone, and the
-    // whole suite green under --no-file-parallelism. That is the write lock
-    // starving whoever asks last, not a hang, so the budget is what has to
-    // move. Serializing instead costs 2min -> 5min for every future run.
+    // whole suite green under --no-file-parallelism.
+    //
+    // The key is now per FILE (setupFiles below), which removes that shared
+    // lock rather than waiting it out. The generous budget stays: it still
+    // covers cross-worktree load and slow seeds, and raising it was never what
+    // fixed the contention.
     testTimeout: 60_000,
     // hookTimeout MUST move with testTimeout. Vitest defaults hooks to 10s, and
     // raising only testTimeout left the heaviest cleanup in the suite on the
@@ -37,7 +40,14 @@ export default defineConfig({
     // See docs/issues/broadcast-fanout-tests-blow-default-hooktimeout.md.
     hookTimeout: 60_000,
     env: {
-      AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? testAccessKeyId(),
+      // NOTE: AWS_ACCESS_KEY_ID is deliberately NOT set here. `test.env` is one
+      // value for the whole run, and the whole point is that it varies per test
+      // FILE - setupFiles is the only hook that runs once per file, before the
+      // file builds its clients. These two carry the inputs it needs.
+      HC_TEST_WORKTREE_ACCESS_KEY: testAccessKeyId(),
+      ...(process.env.AWS_ACCESS_KEY_ID
+        ? { HC_TEST_EXPLICIT_ACCESS_KEY: process.env.AWS_ACCESS_KEY_ID }
+        : {}),
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? 'local',
       // NO TTL REAPER IN TESTS. Services derive `expires_at` from their
       // INJECTED clock, so any suite that pins a past date writes rows that are
@@ -68,5 +78,18 @@ export default defineConfig({
     // Vitest takes its teardown from the FUNCTION globalSetup RETURNS, so the
     // cleanup is wired inside globalSetup.ts itself.
     globalSetup: './test/globalSetup.ts',
+    // Runs once per test FILE, before the file is imported and therefore before
+    // it constructs any DynamoDB client (the SDK resolves credentials at client
+    // CONSTRUCTION, so this is the last moment that can still decide which
+    // database the file reaches). Gives each file its own DynamoDB Local
+    // database - its own queueLock, its own per-table locks - at no runtime
+    // cost. See app/test/setup/dynamoAccessKey.ts.
+    //
+    // This depends on vitest's default `isolate: true`: the module registry is
+    // reset between files, so the getDocumentClient() singleton in
+    // app/src/lib/dynamo.ts is rebuilt under the new key rather than carried
+    // over from the previous file in the same worker. test/setup/
+    // dynamoAccessKeyGuard.test.ts pins that.
+    setupFiles: ['./test/setup/dynamoAccessKey.ts'],
   },
 });

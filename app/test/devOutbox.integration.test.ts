@@ -1,5 +1,14 @@
 // Integration test for /__dev/outbox and /__dev/reseed against DynamoDB Local.
 //
+// hc:dynamo-lane shared
+//   This suite reads the SHARED `hc-local-` tables (TABLE_PREFIX below, and
+//   /__dev/reseed writes into them), which app/test/globalSetup.ts bootstraps
+//   once under the WORKTREE access key. The marker above keeps this file on
+//   that key instead of giving it its own per-file DynamoDB Local database,
+//   where those tables would not exist. Do not remove it without also giving
+//   the suite a throwaway prefix of its own.
+//   See app/test/setup/dynamoAccessKey.ts.
+//
 // Self-skipping: follows the same pattern as dynamo.integration.test.ts —
 // when nothing answers at DYNAMODB_ENDPOINT (default http://localhost:8000),
 // the whole suite is skipped so `npm test` stays green without Docker.

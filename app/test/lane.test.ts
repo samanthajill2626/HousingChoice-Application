@@ -488,5 +488,33 @@ describe('lane.mjs', () => {
       expect(key).toMatch(/^hctest[a-z0-9]+$/);
       expect(key.startsWith('hclane')).toBe(false);
     });
+
+    it('fileAccessKeyId separates files, and never collides with a lane or the worktree key', async () => {
+      const { fileAccessKeyId, testAccessKeyId, laneAccessKeyId } = await getLane();
+
+      // Deterministic: this is what bounds DynamoDB Local at one database per
+      // FILE. A key that varied per run would strand a database per run, and
+      // DynamoDB Local can neither enumerate nor drop one.
+      expect(fileAccessKeyId('app/test/a.test.ts')).toBe(fileAccessKeyId('app/test/a.test.ts'));
+
+      // Distinct per file - the whole point.
+      expect(fileAccessKeyId('app/test/a.test.ts')).not.toBe(
+        fileAccessKeyId('app/test/b.test.ts'),
+      );
+
+      // Alphanumeric: with -sharedDb off the key is validated, and '-' or '_'
+      // raise UnrecognizedClientException. Test file ids are full of both.
+      expect(fileAccessKeyId('app/test/some_file-name.integration.test.ts')).toMatch(
+        /^hcf[a-z0-9]+$/,
+      );
+
+      // Distinct namespaces: a file key must never land on an e2e lane's
+      // database or on the worktree key that globalSetup bootstraps.
+      const fileKey = fileAccessKeyId('app/test/a.test.ts');
+      expect(fileKey).not.toBe(testAccessKeyId());
+      for (let lane = 1; lane <= 16; lane++) {
+        expect(fileKey).not.toBe(laneAccessKeyId(lane));
+      }
+    });
   });
 });

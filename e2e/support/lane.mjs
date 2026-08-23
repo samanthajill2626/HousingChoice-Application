@@ -113,7 +113,13 @@ function djb2(s) {
  * across calls for the same checkout).
  * @returns {string}
  */
+let worktreeIdentityCache;
+
 function worktreeIdentity() {
+  // Memoised: testAccessKeyId()/fileAccessKeyId() are now called once per test
+  // FILE (app/test/setup/dynamoAccessKey.ts), and shelling out to git ~350 times
+  // per run would be pure tax. The answer cannot change inside one process.
+  if (worktreeIdentityCache !== undefined) return worktreeIdentityCache;
   try {
     const moduleDir = path.dirname(fileURLToPath(import.meta.url));
     const result = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
@@ -122,11 +128,12 @@ function worktreeIdentity() {
       timeout: 5_000,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return result.trim();
+    worktreeIdentityCache = result.trim();
   } catch {
     // Fallback: use the module's own resolved directory — stable per install.
-    return path.dirname(fileURLToPath(import.meta.url));
+    worktreeIdentityCache = path.dirname(fileURLToPath(import.meta.url));
   }
+  return worktreeIdentityCache;
 }
 
 /**
@@ -168,6 +175,48 @@ export function laneAccessKeyId(lane) {
  */
 export function testAccessKeyId() {
   return `hctest${djb2(worktreeIdentity()).toString(36)}`;
+}
+
+/**
+ * The DynamoDB Local access key for ONE Vitest test FILE - its own database,
+ * and therefore its own locks.
+ *
+ * WHY PER FILE. DynamoDB Local's SQLiteDBAccess carries two locks, and BOTH are
+ * private final INSTANCE fields (verified 2026-08-21 by disassembling
+ * DynamoDBLocal.jar, not by inference):
+ *
+ *   rowLockTable : ConcurrentMap<tableName, ReentrantReadWriteLock>
+ *   queueLock    : ReentrantReadWriteLock       <- ONE PER DATABASE
+ *
+ * `LocalDynamoDBRequestHandler.getHandler()` keeps `Map<dbName, ...>` and builds
+ * exactly one SQLiteDBAccess per database, where dbName is credential-derived
+ * unless -sharedDb is on (ours is off). So a distinct access key means a
+ * distinct SQLiteDBAccess, and therefore a disjoint set of lock objects.
+ *
+ * `beginTransaction()` takes `queueLock.writeLock().lock()` - UNTIMED - and
+ * holds it until commit/rollback. Every message this codebase writes goes
+ * through a TransactWriteItems (app/src/repos/messagesRepo.ts), so on one shared
+ * key every suite's transactions serialise against every other suite's traffic.
+ * Ops that then queue behind it blow the 10s `tryLock`
+ * (LocalDBAccess.LOCK_WAIT_TIMEOUT_IN_SECONDS) and surface as
+ * "InternalServerError: This action timed out because it too long waiting for a
+ * lock". A per-worktree key does NOT help: all 53 integration suites in a
+ * worktree share it. Their per-suite `hc-test-<uuid>-` prefixes only isolate the
+ * OTHER lock (rowLockTable, keyed by table name) and do nothing for queueLock.
+ *
+ * DETERMINISTIC, NEVER RANDOM. DynamoDB Local can neither enumerate nor drop a
+ * database, so a fresh key per RUN would strand one database per run forever
+ * (docs/issues/dynamodb-local-cross-worktree-test-contention.md). Hashing the
+ * file's stable id bounds the cost at one database per test file.
+ *
+ * Worktree identity is folded in so two worktrees running the same file still
+ * get different databases.
+ *
+ * @param {string} testFileId  stable, normalised repo-relative test file path
+ * @returns {string} e.g. "hcf1a2b3c"
+ */
+export function fileAccessKeyId(testFileId) {
+  return `hcf${djb2(`${worktreeIdentity()}|${testFileId}`).toString(36)}`;
 }
 
 // ---------------------------------------------------------------------------

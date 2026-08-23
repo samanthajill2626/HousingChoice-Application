@@ -90,5 +90,44 @@ worktrees and abandoned lanes. A deleted worktree takes its ledger with it, and
 DynamoDB Local offers no way to enumerate a database. Those are still reclaimed
 only by an operator stopping the container.
 
+---
+
+## Update 2026-08-23, same day: the sweep survived the keys going MACHINE-WIDE
+
+`fix/file-keys-machine-wide` dropped worktree identity from `fileAccessKeyId`,
+so every worktree now reaches the SAME per-file databases (capping the
+never-reclaimable database count at one per test file for the whole machine,
+instead of ~50 per worktree ever created). That broke this sweep's founding
+assumption - "every key this touches belongs to this worktree" - because a
+neighbour's live run now writes its tables into the very databases the sweep
+visits, under per-run UUID names that are indistinguishable from dead residue.
+
+The sweep is now safe by MODE instead of by key scoping:
+
+- `app/test/helpers/testRunRegistry.ts` - a machine-global registry of live
+  vitest runs (os.tmpdir marker per pid, liveness via `kill(pid, 0)`, mtime
+  backstop; deliberately the same shape as `e2e/support/laneLease.mjs`).
+  `globalSetup` registers before the process opens any DynamoDB client and
+  unregisters as the last teardown step.
+- Solo (no other live run, the common case): every residue table is provably
+  dead - delete on sight, exactly the behaviour described above.
+- Concurrent: tables younger than `CONCURRENT_SPARE_MS` (1h, vs ~2-5min real
+  runs) are SPARED, and a key with spared tables keeps its ledger marker so
+  the residue stays findable. Age proves death; the failure mode of every race
+  is "cleanup happens later", never "a live neighbour's table deleted".
+- The mode is re-decided per KEY, shrinking the check-to-delete window to
+  milliseconds against the seconds of head start the registration ordering
+  contract guarantees.
+
+Probed both ways in `dynamoKeyLedger.test.ts` ("the concurrent-mode age gate"):
+the gated sweep spares a fresh table and keeps its marker; the same sweep with
+the gate removed deletes it.
+
+The change also caught its first real bug before it shipped: this suite's own
+fixed `hcledgersweepprobe` key - fine when worktree-scoped, a cross-worktree
+race once shared - was flagged by the new fixed-name invariant in
+`dynamoAccessKeyGuard.test.ts` and now derives from the worktree identity
+(marker: `hc:dynamo-lane worktree-derived-keys`).
+
 Related: [`npm-test-dynamodb-local-contention`](./npm-test-dynamodb-local-contention.md),
 [`dynamodb-local-cross-worktree-test-contention`](./dynamodb-local-cross-worktree-test-contention.md)

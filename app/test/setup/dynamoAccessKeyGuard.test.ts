@@ -48,6 +48,14 @@ const reachable = await endpointReachable();
  */
 const explicitKey = Boolean(process.env.HC_TEST_EXPLICIT_ACCESS_KEY);
 
+/**
+ * A suite carrying this marker keeps its container tables safe from concurrent
+ * worktrees by deriving every access key it uses from the WORKTREE identity
+ * (testAccessKeyId) instead of by randomising table names. Checked by the
+ * fixed-name invariant below.
+ */
+const WORKTREE_DERIVED_KEYS_MARKER = 'hc:dynamo-lane worktree-derived-keys';
+
 /** Every *.test.ts under the app workspace - i.e. everything this hook governs. */
 function allAppTestFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -123,6 +131,22 @@ describe('per-file DynamoDB Local access keys', () => {
     expect(fileAccessKeyId(testFileId(f))).toBe(fileAccessKeyId(testFileId(f)));
   });
 
+  it('is MACHINE-WIDE - the key depends on nothing but the file id', () => {
+    // Pinned against literals computed once from djb2(fileId) alone. This is
+    // the 2026-08-23 change: the first version folded worktree identity into
+    // the hash, which cost ~50 never-reclaimable databases (~55 MiB of
+    // container RSS) for EVERY worktree ever created since the last container
+    // restart. Hashing only the file id caps the whole machine at one database
+    // per test file.
+    //
+    // If either literal fails, someone has re-salted the hash with something
+    // machine- or worktree-varying. That reintroduces the unbounded growth,
+    // so it must be a deliberate decision made against
+    // docs/issues/npm-test-dynamodb-local-contention.md - not a drive-by.
+    expect(fileAccessKeyId('app/test/a.test.ts')).toBe('hcf1riw2q0');
+    expect(fileAccessKeyId('app/test/messaging.integration.test.ts')).toBe('hcfm0zwlz');
+  });
+
   it('gives the same file the same id regardless of path casing', () => {
     const f = fileURLToPath(import.meta.url);
     expect(testFileId(f.toUpperCase())).toBe(testFileId(f.toLowerCase()));
@@ -174,6 +198,50 @@ describe('per-file DynamoDB Local access keys', () => {
 
       expect(strays).toEqual([]);
     });
+  });
+
+  it('every unmarked suite that CREATES container tables mints per-run random names', () => {
+    // THE INVARIANT MACHINE-WIDE KEYS STAND ON. Per-file databases are shared
+    // across worktrees (2026-08-23), so two worktrees running the same file
+    // concurrently write into ONE database. That is data-safe today only
+    // because every such suite builds its table names from a per-run random
+    // component - concurrent runs write disjoint tables. A suite 54 that
+    // creates container tables under a FIXED name would have two worktrees
+    // reading and deleting each other's rows, as an unreproducible cross-
+    // worktree flake. Fail HERE instead, with the fix in the message.
+    //
+    // Audited by hand 2026-08-23 before machine-wide keys shipped; this pins
+    // the audit. Marked suites are exempt (they keep the worktree key, which
+    // stays private per worktree), as is anything that never creates a table.
+    const offenders = allAppTestFiles(TEST_DIR)
+      .filter((f) => {
+        const src = readFileSync(f, 'utf8');
+        const createsTables = /ensureTable|CreateTableCommand|createAllTables|ensureKeyedLocalTables/.test(src);
+        if (!createsTables) return false;
+        if (optsIntoSharedLocalTables(f)) return false;
+        // The other accepted mechanism: every container table the suite makes
+        // lives under a key DERIVED FROM THE WORKTREE IDENTITY, so worktrees
+        // cannot collide by construction and table names may stay fixed (which
+        // some suites need for deterministic sweep counts). Declared, like the
+        // shared marker, in the suite's own source. First caught for real on
+        // dynamoKeyLedger.test.ts, whose fixed probe key this guard flagged
+        // the day keys went machine-wide.
+        if (src.includes(WORKTREE_DERIVED_KEYS_MARKER)) return false;
+        return !/randomUUID|Math\.random/.test(src);
+      })
+      .map((f) => testFileId(f));
+
+    expect(
+      offenders,
+      `These suites create DynamoDB Local tables in a SHARED per-file database ` +
+        `without a per-run random component in their table names. Two worktrees ` +
+        `running the suite concurrently would collide on the same tables. Mint the ` +
+        `prefix with randomUUID() (see contactsRepo.integration.test.ts); or derive ` +
+        `every key the suite uses from testAccessKeyId() and declare it with ` +
+        `"${WORKTREE_DERIVED_KEYS_MARKER}" (see dynamoKeyLedger.test.ts); or - only ` +
+        `if the suite truly needs the shared hc-local- tables - add the marker ` +
+        `"${SHARED_LOCAL_TABLES_MARKER}".`,
+    ).toEqual([]);
   });
 
   describe.skipIf(!reachable || explicitKey)('against DynamoDB Local', () => {

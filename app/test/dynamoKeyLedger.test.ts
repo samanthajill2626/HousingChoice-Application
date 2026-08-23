@@ -20,12 +20,13 @@ import path from 'node:path';
 import { ListTablesCommand } from '@aws-sdk/client-dynamodb';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { LEDGER_ENV_VAR, forgetLedgerKey, readLedgerKeys } from './helpers/dynamoKeyLedger.js';
 import { ensureKeyedLocalTables } from './globalSetup.js';
-import { dropKeyedLocalTables, sweepLedgerResidue } from './globalTeardown.js';
+import { CONCURRENT_SPARE_MS, dropKeyedLocalTables, sweepLedgerResidue } from './globalTeardown.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -44,12 +45,22 @@ if (!reachable) {
 }
 
 /**
- * FIXED, never random. A random key per run would strand one database per run
- * forever - DynamoDB Local has no way to drop one, and -inMemory only reclaims
- * on container stop. This is the same rule `fileAccessKeyId` follows, and this
- * suite would be a poor place to break it.
+ * hc:dynamo-lane worktree-derived-keys
+ *
+ * NOT random - a random key per run would strand one database per run forever
+ * (DynamoDB Local has no way to drop one; -inMemory only reclaims on container
+ * stop). NOT fixed either, any more: a fixed literal key was caught by the
+ * guard's fixed-name invariant the day per-file keys went machine-wide
+ * (2026-08-23) - two worktrees running THIS suite at once would have raced on
+ * one database's identically-named probe tables. Deriving the key from the
+ * worktree identity gives the best of both: one database per worktree
+ * (bounded), no cross-worktree collision (distinct), and deterministic sweep
+ * counts within a worktree (the repo already forbids two simultaneous vitest
+ * runs in one worktree). The marker above tells the guard this is the safety
+ * mechanism in use - see dynamoAccessKeyGuard.test.ts.
  */
-const PROBE_KEY = 'hcledgersweepprobe';
+const WORKTREE_SUFFIX = testAccessKeyId().slice('hctest'.length);
+const PROBE_KEY = `hcledgersweepprobe${WORKTREE_SUFFIX}`;
 const PROBE_PREFIX = 'hc-test-ledgerprobe-';
 
 describe('dynamo key ledger', () => {
@@ -135,7 +146,12 @@ describe('dynamo key ledger', () => {
       else process.env.AWS_ACCESS_KEY_ID = prevKey;
 
       writeFileSync(path.join(dir, PROBE_KEY), '');
-      const result = await sweepLedgerResidue(endpoint, { dir });
+      // Solo mode pinned explicitly: this test is about the sweep MECHANICS
+      // (cross-key reach, deletion, marker pruning). Left to the registry, the
+      // mode would flip to age-gated whenever a NEIGHBOUR worktree happens to
+      // be running vitest, and this fresh table would be spared - a flake by
+      // construction. The mode logic has its own tests below.
+      const result = await sweepLedgerResidue(endpoint, { dir, spareYoungerThanMs: 0 });
 
       expect(result.keys).toBe(1);
       expect(result.tables).toBe(1);
@@ -149,6 +165,62 @@ describe('dynamo key ledger', () => {
       } finally {
         check.destroy();
       }
+    }, 60_000);
+  });
+
+  describe.skipIf(!reachable)('the concurrent-mode age gate', () => {
+    // Per-file keys are MACHINE-WIDE (2026-08-23), so a residue sweep can list
+    // a live NEIGHBOUR worktree's tables - indistinguishable from dead residue
+    // by name, because both are per-run UUIDs. In concurrent mode the sweep
+    // must therefore spare young tables and KEEP the ledger marker, or a
+    // fresh-but-orphaned table would fall out of the only map anyone has of
+    // where residue lives. Both directions probed here: the gate spares, and
+    // removing the gate (spareYoungerThanMs: 0) deletes the same table.
+    const GATE_KEY = `hcledgeragegate${WORKTREE_SUFFIX}`;
+    const GATE_PREFIX = 'hc-test-agegate-';
+
+    afterAll(async () => {
+      const prev = process.env.AWS_ACCESS_KEY_ID;
+      process.env.AWS_ACCESS_KEY_ID = GATE_KEY;
+      const client = createDynamoClient({ endpoint });
+      try {
+        await deleteTableIfExists(client, `${GATE_PREFIX}contacts`);
+      } finally {
+        client.destroy();
+        if (prev === undefined) delete process.env.AWS_ACCESS_KEY_ID;
+        else process.env.AWS_ACCESS_KEY_ID = prev;
+      }
+    }, 60_000);
+
+    it('spares a fresh table, keeps its marker, then solo mode takes both', async () => {
+      const prev = process.env.AWS_ACCESS_KEY_ID;
+      process.env.AWS_ACCESS_KEY_ID = GATE_KEY;
+      const probeClient = createDynamoClient({ endpoint });
+      try {
+        await ensureTable(probeClient, getTableSpec('contacts'), `${GATE_PREFIX}contacts`);
+      } finally {
+        probeClient.destroy();
+        if (prev === undefined) delete process.env.AWS_ACCESS_KEY_ID;
+        else process.env.AWS_ACCESS_KEY_ID = prev;
+      }
+
+      writeFileSync(path.join(dir, GATE_KEY), '');
+
+      // Concurrent mode: the just-created table is far younger than the gate.
+      const gated = await sweepLedgerResidue(endpoint, {
+        dir,
+        spareYoungerThanMs: CONCURRENT_SPARE_MS,
+      });
+      expect(gated.tables).toBe(0);
+      expect(gated.spared).toBe(1);
+      // The marker MUST survive - forgetting it here would orphan the table.
+      expect(existsSync(path.join(dir, GATE_KEY))).toBe(true);
+
+      // The gate, removed (the mutation probe): same sweep, same table, gone.
+      const solo = await sweepLedgerResidue(endpoint, { dir, spareYoungerThanMs: 0 });
+      expect(solo.tables).toBe(1);
+      expect(solo.spared).toBe(0);
+      expect(existsSync(path.join(dir, GATE_KEY))).toBe(false);
     }, 60_000);
   });
 

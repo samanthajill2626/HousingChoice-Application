@@ -23,6 +23,7 @@
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
 import { dropKeyedLocalTables, sweepLedgerResidue } from './globalTeardown.js';
+import { registerRun } from './helpers/testRunRegistry.js';
 
 /**
  * Core logic, exported so tests can call it directly (e.g. with a fresh
@@ -162,10 +163,14 @@ async function sweepPerFileResidue(label: 'globalSetup' | 'globalTeardown'): Pro
   if (!isLocalEndpoint(endpoint)) return;
   try {
     const swept = await sweepLedgerResidue(endpoint);
-    if (swept.tables > 0) {
+    if (swept.tables > 0 || swept.spared > 0) {
       console.log(
         `[${label}] swept ${swept.tables} throwaway table(s) across ` +
-          `${swept.keys} per-file database(s)`,
+          `${swept.keys} per-file database(s)` +
+          (swept.spared > 0
+            ? `; spared ${swept.spared} young table(s) - another vitest run is live, ` +
+              `age will prove them dead or their owner will drop them`
+            : ''),
       );
     }
   } catch (err) {
@@ -185,6 +190,14 @@ async function sweepPerFileResidue(label: 'globalSetup' | 'globalTeardown'): Pro
  * drop exists and what it deliberately does not reclaim.
  */
 export default async function setup(): Promise<() => Promise<void>> {
+  // FIRST, before any DynamoDB client exists: announce this run machine-wide.
+  // Per-file keys are shared across worktrees (2026-08-23), so a neighbour's
+  // residue sweep decides delete-on-sight vs age-gated by whether it can SEE
+  // us - and the ordering contract in helpers/testRunRegistry.ts is that our
+  // marker precedes our first table by seconds. Moving this later in setup
+  // would shrink that head start toward the race it exists to prevent.
+  const unregister = registerRun();
+
   await ensureKeyedLocalTables();
 
   // CLEAN UP BEFORE RUNNING, not only after. A run that dies (Ctrl-C, SIGKILL,
@@ -200,5 +213,8 @@ export default async function setup(): Promise<() => Promise<void>> {
   return async () => {
     await dropKeyedLocalTables();
     await sweepPerFileResidue('globalTeardown');
+    // LAST: neighbours must keep age-gating their sweeps for as long as this
+    // run might still be writing, which includes the teardown above.
+    unregister();
   };
 }

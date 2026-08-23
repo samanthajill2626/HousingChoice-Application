@@ -29,21 +29,30 @@
 // worktree takes its ledger with it. Those are reclaimed ONLY by an operator
 // stopping the container (scripts/db.mjs warns when it is stale).
 //
-// CONCURRENCY: every key this touches belongs to this worktree - its own
-// per-worktree key, plus the per-file keys its own ledger recorded - so it can
-// never reach a neighbour's lane or suite. It does mean two SIMULTANEOUS vitest
-// runs in ONE worktree would drop tables under each other; the repo already
-// tells you not to do that.
+// CONCURRENCY (rewritten 2026-08-23, when per-file keys became MACHINE-WIDE).
+// The worktree key is still private to this worktree, but the per-file keys the
+// ledger records are now SHARED with every other worktree - a neighbour's
+// concurrent run writes its (UUID-named, therefore unattributable) tables into
+// the very databases this sweep visits. The sweep is kept safe by mode, not by
+// key scoping: when no OTHER vitest run is live machine-wide
+// (helpers/testRunRegistry.ts), every residue table is provably dead and is
+// deleted immediately; when one IS live, tables younger than
+// CONCURRENT_SPARE_MS are spared and age proves death instead. Deleting a live
+// neighbour's table is therefore impossible in either mode - the failure mode
+// of every race here is "cleanup happens later", never "data lost". Two
+// SIMULTANEOUS vitest runs in ONE worktree still drop the worktree key's tables
+// under each other; the repo already tells you not to do that.
 //
 // Guards mirror globalSetup exactly: local endpoints only (this must NEVER be
 // able to drop tables against AWS), and fail-soft when Docker is down so
 // pure-unit runs are unaffected.
-import { DeleteTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
+import { DeleteTableCommand, DescribeTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
 
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { dropAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
 import { forgetLedgerKey, ledgerDir, readLedgerKeys } from './helpers/dynamoKeyLedger.js';
+import { otherLiveRuns } from './helpers/testRunRegistry.js';
 
 /**
  * Throwaway table families that `dropAllTables` structurally CANNOT see.
@@ -72,10 +81,34 @@ const RESIDUE_PREFIXES = [
   /^hc-local-\d+-/, // performanceSeed's lane-shaped prefix (NOT plain hc-local-)
 ];
 
-/** Delete every residue table under the ACTIVE key. Returns how many went. */
-async function sweepResidueTables(endpoint: string): Promise<number> {
+/**
+ * How young a residue table must be to be SPARED when another vitest run is
+ * live machine-wide. A live neighbour's tables are at most as old as its
+ * in-flight run (~2-5 min for the app suite), so an hour is a >10x margin; a
+ * genuinely dead run's residue crosses the threshold soon after and the next
+ * sweep takes it. Raising this only delays cleanup; lowering it toward a real
+ * run's duration is what would make the sweep dangerous again.
+ */
+export const CONCURRENT_SPARE_MS = 60 * 60 * 1000;
+
+/**
+ * Delete residue tables under the ACTIVE key.
+ *
+ * `spareYoungerThanMs` is the concurrency guard (2026-08-23, machine-wide
+ * per-file keys): residue is unattributable by NAME (per-run UUID prefixes), so
+ * when another run is live the only safe proof of death is AGE, read from
+ * DescribeTable's CreationDateTime. 0 means solo mode - delete everything, the
+ * behaviour from before keys were shared. A candidate whose age cannot be read
+ * is SPARED in gated mode: never delete what you cannot age.
+ */
+async function sweepResidueTables(
+  endpoint: string,
+  opts: { spareYoungerThanMs?: number } = {},
+): Promise<{ removed: number; spared: number }> {
+  const spareYoungerThanMs = opts.spareYoungerThanMs ?? 0;
   const client = createDynamoClient({ endpoint });
   let removed = 0;
+  let spared = 0;
   try {
     let exclusiveStartTableName: string | undefined;
     const doomed: string[] = [];
@@ -92,6 +125,19 @@ async function sweepResidueTables(endpoint: string): Promise<number> {
     } while (exclusiveStartTableName !== undefined);
 
     for (const name of doomed) {
+      if (spareYoungerThanMs > 0) {
+        try {
+          const d = await client.send(new DescribeTableCommand({ TableName: name }));
+          const createdMs = d.Table?.CreationDateTime?.getTime();
+          if (createdMs === undefined || Date.now() - createdMs < spareYoungerThanMs) {
+            spared += 1;
+            continue;
+          }
+        } catch {
+          spared += 1; // Cannot age it -> cannot prove it dead -> spare it.
+          continue;
+        }
+      }
       try {
         await client.send(new DeleteTableCommand({ TableName: name }));
         removed += 1;
@@ -102,7 +148,7 @@ async function sweepResidueTables(endpoint: string): Promise<number> {
   } finally {
     client.destroy();
   }
-  return removed;
+  return { removed, spared };
 }
 
 /** Run `fn` with AWS_ACCESS_KEY_ID pinned to `key`, then restore the environment. */
@@ -139,21 +185,41 @@ async function withAccessKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
  */
 export async function sweepLedgerResidue(
   endpoint: string,
-  opts: { dir?: string } = {},
-): Promise<{ keys: number; tables: number }> {
+  opts: { dir?: string; spareYoungerThanMs?: number } = {},
+): Promise<{ keys: number; tables: number; spared: number }> {
   const dir = opts.dir ?? ledgerDir();
   const keys = readLedgerKeys(dir);
   let tables = 0;
+  let sparedTotal = 0;
   for (const key of keys) {
+    // MODE, decided per key rather than once (2026-08-23, machine-wide file
+    // keys): these databases are shared with every other worktree, so residue
+    // can only be deleted on sight while NO other vitest run is live. The
+    // per-key re-check shrinks the race window to the milliseconds between one
+    // registry readdir and one ListTables; a starting run registers its marker
+    // seconds before it can create its first table (the ordering contract in
+    // helpers/testRunRegistry.ts). An explicit spareYoungerThanMs (tests) wins.
+    const spareYoungerThanMs =
+      opts.spareYoungerThanMs ?? (otherLiveRuns() > 0 ? CONCURRENT_SPARE_MS : 0);
+    let spared = 0;
     try {
-      tables += await withAccessKey(key, () => sweepResidueTables(endpoint));
+      const swept = await withAccessKey(key, () =>
+        sweepResidueTables(endpoint, { spareYoungerThanMs }),
+      );
+      tables += swept.removed;
+      spared = swept.spared;
+      sparedTotal += swept.spared;
     } catch {
       // One unreachable database must not abandon the rest of the sweep.
       continue;
     }
-    forgetLedgerKey(key, dir);
+    // Keep the marker while anything was spared: a spared table is a LIVE
+    // neighbour's (or unageable), and forgetting the key here would orphan it
+    // if that neighbour dies before its own teardown - the ledger is the only
+    // map anyone has of which databases hold residue.
+    if (spared === 0) forgetLedgerKey(key, dir);
   }
-  return { keys: keys.length, tables };
+  return { keys: keys.length, tables, spared: sparedTotal };
 }
 
 /**
@@ -212,16 +278,17 @@ export async function dropKeyedLocalTables(opts: {
     }
 
     // Then the families the manifest cannot see - see RESIDUE_PREFIXES. Scoped
-    // to THIS key's database, which is why it is safe to run from a test that
-    // passes its own throwaway key. The per-file sweep is NOT: it reaches every
-    // database the worktree has open, so it lives in globalSetup's run-level
-    // entry points instead. See sweepPerFileResidue there.
+    // to THIS key's database - the WORKTREE key or a test's own throwaway key,
+    // both private to their creator even now that per-FILE keys are shared -
+    // so this stays in solo mode (no age gate). The per-file sweep is NOT
+    // private: it reaches shared databases, so it lives in globalSetup's
+    // run-level entry points with the mode logic. See sweepPerFileResidue.
     const swept = await sweepResidueTables(endpoint);
 
     const shortKey = key.length > 12 ? `${key.slice(0, 12)}...` : key;
     console.log(
       `[globalTeardown] dropped hc-local- tables (key=${shortKey}): ${dropped}` +
-        (swept > 0 ? `, plus ${swept} residue table(s) from interrupted runs` : ''),
+        (swept.removed > 0 ? `, plus ${swept.removed} residue table(s) from interrupted runs` : ''),
     );
   } catch (err) {
     // Best-effort: a teardown failure must never turn a green run red. The

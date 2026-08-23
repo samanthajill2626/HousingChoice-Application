@@ -116,8 +116,8 @@ function djb2(s) {
 let worktreeIdentityCache;
 
 function worktreeIdentity() {
-  // Memoised: testAccessKeyId()/fileAccessKeyId() are now called once per test
-  // FILE (app/test/setup/dynamoAccessKey.ts), and shelling out to git ~350 times
+  // Memoised: testAccessKeyId() is called once per test FILE
+  // (app/test/setup/dynamoAccessKey.ts), and shelling out to git ~350 times
   // per run would be pure tax. The answer cannot change inside one process.
   if (worktreeIdentityCache !== undefined) return worktreeIdentityCache;
   try {
@@ -209,14 +209,31 @@ export function testAccessKeyId() {
  * (docs/issues/dynamodb-local-cross-worktree-test-contention.md). Hashing the
  * file's stable id bounds the cost at one database per test file.
  *
- * Worktree identity is folded in so two worktrees running the same file still
- * get different databases.
+ * MACHINE-WIDE, NOT PER WORKTREE (changed 2026-08-23). The first version folded
+ * worktree identity into the hash, copying testAccessKeyId() reflexively. That
+ * multiplied the one resource that never self-heals: a database is ~1.1 MiB of
+ * container RSS that no API can ever release (restart is the only reclaim), so
+ * per-worktree file keys cost ~50 databases / ~55 MiB for EVERY worktree ever
+ * created since the last restart. Hashing only the file id caps the whole
+ * machine at one database per test file, permanently.
+ *
+ * What that trades away: two worktrees running the SAME file at the SAME moment
+ * share that one database's queueLock, so their transactions serialise during
+ * the overlap - a transient pairwise slowdown, measured far below the failure
+ * threshold (one database absorbed 8 sustained transaction writers + 8 put
+ * writers with zero failures). What it does NOT trade away is data safety:
+ * every unmarked container-writing suite mints a per-run random table prefix
+ * (hc-test-<uuid>- and friends), so concurrent runs of one file write disjoint
+ * tables - and the residue sweep only deletes on sight when no other vitest
+ * run is live machine-wide (app/test/helpers/testRunRegistry.ts), age-gating
+ * otherwise. app/test/setup/dynamoAccessKeyGuard.test.ts enforces the naming
+ * invariant; do not weaken it without restoring worktree identity here.
  *
  * @param {string} testFileId  stable, normalised repo-relative test file path
  * @returns {string} e.g. "hcf1a2b3c"
  */
 export function fileAccessKeyId(testFileId) {
-  return `hcf${djb2(`${worktreeIdentity()}|${testFileId}`).toString(36)}`;
+  return `hcf${djb2(testFileId).toString(36)}`;
 }
 
 // ---------------------------------------------------------------------------

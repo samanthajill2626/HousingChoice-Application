@@ -237,8 +237,19 @@ credentials at client CONSTRUCTION, so that is the last moment that can still
 choose the database.
 
 - The key is `fileAccessKeyId(testFileId)` from `e2e/support/lane.mjs`:
-  `hcf<djb2(worktreeIdentity + '|' + repoRelativePath)>` in base36. Worktree
-  identity is folded in so two worktrees running the same file still separate.
+  `hcf<djb2(repoRelativePath)>` in base36. **Machine-wide since 2026-08-23**
+  (`fix/file-keys-machine-wide`): the first version also folded in worktree
+  identity, which multiplied the never-reclaimable database count by every
+  worktree ever created (~50 databases / ~55 MiB apiece, reclaimed only by a
+  container restart). Dropping it caps the whole machine at one database per
+  test file. Concurrent same-file runs across worktrees share that database's
+  `queueLock` (transient, pairwise, measured far below the failure threshold)
+  and are data-safe because every unmarked container-writing suite mints
+  per-run random table names - an invariant `dynamoAccessKeyGuard.test.ts`
+  enforces, and which caught its first real offender (`dynamoKeyLedger.test.ts`'s
+  fixed probe key) the day the keys were shared. The ledger residue sweep is
+  mode-gated to stay safe under sharing; see
+  [`per-file-keys-hid-residue-from-teardown`](./per-file-keys-hid-residue-from-teardown.md).
 - **Deterministic, never random.** DynamoDB Local can neither enumerate nor drop
   a database, so a per-RUN key would strand one database per run forever - the
   documented degradation in

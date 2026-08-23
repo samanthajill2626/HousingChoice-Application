@@ -37,6 +37,13 @@
 // from a deleted test file cannot make a future run re-materialise its database.
 // A marker therefore survives only an INTERRUPTED run - which is precisely the
 // case the next run needs to clean up.
+//
+// SCOPE NOTE (2026-08-23): the LEDGER is per-worktree, but the per-file KEYS it
+// records are machine-wide (e2e/support/lane.mjs fileAccessKeyId) - the same
+// key names appear in every worktree's ledger, and the databases behind them
+// are shared. That is why the sweep itself is mode-gated on whether another
+// vitest run is live (helpers/testRunRegistry.ts) rather than free to delete
+// on sight; see globalTeardown.ts sweepLedgerResidue.
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

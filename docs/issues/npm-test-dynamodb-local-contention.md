@@ -294,15 +294,38 @@ which is exactly why the load rig was needed to test the fix at all.
 
   This was measured because the container **was** OOM-killed once during this
   work (`OOMKilled: true`, exit 137), which failed the `npm test` gate through
-  `globalSetup`'s reachability check - working exactly as intended. That
-  container had been up 3 DAYS accumulating e2e lanes, several worktrees' keys,
-  and ~150 databases created by this investigation's own throwaway probes, each
-  with its own thread pool. The numbers above show ~50 per-file databases are
-  not what fills a 31 GiB Docker VM. The standing advice is unchanged: a
-  long-lived DynamoDB Local container should be restarted periodically
-  (`npm run db:stop && npm run db:start`), and
-  [`dynamodb-local-tables-never-reclaimed`](./dynamodb-local-tables-never-reclaimed.md)
-  already says so.
+  `globalSetup`'s reachability check - working exactly as intended. Chasing that
+  produced three numbers worth keeping, because they contradict the intuition
+  that dropping tables bounds memory:
+
+  1. **An empty database costs ~1.1 MiB.** 300 databases created by a bare
+     `ListTables` under 300 fresh keys: 235 -> 327 -> 449 -> 568 MiB. So the ~50
+     databases this change introduces cost about **55 MiB**. Database COUNT is
+     not what fills a VM, and bucketing files into fewer databases would buy
+     nothing worth the loss of isolation.
+  2. **`DeleteTable` returns almost nothing to the OS.** Writing 300 MB into one
+     table took RSS 606 -> 1091 MiB; dropping that table gave back **4 MiB**.
+     Our teardowns are correct and leave zero tables behind (verified), but they
+     do not reclaim memory - only the table LIST, which is what
+     [`dynamodb-local-tables-never-reclaimed`](./dynamodb-local-tables-never-reclaimed.md)
+     was really about.
+  3. **RSS is a high-water mark, and it PLATEAUS.** Four write-300MB-then-drop
+     cycles: 1101 -> 1491 -> 1762 -> 1880 -> 1883 MiB, i.e. +390, +271, +118,
+     **+3**. The memory is reused by later writes even though it is never
+     handed back. So a long-lived container converges on peak CONCURRENT data
+     plus ~1.1 MiB per key ever seen; it does not climb without bound.
+
+  **What that does and does not explain.** It rules this change out: 55 MiB
+  cannot OOM a 31 GiB VM. It does not fully explain the kill either - the exact
+  trigger was never established. The likeliest driver is that this
+  investigation's own throwaway probes wrote GIGABYTES through that container
+  (one probe alone put ~4,300 items of 380 KB) and created ~150 databases,
+  pushing the high-water mark far above anything the test suite produces.
+
+  Standing advice is unchanged and now has numbers behind it: restarting is the
+  ONLY reclaim (`npm run db:stop && npm run db:start`), `scripts/db.mjs` already
+  warns at `STALE_UPTIME_DAYS = 3`, and the container that died was exactly 3
+  days old - the warning fired and nobody acted on it.
 - Reopen if a full `npm test` fails a DynamoDB suite that mints its own
   throwaway prefix, on an otherwise-idle box, twice.
 

@@ -10,6 +10,17 @@ resolved: 2026-08-16
 refs: app/test/globalTeardown.ts, app/test/globalSetup.ts, app/test/globalSetupEnsure.test.ts, app/scripts/db-create.ts, scripts/e2e-stop.mjs, scripts/db.mjs
 ---
 
+> **What the teardown actually reclaims (measured 2026-08-23).** This issue's
+> fix bounds the TABLE COUNT, and that is what cured the 8-day container below.
+> It does NOT reclaim memory. Writing 300 MB into one table took container RSS
+> 606 -> 1091 MiB; `DeleteTable` then returned **4 MiB**. The memory is reused by
+> later writes rather than handed back, so RSS is a high-water mark that
+> PLATEAUS - four write-300MB-then-drop cycles went 1101 -> 1491 -> 1762 -> 1880
+> -> 1883 MiB (+390, +271, +118, +3). An empty database costs ~1.1 MiB, so the
+> database COUNT is cheap; peak concurrent DATA is what sets the mark. Restarting
+> the container remains the only reclaim. Full numbers in
+> [`npm-test-dynamodb-local-contention`](./npm-test-dynamodb-local-contention.md).
+
 **Problem.** There was a `globalSetup` with no counterpart teardown, and
 `scripts/e2e-stop.mjs` contained no DynamoDB reference at all. Tables were
 created once and reused forever. Because DynamoDB Local runs `-inMemory`

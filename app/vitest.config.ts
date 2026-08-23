@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { testAccessKeyId } from '../e2e/support/lane.mjs';
+import { LEDGER_ENV_VAR, ledgerDir } from './test/helpers/dynamoKeyLedger.js';
 
 // DynamoDB Local integration isolation. The shared local container serves a
 // SEPARATE database - with its own locks - per (accessKeyId, region); see
@@ -45,6 +46,13 @@ export default defineConfig({
       // FILE - setupFiles is the only hook that runs once per file, before the
       // file builds its clients. These two carry the inputs it needs.
       HC_TEST_WORKTREE_ACCESS_KEY: testAccessKeyId(),
+      // Where app/src/lib/dynamo.ts records which DynamoDB Local databases were
+      // actually opened, so globalSetup/globalTeardown can sweep the throwaway
+      // tables a crashed suite left in a PER-FILE database - which the teardown's
+      // own key structurally cannot see. Set here and nowhere else: unset means
+      // no recording, which is what every deployed path gets.
+      // See app/test/helpers/dynamoKeyLedger.ts.
+      [LEDGER_ENV_VAR]: ledgerDir(),
       ...(process.env.AWS_ACCESS_KEY_ID
         ? { HC_TEST_EXPLICIT_ACCESS_KEY: process.env.AWS_ACCESS_KEY_ID }
         : {}),

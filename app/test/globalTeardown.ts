@@ -16,18 +16,24 @@
 // idempotent re-ensure 52ms - so the net tax is ~244ms per run. Negligible
 // against a multi-minute suite.
 //
-// WHAT THIS DOES NOT FIX: a hard kill (Ctrl-C, SIGKILL, agent teardown, reboot)
-// skips teardown, and the databases of DELETED worktrees / abandoned lanes are
-// unreachable - DynamoDB Local exposes no way to enumerate or drop a database,
-// only its tables under a key you already hold. Those are reclaimed ONLY by an
-// operator stopping the container (scripts/db.mjs warns when it is stale).
-// A leak here self-heals for any worktree still in use: the next run recreates
-// the tables under the same key and the next clean exit removes them.
+// A HARD KILL IS COVERED, from the OTHER end (2026-08-23). Ctrl-C, SIGKILL,
+// agent teardown and reboot all skip this file entirely, so nothing it does can
+// help the run that died. What closes that hole is `globalSetup` running the
+// same ledger sweep BEFORE the next run - see sweepLedgerResidue below. The
+// residue only ever harms the run that has to share a container with it, so
+// cleaning on the way IN is what bounds the damage to one run.
 //
-// CONCURRENCY: the key is per-worktree, so this can only ever affect its own
-// worktree - never a neighbour's lane or suite. It does mean two SIMULTANEOUS
-// vitest runs in ONE worktree would drop tables under each other; the repo
-// already tells you not to do that.
+// WHAT THIS STILL DOES NOT FIX: the databases of DELETED worktrees and
+// abandoned lanes. DynamoDB Local exposes no way to enumerate or drop a
+// database, only its tables under a key you already hold, and a deleted
+// worktree takes its ledger with it. Those are reclaimed ONLY by an operator
+// stopping the container (scripts/db.mjs warns when it is stale).
+//
+// CONCURRENCY: every key this touches belongs to this worktree - its own
+// per-worktree key, plus the per-file keys its own ledger recorded - so it can
+// never reach a neighbour's lane or suite. It does mean two SIMULTANEOUS vitest
+// runs in ONE worktree would drop tables under each other; the repo already
+// tells you not to do that.
 //
 // Guards mirror globalSetup exactly: local endpoints only (this must NEVER be
 // able to drop tables against AWS), and fail-soft when Docker is down so
@@ -37,6 +43,7 @@ import { DeleteTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb'
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { dropAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
+import { forgetLedgerKey, ledgerDir, readLedgerKeys } from './helpers/dynamoKeyLedger.js';
 
 /**
  * Throwaway table families that `dropAllTables` structurally CANNOT see.
@@ -45,7 +52,9 @@ import { dropAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scrip
  * drops exactly those 23. But ~38 suites mint their own per-run prefix
  * (`hc-test-<uuid>-`), `performanceSeed.integration.test.ts` uses
  * `hc-local-<lane>-`, and `seedHistory.test.ts` uses `hc-hist-<uuid>-`. None of
- * those are in the manifest, so every INTERRUPTED run leaks its tables forever.
+ * those are in the manifest, so without this sweep an interrupted run leaks its
+ * tables forever - and since the prefixes carry a fresh uuid per RUN, every
+ * interruption adds a new set rather than reusing the last one.
  *
  * That is not cosmetic. Measured 2026-08-23: a key carrying 116 such tables ran
  * the app suite in 607s with 9 failures (plain timeouts and SQLite write-lock
@@ -94,6 +103,57 @@ async function sweepResidueTables(endpoint: string): Promise<number> {
     client.destroy();
   }
   return removed;
+}
+
+/** Run `fn` with AWS_ACCESS_KEY_ID pinned to `key`, then restore the environment. */
+async function withAccessKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prevKey = process.env.AWS_ACCESS_KEY_ID;
+  const prevSecret = process.env.AWS_SECRET_ACCESS_KEY;
+  process.env.AWS_ACCESS_KEY_ID = key;
+  process.env.AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY ?? 'local';
+  try {
+    return await fn();
+  } finally {
+    if (prevKey === undefined) delete process.env.AWS_ACCESS_KEY_ID;
+    else process.env.AWS_ACCESS_KEY_ID = prevKey;
+    if (prevSecret === undefined) delete process.env.AWS_SECRET_ACCESS_KEY;
+    else process.env.AWS_SECRET_ACCESS_KEY = prevSecret;
+  }
+}
+
+/**
+ * Sweep residue out of every database a test file actually opened.
+ *
+ * `app/test/setup/dynamoAccessKey.ts` gives each test FILE its own access key,
+ * so a suite's throwaway tables land in a database this teardown's own key
+ * cannot see. The ledger names the databases that were really used - see
+ * `app/test/helpers/dynamoKeyLedger.ts` for why they are RECORDED rather than
+ * enumerated (walking all ~327 per-file keys would materialise a database for
+ * each, at ~0.6-1.1 MiB apiece that -inMemory keeps until the container stops).
+ *
+ * Markers are dropped as they are swept, so the ledger stays bounded: a marker
+ * outlives its run only when that run was interrupted, which is exactly when
+ * the next run needs to find it.
+ *
+ * Callers must have already checked `isLocalEndpoint(endpoint)`.
+ */
+export async function sweepLedgerResidue(
+  endpoint: string,
+  opts: { dir?: string } = {},
+): Promise<{ keys: number; tables: number }> {
+  const dir = opts.dir ?? ledgerDir();
+  const keys = readLedgerKeys(dir);
+  let tables = 0;
+  for (const key of keys) {
+    try {
+      tables += await withAccessKey(key, () => sweepResidueTables(endpoint));
+    } catch {
+      // One unreachable database must not abandon the rest of the sweep.
+      continue;
+    }
+    forgetLedgerKey(key, dir);
+  }
+  return { keys: keys.length, tables };
 }
 
 /**
@@ -151,7 +211,11 @@ export async function dropKeyedLocalTables(opts: {
       console.log = origLog;
     }
 
-    // Then the families the manifest cannot see - see RESIDUE_PREFIXES.
+    // Then the families the manifest cannot see - see RESIDUE_PREFIXES. Scoped
+    // to THIS key's database, which is why it is safe to run from a test that
+    // passes its own throwaway key. The per-file sweep is NOT: it reaches every
+    // database the worktree has open, so it lives in globalSetup's run-level
+    // entry points instead. See sweepPerFileResidue there.
     const swept = await sweepResidueTables(endpoint);
 
     const shortKey = key.length > 12 ? `${key.slice(0, 12)}...` : key;

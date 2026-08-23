@@ -22,7 +22,7 @@
 
 import { testAccessKeyId } from '../../e2e/support/lane.mjs';
 import { createAllTables, isLocalEndpoint, LOCAL_DEFAULT_ENDPOINT } from '../scripts/db-create.js';
-import { dropKeyedLocalTables } from './globalTeardown.js';
+import { dropKeyedLocalTables, sweepLedgerResidue } from './globalTeardown.js';
 
 /**
  * Core logic, exported so tests can call it directly (e.g. with a fresh
@@ -141,6 +141,41 @@ export async function ensureKeyedLocalTables(opts: {
 }
 
 /**
+ * Sweep the per-file databases named by the ledger.
+ *
+ * DELIBERATELY NOT PART OF `ensureKeyedLocalTables` / `dropKeyedLocalTables`.
+ * Those two are exported and CALLED BY A TEST (globalSetupEnsure.test.ts) while
+ * the rest of the suite is running, and a ledger sweep is the one operation
+ * here whose blast radius is not confined to the key it was handed - it reaches
+ * every database this worktree has open. Putting it inside them deleted 43 LIVE
+ * tables out from under concurrently running suites and failed
+ * performanceSeed.integration.test.ts, whose `hc-local-<lane>-` prefix is one of
+ * the residue families. Measured, not theorised: that is how this comment got
+ * written.
+ *
+ * So it lives in the run-level entry points below, which only vitest itself
+ * calls, exactly once each. `ledgerSweepStaysOutOfTheCore` in
+ * app/test/dynamoKeyLedger.test.ts pins that.
+ */
+async function sweepPerFileResidue(label: 'globalSetup' | 'globalTeardown'): Promise<void> {
+  const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
+  if (!isLocalEndpoint(endpoint)) return;
+  try {
+    const swept = await sweepLedgerResidue(endpoint);
+    if (swept.tables > 0) {
+      console.log(
+        `[${label}] swept ${swept.tables} throwaway table(s) across ` +
+          `${swept.keys} per-file database(s)`,
+      );
+    }
+  } catch (err) {
+    // Best-effort, exactly like the drop: never turn a green run red over
+    // housekeeping.
+    console.warn(`[${label}] per-file sweep failed (harmless, tables persist): ${String(err)}`);
+  }
+}
+
+/**
  * Vitest globalSetup entry point.
  *
  * Returns the TEARDOWN function. Vitest has no `globalTeardown` config option -
@@ -151,7 +186,19 @@ export async function ensureKeyedLocalTables(opts: {
  */
 export default async function setup(): Promise<() => Promise<void>> {
   await ensureKeyedLocalTables();
+
+  // CLEAN UP BEFORE RUNNING, not only after. A run that dies (Ctrl-C, SIGKILL,
+  // agent teardown, reboot) never reaches its teardown, so its throwaway tables
+  // are still sitting in the per-file databases - and residue only harms the run
+  // that has to share a container with it. Sweeping on the way IN bounds the
+  // damage to the run that was interrupted, instead of every run after it.
+  //
+  // Normally a no-op: a clean run prunes the ledger on the way out, so there is
+  // nothing here except after the failure this exists for.
+  await sweepPerFileResidue('globalSetup');
+
   return async () => {
     await dropKeyedLocalTables();
+    await sweepPerFileResidue('globalTeardown');
   };
 }

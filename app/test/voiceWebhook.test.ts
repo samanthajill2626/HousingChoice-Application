@@ -151,6 +151,128 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
   });
 });
 
+describe('inbound masked voice - pool-number multiplexing (relay-number-lifecycle)', () => {
+  const DAVE = '+15550100004';
+  const ERIN = '+15550100005';
+
+  /** A SECOND relay group on the SAME pool number (participant-disjoint). */
+  function seedSecondRelay(
+    world: FakeWorld,
+    overrides: Partial<ConversationItem> = {},
+  ): ConversationItem {
+    const conv: ConversationItem = {
+      conversationId: 'conv-relay-voice-2',
+      participant_phone: POOL,
+      pool_number: POOL,
+      status: 'open',
+      last_activity_at: new Date().toISOString(),
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+        { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
+      ],
+      created_at: new Date().toISOString(),
+      ...overrides,
+    };
+    world.conversations.set(conv.conversationId, conv);
+    return conv;
+  }
+
+  it('two OPEN groups on one pool number: the caller bridges within THEIR group, not the first match', async () => {
+    const world = createFakeWorld();
+    // Group 1 (Alice+Bob) is seeded FIRST so a naive first-open pick returns it.
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { created_at: '2026-08-21T17:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    // Dave (group 2) calls the shared pool number.
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: DAVE, CallSid: 'CAmux1' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    // Bridged to ERIN (Dave's counterpart) - never to group 1's members.
+    expect(xml).toContain('<Dial');
+    expect(xml).toContain(ERIN);
+    expect(xml).not.toContain(BOB);
+    expect(xml).not.toContain(ALICE);
+    expect(xml).toContain(`callerId="${POOL}"`);
+    // The call entry lands in DAVE's conversation, not group 1.
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux1');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
+  });
+
+  it('caller on NO roster of a multiplexed number: refusal recorded on the NEWEST open group (SMS parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { created_at: '2026-08-21T17:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAmux2' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).not.toContain('<Dial');
+    expect(xml).toContain('<Hangup');
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux2');
+    expect(call?.type).toBe('call');
+    expect(call?.conversationId).toBe('conv-relay-voice-2'); // newest open
+    expect(call?.call_outcome).toBe('missed');
+  });
+
+  it('caller only on a CLOSED group: closed-thread refusal in THAT group, even with another OPEN group on the number', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' }); // open, Alice+Bob
+    seedSecondRelay(world, { status: 'closed', created_at: '2026-08-20T12:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    // Dave's group is closed; Alice/Bob's open group must NOT swallow his call.
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: DAVE, CallSid: 'CAmux3' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).not.toContain('<Dial');
+    expect(xml).toContain('<Hangup');
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux3');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
+    expect(call?.received_on_closed_thread).toBe(true);
+  });
+
+  it('caller on TWO open groups (burn invariant violated): routes to the newest (SMS parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' }); // Alice+Bob
+    seedSecondRelay(world, {
+      created_at: '2026-08-21T17:00:00.000Z',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ CallSid: 'CAmux4' }), // From: ALICE
+    );
+    const xml = res.text;
+    // Newest group wins: Alice bridges to Erin, not Bob.
+    expect(xml).toContain(ERIN);
+    expect(xml).not.toContain(BOB);
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux4');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
+  });
+});
+
 describe('inbound masked voice — refusals + echo guard (M1.9a)', () => {
   it('removed-member caller → masked Say + Hangup, NO bridge, NO number leak', async () => {
     const world = createFakeWorld();

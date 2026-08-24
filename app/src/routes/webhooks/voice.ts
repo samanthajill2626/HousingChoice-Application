@@ -149,6 +149,12 @@ function pushCallerLabel(maskedLabel: string, callerPhone: string | undefined): 
  *
  * // SEAM: ring-through rules deferred (v2.17) — inject the routing decision here later.
  */
+function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
+  const aC = a.created_at ?? '';
+  const bC = b.created_at ?? '';
+  return aC < bC ? 1 : aC > bC ? -1 : 0;
+}
+
 function decideRouting(relay: ConversationItem, caller: ConversationParticipant): 'bridge' {
   // Inputs are intentionally unused until the deferred rules land — referenced
   // here so the seam signature stays meaningful (and lint-clean).
@@ -440,12 +446,44 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    // (2) Route by To. A pool number → the masked relay-group bridge.
+    // (2) Route by To. A pool number -> the masked relay-group bridge. A pool
+    // number fronts MANY participant-disjoint groups, concurrently and over
+    // time (relay-number-lifecycle), so voice resolves on (To, From) exactly
+    // like inbound SMS routing in twilio.ts: (a) the caller's own OPEN group
+    // (newest if the burn invariant is violated), (b) else the caller's newest
+    // CLOSED group (closed-thread refusal lands in THEIR thread), (c) else the
+    // newest OPEN group for the record (non-member refusal), (d) else - every
+    // group closed, caller on no roster - the newest group overall. Routing on
+    // To alone via getByPoolNumber judged every caller against ONE arbitrary
+    // open roster and refused legitimate members of the number's other groups
+    // (prod incident 2026-08-22/23).
     if (To !== undefined && To.length > 0) {
-      const relay = await conversations.getByPoolNumber(To);
-      if (relay) {
-        await handleMaskedInbound(res, relay, { CallSid, From });
-        return;
+      const groups = await conversations.getAllByPoolNumber(To);
+      if (groups.length > 0) {
+        const openMatches = groups
+          .filter(
+            (g) => g.status === 'open' && (g.participants ?? []).some((m) => m.phone === From),
+          )
+          .sort(byNewestCreated);
+        if (openMatches.length > 1) {
+          log.error(
+            { callSid: CallSid, matchCount: openMatches.length },
+            'multiple OPEN relay groups on one pool number match the caller (burn invariant violated) - routing to the newest',
+          );
+        }
+        const relay =
+          openMatches[0] ??
+          groups
+            .filter(
+              (g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From),
+            )
+            .sort(byNewestCreated)[0] ??
+          groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0] ??
+          [...groups].sort(byNewestCreated)[0];
+        if (relay) {
+          await handleMaskedInbound(res, relay, { CallSid, From });
+          return;
+        }
       }
     }
 

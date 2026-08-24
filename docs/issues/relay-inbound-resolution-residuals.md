@@ -43,11 +43,14 @@ Recorded here so the next person does not have to rediscover them:
    the real repo returns every partition row (the type is a data convention,
    not a constraint). The fake is stricter than prod - the unsafe direction
    for tests.
-6. A closed-member refusal call row is filed in the caller's CLOSED thread,
-   which the open-partition inbox never lists and the refusal path never
-   activity-stamps - honest record, but invisible to a navigator watching the
-   inbox. The SMS analogue intercepts into the sender's visible 1:1 thread;
-   voice has no equivalent surface today.
+6. A closed-member refusal call row is filed in the caller's CLOSED thread.
+   Since [masked-relay-calls-invisible](masked-relay-calls-invisible.md)
+   (resolved 2026-08-24) that row DOES render in the group's Relay Timeline if
+   someone opens it - but a CLOSED group is not in the open-partition inbox,
+   and masked call rows deliberately carry no activity stamp (no reorder, no
+   preview, no unread), so a navigator watching the inbox still sees nothing.
+   The SMS analogue intercepts into the sender's visible 1:1 thread; voice has
+   no equivalent surface today.
 7. `ourNumberKind`'s pool test stays truthy forever for a released number
    (pool_number is never cleared), so a recycled number's new owner calling
    or texting us is dropped as a self-echo. Pre-existing, both channels.

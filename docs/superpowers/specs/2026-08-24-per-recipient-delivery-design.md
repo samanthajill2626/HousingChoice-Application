@@ -1,6 +1,6 @@
 # Per-recipient delivery visibility on multi-party message bubbles
 
-Status: DESIGN rev 3 (folds design review rounds 1 and 2 - 37 findings, 35 accepted)
+Status: DESIGN rev 4 (folds design review rounds 1-3 - 48 findings, 46 accepted)
 Date: 2026-08-24
 Branch: `feat/per-recipient-delivery`  Worktree: `W:\tmp\per-recipient-delivery`
 Base: `main` @ f0e5ab46
@@ -75,11 +75,20 @@ so. It is not a bubble and renders no list.
   everyone else. `Timeline.test.tsx:701-716` pins exactly that shape on an
   inbound fixture. So on member-authored relay traffic - most of a relay group's
   volume - there is no rollup, no escalation, and no list. If a member's message
-  is the one silently dropped, the dashboard shows nothing. This is pre-existing
-  (the rollup has always been outbound-gated) and covering it would newly render
-  a chip on inbound bubbles, which is its own change. FILE IT; do not widen the
-  gate here. The consequence is stated so no builder has to discover it from a
-  test fixture.
+  is the one silently dropped, the dashboard shows nothing.
+
+  **The honest reason for deferring is scope and review budget, not mechanism.**
+  An earlier draft said widening it "would newly render a chip on inbound
+  bubbles". That is true of the ROLLUP and false of the LIST: S1's gate is now
+  independent of the rollup (the entire point of that fix), so dropping
+  `outbound` from the LIST's gate alone would render no chip - only rows inside
+  a disclosure that is closed by default. And per-recipient information already
+  ships on inbound multi-party bubbles: the opt-out note is not outbound-gated
+  (`Timeline.tsx:666`), reads the same map (`:588`), and is pinned on inbound
+  fixtures (`Timeline.test.tsx:701`/`:718`). A revealed row list would not be a
+  new CLASS of statement there, just the same class with names. It is deferred
+  because it widens a design already three review rounds deep. FILE IT, and
+  record that it is cheaper than it looks.
 - **The bubble reveal is not keyboard-reachable.** The bubble is a `div` with an
   `onClick` and no `role`, `tabIndex`, or `aria-expanded`
   (`Timeline.tsx:619-623`). PRE-EXISTING, and this design makes the consequence
@@ -167,10 +176,18 @@ One row per slot, in ROSTER ORDER, with slots whose key matches no roster member
 last in map-key order. Each row carries the member's label (S2), their own state
 (S4), a timestamp when one exists, and a reason when the row is a failure.
 
-Timestamps: `deliveredAt` on a delivered leg, `sentAt` on a sent leg. Group-text
-legs never have `sentAt` (S5), so many rows show a state with no time. Correct;
-do not back-fill from the message's time, which would present a message-level
-fact as a per-leg one.
+Timestamps: `deliveredAt` on a delivered leg, and `sentAt` on ANY leg that has
+one - not only a `sent` leg. Under the S3 table a `queued` leg can be stale ONLY
+if it carries `sentAt`, so restricting the timestamp to `sent` legs would render
+the new `Queued - not confirmed` row (S4a) as a red state with no time, while
+the identical fact one status over showed one. The row is the answer to "why is
+the chip red"; it must not withhold the very evidence that justifies it. This
+keeps S1's timestamp rule tracking S3's eligibility rule instead of diverging
+from it.
+
+Group-text legs never have `sentAt` (S5), so many rows still show a state with
+no time. Correct; do not back-fill from the message's time, which would present
+a message-level fact as a per-leg one.
 
 **Rows do NOT `stopPropagation`.** They are children of the bubble div whose
 `onClick` is the toggle (`Timeline.tsx:619-623`), so clicking a row collapses
@@ -232,13 +249,41 @@ that clock has been quiet for at least `STALE_SENT_AFTER_MS`** (15 minutes,
 
 Concretely, given `sentAt` on the slot and `at` on the message:
 
-| leg status | has `sentAt` | ages from | can go stale |
+| leg status | has a PARSEABLE `sentAt` | ages from | can go stale |
 | --- | --- | --- | --- |
 | `sent` | yes | `sentAt` | yes |
-| `sent` | no (group text) | `msg.at` | yes |
+| `sent` | no | `msg.at` | yes |
 | `queued` | yes | `sentAt` | yes |
 | `queued` | no | - | **NO** |
+| `queued_pending` | either | - | no |
 | terminal (`delivered`/`failed`/`undelivered`) | either | - | no |
+
+The table is EXHAUSTIVE over `DeliveryStatus`, which has six members
+(`messagesRepo.ts:110-116`, mirrored at `api/types.ts:1508-1518`). A
+`queued_pending` slot never occurs today - `api.ts:1684-1686` seeds slots
+`{ status: 'queued' }` even under a `queued_pending` PARENT - but it gets a row
+anyway, on the same "true by construction rather than by luck" standard S5
+applies to the imported guard. A hold has not been dispatched, so it cannot be
+overdue.
+
+"PARSEABLE" is load-bearing, not decorative. `isQuietSince` carries the
+`Number.isFinite` guard, so a `sentAt` that is present but does not parse would
+yield a NaN clock and silently never age - it must fall to the no-clock rows
+instead, where the rule is explicit. (Unreachable on today's relay data:
+`providerTs` is a non-optional string
+(`app/src/adapters/messaging.ts:87`) produced as
+`(message.dateCreated ?? new Date()).toISOString()` (`:660`). The gap is in the
+rule's construction, not in the data.)
+
+**Why row 2 does not re-open the hazard rows 4-5 exist to forbid.** Row 2 ages a
+clock-less `sent` leg from `msg.at`, which is exactly the ageing the `queued`
+rows refuse. It is safe only because a RELAY leg cannot reach `sent` without a
+`sentAt`: the fan-out writes both on the same object (`relayFanOut.ts:539-543`),
+and the DLR path is child-field-only and never clears it
+(`messagesRepo.ts:2775-2792` sets `status`/`errorCode`/`deliveredAt`/`sid`,
+never `sentAt`). So row 2 is reached only by a native group-text leg, whose
+`msg.at` IS its send time - group sends are not held. This reasoning is the
+load-bearing part of row 2 and must not be lost if either write path changes.
 
 **Why a `queued` leg with no `sentAt` must never age.** Rev 2 aged every
 non-terminal leg from `msg.at` when `sentAt` was absent, and that is wrong in
@@ -268,21 +313,45 @@ two ways that only appear at the write paths:
 Requiring `sentAt` fixes both, because `sentAt` is only ever written after a
 real provider send returned (`relayFanOut.ts:542`, `relayAnnouncements.ts:266`).
 
-**The accepted cost, stated rather than discovered.** A native group text's
-`queued` leg can now never go stale, because no per-leg clock exists for it and
-the message clock is not a safe substitute. That is the shape the server's own
-detector alarms hardest on - `classifyStuck` returns ERROR for a `queued` leg
-and only WARN for an all-`sent` one (`groupSendStaleness.ts:24-28`, `:119-125`).
-The dashboard is therefore quieter than the server on that one case. Accepted:
-the server alarm already covers it, it is our plumbing failing rather than a
-carrier, and the alternative reddens correct history. This is a deliberate
-divergence, not an oversight.
+**The accepted cost - this is a TRADE, not a fix, and this paragraph is what is
+being signed off.** The rule silences the ENTIRE "our dispatch never happened"
+class, on BOTH products. No leg that never got a provider response can ever
+escalate. That covers at least:
 
-Note also that a transient deferral does not accumulate age either:
-`relayFanOut.ts:527` writes `{ status: 'queued', errorCode: code }` as a blind
-whole-slot SET (`messagesRepo.ts:2721`), which clears `sentAt`. Such a leg is
+- **A native group text after a receipts-webhook outage.** Every leg of every
+  send in the window rests at `queued` for ever (`groupSend.ts:612` seeds it,
+  and no `sentAt` is ever written on that product).
+- **A relay fan-out that was never enqueued.** `api.ts:1796-1804` catches and
+  LOGS an enqueue failure without throwing - the message row is already
+  committed with every slot at `{ status: 'queued' }` and no `sentAt`, and
+  nothing will ever run. The app's own ERROR log says "message persisted, not
+  relayed" while the bubble says, for ever, a neutral `delivered 0/N`.
+- **A fan-out job that died or DLQ'd** after a successful enqueue. The repo
+  already carries this shape for the sibling channel
+  (`docs/issues/email-outbound-stuck-queued-on-crash.md`).
+
+**The rule cannot do better, and that is the honest framing.** The released-hold
+state and the never-dispatched state are BYTE-IDENTICAL at the data layer:
+parent `queued`, every slot `{ status: 'queued' }`, no `sentAt`, `msg.at`
+arbitrarily old. Nothing in the row distinguishes "about to send" from "will
+never send", so one answer must serve both. This design picks silence, on the
+judgement that a false red on a message that is about to send is worse than
+silence on one that never will - a false red trains staff to ignore the cue,
+which is the failure mode that produced the incident in the first place.
+
+The dashboard is therefore quieter than the server on this class: `classifyStuck`
+returns ERROR for a `queued` leg and only WARN for an all-`sent` one
+(`groupSendStaleness.ts:24-28`, `:119-125`). Accepted because the server alarm
+already covers it and it is our plumbing failing rather than a carrier - but it
+IS a coverage gap, not a solved problem.
+
+A transient deferral is safely un-aged for a different and better reason: it is
 actively retrying and reaches a terminal `transient_cap` failure on its own
-(`relayFanOut.ts:575`), so leaving it un-aged is correct.
+(`relayFanOut.ts:568-578`). The whole-slot SET at `relayFanOut.ts:527`
+(`messagesRepo.ts:2721`) would also clear any `sentAt`, but at that line there
+is nothing to clear - the write happens in the `catch` of a send that THREW, so
+no `providerTs` was ever obtained. Do not rely on a clearing path that never
+runs.
 
 #### The mechanism
 
@@ -305,7 +374,15 @@ One threshold, one comparison, no divergent copy, and the 1:1 rule untouched.
 **The staleness inputs on `presentRelayDelivery` are OPTIONAL**, mirroring
 `presentDeliveryStatus`'s `sentAtMs?` (`deliveryStatus.ts:85-89`). A call that
 omits them behaves exactly as today. This is what keeps all ten existing
-`presentRelayDelivery` assertions in `deliveryStatus.test.ts` green (6.1).
+`presentRelayDelivery` assertions in `deliveryStatus.test.ts` green (6.1) - but
+see 6.1 for what "green" then means, because the only production caller
+(`Timeline.tsx:602`) always passes the clock.
+
+**Typecheck item:** counting J requires each slot's own clock, so
+`RelayDeliverySlot` (`deliveryStatus.ts:102-106`, today
+`{ status: DeliveryStatus; errorCode?: string }`) must gain `sentAt?: string`.
+`npm run typecheck` is a required gate and this is the type it will fail on
+first.
 
 #### The rollup's branches - ALL SIX, in evaluation order
 
@@ -397,8 +474,12 @@ misread.
 never has `sentAt`: its seed is a bare `{ status: 'queued' }` and the receipts
 path writes only status, errorCode, deliveredAt and sid.
 
-- The two timestamps come from different clocks and must never be subtracted
-  from one another or presented as a duration.
+- **`sentAt` and `deliveredAt` must never be subtracted FROM ONE ANOTHER**, or
+  presented as a duration: they come from different clocks. This does NOT
+  forbid `isQuietSince`, which subtracts a `sentAt` from the browser's
+  `Date.now()`. That cross-clock comparison is already the shipped 1:1 behavior
+  (`Timeline.tsx:577` parses `provider_ts` against `Date.now()`), both are UTC
+  wall clocks, and a 15-minute budget swamps any plausible skew.
 - `imported` rows carry no `delivery_recipients` at all, so the imported-row
   suppression at `Timeline.tsx:577` has no per-leg equivalent to break. Carry
   the same guard anyway - withhold the clock when the parent is imported - so
@@ -438,6 +519,30 @@ Where the visible chip carries a reason in `title` (`Timeline.tsx:659`), the
 `title` stays for mouse users and the reason is folded into the `aria-label`,
 which supersedes it as the accessible name.
 
+**Three consequences of that shape, stated because they are not obvious:**
+
+1. **S2 runs UNCONDITIONALLY.** The name needs every slot's label, so the roster
+   match and the `groupMemberLabel` fallback execute on every outbound
+   multi-party bubble whether or not it is revealed. S1 and S2 otherwise read as
+   though naming is work the reveal triggers. It is not.
+2. **The label uses S2 case 3's neutral wording, and that is a real cost.** A
+   screen-reader user on a surface whose roster failed to load
+   (`TourConversation.tsx:425`, `PlacementConversation.tsx:281`) hears
+   "unnamed recipient" once per member per message - the audible form of the
+   degraded state case 3 exists to keep honest. It is still the right wording:
+   an invented name would be the false reading case 3 forbids. Where the roster
+   is absent AND every slot is contactId-keyed, the name may omit the
+   per-recipient clause entirely and carry only the count, rather than recite
+   "unnamed recipient" N times.
+3. **S1's second justification is weakened, deliberately.** S1 partly justifies
+   the conditional render by keeping row text out of the DOM; S6 puts the same
+   information back as an ATTRIBUTE on every such bubble, always. The specific
+   e2e hazard does not recur - Playwright's and RTL's `getByText` match text
+   content, not attributes - but `getByRole('img', { name })` and
+   `getByLabelText` DO, and 6.2 asks for `toHaveAccessibleName` assertions, so
+   the string is now part of the tested surface. S7 also recomputes it on every
+   tick for every bubble.
+
 ### S7 - A clock that ticks
 
 Without this, S3 computes an escalation nothing ever renders (3.1). Verified
@@ -446,14 +551,23 @@ timeline genuinely re-renders every `MessageBubble` and recomputes staleness.
 
 - The interval is COARSE (order of a minute) and drives only a re-render; it
   fetches nothing and must not touch the network.
-- **Run condition: at least one rendered outbound leg is non-terminal AND NOT
-  YET STALE.** Rev 2 said only "non-terminal", which never terminates: a stale
-  leg stays non-terminal for ever, so the interval would re-render the whole
-  timeline once a minute for as long as the tab was open - worst on exactly the
-  threads this feature targets, since those are the ones with a stuck leg.
-  Staleness is monotonic and any real receipt arrives as an SSE refetch, not as
-  a tick, so the tick only has to carry a leg ACROSS the boundary. Once every
-  non-terminal leg is already stale there is nothing left to escalate.
+- **Run condition: at least one rendered outbound leg is non-terminal AND
+  ELIGIBLE TO AGE AND NOT YET STALE.** All three clauses are required, and each
+  fixes a different non-termination:
+  - *non-terminal* alone (rev 2) never terminates, because a stale leg stays
+    non-terminal for ever.
+  - *non-terminal AND not-yet-stale* (rev 3's first attempt) never terminates
+    either, for the legs S3 makes permanently un-ageable: a `queued` leg with no
+    `sentAt` is non-terminal and not-yet-stale FOR EVER, so the interval would
+    run forever on exactly the threads S3's cost paragraph describes - a group
+    text after a webhook outage, and a relay message whose fan-out never ran.
+  - *eligible to age* closes it. A leg with no ageing clock schedules nothing,
+    exactly like a terminal one. Concretely: the leg must be a row of the S3
+    table for which `isStaleLeg` COULD become true later, and must not be true
+    yet.
+
+  Staleness is monotonic and any real receipt arrives as an SSE refetch rather
+  than a tick, so the tick only ever has to carry a leg ACROSS the boundary.
 - **Visibility-gated**, matching the documented precedent in the same route
   folder (`GroupTextView.tsx:152-166`: "polling a hidden tab spends N contact
   reads a minute to update pixels nobody is looking at"). That interval fetches,
@@ -507,10 +621,18 @@ Broadcasts are readers of the MODULE (`broadcastFormat.ts:13`,
 
 ### Writers - not touched, but the design depends on their exact output
 
-`api.ts:1685`/`:1761`, `relayQueuedMessages.ts:87-95` (the hold release),
-`twilio.ts:610`/`:2381`, `relayFanOut.ts:456/513/520/527/539/575`,
-`relayAnnouncements.ts:240/263/281`, `groupSend.ts:612`, `groupDelivery.ts:59`,
-`groupReceipts.ts:419`, `messagesRepo.ts:2721/2744/2820`. Each was read.
+`api.ts:1685`/`:1761`/`:1796-1804` (the caught enqueue failure),
+`relayQueuedMessages.ts:87-95` (the hold release), `twilio.ts:610`/`:2381`,
+`relayFanOut.ts:456/513/520/527/539/568-578` and its `markRecipient` helper at
+`:708`, `relayAnnouncements.ts:240/263/281` and its `markSlot` helper at `:314`,
+`groupSend.ts:612`, `groupDelivery.ts:59`, `groupReceipts.ts:419`/`:467`
+(`setRecipientDeliverySid`), `messagesRepo.ts:2721/2744/2820`. Each was read.
+
+The three helper hops matter because S3's arguments depend on them: both
+`markRecipient` and `markSlot` pass their argument straight through to the
+whole-slot SET, and `setRecipientDeliverySid` writes only `sid` under
+`attribute_not_exists(...#sid)` (`messagesRepo.ts:2826-2832`), so none of them
+can add or remove a `sentAt`.
 
 ### Confirmed unaffected
 
@@ -537,6 +659,23 @@ REGRESSION, not a re-baseline.**
 | `Timeline.test.tsx:999` (`keeps the in-flight rollup neutral`) | 1 | YES - same fixture. Its INTENT is the neutral branch, so RE-DATE the fixture near the pinned clock rather than rewriting the expectation |
 | `Timeline.test.tsx` `:932`, `:949`, `:962`, `:976`, `:991`, `:1021` | 6 | NO - all terminal legs, or `queued_pending` with no rollup. Do not touch |
 | `deliveryStatus.test.ts` - ten `presentRelayDelivery` calls, three with non-terminal legs (`:38-40`, `:41-43`, `:62-65`) | 10 | NO - the staleness inputs are OPTIONAL (S3), so a call that omits them behaves exactly as today. All ten stay green |
+
+**What "green" means there, and why it is not enough.** `Timeline.tsx:602` is
+the only production caller and it ALWAYS passes the clock. So after this change
+all ten existing assertions exercise a no-clock mode with ZERO production
+callers, and three of them assert outcomes that are wrong for the same slot
+arrays in production:
+
+| line | slots | asserts today | with a clock, aged |
+| --- | --- | --- | --- |
+| `:38-40` | `[{delivered},{sent}]` | `delivered 1/2`, neutral | branch 3, danger |
+| `:41-43` | `[{queued},{queued}]` | `delivered 0/2`, neutral | branch 3 if the legs carry `sentAt`, else branch 5 |
+| `:62-65` | `[{undelivered},{queued}]` | branch 1 | branch 2 if the `queued` leg carries `sentAt` |
+
+Keep the ten as the explicit no-clock contract, and ADD clock-passing twins for
+those three rows - same arrays plus `sentAt` and a `nowMs`. Cheap, and without
+them the file 6.2 calls "where the real coverage belongs" states the rule for a
+mode nothing calls.
 | `GroupTextView.test.tsx:1017` | 1 | Passes either way - `getByText(/delivered 1\/2/)` is a SUBSTRING regex that still matches `delivered 1/2 - 1 not confirmed`. TIGHTEN it to prove the new label rather than leave a test that cannot fail |
 
 The optional-inputs decision is what keeps this census small. If a builder makes
@@ -622,6 +761,9 @@ documented there today.
    ticker unit test (6.2), not in a browser.
 3. A released connect-when-ready hold does NOT render any "not confirmed" state
    before its fan-out has run.
+3a. A thread whose only non-terminal legs are INELIGIBLE to age (a `queued` leg
+   with no `sentAt`) schedules NO interval - the ticker must be provably absent
+   there, not merely harmless.
 4. An opted-out member appears as a row saying they were not sent to, with
    product-aware copy, and the denominator is unchanged from today.
 5. An all-opted-out send renders the message-level chip AND names the members,

@@ -3,11 +3,50 @@ id: fake-twilio-control-econnreset-under-suite-load
 title: The fake-twilio control plane resets a connection mid-suite, failing registerParty with ECONNRESET
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-23
+resolved: 2026-08-24
 refs: e2e/fixtures/fakeTwilio.ts:128, e2e/scenarios/steps.ts:3588, e2e/tests/scenarios/post-tour-application.spec.ts:104
 ---
+
+**REPRODUCED AND FIXED (2026-08-24, `fix/test-suite-wave3`).** Two probe
+designs failed before the mechanism came clear, and the failures are the
+finding:
+
+- Timed idle-then-reuse NEVER collides on loopback: 0 resets in 1,600
+  cross-process samples jittered to +/-3ms around the expiry instant. The FIN
+  is dispatched and the socket evicted long before any timer-scheduled reuse.
+- Node also does not close an expired socket AT its keepAliveTimeout - it
+  closes it at the next `connectionsCheckingInterval` sweep (~30s), so the
+  close instant is not even aligned with the timeout.
+
+What DOES reproduce it, deterministically: a STALLED CLIENT EVENT LOOP. The
+server FINs the expired socket while the client process is busy; the FIN sits
+undispatched in the kernel; the next request - issued in the same synchronous
+tick the stall ends on - is written into the dead socket and the kernel
+answers RST. That is what "under full-suite load" meant all along: a busy
+Playwright worker, not unlucky timing.
+
+A/B against the real fake app, cross-process, identical 36s client stall:
+
+```
+default (keepAliveTimeout 5s):   3/3 ECONNRESET
+hardened (65s / headers 66s):    3/3 ok
+```
+
+Fix: `hardenServerTimeouts` in fake-twilio/src/server.ts, applied in
+index.ts (the entry point both dev.mjs and the e2e session use). 65s clears
+every stall a LIVE test can produce - Playwright's per-test budget is 30s, so
+no in-test gap can exceed it - with 2x margin, and headersTimeout sits above
+keepAliveTimeout per Node's requirement. A unit test pins both properties.
+
+The original caveat ("cannot be proven by a green run") is retired: the fix
+was validated against a deterministic reproduction, not a quiet suite.
+
+Spun out: the SAME default exposure exists on the app's own Express server -
+see [`app-server-default-keepalive-timeout`](./app-server-default-keepalive-timeout.md).
+
 
 **Problem.** In a full `npm run e2e`, registering an ad-hoc persona against the
 fake-twilio control plane fails at the socket:

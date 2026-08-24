@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import type { EventHub } from './eventHub.js';
 import type { EngineEvent, EngineListener } from './engineEvents.js';
+import { parseTwimlMessages } from './twimlSms.js';
 
 // The EngineEvent union + listener type now live in ./engineEvents.js (shared by the
 // messaging engine and the Phase 5 CallEngine). Re-exported here for back-compat with
@@ -20,6 +21,15 @@ export type { EngineEvent, EngineListener } from './engineEvents.js';
 /** The dispatcher surface the engine needs (real WebhookDispatcher in prod, stub in tests). */
 export interface Dispatcher {
   post(path: string, params: WebhookParams): Promise<number>;
+  /**
+   * Like post, but hands back the response BODY too. The inbound-SMS dispatch
+   * uses this when available to render the webhook's TwiML <Message> replies
+   * as texts back to the sender - what real Twilio does, and what the fake
+   * silently dropped until 2026-08-24 (every keyword confirmation was
+   * invisible to the fake phones). Optional so bare status-only stubs in
+   * older tests keep compiling; without it, replies are simply not rendered.
+   */
+  postForResponse?(path: string, params: WebhookParams): Promise<{ status: number; body: string }>;
 }
 
 /** A recorded dispatch failure (non-2xx or rejection), exposed via getDispatchErrors(). */
@@ -254,10 +264,40 @@ export class FakeTwilioEngine {
     });
     // FIX 2a: surface a rejected inbound webhook (e.g. a signing regression → non-2xx)
     // to the control-API caller instead of silently succeeding.
-    const status = await this.dispatcher.post('/webhooks/twilio/sms', params);
-    if (status < 200 || status >= 300) {
-      this.recordDispatchError({ sid, path: '/webhooks/twilio/sms', status, at: this.clock.nowIso() });
-      throw new Error(`sendAsParty: inbound webhook returned ${status}`);
+    //
+    // postForResponse when the dispatcher has it: the response BODY is the
+    // webhook's TwiML, and real Twilio renders its <Message> verbs as SMS back
+    // to the sender. Discarding it left the fake phones showing a STOP with no
+    // confirmation on every keyword path (1:1 keywords, closed-group
+    // intercept, open-path keywords) - manual QA was half-blind.
+    // See docs/issues/fake-phones-no-twiml-replies.md.
+    const response =
+      this.dispatcher.postForResponse !== undefined
+        ? await this.dispatcher.postForResponse('/webhooks/twilio/sms', params)
+        : { status: await this.dispatcher.post('/webhooks/twilio/sms', params), body: '' };
+    if (response.status < 200 || response.status >= 300) {
+      this.recordDispatchError({
+        sid,
+        path: '/webhooks/twilio/sms',
+        status: response.status,
+        at: this.clock.nowIso(),
+      });
+      throw new Error(`sendAsParty: inbound webhook returned ${response.status}`);
+    }
+    // Deliver each TwiML reply exactly as a real handset would receive it:
+    // to the SENDER, from the number they texted (Twilio's default reply
+    // addressing; the app's replies never override it). recordOutboundFromApp
+    // gives the reply the full outbound treatment - thread append, live
+    // events, and, for a pool-number `from`, a single-recipient leg in the
+    // group transcript, which is where the operator is looking when a group
+    // member texts a keyword.
+    for (const reply of parseTwimlMessages(response.body)) {
+      this.recordOutboundFromApp({
+        to: input.from,
+        from: to,
+        ...(reply.body !== undefined && { body: reply.body }),
+        ...(reply.mediaUrls !== undefined && { mediaUrls: reply.mediaUrls }),
+      });
     }
     return sid;
   }

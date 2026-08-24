@@ -1,6 +1,7 @@
 # Implementation plan - per-recipient delivery visibility
 
-Rev 2 (folds plan review round 1 - two reviewers, 32 findings, 30 accepted)
+Rev 4 (folds plan review rounds 1-3 - the delegation trap, the four
+non-terminations, and the exact-timestamp rule)
 Spec: `docs/superpowers/specs/2026-08-24-per-recipient-delivery-design.md` (rev 4)
 Branch: `feat/per-recipient-delivery`  Worktree: `W:\tmp\per-recipient-delivery`
 Base: `main` @ f0e5ab46
@@ -35,8 +36,10 @@ no message clock passed. The rule is therefore explicit and total:
 > undefined, `isStaleLeg` returns false for every slot regardless of `sentAt`,
 > and `presentRelayDelivery` cannot select branch 2 or 3.
 
-That single rule is what makes the ten existing pure-layer assertions green, and
-it is also the mechanism for D-b.
+That single rule is what makes the ELEVEN existing pure-layer assertions green
+(spec 6.1 and an earlier draft of this line both said ten; the eleventh is the
+all-opted-out branch-0 call at `deliveryStatus.test.ts:125`), and it is also the
+mechanism for D-b.
 
 **Two traps in that rule, both of which have already bitten this plan:**
 
@@ -274,9 +277,26 @@ the extraction was faithful.
 ### S2.2 The row-label resolver
 
 **Define the key discriminator once, here, and export it**: a key is
-phone-keyed iff it starts with `phone#`; the number is the remainder, formatted
-with `formatPhoneDisplay` (`lib/phone.ts`). S2.2 and S3.2 both branch on this
-and MUST agree - a second copy is how they drift.
+phone-keyed iff it starts with `phone#` (WITH the hash, never bare `phone`); the
+number is the remainder, formatted with `formatPhoneDisplay` (`lib/phone.ts`).
+S2.2 and S3.2 both branch on this and MUST agree - a second copy is how they
+drift.
+
+**Orchestrator adjudication A4, binding.** Research found the dashboard ALREADY
+has a `phone#` splitter: `broadcasts/broadcastFormat.ts:116-121`
+(`splitContactKey`). So "define it once" cannot be honoured literally - this
+will be a SECOND dashboard copy. Unifying them would edit `broadcastFormat.ts`,
+which the definition of done (#4) and the mission's watch item 2 freeze to a
+ZERO-line diff. RULING: define the new discriminator here, leave
+`broadcastFormat.ts` untouched, and add a MIRROR comment at the new definition
+naming `broadcasts/broadcastFormat.ts:116` and
+`app/src/services/groupReceipts.ts:285`. File the triplication as issue S6.5.
+
+**Also binding: the phone branch is decided by the KEY, never by `rosterKind`.**
+`relayMemberKey` (`app/src/repos/messagesRepo.ts:156-160`) falls back to
+`phone#<E164>` for a member with no contactId, so a RELAY key is phone-shaped
+whenever the member is contactless. A `rosterKind === 'group_text'` gate would
+render those relay rows nameless.
 
 RED: one test per spec S2 case:
 
@@ -395,6 +415,19 @@ Per spec 6.1, corrected by plan review:
 Specifically `:932`, `:949`, `:962`, `:976`, `:991`, `:1021` must stay green
 untouched. If one fails, stop and diagnose; do not edit it.
 
+**Orchestrator adjudication A5 - a free pre-existing tripwire for S4.**
+`Timeline.test.tsx:1979`, `:1998`, `:2023` and `:2042` each assert
+`expect(vi.getTimerCount()).toBe(0)` on call-only threads, inside
+`describe('Timeline call cards - staleness timer')` (`:1928-2044`). A correctly
+gated ticker leaves all four green. **If one goes red the run condition is
+over-broad - fix the source, do not scope the assertion**, exactly as for
+`:570`. They are NOT census items and must not be edited.
+
+**Also known (adjudication A10):** `Timeline.test.tsx:756` and `:772` spread an
+outbound fixture with a populated map and already render a rollup chip, so that
+chip newly gains `role="img"`. Their assertions are `getByText` on the note
+text, so they stay green. Not census items; if they go red, stop and diagnose.
+
 Gate S3: typecheck + dashboard suite.
 
 ---
@@ -489,11 +522,20 @@ Spec file: extend `e2e/tests/dashboard-next/group-text-reply-all.spec.ts` or add
 a sibling in the same directory. Product: NATIVE GROUP TEXT, because that is
 where a stalled leg is armable end to end. Recipe:
 
-1. reseed, dev-login, open the group thread;
+**Orchestrator adjudication A6, binding: step 1 below is WRONG - do NOT
+reseed.** The template spec does not reseed; it mints run-unique numbers,
+`registerParty`s one, creates the thread with `sendGroupAsParty`, then polls for
+the rail. Copy `group-text-reply-all.spec.ts:45-99` verbatim. And arm the stall
+LAST, after the rail poll and immediately before the composer send:
+`takeDeliveryProfile` is ONE-SHOT and the next message to that handset consumes
+it.
+
+1. mint run-unique numbers, `registerParty`, create the thread with
+   `sendGroupAsParty`, poll for the rail, then dev-login and open the thread;
 2. arm one member's line with
    `setDeliveryOutcome(request, { partyNumber, profile: { kind: 'stall' } })`
    (`e2e/fixtures/fakeTwilio.ts:258`) - it stalls at `sent`;
-3. send from the composer;
+3. send from the composer (immediately after arming);
 4. reveal the bubble by clicking it;
 5. assert via `getByRole('list', { name: 'Delivery by recipient' })` and its
    `listitem`s (D-d) that the delivered member and the stalled member are named
@@ -542,7 +584,10 @@ Gate S5: the full four - `npm run typecheck`, `npm test`, `npm run smoke`,
 
 ## S6 - Issues (any time)
 
-File four, using `docs/issues/_TEMPLATE.md`, then run `npm run issues`:
+File FIVE (the fifth is orchestrator adjudication A4), using
+`docs/issues/_TEMPLATE.md`, then run `npm run issues`. None of them exists under
+another slug today; cross-link the near-misses named in
+`.superpowers/sdd/worklist.md` rather than merging into them:
 
 1. **The inbound half.** Deferred by human decision. Record the reviewer's
    finding that it is cheaper than it looks: the list's gate is independent of
@@ -558,6 +603,12 @@ File four, using `docs/issues/_TEMPLATE.md`, then run `npm run issues`:
    fan-out never moves the parent status off `queued`, so the message-level chip
    claims a send is in progress for a message that was sent to nobody. Found
    during this design; pre-existing; not fixed here.
+5. **The `phone#` key discriminator is now defined in three places.**
+   `app/src/services/groupReceipts.ts:285`,
+   `dashboard/src/routes/broadcasts/broadcastFormat.ts:116` and the new one
+   added by S2.2. Unifying them would edit `broadcastFormat.ts`, which this
+   branch freezes to a zero-line diff, so it is a separate change. Per
+   orchestrator adjudication A4.
 
 ---
 

@@ -209,11 +209,15 @@ returns `undefined` for a nameless member, on purpose
 case 3** - an absent roster is not the same fact as an absent member:
 
 1. **Roster present and non-empty, key matches a member.** Label with
-   `groupMemberLabel(member)` (`lib/groupThread.ts:61`) - name, else formatted
-   number. Match EITHER key convention: a relay key is an opaque `contactId`
-   (`messagesRepo.ts:156`), a group-text key is always `phone#<E164>`
-   (`groupMembers.ts:42`). The superset match at `memberAttribution.ts:75-77` is
-   the behavior to reuse - EXTRACT it, do not re-implement it.
+   `groupMemberLabel(member)` (`lib/groupThread.ts:60`) - name, else formatted
+   number. Match EITHER key convention: a relay key is `relayMemberKey`, which is
+   the opaque `contactId` when the member has one and otherwise falls back to
+   `phone#<E164>` (`messagesRepo.ts:156-160`); a group-text key is ALWAYS
+   `phone#<E164>` (`app/src/services/groupMembers.ts:32,43`). Those two shapes
+   are exhaustive - no third exists in `app/`. Because a contactless RELAY member
+   is phone-keyed, the phone branch must be decided by the KEY's `phone#` prefix
+   and never by `rosterKind`. The superset match at `memberAttribution.ts:75-77`
+   is the behavior to reuse - EXTRACT it, do not re-implement it.
 2. **Roster present and non-empty, no match** - a member removed since this
    message was sent, because the roster is CURRENT membership while the map is
    historical. Phone-keyed: show the formatted number, marked a former member.
@@ -222,8 +226,15 @@ case 3** - an absent roster is not the same fact as an absent member:
    `TourConversation.tsx:425` and `PlacementConversation.tsx:281` both
    initialise `members` to `[]` and swallow a roster fetch failure, so two of
    the four list-rendering surfaces can render with an empty roster
-   indefinitely; `ConversationDetail.tsx` has a rendered "couldn't load the
-   members" state, so it reaches this too. Treating absent-roster as no-match
+   indefinitely. `ConversationDetail.tsx` reaches this state by a NARROWER
+   route than an earlier revision claimed: `:180` seeds `members` from
+   `header.participants ?? []` and its `.catch` (`:218-221`) sets only
+   `membersStatus`, so a roster fetch FAILURE there leaves the header roster in
+   place; it reaches case 3 only when `header.participants` is itself
+   absent/empty, including the window before the fetch resolves. Construct case
+   3 in tests with Placement/Tour semantics (an empty roster prop), never by
+   failing `getConversationMembers` on ConversationDetail. Treating
+   absent-roster as no-match
    would assert EVERY recipient of EVERY message a former member - a confident
    false statement from the feature built to stop confident false readings, and
    worse than the chip it replaces because it looks like an answer. Phone-keyed:
@@ -373,7 +384,7 @@ One threshold, one comparison, no divergent copy, and the 1:1 rule untouched.
 
 **The staleness inputs on `presentRelayDelivery` are OPTIONAL**, mirroring
 `presentDeliveryStatus`'s `sentAtMs?` (`deliveryStatus.ts:85-89`). A call that
-omits them behaves exactly as today. This is what keeps all ten existing
+omits them behaves exactly as today. This is what keeps all ELEVEN existing
 `presentRelayDelivery` assertions in `deliveryStatus.test.ts` green (6.1) - but
 see 6.1 for what "green" then means, because the only production caller
 (`Timeline.tsx:602`) always passes the clock.
@@ -641,7 +652,7 @@ its own threshold; S3 now states where the two deliberately disagree).
 
 ## 6. Test strategy
 
-### 6.1 The re-baseline census - exactly two assertions, in one file
+### 6.1 The re-baseline census - exactly three assertions, across two files
 
 `dashboard/src/test/setup.ts` pins the clock to `2026-07-01T12:00:00Z` and
 `RELAY_OUT` (`Timeline.test.tsx:890-906`) is dated `2026-06-08` with
@@ -658,11 +669,11 @@ REGRESSION, not a re-baseline.**
 | `Timeline.test.tsx:910` (`shows a "delivered N/M" summary`) | 1 | YES - c2 `sent`, stale |
 | `Timeline.test.tsx:999` (`keeps the in-flight rollup neutral`) | 1 | YES - same fixture. Its INTENT is the neutral branch, so RE-DATE the fixture near the pinned clock rather than rewriting the expectation |
 | `Timeline.test.tsx` `:932`, `:949`, `:962`, `:976`, `:991`, `:1021` | 6 | NO - all terminal legs, or `queued_pending` with no rollup. Do not touch |
-| `deliveryStatus.test.ts` - ten `presentRelayDelivery` calls, three with non-terminal legs (`:38-40`, `:41-43`, `:62-65`) | 10 | NO - the staleness inputs are OPTIONAL (S3), so a call that omits them behaves exactly as today. All ten stay green |
+| `deliveryStatus.test.ts` - ELEVEN `presentRelayDelivery` calls (`:39`, `:42`, `:48`, `:54`, `:64`, `:71`, `:85`, `:99`, `:114`, `:123`, `:125`), three with non-terminal legs (`:38-40`, `:41-43`, `:63-65`) | 11 | NO - the staleness inputs are OPTIONAL (S3), so a call that omits them behaves exactly as today. All eleven stay green |
 
 **What "green" means there, and why it is not enough.** `Timeline.tsx:602` is
 the only production caller and it ALWAYS passes the clock. So after this change
-all ten existing assertions exercise a no-clock mode with ZERO production
+all eleven existing assertions exercise a no-clock mode with ZERO production
 callers, and three of them assert outcomes that are wrong for the same slot
 arrays in production:
 
@@ -672,14 +683,14 @@ arrays in production:
 | `:41-43` | `[{queued},{queued}]` | `delivered 0/2`, neutral | branch 3 if the legs carry `sentAt`, else branch 5 |
 | `:62-65` | `[{undelivered},{queued}]` | branch 1 | branch 2 if the `queued` leg carries `sentAt` |
 
-Keep the ten as the explicit no-clock contract, and ADD clock-passing twins for
-those three rows - same arrays plus `sentAt` and a `nowMs`. Cheap, and without
+Keep the eleven as the explicit no-clock contract, and ADD clock-passing twins
+for those three rows - same arrays plus `sentAt` and a `nowMs`. Cheap, and without
 them the file 6.2 calls "where the real coverage belongs" states the rule for a
 mode nothing calls.
 | `GroupTextView.test.tsx:1017` | 1 | Passes either way - `getByText(/delivered 1\/2/)` is a SUBSTRING regex that still matches `delivered 1/2 - 1 not confirmed`. TIGHTEN it to prove the new label rather than leave a test that cannot fail |
 
 The optional-inputs decision is what keeps this census small. If a builder makes
-the clock required instead, all ten pure-layer call sites need editing and two
+the clock required instead, all eleven pure-layer call sites need editing and two
 change VALUE - do not.
 
 ### 6.2 Unit

@@ -490,7 +490,17 @@ describe('real npm argv forwarding', () => {
         },
       );
 
-      expect(result.code).toBe(0);
+      // Carry the bounded stderr INTO the failure message. On 2026-08-21 this
+      // assertion failed as a bare "expected 1 to be 0" while the child's
+      // actual complaint (uv_os_get_passwd ENOMEM - machine-level resource
+      // exhaustion, nothing to do with the code under test) sat in the
+      // captured-but-unreported stderr one line up. Someone had to re-run the
+      // npm command BY HAND to learn the failure was environmental. The
+      // capture already existed; only the assertion hid it.
+      expect(
+        result.code,
+        `npm child exited ${String(result.code)}. Bounded stderr:\n${result.stderr || '(empty)'}`,
+      ).toBe(0);
       const parseStdoutOnly = (stdout: string, _boundedStderr: string): SafeRunConfig =>
         JSON.parse(stdout.trim()) as SafeRunConfig;
       const printed = parseStdoutOnly(result.stdout, `${result.stderr}synthetic warning`);

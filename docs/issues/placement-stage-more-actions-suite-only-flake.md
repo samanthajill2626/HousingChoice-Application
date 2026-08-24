@@ -3,11 +3,38 @@ id: placement-stage-more-actions-suite-only-flake
 title: approval-and-move-in times out waiting for the placement page's "More actions" button in full-suite runs, and passes solo
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-23
+resolved: 2026-08-24
 refs: e2e/scenarios/steps.ts:3516, e2e/tests/scenarios/approval-and-move-in.spec.ts:318
 ---
+
+**RESOLVED (2026-08-24): the mystery this issue preserved artifacts for is
+solved, and it was never a click race.** Both sightings' failure snapshots
+(:318 on 2026-08-23, :258 on 2026-08-24 - the second captured because this
+issue's own copy-the-artifacts-first instruction was followed) show the same
+page state: `<main>` holding only `status "Loading"`. The placement bundle
+fetch hung for the entire 30s budget under two-suite machine load; the kebab
+never existed to click.
+
+Two fixes landed on `fix/test-suite-wave3`:
+
+- ROOT CAUSE CLASS: keep-alive hardening on the app server AND the Vite dev
+  server (65s/66s). A server FINning an idle pooled socket the client is about
+  to reuse produces exactly a hung/reset proxied request with nothing in any
+  log - the mechanism reproduced 3/3 vs 0/3 against fake-twilio with the same
+  values (see `app-server-default-keepalive-timeout`).
+- DIAGNOSABILITY: `pickPlacementStage` now waits for the placement header
+  FIRST, with its own named failure ("the placement page did not finish
+  loading"), so any residual cause reads as what it is instead of "a button
+  would not click".
+
+REOPEN IF the NAMED page-load message fires in a gate run - that means a hung
+bundle fetch survives the keep-alive fix and has a second cause worth its own
+diagnosis. A recurrence of the OLD opaque kebab-click shape would instead mean
+the readiness wait regressed.
+
 
 **Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
 A SECOND test in the same file hit the same signature: approval-and-move-in.spec.ts:258 (rent-rejection -> Lost) timed out with the More-actions kebab 'resolved' but never 'visible, enabled and stable'. Same mechanism surface, different test - the flake is per-MACHINERY, not per-test.

@@ -3,11 +3,23 @@ id: outbound-mms-full-suite-reseed-timeout
 title: Outbound MMS full-profile reseed can exhaust the full-suite test timeout
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e/harness
 created: 2026-08-21
+resolved: 2026-08-24
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:163, e2e/playwright.config.ts:107
 ---
+
+**Resolution (2026-08-24): instrumented, measured, and the sighting's era
+explained.** The one occurrence came from the same sick 2026-08-21 gate run as
+two since-resolved machine-exhaustion issues. The instrumentation this issue
+asked for landed (clearMs/seedMs on every reseed log line), and its first
+full-suite baseline showed the WORST reseed at ~3.6s against the 30s budget -
+an 8x margin under normal load. No budget was changed, honoring this issue's
+own warning. Zero recurrences since, including two heavily contended runs.
+REOPEN IF a reseed timeout recurs - it will now arrive carrying its own phase
+breakdown, which is precisely what this issue existed to demand.
+
 
 **First healthy-machine measurement (2026-08-23, `fix/test-suite-wave3` gate
 run, 253/253 green, 17.3m).** The instrumentation's first full-suite numbers:

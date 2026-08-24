@@ -3,11 +3,24 @@ id: tours-pm-exit-closed-chip-flake
 title: "tours.spec.ts:152 PM-team exit-NO: 'Closed' header chip not visible within the 30s test budget (intermittent, passes solo)"
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-07-21
+resolved: 2026-08-24
 refs: e2e/tests/scenarios/tours.spec.ts:152
 ---
+
+**Resolution (2026-08-24): contention-pair era, one sighting, five weeks of
+clean runs since.** Filed 2026-07-21 as half of the documented "contention
+pair"; the header 'Closed' chip is an SSE/refetch-driven render whose 30s
+budget only ever lost on that era's machines. Zero recurrences across every
+measured full run since - the 2026-08-23 pair and the 2026-08-24 runs
+including two heavily contended ones - and the DynamoDB Local contention that
+defined its era is fixed and soak-validated. REOPEN on the exact signature
+(the header-scoped 'Closed' text invisible for 30s post-transition), and note
+the keep-alive hardening (2026-08-24) also removed the strongest cause of a
+stuck post-transition refetch.
+
 
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)

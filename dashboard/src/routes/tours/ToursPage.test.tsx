@@ -306,6 +306,25 @@ describe('ToursPage', () => {
     expect(within(allLists[2]!).getAllByRole('listitem')).toHaveLength(1);
   });
 
+  it('resolves a PARTNER contact to a display name - the widened fan-out reaches this list', () => {
+    // This page reads useContacts('all') as an id->name map. TYPES_FOR.all
+    // gained 'partner' on 2026-08-18; without a partner in the resolution set,
+    // a tour whose tenantId points at a partner-typed contact renders the raw
+    // id. See docs/issues/partner-widening-consumer-test-gap.md.
+    readyAll(
+      [{ ...TOUR_TODAY, tourId: 't-partner', tenantId: 'c-partner' }],
+      [],
+      [
+        ...CONTACTS,
+        { contactId: 'c-partner', type: 'partner', firstName: 'Renata', lastName: 'Cole', phone: '+14040000009' },
+      ],
+    );
+    renderPage();
+    const upcoming = screen.getByRole('region', { name: 'Upcoming tours' });
+    expect(within(upcoming).getByRole('link', { name: /Renata Cole/ })).toBeInTheDocument();
+    expect(within(upcoming).queryByText(/c-partner/)).not.toBeInTheDocument();
+  });
+
   it('each upcoming row links to /tours/:tourId', () => {
     readyAll([TOUR_TODAY, TOUR_NEXT_WEEK]);
     renderPage();

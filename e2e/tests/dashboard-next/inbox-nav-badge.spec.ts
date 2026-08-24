@@ -76,6 +76,26 @@ async function expectBadgeAfter(
   act: () => Promise<void>,
   expected: string | null,
 ): Promise<void> {
+  // HOLD the reconcile AT THE NETWORK LAYER until the snapshot is taken. The
+  // guard below used to enforce its precondition ("the server had not answered
+  // yet") by TIMING alone, and under full-suite load the act()-to-snapshot
+  // window stretched far enough for the count response to land inside it - a
+  // deliberate red firing with no product bug present (2026-08-24 gate run,
+  // 252/253, from an unrelated voice-webhook branch; the file passed 3/3
+  // alone minutes later). Intercepting COUNT_PATH and releasing it only after
+  // the snapshot makes the precondition true BY CONSTRUCTION at any machine
+  // speed, while keeping everything the assertion proves: the badge moved in
+  // the click handler, before any server answer existed to move it.
+  let releaseReconcile!: () => void;
+  const reconcileHeld = new Promise<void>((resolve) => {
+    releaseReconcile = resolve;
+  });
+  const holdRoute = (url: URL): boolean => url.pathname.endsWith(COUNT_PATH);
+  await page.route(holdRoute, async (route) => {
+    await reconcileHeld;
+    await route.continue();
+  });
+
   let reconciled = false;
   const reconcile = page
     .waitForResponse(
@@ -87,21 +107,32 @@ async function expectBadgeAfter(
       reconciled = true;
     });
 
-  await act();
-  const labels = await navBadge(page).evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute('aria-label')),
-  );
-  expect(
-    reconciled,
-    'the server reconcile beat the snapshot - the optimistic assertion below would prove nothing',
-  ).toBe(false);
-  expect(labels, 'the badge did not move in the click handler').toEqual(
-    expected === null ? [] : [expected],
-  );
+  try {
+    await act();
+    const labels = await navBadge(page).evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('aria-label')),
+    );
+    // BACKSTOP, no longer a timing bet: with the route hold above, this can
+    // only fire if the hold itself is broken (a renamed COUNT_PATH, a second
+    // un-intercepted endpoint feeding the badge). Still a deliberate red -
+    // if it fires, the optimistic assertion below would prove nothing.
+    expect(
+      reconciled,
+      'the server reconcile beat the snapshot - the optimistic assertion below would prove nothing',
+    ).toBe(false);
+    expect(labels, 'the badge did not move in the click handler').toEqual(
+      expected === null ? [] : [expected],
+    );
+  } finally {
+    // Always let the held request through - a failed assertion must not strand
+    // the app's count fetch and cascade into later specs.
+    releaseReconcile();
+  }
 
   // ...and the server agrees once it answers, so the optimistic number was not a
   // guess the reconcile has to walk back.
   await reconcile;
+  await page.unroute(holdRoute);
   if (expected === null) await expect(navBadge(page)).toHaveCount(0);
   else await expect(navBadge(page)).toHaveAttribute('aria-label', expected);
 }

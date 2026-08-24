@@ -35,7 +35,11 @@ import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './d
 import type { DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
-import { senderLabel as resolveSenderLabel } from '../../lib/memberAttribution.js';
+import {
+  findMemberByKey,
+  memberDisplayLabel,
+  senderLabel as resolveSenderLabel,
+} from '../../lib/memberAttribution.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
@@ -761,7 +765,53 @@ function MonoAudio(props: React.ComponentProps<'audio'>): React.JSX.Element {
  *  support - the label comes from presentCallState, which returns nothing at all
  *  when nothing is known. The party number lives behind a click-to-reveal detail
  *  line rather than on the face. */
-function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
+function joinCallRecipients(labels: string[]): string {
+  if (labels.length <= 1) return labels[0] ?? '';
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
+}
+
+function relayCallSummary(
+  call: TimelineCall,
+  roster: ConversationParticipant[] | undefined,
+): string | undefined {
+  if (roster === undefined || roster.length < 2) return undefined;
+  let caller = findMemberByKey(call.relay_sender_key, roster);
+
+  // Rows written before relay_sender_key still carry the counterpart's stored
+  // non-phone label. On a two-person group, an unchanged current counterpart
+  // name identifies the other current member as the caller. This is a migration
+  // fallback only; all new rows use the stable key above.
+  if (caller === undefined && roster.length === 2 && call.call_party_label) {
+    const oldCounterpart = call.call_party_label.trim().toLocaleLowerCase();
+    const matchingCounterparts = roster.filter((member) => {
+      const current = memberDisplayLabel(member);
+      return current !== undefined && current.toLocaleLowerCase() === oldCounterpart;
+    });
+    // Duplicate display labels are not identities. Infer only when the legacy
+    // label identifies exactly one current counterpart.
+    const counterpart = matchingCounterparts.length === 1 ? matchingCounterparts[0] : undefined;
+    if (counterpart !== undefined) caller = roster.find((member) => member !== counterpart);
+  }
+
+  if (caller === undefined) return undefined;
+  const callerLabel = memberDisplayLabel(caller);
+  if (callerLabel === undefined) return undefined;
+  const recipients = roster
+    .filter((member) => member !== caller)
+    .map(memberDisplayLabel)
+    .filter((label): label is string => label !== undefined);
+  if (recipients.length === 0) return undefined;
+  return `${callerLabel} called ${joinCallRecipients(recipients)}`;
+}
+
+function CallCard({
+  call,
+  relayRoster,
+}: {
+  call: TimelineCall;
+  relayRoster?: ConversationParticipant[];
+}): React.JSX.Element {
   // The card's own clock: seeded once at mount, advanced by EXACTLY one timeout
   // when the presenter says the current label has an expiry.
   const [now, setNow] = useState<number>(() => Date.now());
@@ -814,6 +864,8 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // minutes; two calls inside one minute would otherwise carry identical names.
   const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  const relaySummary = relayCallSummary(call, relayRoster);
+  const callWho = relaySummary ?? directionWord;
   // An unparseable `at` is a REAL handled case here (the presenter treats it as
   // one and has matrix coverage for it), and the formatter answers '' for it.
   // Concatenating that unconditionally would emit a dangling separator -
@@ -821,7 +873,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // exactly the ambiguity the seconds were added to remove. Fall back to the
   // row id: it is always present, always distinct, and an opaque key rather
   // than anything a screen reader would announce as a phone.
-  const cardName = `${directionWord} - ${nameTime || call.id}`;
+  const cardName = `${callWho} - ${nameTime || call.id}`;
   const duration = formatDuration(call.call_duration);
   const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
   // A MASKED row carries no counterpart identity at all - party_phone is
@@ -829,7 +881,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // ALREADY on the card face, so a detail line there would disclose a duplicate
   // of what the reader can already see. `undefined` means no line AND no reveal
   // control: a disclosure that discloses nothing is worse than no disclosure.
-  const detail = call.party_phone
+  const detail = relayRoster === undefined && call.party_phone
     ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
     : undefined;
 
@@ -850,7 +902,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
         <span className={styles.callArrow} aria-hidden="true">
           {outbound ? ARROW_OUT : ARROW_IN}
         </span>
-        <span className={styles.callWho}>{directionWord}</span>
+        <span className={styles.callWho}>{callWho}</span>
         {state.label !== undefined ? (
           <span className={`${styles.outcome ?? ''} ${toneClass}`}>{state.label}</span>
         ) : null}
@@ -877,7 +929,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}
-      {call.recording_s3_key && call.call_sid ? (
+      {relayRoster === undefined && call.recording_s3_key && call.call_sid ? (
         <MonoAudio
           className={styles.recordingPlayer}
           controls
@@ -888,15 +940,17 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       ) : null}
       {/* Transcript lifecycle (voice-transcription 3.7): the in-flight indicator
           replaces the collapsible while pending/failed. */}
-      {call.transcript_status === 'pending' ? (
-        <p className={styles.transcriptPendingNote}>Transcribing...</p>
-      ) : call.transcript_status === 'failed' ? (
-        <p className={styles.transcriptPendingNote}>Transcript unavailable</p>
-      ) : call.transcript ? (
-        <details className={styles.transcript}>
-          <summary className={styles.transcriptToggle}>Transcript</summary>
-          <p className={styles.transcriptBody}>{call.transcript}</p>
-        </details>
+      {relayRoster === undefined ? (
+        call.transcript_status === 'pending' ? (
+          <p className={styles.transcriptPendingNote}>Transcribing...</p>
+        ) : call.transcript_status === 'failed' ? (
+          <p className={styles.transcriptPendingNote}>Transcript unavailable</p>
+        ) : call.transcript ? (
+          <details className={styles.transcript}>
+            <summary className={styles.transcriptToggle}>Transcript</summary>
+            <p className={styles.transcriptBody}>{call.transcript}</p>
+          </details>
+        ) : null
       ) : null}
     </div>
   );
@@ -1007,7 +1061,9 @@ function StreamItem({
         />
       );
     case 'call':
-      return <CallCard call={item} />;
+      return (
+        <CallCard call={item} {...(relayRoster !== undefined && { relayRoster })} />
+      );
     case 'milestone':
       return <MilestonePin ms={item} />;
     case 'scheduled':

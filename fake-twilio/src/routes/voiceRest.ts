@@ -11,6 +11,9 @@
 //   POST .../IncomingPhoneNumbers.json       ← incomingPhoneNumbers.create({phoneNumber,friendlyName,smsUrl,voiceUrl})
 //   GET  .../IncomingPhoneNumbers.json       ← incomingPhoneNumbers.list({phoneNumber})
 //   POST .../IncomingPhoneNumbers/:sid.json  ← incomingPhoneNumbers(sid).update({voiceUrl})
+//   POST /v1/Services/:sid/PhoneNumbers      ← messaging.v1.services(svc).phoneNumbers.create (A2P attach)
+//   GET  /v1/Services/:sid/PhoneNumbers      ← ...phoneNumbers.list() (detach's sid lookup)
+//   DELETE /v1/Services/:sid/PhoneNumbers/:pn ← ...phoneNumbers(pn).remove()
 //   GET  /recordings/:callSid/:recordingSid.mp3 ← the CallEngine-minted recording URL
 //
 // Twilio-shaped snake_case JSON + the 400 `more_info` error convention mirror
@@ -203,6 +206,94 @@ export function createVoiceRestRouter(deps: VoiceRestDeps): Router {
       voice_url: updated?.voiceUrl ?? null,
       capabilities: { voice: true, sms: true, mms: true, fax: false },
     });
+  });
+
+  // --- Messaging Service sender pool (messaging.twilio.com/v1, same origin
+  // here because twilioHttpClient rewrites only the host) ------------------
+  //
+  // The post-buy A2P step. `warmOneNumber` finishes EVERY buy with
+  // `messaging.v1.services(svc).phoneNumbers.create({ phoneNumberSid })`, and
+  // until 2026-08-23 the fake had no such route - so every hermetic warm buy
+  // died AFTER purchase with a swallowed 404 job failure (22 level-50 lines in
+  // one green e2e run), and the buy path's success log never fired locally.
+  // See docs/issues/fake-twilio-messaging-attach-404.md.
+  //
+  // Path note: `/v1/Services/:sid/...` is shared pathspace with the
+  // Conversations API in this one-origin fake, but Conversations uses
+  // `/v1/Services/:sid/Conversations...` - the `/PhoneNumbers` leaf is
+  // messaging-only, so exact routes cannot collide.
+
+  // POST /v1/Services/:serviceSid/PhoneNumbers — attach a purchased number.
+  router.post('/v1/Services/:serviceSid/PhoneNumbers', (req, res) => {
+    const serviceSid = req.params['serviceSid'] ?? '';
+    const body = (req.body ?? {}) as Record<string, string>;
+    const phoneNumberSid = body['PhoneNumberSid'];
+    if (!phoneNumberSid) {
+      badRequest(res, "PhoneNumbers.create requires a 'PhoneNumberSid'.");
+      return;
+    }
+    const result = registry.attachToMessagingService(serviceSid, phoneNumberSid);
+    if (result.outcome === 'unknown_sid') {
+      res.status(404).json({
+        code: 20404,
+        message: `The requested resource /Services/${serviceSid}/PhoneNumbers was not found: unknown PhoneNumberSid ${phoneNumberSid}`,
+        more_info: 'https://www.twilio.com/docs/errors/20404',
+        status: 404,
+      });
+      return;
+    }
+    if (result.outcome === 'already') {
+      // Twilio 21710: already a sender in a Messaging Service. The adapter
+      // treats this as idempotent success (a redelivered warm job), so
+      // answering it honestly is what keeps that branch exercised locally.
+      badRequest(res, 'Phone Number is already in the Messaging Service.', 21710);
+      return;
+    }
+    res.status(201).json({
+      sid: result.record!.sid,
+      service_sid: serviceSid,
+      phone_number: result.record!.phoneNumber,
+      date_created: new Date().toUTCString(),
+    });
+  });
+
+  // GET /v1/Services/:serviceSid/PhoneNumbers — list the service's senders
+  // (the detach path resolves an E.164 to its PN sid through this).
+  router.get('/v1/Services/:serviceSid/PhoneNumbers', (req, res) => {
+    const serviceSid = req.params['serviceSid'] ?? '';
+    const attached = registry.listAttachedToMessagingService(serviceSid);
+    res.status(200).json({
+      phone_numbers: attached.map((rec) => ({
+        sid: rec.sid,
+        service_sid: serviceSid,
+        phone_number: rec.phoneNumber,
+      })),
+      meta: {
+        key: 'phone_numbers',
+        page: 0,
+        page_size: 50,
+        first_page_url: `${req.protocol}://${req.get('host') ?? ''}${req.originalUrl}`,
+        url: `${req.protocol}://${req.get('host') ?? ''}${req.originalUrl}`,
+        next_page_url: null,
+        previous_page_url: null,
+      },
+    });
+  });
+
+  // DELETE /v1/Services/:serviceSid/PhoneNumbers/:sid — remove a sender.
+  router.delete('/v1/Services/:serviceSid/PhoneNumbers/:sid', (req, res) => {
+    const serviceSid = req.params['serviceSid'] ?? '';
+    const sid = req.params['sid'] ?? '';
+    if (!registry.detachFromMessagingService(serviceSid, sid)) {
+      res.status(404).json({
+        code: 20404,
+        message: `The requested resource /Services/${serviceSid}/PhoneNumbers/${sid} was not found`,
+        more_info: 'https://www.twilio.com/docs/errors/20404',
+        status: 404,
+      });
+      return;
+    }
+    res.status(204).end();
   });
 
   // GET /recordings/:callSid/:recordingSid.mp3 — stream the canned MP3 as

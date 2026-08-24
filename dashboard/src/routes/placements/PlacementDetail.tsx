@@ -145,6 +145,12 @@ export function PlacementDetail(): React.JSX.Element {
   // supersedes the previous one and a late response can't clobber fresher state.
   const abortRef = useRef<AbortController | null>(null);
 
+  // The open move prompt's typed-but-unconfirmed field values. Parent-owned so
+  // a remount of the modal subtree cannot lose them (the 2026-08-24 date-loss
+  // sighting; see MovePromptModal's draftStore doc). A ref: drafts must never
+  // re-render this page per keystroke.
+  const moveDraftRef = useRef<import('./MovePromptModal.js').MovePromptDraft | undefined>(undefined);
+
   // Apply an updated placement in place (after a transition returns it), keeping the
   // resolved unit — instant feedback before the placement.updated refetch reconciles.
   const setPlacement = useCallback(
@@ -425,6 +431,9 @@ export function PlacementDetail(): React.JSX.Element {
       runTransition(toStage, {});
       return;
     }
+    // A NEW prompt starts with a clean draft - the store only exists so a
+    // remount of the OPEN modal cannot lose what the human already typed.
+    moveDraftRef.current = undefined;
     setPending({ toStage, gate });
   }
 
@@ -717,6 +726,7 @@ export function PlacementDetail(): React.JSX.Element {
         pending.gate === 'rentDetermined' ||
         pending.gate === 'moveInReady') ? (
         <MovePromptModal
+          draftStore={moveDraftRef}
           mode={pending.gate}
           initial={{
             finalRent: unit?.final_rent,

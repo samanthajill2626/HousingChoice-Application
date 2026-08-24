@@ -1689,6 +1689,76 @@ function callItem(
 }
 
 describe('Timeline call cards - direction', () => {
+  it('labels a relay call from the current roster name with a phone fallback', () => {
+    const relayCall = {
+      kind: 'call',
+      id: 'c-relay',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      relay_sender_key: 'contact-alice',
+      call_party_label: 'Old counterpart label',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [relayCall],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002' },
+      ],
+    });
+
+    expect(screen.getByText('Alice Adams called (555) 010-0002')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Call recording')).not.toBeInTheDocument();
+    expect(screen.queryByText('Transcript', { exact: true })).not.toBeInTheDocument();
+  });
+
+  it('does not guess a legacy Relay caller when the counterpart label is ambiguous', () => {
+    const legacyRelayCall = {
+      kind: 'call',
+      id: 'legacy-relay-call',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      call_party_label: 'Alex Kim',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [legacyRelayCall],
+      relayRoster: [
+        { contactId: 'contact-alex-1', phone: '+15550100001', name: 'Alex Kim' },
+        { contactId: 'contact-alex-2', phone: '+15550100002', name: 'Alex Kim' },
+      ],
+    });
+
+    expect(screen.getByText('Incoming call')).toBeInTheDocument();
+    expect(screen.queryByText(/called/)).not.toBeInTheDocument();
+  });
+
+  it('infers an unambiguous two-person legacy Relay call written before caller keys', () => {
+    const legacyRelayCall = {
+      kind: 'call',
+      id: 'legacy-relay-call',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      call_party_label: 'Bob Brown',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [legacyRelayCall],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002', name: 'Bob Brown' },
+      ],
+    });
+
+    expect(screen.getByText('Alice Adams called Bob Brown')).toBeInTheDocument();
+  });
+
   it('aligns by direction: inbound left, outbound right + the outbound tint', () => {
     renderTimeline({
       items: [

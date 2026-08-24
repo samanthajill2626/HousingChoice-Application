@@ -351,8 +351,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
 
     // A best-effort contact cache so we resolve each contact at most once (the
     // same tenant may anchor several placements). A missing contact must never 500 the
-    // endpoint — fall back to the contactId for `who`. Drives BOTH name hydration
-    // and the soft-delete check (one getById per contact).
+    // endpoint - fall back to the contactId for `who`. Drives BOTH display-label
+    // hydration and the soft-delete check (one getById per contact).
     const contactCache = new Map<string, ContactItem | undefined>();
     const getContact = async (contactId: string): Promise<ContactItem | undefined> => {
       if (contactCache.has(contactId)) return contactCache.get(contactId);
@@ -367,8 +367,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       contactCache.set(contactId, contact);
       return contact;
     };
-    const resolveName = async (contactId: string): Promise<string | undefined> =>
-      nameFromContact(await getContact(contactId));
+    const resolveContactLabel = async (contactId: string): Promise<string | undefined> => {
+      const contact = await getContact(contactId);
+      return nameFromContact(contact) ?? formatPhoneForDisplay(contact?.phone);
+    };
     // Soft-deleted contacts are off the boards: an item anchored to a deleted
     // contact (its own row, or a placement whose tenant was deleted) is skipped. A
     // lookup failure is NOT treated as deleted (best-effort → keep the item).
@@ -443,7 +445,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       if (groupIds.has(d.placementId)) continue; // per-group dedup (soonest already won)
       if (await isDeletedContact(placement.tenantId)) continue; // deleted tenant → off the boards
       groupIds.add(d.placementId);
-      const who = (await resolveName(placement.tenantId)) ?? placement.tenantId;
+      const who = (await resolveContactLabel(placement.tenantId)) ?? placement.tenantId;
       const at = Date.parse(d.at);
       const item: TodayItem = {
         group: isHardClock ? 'needs_you_now' : 'follow_ups',
@@ -492,7 +494,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             if (existing) existing.item.attention = true;
           } else if (!(await isDeletedContact(c.tenantId))) {
             needsYouNowIds.add(c.placementId);
-            const who = (await resolveName(c.tenantId)) ?? c.tenantId;
+            const who = (await resolveContactLabel(c.tenantId)) ?? c.tenantId;
             const reason =
               typeof (c.attention as { reason?: unknown }).reason === 'string'
                 ? (c.attention as { reason: string }).reason
@@ -517,7 +519,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         // (b) DERIVED stuck → follow_ups (independent of any hard clock).
         if (isStuck(c) && !followUpsIds.has(c.placementId) && !(await isDeletedContact(c.tenantId))) {
           followUpsIds.add(c.placementId);
-          const who = (await resolveName(c.tenantId)) ?? c.tenantId;
+          const who = (await resolveContactLabel(c.tenantId)) ?? c.tenantId;
           followUps.push({
             item: {
               group: 'follow_ups',
@@ -549,7 +551,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       for (const t of todayTours) {
         if (!TOURS_TODAY_STATUSES.has(t.status)) continue; // skip non-active statuses
         if (await isDeletedContact(t.tenantId)) continue; // deleted tenant → off the boards
-        const who = (await resolveName(t.tenantId)) ?? t.tenantId;
+        const who = (await resolveContactLabel(t.tenantId)) ?? t.tenantId;
         const item: TodayItem = {
           group: 'tours_today',
           refType: 'tour',
@@ -630,6 +632,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
               nameFromContact(memberContact) ??
               entry.name ??
               formatPhoneForDisplay(entry.phone) ??
+              formatPhoneForDisplay(memberContact.phone) ??
               memberContactId;
             needsYouNow.push({
               item: {
@@ -955,7 +958,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       for (const [contactId, count] of byContact) {
         if (aiSuggestions.length >= AI_SUGGESTIONS_ITEM_CAP) break;
         if (await isDeletedContact(contactId)) continue; // deleted -> off the boards
-        const who = (await resolveName(contactId)) ?? contactId;
+        const who = (await resolveContactLabel(contactId)) ?? contactId;
         aiSuggestions.push({
           item: {
             group: 'ai_suggestions',

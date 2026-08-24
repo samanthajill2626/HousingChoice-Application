@@ -3,11 +3,31 @@ id: fake-relay-replay-boot-race
 title: "Relay intro-replay: dev.mjs health-gates the app but not the fake; route swallows truncated + lacks per-group isolation"
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-07
+resolved: 2026-08-24
 refs: scripts/dev.mjs:527, app/src/routes/dev.ts:394
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`).** All three parts:
+
+1. BOOT RACE: `scripts/dev.mjs` now health-gates BOTH sides before POSTing the
+   replay - `/__dev/ping` for the app AND `/control/personas` for the fake on
+   :8889 - inside the same 60s deadline, with the skip warning naming which
+   side lagged. The window was narrow in practice; now it is closed by
+   construction.
+2. TRUNCATED: the route surfaces `truncated` in its response and WARNs when
+   the open-group list was cut, instead of dropping the repo contract's flag.
+   `dev.mjs` prints "TRUNCATED - not all groups replayed" when set.
+3. PER-GROUP CONTAINMENT: one group's inline-dispatch throw no longer aborts
+   the remaining groups or 500s the POST - it counts into a new `failed` field
+   and the rest replay. The boot log surfaces `failed=N`.
+
+Both route behaviours are pinned in devRelayReplay.test.ts (7/7): a throwing
+group leaves the rest replayed with `failed: 1` and a 200, and a truncated
+list reports `truncated: true`.
+
 
 **Problem (review finding, 2026-07-07 — dev-only path, self-healing).** The
 `--mock --seeded` boot replay polls only the APP (`/__dev/ping`) before POSTing

@@ -1649,6 +1649,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Claim stamped — a second tick sends nothing more (exactly once per member).
     const rows = await tourReminders.listByTour(tour.tourId);
     expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeDefined();
+    // The GROUP path's sentBody snapshot, pinned to the composed body (not just
+    // defined). All three claimSend call sites pass the body; only the 1:1 poll
+    // path had a regression pin, so a refactor of THIS path could drop the
+    // argument with every test green and the dashboard would silently lose
+    // "what was actually sent" for group-routed rungs.
+    // See docs/issues/reminder-sentbody-group-and-forcesend-untested.md.
+    expect(rows.find((r) => r.kind === 'confirmation')?.sentBody).toBe(
+      rungBody('confirmation', scheduledAt),
+    );
     await runDueTourReminders(now0, rig.deps);
     expect(rig.groupSends).toHaveLength(2);
   });
@@ -2237,6 +2246,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       (r) => r.reminderId === row.reminderId,
     );
     expect(after?.sentAt).toBe(FORCE_NOW);
+    // The FORCE-SEND path's sentBody snapshot, pinned to the composed body -
+    // the third claimSend call site, previously covered only by a one-time
+    // human read during the 2026-08-06 roster merge.
+    // See docs/issues/reminder-sentbody-group-and-forcesend-untested.md.
+    expect(after?.sentBody).toBe(rungBody('confirmation', '2026-02-11T20:00:00.000Z'));
     // The claim told the live surfaces to refetch (advisory tenant contactId).
     expect(emitted.filter((p) => p.contactId === 'contact-force-1')).toHaveLength(1);
   });

@@ -75,11 +75,12 @@ function emptyQueryCalls(): QueryCalls {
 function makeConversations(
   items: ConversationItem[],
   calls: QueryCalls,
+  fakeOpts: { allowTieResume?: boolean } = {},
 ): Pick<ConversationsRepo, 'queryUnreadPage'> {
   return {
     async queryUnreadPage(opts) {
       calls.queryUnreadPage += 1;
-      return queryUnreadPageFromItems(items, opts);
+      return queryUnreadPageFromItems(items, { ...opts, ...fakeOpts });
     },
   };
 }
@@ -784,14 +785,17 @@ describe('collectUnreadRows - capped / consumedAll / truncated', () => {
   it('resumes from scanPosition + the seen-set without duplicating or skipping a row', async () => {
     // Rows 29 and 30 share a `last_activity_at`, so the resume crosses a
     // TIMESTAMP TIE - the case an index-POSITION cursor cannot express, which is
-    // why the cursor is a synthesized full key. The tie proves the MECHANISM,
-    // not the service's ordering across it; see the file header.
+    // why the cursor is a synthesized full key. The tie proves the MECHANISM
+    // (no duplicate, no skip - true under any consistent total order), NOT the
+    // service's ordering across it, which is why `allowTieResume` below is
+    // legitimate here and only here; see the file header.
     const { items, contacts } = contactSeries(300, 29);
     const firstCalls = emptyCollectCalls();
+    const tieAware = { allowTieResume: true };
 
     const first = await collectUnreadRows(
       {
-        conversations: makeConversations(items, firstCalls),
+        conversations: makeConversations(items, firstCalls, tieAware),
         contacts: makeContacts(contacts, firstCalls),
         messages: makeMessages({}, firstCalls),
       },
@@ -804,7 +808,7 @@ describe('collectUnreadRows - capped / consumedAll / truncated', () => {
     const secondCalls = emptyCollectCalls();
     const second = await collectUnreadRows(
       {
-        conversations: makeConversations(items, secondCalls),
+        conversations: makeConversations(items, secondCalls, tieAware),
         contacts: makeContacts(contacts, secondCalls),
         messages: makeMessages({}, secondCalls),
       },

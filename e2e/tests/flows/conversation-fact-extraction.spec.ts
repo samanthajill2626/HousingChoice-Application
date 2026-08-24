@@ -293,12 +293,17 @@ test('type recommendation: an unknown contact gets an AI-suggests line and triag
   });
 });
 
-test('Today tile: a pending suggestion surfaces the AI-suggestions-to-review group', async ({
+test('Today tile: a phone-only contact shows its number in the AI-suggestions-to-review group', async ({
   page,
   request,
 }) => {
   await devLogin(page);
-  const { phone } = await createTenant(page.request, { firstName: 'TodayTile', voucherSize: 2 });
+  const phone = uniquePhone();
+  const created = await page.request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'tenant', phone, voucherSize: 2 },
+  });
+  expect(created.ok(), 'create phone-only tenant').toBeTruthy();
+  const contactId = (await created.json()).contact.contactId as string;
 
   await sendExtractSms(request, phone, {
     fields: { voucherSize: { op: 'suggest', value: '3', reason: 'mentioned a 3 bedroom' } },
@@ -312,7 +317,11 @@ test('Today tile: a pending suggestion surfaces the AI-suggestions-to-review gro
   await expectTodayReady(page);
   const group = page.getByRole('list', { name: 'AI suggestions to review' });
   await expect(group).toBeVisible({ timeout: 10_000 });
-  expect(await group.getByRole('listitem').count()).toBeGreaterThanOrEqual(1);
+  const expectedPhone = `(${phone.slice(2, 5)}) ${phone.slice(5, 8)}-${phone.slice(8)}`;
+  const item = group.getByRole('listitem').filter({ hasText: expectedPhone });
+  await expect(item).toBeVisible();
+  await expect(item).not.toContainText(contactId);
+  await expect(item.getByRole('link')).toHaveAttribute('href', `/contacts/${contactId}`);
 });
 
 test('debounce slide: two quick inbound EXTRACT texts run exactly one extraction', async ({

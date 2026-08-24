@@ -261,3 +261,34 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
 
   return app;
 }
+
+/**
+ * Keep the server's keep-alive sockets alive LONGER than any client stall a
+ * live test can produce, so the server is never the side that closes first.
+ *
+ * WHY (docs/issues/fake-twilio-control-econnreset-under-suite-load.md,
+ * reproduced 2026-08-24): at Node's default `keepAliveTimeout` of 5s, a
+ * kept-alive control-plane socket expires between a Playwright worker's
+ * requests, and the close is only executed at Node's ~30s
+ * `connectionsCheckingInterval` sweep. Timed reuse never collides on loopback
+ * - the client evicts the socket the instant the FIN is dispatched - but a
+ * client whose EVENT LOOP IS STALLED (a busy suite) has the FIN sitting
+ * undispatched in the kernel while its next request is written into the dead
+ * socket, and the kernel answers RST: `apiRequestContext.post: read
+ * ECONNRESET`, seven minutes into an otherwise green run.
+ *
+ * Measured A/B, same 36s client stall, cross-process, against this very app:
+ * default config 3/3 ECONNRESET; these values 3/3 ok.
+ *
+ * 65s clears every stall a live test can produce (Playwright's per-test budget
+ * is 30s, so no in-test gap can exceed it) with 2x margin. `headersTimeout`
+ * must exceed `keepAliveTimeout` (Node's documented requirement) or slow
+ * headers on a reused socket are killed early.
+ */
+export function hardenServerTimeouts(server: {
+  keepAliveTimeout: number;
+  headersTimeout: number;
+}): void {
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+}

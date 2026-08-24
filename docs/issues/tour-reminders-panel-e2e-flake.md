@@ -3,9 +3,10 @@ id: tour-reminders-panel-e2e-flake
 title: "scheduled-visibility.spec.ts Reminders panel - a rare rung-visibility timing flake (the 08:00 wall-clock half is CLOSED)"
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-07-10
+resolved: 2026-08-24
 updated: 2026-08-21
 refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:103, e2e/tests/scenarios/scheduled-visibility.spec.ts:132, e2e/scenarios/steps.ts:3242
 
@@ -25,6 +26,17 @@ visible inside its 10s budget under full-suite load, both on branches with zero
 intersection with tours. Not reproduced since 2026-08-05 across a 204-pass gate
 run and four per-file runs.
 ---
+
+**Resolution (2026-08-24).** The remaining scope after the 08:00 half closed
+was a rare confirmation-rung visibility race: two sightings (2026-07-10,
+2026-08-03), and ZERO recurrences in the ~20 full gate runs since 2026-08-05 -
+through the degraded-container era, the contention fixes, and two heavily
+contended 2026-08-24 runs. This issue's own guidance was that re-running is
+the correct response to what remained; what remains no longer occurs. REOPEN
+on the signature (a Reminders-panel rung row invisible inside its 10s budget,
+on a branch with no tours intersection) - and per the title's own history,
+read THIS body before concluding anything from the title.
+
 
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)

@@ -157,3 +157,19 @@ describe('seed data field casing', () => {
     }
   });
 });
+
+describe('seed contact types match the glossary', () => {
+  it('Renee Carter (the HA staffer) is a partner - an OUTSIDE agency contact', () => {
+    // Retyped 2026-08-24 after two months as team_member. The mistype survived
+    // exactly because nothing observed her type: team_member is excluded from
+    // audience fan-out and every outside-contact surface, so she was quietly
+    // invisible and every test stayed green - including the run that CHANGED
+    // the type, which is why this pin exists. A silent regression back would
+    // re-hide her the same way.
+    // See docs/issues/lean-seed-ha-staffer-should-be-partner.md.
+    const renee = contacts.find((c) => c['contactId'] === 'contact-hastaff-0001');
+    expect(renee, 'the pinned HA staffer is missing from the lean seed').toBeDefined();
+    expect(renee!['type']).toBe('partner');
+    expect(renee!['housingAuthority']).toBe('atlanta_housing');
+  });
+});

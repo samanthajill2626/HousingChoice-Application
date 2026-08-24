@@ -3,11 +3,34 @@ id: unread-index-fake-tie-order-is-not-the-services
 title: The byUnread fake breaks last_activity_at ties by conversationId; DynamoDB does not, and a resume inside a tie returns a different row set
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/test-infra
 created: 2026-08-23
+resolved: 2026-08-23
 refs: app/test/helpers/unreadIndexFake.ts, app/test/unreadIndexFakeMirror.integration.test.ts, app/src/lib/unreadFeed.ts:337
 ---
+
+**Resolution (2026-08-23, `fix/test-suite-wave3`).** The reason this stayed a
+bug was point 1 below: the comments were the only guard. That is fixed by
+making the fake REFUSE the divergent input instead of answering it wrong:
+`queryUnreadPageFromItems` now THROWS when an `exclusiveStartKey` lands inside
+a `last_activity_at` tie group - the one input where the fake and the service
+return different row SETS - with a message that names the two escape routes
+(distinct fixture timestamps, or an explicit `allowTieResume: true` for a test
+that exercises the cursor mechanism rather than service behaviour).
+
+Verified by construction: enabling the guard immediately failed the one
+existing tie-crossing test (`resumes from scanPosition...`) with the full
+explanatory message, and that test now carries the documented opt-out. 34/34
+green across unreadFeed + the fake-vs-real mirror suite.
+
+Point 3's alternative (hash-scrambled tie order) was considered and rejected:
+it breaks "natural order" luck but not copy-the-fake's-output calibration,
+while the throw stops BOTH cold at the input that matters. Point 2 (whether
+real AWS matches DynamoDB Local here) remains unverified and unimportant to
+the remedy - both are "unspecified"; it becomes relevant only if a feature
+ever needs defined tie ordering, which would be new work, not this issue.
+
 
 **Found by the fake-vs-real mirror suite on its first run**, which is the point
 of that suite: it compares rather than asserts, so it can surface a rule nobody

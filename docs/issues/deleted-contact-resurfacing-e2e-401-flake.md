@@ -3,11 +3,25 @@ id: deleted-contact-resurfacing-e2e-401-flake
 title: deleted-contact-resurfacing e2e spec flakes in full-suite runs (mid-spec 401s)
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-05
+resolved: 2026-08-24
 refs: e2e/tests/dashboard-next/deleted-contact-resurfacing.spec.ts:90
 ---
+
+**Resolution (2026-08-24): unreproduced era-artifact, cause UNKNOWN - and the
+first draft of this resolution mis-blamed the epoch-cache bug, which was fixed
+2026-06-29, five weeks BEFORE this sighting, so it cannot be the cause.** What
+stands: one sighting ever (2026-08-05, inside the degraded-container window),
+a precisely documented signature, and zero recurrences across every measured
+full run since - the 2026-08-23 pair (251/2, 253/0) and the 2026-08-24 runs
+including two heavily contended ones. Closing on evidence, not on a mechanism:
+nothing reproduces, nothing is actionable, and leaving it open buys no safety
+a signature-match cannot. REOPEN ON THE SIGNATURE: an inbox-row visibility
+timeout WITH browser-agent 401s on `/api/*` in the same webserver-log window -
+that pairing is this issue and nothing else is, and a recurrence would deserve
+the session-invalidation hunt this issue originally asked for.
 
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)

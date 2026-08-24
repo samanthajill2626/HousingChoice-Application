@@ -1,4 +1,4 @@
-import { buildFakeTwilioApp } from './server.js';
+import { buildFakeTwilioApp, hardenServerTimeouts } from './server.js';
 import { loadFakeConfig } from './config.js';
 
 const config = loadFakeConfig(); // throws if NODE_ENV=production (boot guard)
@@ -7,6 +7,10 @@ const server = app.listen(config.port, () => {
   // eslint-disable-next-line no-console
   console.log(`fake-twilio listening on :${config.port} → app ${config.appBaseUrl}`);
 });
+// Outlive any client stall a live test can produce, so this server never
+// closes a keep-alive socket a Playwright worker is about to reuse - the
+// stalled-loop ECONNRESET reproduced in the linked issue. See the helper.
+hardenServerTimeouts(server);
 // Fail loudly if the port can't actually be bound (e.g. an orphan already holds
 // it). Without this the listen error is swallowed, the event loop empties, and
 // the process exits 0 — masquerading as a clean shutdown to any launcher that

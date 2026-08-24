@@ -409,17 +409,25 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const members = await Promise.all(
       (conversation.participants ?? []).map(async (member) => {
         if (!member.contactId) return member;
+        // The participant name is a creation-time convenience snapshot. Once a
+        // member has a contactId, never let that snapshot outrank current contact
+        // state: current name wins, otherwise the dashboard uses this current
+        // roster phone as its fallback.
+        const memberWithoutStoredName = { ...member };
+        delete memberWithoutStoredName.name;
         try {
           const name = nameFromContact(await contacts.getById(member.contactId));
-          return name === undefined ? member : { ...member, name };
+          return name === undefined
+            ? memberWithoutStoredName
+            : { ...memberWithoutStoredName, name };
         } catch (err) {
           // A transient contact lookup must not make the Relay thread unusable.
           // IDs are safe to log; names and phone numbers are deliberately absent.
           log.warn(
             { err, conversationId, contactId: member.contactId },
-            'relay roster contact lookup failed - returning stored member identity',
+            'relay roster contact lookup failed - returning roster phone without stored name',
           );
-          return member;
+          return memberWithoutStoredName;
         }
       }),
     );

@@ -79,5 +79,8 @@ Relay calls into a media-free call shape before rendering a current-roster
 formatted phone is shown; no name or phone snapshot is added to the call row.
 The mapper and Relay card both suppress recording/transcript fields. Focused
 unit coverage protects the writer, live roster hydration, safe mapper, and call
-card; a hermetic browser regression places a real masked call and proves the
-Timeline row appears without recording or transcript controls.
+card. Accepted-call status changes emit a Timeline-only `message.persisted`
+event without changing Inbox activity, so an open card cannot age from stale
+`ringing` into a false missed state. A hermetic browser regression opens the
+group, places a real accepted masked call, and proves the live Timeline row
+appears without recording or transcript controls.

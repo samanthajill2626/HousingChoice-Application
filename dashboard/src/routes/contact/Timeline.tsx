@@ -784,10 +784,13 @@ function relayCallSummary(
   // fallback only; all new rows use the stable key above.
   if (caller === undefined && roster.length === 2 && call.call_party_label) {
     const oldCounterpart = call.call_party_label.trim().toLocaleLowerCase();
-    const counterpart = roster.find((member) => {
+    const matchingCounterparts = roster.filter((member) => {
       const current = memberDisplayLabel(member);
       return current !== undefined && current.toLocaleLowerCase() === oldCounterpart;
     });
+    // Duplicate display labels are not identities. Infer only when the legacy
+    // label identifies exactly one current counterpart.
+    const counterpart = matchingCounterparts.length === 1 ? matchingCounterparts[0] : undefined;
     if (counterpart !== undefined) caller = roster.find((member) => member !== counterpart);
   }
 

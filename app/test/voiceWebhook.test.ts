@@ -326,14 +326,7 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).not.toContain('<Dial');
   });
 
-  // A MASKED relay bridge's call row is rendered by NO surface: the contact
-  // timeline excludes relay_group conversations, and the relay thread mapper
-  // drops type:'call' rows entirely. Announcing the press-1 stamp would fan an
-  // SSE broadcast out to every connected dashboard - plus a mark-read POST and
-  // a media refetch from every open contact page - to redraw a row nobody
-  // draws. Relay groups are the growing product, so this must not scale with
-  // them.
-  it('press-1 on a MASKED relay bridge stamps the row but announces NOTHING', async () => {
+  it('press-1 on a MASKED relay bridge announces the status without touching Inbox activity', async () => {
     const world = createFakeWorld();
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
@@ -354,8 +347,16 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
     expect(call.masked).toBe(true);
     expect(call.call_status).toBe('in-progress');
-    // ...and nothing at all is announced for it.
-    expect(world.emitted).toHaveLength(0);
+    // The Relay Timeline now renders this row, so its open view must refetch
+    // before a stale ringing card can age into a false "Missed" label.
+    expect(world.emitted).toEqual([
+      {
+        event: 'message.persisted',
+        payload: expect.objectContaining({ conversationId: 'conv-relay-voice-1' }),
+      },
+    ]);
+    // message.persisted refreshes the Timeline only. It must not reorder the
+    // Inbox, alter its preview, or bump unread state.
     expect(world.touches).toHaveLength(0);
   });
 

@@ -1061,15 +1061,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * describes the state BEFORE the stamp committed.
    */
   function announceCallStamp(row: MessageItem): void {
-    // A MASKED relay bridge's call row is rendered by NO surface - the contact
-    // timeline excludes relay_group conversations and the relay thread mapper
-    // drops type:'call' rows - so announcing it costs an SSE broadcast to every
-    // connected dashboard, plus a mark-read POST and a media refetch from every
-    // open contact page, to redraw a row nobody draws. Relay groups are the
-    // GROWING product, so this must not scale with them. DO NOT "restore" this:
-    // it is a no-op only for as long as no surface renders a masked call, and
-    // the surface that starts rendering one is the change that removes it.
-    if (row.masked === true) return;
+    // Masked Relay calls now render in their Relay Timeline, so they need this
+    // same lifecycle refresh. message.persisted is intentionally the ONLY
+    // event: no conversation activity stamp means no Inbox reorder, preview
+    // change, or unread bump for either Relay or 1:1 calls.
     events.emit('message.persisted', {
       conversationId: row.conversationId,
       tsMsgId: row.tsMsgId,
@@ -1471,8 +1466,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // the write has already committed. Best-effort on both halves: neither
         // may break an accepted bridge. The row comes from the stamp itself -
         // NOTHING may be read between press-1 and the bridge (fix wave 4, N-1),
-        // and this arm also serves every MASKED relay bridge, whose row the
-        // announce skips entirely (see announceCallStamp).
+        // and this arm also serves every MASKED relay bridge, whose open Relay
+        // Timeline now consumes the same lifecycle refresh.
         if (stamp?.transitioned === true && stamp.row !== undefined) {
           try {
             announceCallStamp(stamp.row);

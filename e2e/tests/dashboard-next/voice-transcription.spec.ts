@@ -13,8 +13,8 @@
 //   3. Dropped VI completion webhook -> the card shows "Transcribing..." while the
 //      transcript is pending, then the RECONCILE safety net (lane delay 2s) delivers
 //      it WITHOUT any webhook. This test carries the pending-indicator proof.
-//   4. Missed MASKED relay call      -> the do-not-record privacy invariant holds: the
-//      fake never records it (no recordingSid), so no voicemail is ever offered.
+//   4. Accepted MASKED relay call    -> its metadata appears live in the Relay Timeline,
+//      while the do-not-record privacy invariant prevents recording or transcription.
 //
 // Driving + timing notes:
 //   - We pre-create the caller as a tenant contact via the authenticated API (an
@@ -28,10 +28,12 @@
 //     so the SSE-driven contact timeline refetch (300ms trailing debounce) shows the
 //     recording, then later the transcript. In the lane the fake fires the completion
 //     webhook in ~milliseconds, so recording/pending/completed can coalesce and the
-//     debounced refetch may not re-render the final state. To stay robust we POLL the
-//     timeline API for readiness, THEN navigate so the initial page fetch is the
-//     authoritative source (no live-SSE dependency). Test 3 keeps a real 2s pending
-//     window (the dropped-webhook reconcile), so it observes "Transcribing..." live.
+//     debounced refetch may not re-render the final state. For scenarios 1-3 we POLL
+//     the timeline API for readiness, THEN navigate so the initial page fetch is the
+//     authoritative source. Scenario 4 intentionally opens the Relay Timeline first
+//     to prove its metadata-only call lifecycle updates live over SSE. Test 3 keeps a
+//     real 2s pending window (the dropped-webhook reconcile), so it observes
+//     "Transcribing..." live.
 //   - All call-card assertions are scoped to the "Communications and activity" region
 //     (accessibility-first per e2e/support/selectors.md).
 //   - Test 4 needs a real relay pool number (getByPoolNumber), which lives only in the
@@ -245,24 +247,29 @@ test('a dropped VI webhook still transcribes via the reconcile safety net, showi
 });
 
 // ---------------------------------------------------------------------------
-// 4. Missed MASKED relay call -> visible metadata, no recording or transcript
+// 4. Accepted MASKED relay call -> live metadata, no recording or transcript
 // ---------------------------------------------------------------------------
-test('a missed masked relay call appears in the Relay timeline without media', async ({ page }) => {
+test('an accepted masked relay call appears live in the Relay timeline without media', async ({ page }) => {
   const request = page.request;
   // The live relay group + its pool number exist only in the FULL profile.
   const seeded = await request.post(`${NEXT}/__dev/reseed?profile=full`);
   expect(seeded.ok(), `full reseed failed: ${seeded.status()}`).toBeTruthy();
 
-  // A rostered member calls the pool number; digit:null misses the bridge. A masked
+  // Open the group BEFORE the call so both the append and accepted-status SSE
+  // events have to update an already-visible Relay Timeline.
+  await devLogin(page);
+  await page.goto(`${NEXT}/conversations/${RELAY_CONVERSATION}`);
+
+  // A rostered member calls the pool number; digit:'1' accepts the bridge. A masked
   // relay <Dial> is record="do-not-record", so no recording callback EVER fires -
-  // even on a miss - and the missed branch never offers a masked caller voicemail.
+  // even on a connected call - and Voice Intelligence is never requested.
   const sid = await placeCall(request, {
     from: RELAY_MEMBER,
     to: RELAY_POOL,
-    scenario: { digit: null },
+    scenario: { digit: '1' },
   });
 
-  // Let the fake run the masked bridge past the ringing state (to its missed terminal).
+  // Let the fake run the masked bridge past the ringing state.
   await expect
     .poll(
       async () => {
@@ -278,8 +285,6 @@ test('a missed masked relay call appears in the Relay timeline without media', a
   // The masked privacy invariant: no recording (hence no voicemail) is ever produced.
   expect(call!['recordingSid'], 'a masked relay call must NEVER record a voicemail').toBeUndefined();
 
-  await devLogin(page);
-  await page.goto(`${NEXT}/conversations/${RELAY_CONVERSATION}`);
   const timeline = commsRegion(page);
   await expect(timeline.getByText('Diana Osei called Gloria Mensah', { exact: true })).toBeVisible({
     timeout: 15_000,

@@ -1,5 +1,6 @@
 # Implementation plan - per-recipient delivery visibility
 
+Rev 2 (folds plan review round 1 - two reviewers, 32 findings, 30 accepted)
 Spec: `docs/superpowers/specs/2026-08-24-per-recipient-delivery-design.md` (rev 4)
 Branch: `feat/per-recipient-delivery`  Worktree: `W:\tmp\per-recipient-delivery`
 Base: `main` @ f0e5ab46
@@ -14,110 +15,170 @@ Human decisions confirmed 2026-08-24, do not revisit:
 - The inbound half is DEFERRED and filed, not built (spec 2.2).
 
 TDD throughout: write the failing test, watch it fail for the RIGHT reason, then
-implement. A test that passes before the implementation is a test that proves
-nothing - delete it and write a real one.
+implement. A test that passes before the implementation proves nothing - delete
+it and write a real one. Where a step below says its red state cannot exist,
+believe it and do not fake one.
+
+---
+
+## 0. Decisions this plan makes so the builder does not have to
+
+These were left open in rev 1 and each has more than one defensible answer. They
+are settled here; do not re-litigate mid-build.
+
+**D-a. How staleness is DISABLED.** Rev 1 said "omitting the staleness inputs
+reproduces today's behavior exactly". That is false as stated: `slot.sentAt` is
+a per-slot clock a caller cannot withhold, so a slot could still age even with
+no message clock passed. The rule is therefore explicit and total:
+
+> Staleness is evaluated ONLY when `nowMs` is supplied. With `nowMs`
+> undefined, `isStaleLeg` returns false for every slot regardless of `sentAt`,
+> and `presentRelayDelivery` cannot select branch 2 or 3.
+
+That single rule is what makes the ten existing pure-layer assertions green, and
+it is also the mechanism for D-b.
+
+**D-b. The imported guard (spec S5).** `Timeline.tsx` withholds `nowMs` when
+`msg.imported === true`, exactly as the 1:1 path already withholds its timestamp
+at `Timeline.tsx:577`. Composed with D-a, an imported row can never show a stale
+state anywhere. NOTE the honest reachability: the importer writes no
+`delivery_recipients` (`app/src/lib/import/apply.ts` stamps `imported_from` on
+conversations and messages but no per-recipient map), so no row should carry
+both today. The spec requires the guard anyway so the rule holds by
+construction. Task it; do not skip it because it looks unreachable.
+
+**D-c. The ticker lives in `Timeline`, not in `MessageBubble`.** One interval
+per thread, not one per bubble. It bumps a `now` value that reaches bubbles by
+the same prop path `rosterKind` already uses (`Timeline` -> `StreamItem` ->
+`MessageBubble`). This choice determines the acceptance-3a test, so it is fixed
+here.
+
+**D-d. Row markup and its accessible handles.** The list is a `<ul>` with
+`aria-label="Delivery by recipient"`; each row is an `<li>`. This gives the e2e
+`getByRole('list', { name: ... })` / `getByRole('listitem')` instead of a
+`data-testid`, satisfying the accessibility-first rule in
+`e2e/support/selectors.md:1-12`, and it gives the unit tests a non-vacuous
+handle.
+
+**D-e. The row timestamp uses the module's existing `formatTime`** - the same
+helper that builds the `meta` line at `Timeline.tsx:551-560`. No new formatter.
+
+**D-f. Writing the queued label in new tests.** The shipped label for `queued`
+carries a non-ASCII ellipsis, and AGENTS.md requires ADDED lines to be ASCII.
+New assertions must therefore compare against `presentDeliveryStatus('queued')`
+rather than typing the literal string. Do not "fix" the shipped label.
+
+---
 
 ## Slice order and why
 
 S1 (pure presenter) -> S2 (naming) -> S3 (rendering) -> S4 (ticker) -> S5
-(surfaces + e2e) -> S6 (issues). Each slice self-gates with
-`npm run typecheck` and the dashboard unit suite. e2e runs once, in S5, when the
-path is end-to-end.
+(surfaces + e2e) -> S6 (issues). Each slice self-gates with `npm run typecheck`
+and the dashboard unit suite. e2e runs once, in S5, when the path is end-to-end.
 
-The order is a dependency order, not a preference: S3 cannot render rows without
-S2's labels or S1's presentations, and S4's run condition is defined in terms of
-S1's `isStaleLeg`. **Mid-build the branch is not shippable** - after S1 the
-rollup counts stale legs that no row explains, and after S3 the escalation
-computes but nothing re-renders it. That is expected; do not "fix" it early.
+The order is a dependency order: S3 cannot render rows without S2's labels or
+S1's presentations, and S4's run condition is defined in terms of S1's
+`isStaleLeg`.
+
+**Correcting rev 1's account of the mid-build state:** after S1 the suite is
+fully GREEN, not partially red - the new code is additive and, by D-a, dormant
+until a caller passes `nowMs`. The first behavior change lands in S3. Do not go
+looking for a red suite that should not exist.
 
 ---
 
 ## S1 - The pure presenter layer
 
 All in `dashboard/src/routes/contact/deliveryStatus.ts` and its test. No
-component touched. This is where the real coverage lives.
+component touched.
 
 ### S1.1 `isQuietSince` - the single clock comparison
 
-RED: a test asserting the boundary is inclusive at exactly
-`STALE_SENT_AFTER_MS`, exclusive one millisecond under, and false for a
-non-finite input.
+RED: the boundary is inclusive at exactly `STALE_SENT_AFTER_MS`, exclusive one
+millisecond under, and false for a non-finite input.
 
-GREEN: export `isQuietSince(atMs: number, nowMs: number): boolean` -
-`Number.isFinite(atMs) && nowMs - atMs >= STALE_SENT_AFTER_MS`.
+GREEN: `export function isQuietSince(atMs: number | undefined, nowMs: number):
+boolean` - note `number | undefined`, because its first caller passes
+`sentAtMs?: number` (`deliveryStatus.ts:85-89`) and a `number`-only signature
+does not typecheck there.
 
-Then refactor `presentDeliveryStatus` to call it. **`presentDeliveryStatus` must
-keep its `sent`-only gate.** `deliveryStatus.test.ts:197-201` ("leaves every
-OTHER status alone no matter how old") must pass VERBATIM afterwards - run that
-file and confirm before moving on. This is the trap the spec's S3 mechanism
-section exists to prevent: one shared comparison, NOT one shared predicate.
+Then refactor `presentDeliveryStatus` to call it. **It must keep its `sent`-only
+gate.** `deliveryStatus.test.ts:197-201` ("leaves every OTHER status alone no
+matter how old") must pass VERBATIM afterwards - run that file and confirm
+before moving on. One shared COMPARISON, never one shared PREDICATE.
 
-### S1.2 `RelayDeliverySlot` gains `sentAt`
+### S1.2 `RelayDeliverySlot` gains both clocks
 
 `deliveryStatus.ts:102-106` becomes
-`{ status: DeliveryStatus; errorCode?: string; sentAt?: string }`.
-`npm run typecheck` is a gate and this is the first thing it fails on. No
-behavior change; no test of its own.
+`{ status: DeliveryStatus; errorCode?: string; sentAt?: string; deliveredAt?: string }`.
+Both, not just `sentAt` - S3.1 renders `deliveredAt` on a delivered row and
+would otherwise hit a typecheck wall mid-slice.
+
+No test, and **no red state exists for this step** - adding optional fields
+cannot fail `tsc`, and the wire type already carries both
+(`api/types.ts:1532-1538`). Rev 1 claimed a typecheck failure here; it was
+wrong.
 
 ### S1.3 `isStaleLeg` - the eligibility table
 
-RED: one test per row of the spec's S3 table, including the two that carry the
-human's decision:
+RED: one test per row of the spec's S3 table, plus D-a:
 
 - `sent` + parseable `sentAt` -> ages from `sentAt`
 - `sent` + no `sentAt` -> ages from `messageAtMs`
-- `sent` + UNPARSEABLE `sentAt` -> falls to the no-clock row, does NOT age from
-  `sentAt` and does NOT crash
+- `sent` + UNPARSEABLE `sentAt` -> falls to the no-clock row; does not age from
+  `sentAt`, does not crash
 - `queued` + parseable `sentAt` -> ages from `sentAt`
-- **`queued` + no `sentAt` -> NEVER stale, however old** (the released-hold and
-  never-dispatched cases; name both in the test title)
+- **`queued` + no `sentAt` -> NEVER stale, however old.** Title the test with
+  both cases it protects: a released connect-when-ready hold, and a send whose
+  fan-out never ran.
 - `queued_pending` -> never stale
 - `delivered` / `failed` / `undelivered` -> never stale
+- **`nowMs` undefined -> false for every slot above, including ones with a
+  `sentAt`** (D-a)
 
-GREEN: `isStaleLeg(slot: RelayDeliverySlot, messageAtMs: number | undefined,
-nowMs: number): boolean`, exhaustive over `DeliveryStatus`, delegating the
-comparison to `isQuietSince`.
-
-Prefer an exhaustive `switch` over a set-membership check so a future
-`DeliveryStatus` member is a typecheck failure rather than a silent default.
+GREEN: `isStaleLeg(slot, messageAtMs: number | undefined, nowMs: number |
+undefined): boolean`, exhaustive over `DeliveryStatus` via a `switch` so a
+future member is a typecheck failure rather than a silent default.
 
 ### S1.4 `presentRelayDelivery` - six branches, optional clock
 
-RED: the six branches from the spec's table, asserted whole-object as the file
-already does. Branch 0 (`null`) is EXISTING - `deliveryStatus.test.ts:123`
-already pins it; do not rewrite that test, just do not break it.
+RED: the six branches from the spec's table, whole-object as the file already
+does. Branch 0 (`null`) is EXISTING and pinned at `deliveryStatus.test.ts:123` -
+do not rewrite it, just do not break it.
 
-New signature: `presentRelayDelivery(slots, messageAtMs?, nowMs?)`. **The
-staleness inputs are OPTIONAL and omitting them must reproduce today's behavior
-exactly** - that is what keeps the ten existing assertions green.
+New signature: `presentRelayDelivery(slots, messageAtMs?, nowMs?)`, obeying D-a.
 
-Also add the three clock-passing twins the spec's 6.1 names, for `:38-40`,
-`:41-43` and `:62-65`. Do not edit those three; ADD twins beside them, so the
-file states both the no-clock contract and the real one.
+ADD clock-passing twins beside `:38-40`, `:41-43` and `:62-65` - same arrays
+plus `sentAt` and a `nowMs`. Do NOT edit those three; they stay as the no-clock
+contract.
 
-Watch the counting: `K` (failed) and `J` (stale) are disjoint by construction -
-a hard-failed leg is terminal so `isStaleLeg` is false for it - but assert that
-rather than assuming it, because branch 2's label adds them.
+Assert, rather than assume, that `K` (failed) and `J` (stale) are disjoint: a
+hard-failed leg is terminal so `isStaleLeg` is false for it. Branch 2's label
+adds them, so their disjointness is load-bearing.
 
 ### S1.5 The per-leg presenter
 
 RED, then GREEN: `presentLegDelivery(slot, rosterKind, messageAtMs?, nowMs?)`
-returning a `DeliveryPresentation | null`, covering:
+returning `DeliveryPresentation | null`:
 
 - opted-out (`errorCode === 'contact_opted_out'` ALONE, on `failed` OR
   `undelivered`) -> product-aware label per spec S4(b), `isFailure: false`
 - stale `sent` -> `Sent - not confirmed`
-- stale `queued` -> `Queued - not confirmed` (must DIFFER from the above; a test
-  asserting they differ is worth its line)
-- otherwise -> delegate to `presentDeliveryStatus` for the plain status
-- a `queued` leg carrying a transient `errorCode` -> NOT a failure, and its
-  reason must NOT render
+- stale `queued` -> `Queued - not confirmed`, and a test asserting the two
+  differ
+- otherwise -> delegate to `presentDeliveryStatus`
+- a `queued` leg carrying a transient `errorCode` -> NOT a failure, reason does
+  NOT render
+
+**`null` case:** `presentDeliveryStatus` returns null for an unrecognised
+status. A row whose presentation is null renders the member's name and NO state
+chip - never a blank row, never an invented state. Test it.
 
 **This function, not `presentDeliveryStatus`, owns the new labels.**
 `broadcastFormat.ts:108` and `Timeline.tsx:920` call `presentDeliveryStatus` and
-must not move - after S1, re-run the broadcasts tests and confirm.
+must not move - after S1, run the broadcasts tests and confirm.
 
-Gate S1: `npm run typecheck`, then the dashboard suite.
+Gate S1: `npm run typecheck`, then the dashboard suite. Both green.
 
 ---
 
@@ -127,27 +188,31 @@ Gate S1: `npm run typecheck`, then the dashboard suite.
 
 `lib/memberAttribution.ts:75-77` already matches a member against EITHER key
 convention. EXTRACT it (do not re-implement) as an exported helper taking a key
-and a roster and returning the matched `ConversationParticipant | undefined`.
-`senderLabel` must then call the extracted helper and its existing tests must
-pass unchanged - that is the proof the extraction was faithful.
+and a roster and returning `ConversationParticipant | undefined`. `senderLabel`
+then calls it, and ITS existing tests must pass unchanged - that is the proof
+the extraction was faithful.
 
 ### S2.2 The row-label resolver
 
-RED: one test per spec S2 case, and the case-3 test is the one that matters:
+**Define the key discriminator once, here, and export it**: a key is
+phone-keyed iff it starts with `phone#`; the number is the remainder, formatted
+with `formatPhoneDisplay` (`lib/phone.ts`). S2.2 and S3.2 both branch on this
+and MUST agree - a second copy is how they drift.
 
-1. roster non-empty + match -> `groupMemberLabel(member)` (name, else formatted
-   number). Cover BOTH key conventions.
+RED: one test per spec S2 case:
+
+1. roster non-empty + match -> `groupMemberLabel(member)`. Cover BOTH key
+   conventions.
 2. roster non-empty + NO match -> former-member wording; phone-keyed shows the
    formatted number, contactId-keyed shows no number.
 3. **roster ABSENT or EMPTY -> no membership claim.** Phone-keyed shows the
    formatted number; contactId-keyed shows the neutral unnamed-recipient label.
-   Assert explicitly that the former-member wording is ABSENT here. This is the
-   case that would otherwise tell a founder every recipient had left the group
-   whenever a roster fetch failed, which happens by default on two surfaces.
+   Assert explicitly that the former-member wording is ABSENT. This is the case
+   that would otherwise tell a founder every recipient had left the group
+   whenever a roster fetch failed - the default state on two surfaces.
 
-GREEN: the resolver. Return a label AND a discriminator the row can use, not a
-pre-baked string - S6's accessible name needs the same data and must not
-re-derive it differently.
+GREEN: return a label AND the discriminator, not a pre-baked string. S6's
+accessible name consumes the same data and must not re-derive it differently.
 
 Gate S2: typecheck + dashboard suite.
 
@@ -159,20 +224,23 @@ Gate S2: typecheck + dashboard suite.
 
 ### S3.1 The gate and the rows
 
-Replace the `Object.values(...)` call at `Timeline.tsx:602` so the KEYS survive.
+Replace the `Object.values(...)` at `Timeline.tsx:602` so the KEYS survive.
+
 The list's gate is the spec's single predicate - `outbound` AND at least one
 slot AND parent status not `queued_pending` - **evaluated independently of the
-rollup's null-ness.** Do not reuse `deliveredSummary !== null` as the gate; that
-is the exact defect round 1 caught.
+rollup's null-ness.** Do not reuse `deliveredSummary !== null`; that is the
+exact defect spec review round 1 caught.
 
 Render rows only while `revealed` is true (conditional render, NOT a CSS
-`display` rule). Roster order, unmatched keys last in map-key order. Rows do NOT
-`stopPropagation` - see spec S1; a builder adding it defensively violates a
-locked decision.
+`display` rule). Markup per D-d. Roster order, unmatched keys last in map-key
+order. Rows do NOT `stopPropagation` (spec S1) - a builder adding it defensively
+violates a locked decision.
 
-Per row: label (S2), presentation (S1.5), timestamp (`deliveredAt` when
+Per row: label (S2), presentation (S1.5), timestamp via D-e (`deliveredAt` when
 delivered, `sentAt` whenever the slot has one), and a reason only when the row's
 own presentation `isFailure`.
+
+Pass `nowMs` per D-b: withheld when `msg.imported === true`.
 
 CSS: a new list block in `Timeline.module.css` reusing the existing `TONE_CLASS`
 tone colours. Do not import `ConversationDetail.module.css` or the broadcasts
@@ -180,43 +248,67 @@ tone colours. Do not import `ConversationDetail.module.css` or the broadcasts
 
 ### S3.2 The rollup and the accessible name
 
-Wire the rollup call to pass the clock. Add `role="img"` + `aria-label` to
-whichever chip actually renders:
+Wire the rollup call to pass the clock (same imported guard). Add `role="img"` +
+`aria-label` to whichever chip actually renders:
 
 - rollup present -> the rollup chip (`Timeline.tsx:656-664`)
-- rollup null with a non-empty map (all opted out) -> the MESSAGE-LEVEL chip
+- rollup null with a non-empty map -> the MESSAGE-LEVEL chip
   (`Timeline.tsx:644-655`)
 
+**The accessible name uses the SAME clock as the chip it names** - pass it the
+same `nowMs` (or the same withheld undefined). A name computed against a
+different clock than its own visible label is a contradiction a reader cannot
+resolve.
+
 Name shape per spec S6, including its case-3 clause (omit the per-recipient
-recital when the roster is absent and every key is contactId-keyed). `title`
+recital when the roster is absent AND every key is contactId-keyed). `title`
 stays for mouse users. Repo precedent for the construct: `AutoBadge.tsx:25`.
+
+**Known collision to handle, not to discover:** `Timeline.test.tsx:570` asserts
+`queryByRole('img')` is absent on an MMS bubble. That assertion's INTENT is "the
+attachment did not render an image element", not "no role=img anywhere". If the
+new chip trips it, SCOPE that assertion to the attachment gallery rather than
+deleting it, and say so in the commit.
+
+**Also known:** on a RELAY all-opted-out bubble the message-level chip reads the
+queued label, because the relay fan-out never moves the parent status off
+`queued`. The visible chip is therefore wrong there TODAY, before this change.
+Attaching the accessible name is still correct - the name supersedes the visible
+text for assistive technology and will read accurately. Do not fix the visible
+chip here; FILE it (S6.4).
 
 ### S3.3 Tests
 
 In `Timeline.test.tsx`. **Every list assertion, positive AND negative, must
 drive the reveal first** - click the bubble body text, which bubbles to
-`toggleMeta`. A `queryBy...`-absent assertion without a click passes on a
+`toggleMeta`. A `queryBy`-absent assertion without a click passes on a
 completely broken build; phrase the negatives as "revealed, and still no list".
 
 Cover: rows per member under both key conventions; roster order; all three S2
-cases end-to-end; no list for `queued_pending`, for an empty map, or on an
-inbound bubble; a list for the all-opted-out map ALONGSIDE the message-level
-chip; `toHaveAttribute('role','img')` and `toHaveAccessibleName(...)` on both
-chip variants.
+cases end-to-end; **row timestamps** (present on delivered and on any leg with
+`sentAt`, absent otherwise - this is half of spec acceptance 1 and rev 1 omitted
+it); no list for `queued_pending`, for an empty map, or on an inbound bubble; a
+list for the all-opted-out map ALONGSIDE the message-level chip; the imported
+guard (D-b) showing no stale state on an imported row carrying a synthetic map;
+`toHaveAttribute('role','img')` and `toHaveAccessibleName(...)` on BOTH chip
+variants.
 
 Never write `toBeVisible()` about the reveal - `vite.config.ts:99` sets
 `css:false`, so it would be vacuous.
 
-### S3.4 The re-baseline - exactly two assertions
+### S3.4 The re-baseline census - three assertions, each for a stated reason
 
-Per spec 6.1. `Timeline.test.tsx:910` moves. `Timeline.test.tsx:999` moves, and
-its INTENT is the neutral branch, so RE-DATE its fixture near the pinned clock
-rather than rewriting the expectation. Tighten
-`GroupTextView.test.tsx:1017` from its substring regex so it can actually fail.
+Per spec 6.1, corrected by plan review:
 
-**Any other rollup assertion that goes red is a REGRESSION, not a re-baseline.**
-Specifically `:932`, `:949`, `:962`, `:976`, `:991`, `:1021` must all stay green
-untouched. If one of them fails, stop and diagnose; do not edit it.
+| Assertion | Change | Reason |
+| --- | --- | --- |
+| `Timeline.test.tsx:910` | expectation moves to branch 3 | `RELAY_OUT`'s `c2` is `sent` with no `sentAt`, so row 2, so stale against the pinned clock |
+| `Timeline.test.tsx:999` | **override the fixture LOCALLY** | Its intent is the neutral branch. **`RELAY_OUT` is SHARED** - it is spread into `:917`, `:941`, `:955`, `:968`, `:983`, `:1009` and used directly at `:909` - so re-dating the const (rev 1's instruction) would silently un-stale `:910` and delete the feature's only Timeline-level re-baseline. Give THIS test its own `at`/slots instead. |
+| `GroupTextView.test.tsx:1017` | tighten the regex | Its `sent` leg is stale under the pinned clock, but `getByText(/delivered 1\/2/)` is a SUBSTRING match that still passes. Tighten it so it can actually fail. |
+
+**Any OTHER rollup assertion that goes red is a REGRESSION, not a re-baseline.**
+Specifically `:932`, `:949`, `:962`, `:976`, `:991`, `:1021` must stay green
+untouched. If one fails, stop and diagnose; do not edit it.
 
 Gate S3: typecheck + dashboard suite.
 
@@ -226,7 +318,8 @@ Gate S3: typecheck + dashboard suite.
 
 ### S4.1 The hook
 
-A small hook beside the timeline (NOT in `deliveryStatus.ts`, which stays pure).
+Per D-c: hosted by `Timeline`, one interval per thread, bumping a `now` that
+reaches bubbles by the existing prop path.
 
 Run condition, all three clauses required: at least one rendered outbound leg is
 non-terminal AND eligible to age AND not yet stale. The middle clause is
@@ -240,11 +333,27 @@ Release the `Date` pin then install fake timers - `vi.useRealTimers()` then
 `vi.useFakeTimers()`, the sequence `dashboard/src/test/setup.ts:27-30`
 documents. Do NOT suppress the ticker under test.
 
-Prove: a not-yet-stale leg escalates after advancing past the boundary, with no
-refetch and no re-mount (this is what proves spec acceptance 2); the interval
-STOPS once every eligible leg is stale; a thread of only terminal legs schedules
-nothing; and **a thread whose only non-terminal legs are ineligible schedules
-nothing** (spec acceptance 3a - assert absence, not harmlessness).
+**RESTORE THEM.** An `afterEach` in the ticker's describe block must call
+`vi.useRealTimers()` and let `setup.ts`'s `beforeEach` re-pin. Leaving fake
+timers installed wedges every `waitFor` in the rest of `Timeline.test.tsx`,
+which is 1600+ lines and mostly async. Prefer putting these tests in their own
+file beside the others (the repo already splits Timeline coverage by topic -
+`Timeline.mms.test.tsx`, `Timeline.email.test.tsx`) so the blast radius of a
+timer mistake is one small file.
+
+Prove:
+- a not-yet-stale leg escalates after advancing past the boundary, with no
+  refetch and no re-mount (this proves spec acceptance 2);
+- the interval STOPS once every eligible leg is stale;
+- a thread of only terminal legs schedules nothing;
+- **a thread whose only non-terminal legs are INELIGIBLE schedules nothing**
+  (spec acceptance 3a).
+
+**Observable for the three absence proofs:** do NOT use `vi.getTimerCount()` -
+it is polluted by `CallCard`'s own timer and by RTL internals. Spy on
+`window.setInterval` and assert it was not called, or assert behaviourally that
+advancing a long way leaves the rendered chip text unchanged. Name which you
+used in the test title.
 
 Gate S4: typecheck + dashboard suite.
 
@@ -259,68 +368,99 @@ Gate S4: typecheck + dashboard suite.
   `cleanup()` BEFORE `restoreAllMocks()` in teardown. Re-arm every mock you
   touch or adopt the `AnyAsyncMock` form from `ConversationDetail.test.tsx:34-47`.
   Getting this wrong reproduces `conversationdetail-members-mock-suite-flake`.
-- `ConversationDetail.test.tsx`: one relay-arm case. It has ZERO delivery-chip
-  coverage today.
+- `ConversationDetail.test.tsx`: one relay-arm case. Zero delivery-chip coverage
+  today.
 
 ### S5.2 E2E
 
-Arm a stalled leg with
-`setDeliveryOutcome(request, { partyNumber, profile: { kind: 'stall' } })`
-(`e2e/fixtures/fakeTwilio.ts:258`), which stalls at `sent`. Reveal the bubble,
-assert the rows appear and name the right member against the right state.
+Spec file: extend `e2e/tests/dashboard-next/group-text-reply-all.spec.ts` or add
+a sibling in the same directory. Product: NATIVE GROUP TEXT, because that is
+where a stalled leg is armable end to end. Recipe:
+
+1. reseed, dev-login, open the group thread;
+2. arm one member's line with
+   `setDeliveryOutcome(request, { partyNumber, profile: { kind: 'stall' } })`
+   (`e2e/fixtures/fakeTwilio.ts:258`) - it stalls at `sent`;
+3. send from the composer;
+4. reveal the bubble by clicking it;
+5. assert via `getByRole('list', { name: 'Delivery by recipient' })` and its
+   `listitem`s (D-d) that the delivered member and the stalled member are named
+   with the right states.
 
 Staleness stays in the unit layer - 15 real minutes is not an e2e. A leg stuck
 at `queued` cannot be armed through the fixture's documented signature (it
-exposes `failState` while the engine's option is `stallAt`); do not add a seam
-for it.
+exposes `failState` while the engine's option is `stallAt`); do not add a seam.
 
 Do NOT add a stale fixture to the `lean` profile - it is the byte-stable e2e
 world.
 
-Scope the two locators at `group-text-stop.spec.ts:133` and `:136`: a revealed
-bubble adds a third string carrying "opted out" to the same page, and those are
-page-wide `getByText` calls today.
+**Rev 1's instruction to scope the two `group-text-stop.spec.ts` locators is
+WITHDRAWN.** It was premised on rows sitting in the DOM permanently. The
+conditional render removed that: no test in that spec reveals a bubble, so no
+row exists there, and the accessible name is an ATTRIBUTE which `getByText`
+does not match. Leave those locators alone unless a run actually shows a
+collision.
 
-Add a `selectors.md` row for the delivery chip and the bubble reveal; neither is
-documented.
+Add a `selectors.md` row for the new list and for the bubble reveal; neither is
+documented today.
 
 ### S5.3 The five surfaces in a browser
 
-Spec acceptance 7. Four surfaces render the list - relay `ConversationDetail`,
-`GroupTextView`, `PlacementConversation`, `TourConversation`. The contact page
-renders NO list and must be verified visually unchanged. Do not infer any of the
-five from "it is the same component".
+Spec acceptance 7. **Use the hermetic interactive lane and nothing else:**
+`npm run e2e:session` from THIS worktree, then drive it with the Playwright MCP.
+Never `:5174` / `:8080` - those are the human's live stack and AGENTS.md forbids
+touching them.
+
+No seed carries `delivery_recipients`, so create the state the same way S5.2
+does: arm a stalled leg, send from the composer, then look. Four surfaces must
+render the list - relay `ConversationDetail`, `GroupTextView`,
+`PlacementConversation`, `TourConversation`. The contact page must render NO
+list and be visually unchanged. Do not infer any of the five from "it is the
+same component".
+
+Also verify here, because only a browser can: the spec's chip-wrap question -
+the longest branch-2 string sharing the revealed meta row with the transport
+line (spec S3), and that S6's name is present on the chip while collapsed
+(spec S6 consequence 1, that S2 resolution runs unconditionally).
 
 Gate S5: the full four - `npm run typecheck`, `npm test`, `npm run smoke`,
-`npm run e2e`, run BARE from the worktree, never piped.
+`npm run e2e` - run BARE from the worktree, never piped.
 
 ---
 
 ## S6 - Issues (any time)
 
-File three, using `docs/issues/_TEMPLATE.md`, then run `npm run issues`:
+File four, using `docs/issues/_TEMPLATE.md`, then run `npm run issues`:
 
-1. **The inbound half.** Deferred by human decision. Record what the reviewer
-   established: the list's gate is independent of the rollup, so widening it
-   adds rows only and renders no new chip - it is cheaper than it looks.
+1. **The inbound half.** Deferred by human decision. Record the reviewer's
+   finding that it is cheaper than it looks: the list's gate is independent of
+   the rollup, so widening it adds rows only and renders no new chip.
 2. **The bubble reveal is not keyboard-reachable.** Pre-existing; this feature
-   makes the consequence worse by putting its payload behind it. Note the
-   blocker: the bubble already nests interactive children (a Link, a Retry
-   button), so it cannot simply become a button.
+   makes the consequence worse. Note the blocker: the bubble already nests
+   interactive children (a Link, a Retry button), so it cannot simply become a
+   button.
 3. **A relay-observed 21610 keeps the raw code** while the group path translates
    it to `contact_opted_out`, so only the group case is excluded from the
    denominator.
+4. **A relay all-opted-out message shows the queued label for ever.** The relay
+   fan-out never moves the parent status off `queued`, so the message-level chip
+   claims a send is in progress for a message that was sent to nobody. Found
+   during this design; pre-existing; not fixed here.
 
 ---
 
 ## Definition of done
 
 1. All four gates green from the worktree, BARE, with real exit codes quoted.
-2. The two re-baselined assertions are the ONLY rollup assertions that changed.
+2. The THREE assertions in the S3.4 census are the only pre-existing delivery
+   assertions changed, each with its stated reason in the commit message. (Plus
+   `Timeline.test.tsx:570` IF the `role="img"` collision materialises - scoped,
+   not deleted.)
 3. `deliveryStatus.test.ts:197-201` passes verbatim - the 1:1 rule did not move.
 4. Broadcasts are untouched: `broadcastFormat.ts` / `DeliveryBadge.tsx` have no
    diff and their tests pass.
-5. Every spec acceptance item has a test or a browser check naming it.
-6. `main` synced ONCE at the final pre-handback step, not chased repeatedly.
-7. ASCII-only on every added line. Explicit paths on every commit; never
-   `git add -A`. A `Co-Authored-By` trailer naming the authoring model.
+5. Every spec acceptance item has a test or a named browser check.
+6. No fake timers escape their describe block.
+7. `main` synced ONCE at the final pre-handback step, not chased repeatedly.
+8. ASCII-only on every added line (see D-f). Explicit paths on every commit;
+   never `git add -A`. A `Co-Authored-By` trailer naming the authoring model.

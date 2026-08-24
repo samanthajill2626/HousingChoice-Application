@@ -64,7 +64,13 @@ export class RecordingMessagingDriver implements MessagingAdapter {
     this.log = deps.logger ?? defaultLogger;
     this.client = deps.client ?? createDynamoClient({ config: deps.config });
     this.doc = deps.doc ?? createDocumentClient({ config: deps.config });
-    this.table = tableName(OUTBOX_TABLE_BASE);
+    // From the INJECTED config, not bare process.env (the devReset.ts idiom).
+    // The bare call read the same value on every deployed path, so nothing
+    // noticed - until a test injected a throwaway prefix and the driver kept
+    // writing to the shared hc-local-dev-outbox anyway.
+    this.table = tableName(OUTBOX_TABLE_BASE, {
+      TABLE_PREFIX: deps.config.tablePrefix,
+    } as NodeJS.ProcessEnv);
   }
 
   private ensureTable(): Promise<unknown> {

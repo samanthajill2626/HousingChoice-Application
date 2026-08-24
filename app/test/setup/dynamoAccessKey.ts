@@ -67,6 +67,20 @@ import { fileAccessKeyId } from '../../../e2e/support/lane.mjs';
  */
 export const SHARED_LOCAL_TABLES_MARKER = 'hc:dynamo-lane shared';
 
+/**
+ * The marker counts ONLY as a declaration: a `//` comment line that says the
+ * marker and nothing else (leading whitespace and a `.` are allowed - `-` and
+ * further words are not, so `hc:dynamo-lane shared-nothing` does not match).
+ *
+ * It was a bare substring `.includes()` until 2026-08-23, when a suite that
+ * had just ESCAPED the shared key wrote "deliberately NOT `hc:dynamo-lane
+ * shared`" in its header - and the substring match silently opted it back in.
+ * The suite went green either way, so nothing surfaced until a probe printed
+ * which access key the worker actually held. Prose ABOUT the marker must never
+ * behave as the marker.
+ */
+const SHARED_MARKER_LINE = /^\s*\/\/\s*hc:dynamo-lane shared\.?\s*$/m;
+
 /** Repo root, resolved from this file: app/test/setup -> app/test -> app -> root. */
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -85,7 +99,7 @@ export function testFileId(absPath: string): string {
 /** True when this suite has declared that it reads the shared hc-local- tables. */
 export function optsIntoSharedLocalTables(absPath: string): boolean {
   try {
-    return readFileSync(absPath, 'utf8').includes(SHARED_LOCAL_TABLES_MARKER);
+    return SHARED_MARKER_LINE.test(readFileSync(absPath, 'utf8'));
   } catch {
     // Unreadable source is not a reason to hand back the shared key - that
     // would quietly restore the contention this hook exists to remove.

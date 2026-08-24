@@ -192,13 +192,20 @@ const ERROR_CODE_REASONS: Record<string, string> = {
  * "attachment", not "picture", because MMS here also carries PDFs
  * (MMS_ALLOWED_TYPES in Timeline.tsx).
  *
- * 30006 is deliberately ABSENT: "landline or unreachable carrier" is a claim
- * about the line type, true whichever leg reports it, and the server-side twin
- * (app/src/routes/webhooks/twilio.ts) trusts it from an MMS leg for that reason.
- * Adding it here would contradict that arm.
+ * 30006 gets the SAME copy, and for the same reason. Its Twilio name is
+ * "landline OR unreachable carrier" - a disjunction whose second half is
+ * message-type-specific - so on an attachment leg it does NOT establish that
+ * the number is a landline. The server-side twin
+ * (app/src/routes/webhooks/twilio.ts) declines to write `sms_unreachable` from
+ * an MMS leg for either code, and a chip confidently reading "That number is a
+ * landline" about a leg the server just refused to trust would contradict it,
+ * and would stop staff texting a number that may well work. On an SMS leg 30006
+ * keeps its landline reading, which is how every real landline in prod was
+ * caught.
  */
 const MMS_ERROR_CODE_REASONS: Record<string, string> = {
   '30005': "Attachment didn't get through, texts may still work",
+  '30006': "Attachment didn't get through, texts may still work",
 };
 
 /** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */

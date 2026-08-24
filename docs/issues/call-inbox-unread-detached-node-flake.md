@@ -9,6 +9,19 @@ created: 2026-08-23
 refs: e2e/tests/dashboard-next/call-inbox-unread.spec.ts:155
 ---
 
+**Sighting 3 (2026-08-24, soak R3, lane B) - AND IT ELIMINATES THE CONTAINER
+EXPLANATION.** Same test, same signature verbatim: the All tab in its
+READY-AND-EMPTY state ("No conversations yet") at the Mark-unread click, after
+earlier steps proved the row present. This time the shared container was the
+NEW tmpfs shape and demonstrably healthy - ~1GiB RSS, no stalls, and BOTH
+sibling lanes (a full e2e and a full npm test) were green at that moment. So
+the empty-partition read after a mark-read write is not GC-stall collateral:
+it is a real app read-path behaviour, now THREE sightings, always this spec,
+roughly 3 in the last 12 full runs. This is the strongest single datum yet for
+C1's `mark-read-fanout-stale-gsi-skip` - a whole open-partition read answering
+empty moments after the mark-read write path ran. Artifact preserved.
+
+
 **ADJUDICATED 2026-08-24: this is C1 evidence, not a spec bug - the spec-side
 "re-resolve the locator" remedy is WITHDRAWN.** Reading sighting 2's preserved
 page snapshot changed the diagnosis:

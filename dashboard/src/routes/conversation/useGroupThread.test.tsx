@@ -234,9 +234,13 @@ describe('useGroupThread paging', () => {
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
 
-    // 50 rows the relay mapper drops entirely.
-    const calls = page(50, 60).map((m) => ({ ...m, tsMsgId: `call${m.tsMsgId}`, type: 'call' }));
-    getConversationMessages.mockResolvedValueOnce(calls);
+    // 50 rows the relay mapper drops entirely. EMAIL, not call: masked calls
+    // became a rendered Timeline card (masked-relay-calls-invisible, resolved
+    // 2026-08-24), so a page of `call` rows no longer maps to zero. The relay
+    // copy of this test was moved to email in that change; this group copy is
+    // the byte-identical twin the comment above warns about.
+    const emails = page(50, 60).map((m) => ({ ...m, tsMsgId: `email${m.tsMsgId}`, type: 'email' }));
+    getConversationMessages.mockResolvedValueOnce(emails);
     await act(async () => {
       screen.getByRole('button', { name: 'load older' }).click();
     });
@@ -251,7 +255,7 @@ describe('useGroupThread paging', () => {
     });
     expect(getConversationMessages).toHaveBeenLastCalledWith(
       'g1',
-      { limit: 50, before: `callm60` },
+      { limit: 50, before: `emailm60` },
       expect.anything(),
     );
   });

@@ -26,6 +26,20 @@ intersection with tours. Not reproduced since 2026-08-05 across a 204-pass gate
 run and four per-file runs.
 ---
 
+**Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
+Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)
+then 253 passed (19.0m). This spec passed in BOTH, as did every other issue on
+the C6/C11 flake list. The two failures in run 1 were different specs, both new
+and both filed separately.
+
+Deliberately NOT closed on that. Two green runs cannot prove an intermittent
+failure absent, and this issue's own history is of a spec that passes repeatedly
+and then does not. Recorded so the next person has a dated data point rather
+than a re-measurement to redo - and note the DynamoDB Local contention that
+several of these were filed under has since been fixed, so a recurrence now
+means something different than it did before.
+
+
 **Update (2026-08-05, feat/tour-reminder-details).** Status of the two halves:
 
 - The DETERMINISTIC half (morning_of never armed before 08:00 org-local) was

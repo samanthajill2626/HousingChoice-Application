@@ -44,7 +44,8 @@ import type { DeliveryPresentation, DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
 import {
-  findRosterMember,
+  findMemberByKey,
+  memberDisplayLabel,
   senderLabel as resolveSenderLabel,
 } from '../../lib/memberAttribution.js';
 import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
@@ -488,9 +489,9 @@ function recipientRowTime(slot: RelayRecipientDelivery): string {
  * Order the map's entries for display: ROSTER order first, then every slot whose
  * key matches no roster member, in MAP-KEY order.
  *
- * The match reuses `findRosterMember` - the same matcher `senderLabel` and
- * `resolveRecipientLabel` use - so a row can never sort as "unmatched" while it
- * renders a member's name.
+ * The match reuses `findMemberByKey` - the same matcher `senderLabel`,
+ * `relayCallSummary` and `resolveRecipientLabel` use - so a row can never sort as
+ * "unmatched" while it renders a member's name.
  *
  * The `Array.isArray` guard is DEFENCE IN DEPTH, not a response to an observed
  * wire shape: these rosters arrive off raw passthroughs, and the guard holds the
@@ -506,7 +507,7 @@ function orderRecipientRows(
   const members = Array.isArray(roster) ? roster : [];
   return entries
     .map(([key, slot], index) => {
-      const member = members.length > 0 ? findRosterMember(key, members) : undefined;
+      const member = members.length > 0 ? findMemberByKey(key, members) : undefined;
       const rank = member === undefined ? Number.MAX_SAFE_INTEGER : members.indexOf(member);
       return { key, slot, name: resolveRecipientLabel(key, roster), when: recipientRowTime(slot), rank, index };
     })
@@ -544,7 +545,9 @@ function speakDeliveryText(text: string): string {
  *
  * It takes the SAME clock as the chip it names. A name computed against a
  * different clock than its own visible label is a contradiction a reader cannot
- * resolve.
+ * resolve. It takes the SAME `media` flag for the same reason: a 30005 on an
+ * attachment leg must read "Attachment didn't get through" here, on the visible
+ * row, and on the rollup chip alike. One `isMms`, three consumers.
  *
  * Case-3 clause: with NO roster and every slot contactId-keyed there is nothing
  * to say about anyone, so the name carries only the count rather than reciting
@@ -556,6 +559,7 @@ function recipientSummaryName(
   rosterKind: RosterKind,
   messageAtMs: number | undefined,
   nowMs: number | undefined,
+  media: boolean,
 ): string {
   const spoken = speakDeliveryText(headline);
   const anonymous = rows.every((r) => r.name.match === 'unidentified' && !r.name.phoneKeyed);
@@ -566,7 +570,7 @@ function recipientSummaryName(
     // A null presentation (an unrecognised wire status) names the person and
     // claims no state - never a blank row, never an invented one.
     if (leg === null) return `${who}.`;
-    const legReason = leg.isFailure ? deliveryReason(row.slot.errorCode) : undefined;
+    const legReason = leg.isFailure ? deliveryReason(row.slot.errorCode, { media }) : undefined;
     return `${who}: ${speakDeliveryText(chipText(leg, legReason))}.`;
   });
   return `${spoken}. ${recital.join(' ')}`;
@@ -818,7 +822,13 @@ function MessageBubble({
   const delivery = outbound
     ? presentDeliveryStatus(msg.delivery_status, msg.imported === true ? undefined : Date.parse(msg.at))
     : null;
-  const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
+  // `media` scopes the reason copy to the leg that actually failed: a 30005 on
+  // an attachment is routinely an MMS-path failure to a line whose texts all
+  // deliver, so an attachment bubble must not read "Number is invalid". WHERE
+  // that path breaks is deliberately unnamed - see
+  // docs/issues/mms-silent-drop-dish-textnow.md.
+  const isMms = msg.type === 'mms';
+  const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
@@ -865,8 +875,7 @@ function MessageBubble({
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(
           recipientEntries.map(([, slot]) => slot),
-          messageAtMs,
-          bubbleNowMs,
+          { media: isMms, messageAtMs, nowMs: bubbleNowMs },
         )
       : null;
   const recipientRows = orderRecipientRows(recipientEntries, relayRoster);
@@ -891,6 +900,7 @@ function MessageBubble({
           rosterKind,
           messageAtMs,
           bubbleNowMs,
+          isMms,
         )
       : undefined;
   // Multi-party attribution: who authored this message ("Team" or a member's
@@ -910,6 +920,7 @@ function MessageBubble({
           rosterKind,
           messageAtMs,
           bubbleNowMs,
+          isMms,
         )
       : undefined;
 
@@ -1004,7 +1015,17 @@ function MessageBubble({
             // mirroring the message-level rule. An errorCode does NOT imply
             // failure: the fan-out writes a transient carrier code onto a leg it
             // is still retrying, and printing that beside it is its own misread.
-            const legReason = leg?.isFailure === true ? deliveryReason(row.slot.errorCode) : undefined;
+            //
+            // `{ media: isMms }` is REQUIRED, not decorative. Without it a 30005
+            // on an attachment leg reads "Number is invalid" beside a named
+            // member - the un-hedged copy the MMS fix removed from the rollup -
+            // so this NEW surface would contradict the message-level chip
+            // directly above it. One `isMms` feeds the rollup, this row and the
+            // accessible name, so the three cannot disagree.
+            const legReason =
+              leg?.isFailure === true
+                ? deliveryReason(row.slot.errorCode, { media: isMms })
+                : undefined;
             return (
               <li key={row.key} className={styles.recipientRow}>
                 <span className={styles.recipientName}>
@@ -1121,7 +1142,53 @@ function MonoAudio(props: React.ComponentProps<'audio'>): React.JSX.Element {
  *  support - the label comes from presentCallState, which returns nothing at all
  *  when nothing is known. The party number lives behind a click-to-reveal detail
  *  line rather than on the face. */
-function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
+function joinCallRecipients(labels: string[]): string {
+  if (labels.length <= 1) return labels[0] ?? '';
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
+}
+
+function relayCallSummary(
+  call: TimelineCall,
+  roster: ConversationParticipant[] | undefined,
+): string | undefined {
+  if (roster === undefined || roster.length < 2) return undefined;
+  let caller = findMemberByKey(call.relay_sender_key, roster);
+
+  // Rows written before relay_sender_key still carry the counterpart's stored
+  // non-phone label. On a two-person group, an unchanged current counterpart
+  // name identifies the other current member as the caller. This is a migration
+  // fallback only; all new rows use the stable key above.
+  if (caller === undefined && roster.length === 2 && call.call_party_label) {
+    const oldCounterpart = call.call_party_label.trim().toLocaleLowerCase();
+    const matchingCounterparts = roster.filter((member) => {
+      const current = memberDisplayLabel(member);
+      return current !== undefined && current.toLocaleLowerCase() === oldCounterpart;
+    });
+    // Duplicate display labels are not identities. Infer only when the legacy
+    // label identifies exactly one current counterpart.
+    const counterpart = matchingCounterparts.length === 1 ? matchingCounterparts[0] : undefined;
+    if (counterpart !== undefined) caller = roster.find((member) => member !== counterpart);
+  }
+
+  if (caller === undefined) return undefined;
+  const callerLabel = memberDisplayLabel(caller);
+  if (callerLabel === undefined) return undefined;
+  const recipients = roster
+    .filter((member) => member !== caller)
+    .map(memberDisplayLabel)
+    .filter((label): label is string => label !== undefined);
+  if (recipients.length === 0) return undefined;
+  return `${callerLabel} called ${joinCallRecipients(recipients)}`;
+}
+
+function CallCard({
+  call,
+  relayRoster,
+}: {
+  call: TimelineCall;
+  relayRoster?: ConversationParticipant[];
+}): React.JSX.Element {
   // The card's own clock: seeded once at mount, advanced by EXACTLY one timeout
   // when the presenter says the current label has an expiry.
   const [now, setNow] = useState<number>(() => Date.now());
@@ -1174,6 +1241,8 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // minutes; two calls inside one minute would otherwise carry identical names.
   const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  const relaySummary = relayCallSummary(call, relayRoster);
+  const callWho = relaySummary ?? directionWord;
   // An unparseable `at` is a REAL handled case here (the presenter treats it as
   // one and has matrix coverage for it), and the formatter answers '' for it.
   // Concatenating that unconditionally would emit a dangling separator -
@@ -1181,7 +1250,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // exactly the ambiguity the seconds were added to remove. Fall back to the
   // row id: it is always present, always distinct, and an opaque key rather
   // than anything a screen reader would announce as a phone.
-  const cardName = `${directionWord} - ${nameTime || call.id}`;
+  const cardName = `${callWho} - ${nameTime || call.id}`;
   const duration = formatDuration(call.call_duration);
   const toneClass = state.tone !== undefined ? (CALL_TONE_CLASS[state.tone] ?? '') : '';
   // A MASKED row carries no counterpart identity at all - party_phone is
@@ -1189,7 +1258,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   // ALREADY on the card face, so a detail line there would disclose a duplicate
   // of what the reader can already see. `undefined` means no line AND no reveal
   // control: a disclosure that discloses nothing is worse than no disclosure.
-  const detail = call.party_phone
+  const detail = relayRoster === undefined && call.party_phone
     ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
     : undefined;
 
@@ -1210,7 +1279,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
         <span className={styles.callArrow} aria-hidden="true">
           {outbound ? ARROW_OUT : ARROW_IN}
         </span>
-        <span className={styles.callWho}>{directionWord}</span>
+        <span className={styles.callWho}>{callWho}</span>
         {state.label !== undefined ? (
           <span className={`${styles.outcome ?? ''} ${toneClass}`}>{state.label}</span>
         ) : null}
@@ -1237,7 +1306,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}
-      {call.recording_s3_key && call.call_sid ? (
+      {relayRoster === undefined && call.recording_s3_key && call.call_sid ? (
         <MonoAudio
           className={styles.recordingPlayer}
           controls
@@ -1248,15 +1317,17 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
       ) : null}
       {/* Transcript lifecycle (voice-transcription 3.7): the in-flight indicator
           replaces the collapsible while pending/failed. */}
-      {call.transcript_status === 'pending' ? (
-        <p className={styles.transcriptPendingNote}>Transcribing...</p>
-      ) : call.transcript_status === 'failed' ? (
-        <p className={styles.transcriptPendingNote}>Transcript unavailable</p>
-      ) : call.transcript ? (
-        <details className={styles.transcript}>
-          <summary className={styles.transcriptToggle}>Transcript</summary>
-          <p className={styles.transcriptBody}>{call.transcript}</p>
-        </details>
+      {relayRoster === undefined ? (
+        call.transcript_status === 'pending' ? (
+          <p className={styles.transcriptPendingNote}>Transcribing...</p>
+        ) : call.transcript_status === 'failed' ? (
+          <p className={styles.transcriptPendingNote}>Transcript unavailable</p>
+        ) : call.transcript ? (
+          <details className={styles.transcript}>
+            <summary className={styles.transcriptToggle}>Transcript</summary>
+            <p className={styles.transcriptBody}>{call.transcript}</p>
+          </details>
+        ) : null
       ) : null}
     </div>
   );
@@ -1373,7 +1444,9 @@ function StreamItem({
         />
       );
     case 'call':
-      return <CallCard call={item} />;
+      return (
+        <CallCard call={item} {...(relayRoster !== undefined && { relayRoster })} />
+      );
     case 'milestone':
       return <MilestonePin ms={item} />;
     case 'scheduled':

@@ -158,3 +158,85 @@ describe('MovePromptModal (prefill from recorded value)', () => {
     expect(screen.getByRole('radio', { name: 'Fail' })).toBeChecked();
   });
 });
+
+describe('MovePromptModal draftStore - typed values survive a remount', () => {
+  // The 2026-08-24 e2e gate caught the loss in the wild: the Schedule-inspection
+  // dialog's filled date was EMPTY (Confirm disabled) moments after a successful
+  // fill - the modal subtree had re-initialized from `initial` while its owner's
+  // `pending` state survived. The parent-owned draftStore removes the class:
+  // initializers read it first, setters write through, so a remount restores
+  // exactly what the human had typed. The exact production remount trigger is
+  // load-dependent and unproven, so the test drives the remount DIRECTLY -
+  // unmount, re-render with the same store - which is the invariant the fix
+  // claims, independent of trigger.
+  // See docs/issues/move-prompt-modal-loses-filled-date-under-load.md.
+  it('the filled inspection date survives unmount + remount with the same store', async () => {
+    const user = userEvent.setup();
+    const draftStore: { current: import('./MovePromptModal.js').MovePromptDraft | undefined } = {
+      current: undefined,
+    };
+    const { unmount } = render(
+      <MovePromptModal mode="inspectionDate" onClose={() => {}} onConfirm={() => {}} draftStore={draftStore} />,
+    );
+    await user.type(screen.getByLabelText('Inspection date'), '2026-09-15');
+    expect(screen.getByRole('button', { name: 'Confirm move' })).toBeEnabled();
+
+    unmount(); // the load-dependent trigger, driven directly
+
+    const onConfirm = vi.fn();
+    render(
+      <MovePromptModal mode="inspectionDate" onClose={() => {}} onConfirm={onConfirm} draftStore={draftStore} />,
+    );
+    expect(screen.getByLabelText('Inspection date')).toHaveValue('2026-09-15');
+    const confirm = screen.getByRole('button', { name: 'Confirm move' });
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith({ inspectionDate: '2026-09-15' });
+  });
+
+  it('WITHOUT a store the same remount loses the date - the class the store exists for', async () => {
+    // The negative control: proves the survival above comes from the store, not
+    // from some other mechanism, and documents what every storeless mount risks.
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <MovePromptModal mode="inspectionDate" onClose={() => {}} onConfirm={() => {}} />,
+    );
+    await user.type(screen.getByLabelText('Inspection date'), '2026-09-15');
+    unmount();
+    render(<MovePromptModal mode="inspectionDate" onClose={() => {}} onConfirm={() => {}} />);
+    expect(screen.getByLabelText('Inspection date')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Confirm move' })).toBeDisabled();
+  });
+
+  it('a draft WINS over the recorded prefill after a remount (the human typed something newer)', async () => {
+    const user = userEvent.setup();
+    const draftStore: { current: import('./MovePromptModal.js').MovePromptDraft | undefined } = {
+      current: undefined,
+    };
+    const { unmount } = render(
+      <MovePromptModal
+        mode="inspectionDate"
+        onClose={() => {}}
+        onConfirm={() => {}}
+        initial={{ inspectionDate: '2026-09-01' }}
+        draftStore={draftStore}
+      />,
+    );
+    const input = screen.getByLabelText('Inspection date');
+    expect(input).toHaveValue('2026-09-01');
+    await user.clear(input);
+    await user.type(input, '2026-09-20');
+    unmount();
+
+    render(
+      <MovePromptModal
+        mode="inspectionDate"
+        onClose={() => {}}
+        onConfirm={() => {}}
+        initial={{ inspectionDate: '2026-09-01' }}
+        draftStore={draftStore}
+      />,
+    );
+    expect(screen.getByLabelText('Inspection date')).toHaveValue('2026-09-20');
+  });
+});

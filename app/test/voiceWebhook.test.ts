@@ -106,6 +106,9 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(call.provider_sid).toBe('CAinbound0001');
     expect(call.call_status).toBe('ringing');
     expect(call.author).toBe('tenant'); // caller's reviewed role
+    // Live identity, not a name/phone snapshot: the dashboard resolves this
+    // existing relay member key against the CURRENT roster whenever it renders.
+    expect(call.relay_sender_key).toBe('c-alice');
     // call_party_label is the COUNTERPART (callee) role/name — never a phone.
     expect(call.call_party_label).toBe('Bob');
     expect(call.call_party_label).not.toContain('+');
@@ -145,6 +148,144 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(xml).toContain(CAROL);
     expect(xml).not.toContain(ALICE); // caller's own leg is never a dial target
     expect(xml).toContain(`callerId="${POOL}"`);
+  });
+});
+
+describe('inbound masked voice - pool-number multiplexing (relay-number-lifecycle)', () => {
+  const DAVE = '+15550100004';
+  const ERIN = '+15550100005';
+
+  /**
+   * A SECOND relay group on the SAME pool number (participant-disjoint).
+   * Every test here overrides created_at explicitly - ordering is the subject
+   * under test, so no wall-clock default may decide a newest-first tie.
+   */
+  function seedSecondRelay(
+    world: FakeWorld,
+    overrides: Partial<ConversationItem> = {},
+  ): ConversationItem {
+    return seedRelay(world, {
+      conversationId: 'conv-relay-voice-2',
+      participants: [
+        { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+        { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
+      ],
+      ...overrides,
+    });
+  }
+
+  it('two OPEN groups on one pool number: the caller bridges within THEIR group, not the first match', async () => {
+    const world = createFakeWorld();
+    // Group 1 (Alice+Bob) is seeded FIRST so a naive first-open pick returns it.
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { created_at: '2026-08-21T17:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    // Dave (group 2) calls the shared pool number.
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: DAVE, CallSid: 'CAmux1' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    // Bridged to ERIN (Dave's counterpart) - never to group 1's members.
+    expect(xml).toContain('<Dial');
+    expect(xml).toContain(ERIN);
+    expect(xml).not.toContain(BOB);
+    expect(xml).not.toContain(ALICE);
+    expect(xml).toContain(`callerId="${POOL}"`);
+    // The call entry lands in DAVE's conversation, not group 1.
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux1');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
+  });
+
+  it('caller on NO roster of a multiplexed number: refusal recorded on the NEWEST open group (SMS parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { created_at: '2026-08-21T17:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAmux2' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).not.toContain('<Dial');
+    expect(xml).toContain('<Hangup');
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux2');
+    expect(call?.type).toBe('call');
+    expect(call?.conversationId).toBe('conv-relay-voice-2'); // newest open
+    expect(call?.call_outcome).toBe('missed');
+  });
+
+  it('caller only on a CLOSED group: closed-thread refusal in THAT group, even with another OPEN group on the number', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' }); // open, Alice+Bob
+    seedSecondRelay(world, { status: 'closed', created_at: '2026-08-20T12:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    // Dave's group is closed; Alice/Bob's open group must NOT swallow his call.
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: DAVE, CallSid: 'CAmux3' }),
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).not.toContain('<Dial');
+    expect(xml).toContain('<Hangup');
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux3');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
+    expect(call?.received_on_closed_thread).toBe(true);
+  });
+
+  it('every group closed and caller on NO roster: founder triage, never buried in a dead group (AF-5 parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed', created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { status: 'closed', created_at: '2026-08-20T12:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAmux5' }),
+    );
+    expect(res.status).toBe(200);
+    // The harness world has no inbound-voice-line holder, so founder triage
+    // answers with the text-us greeting. The point under test is that the call
+    // reaches founder triage AT ALL instead of a masked burial: no bridge, and
+    // crucially NO call row filed into either dead relay transcript (the SMS
+    // AF-5 rule - a stranger, a second phone, or a member from a NEW phone).
+    expect(res.text).not.toContain('<Dial');
+    expect(world.messages.find((m) => m.provider_sid === 'CAmux5')).toBeUndefined();
+  });
+
+  it('caller on TWO open groups (burn invariant violated): routes to the newest (SMS parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { created_at: '2026-08-21T15:00:00.000Z' }); // Alice+Bob
+    seedSecondRelay(world, {
+      created_at: '2026-08-21T17:00:00.000Z',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ CallSid: 'CAmux4' }), // From: ALICE
+    );
+    const xml = res.text;
+    // Newest group wins: Alice bridges to Erin, not Bob.
+    expect(xml).toContain(ERIN);
+    expect(xml).not.toContain(BOB);
+    const call = world.messages.find((m) => m.provider_sid === 'CAmux4');
+    expect(call?.conversationId).toBe('conv-relay-voice-2');
   });
 });
 
@@ -323,14 +464,7 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).not.toContain('<Dial');
   });
 
-  // A MASKED relay bridge's call row is rendered by NO surface: the contact
-  // timeline excludes relay_group conversations, and the relay thread mapper
-  // drops type:'call' rows entirely. Announcing the press-1 stamp would fan an
-  // SSE broadcast out to every connected dashboard - plus a mark-read POST and
-  // a media refetch from every open contact page - to redraw a row nobody
-  // draws. Relay groups are the growing product, so this must not scale with
-  // them.
-  it('press-1 on a MASKED relay bridge stamps the row but announces NOTHING', async () => {
+  it('press-1 on a MASKED relay bridge announces the status without touching Inbox activity', async () => {
     const world = createFakeWorld();
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
@@ -351,8 +485,16 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
     expect(call.masked).toBe(true);
     expect(call.call_status).toBe('in-progress');
-    // ...and nothing at all is announced for it.
-    expect(world.emitted).toHaveLength(0);
+    // The Relay Timeline now renders this row, so its open view must refetch
+    // before a stale ringing card can age into a false "Missed" label.
+    expect(world.emitted).toEqual([
+      {
+        event: 'message.persisted',
+        payload: expect.objectContaining({ conversationId: 'conv-relay-voice-1' }),
+      },
+    ]);
+    // message.persisted refreshes the Timeline only. It must not reorder the
+    // Inbox, alter its preview, or bump unread state.
     expect(world.touches).toHaveLength(0);
   });
 

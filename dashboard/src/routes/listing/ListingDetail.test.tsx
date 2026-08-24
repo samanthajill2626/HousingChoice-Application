@@ -383,6 +383,31 @@ describe('ListingDetail', () => {
     expect(screen.queryByText('t-del')).not.toBeInTheDocument();
   });
 
+  it('resolves a PARTNER contact to their name on the placements card - the widened fan-out reaches this map', () => {
+    // Same id->name map as the tours list: TYPES_FOR.all gained 'partner' on
+    // 2026-08-18, and without partners in the resolution set a placement row
+    // pointing at one renders its raw id.
+    // See docs/issues/partner-widening-consumer-test-gap.md.
+    useContacts.mockImplementation((filter: string) =>
+      filter === 'deleted'
+        ? { status: 'ready', contacts: [] }
+        : {
+            status: 'ready',
+            contacts: [
+              { contactId: 'c-partner', type: 'partner', firstName: 'Renata', lastName: 'Cole', phone: '+14045550190' },
+            ],
+          },
+    );
+    useListing.mockReturnValue({
+      ...READY,
+      placementsOnUnit: [{ placementId: 'p-part', tenantId: 'c-partner', unitId: 'u1', stage: 'moved_in' }],
+    });
+    renderAt();
+    const row = screen.getByRole('link', { name: /Renata Cole/ });
+    expect(row).toHaveAttribute('href', '/placements/p-part');
+    expect(screen.queryByText('c-partner')).not.toBeInTheDocument();
+  });
+
   it('renders the "Tours on this property" card: tenant name + date rows linking to the tour, status on the right', () => {
     useListing.mockReturnValue({
       ...READY,

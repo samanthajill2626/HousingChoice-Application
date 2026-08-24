@@ -4,7 +4,8 @@
 // Each of these has been mutation-probed: the defect it names was reintroduced
 // and the assertion was confirmed to fail. A guard that has never failed is
 // worth nothing.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -161,6 +162,56 @@ describe('per-file DynamoDB Local access keys', () => {
       expect(accessKeyForTestFile(unmarked, { worktreeKey: 'hctestwork' })).toBe(
         fileAccessKeyId(testFileId(unmarked)),
       );
+    });
+
+    it('treats the marker as a DECLARATION LINE, never as a substring', () => {
+      // Regression pin (2026-08-23). The check was a bare `.includes()`, and a
+      // suite that had just ESCAPED the shared key wrote "deliberately NOT
+      // `<marker>`" in its header comment - which CONTAINS the marker, so the
+      // substring match silently opted the file back into the very key it was
+      // escaping. The suite stayed green under either key (its throwaway table
+      // works anywhere), so nothing surfaced until a probe printed the access
+      // key the worker actually held. Prose ABOUT the marker must never behave
+      // as the marker.
+      const dir = mkdtempSync(path.join(tmpdir(), 'hc-marker-'));
+      const write = (name: string, content: string): string => {
+        const f = path.join(dir, name);
+        writeFileSync(f, content);
+        return f;
+      };
+      try {
+        // The declaration forms that must count.
+        expect(
+          optsIntoSharedLocalTables(write('a.test.ts', `// ${SHARED_LOCAL_TABLES_MARKER}\nexport {};\n`)),
+          'a line-start comment declares',
+        ).toBe(true);
+        expect(
+          optsIntoSharedLocalTables(write('b.test.ts', `  // ${SHARED_LOCAL_TABLES_MARKER}\nexport {};\n`)),
+          'an indented comment declares',
+        ).toBe(true);
+
+        // The mentions that must NOT.
+        expect(
+          optsIntoSharedLocalTables(
+            write('c.test.ts', `// deliberately NOT \`${SHARED_LOCAL_TABLES_MARKER}\` (see header)\nexport {};\n`),
+          ),
+          'the exact early-draft prose that caused the regression',
+        ).toBe(false);
+        expect(
+          optsIntoSharedLocalTables(
+            write('d.test.ts', `const s = '${SHARED_LOCAL_TABLES_MARKER}';\nexport {};\n`),
+          ),
+          'a string literal in code',
+        ).toBe(false);
+        expect(
+          optsIntoSharedLocalTables(
+            write('e.test.ts', `// ${SHARED_LOCAL_TABLES_MARKER}-nothing else like it\nexport {};\n`),
+          ),
+          'the marker with trailing words',
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('lets an explicitly exported AWS_ACCESS_KEY_ID win over both', () => {

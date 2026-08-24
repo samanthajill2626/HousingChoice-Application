@@ -64,6 +64,7 @@ import {
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
+import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import { applyNumberSuppression } from '../../services/numberSuppression.js';
 import {
@@ -173,13 +174,6 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
 }
 
 /**
- * Sort relay groups NEWEST-first by created_at (missing created_at sorts last).
- * Used to break ties in (To, From) resolution: at most one OPEN group should
- * match by the burn invariant, but a corrupt-many is disambiguated to the
- * newest (never a crash), and a sender in several CLOSED groups on one number
- * routes to the newest for provenance.
- */
-/**
  * Seen keys for the delivery-error DEGRADATION logs (the arms that flag nothing
  * and only report: sms_unreachable with no contact, and the 21610 arms). Twilio
  * redelivers a status callback until it is acked, and a group leg has no contact
@@ -204,12 +198,6 @@ function logDegradationOnce(key: string, emit: () => void): void {
   }
   DEGRADATION_LOGGED_KEYS.add(key);
   emit();
-}
-
-function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
-  const aC = a.created_at ?? '';
-  const bC = b.created_at ?? '';
-  return aC < bC ? 1 : aC > bC ? -1 : 0;
 }
 
 export interface TwilioWebhookDeps {
@@ -1948,70 +1936,61 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // (1.5) Relay routing (relay-number-lifecycle): a pool number now fronts
     // MANY participant-disjoint groups (concurrently + over time), so inbound
     // resolves on (To, From) via getAllByPoolNumber (open + closed - pool_number
-    // is never cleared). The byPoolNumber GSI read is still the cheap lookup
-    // (never a scan). Zero groups on To -> fall through to the normal 1:1 path.
+    // is never cleared) through the shared ladder in
+    // services/relayInboundResolution.ts (one policy for SMS and voice - the
+    // rung rationale lives there). The byPoolNumber GSI read is still the
+    // cheap lookup (never a scan). Zero groups on To -> fall through to the
+    // normal 1:1 path.
     if (To !== undefined && To.length > 0) {
       const groups = await conversations.getAllByPoolNumber(To);
-      if (groups.length > 0) {
+      const resolution = resolveRelayInbound(groups, From);
+      if (resolution !== undefined && resolution.kind === 'open_member') {
         // (a) OPEN group whose roster contains the sender -> today's relay path
-        //     (fan-out, DLR pointers, STOP handling all unchanged). The burn
-        //     invariant guarantees at most one; a corrupt-many routes to the
-        //     newest and logs an error (never crashes the webhook).
-        const openMatches = groups.filter(
-          (g) => g.status === 'open' && (g.participants ?? []).some((m) => m.phone === From),
-        );
-        if (openMatches.length > 1) {
+        //     (fan-out, DLR pointers, STOP handling all unchanged).
+        if (resolution.violatingOpenMatchIds) {
           log.error(
-            { providerSid: MessageSid, matchCount: openMatches.length },
+            {
+              providerSid: MessageSid,
+              matchCount: resolution.violatingOpenMatchIds.length,
+              conversationIds: resolution.violatingOpenMatchIds,
+            },
             'multiple OPEN relay groups on one pool number match the sender (burn invariant violated) - routing to the newest',
           );
         }
-        const openMatch = openMatches.sort(byNewestCreated)[0];
-        if (openMatch) {
-          // Empty ack, keyword or not: the open path processes STOP/HELP/opt-in
-          // and Twilio's Advanced Opt-Out sends the confirmation.
-          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
-          return;
-        }
-        // (b) Else a CLOSED group whose roster contains the sender -> deliver
-        //     the late text into the sender's OWN 1:1 thread with provenance
-        //     (newest of several - a person can be in several closed groups on
-        //     one number over the years). No fan-out, no group append.
-        const closedMatch = groups
-          .filter((g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From))
-          .sort(byNewestCreated)[0];
-        if (closedMatch) {
-          // AF-4: the intercept processes STOP/opt-out; the confirmation is
-          // Twilio's, so the ack is empty.
-          await handleClosedGroupInbound(closedMatch, {
-            MessageSid,
-            From,
-            Body,
-            params,
-          });
-          res.type('text/xml').send(EMPTY_TWIML);
-          return;
-        }
-        // (c) Unknown sender (on NO roster) texting a pool number.
-        //   - If any OPEN group exists: keep today's non-member behavior
-        //     (persist on the newest OPEN group for the record, no fan-out).
-        //   - If ALL groups are closed (AF-5): do NOT bury the text in a dead
-        //     group transcript (it could hide a real message - a stranger, a
-        //     second phone, or a member from a NEW phone). Fall THROUGH to the
-        //     normal 1:1 intake path below (pre-feature behavior: a cleared
-        //     number fell to 1:1). No via_closed_group - they are not a
-        //     closed-roster member (that interception is branch (b) above).
-        const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
-        if (openFallback) {
-          // Same contract as the open-roster match above (an unknown-sender STOP
-          // is still recorded; Twilio still confirms it).
-          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
-          return;
-        }
-        // else: every group on this number is closed -> fall through to (2).
+        // Empty ack, keyword or not: the open path processes STOP/HELP/opt-in
+        // and Twilio's Advanced Opt-Out sends the confirmation.
+        await handleRelayInbound(resolution.group, { MessageSid, From, To, Body, params });
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
       }
+      if (resolution !== undefined && resolution.kind === 'closed_member') {
+        // (b) CLOSED group whose roster contains the sender -> deliver the late
+        //     text into the sender's OWN 1:1 thread with provenance. No
+        //     fan-out, no group append. AF-4: the intercept processes
+        //     STOP/opt-out; the confirmation is Twilio's, so the ack is empty.
+        await handleClosedGroupInbound(resolution.group, {
+          MessageSid,
+          From,
+          Body,
+          params,
+        });
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
+      if (resolution !== undefined && resolution.kind === 'non_member_open') {
+        // (c) Unknown sender (on NO roster) with an OPEN group present ->
+        //     persist on the newest open group for the record, no fan-out.
+        //     Same contract as the open-roster match above (an unknown-sender
+        //     STOP is still recorded; Twilio still confirms it).
+        await handleRelayInbound(resolution.group, { MessageSid, From, To, Body, params });
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
+      // (d) all_closed_non_member (AF-5: do NOT bury the text in a dead group
+      //     transcript - it could hide a real message from a stranger, a
+      //     second phone, or a member from a NEW phone; no via_closed_group -
+      //     they are not a closed-roster member) or undefined (no groups on
+      //     To) -> fall through to the normal 1:1 intake path below.
     }
 
     // (1.75) NATIVE GROUP TEXT detection (group-texting spec 5). Sits AFTER both
@@ -2599,6 +2578,49 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // only flag when the failing number IS the contact's PRIMARY
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
+            //
+            // MMS-SCOPED, BOTH CODES (prod 2026-08-24): a leg that carried media
+            // may never write `sms_unreachable`. The flag asserts SMS
+            // reachability, and neither code establishes that from an MMS leg.
+            //
+            //   30005 "unknown destination handset" is PROVEN ambiguous here. A
+            //   Verizon mobile delivered 10/10 texts and 8 inbound the same week
+            //   6/6 of its MMS died 30005, each rejected in under a second,
+            //   while 26 other MMS from this same sender delivered - including
+            //   to three other Verizon 310/012 lines. Something destination-side
+            //   has no MMS path for that number; which element is UNKNOWN.
+            //
+            //   30006 "landline OR UNREACHABLE CARRIER" is a disjunction, and
+            //   only the first half is a line-type fact. "Unreachable carrier"
+            //   is inherently message-type-specific - SMS and MMS traverse
+            //   different interconnects, which is this whole bug. We have ZERO
+            //   observations of a 30006 on an MMS leg, either way: every 30006
+            //   in the prod audit came from an SMS leg. That is silence about
+            //   this case, NOT evidence for it, and an earlier revision of this
+            //   comment wrongly read it as evidence.
+            //
+            // The asymmetry decides it. Scoping costs at most ONE broadcast:
+            // every consumer of this flag (routes/broadcasts.ts,
+            // services/audienceResolution.ts, jobs/broadcastFanOut.ts) sends
+            // TEXT-ONLY, so a landline that slipped through is flagged by its
+            // next leg, which is SMS - and non-tenants are excluded by those
+            // fences anyway, so the flag never mattered for them. NOT scoping
+            // risks a permanent, invisible false exclusion: nothing ever clears
+            // `sms_unreachable` and it has no contact-page surface, which is
+            // exactly why two wrong flags sat unnoticed for days in prod. A
+            // recoverable miss beats an unrecoverable false positive.
+            //
+            // The per-MMS truth stays on the message row (error_code + type);
+            // the durable "this line can't take attachments" signal and the
+            // SMS-link fallback are tracked in
+            // docs/issues/mms-silent-drop-dish-textnow.md.
+            if (message.type === 'mms') {
+              log.warn(
+                { providerSid: MessageSid, errorCode: ErrorCode },
+                'attachment did not get through - MMS-only failure, SMS reachability untouched',
+              );
+              break;
+            }
             const conversation = await conversations.getById(message.conversationId);
             // NATIVE GROUP TEXTS ARE REACHABLE HERE. A classic status callback
             // for a group leg in the pre-marker window resolves to the GROUP

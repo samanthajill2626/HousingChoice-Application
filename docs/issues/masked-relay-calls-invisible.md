@@ -3,10 +3,11 @@ id: masked-relay-calls-invisible
 title: A masked relay call is persisted on the relay thread but rendered nowhere - the dashboard shows no sign the call happened
 type: bug
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-18
-refs: app/src/routes/webhooks/voice.ts:913, app/src/routes/contactTimeline.ts:850, dashboard/src/routes/conversation/useRelayThread.ts:44
+resolved: 2026-08-24
+refs: app/src/routes/webhooks/voice.ts, app/src/routes/relayGroups.ts, dashboard/src/routes/conversation/useRelayThread.ts, dashboard/src/routes/contact/Timeline.tsx
 ---
 
 **Problem.** A masked relay call (a member dials the group's pool number and we
@@ -44,10 +45,11 @@ are imported carrier conversations and carry no call functionality at all. This
 issue is only about relay groups, where the masked-call bridge exists.
 
 **Desired behavior.** Show that the call happened, with the masking intact:
-who to whom by ROLE or roster display name (never a raw phone), when, duration,
-and the outcome. Never a recording and never a transcript - masked calls are
-dialed `record="do-not-record"` and are never sent to Voice Intelligence, so
-there is nothing to expose even if we wanted to.
+who called whom using the current roster display name, falling back to the
+current formatted phone when a member is unnamed, plus when, duration, and the
+outcome. Never a recording and never a transcript - masked calls are dialed
+`record="do-not-record"` and are never sent to Voice Intelligence, so there is
+nothing to expose even if we wanted to.
 
 **Suggested fix.** Two independent halves; the first is small.
 
@@ -68,3 +70,17 @@ Related: `docs/issues/inbound-calls-invisible-in-inbox.md` (resolved) explicitly
 listed masked/pool-number relay calls as a non-goal, so the inbox side of this
 is also untouched - a masked call does not stamp the relay thread's last
 activity, does not re-sort it, and does not bump unread.
+
+**Resolution (2026-08-24).** The voice writer now stores the caller's stable
+Relay member key on metadata-only call rows. The Relay roster read resolves
+contact-backed names from the current contact record, and the dashboard maps
+Relay calls into a media-free call shape before rendering a current-roster
+"caller called recipient" summary. If a current name is absent, the current
+formatted phone is shown; no name or phone snapshot is added to the call row.
+The mapper and Relay card both suppress recording/transcript fields. Focused
+unit coverage protects the writer, live roster hydration, safe mapper, and call
+card. Accepted-call status changes emit a Timeline-only `message.persisted`
+event without changing Inbox activity, so an open card cannot age from stale
+`ringing` into a false missed state. A hermetic browser regression opens the
+group, places a real accepted masked call, and proves the live Timeline row
+appears without recording or transcript controls.

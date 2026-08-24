@@ -9,6 +9,17 @@ created: 2026-08-13
 refs: e2e/tests/dashboard-next/deleted-contact-resurfacing.spec.ts:95, e2e/tests/dashboard-next/inbox-markread.spec.ts:17
 ---
 
+**ROUTED TO C1 (2026-08-24) - stays open as inbox read-path evidence, not as a
+spec flake.** "An inbound arrived and the row did not appear within 10s" is the
+same read path as `call-inbox-unread-detached-node-flake`'s adjudicated
+sighting (a whole open-partition read answering empty after a write) and sits
+squarely under C1's two open highs. Both filed sightings predate the 2026-08
+contention fixes and it has not reproduced in the 8+ full runs since,
+INCLUDING two heavily contended ones - so there is nothing spec-side to fix
+and nothing currently reproducing to chase. Expected to close with the C1
+mission; a recurrence before then is fresh evidence for it.
+
+
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)
 then 253 passed (19.0m). This spec passed in BOTH, as did every other issue on

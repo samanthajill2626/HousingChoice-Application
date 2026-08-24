@@ -45,11 +45,51 @@ describe('toTimelineMessage - import provenance', () => {
 
   it('carries imported:true off the raw stored row', () => {
     const m = { ...base, imported_from: 'quo-airtable-import' } as unknown as Message;
-    expect(toTimelineMessage(m)?.imported).toBe(true);
+    expect(toTimelineMessage(m)).toMatchObject({ kind: 'message', imported: true });
   });
 
   it('leaves imported ABSENT on a row we sent ourselves', () => {
-    expect(toTimelineMessage(base as unknown as Message)?.imported).toBeUndefined();
+    expect(toTimelineMessage(base as unknown as Message)).not.toHaveProperty('imported');
+  });
+});
+
+describe('toTimelineMessage - masked relay calls', () => {
+  it('maps safe call metadata instead of dropping the call or forwarding media', () => {
+    const call = {
+      conversationId: 'c1',
+      tsMsgId: '2026-08-24T10:00:00.000Z#CA1',
+      provider_sid: 'CA1',
+      provider_ts: '2026-08-24T10:00:00.000Z',
+      direction: 'inbound',
+      author: 'tenant',
+      type: 'call',
+      delivery_status: 'delivered',
+      masked: true,
+      relay_sender_key: 'contact-alice',
+      call_party_label: 'Bob',
+      call_status: 'completed',
+      call_outcome: 'answered',
+      call_duration: 42,
+      // Defense in depth: even a malformed masked row must not put media on the
+      // relay TimelineCall wire shape.
+      recording_s3_key: 'recordings/forbidden.wav',
+      transcript: 'must not render',
+      transcript_status: 'completed',
+    } as unknown as Message;
+
+    expect(toTimelineMessage(call)).toEqual({
+      kind: 'call',
+      id: '2026-08-24T10:00:00.000Z#CA1',
+      at: '2026-08-24T10:00:00.000Z',
+      conversationId: 'c1',
+      direction: 'inbound',
+      author: 'tenant',
+      relay_sender_key: 'contact-alice',
+      call_party_label: 'Bob',
+      call_status: 'completed',
+      call_outcome: 'answered',
+      call_duration: 42,
+    });
   });
 });
 
@@ -247,8 +287,8 @@ describe('useRelayThread paging', () => {
     expect(screen.getByTestId('ids')).toHaveTextContent('m8,m9,m10');
   });
 
-  // The guard is on the MAPPED page, not the raw one: buildRelayItems drops calls
-  // and email, so a page that came back FULL can still prepend nothing. The bound
+  // The guard is on the MAPPED page, not the raw one: buildRelayItems drops
+  // email, so a page that came back FULL can still prepend nothing. The bound
   // and hasOlder still move, so the operator can page THROUGH such a run.
   it('leaves olderPagesLoaded untouched when a full older page maps to no rows', async () => {
     getConversationMessages.mockResolvedValueOnce(page(50, 10)); // m10..m59
@@ -256,8 +296,8 @@ describe('useRelayThread paging', () => {
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
 
     // 50 rows the relay mapper drops entirely.
-    const calls = page(50, 60).map((m) => ({ ...m, tsMsgId: `call${m.tsMsgId}`, type: 'call' }));
-    getConversationMessages.mockResolvedValueOnce(calls);
+    const emails = page(50, 60).map((m) => ({ ...m, tsMsgId: `email${m.tsMsgId}`, type: 'email' }));
+    getConversationMessages.mockResolvedValueOnce(emails);
     await act(async () => {
       screen.getByRole('button', { name: 'load older' }).click();
     });
@@ -272,7 +312,7 @@ describe('useRelayThread paging', () => {
     });
     expect(getConversationMessages).toHaveBeenLastCalledWith(
       'c1',
-      { limit: 50, before: `callm60` },
+      { limit: 50, before: `emailm60` },
       expect.anything(),
     );
   });

@@ -13,9 +13,12 @@ import {
   getConversationMessages,
   getConversationScheduled,
   useEventStream,
+  type CallOutcome,
+  type CallStatus,
   type ConversationScheduledPage,
   type Message,
   type SendMessageResult,
+  type TimelineCall,
   type TimelineItem,
   type TimelineMessage,
   type TimelineScheduled,
@@ -41,13 +44,50 @@ function messageInstant(m: Message): string {
   return /^\d{4}-\d{2}-\d{2}T/.test(prefix) ? prefix : '';
 }
 
-/** Map a persisted Message -> a TimelineMessage bubble, or null to drop it.
- *  Relay threads never carry email or 1:1 call content: inbound email and
- *  calls thread into 1:1 conversations server-side, so a relay-group fetch
- *  never sees them - the check below is the relay-only contract, not defense. */
-export function toTimelineMessage(m: Message): TimelineMessage | null {
-  if (m.type === 'call' || m.type === 'email') return null;
+const CALL_STATUSES = new Set<CallStatus>([
+  'ringing',
+  'in-progress',
+  'completed',
+  'no-answer',
+  'busy',
+  'failed',
+  'canceled',
+]);
+const CALL_OUTCOMES = new Set<CallOutcome>(['answered', 'missed', 'voicemail']);
+
+function isCallStatus(value: unknown): value is CallStatus {
+  return typeof value === 'string' && CALL_STATUSES.has(value as CallStatus);
+}
+
+function isCallOutcome(value: unknown): value is CallOutcome {
+  return typeof value === 'string' && CALL_OUTCOMES.has(value as CallOutcome);
+}
+
+/** Map a persisted Relay Message to the shared Timeline's safe wire shape.
+ *  Email is unsupported in a Relay thread. Calls retain metadata only: media,
+ *  provider IDs, recordings, and transcripts are deliberately not forwarded. */
+export function toTimelineMessage(m: Message): TimelineMessage | TimelineCall | null {
+  if (m.type === 'email') return null;
   const at = messageInstant(m);
+  if (m.type === 'call') {
+    const duration =
+      typeof m.call_duration === 'number' && Number.isFinite(m.call_duration) && m.call_duration >= 0
+        ? m.call_duration
+        : undefined;
+    return {
+      kind: 'call',
+      id: m.tsMsgId,
+      at,
+      conversationId: m.conversationId,
+      direction: m.direction,
+      author: m.author,
+      ...(typeof m.relay_sender_key === 'string' && { relay_sender_key: m.relay_sender_key }),
+      ...(typeof m.call_party_label === 'string' && { call_party_label: m.call_party_label }),
+      ...(isCallStatus(m.call_status) && { call_status: m.call_status }),
+      ...(isCallOutcome(m.call_outcome) && { call_outcome: m.call_outcome }),
+      ...(duration !== undefined && { call_duration: duration }),
+    };
+  }
   const retryOf = typeof m['retry_of'] === 'string' ? (m['retry_of'] as string) : undefined;
   return {
     kind: 'message',
@@ -78,7 +118,7 @@ export function toTimelineMessage(m: Message): TimelineMessage | null {
 /** Build the chronological (oldest→newest) TimelineItem[] from a newest-first
  *  Message page. Exported for unit testing. */
 export function buildRelayItems(messages: Message[]): TimelineItem[] {
-  const mapped: TimelineMessage[] = [];
+  const mapped: TimelineItem[] = [];
   for (const m of messages) {
     const item = toTimelineMessage(m);
     if (item !== null) mapped.push(item);
@@ -176,7 +216,7 @@ export function useRelayThread(conversationId: string): RelayThreadState {
   const loadingOlderRef = useRef(false);
   // [R3] The `before` bound, taken from the RAW newest-first page (its LAST
   // element is its oldest). Never derived from the mapped items: buildRelayItems
-  // drops calls and email, so a page can map to fewer rows - or none - and a
+  // drops email, so a page can map to fewer rows - or none - and a
   // mapped-derived bound would leave a live button with nothing to page from.
   const oldestFetchedIdRef = useRef<string | null>(null);
   // Older-page fetches get their OWN controller: an SSE refetch aborts abortRef,
@@ -332,7 +372,7 @@ export function useRelayThread(conversationId: string): RelayThreadState {
       const olderItems = buildRelayItems(older);
       // Spec 4.5: an older page that merges NOTHING is not a prepend, so neither
       // the item state nor the counter moves. The check is on the MAPPED page,
-      // not the raw one - buildRelayItems drops calls and email, so a full raw
+      // not the raw one - buildRelayItems drops email, so a full raw
       // page can map to zero rows, which is equally not a prepend. Merging an
       // empty page would only allocate a new array and force a pointless
       // re-render; bumping the counter would fire <Timeline>'s scroll anchor for

@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app/relay
 created: 2026-08-24
-refs: app/src/routes/webhooks/twilio.ts:2386, app/src/services/groupReceipts.ts:419, app/src/services/groupDelivery.ts:42, app/src/jobs/relayFanOut.ts:458, dashboard/src/routes/contact/deliveryStatus.ts:376 (presentRelayDelivery's `fanned` filter), dashboard/src/routes/contact/Timeline.tsx:830 (optedOutCount)
+refs: app/src/routes/webhooks/twilio.ts:2386, app/src/services/groupReceipts.ts:419, app/src/services/groupDelivery.ts:42, app/src/jobs/relayFanOut.ts:458, dashboard/src/routes/contact/deliveryStatus.ts:400 (presentRelayDelivery's `fanned` filter), dashboard/src/routes/contact/Timeline.tsx:840 (optedOutCount)
 ---
 
 **Problem.** The two multi-party products disagree about what a 21610 (Twilio
@@ -28,9 +28,9 @@ Every downstream reader keys on the CODE ALONE, and on the translated form only:
 - the delivery rollup excludes opted-out legs from the `delivered N/M`
   denominator with `slots.filter((s) => s.errorCode !== 'contact_opted_out')`
   (`presentRelayDelivery`'s `fanned` filter,
-  `dashboard/src/routes/contact/deliveryStatus.ts:376`), and
+  `dashboard/src/routes/contact/deliveryStatus.ts:400`), and
 - the bubble's "N members opted out" note counts the same code
-  (`optedOutCount`, `dashboard/src/routes/contact/Timeline.tsx:830-832`).
+  (`optedOutCount`, `dashboard/src/routes/contact/Timeline.tsx:840-842`).
 
 So a relay member observed opted out THIS way is painted as a hard failure - it
 turns the rollup chip danger and shows in the failed count - while the identical

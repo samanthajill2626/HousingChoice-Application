@@ -767,12 +767,15 @@ export interface ConversationsRepo {
    */
   rebindOwner(conversationId: string, newOwner: RelayOwner): Promise<ConversationItem>;
   /**
-   * LEGACY single-collapse: resolve a pool number to ONE relay_group via the
-   * byPoolNumber GSI, preferring the OPEN match (else the first the GSI yields).
-   * Under burn-multiplexing a number fronts MANY groups (open + closed), so this
-   * lossy view is retained ONLY for the voice masked-inbound seam
-   * (webhooks/voice.ts), which assumes one group per number and is unchanged by
-   * this design. New callers (SMS routing, retirement) use getAllByPoolNumber.
+   * MEMBERSHIP TEST ONLY - do NOT route on this. Resolves a pool number to
+   * ONE arbitrary relay_group via the byPoolNumber GSI (open preferred, else
+   * the first the GSI yields). Under burn-multiplexing a number fronts MANY
+   * participant-disjoint groups, so the single collapse is lossy by
+   * construction: routing on it caused the 2026-08-22/23 masked-voice
+   * misrouting incident. Its ONLY legitimate caller is ourNumberKind's
+   * "is this one of OUR pool numbers" truthiness check (one cheap Query).
+   * Anything that needs THE group for an inbound must use getAllByPoolNumber
+   * + services/relayInboundResolution.ts.
    */
   getByPoolNumber(poolNumber: string): Promise<ConversationItem | undefined>;
   /**
@@ -1913,10 +1916,10 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async getByPoolNumber(poolNumber) {
-      // LEGACY single-collapse for the voice seam (see interface): prefer the
-      // OPEN match, else the first the GSI yields. Under burn-multiplexing a
-      // number fronts many groups (open + closed); new SMS/retirement callers
-      // use getAllByPoolNumber instead.
+      // Membership test only (see interface): prefer the OPEN match, else the
+      // first the GSI yields - truthy exactly when the partition holds ANY
+      // group. Routing callers use getAllByPoolNumber + the shared
+      // relayInboundResolution ladder.
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,

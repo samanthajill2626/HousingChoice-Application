@@ -6,7 +6,7 @@ severity: med
 status: open
 area: dashboard/contact-timeline
 created: 2026-08-24
-refs: dashboard/src/routes/contact/Timeline.tsx:818, dashboard/src/routes/contact/Timeline.tsx:756, dashboard/src/routes/contact/Timeline.tsx:1280, dashboard/src/routes/contact/deliveryStatus.ts:103, dashboard/src/routes/contact/deliveryStatus.ts:112, dashboard/src/routes/broadcasts/broadcastFormat.ts:108
+refs: dashboard/src/routes/contact/Timeline.tsx:822, dashboard/src/routes/contact/Timeline.tsx:760, dashboard/src/routes/contact/Timeline.tsx:1351, dashboard/src/routes/contact/deliveryStatus.ts:103, dashboard/src/routes/contact/deliveryStatus.ts:112, dashboard/src/routes/broadcasts/broadcastFormat.ts:108
 ---
 
 **Problem.** A 1:1 outbound bubble computes its delivery chip with
@@ -15,11 +15,11 @@ refs: dashboard/src/routes/contact/Timeline.tsx:818, dashboard/src/routes/contac
 presentDeliveryStatus(msg.delivery_status, msg.imported === true ? undefined : Date.parse(msg.at))
 ```
 
-(`dashboard/src/routes/contact/Timeline.tsx:818-820`), passing NO third argument -
+(`dashboard/src/routes/contact/Timeline.tsx:822-824`), passing NO third argument -
 so it reads that function's implicit `Date.now()` default. Everything
 `feat/per-recipient-delivery` (2026-08-24) added reads `tickNow` instead, the
 thread-level clock the staleness ticker bumps. The ticker's run condition
-(`hasTickableLeg`, `Timeline.tsx:756-768`) only ever inspects
+(`hasTickableLeg`, `Timeline.tsx:760-772`) only ever inspects
 `delivery_recipients`, and a 1:1 message has no such map, so a 1:1 bubble buys no
 interval of its own.
 
@@ -52,7 +52,7 @@ been quiet past `STALE_SENT_AFTER_MS`.
 this branch, and its own doc says so (`deliveryStatus.ts:103-110`, the
 "CONVENTION DIVERGENCE" note). Two out-of-scope consumers depend on both:
 
-- the EmailCard chip (`Timeline.tsx:1280`, which calls it with the status ALONE,
+- the EmailCard chip (`Timeline.tsx:1351`, which calls it with the status ALONE,
   so email never goes stale at all), and
 - the broadcasts recipient badge (`dashboard/src/routes/broadcasts/broadcastFormat.ts:108`,
   in a directory the per-recipient branch is required to leave with a ZERO-LINE

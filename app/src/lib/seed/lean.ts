@@ -150,7 +150,16 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
     },
     {
       contactId: IDS.haStaffer,
-      type: 'team_member',
+      // `partner` (retyped 2026-08-24): an OUTSIDE agency contact, which is what
+      // the glossary defines partner to mean. She spent two months as
+      // `team_member` only because her ORIGINAL type (`housing_authority_staff`)
+      // was never a valid ContactType at all, and the 2026-06-18 triage picked
+      // the least-wrong bucket that existed before `partner` did (2026-07-21).
+      // team_member is the internal-staff bucket - excluded from audience
+      // fan-out, no 1:1 lifecycle - so the mistype quietly hid her from every
+      // outside-contact surface. See
+      // docs/issues/lean-seed-ha-staffer-should-be-partner.md.
+      type: 'partner',
       status: 'active',
       phone: '+15550100003',
       firstName: 'Renee',
@@ -277,6 +286,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       author: 'teammate',
       body: 'Hi Tasha! A 2BR near MARTA just opened up — want to tour it this week?',
       ts: T0,
+      created_at: T0, // production stamps every appended message; absent, the extraction window silently DROPS the row (docs/issues/seed-messages-missing-created-at.md)
     },
     {
       conversationId: IDS.conversation,
@@ -286,6 +296,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       author: 'tenant',
       body: 'Yes! Could we do Saturday morning?',
       ts: T1,
+      created_at: T1,
     },
     {
       conversationId: IDS.conversation,
@@ -295,6 +306,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       author: 'teammate',
       body: 'Booked: Saturday 6/13 at 10am. Address: 1450 Joseph E. Boone Blvd NW.',
       ts: T2,
+      created_at: T2,
     },
     // The carrier group's transcript. Inbound rows carry `relay_sender_key` -
     // the SHARED sender-attribution field - keyed PHONE-scoped (`phone#<E164>`)
@@ -309,6 +321,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       delivery_status: 'delivered',
       relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[0]}`,
       ts: TG0,
+      created_at: TG0,
     },
     {
       conversationId: GROUP_TEXT_ID,
@@ -319,6 +332,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       body: 'Saturday 10am works on our side - confirming with the owner.',
       delivery_status: 'delivered',
       ts: TG1,
+      created_at: TG1,
     },
     {
       conversationId: GROUP_TEXT_ID,
@@ -330,6 +344,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       delivery_status: 'delivered',
       relay_sender_key: `phone#${GROUP_TEXT_MEMBERS[1]}`,
       ts: TG2,
+      created_at: TG2,
     },
   ],
   matches: [

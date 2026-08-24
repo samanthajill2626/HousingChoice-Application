@@ -26,7 +26,7 @@
 //     exists to stop.
 import type { ConversationParticipant } from '../api/index.js';
 import { groupMemberLabel } from './groupThread.js';
-import { findRosterMember } from './memberAttribution.js';
+import { findMemberByKey } from './memberAttribution.js';
 import { formatPhoneDisplay } from './phone.js';
 
 /** How the key resolved against the roster - spec S2's three cases, in order.
@@ -113,7 +113,7 @@ export function resolveRecipientLabel(
   const rosterPresent = Array.isArray(roster) && roster.length > 0;
 
   if (rosterPresent) {
-    const found = findRosterMember(key, roster);
+    const found = findMemberByKey(key, roster);
     if (found !== undefined) {
       // groupMemberLabel is the member panel's rule and the ONE place it lives:
       // full name, else formatted number. It returns '' for a member carrying

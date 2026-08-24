@@ -45,3 +45,17 @@ describe('fake-twilio host', () => {
     expect(cfg({ CF_ORIGIN_SECRET: 'a-different-secret' }).originSecret).toBe('a-different-secret');
   });
 });
+
+describe('hardenServerTimeouts', () => {
+  it('makes the server outlive any in-test client stall, with headers above keep-alive', async () => {
+    // The stalled-loop ECONNRESET (2026-08-24, reproduced 3/3 at Node's 5s
+    // default, 0/3 at these values, same 36s stall). Playwright's per-test
+    // budget is 30s, so 65s clears every stall a live test can produce with
+    // 2x margin; Node requires headersTimeout > keepAliveTimeout.
+    const { hardenServerTimeouts } = await import('../src/server.js');
+    const server = { keepAliveTimeout: 5_000, headersTimeout: 60_000 };
+    hardenServerTimeouts(server);
+    expect(server.keepAliveTimeout).toBeGreaterThanOrEqual(65_000);
+    expect(server.headersTimeout).toBeGreaterThan(server.keepAliveTimeout);
+  });
+});

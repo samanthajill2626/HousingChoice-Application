@@ -297,6 +297,71 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     ).toBeInTheDocument();
   });
 
+  // THE MEDIA CONVERGENCE (main's MMS fix, carried onto this NEW surface).
+  // Prod 2026-08-24: a Verizon mobile delivered 10/10 texts the same week 6/6 of
+  // its MMS died 30005, so "Number is invalid" on an attachment leg sends staff
+  // chasing a number that works. main hedged that copy on the MESSAGE-LEVEL chip
+  // and the rollup. The per-recipient rows are a surface main never saw, and an
+  // un-hedged reason HERE - beside a named member, directly under a hedged chip -
+  // would contradict the fix at the exact place it matters most.
+  //
+  // This pins the CALL SITE, not the pure function: deleting `{ media: isMms }`
+  // from the row's `deliveryReason` call leaves every other test in the repo
+  // green. Proved non-vacuous by removing it - this test then rendered
+  // "Failed - Number is invalid (error 30005)" on Lars Landlord's row, which the
+  // negative below catches.
+  it('hedges a 30005 on an ATTACHMENT row instead of blaming the number', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-mms-fail',
+      tsMsgId: 'r-mms-fail',
+      type: 'mms',
+      body: 'photos of the unit',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: '30005' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('photos of the unit');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(failedRow).toHaveTextContent('Lars Landlord');
+    // EXACT text, never a substring: the whole point is WHICH sentence renders.
+    expect(
+      within(failedRow).getByText(
+        "Failed - Attachment didn't get through, texts may still work (error 30005)",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Number is invalid/)).not.toBeInTheDocument();
+    // The accessible name is the THIRD consumer of the same `isMms`, and a
+    // screen-reader user reading "Number is invalid" is the same wrong fact.
+    expect(screen.getByRole('img')).toHaveAccessibleName(
+      "delivered 1 of 2, 1 failed, Attachment didn't get through, texts may still work (error 30005). " +
+        "Keisha Kane: Delivered. Lars Landlord: Failed, Attachment didn't get through, texts may still work (error 30005).",
+    );
+  });
+
+  it('keeps the invalid-number reading on a 30005 row of a TEXT message', () => {
+    // The other half of main's rule, and the reason the flag is per-message
+    // rather than global: 30005 on a plain SMS really does mean the number is
+    // bad, and that is how every dead number in prod was caught.
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-sms-fail',
+      tsMsgId: 'r-sms-fail',
+      body: 'plain text to the group',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: '30005' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('plain text to the group');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(within(failedRow).getByText('Failed - Number is invalid (error 30005)')).toBeInTheDocument();
+    expect(screen.queryByText(/Attachment didn't get through/)).not.toBeInTheDocument();
+  });
+
   it('shows NO reason on a STILL-RETRYING row that carries a transient carrier code', () => {
     // The fan-out writes a transient code onto a leg it is still retrying.
     // `queued` is not a failure, so 30003's "will retry" copy must not appear

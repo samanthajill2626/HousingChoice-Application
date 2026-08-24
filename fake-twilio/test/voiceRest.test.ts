@@ -190,3 +190,101 @@ describe('voice REST: GET /recordings/:callSid/:recordingSid.mp3', () => {
     expect(res.body[0]).toBe(0xff);
   });
 });
+
+describe('messaging REST: /v1/Services/:sid/PhoneNumbers (the A2P attach warmOneNumber ends every buy with)', () => {
+  // Until 2026-08-23 this surface did not exist, so every hermetic warm buy
+  // died post-purchase with a swallowed 404 job failure - 22 level-50 lines in
+  // one green e2e run. See docs/issues/fake-twilio-messaging-attach-404.md.
+  const SVC = 'MGtestservice001';
+
+  async function buy(app: ReturnType<typeof makeApp>['app'], phoneNumber: string): Promise<string> {
+    const res = await request(app)
+      .post('/2010-04-01/Accounts/ACtest/IncomingPhoneNumbers.json')
+      .type('form')
+      .send({ PhoneNumber: phoneNumber });
+    expect(res.status).toBe(201);
+    return (res.body as { sid: string }).sid;
+  }
+
+  it('attaches a purchased number: 201, and the sender appears in the list', async () => {
+    const { app, registry } = makeApp();
+    const sid = await buy(app, '+15550194201');
+
+    const attach = await request(app)
+      .post(`/v1/Services/${SVC}/PhoneNumbers`)
+      .type('form')
+      .send({ PhoneNumberSid: sid });
+    expect(attach.status).toBe(201);
+    expect(attach.body).toMatchObject({ sid, service_sid: SVC, phone_number: '+15550194201' });
+    expect(registry.get('+15550194201')?.messagingServiceSid).toBe(SVC);
+
+    // The list the DETACH path resolves an E.164 through - twilio page shape.
+    const list = await request(app).get(`/v1/Services/${SVC}/PhoneNumbers`);
+    expect(list.status).toBe(200);
+    expect(list.body.meta.key).toBe('phone_numbers');
+    expect(list.body.meta.next_page_url).toBeNull();
+    expect(list.body.phone_numbers).toEqual([
+      { sid, service_sid: SVC, phone_number: '+15550194201' },
+    ]);
+  });
+
+  it('re-attach answers 21710, the code the adapter treats as idempotent success', async () => {
+    const { app } = makeApp();
+    const sid = await buy(app, '+15550194202');
+    await request(app).post(`/v1/Services/${SVC}/PhoneNumbers`).type('form').send({ PhoneNumberSid: sid });
+
+    const again = await request(app)
+      .post(`/v1/Services/${SVC}/PhoneNumbers`)
+      .type('form')
+      .send({ PhoneNumberSid: sid });
+    // The REAL contract matters here: attachToMessagingService branches on
+    // code 21710 (idempotent no-op). Any other answer and a redelivered warm
+    // job turns into a spurious failure.
+    expect(again.status).toBe(400);
+    expect(again.body.code).toBe(21710);
+  });
+
+  it('an unknown PhoneNumberSid is 404/20404 - a RestException, like the pre-route days', async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .post(`/v1/Services/${SVC}/PhoneNumbers`)
+      .type('form')
+      .send({ PhoneNumberSid: 'PNnope' });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe(20404);
+  });
+
+  it('a missing PhoneNumberSid is a 400, not a silent attach of nothing', async () => {
+    const { app } = makeApp();
+    const res = await request(app).post(`/v1/Services/${SVC}/PhoneNumbers`).type('form').send({});
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE removes the sender; the list empties; a second DELETE is 404', async () => {
+    const { app, registry } = makeApp();
+    const sid = await buy(app, '+15550194203');
+    await request(app).post(`/v1/Services/${SVC}/PhoneNumbers`).type('form').send({ PhoneNumberSid: sid });
+
+    const del = await request(app).delete(`/v1/Services/${SVC}/PhoneNumbers/${sid}`);
+    expect(del.status).toBe(204);
+    expect(registry.get('+15550194203')?.messagingServiceSid).toBeUndefined();
+
+    const list = await request(app).get(`/v1/Services/${SVC}/PhoneNumbers`);
+    expect(list.body.phone_numbers).toEqual([]);
+
+    const again = await request(app).delete(`/v1/Services/${SVC}/PhoneNumbers/${sid}`);
+    expect(again.status).toBe(404);
+    expect(again.body.code).toBe(20404);
+  });
+
+  it('a sender attached to service A is invisible to service B and undetachable through it', async () => {
+    const { app } = makeApp();
+    const sid = await buy(app, '+15550194204');
+    await request(app).post(`/v1/Services/${SVC}/PhoneNumbers`).type('form').send({ PhoneNumberSid: sid });
+
+    const otherList = await request(app).get('/v1/Services/MGother/PhoneNumbers');
+    expect(otherList.body.phone_numbers).toEqual([]);
+    const otherDel = await request(app).delete(`/v1/Services/MGother/PhoneNumbers/${sid}`);
+    expect(otherDel.status).toBe(404);
+  });
+});

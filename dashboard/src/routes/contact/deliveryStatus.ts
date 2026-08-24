@@ -335,6 +335,22 @@ export function canEverGoStale(
 }
 
 /**
+ * Everything the relay rollup takes besides the slots themselves: the media flag
+ * it forwards to `deliveryReason`, plus the two optional staleness clocks. It
+ * EXTENDS `DeliveryReasonOptions` rather than restating `media`, so the bag can
+ * be handed straight to `deliveryReason` and the two can never disagree about
+ * what "media" means.
+ */
+export interface RelayDeliveryOptions extends DeliveryReasonOptions {
+  /** The message's own instant - the clock a `sent` leg with no `sentAt` ages
+   *  from. See `stalenessClockMs`. */
+  messageAtMs?: number;
+  /** The READING clock. Withholding it turns staleness off entirely; see the
+   *  WITHHELD-CLOCK convention on `isStaleLeg`. */
+  nowMs?: number;
+}
+
+/**
  * Present a relay SOURCE message's per-recipient rollup as one chip. The rules:
  *   - in flight → neutral "delivered N/M" that counts up as DLRs land;
  *   - every leg delivered → the SAME green "Delivered" cue as a 1:1 bubble
@@ -359,12 +375,20 @@ export function canEverGoStale(
  * whatever `sentAt` the slots carry, and behaves exactly as it did before. That
  * is what keeps every pre-existing no-clock assertion honest rather than lucky.
  * (Note the opposite convention on `presentDeliveryStatus` - see its doc.)
+ *
+ * ONE OPTIONS BAG, not positional arguments. `media` (the MMS reason override)
+ * and the two staleness clocks arrived from two different changes that each
+ * claimed positional argument 2, and a rollup needs BOTH: an attachment leg that
+ * failed 30005 must read as an attachment failure whether or not another leg has
+ * gone quiet. A bag is also what keeps the pre-existing single-argument
+ * assertions - the ones that prove staleness is OFF without a clock - honest
+ * rather than accidentally re-armed by argument-position drift.
  */
 export function presentRelayDelivery(
   slots: RelayDeliverySlot[],
-  messageAtMs?: number,
-  nowMs?: number,
+  opts: RelayDeliveryOptions = {},
 ): DeliveryPresentation | null {
+  const { messageAtMs, nowMs } = opts;
   // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
   // suppressed leg as `failed`; the group-text receipts path records what Twilio
   // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
@@ -389,7 +413,7 @@ export function presentRelayDelivery(
       new Set(
         fanned
           .filter((s) => s.status === 'failed' || s.status === 'undelivered')
-          .map((s) => deliveryReason(s.errorCode))
+          .map((s) => deliveryReason(s.errorCode, opts))
           .filter((r): r is string => r !== undefined),
       ),
     );
@@ -526,6 +550,45 @@ const ERROR_CODE_REASONS: Record<string, string> = {
 };
 
 /**
+ * Overrides that apply ONLY to a leg that carried media, checked before
+ * ERROR_CODE_REASONS. 30005 on an attachment frequently means the destination
+ * has no MMS path while every text routes fine - prod 2026-08-24 had a Verizon
+ * mobile deliver 10/10 texts the same week 6/6 of its MMS died 30005 - so the
+ * generic "Number is invalid" sends staff chasing a working number.
+ *
+ * The copy is PURELY OBSERVATIONAL and hedged on purpose. It does not say
+ * "carrier rejected": one documented prod case (case 4 in the issue) produced
+ * this same 30005 from a 72h validity-period EXPIRY on an oversized payload,
+ * where nothing rejected anything and the right action was "send fewer files",
+ * and two of the candidate mechanisms put the failure at an aggregator rather
+ * than the carrier. It does not promise texts work either: 30005 still fires for
+ * a genuinely dead number, so a first-ever send that happens to carry an
+ * attachment must not leave staff believing the number takes texts. And it says
+ * "attachment", not "picture", because MMS here also carries PDFs
+ * (MMS_ALLOWED_TYPES in Timeline.tsx).
+ *
+ * 30006 gets the SAME copy, and for the same reason. Its Twilio name is
+ * "landline OR unreachable carrier" - a disjunction whose second half is
+ * message-type-specific - so on an attachment leg it does NOT establish that
+ * the number is a landline. The server-side twin
+ * (app/src/routes/webhooks/twilio.ts) declines to write `sms_unreachable` from
+ * an MMS leg for either code, and a chip confidently reading "That number is a
+ * landline" about a leg the server just refused to trust would contradict it,
+ * and would stop staff texting a number that may well work. On an SMS leg 30006
+ * keeps its landline reading, which is how every real landline in prod was
+ * caught.
+ */
+const MMS_ERROR_CODE_REASONS: Record<string, string> = {
+  '30005': "Attachment didn't get through, texts may still work",
+  '30006': "Attachment didn't get through, texts may still work",
+};
+
+/** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */
+export interface DeliveryReasonOptions {
+  media?: boolean;
+}
+
+/**
  * Codes THIS APP invents, which no carrier ever emits and no operator can look
  * up. They get plain operator copy and, deliberately, NO "(error <code>)" tail:
  * printing `contact_opted_out` as if it were a carrier error number is the
@@ -562,11 +625,16 @@ function ownReason(map: Record<string, string>, code: string): string | undefine
   return Object.prototype.hasOwnProperty.call(map, code) ? map[code] : undefined;
 }
 
-export function deliveryReason(errorCode: string | undefined): string | undefined {
+export function deliveryReason(
+  errorCode: string | undefined,
+  opts: DeliveryReasonOptions = {},
+): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
-  const mapped = ownReason(ERROR_CODE_REASONS, errorCode);
+  const mapped =
+    (opts.media === true ? ownReason(MMS_ERROR_CODE_REASONS, errorCode) : undefined) ??
+    ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`
     : `Delivery failed (error ${errorCode})`;

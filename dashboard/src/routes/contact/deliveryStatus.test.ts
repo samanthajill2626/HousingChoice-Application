@@ -329,6 +329,19 @@ describe('presentRelayDelivery', () => {
     });
   });
 
+  it('carries the attachment reading into a relay MMS rollup', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'undelivered', errorCode: '30005' }], {
+        media: true,
+      }),
+    ).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: "Attachment didn't get through, texts may still work (error 30005)",
+    });
+  });
+
   it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
     expect(
       presentRelayDelivery([
@@ -377,7 +390,10 @@ describe('presentRelayDelivery', () => {
 
   it('twin of "counts up in neutral": a quiet `sent` leg turns the SAME array danger once a clock is passed', () => {
     expect(
-      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }], MSG_AT, NOW),
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }], {
+        messageAtMs: MSG_AT,
+        nowMs: NOW,
+      }),
     ).toEqual({
       label: 'delivered 1/2 - 1 not confirmed',
       tone: 'danger',
@@ -394,8 +410,7 @@ describe('presentRelayDelivery', () => {
           { status: 'queued', sentAt: QUIET },
           { status: 'queued', sentAt: QUIET },
         ],
-        MSG_AT,
-        NOW,
+        { messageAtMs: MSG_AT, nowMs: NOW },
       ),
     ).toEqual({ label: 'delivered 0/2 - 2 not confirmed', tone: 'danger', isFailure: false });
     // Same array, same clock, no sentAt: the released connect-when-ready hold and
@@ -403,8 +418,7 @@ describe('presentRelayDelivery', () => {
     expect(
       presentRelayDelivery(
         [{ status: 'queued' }, { status: 'queued' }],
-        NOW - STALE_SENT_AFTER_MS * 1000,
-        NOW,
+        { messageAtMs: NOW - STALE_SENT_AFTER_MS * 1000, nowMs: NOW },
       ),
     ).toEqual({ label: 'delivered 0/2', tone: 'neutral', isFailure: false });
   });
@@ -413,8 +427,7 @@ describe('presentRelayDelivery', () => {
     expect(
       presentRelayDelivery(
         [{ status: 'undelivered' }, { status: 'queued', sentAt: QUIET }],
-        MSG_AT,
-        NOW,
+        { messageAtMs: MSG_AT, nowMs: NOW },
       ),
     ).toEqual({
       label: 'delivered 0/2 - 1 failed, 1 not confirmed',
@@ -432,8 +445,7 @@ describe('presentRelayDelivery', () => {
           { status: 'sent', sentAt: QUIET },
           { status: 'delivered' },
         ],
-        MSG_AT,
-        NOW,
+        { messageAtMs: MSG_AT, nowMs: NOW },
       ),
     ).toEqual({
       label: 'delivered 1/3 - 1 failed, 1 not confirmed',
@@ -451,8 +463,7 @@ describe('presentRelayDelivery', () => {
           { status: 'sent', sentAt: QUIET },
           { status: 'failed', errorCode: 'contact_opted_out' },
         ],
-        MSG_AT,
-        NOW,
+        { messageAtMs: MSG_AT, nowMs: NOW },
       ),
     ).toEqual({ label: 'delivered 1/2 - 1 not confirmed', tone: 'danger', isFailure: false });
   });
@@ -460,12 +471,12 @@ describe('presentRelayDelivery', () => {
   it('escalates exactly AT STALE_SENT_AFTER_MS and not one millisecond before', () => {
     const atBoundary = [{ status: 'sent', sentAt: iso(NOW - STALE_SENT_AFTER_MS) }] as const;
     const justUnder = [{ status: 'sent', sentAt: iso(NOW - STALE_SENT_AFTER_MS + 1) }] as const;
-    expect(presentRelayDelivery([...atBoundary], MSG_AT, NOW)).toEqual({
+    expect(presentRelayDelivery([...atBoundary], { messageAtMs: MSG_AT, nowMs: NOW })).toEqual({
       label: 'delivered 0/1 - 1 not confirmed',
       tone: 'danger',
       isFailure: false,
     });
-    expect(presentRelayDelivery([...justUnder], MSG_AT, NOW)).toEqual({
+    expect(presentRelayDelivery([...justUnder], { messageAtMs: MSG_AT, nowMs: NOW })).toEqual({
       label: 'delivered 0/1',
       tone: 'neutral',
       isFailure: false,
@@ -479,8 +490,7 @@ describe('presentRelayDelivery', () => {
           { status: 'delivered', deliveredAt: QUIET },
           { status: 'delivered', deliveredAt: QUIET },
         ],
-        NOW - STALE_SENT_AFTER_MS * 1000,
-        NOW,
+        { messageAtMs: NOW - STALE_SENT_AFTER_MS * 1000, nowMs: NOW },
       ),
     ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
   });
@@ -495,19 +505,17 @@ describe('presentRelayDelivery', () => {
           { status: 'failed', sentAt: QUIET },
           { status: 'undelivered', sentAt: QUIET },
         ],
-        NOW - STALE_SENT_AFTER_MS * 1000,
-        NOW,
+        { messageAtMs: NOW - STALE_SENT_AFTER_MS * 1000, nowMs: NOW },
       ),
     ).toEqual({ label: 'delivered 0/2 - 2 failed', tone: 'danger', isFailure: true });
   });
 
   it('still returns null with a clock passed when there is nothing to summarize', () => {
-    expect(presentRelayDelivery([], MSG_AT, NOW)).toBeNull();
+    expect(presentRelayDelivery([], { messageAtMs: MSG_AT, nowMs: NOW })).toBeNull();
     expect(
       presentRelayDelivery(
         [{ status: 'failed', errorCode: 'contact_opted_out', sentAt: QUIET }],
-        NOW - STALE_SENT_AFTER_MS * 1000,
-        NOW,
+        { messageAtMs: NOW - STALE_SENT_AFTER_MS * 1000, nowMs: NOW },
       ),
     ).toBeNull();
   });
@@ -520,7 +528,9 @@ describe('presentRelayDelivery', () => {
       presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }]),
     ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
     expect(
-      presentRelayDelivery([{ status: 'sent', sentAt: QUIET }], NOW - STALE_SENT_AFTER_MS * 1000),
+      presentRelayDelivery([{ status: 'sent', sentAt: QUIET }], {
+        messageAtMs: NOW - STALE_SENT_AFTER_MS * 1000,
+      }),
     ).toEqual({ label: 'delivered 0/1', tone: 'neutral', isFailure: false });
     expect(
       presentRelayDelivery([{ status: 'undelivered' }, { status: 'queued', sentAt: QUIET }]),
@@ -529,7 +539,10 @@ describe('presentRelayDelivery', () => {
 
   it('leaves a fresh leg neutral even with a clock - the ordinary in-flight bubble is unchanged', () => {
     expect(
-      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: FRESH }], MSG_AT, NOW),
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: FRESH }], {
+        messageAtMs: MSG_AT,
+        nowMs: NOW,
+      }),
     ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
   });
 });
@@ -543,6 +556,46 @@ describe('deliveryReason', () => {
 
   it('falls back to a generic line that still surfaces the raw code', () => {
     expect(deliveryReason('99999')).toBe('Delivery failed (error 99999)');
+  });
+
+  // Prod 2026-08-24: a Verizon line delivered 10/10 texts the same week 6/6 of
+  // its MMS died 30005. "Number is invalid" is flatly wrong there and sends
+  // staff chasing a number that works. The replacement HEDGES on purpose - 30005
+  // still fires for a genuinely dead number, so a first-ever send that happens
+  // to carry an attachment must not leave staff believing the number takes
+  // texts. Only the media leg gets the override; a 30005 on a plain SMS really
+  // does mean the number is bad.
+  it('reads 30005 as an attachment failure on an MMS leg, and as a bad number on an SMS leg', () => {
+    expect(deliveryReason('30005', { media: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30005)",
+    );
+    expect(deliveryReason('30005')).toBe('Number is invalid (error 30005)');
+    expect(deliveryReason('30005', { media: false })).toBe('Number is invalid (error 30005)');
+  });
+
+  // 30006 is "landline OR unreachable carrier" - a disjunction whose second half
+  // is message-type-specific. On an attachment leg it does not establish a
+  // landline, and the server-side twin (app/src/routes/webhooks/twilio.ts)
+  // declines to write sms_unreachable from an MMS leg for either code. A chip
+  // confidently saying "landline" about a leg the server just refused to trust
+  // would contradict it and would stop staff texting a working number. On an SMS
+  // leg the landline reading stands - that is how every real landline in prod
+  // was caught.
+  it('hedges 30006 on an MMS leg, but keeps the landline reading on an SMS leg', () => {
+    expect(deliveryReason('30006', { media: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30006)",
+    );
+    expect(deliveryReason('30006')).toBe('That number is a landline (error 30006)');
+    expect(deliveryReason('30006', { media: false })).toBe('That number is a landline (error 30006)');
+  });
+
+  it('leaves every OTHER code alone on an MMS leg', () => {
+    expect(deliveryReason('30007', { media: true })).toBe('Carrier filtered the message (error 30007)');
+    expect(deliveryReason('21610', { media: true })).toBe('Recipient has opted out (STOP) (error 21610)');
+    expect(deliveryReason('99999', { media: true })).toBe('Delivery failed (error 99999)');
+    expect(deliveryReason('contact_opted_out', { media: true })).toBe(
+      'Everyone here has opted out - nothing was sent',
+    );
   });
 
   it('returns undefined when there is no code', () => {

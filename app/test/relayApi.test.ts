@@ -397,6 +397,78 @@ describe('relay-group API (M1.7)', () => {
     expect(delAgain.body.members).toHaveLength(1);
   });
 
+  it('GET roster resolves a contact name live instead of returning the creation-time snapshot', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    world.contacts.push({
+      contactId: 'c-alice',
+      type: 'tenant',
+      status: 'active',
+      phone: ALICE,
+      firstName: 'Alicia',
+      lastName: 'Jones',
+    });
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550300999',
+      members: [{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }],
+    });
+
+    const roster = await request(app)
+      .get(`/api/conversations/${conversation.conversationId}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(roster.status).toBe(200);
+    expect(roster.body.members).toEqual([
+      { contactId: 'c-alice', phone: ALICE, name: 'Alicia Jones' },
+    ]);
+  });
+
+  it('GET roster drops the creation-time name when the current contact is unnamed', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    world.contacts.push({
+      contactId: 'c-alice',
+      type: 'tenant',
+      status: 'active',
+      phone: ALICE,
+    });
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550300998',
+      members: [{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }],
+    });
+
+    const roster = await request(app)
+      .get(`/api/conversations/${conversation.conversationId}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(roster.status).toBe(200);
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+  });
+
+  it('GET roster falls back to the roster phone, not a stale name, when contact lookup fails', async () => {
+    const originalGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+    world.contactsRepo.getById = async (contactId) => {
+      if (contactId === 'c-alice') throw new Error('injected contact lookup failure');
+      return originalGetById(contactId);
+    };
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550300997',
+      members: [{ contactId: 'c-alice', phone: ALICE, name: 'Old roster name' }],
+    });
+
+    const roster = await request(app)
+      .get(`/api/conversations/${conversation.conversationId}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(roster.status).toBe(200);
+    expect(roster.body.members).toEqual([{ contactId: 'c-alice', phone: ALICE }]);
+  });
+
   it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);

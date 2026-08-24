@@ -61,13 +61,24 @@ test.describe('Settings — admin path', () => {
     // --- Edit a template field; reload → it persists ---
     await page.getByRole('tab', { name: 'Templates' }).click();
     await expect(page).toHaveURL(/\/settings\/templates$/);
+
+    // NON-VACUITY PIN for the Saved assertions below (2026-08-21 collision).
+    // The Templates hint copy contains the word "saved", and a substring
+    // locator (getByText('Saved')) matched IT - so the save-status assertions
+    // could pass with no save observed at all, or die in strict mode once the
+    // real badge appeared beside it. Prove both halves before the first save:
+    // the colliding prose is on screen, and our exact role-scoped locator
+    // matches nothing until a save really happens.
+    await expect(page.getByText(/saved/i).first()).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: /^Saved$/ })).toHaveCount(0);
+
     const autoText = page.getByLabel(/^Missed-call auto-text/i);
     // A2P/CTIA template floor (spec §5): a first-contact template edit that drops
     // the opt-out line is rejected (400 missing_opt_out_language) → keep "Reply STOP".
     const newAutoText = `Sorry I missed you — e2e ${Date.now()}. Reply STOP to opt out.`;
     await autoText.fill(newAutoText);
     await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByText('Saved')).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible();
 
     await page.reload();
     await expect(page.getByLabel(/^Missed-call auto-text/i)).toHaveValue(newAutoText);
@@ -78,7 +89,7 @@ test.describe('Settings — admin path', () => {
     const welcomeBody = `Welcome {firstName}! e2e settings check ${Date.now()}. Reply STOP to opt out.`;
     await page.getByLabel(/Housing-fair welcome text/i).fill(welcomeBody);
     await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByText('Saved')).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible();
 
     // Confirm the edit actually PERSISTED (via the API the public handler reads)
     // BEFORE signing up — the UI "Saved" badge can flip a tick before the write is
@@ -158,7 +169,7 @@ test.describe('Settings — admin path', () => {
       .getByLabel(/Housing-fair welcome text/i)
       .fill('Hi {firstName}, thanks for stopping by! Reply STOP to opt out.');
     await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByText('Saved')).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible();
   });
 
   test('admin can remove an invited teammate', async ({ page }) => {

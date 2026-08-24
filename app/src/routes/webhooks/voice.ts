@@ -65,6 +65,7 @@ import {
 } from '../../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
+  relayMemberKey,
   type CallStatus,
   type CallStatusUpdate,
   type MessageItem,
@@ -84,6 +85,7 @@ import {
 import type { AuditRepo } from '../../repos/auditRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
+import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
@@ -439,13 +441,39 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    // (2) Route by To. A pool number → the masked relay-group bridge.
+    // (2) Route by To. A pool number -> the masked relay-group bridge. A pool
+    // number fronts MANY participant-disjoint groups (relay-number-lifecycle),
+    // so the group is resolved on the (To, From) PAIR by the shared ladder in
+    // services/relayInboundResolution.ts - the same policy object the SMS
+    // webhook consumes, extracted so the two channels cannot drift. Routing on
+    // To alone via getByPoolNumber judged every caller against ONE arbitrary
+    // open roster and refused legitimate members of the number's other groups
+    // (prod incident 2026-08-22/23).
     if (To !== undefined && To.length > 0) {
-      const relay = await conversations.getByPoolNumber(To);
-      if (relay) {
-        await handleMaskedInbound(res, relay, { CallSid, From });
+      const groups = await conversations.getAllByPoolNumber(To);
+      const resolution = resolveRelayInbound(groups, From);
+      if (resolution !== undefined && resolution.kind !== 'all_closed_non_member') {
+        if (resolution.kind === 'open_member' && resolution.violatingOpenMatchIds) {
+          log.error(
+            {
+              callSid: CallSid,
+              matchCount: resolution.violatingOpenMatchIds.length,
+              conversationIds: resolution.violatingOpenMatchIds,
+            },
+            'multiple OPEN relay groups on one pool number match the caller (burn invariant violated) - routing to the newest',
+          );
+        }
+        // open_member -> bridge. closed_member -> the closed-thread refusal,
+        // filed in the caller's OWN dead thread. non_member_open -> the
+        // non-member refusal, filed on the newest open group for the record.
+        // handleMaskedInbound derives each outcome from the group it is handed.
+        await handleMaskedInbound(res, resolution.group, { CallSid, From });
         return;
       }
+      // undefined (To fronts no relay groups at all) or all_closed_non_member
+      // (AF-5: never bury a stranger, a second phone, or a member calling from
+      // a NEW phone in a dead group transcript) -> fall through to founder
+      // call-triage below, the voice analogue of the SMS 1:1 intake path.
     }
 
     // (3) To is the business number (config.businessPhoneNumber) or unknown → FOUNDER
@@ -853,6 +881,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           callOutcome: 'missed',
           startedAt,
           masked: true,
+          ...(caller !== undefined && { relaySenderKey: relayMemberKey(caller) }),
           // No counterpart label on a refusal (no bridge happened); record why.
           callPartyLabel: reason === 'closed_thread' ? 'Closed thread' : 'Not connected',
           ...(isClosed && { receivedOnClosedThread: true }),
@@ -922,6 +951,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         callStatus: 'ringing',
         startedAt,
         masked: true,
+        relaySenderKey: relayMemberKey(caller),
         callPartyLabel: calleeLabel,
       });
       if (!appended.deduped) {
@@ -1058,15 +1088,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * describes the state BEFORE the stamp committed.
    */
   function announceCallStamp(row: MessageItem): void {
-    // A MASKED relay bridge's call row is rendered by NO surface - the contact
-    // timeline excludes relay_group conversations and the relay thread mapper
-    // drops type:'call' rows - so announcing it costs an SSE broadcast to every
-    // connected dashboard, plus a mark-read POST and a media refetch from every
-    // open contact page, to redraw a row nobody draws. Relay groups are the
-    // GROWING product, so this must not scale with them. DO NOT "restore" this:
-    // it is a no-op only for as long as no surface renders a masked call, and
-    // the surface that starts rendering one is the change that removes it.
-    if (row.masked === true) return;
+    // Masked Relay calls now render in their Relay Timeline, so they need this
+    // same lifecycle refresh. message.persisted is intentionally the ONLY
+    // event: no conversation activity stamp means no Inbox reorder, preview
+    // change, or unread bump for either Relay or 1:1 calls.
     events.emit('message.persisted', {
       conversationId: row.conversationId,
       tsMsgId: row.tsMsgId,
@@ -1468,8 +1493,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // the write has already committed. Best-effort on both halves: neither
         // may break an accepted bridge. The row comes from the stamp itself -
         // NOTHING may be read between press-1 and the bridge (fix wave 4, N-1),
-        // and this arm also serves every MASKED relay bridge, whose row the
-        // announce skips entirely (see announceCallStamp).
+        // and this arm also serves every MASKED relay bridge, whose open Relay
+        // Timeline now consumes the same lifecycle refresh.
         if (stamp?.transitioned === true && stamp.row !== undefined) {
           try {
             announceCallStamp(stamp.row);

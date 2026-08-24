@@ -467,6 +467,39 @@ describe('ConversationDetail roster management', () => {
     );
   });
 
+  it('offers a PARTNER in the add-member search - the widened fan-out reaches the group roster', async () => {
+    // The suite's default mock deliberately answers the TENANT fan-out only,
+    // which meant the partner leg of useContacts('all') was never exercised
+    // here (docs/issues/partner-widening-consumer-test-gap.md). Keyed by type:
+    // this fails if the fan-out stops asking for partners or the picker drops
+    // the row.
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getAllContacts.mockImplementation(async (...args: unknown[]) => {
+      const params = (args[0] ?? {}) as { type?: string };
+      return params.type === 'partner'
+        ? [{ contactId: 'c-partner', type: 'partner', firstName: 'Renata', lastName: 'Cole', phones: [{ phone: '+14045550190', primary: true }] }]
+        : [];
+    });
+    getConversation.mockResolvedValue(relayHeader());
+    addConversationMember.mockResolvedValue([KEISHA, LARS, { contactId: 'c-partner', phone: '+14045550190', name: 'Renata Cole' }]);
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Relay group')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Add a member' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add member' }), 'Renata');
+    await user.click(await screen.findByRole('option', { name: /Renata Cole/ }));
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() =>
+      expect(addConversationMember).toHaveBeenCalledWith('conv-g1', {
+        phone: '+14045550190',
+        contactId: 'c-partner',
+        name: 'Renata Cole',
+      }),
+    );
+  });
+
   it('adds a member by raw phone (normalized to E.164) when no contact is picked', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

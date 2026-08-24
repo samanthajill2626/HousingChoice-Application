@@ -624,6 +624,42 @@ describe('Timeline', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  // Prod 2026-08-24: a Verizon mobile delivered 10/10 texts the same week 6/6 of
+  // its MMS died 30005. "Number is invalid" on the attachment bubble sent staff
+  // chasing a number that works. The replacement is purely observational - it
+  // does not name a culprit (one prod case was a 72h expiry on an oversized
+  // payload, where nothing rejected anything) and does not promise texts work.
+  // The SAME code on a TEXT bubble still means the number is bad.
+  it('reads a 30005 on an ATTACHMENT as a delivery failure, not an invalid number', () => {
+    const failedMms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-mms-fail',
+      tsMsgId: 'm-mms-fail',
+      type: 'mms',
+      delivery_status: 'undelivered',
+      error_code: '30005',
+      body: 'Here is the place',
+    };
+    renderTimeline({ items: [failedMms] });
+    expect(
+      screen.getByText(/Undelivered - Attachment didn't get through, texts may still work \(error 30005\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Number is invalid/)).not.toBeInTheDocument();
+  });
+
+  it('still reads a 30005 on a TEXT message as an invalid number', () => {
+    const failedSms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-sms-fail',
+      tsMsgId: 'm-sms-fail',
+      delivery_status: 'undelivered',
+      error_code: '30005',
+      body: 'plain text',
+    };
+    renderTimeline({ items: [failedSms] });
+    expect(screen.getByText(/Undelivered - Number is invalid \(error 30005\)/)).toBeInTheDocument();
+  });
+
   it('surfaces a rate-limited RETRY in the composer error slot (retry shares the manual-send budget)', async () => {
     const failed: TimelineItem = {
       ...MESSAGE_OUT,
@@ -982,6 +1018,28 @@ describe('Timeline relay-group annotations', () => {
     const chip = screen.getByText(/delivered 1\/2 - 1 failed - Number is invalid \(error 30005\)/);
     expect(chip.className).toMatch(/toneDanger/);
     expect(chip).toHaveAttribute('title', expect.stringContaining('error 30005'));
+  });
+
+  // Pins the ROLLUP CALL SITE, not just the pure function: the media flag has to
+  // reach presentRelayDelivery from the bubble. Without this, deleting
+  // `, { media: isMms }` in Timeline.tsx leaves the whole suite green and a relay
+  // MMS silently reverts to "Number is invalid" - which is case 1 of the
+  // originating issue (the Dish relay tour group), the highest-value case there is.
+  it('reads a 30005 on a relay PICTURE rollup as an attachment failure, not an invalid number', () => {
+    const mmsOneFailed: TimelineItem = {
+      ...RELAY_OUT,
+      type: 'mms',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: '30005' },
+      },
+    };
+    renderTimeline({ items: [mmsOneFailed], relayRoster: ROSTER });
+    const chip = screen.getByText(
+      /delivered 1\/2 - 1 failed - Attachment didn't get through, texts may still work \(error 30005\)/,
+    );
+    expect(chip.className).toMatch(/toneDanger/);
+    expect(screen.queryByText(/Number is invalid/)).not.toBeInTheDocument();
   });
 
   it('surfaces the A2P-unregistered code (30034) on the rollup - the relay-group bug now shows WHY', () => {
@@ -1716,6 +1774,76 @@ function callItem(
 }
 
 describe('Timeline call cards - direction', () => {
+  it('labels a relay call from the current roster name with a phone fallback', () => {
+    const relayCall = {
+      kind: 'call',
+      id: 'c-relay',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      relay_sender_key: 'contact-alice',
+      call_party_label: 'Old counterpart label',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [relayCall],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002' },
+      ],
+    });
+
+    expect(screen.getByText('Alice Adams called (555) 010-0002')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Call recording')).not.toBeInTheDocument();
+    expect(screen.queryByText('Transcript', { exact: true })).not.toBeInTheDocument();
+  });
+
+  it('does not guess a legacy Relay caller when the counterpart label is ambiguous', () => {
+    const legacyRelayCall = {
+      kind: 'call',
+      id: 'legacy-relay-call',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      call_party_label: 'Alex Kim',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [legacyRelayCall],
+      relayRoster: [
+        { contactId: 'contact-alex-1', phone: '+15550100001', name: 'Alex Kim' },
+        { contactId: 'contact-alex-2', phone: '+15550100002', name: 'Alex Kim' },
+      ],
+    });
+
+    expect(screen.getByText('Incoming call')).toBeInTheDocument();
+    expect(screen.queryByText(/called/)).not.toBeInTheDocument();
+  });
+
+  it('infers an unambiguous two-person legacy Relay call written before caller keys', () => {
+    const legacyRelayCall = {
+      kind: 'call',
+      id: 'legacy-relay-call',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      call_party_label: 'Bob Brown',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [legacyRelayCall],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002', name: 'Bob Brown' },
+      ],
+    });
+
+    expect(screen.getByText('Alice Adams called Bob Brown')).toBeInTheDocument();
+  });
+
   it('aligns by direction: inbound left, outbound right + the outbound tint', () => {
     renderTimeline({
       items: [

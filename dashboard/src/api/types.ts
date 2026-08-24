@@ -2079,6 +2079,13 @@ export interface Message {
    *  never dangerouslySetInnerHTML. */
   email_html_sanitized?: string;
   // --- Voice call — present only on a type:'call' entry --------------------
+  /** True for a Relay pool-number bridge. Masked calls never carry media. */
+  masked?: boolean;
+  /** Stable Relay roster key for the caller; resolved against the current roster. */
+  relay_sender_key?: string;
+  /** Legacy, non-phone counterpart label used only when no roster key can resolve. */
+  call_party_label?: string;
+  call_status?: CallStatus;
   call_outcome?: CallOutcome;
   started_at?: string;
   call_duration?: number;
@@ -2272,6 +2279,13 @@ export interface TimelineCall extends TimelineBase {
   /** Who placed the call. REQUIRED - every stored call row carries it (no
    *  backfill needed), and the card renders the side + arrow from it. */
   direction: MessageDirection;
+  /** Stored role of the caller; a fallback for old Relay rows without a roster key. */
+  author?: MessageAuthor;
+  /** Relay caller key. The card resolves this against the current roster so a
+   *  later contact-name edit updates historical call attribution. */
+  relay_sender_key?: string;
+  /** Legacy metadata fallback for Relay calls written before relay_sender_key. */
+  call_party_label?: string;
   /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
    *  status) and on any row whose stored value is not a union member. */
   call_status?: CallStatus;

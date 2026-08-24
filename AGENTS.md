@@ -117,20 +117,30 @@ on a residue-carrying key, 65s and 0 failures on an empty one, same commit. If
 the clean-key run is green, the failure is environmental.
 See [`npm-test-dynamodb-local-contention`](docs/issues/npm-test-dynamodb-local-contention.md).
 
-Known flakes must be re-run once before blaming the current change, with both runs
-reported:
+**There is no longer a named-flake re-run list.** Both entries that stood here
+are now closed, so a named-spec failure is a REGRESSION to diagnose, not
+something to re-run and excuse:
 
-- [`tour-reminders-panel-e2e-flake`](docs/issues/tour-reminders-panel-e2e-flake.md) -
-  a rare Reminders-panel rung-visibility timeout, last seen 2026-08-03. NOTE the
-  issue's title long advertised a DETERMINISTIC pre-08:00 failure; that half was
-  closed by `150fbfa4` on 2026-08-05 and re-running really is the right response
-  to what remains.
+- [`tour-reminders-panel-e2e-flake`](docs/issues/tour-reminders-panel-e2e-flake.md)
+  - resolved 2026-08-24. A rare Reminders-panel rung-visibility timeout, last
+  seen 2026-08-03, with zero recurrences across ~20 full gate runs since - the
+  degraded-container era and the contention fixes included. Reopen only on that
+  exact signature (a rung row invisible inside its 10s budget, on a branch with
+  no tours intersection), and read the issue BODY first: its title long
+  advertised a deterministic pre-08:00 failure that was closed separately by
+  `150fbfa4`.
+- [`conversationdetail-members-mock-suite-flake`](docs/issues/conversationdetail-members-mock-suite-flake.md)
+  - fixed 2026-08-21. Its mocks were bare `vi.fn()`s returning `undefined` after
+  `mockReset`, so the component died on `.then()` of undefined. Never a timing
+  flake - a reachable-by-construction defect.
 
-`conversationdetail-members-mock-suite-flake` was on this list and is FIXED
-(2026-08-21): its mocks were bare `vi.fn()`s that returned `undefined` after
-`mockReset`, so the component died on `.then()` of undefined. Not a timing
-flake - a reachable-by-construction defect. If that file fails again, treat it
-as a real regression rather than re-running.
+The re-run-and-compare discipline still applies to the ENVIRONMENTAL failure
+above, which is not a named flake: re-run the failing FILES alone, run the full
+suite at the branch's base commit, and compare failing FILES rather than failing
+cases, reporting both runs. See
+[`npm-test-dynamodb-local-contention`](docs/issues/npm-test-dynamodb-local-contention.md),
+which is still open - the per-file-keys fix closed its reopened cause, but an
+`UpdateTable` `InternalFailure` tail remains.
 
 ## Required completion gates
 

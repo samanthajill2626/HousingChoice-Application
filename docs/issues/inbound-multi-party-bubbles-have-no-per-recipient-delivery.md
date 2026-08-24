@@ -6,7 +6,7 @@ severity: med
 status: open
 area: dashboard/contact-timeline
 created: 2026-08-24
-refs: dashboard/src/routes/contact/Timeline.tsx:879 (showRecipients), dashboard/src/routes/contact/Timeline.tsx:864 (deliveredSummary), dashboard/src/routes/contact/Timeline.tsx:830 (optedOutCount), app/src/routes/webhooks/twilio.ts:610, app/src/jobs/relayFanOut.ts:708, dashboard/src/routes/contact/Timeline.test.tsx:701
+refs: dashboard/src/routes/contact/Timeline.tsx:888 (showRecipients), dashboard/src/routes/contact/Timeline.tsx:874 (deliveredSummary), dashboard/src/routes/contact/Timeline.tsx:840 (optedOutCount), app/src/routes/webhooks/twilio.ts:610, app/src/jobs/relayFanOut.ts:708, dashboard/src/routes/contact/Timeline.test.tsx:737
 ---
 
 **Problem.** The per-recipient delivery breakdown shipped by
@@ -18,7 +18,7 @@ const showRecipients =
   outbound && recipientEntries.length > 0 && msg.delivery_status !== 'queued_pending';
 ```
 
-(`showRecipients`, `Timeline.tsx:879-880`; the rollup chip's own gate
+(`showRecipients`, `Timeline.tsx:888-889`; the rollup chip's own gate
 `deliveredSummary`, `:864-865`, starts the same way). That `outbound` is inherited
 from the rollup, and it is NOT a no-op on this map:
 
@@ -28,7 +28,7 @@ from the rollup, and it is NOT a no-op on this map:
   map and a child in one expression), and the fan-out fills the slots as it
   relays that member's message on to everyone else
   (`app/src/jobs/relayFanOut.ts:708`, `messages.setRecipientDelivery`).
-- `dashboard/src/routes/contact/Timeline.test.tsx:701-716` pins exactly that
+- `dashboard/src/routes/contact/Timeline.test.tsx:737-752` pins exactly that
   shape on an INBOUND fixture (`...MESSAGE_IN` with a two-slot
   `delivery_recipients` map), and `:718-731` pins the plural case.
 
@@ -46,26 +46,26 @@ wrong, and this is the part a future reader will not rediscover:
 
 - **Widening the LIST's gate renders no new chip.** An earlier draft said
   dropping `outbound` "would newly render a chip on inbound bubbles". That is
-  true of the ROLLUP (`deliveredSummary`, `Timeline.tsx:864`) and false of the
+  true of the ROLLUP (`deliveredSummary`, `Timeline.tsx:874`) and false of the
   LIST: after this branch the list's gate is evaluated INDEPENDENTLY of the
   rollup's value (the "THE LIST'S GATE" comment and `showRecipients`,
-  `Timeline.tsx:873-880`, the whole point of that fix). Dropping `outbound` from
+  `Timeline.tsx:882-889`, the whole point of that fix). Dropping `outbound` from
   the LIST's gate alone would add rows only - and those rows live inside a
   disclosure that is closed by default (the `showRecipients && revealed` guard on
-  the recipient `<ul>`, `Timeline.tsx:999-1000`), so a collapsed
+  the recipient `<ul>`, `Timeline.tsx:1010-1011`), so a collapsed
   inbound bubble would look byte-identical to today.
 - **Per-recipient information ALREADY ships on inbound multi-party bubbles.** The
   opt-out note is not outbound-gated: `optedOutCount` reads the same map with no
-  direction check (`Timeline.tsx:830-832`) and the note renders at `:1026-1046`,
-  and it is pinned on INBOUND fixtures (`Timeline.test.tsx:701`, `:718`). A
+  direction check (`Timeline.tsx:840-842`) and the note renders at `:1047-1067`,
+  and it is pinned on INBOUND fixtures (`Timeline.test.tsx:737`, `:754`). A
   revealed row list would not be a new CLASS of statement on an inbound bubble -
   it is the same class of statement, with names.
 
-**Suggested fix.** Drop `outbound` from `showRecipients` (`Timeline.tsx:879`) and
+**Suggested fix.** Drop `outbound` from `showRecipients` (`Timeline.tsx:888`) and
 leave the rollup chip's gate (`deliveredSummary`, `:864`) alone, so an inbound
 multi-party bubble gains rows behind its existing reveal and gains no new chip.
 Decide deliberately
 whether the per-leg staleness escalation should apply on the inbound side (the
 row presenter is direction-agnostic today), and extend
 `Timeline.delivery.test.tsx` with an inbound fixture - the existing inbound
-fixtures at `Timeline.test.tsx:701`/`:718` are the shape to copy.
+fixtures at `Timeline.test.tsx:737`/`:754` are the shape to copy.

@@ -3,11 +3,44 @@ id: outbound-mms-full-suite-reseed-timeout
 title: Outbound MMS full-profile reseed can exhaust the full-suite test timeout
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e/harness
 created: 2026-08-21
+resolved: 2026-08-24
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:163, e2e/playwright.config.ts:107
 ---
+
+**Resolution (2026-08-24): instrumented, measured, and the sighting's era
+explained.** The one occurrence came from the same sick 2026-08-21 gate run as
+two since-resolved machine-exhaustion issues. The instrumentation this issue
+asked for landed (clearMs/seedMs on every reseed log line), and its first
+full-suite baseline showed the WORST reseed at ~3.6s against the 30s budget -
+an 8x margin under normal load. No budget was changed, honoring this issue's
+own warning. Zero recurrences since, including two heavily contended runs.
+REOPEN IF a reseed timeout recurs - it will now arrive carrying its own phase
+breakdown, which is precisely what this issue existed to demand.
+
+
+**First healthy-machine measurement (2026-08-23, `fix/test-suite-wave3` gate
+run, 253/253 green, 17.3m).** The instrumentation's first full-suite numbers:
+across every reseed in the run, the WORST case was clearMs=870 + seedMs=2728,
+i.e. ~3.6s total against the 30s budget - an 8x margin under normal full-suite
+load. This strongly supports the environmental reading: the 2026-08-21 sighting
+came from the same degraded gate run that produced two since-resolved
+machine-exhaustion issues (`otel-child-boot-stdout-missing`,
+`performance-config-npm-cmd-enomem`). Stays open until a loaded recurrence
+either does not happen for a while or arrives carrying its phase breakdown.
+
+
+**Instrumented (2026-08-23, `fix/test-suite-wave3`) - still open, awaiting a
+loaded-suite measurement.** The suggested first step is done: `resetLocalData`
+now logs `clearMs` and `seedMs` alongside its existing summary line, so the
+next reseed that runs long under full-suite load names its own bottleneck
+(table clearing vs seeding vs a competing job holding the request) instead of
+dying as a bare 30s timeout. No budget was changed - per this issue's own
+warning, a justified budget comes AFTER the phases are measured, and masking a
+stuck reseed with a bigger timeout would be worse than the flake.
+
 
 **Problem.** In a bare `npm run e2e` on feature head `709a5263`, the team group MMS
 media case exhausted the 30-second test timeout inside `beforeEach` while awaiting

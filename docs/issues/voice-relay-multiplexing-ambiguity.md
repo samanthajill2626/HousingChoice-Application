@@ -2,12 +2,29 @@
 id: voice-relay-multiplexing-ambiguity
 title: Masked-voice routing is ambiguous on a multi-group pool number
 type: debt
-severity: low
-status: open
+severity: high
+status: resolved
+resolved: 2026-08-24
 area: app
 created: 2026-07-17
-refs: app/src/routes/webhooks/voice.ts:356, app/src/routes/webhooks/voice.ts:370
+refs: app/src/services/relayInboundResolution.ts, app/src/routes/webhooks/voice.ts
 ---
+
+**Resolution (2026-08-24).** Fixed on `fix/voice-pool-multiplex` after the
+deferred risk landed in production: 2026-08-22/23, five legitimate inbound
+calls to pool +14704107371 (five open groups) were refused as non-members and
+their refusal rows filed into an unrelated group's thread (severity raised
+from low accordingly; the five prod rows were moved to the callers' real
+threads by hand on 2026-08-24). The suggested fix below shipped, one level
+up from the suggestion: the (To, From) ladder now lives ONCE in
+`app/src/services/relayInboundResolution.ts` and BOTH webhooks consume it, so
+the channels cannot drift again. Voice additionally adopts the SMS AF-5 rule
+the suggestion did not cover: when every group on the number is closed and
+the caller is on no roster, the call falls through to founder call-triage
+instead of being buried in a dead transcript. getByPoolNumber survives only
+as ourNumberKind's yes/no membership test and its contract doc now says so.
+Known residuals shared with (and matching) the SMS path are filed in
+[relay-inbound-resolution-residuals](relay-inbound-resolution-residuals.md).
 
 **Problem.** Under burn-multiplexing (relay-number-lifecycle), one pool number
 can front several relay groups over its lifetime, participant-disjoint. Inbound

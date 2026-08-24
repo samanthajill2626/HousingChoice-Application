@@ -9,6 +9,15 @@ created: 2026-08-24
 refs: dashboard/src/routes/placements/MovePromptModal.tsx:190, dashboard/src/routes/placements/PlacementDetail.tsx:719, e2e/scenarios/steps.ts:3544, e2e/tests/scenarios/approval-and-move-in.spec.ts:223
 ---
 
+**Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
+:223 failed AGAIN in the re-run, but at an EARLIER step ('App: placement is at Awaiting inspection') with a plain-timeout shape - slowness, not necessarily the input-loss mechanism. Keep the two signatures separate when tallying: the empty-field-with-open-dialog snapshot from run 1 is the input-loss evidence; this one is load.
+IMPORTANT CONTEXT for both runs that day: the re-run raced a LIVE concurrent
+feature mission on the same machine (a dozen Playwright MCP browser processes,
+a live test-server, Codex runtimes), and the suite ran 27.4m against a healthy
+21m baseline. All three failures in that run were already-filed load-sensitive
+issues; treat sightings from it as heavy-load data points, not baselines.
+
+
 **Sighting (2026-08-24, `fix/test-suite-wave3` gate run, 252 passed / 1
 failed, 21.0m).** `approval-and-move-in.spec.ts:223` (inspection FAILS ->
 Lost) timed out clicking "Confirm move" in the Schedule-inspection dialog. The

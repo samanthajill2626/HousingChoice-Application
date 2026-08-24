@@ -9,6 +9,15 @@ created: 2026-08-23
 refs: e2e/scenarios/steps.ts:3516, e2e/tests/scenarios/approval-and-move-in.spec.ts:318
 ---
 
+**Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
+A SECOND test in the same file hit the same signature: approval-and-move-in.spec.ts:258 (rent-rejection -> Lost) timed out with the More-actions kebab 'resolved' but never 'visible, enabled and stable'. Same mechanism surface, different test - the flake is per-MACHINERY, not per-test.
+IMPORTANT CONTEXT for both runs that day: the re-run raced a LIVE concurrent
+feature mission on the same machine (a dozen Playwright MCP browser processes,
+a live test-server, Codex runtimes), and the suite ran 27.4m against a healthy
+21m baseline. All three failures in that run were already-filed load-sensitive
+issues; treat sightings from it as heavy-load data points, not baselines.
+
+
 **Problem.** In a full `npm run e2e`, the LIF non-eligible branch fails at its
 first stage move:
 

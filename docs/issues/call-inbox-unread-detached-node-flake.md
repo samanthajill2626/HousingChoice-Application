@@ -9,6 +9,15 @@ created: 2026-08-23
 refs: e2e/tests/dashboard-next/call-inbox-unread.spec.ts:155
 ---
 
+**Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
+First recurrence since the 2026-08-23 measurement stamps: the Mark-read click timed out in the re-run. One occurrence in six full runs since filing, and only under the heaviest machine load yet observed.
+IMPORTANT CONTEXT for both runs that day: the re-run raced a LIVE concurrent
+feature mission on the same machine (a dozen Playwright MCP browser processes,
+a live test-server, Codex runtimes), and the suite ran 27.4m against a healthy
+21m baseline. All three failures in that run were already-filed load-sensitive
+issues; treat sightings from it as heavy-load data points, not baselines.
+
+
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)
 then 253 passed (19.0m). This spec passed in BOTH, as did every other issue on

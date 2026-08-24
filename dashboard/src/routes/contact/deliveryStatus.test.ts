@@ -279,6 +279,178 @@ describe('presentRelayDelivery', () => {
       presentRelayDelivery([{ status: 'failed', errorCode: 'contact_opted_out' }]),
     ).toBeNull();
   });
+
+  // ---------------------------------------------------------------------------
+  // The clock-passing half. Every assertion ABOVE this line omits the staleness
+  // inputs and is the explicit NO-CLOCK contract; the twins below pass the same
+  // slot arrays WITH a clock, because the only production caller always does.
+  // ---------------------------------------------------------------------------
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const R0 = Date.parse('2026-08-19T21:28:59.000Z');
+  const NOW = R0 + STALE_SENT_AFTER_MS * 4;
+  /** Quiet for four thresholds. */
+  const QUIET = iso(R0);
+  /** One minute old as of NOW. */
+  const FRESH = iso(NOW - 60_000);
+  const MSG_AT = NOW - 60_000;
+
+  it('twin of "counts up in neutral": a quiet `sent` leg turns the SAME array danger once a clock is passed', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }], MSG_AT, NOW),
+    ).toEqual({
+      label: 'delivered 1/2 - 1 not confirmed',
+      tone: 'danger',
+      // NOT a failure: no receipt is not proof of failure, and isFailure is what
+      // offers a Retry that could double-send.
+      isFailure: false,
+    });
+  });
+
+  it('twin of "counts up in neutral": two `queued` legs escalate ONLY when they carry a sentAt', () => {
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'queued', sentAt: QUIET },
+          { status: 'queued', sentAt: QUIET },
+        ],
+        MSG_AT,
+        NOW,
+      ),
+    ).toEqual({ label: 'delivered 0/2 - 2 not confirmed', tone: 'danger', isFailure: false });
+    // Same array, same clock, no sentAt: the released connect-when-ready hold and
+    // the fan-out that never ran. Stays neutral for ever, by decision.
+    expect(
+      presentRelayDelivery(
+        [{ status: 'queued' }, { status: 'queued' }],
+        NOW - STALE_SENT_AFTER_MS * 1000,
+        NOW,
+      ),
+    ).toEqual({ label: 'delivered 0/2', tone: 'neutral', isFailure: false });
+  });
+
+  it('twin of "undelivered is a hard failure too": a failed leg AND a stale leg add up, and the counts stay separate', () => {
+    expect(
+      presentRelayDelivery(
+        [{ status: 'undelivered' }, { status: 'queued', sentAt: QUIET }],
+        MSG_AT,
+        NOW,
+      ),
+    ).toEqual({
+      label: 'delivered 0/2 - 1 failed, 1 not confirmed',
+      tone: 'danger',
+      // A real failure exists here, unlike the stale-only branch.
+      isFailure: true,
+    });
+  });
+
+  it('puts the reason LAST and takes it from the FAILED legs only - it belongs to them, not to the unconfirmed ones', () => {
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'failed', errorCode: '30034' },
+          { status: 'sent', sentAt: QUIET },
+          { status: 'delivered' },
+        ],
+        MSG_AT,
+        NOW,
+      ),
+    ).toEqual({
+      label: 'delivered 1/3 - 1 failed, 1 not confirmed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Number not registered for A2P 10DLC (error 30034)',
+    });
+  });
+
+  it('keeps opted-out members out of the not-confirmed denominator too, exactly as it keeps them out of N/M', () => {
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'delivered' },
+          { status: 'sent', sentAt: QUIET },
+          { status: 'failed', errorCode: 'contact_opted_out' },
+        ],
+        MSG_AT,
+        NOW,
+      ),
+    ).toEqual({ label: 'delivered 1/2 - 1 not confirmed', tone: 'danger', isFailure: false });
+  });
+
+  it('escalates exactly AT STALE_SENT_AFTER_MS and not one millisecond before', () => {
+    const atBoundary = [{ status: 'sent', sentAt: iso(NOW - STALE_SENT_AFTER_MS) }] as const;
+    const justUnder = [{ status: 'sent', sentAt: iso(NOW - STALE_SENT_AFTER_MS + 1) }] as const;
+    expect(presentRelayDelivery([...atBoundary], MSG_AT, NOW)).toEqual({
+      label: 'delivered 0/1 - 1 not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+    expect(presentRelayDelivery([...justUnder], MSG_AT, NOW)).toEqual({
+      label: 'delivered 0/1',
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
+
+  it('still finalizes GREEN with a clock passed - every leg delivered is terminal, so nothing can be not-confirmed', () => {
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'delivered', deliveredAt: QUIET },
+          { status: 'delivered', deliveredAt: QUIET },
+        ],
+        NOW - STALE_SENT_AFTER_MS * 1000,
+        NOW,
+      ),
+    ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
+  });
+
+  it('K (failed) and J (not confirmed) are DISJOINT - a hard-failed leg is never also counted not-confirmed', () => {
+    // Both legs failed and both are ancient. If the two counts overlapped this
+    // would read "2 failed, 2 not confirmed" and the chip would double-count the
+    // whole group.
+    expect(
+      presentRelayDelivery(
+        [
+          { status: 'failed', sentAt: QUIET },
+          { status: 'undelivered', sentAt: QUIET },
+        ],
+        NOW - STALE_SENT_AFTER_MS * 1000,
+        NOW,
+      ),
+    ).toEqual({ label: 'delivered 0/2 - 2 failed', tone: 'danger', isFailure: true });
+  });
+
+  it('still returns null with a clock passed when there is nothing to summarize', () => {
+    expect(presentRelayDelivery([], MSG_AT, NOW)).toBeNull();
+    expect(
+      presentRelayDelivery(
+        [{ status: 'failed', errorCode: 'contact_opted_out', sentAt: QUIET }],
+        NOW - STALE_SENT_AFTER_MS * 1000,
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('cannot select the not-confirmed branches at all when the clock is withheld, however quiet the legs are', () => {
+    // Plan D-a, total: a caller cannot withhold a per-slot sentAt, so withholding
+    // the READING clock is the only complete off switch - and it is what keeps
+    // every pre-existing no-clock assertion in this file honest rather than lucky.
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: QUIET }]),
+    ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
+    expect(
+      presentRelayDelivery([{ status: 'sent', sentAt: QUIET }], NOW - STALE_SENT_AFTER_MS * 1000),
+    ).toEqual({ label: 'delivered 0/1', tone: 'neutral', isFailure: false });
+    expect(
+      presentRelayDelivery([{ status: 'undelivered' }, { status: 'queued', sentAt: QUIET }]),
+    ).toEqual({ label: 'delivered 0/2 - 1 failed', tone: 'danger', isFailure: true });
+  });
+
+  it('leaves a fresh leg neutral even with a clock - the ordinary in-flight bubble is unchanged', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent', sentAt: FRESH }], MSG_AT, NOW),
+    ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
+  });
 });
 
 describe('deliveryReason', () => {

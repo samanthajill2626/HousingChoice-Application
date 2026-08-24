@@ -253,13 +253,30 @@ export function canEverGoStale(
  *   - in flight → neutral "delivered N/M" that counts up as DLRs land;
  *   - every leg delivered → the SAME green "Delivered" cue as a 1:1 bubble
  *     ("Delivered N/N") so a finalized group send is legible at a glance;
- *   - any hard-failed leg (failed/undelivered) → danger, with the failure count.
- * Opted-out members are EXCLUDED from the count: they were never sent to (the
- * bubble's opt-out note explains them), and counting them would make N/M
- * unreachable — the chip could never finalize. All-opted-out (or no slots) ⇒
- * null: nothing was fanned out, so there is nothing to summarize.
+ *   - any hard-failed leg (failed/undelivered) → danger, with the failure count;
+ *   - any leg that has gone QUIET (see `isStaleLeg`) → danger, counted
+ *     separately as "J not confirmed", because a count alone is a coin flip and
+ *     the 2026-08-23 drop was lost on exactly that toss.
+ * Opted-out members are EXCLUDED from every counter - N, M, K and J: they were
+ * never sent to (the bubble's opt-out note explains them), and counting them
+ * would make N/M unreachable — the chip could never finalize. All-opted-out (or
+ * no slots) ⇒ null: nothing was fanned out, so there is nothing to summarize.
+ *
+ * K and J are DISJOINT by construction: a hard-failed leg is terminal, and
+ * `isStaleLeg` is false for every terminal status. Branch 2's label adds them,
+ * so that disjointness is load-bearing and is asserted in the tests.
+ *
+ * The staleness inputs are OPTIONAL and follow the WITHHELD-CLOCK convention:
+ * with `nowMs` undefined this cannot select the not-confirmed branches at all,
+ * whatever `sentAt` the slots carry, and behaves exactly as it did before. That
+ * is what keeps every pre-existing no-clock assertion honest rather than lucky.
+ * (Note the opposite convention on `presentDeliveryStatus` - see its doc.)
  */
-export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresentation | null {
+export function presentRelayDelivery(
+  slots: RelayDeliverySlot[],
+  messageAtMs?: number,
+  nowMs?: number,
+): DeliveryPresentation | null {
   // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
   // suppressed leg as `failed`; the group-text receipts path records what Twilio
   // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
@@ -275,6 +292,7 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
     (s) => s.status === 'failed' || s.status === 'undelivered',
   ).length;
   const total = fanned.length;
+  const stale = fanned.filter((s) => isStaleLeg(s, messageAtMs, nowMs)).length;
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
     // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
@@ -288,10 +306,28 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
       ),
     );
     return {
-      label: `delivered ${delivered}/${total} - ${failed} failed`,
+      // The reason is appended INLINE after this label by the bubble, so the
+      // counts come first and the reason last: it belongs to the FAILED legs
+      // only, and putting it between the two counts would attach it to the
+      // unconfirmed ones instead.
+      label:
+        stale > 0
+          ? `delivered ${delivered}/${total} - ${failed} failed, ${stale} not confirmed`
+          : `delivered ${delivered}/${total} - ${failed} failed`,
       tone: 'danger',
       isFailure: true,
       ...(reasons.length > 0 && { reason: reasons.join('; ') }),
+    };
+  }
+  if (stale > 0) {
+    // Danger so it draws the eye, but deliberately NOT isFailure: no receipt is
+    // not proof of failure, and isFailure is what offers a Retry that could
+    // double-send a message that actually landed. Same reasoning as
+    // STALE_SENT_PRESENTATION.
+    return {
+      label: `delivered ${delivered}/${total} - ${stale} not confirmed`,
+      tone: 'danger',
+      isFailure: false,
     };
   }
   if (delivered === total) {

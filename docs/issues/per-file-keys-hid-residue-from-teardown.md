@@ -123,6 +123,23 @@ Probed both ways in `dynamoKeyLedger.test.ts` ("the concurrent-mode age gate"):
 the gated sweep spares a fresh table and keeps its marker; the same sweep with
 the gate removed deletes it.
 
+**Soaked, 26 runs, 0 failures (2026-08-23).** 12 solo `npm test -w app` runs,
+3 under a sustained transaction+put load rig, 5 rounds of genuine two-worktree
+concurrency, 2 SIGKILL-recovery drills, plus the four gates. Under concurrency
+the spare path fired for real: one run finished while its neighbour was
+mid-flight and logged `spared 11 young table(s) - another vitest run is live`;
+the neighbour's clean exit then dropped its own tables and the next sweep found
+zero and pruned the kept marker. The kill drills killed 15-16 node processes
+mid-run (proven by 36-37 ledger markers SURVIVING the kill - a clean exit
+prunes them) and left 75-76 orphaned throwaway tables; the next run's
+sweep-on-entry removed all of them and went green.
+
+A lesson from running those drills that belongs next to the mechanism: the
+first two drill attempts LOOKED green and had killed nothing (one fired its
+timer after the run had already finished; the other handed taskkill an MSYS pid
+it silently rejects). A recovery drill is only evidence when the kill is proven
+to have landed - which is what the surviving-markers check is for.
+
 The change also caught its first real bug before it shipped: this suite's own
 fixed `hcledgersweepprobe` key - fine when worktree-scoped, a cross-worktree
 race once shared - was flagged by the new fixed-name invariant in

@@ -121,10 +121,131 @@ export function presentDeliveryStatus(
   return STATUS_PRESENTATION[status] ?? null;
 }
 
-/** The slice of a relay `delivery_recipients` slot the rollup presenter reads. */
+/** The slice of a relay `delivery_recipients` slot the rollup presenter reads.
+ *
+ *  Both clocks are ISO strings off the wire (`api/types.ts` RelayRecipientDelivery)
+ *  and come from DIFFERENT sources: `sentAt` is the PROVIDER's timestamp, written
+ *  only by the two relay send paths after a real send returned, and `deliveredAt`
+ *  is OUR server clock, written only on the `delivered` transition. Never subtract
+ *  one from the other or present the pair as a duration. */
 export interface RelayDeliverySlot {
   status: DeliveryStatus;
   errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
+
+/** Parse an ISO clock string off the wire, or undefined when it is absent or
+ *  does not parse. "PARSEABLE" is load-bearing: a `sentAt` that is present but
+ *  malformed must fall to the NO-CLOCK rows of the table below, where the rule
+ *  is explicit, rather than yielding a NaN clock that silently never ages. */
+function parseWireClock(iso: string | undefined): number | undefined {
+  if (iso === undefined) return undefined;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * THE clock a leg ages from, or undefined when this leg has none. `isStaleLeg`
+ * and `canEverGoStale` are both derived from this ONE helper so they can never
+ * drift about which clock a slot uses.
+ *
+ * The S3 eligibility table, encoded:
+ *
+ *   | leg status     | parseable sentAt | ages from |
+ *   | sent           | yes              | sentAt    |
+ *   | sent           | no               | msg.at    |
+ *   | queued         | yes              | sentAt    |
+ *   | queued         | no               | NOTHING   |
+ *   | queued_pending | either           | NOTHING   |
+ *   | delivered/failed/undelivered | either | NOTHING |
+ *
+ * Why `sent` may fall back to the message clock but `queued` may NOT: a RELAY
+ * leg cannot reach `sent` without a `sentAt` (the fan-out writes both on one
+ * object, and the DLR path is child-field-only and never clears it), so the
+ * fallback is reached only by a native group-text leg, whose `msg.at` IS its
+ * send time. A `queued` leg with no `sentAt`, by contrast, is exactly the shape
+ * of a released connect-when-ready hold (parent flipped to `queued` before the
+ * fan-out is enqueued, `msg.at` days old) and of a fan-out that never ran. Those
+ * two are BYTE-IDENTICAL, so one answer must serve both, and the decided answer
+ * is silence: a false red on a message that is about to send trains staff to
+ * ignore the cue. The cost is that the whole "our dispatch never happened" class
+ * can never escalate here; the server's own staleness alarm covers it.
+ *
+ * A terminal leg has settled, and a `queued_pending` hold has not been
+ * dispatched, so neither can be overdue.
+ */
+function stalenessClockMs(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+): number | undefined {
+  const legClock = parseWireClock(slot.sentAt);
+  // Exhaustive over DeliveryStatus. The `never` default is deliberate: a future
+  // union member becomes a TYPECHECK FAILURE here rather than silently falling
+  // into a default branch that decides its staleness by accident.
+  switch (slot.status) {
+    case 'sent':
+      return legClock ?? messageAtMs;
+    case 'queued':
+      return legClock;
+    case 'queued_pending':
+    case 'delivered':
+    case 'undelivered':
+    case 'failed':
+      return undefined;
+    default: {
+      const unreachable: never = slot.status;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Has this leg gone quiet? True only when the leg has a clock proving the LEG
+ * ITSELF started (see `stalenessClockMs`) and that clock has been quiet for
+ * STALE_SENT_AFTER_MS.
+ *
+ * CONVENTION, opposite to `presentDeliveryStatus`'s and deliberately so:
+ * staleness is evaluated ONLY when `nowMs` is supplied. With `nowMs` undefined,
+ * this returns false for EVERY slot regardless of `sentAt` - a caller cannot
+ * withhold a per-slot clock, so withholding the READING clock is the only total
+ * off switch, and callers rely on it (an imported row, and every pre-existing
+ * `presentRelayDelivery` call that passes no clock at all).
+ */
+export function isStaleLeg(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+  nowMs: number | undefined,
+): boolean {
+  if (nowMs === undefined) return false;
+  return isQuietSince(stalenessClockMs(slot, messageAtMs), nowMs);
+}
+
+/**
+ * COULD this leg ever become stale later? The ticker's run condition is
+ * `canEverGoStale(...) && !isStaleLeg(...)` - a leg that can never age schedules
+ * nothing, exactly like a terminal one, which is what makes the interval
+ * terminate.
+ *
+ * True iff a clock is supplied AND the leg has an applicable clock that is
+ * FINITE. Finiteness is not defensive: the row clock falls back to the message
+ * instant, and `messageInstant` (conversation/useRelayThread.ts) returns `''`
+ * for a non-ISO `tsMsgId`, whose `Date.parse` is NaN. Under a shape test such a
+ * leg would read "eligible" for ever and never stale, and the interval would
+ * spin for ever.
+ *
+ * The stale-capable statuses (`sent`, `queued`) are implied rather than re-listed:
+ * `stalenessClockMs` returns undefined for every other status, and re-listing
+ * them here is exactly the drift the shared helper exists to prevent.
+ */
+export function canEverGoStale(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+  nowMs: number | undefined,
+): boolean {
+  if (nowMs === undefined) return false;
+  const clock = stalenessClockMs(slot, messageAtMs);
+  return clock !== undefined && Number.isFinite(clock);
 }
 
 /**

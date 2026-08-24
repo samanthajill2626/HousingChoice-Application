@@ -4,6 +4,8 @@ import {
   presentRelayDelivery,
   deliveryReason,
   isQuietSince,
+  isStaleLeg,
+  canEverGoStale,
   STALE_SENT_AFTER_MS,
 } from './deliveryStatus.js';
 
@@ -51,6 +53,137 @@ describe('isQuietSince', () => {
     expect(isQuietSince(undefined, forever)).toBe(false);
     expect(isQuietSince(Number.NaN, forever)).toBe(false);
     expect(isQuietSince(Number.POSITIVE_INFINITY, forever)).toBe(false);
+  });
+});
+
+// The S3 eligibility table: a leg is STALE when it has a clock that proves the
+// LEG ITSELF started and that clock has been quiet for STALE_SENT_AFTER_MS.
+//
+// | leg status | parseable sentAt | ages from | can go stale |
+// | sent       | yes              | sentAt    | yes |
+// | sent       | no               | msg.at    | yes |
+// | queued     | yes              | sentAt    | yes |
+// | queued     | no               | -         | NO  |
+// | queued_pending | either       | -         | no  |
+// | terminal (delivered/failed/undelivered) | either | - | no |
+describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  // A fixed instant to build every clock from; nothing here reads the real clock.
+  const L0 = Date.parse('2026-08-19T21:28:59.000Z');
+  const NOW = L0 + STALE_SENT_AFTER_MS * 4;
+  /** Quiet for four thresholds - stale by any reading. */
+  const QUIET_MS = L0;
+  const QUIET = iso(QUIET_MS);
+  /** One minute old as of NOW - nowhere near the threshold. */
+  const FRESH_MS = NOW - 60_000;
+  const FRESH = iso(FRESH_MS);
+  /** Three weeks before NOW: a connect-when-ready compose time. */
+  const ANCIENT_MS = NOW - 21 * 24 * 60 * 60 * 1000;
+
+  it('ages a `sent` leg from its OWN sentAt, not from the message clock', () => {
+    // Fresh leg clock, ancient message clock -> NOT stale. This is the released
+    // connect-when-ready hold: the message was composed weeks ago, the leg went
+    // out a minute ago.
+    expect(isStaleLeg({ status: 'sent', sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(false);
+    // Quiet leg clock, fresh message clock -> stale. The leg's own clock rules.
+    expect(isStaleLeg({ status: 'sent', sentAt: QUIET }, FRESH_MS, NOW)).toBe(true);
+  });
+
+  it('ages a `sent` leg with NO sentAt from the message clock - a native group-text leg, whose msg.at IS its send time', () => {
+    expect(isStaleLeg({ status: 'sent' }, QUIET_MS, NOW)).toBe(true);
+    expect(isStaleLeg({ status: 'sent' }, FRESH_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'sent' }, undefined, NOW)).toBe(false);
+  });
+
+  it('falls a `sent` leg with an UNPARSEABLE sentAt to the no-clock row rather than a NaN clock that never ages', () => {
+    expect(isStaleLeg({ status: 'sent', sentAt: 'not-a-date' }, QUIET_MS, NOW)).toBe(true);
+    expect(isStaleLeg({ status: 'sent', sentAt: '' }, FRESH_MS, NOW)).toBe(false);
+  });
+
+  it('ages a `queued` leg from its sentAt when it has one - the fan-out reported queued with a provider timestamp', () => {
+    expect(isStaleLeg({ status: 'queued', sentAt: QUIET }, undefined, NOW)).toBe(true);
+    expect(isStaleLeg({ status: 'queued', sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(false);
+  });
+
+  it('NEVER stales a `queued` leg with no sentAt, however old - a released connect-when-ready hold, and a fan-out that never ran', () => {
+    // Both shapes are BYTE-IDENTICAL at the data layer: parent queued, every slot
+    // { status: 'queued' }, no sentAt, msg.at arbitrarily old. Silence is the
+    // decided answer; a false red on a message about to send trains staff to
+    // ignore the cue.
+    expect(isStaleLeg({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'queued' }, QUIET_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'queued', sentAt: 'not-a-date' }, ANCIENT_MS, NOW)).toBe(false);
+  });
+
+  it('never stales a queued_pending hold - it has not been dispatched, so it cannot be overdue', () => {
+    expect(isStaleLeg({ status: 'queued_pending' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'queued_pending', sentAt: QUIET }, ANCIENT_MS, NOW)).toBe(false);
+  });
+
+  it('never stales a terminal leg - delivered, failed and undelivered are all settled', () => {
+    for (const status of ['delivered', 'failed', 'undelivered'] as const) {
+      expect(isStaleLeg({ status }, ANCIENT_MS, NOW)).toBe(false);
+      expect(isStaleLeg({ status, sentAt: QUIET }, ANCIENT_MS, NOW)).toBe(false);
+    }
+  });
+
+  it('evaluates staleness ONLY when a clock is supplied - a withheld nowMs is false for every slot, sentAt or not', () => {
+    expect(isStaleLeg({ status: 'sent', sentAt: QUIET }, QUIET_MS, undefined)).toBe(false);
+    expect(isStaleLeg({ status: 'sent' }, QUIET_MS, undefined)).toBe(false);
+    expect(isStaleLeg({ status: 'queued', sentAt: QUIET }, QUIET_MS, undefined)).toBe(false);
+  });
+
+  it('K (hard-failed) and J (stale) are DISJOINT - a hard-failed leg is terminal, so it is never also counted not-confirmed', () => {
+    for (const status of ['failed', 'undelivered'] as const) {
+      expect(isStaleLeg({ status, sentAt: QUIET, errorCode: '30005' }, QUIET_MS, NOW)).toBe(false);
+    }
+  });
+
+  it('canEverGoStale is true for exactly the three stale-CAPABLE rows of the table', () => {
+    expect(canEverGoStale({ status: 'sent', sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(true);
+    expect(canEverGoStale({ status: 'sent' }, FRESH_MS, NOW)).toBe(true);
+    expect(canEverGoStale({ status: 'queued', sentAt: FRESH }, undefined, NOW)).toBe(true);
+    // and stays true once the leg has already crossed the boundary - "can EVER"
+    // is about having a clock, not about the answer today.
+    expect(canEverGoStale({ status: 'sent', sentAt: QUIET }, undefined, NOW)).toBe(true);
+  });
+
+  it('canEverGoStale is false for the rows with no ageing clock, so the ticker never spins on them', () => {
+    expect(canEverGoStale({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued', sentAt: 'not-a-date' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued_pending' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued_pending', sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(false);
+    for (const status of ['delivered', 'failed', 'undelivered'] as const) {
+      expect(canEverGoStale({ status, sentAt: FRESH }, ANCIENT_MS, NOW)).toBe(false);
+    }
+  });
+
+  it('canEverGoStale is false for a NaN message clock - messageInstant returns "" for a non-ISO tsMsgId and Date.parse("") is NaN', () => {
+    expect(canEverGoStale({ status: 'sent' }, Number.NaN, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'sent', sentAt: 'not-a-date' }, Number.NaN, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'sent' }, undefined, NOW)).toBe(false);
+    // ...and isStaleLeg agrees, so such a leg is neither stale nor ever will be:
+    // under a shape test it would be "eligible" for ever and the interval would
+    // never terminate.
+    expect(isStaleLeg({ status: 'sent' }, Number.NaN, NOW)).toBe(false);
+  });
+
+  it('canEverGoStale is false for a WITHHELD clock, so an imported bubble schedules nothing', () => {
+    expect(canEverGoStale({ status: 'sent', sentAt: QUIET }, QUIET_MS, undefined)).toBe(false);
+    expect(canEverGoStale({ status: 'queued', sentAt: FRESH }, QUIET_MS, undefined)).toBe(false);
+    expect(canEverGoStale({ status: 'sent' }, QUIET_MS, undefined)).toBe(false);
+  });
+
+  it('canEverGoStale and isStaleLeg agree about WHICH clock a slot uses - they derive it from one helper', () => {
+    // A `sent` leg with a fresh sentAt but an ancient message clock is the case
+    // that separates them if they ever drift: eligible (it has a clock), not yet
+    // stale (that clock is a minute old).
+    const slot = { status: 'sent', sentAt: FRESH } as const;
+    expect(canEverGoStale(slot, ANCIENT_MS, NOW)).toBe(true);
+    expect(isStaleLeg(slot, ANCIENT_MS, NOW)).toBe(false);
+    // A `queued` leg with no sentAt is the mirror: never eligible, never stale.
+    expect(canEverGoStale({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
+    expect(isStaleLeg({ status: 'queued' }, ANCIENT_MS, NOW)).toBe(false);
   });
 });
 

@@ -150,7 +150,16 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
     },
     {
       contactId: IDS.haStaffer,
-      type: 'team_member',
+      // `partner` (retyped 2026-08-24): an OUTSIDE agency contact, which is what
+      // the glossary defines partner to mean. She spent two months as
+      // `team_member` only because her ORIGINAL type (`housing_authority_staff`)
+      // was never a valid ContactType at all, and the 2026-06-18 triage picked
+      // the least-wrong bucket that existed before `partner` did (2026-07-21).
+      // team_member is the internal-staff bucket - excluded from audience
+      // fan-out, no 1:1 lifecycle - so the mistype quietly hid her from every
+      // outside-contact surface. See
+      // docs/issues/lean-seed-ha-staffer-should-be-partner.md.
+      type: 'partner',
       status: 'active',
       phone: '+15550100003',
       firstName: 'Renee',

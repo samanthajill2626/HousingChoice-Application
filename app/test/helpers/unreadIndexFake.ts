@@ -117,7 +117,28 @@ function keyOf(item: ConversationItem): UnreadIndexKey {
  */
 export function queryUnreadPageFromItems(
   items: Iterable<ConversationItem>,
-  opts: { limit: number; exclusiveStartKey?: Record<string, unknown> },
+  opts: {
+    limit: number;
+    exclusiveStartKey?: Record<string, unknown>;
+    /**
+     * Permit a resume key that lands INSIDE a last_activity_at tie group.
+     *
+     * By default that is an ERROR here, because it is the one input where this
+     * fake and DynamoDB return DIFFERENT ROW SETS: the service orders tied
+     * rows by an opaque key-derived function (measured 2026-08-23 - a..f came
+     * back f,b,c,d,e,a), this fake by conversationId DESC, so "everything
+     * after the key" disagrees between them. A test that paginates across a
+     * tie is calibrated against something production will not do, and before
+     * this guard the only defence was a comment.
+     *
+     * Pass true ONLY for a test that exercises the cursor MECHANISM (resume
+     * without duplication or skips, which holds under any consistent total
+     * order) and does not read its row sets as service behaviour. Say so in a
+     * comment at the call site.
+     * See docs/issues/unread-index-fake-tie-order-is-not-the-services.md.
+     */
+    allowTieResume?: boolean;
+  },
 ): { items: ConversationItem[]; lastEvaluatedKey?: Record<string, unknown> } {
   const ordered = [...items]
     .filter((c) => c.unread_flag === 'unread')
@@ -128,6 +149,24 @@ export function queryUnreadPageFromItems(
     typeof start?.['last_activity_at'] === 'string' ? start['last_activity_at'] : undefined;
   const startId =
     typeof start?.['conversationId'] === 'string' ? start['conversationId'] : undefined;
+
+  if (startTs !== undefined && startId !== undefined && opts.allowTieResume !== true) {
+    const tied = ordered.some(
+      (c) => c.last_activity_at === startTs && c.conversationId !== startId,
+    );
+    if (tied) {
+      throw new Error(
+        `unreadIndexFake: the resume key (last_activity_at=${startTs}, ` +
+          `conversationId=${startId}) lands inside a last_activity_at TIE, where this ` +
+          `fake's row order diverges from DynamoDB's and the resumed row SET would be ` +
+          `wrong. Give the fixture distinct timestamps, or - if this test exercises ` +
+          `the cursor mechanism rather than service behaviour - pass ` +
+          `allowTieResume: true with a comment. ` +
+          `See docs/issues/unread-index-fake-tie-order-is-not-the-services.md.`,
+      );
+    }
+  }
+
   // EXCLUSIVE: keep only what sorts strictly AFTER the key in the same order.
   const remaining =
     startTs === undefined || startId === undefined

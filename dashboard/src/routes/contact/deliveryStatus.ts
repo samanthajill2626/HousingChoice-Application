@@ -116,7 +116,10 @@ export interface RelayDeliverySlot {
  * unreachable — the chip could never finalize. All-opted-out (or no slots) ⇒
  * null: nothing was fanned out, so there is nothing to summarize.
  */
-export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresentation | null {
+export function presentRelayDelivery(
+  slots: RelayDeliverySlot[],
+  opts: DeliveryReasonOptions = {},
+): DeliveryPresentation | null {
   // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
   // suppressed leg as `failed`; the group-text receipts path records what Twilio
   // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
@@ -140,7 +143,7 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
       new Set(
         fanned
           .filter((s) => s.status === 'failed' || s.status === 'undelivered')
-          .map((s) => deliveryReason(s.errorCode))
+          .map((s) => deliveryReason(s.errorCode, opts))
           .filter((r): r is string => r !== undefined),
       ),
     );
@@ -170,6 +173,33 @@ const ERROR_CODE_REASONS: Record<string, string> = {
   '30034': 'Number not registered for A2P 10DLC',
   '21610': 'Recipient has opted out (STOP)',
 };
+
+/**
+ * Overrides that apply ONLY to a leg that carried media, checked before
+ * ERROR_CODE_REASONS. 30005 on an attachment frequently means the destination
+ * has no MMS path while every text routes fine - prod 2026-08-24 had a Verizon
+ * mobile deliver 10/10 texts the same week 6/6 of its MMS died 30005 - so the
+ * generic "Number is invalid" sends staff chasing a working number.
+ *
+ * The copy deliberately states only what we OBSERVED and hedges the rest: 30005
+ * still fires for a genuinely dead number, so a first-ever send that happens to
+ * be an attachment must not leave staff believing the number takes texts. It
+ * says "attachment", not "picture", because MMS here also carries PDFs
+ * (MMS_ALLOWED_TYPES in Timeline.tsx).
+ *
+ * 30006 is deliberately ABSENT: "landline or unreachable carrier" is a claim
+ * about the line type, true whichever leg reports it, and the server-side twin
+ * (app/src/routes/webhooks/twilio.ts) trusts it from an MMS leg for that reason.
+ * Adding it here would contradict that arm.
+ */
+const MMS_ERROR_CODE_REASONS: Record<string, string> = {
+  '30005': 'Carrier rejected the attachment - texts may still work',
+};
+
+/** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */
+export interface DeliveryReasonOptions {
+  media?: boolean;
+}
 
 /**
  * Codes THIS APP invents, which no carrier ever emits and no operator can look
@@ -208,11 +238,16 @@ function ownReason(map: Record<string, string>, code: string): string | undefine
   return Object.prototype.hasOwnProperty.call(map, code) ? map[code] : undefined;
 }
 
-export function deliveryReason(errorCode: string | undefined): string | undefined {
+export function deliveryReason(
+  errorCode: string | undefined,
+  opts: DeliveryReasonOptions = {},
+): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
   const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
-  const mapped = ownReason(ERROR_CODE_REASONS, errorCode);
+  const mapped =
+    (opts.media === true ? ownReason(MMS_ERROR_CODE_REASONS, errorCode) : undefined) ??
+    ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`
     : `Delivery failed (error ${errorCode})`;

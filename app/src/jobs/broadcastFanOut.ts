@@ -425,6 +425,16 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
             await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
           );
           failedCount += 1;
+          // TODO(mms-silent-drop-dish-textnow): scope this to SMS legs if
+          // broadcasts ever carry media. The status webhook's twin arm
+          // (routes/webhooks/twilio.ts) no longer accepts a 30005 from an MMS
+          // leg as evidence about SMS - prod 2026-08-24 had a Verizon mobile
+          // deliver 10/10 texts while 6/6 of its MMS died 30005. This arm is
+          // SAFE ONLY BECAUSE the sendMessage call above passes no mediaUrls or
+          // attachments, so every broadcast leg is typed 'sms'. Per-recipient
+          // media on broadcasts is an OPEN proposal (docs/issues/broadcast-mms.md);
+          // the day it lands, this line re-creates the false positive that
+          // wrongly flagged two prod contacts sms_unreachable.
           // Flag the contact unreachable (prompt voice; never retry SMS).
           try {
             await contacts.setFlag(contact.contactId, 'sms_unreachable');

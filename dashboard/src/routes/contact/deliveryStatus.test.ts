@@ -94,6 +94,19 @@ describe('presentRelayDelivery', () => {
     });
   });
 
+  it('carries the attachment reading into a relay MMS rollup', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'undelivered', errorCode: '30005' }], {
+        media: true,
+      }),
+    ).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Carrier rejected the attachment - texts may still work (error 30005)',
+    });
+  });
+
   it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
     expect(
       presentRelayDelivery([
@@ -136,6 +149,39 @@ describe('deliveryReason', () => {
 
   it('falls back to a generic line that still surfaces the raw code', () => {
     expect(deliveryReason('99999')).toBe('Delivery failed (error 99999)');
+  });
+
+  // Prod 2026-08-24: a Verizon line delivered 10/10 texts the same week 6/6 of
+  // its MMS died 30005. "Number is invalid" is flatly wrong there and sends
+  // staff chasing a number that works. The replacement HEDGES on purpose - 30005
+  // still fires for a genuinely dead number, so a first-ever send that happens
+  // to carry an attachment must not leave staff believing the number takes
+  // texts. Only the media leg gets the override; a 30005 on a plain SMS really
+  // does mean the number is bad.
+  it('reads 30005 as an attachment failure on an MMS leg, and as a bad number on an SMS leg', () => {
+    expect(deliveryReason('30005', { media: true })).toBe(
+      'Carrier rejected the attachment - texts may still work (error 30005)',
+    );
+    expect(deliveryReason('30005')).toBe('Number is invalid (error 30005)');
+    expect(deliveryReason('30005', { media: false })).toBe('Number is invalid (error 30005)');
+  });
+
+  // 30006 is deliberately NOT overridden: "landline or unreachable carrier" is a
+  // claim about the LINE TYPE, true whichever leg reports it, and the server-side
+  // twin (app/src/routes/webhooks/twilio.ts) trusts a 30006 from an MMS leg for
+  // exactly that reason. Overriding it here would make the two halves disagree.
+  it('leaves 30006 reading as a landline on an MMS leg - it is a line-type fact', () => {
+    expect(deliveryReason('30006', { media: true })).toBe('That number is a landline (error 30006)');
+    expect(deliveryReason('30006')).toBe('That number is a landline (error 30006)');
+  });
+
+  it('leaves every OTHER code alone on an MMS leg', () => {
+    expect(deliveryReason('30007', { media: true })).toBe('Carrier filtered the message (error 30007)');
+    expect(deliveryReason('21610', { media: true })).toBe('Recipient has opted out (STOP) (error 21610)');
+    expect(deliveryReason('99999', { media: true })).toBe('Delivery failed (error 99999)');
+    expect(deliveryReason('contact_opted_out', { media: true })).toBe(
+      'Everyone here has opted out - nothing was sent',
+    );
   });
 
   it('returns undefined when there is no code', () => {

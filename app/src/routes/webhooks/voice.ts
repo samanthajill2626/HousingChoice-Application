@@ -65,6 +65,7 @@ import {
 } from '../../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
+  relayMemberKey,
   type CallStatus,
   type CallStatusUpdate,
   type MessageItem,
@@ -853,6 +854,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           callOutcome: 'missed',
           startedAt,
           masked: true,
+          ...(caller !== undefined && { relaySenderKey: relayMemberKey(caller) }),
           // No counterpart label on a refusal (no bridge happened); record why.
           callPartyLabel: reason === 'closed_thread' ? 'Closed thread' : 'Not connected',
           ...(isClosed && { receivedOnClosedThread: true }),
@@ -922,6 +924,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         callStatus: 'ringing',
         startedAt,
         masked: true,
+        relaySenderKey: relayMemberKey(caller),
         callPartyLabel: calleeLabel,
       });
       if (!appended.deduped) {

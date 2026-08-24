@@ -106,6 +106,9 @@ describe('inbound masked voice — the bridge (M1.9a)', () => {
     expect(call.provider_sid).toBe('CAinbound0001');
     expect(call.call_status).toBe('ringing');
     expect(call.author).toBe('tenant'); // caller's reviewed role
+    // Live identity, not a name/phone snapshot: the dashboard resolves this
+    // existing relay member key against the CURRENT roster whenever it renders.
+    expect(call.relay_sender_key).toBe('c-alice');
     // call_party_label is the COUNTERPART (callee) role/name — never a phone.
     expect(call.call_party_label).toBe('Bob');
     expect(call.call_party_label).not.toContain('+');

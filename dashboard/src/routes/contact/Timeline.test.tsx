@@ -1689,6 +1689,31 @@ function callItem(
 }
 
 describe('Timeline call cards - direction', () => {
+  it('labels a relay call from the current roster name with a phone fallback', () => {
+    const relayCall = {
+      kind: 'call',
+      id: 'c-relay',
+      at: '2026-06-08T11:00:00',
+      direction: 'inbound',
+      call_outcome: 'answered',
+      author: 'tenant',
+      relay_sender_key: 'contact-alice',
+      call_party_label: 'Old counterpart label',
+    } as unknown as TimelineItem;
+
+    renderTimeline({
+      items: [relayCall],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002' },
+      ],
+    });
+
+    expect(screen.getByText('Alice Adams called (555) 010-0002')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Call recording')).not.toBeInTheDocument();
+    expect(screen.queryByText('Transcript', { exact: true })).not.toBeInTheDocument();
+  });
+
   it('aligns by direction: inbound left, outbound right + the outbound tint', () => {
     renderTimeline({
       items: [

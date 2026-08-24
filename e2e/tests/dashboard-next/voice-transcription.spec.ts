@@ -55,6 +55,7 @@ const BUSINESS = '+15550009999';
 // masked-miss test. Same values relay-group-view.spec.ts drives.
 const RELAY_POOL = '+15550160001';
 const RELAY_MEMBER = '+15550170001'; // Diana Osei (a rostered member of the group)
+const RELAY_CONVERSATION = 'conv-live-relay-group';
 
 /** Dev-login as the seeded navigator, then land on the SPA so the session cookie
  *  is live for subsequent page.request API calls (mirrors voice-outbound.spec.ts). */
@@ -244,9 +245,10 @@ test('a dropped VI webhook still transcribes via the reconcile safety net, showi
 });
 
 // ---------------------------------------------------------------------------
-// 4. Missed MASKED relay call -> no recording, hence no voicemail (privacy)
+// 4. Missed MASKED relay call -> visible metadata, no recording or transcript
 // ---------------------------------------------------------------------------
-test('a missed masked relay call is never recorded, so no voicemail is taken', async ({ request }) => {
+test('a missed masked relay call appears in the Relay timeline without media', async ({ page }) => {
+  const request = page.request;
   // The live relay group + its pool number exist only in the FULL profile.
   const seeded = await request.post(`${NEXT}/__dev/reseed?profile=full`);
   expect(seeded.ok(), `full reseed failed: ${seeded.status()}`).toBeTruthy();
@@ -275,4 +277,13 @@ test('a missed masked relay call is never recorded, so no voicemail is taken', a
   expect(call, 'the masked call should exist in the fake control API').toBeDefined();
   // The masked privacy invariant: no recording (hence no voicemail) is ever produced.
   expect(call!['recordingSid'], 'a masked relay call must NEVER record a voicemail').toBeUndefined();
+
+  await devLogin(page);
+  await page.goto(`${NEXT}/conversations/${RELAY_CONVERSATION}`);
+  const timeline = commsRegion(page);
+  await expect(timeline.getByText('Diana Osei called Gloria Mensah', { exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(timeline.getByLabel('Call recording')).toHaveCount(0);
+  await expect(timeline.getByText('Transcript', { exact: true })).toHaveCount(0);
 });

@@ -36,6 +36,7 @@ import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import { findOpenGroupWithSamePhones } from '../services/relayGroupDuplicates.js';
 import {
   addMemberToRelay,
+  nameFromContact,
   parseRelayMember,
   removeMemberFromRelay,
   resolveMemberName,
@@ -405,7 +406,24 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(404).json({ error: 'relay_group_not_found' });
       return;
     }
-    res.json({ members: conversation.participants ?? [] });
+    const members = await Promise.all(
+      (conversation.participants ?? []).map(async (member) => {
+        if (!member.contactId) return member;
+        try {
+          const name = nameFromContact(await contacts.getById(member.contactId));
+          return name === undefined ? member : { ...member, name };
+        } catch (err) {
+          // A transient contact lookup must not make the Relay thread unusable.
+          // IDs are safe to log; names and phone numbers are deliberately absent.
+          log.warn(
+            { err, conversationId, contactId: member.contactId },
+            'relay roster contact lookup failed - returning stored member identity',
+          );
+          return member;
+        }
+      }),
+    );
+    res.json({ members });
   });
 
   // POST /api/conversations/:id/members - idempotent add. The whole sequence

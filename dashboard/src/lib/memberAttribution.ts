@@ -36,6 +36,31 @@ export function memberKey(member: ConversationParticipant): string {
     : phoneMemberKey(member);
 }
 
+/** Find a current roster member using either supported stable-key convention. */
+export function findMemberByKey(
+  senderKey: string | undefined,
+  roster: ConversationParticipant[] | undefined,
+): ConversationParticipant | undefined {
+  if (senderKey === undefined || senderKey.length === 0) return undefined;
+  return (roster ?? []).find((member) => {
+    const contactId = typeof member.contactId === 'string' ? member.contactId : '';
+    const phone = typeof member.phone === 'string' ? member.phone : '';
+    return (
+      (contactId.length > 0 && contactId === senderKey) ||
+      (phone.length > 0 && `phone#${phone}` === senderKey)
+    );
+  });
+}
+
+/** Current display identity for a roster member: current name, else current phone. */
+export function memberDisplayLabel(member: ConversationParticipant): string | undefined {
+  const name = typeof member.name === 'string' ? member.name.trim() : '';
+  if (name.length > 0) return name;
+  const phone = typeof member.phone === 'string' ? member.phone : '';
+  const formatted = formatPhoneDisplay(phone);
+  return formatted.length > 0 ? formatted : undefined;
+}
+
 /** Resolve a multi-party message's sender label: the `'team'` sentinel -> "Team";
  *  the `'system'` sentinel -> "Automated" (an app announcement: group intro /
  *  tour reminder rung); a member key (EITHER convention) -> that member's name
@@ -65,33 +90,11 @@ export function senderLabel(
   if (senderKey === undefined || senderKey.length === 0) return undefined;
   if (senderKey === 'team') return 'Team';
   if (senderKey === 'system') return 'Automated';
-  for (const m of roster ?? []) {
-    // GUARDED, restoring the check the code this replaced carried (A25). The
-    // types say `contactId: string` / `phone: string`, but the relay view seeds
-    // its roster straight from `header.participants` - the raw passthrough
-    // ConversationDetail documents as arriving in more than one wire shape. This
-    // function runs for EVERY bubble in BOTH timelines, so an absent field here
-    // does not blank one chip: it throws and blanks the whole conversation page.
-    const contactId = typeof m.contactId === 'string' ? m.contactId : '';
-    const matches =
-      (contactId.length > 0 && contactId === senderKey) || phoneMemberKey(m) === senderKey;
-    if (matches) {
-      // GUARDED for the same reason, and against the same wire shape, as
-      // `contactId` above (adversarial 28): `name` is the field most likely to
-      // arrive off-shape from the raw passthrough, and `m.name?.trim()` throws
-      // on a non-string non-null value - blanking the whole conversation page,
-      // not one chip.
-      const name = typeof m.name === 'string' ? m.name.trim() : '';
-      if (name.length > 0) return name;
-      if (kind !== 'group_text') return undefined;
-      // The repo's ONE dashboard phone formatter (lib/phone.ts), never a
-      // hand-rolled copy: the member panel, the thread header and this chip must
-      // spell one person's number identically or they read as two people. A
-      // non-NANP number comes back unchanged, and an empty phone falls through
-      // to no attribution rather than an empty chip.
-      const formatted = formatPhoneDisplay(m.phone);
-      return formatted.length > 0 ? formatted : undefined;
-    }
-  }
-  return undefined;
+  const member = findMemberByKey(senderKey, roster);
+  if (member === undefined) return undefined;
+  const name = typeof member.name === 'string' ? member.name.trim() : '';
+  if (name.length > 0) return name;
+  // Preserve the shipped Relay message behavior: its nameless sender chip stays
+  // absent. Native group texts and Relay CALLS use the shared phone fallback.
+  return kind === 'group_text' ? memberDisplayLabel(member) : undefined;
 }

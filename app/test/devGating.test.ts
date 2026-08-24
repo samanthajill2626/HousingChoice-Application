@@ -793,3 +793,136 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('dev tick — POST /__dev/roster-actions/tick', () => {
+  // The deterministic e2e seam for the worker's 60s pending-roster-action poll
+  // (contact-rosters Task 13) - the ONLY way an e2e can advance a quiet-hours
+  // deferral without waiting for real 8 AM. Its two sibling ticks had this
+  // block from day one; this one shipped without it, so a dev-router refactor
+  // could have silently un-gated or broken the seam with every test green.
+  // See docs/issues/roster-actions-tick-no-devgating-test.md.
+  //
+  // The tick is proven to have REALLY POLLED by outcome, not by its 200: a due
+  // open_group deferral whose tour is CANCELED must flip pending -> skipped
+  // with resolvedAt = the tick's normalized now. That path provisions nothing
+  // and sends nothing, so the poolNumbers stub below can afford to throw on
+  // ANY use - which also pins that the skip path stays network-free.
+  const FIXED_NOW = '2026-07-13T14:00:00.000Z';
+
+  /** Loud stub: this fixture's skip path must never reach the pool service. */
+  const poolNumbersNever = new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        throw new Error(`roster tick devGating fixture must not touch poolNumbers.${String(prop)}`);
+      },
+    },
+  ) as import('../src/services/poolNumbers.js').PoolNumbersService;
+
+  function buildTickHarness(): { app: Express; world: FakeWorld } {
+    const world = createFakeWorld();
+    const capture = createLogCapture();
+    const logger = createLogger({ destination: capture.stream });
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      DEV_AUTH_ENABLED: '1',
+      CF_ORIGIN_SECRET: SECRET,
+      MESSAGING_DRIVER: 'console',
+    });
+    const devRouter = createDevRouter({
+      config,
+      logger,
+      // Same shape worker.ts builds - wired to the world fakes.
+      rosterActionDeps: {
+        actions: world.pendingRosterActionsRepo,
+        tours: world.toursRepo,
+        placements: world.placementsRepo,
+        placementDeadlines: world.placementDeadlinesRepo,
+        conversations: world.conversationsRepo,
+        contacts: world.contactsRepo,
+        units: world.unitsRepo,
+        audit: world.auditRepo,
+        activityEvents: world.activityEventsRepo,
+        poolNumbers: poolNumbersNever,
+        events: world.events,
+        relayLiveProvisioning: true,
+        logger,
+      },
+    });
+    const { app } = makeWebhookHarness({ world, devRouter });
+    return { app, world };
+  }
+
+  /** A DUE open_group deferral on a CANCELED tour: the poll must retire it
+   *  as skipped (owner_canceled) without provisioning or sending anything. */
+  async function armCanceledOwnerDeferral(world: FakeWorld): Promise<string> {
+    const tour = await world.toursRepo.create({
+      tenantId: 'c-roster-tick-tenant',
+      unitId: 'unit-roster-tick',
+      scheduledAt: '2026-07-16T14:00:00.000Z',
+      tourType: 'landlord_led',
+      status: 'scheduled',
+    });
+    await world.toursRepo.patch(tour.tourId, { status: 'canceled' });
+    const row = await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tour.tourId,
+      action: 'open_group',
+      dueAt: '2026-07-13T08:00:00.000Z', // due well before FIXED_NOW
+      createdAt: '2026-07-12T20:00:00.000Z',
+    });
+    return row.actionId;
+  }
+
+  it('runs one poll pass: the due row resolves, stamped with the NORMALIZED now', async () => {
+    const { app, world } = buildTickHarness();
+    const actionId = await armCanceledOwnerDeferral(world);
+
+    // A milliseconds-less now must collapse to full toISOString() form - dueAt
+    // comparisons are lexicographic, and the resolvedAt stamp is the witness
+    // that the normalized instant reached the poll.
+    const res = await request(app)
+      .post('/__dev/roster-actions/tick')
+      .send({ now: '2026-07-13T14:00:00Z' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
+
+    const row = await world.pendingRosterActionsRepo.getById(actionId);
+    expect(row?.status).toBe('skipped');
+    expect(row?.resolvedAt).toBe(FIXED_NOW);
+    expect(world.sent).toHaveLength(0); // a skip sends nothing
+  });
+
+  it('defaults now to the wall clock when the body carries none', async () => {
+    const { app } = buildTickHarness();
+    const res = await request(app).post('/__dev/roster-actions/tick').send();
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(typeof res.body.now).toBe('string');
+    expect(new Date(res.body.now as string).toISOString()).toBe(res.body.now);
+  });
+
+  it('rejects a malformed now with 400 (and resolves no rows)', async () => {
+    const { app, world } = buildTickHarness();
+    const actionId = await armCanceledOwnerDeferral(world);
+
+    for (const bad of ['not-a-date', '', 123, { nested: true }]) {
+      const res = await request(app).post('/__dev/roster-actions/tick').send({ now: bad });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body).toEqual({ error: 'now must be a valid ISO 8601 datetime' });
+    }
+    // The due row is untouched: the 400 really did return before the poll.
+    const row = await world.pendingRosterActionsRepo.getById(actionId);
+    expect(row?.status).toBe('pending');
+  });
+
+  it('is absent when the dev router is not mounted', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const app = buildApp({ config }); // no devRouter
+    const res = await request(app)
+      .post('/__dev/roster-actions/tick')
+      .set('x-origin-verify', SECRET)
+      .send({ now: FIXED_NOW });
+    expect(res.status).toBe(404);
+  });
+});

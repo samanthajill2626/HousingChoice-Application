@@ -103,7 +103,7 @@ describe('presentRelayDelivery', () => {
       label: 'delivered 1/2 - 1 failed',
       tone: 'danger',
       isFailure: true,
-      reason: 'Carrier rejected the attachment - texts may still work (error 30005)',
+      reason: "Attachment didn't get through, texts may still work (error 30005)",
     });
   });
 
@@ -160,7 +160,7 @@ describe('deliveryReason', () => {
   // does mean the number is bad.
   it('reads 30005 as an attachment failure on an MMS leg, and as a bad number on an SMS leg', () => {
     expect(deliveryReason('30005', { media: true })).toBe(
-      'Carrier rejected the attachment - texts may still work (error 30005)',
+      "Attachment didn't get through, texts may still work (error 30005)",
     );
     expect(deliveryReason('30005')).toBe('Number is invalid (error 30005)');
     expect(deliveryReason('30005', { media: false })).toBe('Number is invalid (error 30005)');

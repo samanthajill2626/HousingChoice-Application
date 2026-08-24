@@ -181,10 +181,15 @@ const ERROR_CODE_REASONS: Record<string, string> = {
  * mobile deliver 10/10 texts the same week 6/6 of its MMS died 30005 - so the
  * generic "Number is invalid" sends staff chasing a working number.
  *
- * The copy deliberately states only what we OBSERVED and hedges the rest: 30005
- * still fires for a genuinely dead number, so a first-ever send that happens to
- * be an attachment must not leave staff believing the number takes texts. It
- * says "attachment", not "picture", because MMS here also carries PDFs
+ * The copy is PURELY OBSERVATIONAL and hedged on purpose. It does not say
+ * "carrier rejected": one documented prod case (case 4 in the issue) produced
+ * this same 30005 from a 72h validity-period EXPIRY on an oversized payload,
+ * where nothing rejected anything and the right action was "send fewer files",
+ * and two of the candidate mechanisms put the failure at an aggregator rather
+ * than the carrier. It does not promise texts work either: 30005 still fires for
+ * a genuinely dead number, so a first-ever send that happens to carry an
+ * attachment must not leave staff believing the number takes texts. And it says
+ * "attachment", not "picture", because MMS here also carries PDFs
  * (MMS_ALLOWED_TYPES in Timeline.tsx).
  *
  * 30006 is deliberately ABSENT: "landline or unreachable carrier" is a claim
@@ -193,7 +198,7 @@ const ERROR_CODE_REASONS: Record<string, string> = {
  * Adding it here would contradict that arm.
  */
 const MMS_ERROR_CODE_REASONS: Record<string, string> = {
-  '30005': 'Carrier rejected the attachment - texts may still work',
+  '30005': "Attachment didn't get through, texts may still work",
 };
 
 /** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */

@@ -172,7 +172,7 @@ is closed. It is NOT the fallback below:
   ~2.
 - `dashboard/src/routes/contact/deliveryStatus.ts` read 30005 as "Number is
   invalid" on an attachment bubble, which sends staff chasing a working number.
-  An MMS leg now reads "Carrier rejected the attachment - texts may still work".
+  An MMS leg now reads "Attachment didn't get through, texts may still work".
   The hedge is deliberate: 30005 still fires for a genuinely dead number, so a
   first-ever send that happens to carry an attachment must not leave staff
   believing the number takes texts. "Attachment", not "picture", because MMS
@@ -215,9 +215,10 @@ is closed. It is NOT the fallback below:
      `sms_unreachable`; `voice_opt_out` is a separate staff-set do-not-call flag
      (`app/src/repos/contactsRepo.ts`). So a landline-flagged contact stays
      callable - the right outcome, but nobody decided it.
-   - **The "prompt voice" half does not exist.** That phrase appears in three
-     comments (`contactsRepo.ts`, `broadcastFanOut.ts` x2) and nowhere else. No
-     badge, no composer note, no Today item, nothing suggests calling.
+   - **The "prompt voice" half does not exist.** That phrase appears in four
+     comments (`repos/contactsRepo.ts`, `jobs/broadcastFanOut.ts` x2,
+     `routes/webhooks/twilio.ts`) and in no executable code anywhere. No badge,
+     no composer note, no Today item, nothing suggests calling.
    - **1:1 texting is not gated either.** `services/sendMessage.ts` refuses only
      on `sms_opt_out`. So staff can sit on a known landline's contact page
      texting into the void indefinitely, watch each send fail, and never be told

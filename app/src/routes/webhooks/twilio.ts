@@ -2632,7 +2632,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             if (ErrorCode === '30005' && message.type === 'mms') {
               log.warn(
                 { providerSid: MessageSid, errorCode: ErrorCode },
-                'carrier rejected the attachment - MMS-only failure, SMS reachability untouched',
+                'attachment did not get through - MMS-only failure, SMS reachability untouched',
               );
               break;
             }

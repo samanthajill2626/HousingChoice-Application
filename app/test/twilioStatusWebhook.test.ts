@@ -413,7 +413,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(outbound.delayed).toHaveLength(0); // still never retried
       const warn = capture
         .atLevel(WARN)
-        .find((l) => String(l['msg']).includes('carrier rejected the attachment'));
+        .find((l) => String(l['msg']).includes('attachment did not get through'));
       expect(warn).toBeDefined();
       expect(warn?.['errorCode']).toBe('30005');
     });

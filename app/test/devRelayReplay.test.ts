@@ -132,11 +132,63 @@ describe('POST /__dev/relay/replay-intros — route behavior', () => {
     const res = await request(app).post('/__dev/relay/replay-intros').send();
     expect(res.status).toBe(200);
     // 1 replayed (live), 3 skipped (cast bare-id + matrix empty + pool-less).
-    expect(res.body).toEqual({ replayed: 1, skipped: 3 });
+    expect(res.body).toEqual({ replayed: 1, skipped: 3, failed: 0, truncated: false });
     // Only the well-formed open group's intro was enqueued (exactly once).
     expect(enqueued).toEqual(['conv-live-relay-group']);
     // The route queried the OPEN partition (closed groups never entered the pool).
     expect(queriedStatuses).toEqual(['open']);
+  });
+
+  it('CONTAINS a per-group enqueue failure: the rest still replay, the POST still 200s', async () => {
+    // fake-relay-replay-boot-race nit 2: in --local the intro job runs
+    // in-process, so one group's dispatch throw used to abort every remaining
+    // group AND 500 the whole POST.
+    const items: ConversationItem[] = [
+      relayGroup({ conversationId: 'conv-bad', pool_number: '+15550160001' }),
+      relayGroup({ conversationId: 'conv-good', pool_number: '+15550160002' }),
+    ];
+    const { repo } = makeConversationsRepo(items);
+    const enqueued: string[] = [];
+    const cfg = config();
+    const devRouter = createDevRouter({
+      config: cfg,
+      relayReplayDeps: {
+        conversationsRepo: repo,
+        enqueueIntro: async (id) => {
+          if (id === 'conv-bad') throw new Error('inline dispatch blew up');
+          enqueued.push(id);
+        },
+      },
+    });
+    const app = buildApp({ config: cfg, devRouter });
+
+    const res = await request(app).post('/__dev/relay/replay-intros').send();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ replayed: 1, skipped: 0, failed: 1, truncated: false });
+    expect(enqueued).toEqual(['conv-good']);
+  });
+
+  it('SURFACES a truncated open-group list instead of dropping the flag', async () => {
+    // The repo contract says callers must surface `truncated`; this route
+    // dropped it until 2026-08-24, so a partial replay looked complete.
+    const cfg = config();
+    const devRouter = createDevRouter({
+      config: cfg,
+      relayReplayDeps: {
+        conversationsRepo: {
+          listRelayGroups: async () => ({
+            items: [relayGroup({ conversationId: 'conv-live-relay-group', pool_number: '+15550160001' })],
+            truncated: true,
+          }),
+        } as unknown as ConversationsRepo,
+        enqueueIntro: async () => {},
+      },
+    });
+    const app = buildApp({ config: cfg, devRouter });
+
+    const res = await request(app).post('/__dev/relay/replay-intros').send();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ replayed: 1, skipped: 0, failed: 0, truncated: true });
   });
 
   it('reports { replayed: 0, skipped: 0 } when there are no open relay groups', async () => {
@@ -150,7 +202,7 @@ describe('POST /__dev/relay/replay-intros — route behavior', () => {
 
     const res = await request(app).post('/__dev/relay/replay-intros').send();
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ replayed: 0, skipped: 0 });
+    expect(res.body).toEqual({ replayed: 0, skipped: 0, failed: 0, truncated: false });
   });
 
   it('re-fires on repeat POSTs (idempotent for a dev tool — enqueues again each call)', async () => {
@@ -238,7 +290,7 @@ describe('POST /__dev/relay/replay-intros — the real relay.intro job persists 
 
     const res = await request(app).post('/__dev/relay/replay-intros').send();
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ replayed: 1, skipped: 0 });
+    expect(res.body).toEqual({ replayed: 1, skipped: 0, failed: 0, truncated: false });
 
     // The intro fired: one leg per member, all FROM the pool number.
     expect(world.sent.map((s) => s.to).sort()).toEqual([DIANA, GLORIA].sort());

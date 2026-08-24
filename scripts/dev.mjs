@@ -696,23 +696,44 @@ const { result } = concurrently(commands, {
 if (mockEnabled && seedEnabled && mode === 'local') {
   void (async () => {
     const appBase = 'http://localhost:8080';
+    const fakeBase = 'http://localhost:8889';
     const deadline = Date.now() + 60_000;
-    let healthy = false;
-    while (Date.now() < deadline) {
-      try {
-        const ping = await fetch(`${appBase}/__dev/ping`);
-        if (ping.ok) {
-          healthy = true;
-          break;
+    // BOTH sides must be up. The intro legs are dispatched in-process by the
+    // APP but DELIVERED to the FAKE on :8889, which concurrently starts in
+    // parallel and used to go unchecked — if the app won the boot race, legs
+    // hit ECONNREFUSED, were caught per-member and lost, and the fake inferred
+    // a partial roster (legs are ~1/s apart, so member 1 can fail while member
+    // 2 succeeds) while this script still logged replayed=N as if delivery
+    // happened. Narrow window in practice; deterministic to close.
+    // See docs/issues/fake-relay-replay-boot-race.md.
+    let appHealthy = false;
+    let fakeHealthy = false;
+    while (Date.now() < deadline && (!appHealthy || !fakeHealthy)) {
+      if (!appHealthy) {
+        try {
+          const ping = await fetch(`${appBase}/__dev/ping`);
+          if (ping.ok) appHealthy = true;
+        } catch {
+          // app not listening yet — keep polling
         }
-      } catch {
-        // app not listening yet — keep polling
       }
+      if (!fakeHealthy) {
+        try {
+          // Any 2xx proves the fake's HTTP server is accepting; the personas
+          // list is its cheapest always-on control read.
+          const ping = await fetch(`${fakeBase}/control/personas`);
+          if (ping.ok) fakeHealthy = true;
+        } catch {
+          // fake not listening yet — keep polling
+        }
+      }
+      if (appHealthy && fakeHealthy) break;
       await new Promise((r) => setTimeout(r, 500));
     }
-    if (!healthy) {
+    if (!appHealthy || !fakeHealthy) {
+      const laggard = !appHealthy ? 'the app never became healthy on :8080' : 'fake-twilio never became healthy on :8889';
       console.warn(
-        'dev — relay intro-replay skipped: the app never became healthy on :8080 within 60s\n' +
+        `dev — relay intro-replay skipped: ${laggard} within 60s\n` +
           '       (fake-phones relay groups will appear on first live traffic instead).',
       );
       return;
@@ -729,7 +750,10 @@ if (mockEnabled && seedEnabled && mode === 'local') {
       const body = await res.json();
       console.log(
         `dev — replayed seeded relay-group intros to the fake phones ` +
-          `(replayed=${body.replayed}, skipped=${body.skipped}).`,
+          `(replayed=${body.replayed}, skipped=${body.skipped}` +
+          (body.failed ? `, failed=${body.failed}` : '') +
+          (body.truncated ? ', TRUNCATED - not all groups replayed' : '') +
+          ').',
       );
     } catch (err) {
       console.warn(

@@ -968,19 +968,41 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     // listRelayGroups reads the sparse byRelayStatus GSI, which a native group
     // text never writes (spec 4.2) - so this dev replay is relay-scoped by the
     // reader itself and can never touch a group thread.
-    const { items } = await conversationsRepo.listRelayGroups('open');
+    //
+    // `truncated` is the repo contract's "the page budget ended before the
+    // partition did" flag, which callers must surface rather than drop (this
+    // route dropped it until 2026-08-24). Moot until >2000 open groups, but a
+    // silent partial replay would read as "some groups never appear in the
+    // fake phones" with nothing pointing here.
+    const { items, truncated } = await conversationsRepo.listRelayGroups('open');
     let replayed = 0;
     let skipped = 0;
+    let failed = 0;
     for (const conv of items) {
-      if (isReplayableRelayGroup(conv)) {
+      if (!isReplayableRelayGroup(conv)) {
+        skipped += 1;
+        continue;
+      }
+      // PER-GROUP containment (fake-relay-replay-boot-race nit 2): in --local
+      // the intro job runs IN-PROCESS, so one group's dispatch throw used to
+      // abort every remaining group AND 500 the whole POST - a single bad row
+      // silently cost the rest of the seed world its fake-phones groups.
+      try {
         await enqueueIntro(conv.conversationId);
         replayed += 1;
-      } else {
-        skipped += 1;
+      } catch (err) {
+        failed += 1;
+        log.warn(
+          { conversationId: conv.conversationId, err },
+          'dev relay intro-replay: one group failed - continuing with the rest',
+        );
       }
     }
-    log.info({ replayed, skipped }, 'dev relay intro-replay ran');
-    res.status(200).json({ replayed, skipped });
+    if (truncated) {
+      log.warn({ replayed, skipped }, 'dev relay intro-replay: open-group list TRUNCATED - replay incomplete');
+    }
+    log.info({ replayed, skipped, failed, truncated }, 'dev relay intro-replay ran');
+    res.status(200).json({ replayed, skipped, failed, truncated });
   });
 
   return router;

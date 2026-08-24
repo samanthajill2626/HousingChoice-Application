@@ -6,7 +6,11 @@ import type {
   Contact,
   ConversationHeader,
   ConversationParticipant,
+  Message,
 } from '../../api/index.js';
+// The row timestamp is asserted through the SAME formatter the component uses,
+// so the expectation cannot drift with the developer's UTC offset.
+import { formatTime } from '../contact/format.js';
 
 // PROMISE-RETURNING DEFAULTS, not bare vi.fn().
 //
@@ -341,6 +345,71 @@ describe('ConversationDetail group view', () => {
     await user.type(screen.getByLabelText('Reply message'), 'On my way');
     await user.click(screen.getByRole('button', { name: /^Send$/ }));
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('conv-g1', { body: 'On my way' }));
+  });
+
+  // THE FIRST TIMELINE-CONTENT TEST IN THIS FILE (slice S5, adjudication A8).
+  // `getConversationMessages` was armed with `[]` in `beforeEach` and never
+  // given a non-empty value anywhere here, so the relay arm had zero delivery
+  // coverage - the 8/23 incident shape (one leg delivered, one quietly stuck on
+  // `sent`) could regress on this surface without a single red test.
+  //
+  // RELAY keys are contactIds (`c1` / `c2`, messagesRepo.ts:156), NOT
+  // `phone#<E164>` - that is the group-text convention and it is covered in
+  // GroupTextView.test.tsx. Both mocks touched here are declared with the
+  // `AnyAsyncMock` promise-returning form at the top of the file, so a call
+  // landing outside the arranged window still hands back a promise.
+  it('names each relay recipient and their state once the bubble is revealed', async () => {
+    // Derived from the fixture's OWN instant, never a hardcoded clock literal:
+    // three weeks before whatever `Date.now()` is (setup.ts pins it), which is
+    // far past STALE_SENT_AFTER_MS, so the clock-less `sent` leg ages from
+    // `msg.at` and escalates. A date string chosen to sit "near the pin" would
+    // shift with the machine's UTC offset.
+    const sentAt = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
+    getConversation.mockResolvedValue(relayHeader());
+    getConversationMessages.mockResolvedValue([
+      {
+        conversationId: 'conv-g1',
+        tsMsgId: `${sentAt}#IM1`,
+        direction: 'outbound',
+        author: 'teammate',
+        type: 'sms',
+        body: 'Tour is confirmed for Saturday',
+        delivery_status: 'sent',
+        provider_ts: sentAt,
+        relay_sender_key: 'team',
+        delivery_recipients: {
+          // Reverse of participant order on purpose - the rows come back in
+          // ROSTER order, not map order.
+          c2: { status: 'sent' },
+          c1: { status: 'delivered', deliveredAt: sentAt },
+        },
+      } as unknown as Message,
+    ]);
+    renderAt('conv-g1');
+    await waitFor(() =>
+      expect(screen.getByText('Tour is confirmed for Saturday')).toBeInTheDocument(),
+    );
+    // The rollup escalates with NO interaction - that is the half of the feature
+    // an operator sees without opening anything.
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    // The list is CONDITIONALLY rendered, so this absence check is only
+    // meaningful beside the reveal that follows it.
+    expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
+    // The bubble is a bare div with no role or name; clicking the body text
+    // bubbles up to its toggleMeta.
+    fireEvent.click(screen.getByText('Tour is confirmed for Saturday'));
+    const list = await screen.findByRole('list', { name: 'Delivery by recipient' });
+    const recipients = within(list).getAllByRole('listitem');
+    expect(recipients).toHaveLength(2);
+    // Scoped to the rows: the Members card carries these names too.
+    expect(recipients[0]).toHaveTextContent('Keisha Kane');
+    expect(recipients[0]).toHaveTextContent('Delivered');
+    expect(recipients[0]).toHaveTextContent(formatTime(sentAt));
+    expect(recipients[1]).toHaveTextContent('Lars Landlord');
+    expect(recipients[1]).toHaveTextContent('Sent - not confirmed');
+    // Both keys match the roster, so no row may claim a membership it cannot
+    // know.
+    expect(within(list).queryByText(/former member/)).not.toBeInTheDocument();
   });
 });
 

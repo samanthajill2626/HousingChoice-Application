@@ -38,6 +38,29 @@ no message clock passed. The rule is therefore explicit and total:
 That single rule is what makes the ten existing pure-layer assertions green, and
 it is also the mechanism for D-b.
 
+**Two traps in that rule, both of which have already bitten this plan:**
+
+1. **`presentDeliveryStatus` is EXEMPT and keeps the opposite convention.** Its
+   `nowMs` is a DEFAULTED parameter (`nowMs: number = Date.now()`,
+   `deliveryStatus.ts:88`), so passing `undefined` re-arms the real clock rather
+   than disabling anything. Its documented opt-out is withholding the TIMESTAMP
+   (`deliveryStatus.ts:80-83`), not the clock. So one module now has two
+   meanings for the name `nowMs`. Do not "harmonise" them - changing
+   `presentDeliveryStatus`'s signature moves the 1:1 rule, which is forbidden.
+   Comment the divergence at both definitions.
+2. **Therefore `presentLegDelivery` must delegate by withholding the
+   TIMESTAMP.** When staleness is disabled it calls
+   `presentDeliveryStatus(slot.status)` with NO second argument. Passing
+   `presentDeliveryStatus(slot.status, someTimestamp, undefined)` silently
+   re-arms `Date.now()` and defeats both D-a and D-b - every `sent` leg on an
+   imported row would read "Sent - not confirmed". This is the single easiest
+   way to build this feature wrong; write the test for it (S1.5).
+
+**One clock per bubble.** `MessageBubble` computes its `nowMs` ONCE and passes
+the same value to the rollup, to every row, and to the accessible name. Three
+independent `Date.now()` reads in one render can disagree with each other, which
+is exactly the class of contradiction this feature exists to remove.
+
 **D-b. The imported guard (spec S5).** `Timeline.tsx` withholds `nowMs` when
 `msg.imported === true`, exactly as the 1:1 path already withholds its timestamp
 at `Timeline.tsx:577`. Composed with D-a, an imported row can never show a stale
@@ -51,7 +74,21 @@ construction. Task it; do not skip it because it looks unreachable.
 per thread, not one per bubble. It bumps a `now` value that reaches bubbles by
 the same prop path `rosterKind` already uses (`Timeline` -> `StreamItem` ->
 `MessageBubble`). This choice determines the acceptance-3a test, so it is fixed
-here.
+here. Verified: that prop path is real and there is no `React.memo` anywhere in
+`Timeline.tsx`, so a bump genuinely re-renders every bubble.
+
+**`now` INITIALISES TO `Date.now()` AT MOUNT, never to `undefined`.** Under D-a
+an undefined clock means "staleness off", so initialising lazily would make the
+first render of every thread show no escalation at all - and the 8/23 headline
+case, where the founder opens a thread whose leg went quiet hours ago, would
+render exactly as it does today until a tick fired a minute later. D-a's failure
+mode is SILENT-OFF, which is safe against false reds and dangerous against
+missing ones; this is the one place that asymmetry bites. Test the first render,
+not just the tick.
+
+**D-c2. The ticker's `nowMs` must reach the same place the imported guard
+does.** A bubble whose clock is withheld (D-b) contributes NOTHING to the run
+condition - see S4.1.
 
 **D-d. Row markup and its accessible handles.** The list is a `<ul>` with
 `aria-label="Delivery by recipient"`; each row is an `<li>`. This gives the e2e
@@ -63,10 +100,24 @@ handle.
 **D-e. The row timestamp uses the module's existing `formatTime`** - the same
 helper that builds the `meta` line at `Timeline.tsx:551-560`. No new formatter.
 
+**Timezone hazard, and how tests avoid it.** `formatTime` renders LOCAL time,
+while `sentAt` and `deliveredAt` are UTC (`Z`-suffixed) provider/server strings
+- unlike `msg.at`, which is naive-local. No suite in this repo pins `TZ`, so an
+exact-string timestamp assertion would be the first timezone-dependent test in
+the codebase and would pass on one machine and fail on another. **New tests
+assert that a timestamp is PRESENT or ABSENT, and match it loosely (a
+time-shaped pattern), never an exact clock string.** Do not add a `TZ` pin to
+the shared setup to make an exact assertion possible; that is a suite-wide
+change for one test.
+
 **D-f. Writing the queued label in new tests.** The shipped label for `queued`
 carries a non-ASCII ellipsis, and AGENTS.md requires ADDED lines to be ASCII.
-New assertions must therefore compare against `presentDeliveryStatus('queued')`
-rather than typing the literal string. Do not "fix" the shipped label.
+Write the ellipsis as a unicode escape (backslash-u-2026) inside the string
+literal instead of typing the character: the source line stays all-ASCII and
+still evaluates to the real label. Do NOT compare against
+`presentDeliveryStatus('queued')`: an assertion that the delegate returns what
+the delegate returns is self-referential and would pass even if the delegation
+broke. Do not "fix" the shipped label.
 
 ---
 
@@ -138,7 +189,10 @@ RED: one test per row of the spec's S3 table, plus D-a:
 
 GREEN: `isStaleLeg(slot, messageAtMs: number | undefined, nowMs: number |
 undefined): boolean`, exhaustive over `DeliveryStatus` via a `switch` so a
-future member is a typecheck failure rather than a silent default.
+future member is a typecheck failure rather than a silent default, **delegating
+the actual comparison to `isQuietSince`**. That delegation is spec S3's
+one-comparison ruling and is the only thing that gives S1.1 a caller; an earlier
+draft of this plan dropped the clause and left `isQuietSince` orphaned.
 
 ### S1.4 `presentRelayDelivery` - six branches, optional clock
 
@@ -264,11 +318,17 @@ Name shape per spec S6, including its case-3 clause (omit the per-recipient
 recital when the roster is absent AND every key is contactId-keyed). `title`
 stays for mouse users. Repo precedent for the construct: `AutoBadge.tsx:25`.
 
-**Known collision to handle, not to discover:** `Timeline.test.tsx:570` asserts
-`queryByRole('img')` is absent on an MMS bubble. That assertion's INTENT is "the
-attachment did not render an image element", not "no role=img anywhere". If the
-new chip trips it, SCOPE that assertion to the attachment gallery rather than
-deleting it, and say so in the commit.
+**`role="img"` is applied ONLY in the two cases bulleted above** - a bubble with
+no `delivery_recipients` map at all (every 1:1 bubble, and the MMS fixture at
+`Timeline.test.tsx:560-570`) gets NEITHER, because it has no rollup and does not
+meet the branch-0 condition either.
+
+Consequence, stated so it is not "handled" away: `Timeline.test.tsx:570` asserts
+`queryByRole('img')` is absent on an MMS bubble, and it is the repo's only
+unnamed-img guard. **If that assertion goes red, the implementation applied the
+role unconditionally - that is a REGRESSION to fix in the source, not an
+assertion to scope.** An earlier draft of this plan pre-authorised weakening it;
+that permission is WITHDRAWN.
 
 **Also known:** on a RELAY all-opted-out bubble the message-level chip reads the
 queued label, because the relay fan-out never moves the parent status off
@@ -293,7 +353,7 @@ guard (D-b) showing no stale state on an imported row carrying a synthetic map;
 `toHaveAttribute('role','img')` and `toHaveAccessibleName(...)` on BOTH chip
 variants.
 
-Never write `toBeVisible()` about the reveal - `vite.config.ts:99` sets
+Never write `toBeVisible()` about the reveal - `vite.config.ts:98` sets
 `css:false`, so it would be vacuous.
 
 ### S3.4 The re-baseline census - three assertions, each for a stated reason
@@ -303,7 +363,7 @@ Per spec 6.1, corrected by plan review:
 | Assertion | Change | Reason |
 | --- | --- | --- |
 | `Timeline.test.tsx:910` | expectation moves to branch 3 | `RELAY_OUT`'s `c2` is `sent` with no `sentAt`, so row 2, so stale against the pinned clock |
-| `Timeline.test.tsx:999` | **override the fixture LOCALLY** | Its intent is the neutral branch. **`RELAY_OUT` is SHARED** - it is spread into `:917`, `:941`, `:955`, `:968`, `:983`, `:1009` and used directly at `:909` - so re-dating the const (rev 1's instruction) would silently un-stale `:910` and delete the feature's only Timeline-level re-baseline. Give THIS test its own `at`/slots instead. |
+| `Timeline.test.tsx:999` | **override the fixture LOCALLY** | Its intent is the neutral branch. **`RELAY_OUT` is SHARED** - it is spread into `:917`, `:941`, `:955`, `:968`, `:983`, `:1009` and used directly at `:909` - so re-dating the const (rev 1's instruction) would silently un-stale `:910` and delete the feature's only Timeline-level re-baseline. Give THIS test its own `at`/slots instead. **Compute that `at` from the pinned clock in code** (e.g. an offset from `new Date()` under the pin), not as a hardcoded date string: `RELAY_OUT.at` is naive-local, so a literal chosen to sit "near the pinned clock" shifts by the machine's UTC offset and would go stale on some developers' machines and not others. |
 | `GroupTextView.test.tsx:1017` | tighten the regex | Its `sent` leg is stale under the pinned clock, but `getByText(/delivered 1\/2/)` is a SUBSTRING match that still passes. Tighten it so it can actually fail. |
 
 **Any OTHER rollup assertion that goes red is a REGRESSION, not a re-baseline.**
@@ -326,6 +386,14 @@ non-terminal AND eligible to age AND not yet stale. The middle clause is
 load-bearing - without it the interval never stops for the very legs the human
 decided stay silent. Coarse interval (order of a minute), visibility-gated per
 `GroupTextView.tsx:152-166`, cleaned up on unmount, no network.
+
+**A bubble whose clock is WITHHELD contributes nothing to the run condition**
+(D-c2). An imported row (D-b) has no clock, so every one of its legs is
+non-terminal and can never become stale - which satisfies "non-terminal AND not
+yet stale" for ever and would spin the interval permanently on exactly the
+fixture S3.3 now requires. "Eligible to age" must be evaluated against the SAME
+withheld clock the rows use, not against the slot shape alone. This is the third
+distinct way this run condition has failed to terminate; test it.
 
 ### S4.2 Tests
 

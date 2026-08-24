@@ -104,10 +104,12 @@ export function resolveRecipientLabel(
 ): RecipientLabel {
   const phone = phoneFromRecipientKey(key);
   const phoneKeyed = phone !== undefined;
-  // GUARDED to the standard the rest of this subsystem holds: these rosters come
-  // off raw passthroughs (`header.participants`) and really do arrive off-shape.
-  // Anything that is not an array cannot be searched, so it is an ABSENT roster -
-  // case 3 - never a roster that failed to match, which would be a claim.
+  // GUARDED to the standard the rest of this subsystem holds - these rosters come
+  // off raw passthroughs (`header.participants`) - but as DEFENCE IN DEPTH, not
+  // because an off-shape roster has been observed here. What the guard DOES
+  // decide is the semantics: anything that is not an array cannot be searched, so
+  // it is an ABSENT roster - case 3 - never a roster that failed to match, which
+  // would be a claim about membership.
   const rosterPresent = Array.isArray(roster) && roster.length > 0;
 
   if (rosterPresent) {

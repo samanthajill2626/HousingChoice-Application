@@ -176,6 +176,61 @@ describe('isStaleLeg / canEverGoStale - the S3 eligibility table', () => {
     expect(canEverGoStale({ status: 'sent' }, QUIET_MS, undefined)).toBe(false);
   });
 
+  // THE FUTURITY BOUND. A clock AHEAD of ours is ordinary browser skew until it
+  // is more than one staleness budget ahead; past that it is not measuring the
+  // same time we are. The bound is on the FUTURITY, never on the sign: a
+  // `clock <= nowMs` rule would make an ordinary slow-browser leg INELIGIBLE, so
+  // nothing would be scheduled, nothing would re-render, and the escalation would
+  // be missed entirely - the exact failure direction this feature exists to stop.
+  it('canEverGoStale is false for a clock more than ONE BUDGET in the future - a badly skewed browser clock is not evidence we can age from', () => {
+    const A_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+    // (a) far in the future - on the leg's own clock, and on the message clock a
+    // clock-less `sent` leg falls back to (S3 row 2).
+    expect(canEverGoStale({ status: 'sent', sentAt: iso(NOW + A_YEAR_MS) }, undefined, NOW)).toBe(
+      false,
+    );
+    expect(canEverGoStale({ status: 'sent' }, NOW + A_YEAR_MS, NOW)).toBe(false);
+    expect(canEverGoStale({ status: 'queued', sentAt: iso(NOW + A_YEAR_MS) }, undefined, NOW)).toBe(
+      false,
+    );
+    // Exactly one budget ahead is still ordinary skew - inclusive at the bound,
+    // like the staleness comparison itself. One millisecond past it is not.
+    expect(
+      canEverGoStale({ status: 'sent', sentAt: iso(NOW + STALE_SENT_AFTER_MS) }, undefined, NOW),
+    ).toBe(true);
+    expect(
+      canEverGoStale({ status: 'sent', sentAt: iso(NOW + STALE_SENT_AFTER_MS + 1) }, undefined, NOW),
+    ).toBe(false);
+    // (b) slightly in the future, within the budget.
+    expect(canEverGoStale({ status: 'sent', sentAt: iso(NOW + 60_000) }, undefined, NOW)).toBe(true);
+    // (c) exactly at nowMs.
+    expect(canEverGoStale({ status: 'sent', sentAt: iso(NOW) }, undefined, NOW)).toBe(true);
+    // (d) in the past - the ordinary case, unchanged.
+    expect(canEverGoStale({ status: 'sent', sentAt: FRESH }, undefined, NOW)).toBe(true);
+    expect(canEverGoStale({ status: 'sent', sentAt: QUIET }, undefined, NOW)).toBe(true);
+  });
+
+  it('a WITHIN-BUDGET future clock is bounded - it crosses the boundary within two budgets of real time, and isStaleLeg is what carries it there', () => {
+    // This is why the bound is one budget rather than zero: the run condition
+    // stays armed, `nowMs` advances with real time, and the leg escalates LATE
+    // rather than never.
+    const slot = { status: 'sent', sentAt: iso(NOW + STALE_SENT_AFTER_MS) } as const;
+    expect(canEverGoStale(slot, undefined, NOW)).toBe(true);
+    expect(isStaleLeg(slot, undefined, NOW)).toBe(false);
+    expect(isStaleLeg(slot, undefined, NOW + 2 * STALE_SENT_AFTER_MS)).toBe(true);
+  });
+
+  it('canEverGoStale and isStaleLeg deliberately DISAGREE about futurity while agreeing about the clock - a far-future leg is ineligible AND not stale', () => {
+    // They share `stalenessClockMs`, so they can never differ about WHICH clock a
+    // slot uses. They are allowed to differ about the futurity bound, because
+    // `canEverGoStale` answers "should we buy an interval" and is the
+    // conservative one. `isStaleLeg` is unchanged: a future clock is simply not
+    // yet quiet, and it becomes stale once it genuinely is.
+    const slot = { status: 'sent', sentAt: iso(NOW + 365 * 24 * 60 * 60 * 1000) } as const;
+    expect(canEverGoStale(slot, undefined, NOW)).toBe(false);
+    expect(isStaleLeg(slot, undefined, NOW)).toBe(false);
+  });
+
   it('canEverGoStale and isStaleLeg agree about WHICH clock a slot uses - they derive it from one helper', () => {
     // A `sent` leg with a fresh sentAt but an ancient message clock is the case
     // that separates them if they ever drift: eligible (it has a clock), not yet

@@ -159,6 +159,13 @@ function parseWireClock(iso: string | undefined): number | undefined {
  *   | queued         | no               | NOTHING   |
  *   | queued_pending | either           | NOTHING   |
  *   | delivered/failed/undelivered | either | NOTHING |
+ *   | any of the above | clock MORE THAN ONE BUDGET AHEAD of nowMs | NOTHING |
+ *
+ * That last row is the FUTURITY bound, and it is the only row this function does
+ * not decide, because it depends on the READING clock rather than on the slot:
+ * it is enforced in `canEverGoStale`, whose doc carries the reasoning. A clock
+ * further ahead of ours than the entire staleness budget is not measuring the
+ * same time we are, so nothing may be inferred from its age.
  *
  * Why `sent` may fall back to the message clock but `queued` may NOT: a RELAY
  * leg cannot reach `sent` without a `sentAt` (the fan-out writes both on one
@@ -241,6 +248,38 @@ export function isStaleLeg(
  * The stale-capable statuses (`sent`, `queued`) are implied rather than re-listed:
  * `stalenessClockMs` returns undefined for every other status, and re-listing
  * them here is exactly the drift the shared helper exists to prevent.
+ *
+ * THE FUTURITY BOUND, and why it is a BOUND rather than `clock <= nowMs`. Every
+ * ageing clock here is the PROVIDER's; `nowMs` is the OPERATOR'S BROWSER clock.
+ * A browser clock running slow - a stale VM, no NTP, a dead CMOS battery - puts
+ * every freshly-sent leg in the FUTURE, and a future clock answered "eligible"
+ * and "not yet stale" at the same time, so the interval stayed armed for ever
+ * (the fifth shipped non-termination; see `Timeline.tsx`'s run-condition doc).
+ *
+ * Two properties decide the shape of the fix, and BOTH must survive any later
+ * simplification of this clause:
+ *
+ *  1. BOUNDEDNESS. A clock at most one staleness budget ahead of ours is
+ *     ordinary skew. It stays eligible, `nowMs` advances with real time, and the
+ *     leg crosses the boundary within at most TWO budgets (about 30 minutes) -
+ *     so the interval terminates, and the escalation is merely LATE.
+ *  2. NO MISSED ESCALATION. Requiring `clock <= nowMs` instead would make that
+ *     ordinary slow-browser leg INELIGIBLE. Nothing would be armed, so nothing
+ *     would re-render when `nowMs` caught up, and the escalation would be missed
+ *     ENTIRELY - the exact failure direction this feature exists to prevent. A
+ *     bounded late signal is acceptable; a silently absent one is not.
+ *
+ * Past one whole budget ahead the clock is not measuring the same time we are,
+ * and this design prefers SILENCE over a signal computed from a clock we cannot
+ * trust - so such a leg ages from nothing.
+ *
+ * `isStaleLeg` is deliberately NOT given this bound. It already answers false
+ * for a future clock (it is not yet quiet) and correctly becomes true once that
+ * clock genuinely is. The two functions still agree BY CONSTRUCTION about WHICH
+ * clock a slot uses - they share `stalenessClockMs`, which is the drift this
+ * module guards against - and they do NOT have to agree about futurity, because
+ * `canEverGoStale` answers "should we buy an interval" and is allowed to be the
+ * conservative one.
  */
 export function canEverGoStale(
   slot: RelayDeliverySlot,
@@ -249,7 +288,11 @@ export function canEverGoStale(
 ): boolean {
   if (nowMs === undefined) return false;
   const clock = stalenessClockMs(slot, messageAtMs);
-  return clock !== undefined && Number.isFinite(clock);
+  if (clock === undefined || !Number.isFinite(clock)) return false;
+  // Inclusive at exactly one budget ahead, mirroring `isQuietSince`'s inclusive
+  // threshold. A NaN clock is already excluded above, so this comparison never
+  // decides anything by NaN's own falsiness.
+  return clock - nowMs <= STALE_SENT_AFTER_MS;
 }
 
 /**

@@ -235,7 +235,61 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(list).toHaveLength(2);
     expect(list[0]).toHaveTextContent('Keisha Kane');
     expect(list[0]).toHaveTextContent('Not sent - opted out');
+    // EXACT, beside the substring assertion above and deliberately not instead
+    // of it: `contact_opted_out` maps in `deliveryReason` to the MESSAGE-LEVEL
+    // aggregate ("Everyone here has opted out - nothing was sent"), which beside
+    // ONE member's name is the precise misread this feature exists to kill. The
+    // row-level gate is what keeps it out, and only an exact assertion notices
+    // when that gate is inverted - a substring match survives the appended copy.
+    expect(within(list[0] as HTMLElement).getByText('Not sent - opted out')).toBeInTheDocument();
+    expect(screen.queryByText(/Everyone here has opted out/)).not.toBeInTheDocument();
     expect(list[1]).toHaveTextContent('Lars Landlord');
+  });
+
+  // THE ROW-LEVEL REASON GATE (spec S4). A row shows a reason only when THAT
+  // ROW's own presentation isFailure. Both directions are load-bearing and both
+  // are asserted with EXACT text, never a substring: a build with the gate
+  // inverted renders the row with the reason appended (or stripped), and a
+  // substring assertion would stay green through exactly the misread this
+  // feature exists to stop.
+  it('shows the failure reason on a HARD-FAILED row, with the raw carrier code', () => {
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: '30034' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('Team reply to the group');
+    const failedRow = rows()[1] as HTMLElement;
+    expect(failedRow).toHaveTextContent('Lars Landlord');
+    expect(
+      within(failedRow).getByText('Failed - Number not registered for A2P 10DLC (error 30034)'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows NO reason on a STILL-RETRYING row that carries a transient carrier code', () => {
+    // The fan-out writes a transient code onto a leg it is still retrying.
+    // `queued` is not a failure, so 30003's "will retry" copy must not appear
+    // beside this person's name as though the send were over.
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'queued', errorCode: '30003' },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('Team reply to the group');
+    const retryingRow = rows()[1] as HTMLElement;
+    expect(retryingRow).toHaveTextContent('Lars Landlord');
+    // EXACT: the state chip is the label alone, with nothing appended. The
+    // shipped label carries a U+2026 ellipsis; written as an escape so this
+    // source line stays ASCII (AGENTS.md).
+    expect(within(retryingRow).getByText('Sending\u2026')).toBeInTheDocument();
+    expect(within(retryingRow).queryByText(/30003/)).not.toBeInTheDocument();
+    expect(within(retryingRow).queryByText(/will retry/)).not.toBeInTheDocument();
   });
 
   it('revealed, a queued_pending HOLD still renders no list', () => {

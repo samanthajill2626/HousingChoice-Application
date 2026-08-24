@@ -38,6 +38,9 @@ const LIST_NAME = 'Delivery by recipient';
 const PAST_THE_BOUNDARY_MS = 16 * 60 * 1000;
 /** A long idle stretch, used by the absence proofs' behavioural half. */
 const A_LONG_WHILE_MS = 24 * 60 * 60 * 1000;
+/** Further ahead of the browser clock than any ordinary skew - the shape a
+ *  machine with no NTP or a dead CMOS battery puts EVERY freshly-sent leg in. */
+const A_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 const ROSTER = [
   { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },
@@ -346,6 +349,46 @@ const SILENT_CASES: TickerCase[] = [
     }),
   },
   {
+    title:
+      'a leg whose sentAt is more than one budget in the FUTURE (the operator browser clock is slow) ages from NOTHING, so the interval is never armed',
+    build: (t0) =>
+      outboundAt(t0, {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent', sentAt: new Date(t0 + A_YEAR_MS).toISOString() },
+      }),
+  },
+  {
+    title:
+      'the same skew reached through the MESSAGE clock - a clock-less `sent` leg (S3 row 2) on a message instant far in the future - also ages from NOTHING',
+    build: (t0) =>
+      outboundAt(t0 + A_YEAR_MS, {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent' },
+      }),
+  },
+  {
+    title:
+      'an EMAIL row renders an EmailCard - no rollup, no rows, no legs - so even an otherwise-eligible leg presents nothing that could change',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        { c1: { status: 'sent', sentAt: new Date(t0).toISOString() } },
+        { type: 'email', subject: 'Property options for you' },
+      ),
+  },
+  {
+    title:
+      'an OPTED-OUT leg is excluded from the rollup and short-circuited by the row presenter, so no pixel can ever change for it',
+    build: (t0) =>
+      outboundAt(t0, {
+        c1: {
+          status: 'sent',
+          sentAt: new Date(t0).toISOString(),
+          errorCode: 'contact_opted_out',
+        },
+      }),
+  },
+  {
     title: 'an INBOUND bubble carrying a map is not an outbound send',
     build: (t0) =>
       outboundAt(
@@ -428,6 +471,34 @@ describe('Timeline staleness ticker - termination table', () => {
     // nothing left to carry across the boundary, so there is nothing to schedule.
     expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
     expect(spies.set).not.toHaveBeenCalled();
+  });
+
+  it('ARMS and TERMINATES for a clock WITHIN one budget in the future - ordinary browser skew escalates LATE, never not at all - observable: window.setInterval once, then window.clearInterval with the ticker id', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    // The operator's browser clock is five minutes slow, so a freshly-sent leg
+    // carries a provider clock five minutes AHEAD of ours. This is the case a
+    // `clock <= nowMs` bound would have made INELIGIBLE - arming nothing, so
+    // nothing re-renders when the browser clock catches up and the escalation is
+    // missed entirely.
+    const skewMs = 5 * 60 * 1000;
+    renderTimeline({
+      items: [
+        outboundAt(t0, {
+          c1: { status: 'delivered' },
+          c2: { status: 'sent', sentAt: new Date(t0 + skewMs).toISOString() },
+        }),
+      ],
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    // BOUNDED: at most two budgets of real time, not for ever.
+    act(() => {
+      vi.advanceTimersByTime(2 * PAST_THE_BOUNDARY_MS);
+    });
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
   });
 
   it('a thread of only CALL cards schedules nothing - observable: window.setInterval was never called (a local mirror of the four getTimerCount tripwires in Timeline.test.tsx)', () => {

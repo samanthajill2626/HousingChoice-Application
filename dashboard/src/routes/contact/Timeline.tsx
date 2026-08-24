@@ -490,9 +490,14 @@ function recipientRowTime(slot: RelayRecipientDelivery): string {
  *
  * The match reuses `findRosterMember` - the same matcher `senderLabel` and
  * `resolveRecipientLabel` use - so a row can never sort as "unmatched" while it
- * renders a member's name. The roster is guarded rather than trusted: these
- * arrive off raw passthroughs and really do come through off-shape, and
- * `findRosterMember` throws on a non-array.
+ * renders a member's name.
+ *
+ * The `Array.isArray` guard is DEFENCE IN DEPTH, not a response to an observed
+ * wire shape: these rosters arrive off raw passthroughs, and the guard holds the
+ * same standard as the pre-existing `typeof` field guards in
+ * `memberAttribution.ts`. It is NOT a page-level guarantee - `GroupReplyNote` in
+ * this file calls `roster.map` on the same prop with no guard - so do not read it
+ * as one.
  */
 function orderRecipientRows(
   entries: Array<[string, RelayRecipientDelivery]>,
@@ -716,6 +721,13 @@ function bubbleClocks(
  *     `bubbleClocks`), not the raw tick.
  *  4. a clock that parses to NaN - a real handled shape here, not a defensive
  *     hypothetical. Closed by `canEverGoStale`'s finiteness clause.
+ *  5. a clock in the FUTURE - the ageing clocks are the PROVIDER's and `nowMs`
+ *     is the OPERATOR'S BROWSER clock, so a browser running slow puts every
+ *     freshly-sent leg ahead of us, where it is "eligible" and "not yet stale"
+ *     at once. Closed by `canEverGoStale`'s FUTURITY BOUND, which keeps ordinary
+ *     skew eligible (so the escalation is late, never missed) and drops a clock
+ *     more than one whole staleness budget ahead. Read that function's doc
+ *     before touching the bound.
  *
  * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
  * helper inside the presenter, so they cannot disagree about which clock a slot
@@ -723,18 +735,35 @@ function bubbleClocks(
  * rather than a tick, so the tick only ever has to carry a leg ACROSS the
  * boundary - never back.
  *
- * The gate mirrors what the bubble actually RENDERS (outbound, a non-empty map,
- * and not a `queued_pending` hold): a leg nothing presents cannot change any
- * pixel, so it must not buy an interval.
+ * The gate mirrors what the bubble actually RENDERS: a leg nothing presents
+ * cannot change any pixel, so it must not buy an interval. FIVE clauses carry
+ * that mirror, and each one names a real rendering decision made elsewhere:
+ *
+ *  - OUTBOUND only, and a non-empty `delivery_recipients` map, which is
+ *    `showRecipients` / the rollup guard in `MessageBubble`.
+ *  - NOT a `queued_pending` hold, which suppresses both the rollup and the rows.
+ *  - NOT an `email` row. `StreamItem` routes `type === 'email'` to `EmailCard`,
+ *    which renders no rollup, no rows and no legs at all - while the server
+ *    (`app/src/routes/contactTimeline.ts`) attaches `delivery_recipients` to a
+ *    message of ANY type. Latent today (no email carries such a map), and the
+ *    check is on the TYPE for exactly the reason the routing is: this predicate
+ *    must move whenever that switch does.
+ *  - NOT an OPTED-OUT leg. `presentRelayDelivery` filters `contact_opted_out`
+ *    out of its counts and `presentLegDelivery` short-circuits on the code
+ *    BEFORE any staleness test, so neither the chip nor the row can ever change
+ *    for such a leg however long it sits there.
  */
 function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
   if (msg.direction !== 'outbound') return false;
+  if (msg.type === 'email') return false;
   if (msg.delivery_status === 'queued_pending') return false;
   const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
   if (bubbleNowMs === undefined) return false;
   return Object.values(msg.delivery_recipients ?? {}).some(
     (slot) =>
-      canEverGoStale(slot, messageAtMs, bubbleNowMs) && !isStaleLeg(slot, messageAtMs, bubbleNowMs),
+      slot.errorCode !== 'contact_opted_out' &&
+      canEverGoStale(slot, messageAtMs, bubbleNowMs) &&
+      !isStaleLeg(slot, messageAtMs, bubbleNowMs),
   );
 }
 
@@ -948,10 +977,18 @@ function MessageBubble({
       </div>
       {/* Who the send actually reached. CONDITIONALLY RENDERED on the reveal -
        *  NOT the meta line's display:none - so presence/absence is a real unit
-       *  assertion in a css:false environment, no hidden row text sits in the DOM
-       *  for a page-scoped e2e getByText to match, and a collapsed bubble carries
-       *  no per-recipient claims at all. A SIBLING of .meta, never a child: a
-       *  <ul> inside that flex row fights margin-left:auto on .status.
+       *  assertion in a css:false environment and no hidden row TEXT sits in the
+       *  DOM for a page-scoped e2e getByText to match. A SIBLING of .meta, never
+       *  a child: a <ul> inside that flex row fights margin-left:auto on .status.
+       *
+       *  WHAT THIS DOES NOT MEAN. A collapsed bubble is not silent about its
+       *  recipients: spec S6 puts the same per-recipient facts on the
+       *  always-rendered chip as an `aria-label` ATTRIBUTE (`rollupName` /
+       *  `messageChipName` above, computed unconditionally), and S6 consequence 3
+       *  states that DELIBERATELY - it is what gives a screen-reader user, who
+       *  cannot open this disclosure at all, the names. So the guarantee here is
+       *  about rendered TEXT ONLY, which is exactly what the unit negatives and
+       *  the e2e `toHaveCount(0)` / `toContainText` assertions read.
        *
        *  The rows do NOT stopPropagation, deliberately. They are children of the
        *  bubble whose onClick is the toggle, so clicking a row collapses the list

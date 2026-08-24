@@ -85,6 +85,7 @@ import {
 import type { AuditRepo } from '../../repos/auditRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
+import { resolveRelayInbound } from '../../services/relayInboundResolution.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
@@ -149,12 +150,6 @@ function pushCallerLabel(maskedLabel: string, callerPhone: string | undefined): 
  *
  * // SEAM: ring-through rules deferred (v2.17) — inject the routing decision here later.
  */
-function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
-  const aC = a.created_at ?? '';
-  const bC = b.created_at ?? '';
-  return aC < bC ? 1 : aC > bC ? -1 : 0;
-}
-
 function decideRouting(relay: ConversationItem, caller: ConversationParticipant): 'bridge' {
   // Inputs are intentionally unused until the deferred rules land — referenced
   // here so the seam signature stays meaningful (and lint-clean).
@@ -447,44 +442,38 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     }
 
     // (2) Route by To. A pool number -> the masked relay-group bridge. A pool
-    // number fronts MANY participant-disjoint groups, concurrently and over
-    // time (relay-number-lifecycle), so voice resolves on (To, From) exactly
-    // like inbound SMS routing in twilio.ts: (a) the caller's own OPEN group
-    // (newest if the burn invariant is violated), (b) else the caller's newest
-    // CLOSED group (closed-thread refusal lands in THEIR thread), (c) else the
-    // newest OPEN group for the record (non-member refusal), (d) else - every
-    // group closed, caller on no roster - the newest group overall. Routing on
+    // number fronts MANY participant-disjoint groups (relay-number-lifecycle),
+    // so the group is resolved on the (To, From) PAIR by the shared ladder in
+    // services/relayInboundResolution.ts - the same policy object the SMS
+    // webhook consumes, extracted so the two channels cannot drift. Routing on
     // To alone via getByPoolNumber judged every caller against ONE arbitrary
     // open roster and refused legitimate members of the number's other groups
     // (prod incident 2026-08-22/23).
     if (To !== undefined && To.length > 0) {
       const groups = await conversations.getAllByPoolNumber(To);
-      if (groups.length > 0) {
-        const openMatches = groups
-          .filter(
-            (g) => g.status === 'open' && (g.participants ?? []).some((m) => m.phone === From),
-          )
-          .sort(byNewestCreated);
-        if (openMatches.length > 1) {
+      const resolution = resolveRelayInbound(groups, From);
+      if (resolution !== undefined && resolution.kind !== 'all_closed_non_member') {
+        if (resolution.kind === 'open_member' && resolution.violatingOpenMatchIds) {
           log.error(
-            { callSid: CallSid, matchCount: openMatches.length },
+            {
+              callSid: CallSid,
+              matchCount: resolution.violatingOpenMatchIds.length,
+              conversationIds: resolution.violatingOpenMatchIds,
+            },
             'multiple OPEN relay groups on one pool number match the caller (burn invariant violated) - routing to the newest',
           );
         }
-        const relay =
-          openMatches[0] ??
-          groups
-            .filter(
-              (g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From),
-            )
-            .sort(byNewestCreated)[0] ??
-          groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0] ??
-          [...groups].sort(byNewestCreated)[0];
-        if (relay) {
-          await handleMaskedInbound(res, relay, { CallSid, From });
-          return;
-        }
+        // open_member -> bridge. closed_member -> the closed-thread refusal,
+        // filed in the caller's OWN dead thread. non_member_open -> the
+        // non-member refusal, filed on the newest open group for the record.
+        // handleMaskedInbound derives each outcome from the group it is handed.
+        await handleMaskedInbound(res, resolution.group, { CallSid, From });
+        return;
       }
+      // undefined (To fronts no relay groups at all) or all_closed_non_member
+      // (AF-5: never bury a stranger, a second phone, or a member calling from
+      // a NEW phone in a dead group transcript) -> fall through to founder
+      // call-triage below, the voice analogue of the SMS 1:1 intake path.
     }
 
     // (3) To is the business number (config.businessPhoneNumber) or unknown → FOUNDER

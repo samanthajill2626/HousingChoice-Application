@@ -155,28 +155,23 @@ describe('inbound masked voice - pool-number multiplexing (relay-number-lifecycl
   const DAVE = '+15550100004';
   const ERIN = '+15550100005';
 
-  /** A SECOND relay group on the SAME pool number (participant-disjoint). */
+  /**
+   * A SECOND relay group on the SAME pool number (participant-disjoint).
+   * Every test here overrides created_at explicitly - ordering is the subject
+   * under test, so no wall-clock default may decide a newest-first tie.
+   */
   function seedSecondRelay(
     world: FakeWorld,
     overrides: Partial<ConversationItem> = {},
   ): ConversationItem {
-    const conv: ConversationItem = {
+    return seedRelay(world, {
       conversationId: 'conv-relay-voice-2',
-      participant_phone: POOL,
-      pool_number: POOL,
-      status: 'open',
-      last_activity_at: new Date().toISOString(),
-      type: 'relay_group',
-      ai_mode: 'manual',
       participants: [
         { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
         { contactId: 'c-erin', phone: ERIN, name: 'Erin' },
       ],
-      created_at: new Date().toISOString(),
       ...overrides,
-    };
-    world.conversations.set(conv.conversationId, conv);
-    return conv;
+    });
   }
 
   it('two OPEN groups on one pool number: the caller bridges within THEIR group, not the first match', async () => {
@@ -245,6 +240,27 @@ describe('inbound masked voice - pool-number multiplexing (relay-number-lifecycl
     const call = world.messages.find((m) => m.provider_sid === 'CAmux3');
     expect(call?.conversationId).toBe('conv-relay-voice-2');
     expect(call?.received_on_closed_thread).toBe(true);
+  });
+
+  it('every group closed and caller on NO roster: founder triage, never buried in a dead group (AF-5 parity)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed', created_at: '2026-08-21T15:00:00.000Z' });
+    seedSecondRelay(world, { status: 'closed', created_at: '2026-08-20T12:00:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAmux5' }),
+    );
+    expect(res.status).toBe(200);
+    // The harness world has no inbound-voice-line holder, so founder triage
+    // answers with the text-us greeting. The point under test is that the call
+    // reaches founder triage AT ALL instead of a masked burial: no bridge, and
+    // crucially NO call row filed into either dead relay transcript (the SMS
+    // AF-5 rule - a stranger, a second phone, or a member from a NEW phone).
+    expect(res.text).not.toContain('<Dial');
+    expect(world.messages.find((m) => m.provider_sid === 'CAmux5')).toBeUndefined();
   });
 
   it('caller on TWO open groups (burn invariant violated): routes to the newest (SMS parity)', async () => {

@@ -6,8 +6,10 @@ import {
   isQuietSince,
   isStaleLeg,
   canEverGoStale,
+  presentLegDelivery,
   STALE_SENT_AFTER_MS,
 } from './deliveryStatus.js';
+import type { RelayDeliverySlot } from './deliveryStatus.js';
 
 describe('presentDeliveryStatus', () => {
   it('maps each delivery status to label / tone / isFailure', () => {
@@ -538,5 +540,187 @@ describe('presentDeliveryStatus - a `sent` that never advanced', () => {
   it('ignores an unparseable timestamp rather than crying stale', () => {
     // Date.parse of a malformed `at` yields NaN.
     expect(presentDeliveryStatus('sent', Number.NaN, T0)?.label).toBe('Sent');
+  });
+});
+
+describe('presentLegDelivery - one recipient row', () => {
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const P0 = Date.parse('2026-08-19T21:28:59.000Z');
+  const NOW = P0 + STALE_SENT_AFTER_MS * 4;
+  const QUIET = iso(P0);
+  const MSG_AT = NOW - 60_000;
+  // The queued label ships with a U+2026 ellipsis. Written as an escape so this
+  // source line stays ASCII while still evaluating to the real shipped string -
+  // and NOT as presentDeliveryStatus('queued'), which would be an assertion that
+  // the delegate returns what the delegate returns and would pass even if the
+  // delegation broke.
+  const SENDING = 'Sending\u2026';
+
+  it('delegates every ordinary status to the 1:1 presenter, so a leg and a 1:1 message never disagree', () => {
+    expect(presentLegDelivery({ status: 'queued' }, 'relay', MSG_AT, NOW)).toEqual({
+      label: SENDING,
+      tone: 'neutral',
+      isFailure: false,
+    });
+    expect(presentLegDelivery({ status: 'queued_pending' }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Queued - will send when connected',
+      tone: 'neutral',
+      isFailure: false,
+    });
+    expect(presentLegDelivery({ status: 'sent' }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Sent',
+      tone: 'info',
+      isFailure: false,
+    });
+    expect(presentLegDelivery({ status: 'delivered', deliveredAt: QUIET }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Delivered',
+      tone: 'success',
+      isFailure: false,
+    });
+    expect(presentLegDelivery({ status: 'failed', errorCode: '30005' }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Failed',
+      tone: 'danger',
+      isFailure: true,
+    });
+    expect(presentLegDelivery({ status: 'undelivered' }, 'group_text', MSG_AT, NOW)).toEqual({
+      label: 'Undelivered',
+      tone: 'danger',
+      isFailure: true,
+    });
+  });
+
+  // THE regression this function exists to avoid. `presentDeliveryStatus`'s
+  // `nowMs` is a DEFAULTED parameter, so its opt-out is withholding the
+  // TIMESTAMP - which means delegating as
+  // `presentDeliveryStatus(slot.status, messageAtMs, nowMs)` would age a `sent`
+  // leg from the MESSAGE clock and paint this row red. Reachable in production:
+  // a connect-when-ready hold waits days for its number to warm, so msg.at is
+  // arbitrarily old while the leg itself went out seconds ago.
+  it('reads a plain "Sent" on a released connect-when-ready hold - a fresh leg under a three-week-old message', () => {
+    const now = Date.now();
+    const threeWeeksAgo = now - 21 * 24 * 60 * 60 * 1000;
+    expect(
+      presentLegDelivery(
+        { status: 'sent', sentAt: iso(now - 60_000) },
+        'relay',
+        threeWeeksAgo,
+        now,
+      ),
+    ).toEqual({ label: 'Sent', tone: 'info', isFailure: false });
+  });
+
+  it('reads a plain "Sent" on the DISABLED path too - a withheld clock never ages anything', () => {
+    // Same delegation call shape as the enabled path, so there is exactly one
+    // way this function can reach the 1:1 presenter.
+    expect(presentLegDelivery({ status: 'sent', sentAt: QUIET }, 'relay')).toEqual({
+      label: 'Sent',
+      tone: 'info',
+      isFailure: false,
+    });
+    expect(
+      presentLegDelivery({ status: 'sent', sentAt: QUIET }, 'relay', NOW - STALE_SENT_AFTER_MS * 1000),
+    ).toEqual({ label: 'Sent', tone: 'info', isFailure: false });
+    expect(presentLegDelivery({ status: 'queued', sentAt: QUIET }, 'relay')).toEqual({
+      label: SENDING,
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
+
+  it('renders its OWN stale label for a quiet `sent` leg, matching STALE_SENT_PRESENTATION', () => {
+    expect(presentLegDelivery({ status: 'sent', sentAt: QUIET }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Sent - not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  it('renders a DIFFERENT stale label for a quiet `queued` leg - the 1:1 rule is sent-only and will not produce one', () => {
+    expect(presentLegDelivery({ status: 'queued', sentAt: QUIET }, 'relay', MSG_AT, NOW)).toEqual({
+      label: 'Queued - not confirmed',
+      tone: 'danger',
+      isFailure: false,
+    });
+  });
+
+  it('never says "Sent - not confirmed" on a leg the provider never reported sent - the two stale strings must differ', () => {
+    const sentLeg = presentLegDelivery({ status: 'sent', sentAt: QUIET }, 'relay', MSG_AT, NOW);
+    const queuedLeg = presentLegDelivery({ status: 'queued', sentAt: QUIET }, 'relay', MSG_AT, NOW);
+    expect(queuedLeg?.label).not.toBe(sentLeg?.label);
+    expect(queuedLeg?.label).not.toMatch(/^Sent/);
+  });
+
+  it('never stales a `queued` leg with no sentAt, so a released hold and a dead fan-out stay quiet on the row too', () => {
+    expect(
+      presentLegDelivery({ status: 'queued' }, 'relay', NOW - STALE_SENT_AFTER_MS * 1000, NOW),
+    ).toEqual({ label: SENDING, tone: 'neutral', isFailure: false });
+  });
+
+  it('labels an opted-out RELAY leg as not sent - the app itself declined to send', () => {
+    expect(
+      presentLegDelivery({ status: 'failed', errorCode: 'contact_opted_out' }, 'relay', MSG_AT, NOW),
+    ).toEqual({ label: 'Not sent - opted out', tone: 'neutral', isFailure: false });
+  });
+
+  it('labels an opted-out GROUP TEXT leg product-awarely - there Twilio skips the participant', () => {
+    // The group receipts path records what Twilio reports for a 21610, which is
+    // `undelivered`; the relay fan-out records `failed`. The CODE alone
+    // identifies the row, exactly as it does in the rollup's denominator filter.
+    expect(
+      presentLegDelivery(
+        { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'group_text',
+        MSG_AT,
+        NOW,
+      ),
+    ).toEqual({
+      label: 'Not sent - opted out (Twilio skips them)',
+      tone: 'neutral',
+      isFailure: false,
+    });
+    // Same slot on the other product reads the other way round.
+    expect(
+      presentLegDelivery(
+        { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'relay',
+        MSG_AT,
+        NOW,
+      )?.label,
+    ).toBe('Not sent - opted out');
+  });
+
+  it('never puts the message-level AGGREGATE opt-out copy on a single row', () => {
+    // deliveryReason maps contact_opted_out to "Everyone here has opted out -
+    // nothing was sent". That copy was written for the whole-message chip; on the
+    // row of the one member in five who opted out it is a fresh instance of the
+    // misread this feature exists to kill. It also must not read as a failure,
+    // because the bubble only renders a reason when the row isFailure.
+    for (const kind of ['relay', 'group_text'] as const) {
+      const row = presentLegDelivery(
+        { status: 'failed', errorCode: 'contact_opted_out' },
+        kind,
+        MSG_AT,
+        NOW,
+      );
+      expect(row?.label).not.toMatch(/Everyone here/);
+      expect(row?.isFailure).toBe(false);
+    }
+  });
+
+  it('does not treat a transient carrier code on a still-retrying `queued` leg as a failure', () => {
+    // relayFanOut writes { status: 'queued', errorCode: <transient code> } while
+    // it retries. An errorCode does NOT imply failure, and printing a carrier
+    // code beside a leg that is still going would be its own misread - the row
+    // renders a reason only when its own presentation isFailure.
+    expect(presentLegDelivery({ status: 'queued', errorCode: '30003' }, 'relay', MSG_AT, NOW)).toEqual({
+      label: SENDING,
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
+
+  it('returns null for an unrecognised status - the row shows a name and NO state chip, never an invented one', () => {
+    const offWire = { status: 'gremlin' } as unknown as RelayDeliverySlot;
+    expect(presentLegDelivery(offWire, 'relay', MSG_AT, NOW)).toBeNull();
   });
 });

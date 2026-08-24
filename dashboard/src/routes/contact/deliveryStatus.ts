@@ -195,7 +195,11 @@ function stalenessClockMs(
       return undefined;
     default: {
       const unreachable: never = slot.status;
-      return unreachable;
+      void unreachable;
+      // Unreachable for a well-typed status; an off-wire value has no ageing
+      // clock. The annotation above is what turns a NEW union member into a
+      // typecheck failure instead of a silent staleness decision.
+      return undefined;
     }
   }
 }
@@ -253,14 +257,16 @@ export function canEverGoStale(
  *   - in flight → neutral "delivered N/M" that counts up as DLRs land;
  *   - every leg delivered → the SAME green "Delivered" cue as a 1:1 bubble
  *     ("Delivered N/N") so a finalized group send is legible at a glance;
- *   - any hard-failed leg (failed/undelivered) → danger, with the failure count;
- *   - any leg that has gone QUIET (see `isStaleLeg`) → danger, counted
- *     separately as "J not confirmed", because a count alone is a coin flip and
- *     the 2026-08-23 drop was lost on exactly that toss.
- * Opted-out members are EXCLUDED from every counter - N, M, K and J: they were
- * never sent to (the bubble's opt-out note explains them), and counting them
- * would make N/M unreachable — the chip could never finalize. All-opted-out (or
- * no slots) ⇒ null: nothing was fanned out, so there is nothing to summarize.
+ *   - any hard-failed leg (failed/undelivered) → danger, with the failure count.
+ * Opted-out members are EXCLUDED from the count: they were never sent to (the
+ * bubble's opt-out note explains them), and counting them would make N/M
+ * unreachable — the chip could never finalize. All-opted-out (or no slots) ⇒
+ * null: nothing was fanned out, so there is nothing to summarize.
+ *
+ * NEW: a leg that has gone QUIET (see `isStaleLeg`) is counted separately and
+ * turns the chip danger as "J not confirmed" - a bare count is a coin flip, and
+ * the 2026-08-23 drop was lost on exactly that toss. The opted-out exclusion
+ * above covers J as well as N, M and K.
  *
  * K and J are DISJOINT by construction: a hard-failed leg is terminal, and
  * `isStaleLeg` is false for every terminal status. Branch 2's label adds them,
@@ -334,6 +340,93 @@ export function presentRelayDelivery(
     return { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false };
   }
   return { label: `delivered ${delivered}/${total}`, tone: 'neutral', isFailure: false };
+}
+
+/**
+ * Which multi-party product a per-recipient row belongs to. Structurally
+ * identical to - and assignable from - `RosterKind` in `Timeline.tsx`; declared
+ * here rather than imported so this presenter module stays a leaf (the
+ * broadcasts routes import it too, and it must not drag a component in).
+ */
+export type LegRosterKind = 'relay' | 'group_text';
+
+/**
+ * `queued` that never advanced. `presentDeliveryStatus` will NOT produce this:
+ * the 1:1 rule stays `sent`-only, so the per-leg presenter renders it itself.
+ *
+ * It MUST differ from STALE_SENT_PRESENTATION. "Sent - not confirmed" on a leg
+ * the provider never reported sent asserts an event that did not happen. Same
+ * tone and same non-failure reasoning as the `sent` twin.
+ */
+const STALE_QUEUED_PRESENTATION: DeliveryPresentation = {
+  label: 'Queued - not confirmed',
+  tone: 'danger',
+  isFailure: false,
+};
+
+/**
+ * Present ONE recipient's leg of a multi-party send.
+ *
+ * Per-leg state reuses `presentDeliveryStatus` so a leg and a 1:1 message never
+ * disagree about what a status MEANS, with exactly two exceptions this function
+ * owns - the stale labels and the opted-out label. They live here and NOT in
+ * `presentDeliveryStatus`, whose other callers (the EmailCard chip and the
+ * broadcasts recipient badge) must not move.
+ *
+ * THE DELEGATION RULE, and the reason this function exists at all: it NEVER
+ * delegates the staleness decision, on either path. It decides staleness itself
+ * with `isStaleLeg` and returns its own stale presentation; for everything else
+ * it calls `presentDeliveryStatus(slot.status)` with NO second argument,
+ * ALWAYS - enabled path and disabled path alike, so there is exactly one
+ * delegation call shape here. That is correct for all six statuses, because
+ * branch 4 is reached only when the leg is NOT stale, so the plain
+ * STATUS_PRESENTATION label is by construction the right answer.
+ *
+ * Passing `presentDeliveryStatus(slot.status, messageAtMs, nowMs)` instead would
+ * hand that function's `sent`-only rule the MESSAGE clock, and a released
+ * connect-when-ready hold - composed days ago, fanned out seconds ago - would
+ * render instant red. That false red is the exact failure the per-leg `sentAt`
+ * gate exists to prevent, and it is reachable in production.
+ *
+ * Returns null for an unrecognised status: the row then shows the member's name
+ * and NO state chip, never a blank row and never an invented state.
+ */
+export function presentLegDelivery(
+  slot: RelayDeliverySlot,
+  rosterKind: LegRosterKind,
+  messageAtMs?: number,
+  nowMs?: number,
+): DeliveryPresentation | null {
+  // Keyed on the CODE ALONE, exactly as the rollup's denominator filter is, so a
+  // leg excluded from N/M and a leg labelled "not sent" are always the same set.
+  // The relay fan-out records a suppressed leg as `failed` and the group-text
+  // receipts path records Twilio's `undelivered` for a 21610; both mean the same
+  // thing, and `contact_opted_out` is written by us, never by a carrier.
+  //
+  // Deliberately NOT routed through `deliveryReason`, which maps this code to
+  // "Everyone here has opted out - nothing was sent" - copy written for the
+  // message-level AGGREGATE. On the row of the one member in five who opted out
+  // that would be a fresh instance of the misread this feature exists to kill.
+  //
+  // PRODUCT-AWARE, mirroring the split the opt-out note above the rows already
+  // makes, because the mechanism genuinely differs: on a group text Twilio skips
+  // the participant, on a relay the app itself declines to send.
+  if (slot.errorCode === 'contact_opted_out') {
+    return {
+      label:
+        rosterKind === 'group_text'
+          ? 'Not sent - opted out (Twilio skips them)'
+          : 'Not sent - opted out',
+      tone: 'neutral',
+      // Not a failure: nothing was sent, so there is nothing to retry, and the
+      // bubble renders a row's reason only when that row isFailure.
+      isFailure: false,
+    };
+  }
+  if (isStaleLeg(slot, messageAtMs, nowMs)) {
+    return slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
+  }
+  return presentDeliveryStatus(slot.status);
 }
 
 /**

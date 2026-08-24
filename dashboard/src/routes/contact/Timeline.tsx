@@ -580,7 +580,11 @@ function MessageBubble({
   const delivery = outbound
     ? presentDeliveryStatus(msg.delivery_status, msg.imported === true ? undefined : Date.parse(msg.at))
     : null;
-  const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
+  // `media` scopes the reason copy to the leg that actually failed: a carrier
+  // with no MMS record for a line rejects the picture with 30005 while routing
+  // every text fine, so a picture bubble must not read "Number is invalid".
+  const isMms = msg.type === 'mms';
+  const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
@@ -603,7 +607,7 @@ function MessageBubble({
   // message's own "Queued - will send when connected" chip is the honest state.
   const deliveredSummary =
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
-      ? presentRelayDelivery(Object.values(msg.delivery_recipients))
+      ? presentRelayDelivery(Object.values(msg.delivery_recipients), { media: isMms })
       : null;
   // Multi-party attribution: who authored this message ("Team" or a member's
   // name), resolved through the SHARED resolver so a relay bubble and a native

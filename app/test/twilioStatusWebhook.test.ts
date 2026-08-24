@@ -391,6 +391,56 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(outbound.delayed).toHaveLength(0);
     });
 
+    it('30005 on an MMS leg flags NOTHING - "unknown handset" on a picture says nothing about SMS', async () => {
+      // Prod 2026-08-24: a Verizon mobile delivered 10/10 SMS and 8 inbound
+      // while 6/6 of its MMS died 30005 in under a second each. The old arm
+      // flagged the contact sms_unreachable off those MMS legs, and that flag is
+      // a HARD exclusion from every broadcast + matching audience - so a tenant
+      // whose texts all land would be silently dropped from sends.
+      const { app, world, capture } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+      await seedOutbound(world, 'MMout0001', { type: 'mms' });
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageSid: 'MMout0001', MessageStatus: 'undelivered', ErrorCode: '30005' }),
+      );
+
+      expect(world.flagWrites).toHaveLength(0);
+      const owner = world.contacts.find((c) => c.contactId === 'contact-T')!;
+      expect(owner.sms_unreachable).toBeFalsy();
+      expect(outbound.delayed).toHaveLength(0); // still never retried
+      const warn = capture
+        .atLevel(WARN)
+        .find((l) => String(l['msg']).includes('carrier rejected the attachment'));
+      expect(warn).toBeDefined();
+      expect(warn?.['errorCode']).toBe('30005');
+    });
+
+    it('30006 on an MMS leg STILL flags - "landline" is a line-type fact, true on any leg', async () => {
+      // The counterpart to the 30005 case above, and deliberately NOT symmetric
+      // with it. A landline receives neither SMS nor MMS, so 30006 reported on a
+      // picture leg is still a true statement about the line - and every 30006
+      // in the prod audit was a real landline. Scoping this one too would only
+      // lose landline detection when the first send to a number carries media,
+      // which is exactly the "texts can never reach them, call instead" case.
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+      await seedOutbound(world, 'MMout0002', { type: 'mms' });
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageSid: 'MMout0002', MessageStatus: 'undelivered', ErrorCode: '30006' }),
+      );
+
+      expect(world.flagWrites).toEqual([
+        { contactId: 'contact-T', flag: 'sms_unreachable', value: true },
+      ]);
+      expect(outbound.delayed).toHaveLength(0);
+    });
+
     it('30005 on an ATTACHED SECONDARY number does NOT flag the owner sms_unreachable (number-scoped); the SAME on the PRIMARY does', async () => {
       const SECOND = '+15550100002';
 

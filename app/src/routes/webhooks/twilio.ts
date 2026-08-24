@@ -2599,6 +2599,43 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // only flag when the failing number IS the contact's PRIMARY
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
+            //
+            // 30005 IS MMS-SCOPED; 30006 IS NOT (prod 2026-08-24). The flag
+            // asserts SMS reachability, so a leg that carried media may only set
+            // it when the code actually says something about the LINE:
+            //
+            //   30005 "unknown destination handset" is PROVEN ambiguous on an
+            //   MMS leg. A Verizon mobile delivered 10/10 texts and 8 inbound
+            //   the same week 6/6 of its MMS died 30005, each rejected in under
+            //   a second, while 26 other MMS from this same sender delivered -
+            //   including to three other Verizon 310/012 lines. Something
+            //   destination-side has no MMS path for that number; which network
+            //   element is UNKNOWN and does not matter here. Flagging off that
+            //   leg set `sms_unreachable`, a HARD exclusion from broadcasts
+            //   (routes/broadcasts.ts) and matching audiences
+            //   (services/audienceResolution.ts), which would silently drop a
+            //   tenant whose texts all land.
+            //
+            //   30006 "landline or unreachable carrier" is a claim about the
+            //   LINE TYPE, and a landline takes neither SMS nor MMS - so it is
+            //   true no matter which leg reports it. There is also zero evidence
+            //   of a 30006 false positive: every 30006 in the prod audit was a
+            //   real landline caught on an SMS leg. Scoping it would only lose
+            //   detection when a landline's first send happens to carry media.
+            //
+            // Self-correcting for 30005: a number really dead for SMS stays in
+            // the audience for at most one more broadcast, and broadcast legs
+            // are always SMS, so that leg flags it. The per-MMS truth stays on
+            // the message row (error_code + type); the durable "this line can't
+            // take attachments" signal and the SMS-link fallback are tracked in
+            // docs/issues/mms-silent-drop-dish-textnow.md.
+            if (ErrorCode === '30005' && message.type === 'mms') {
+              log.warn(
+                { providerSid: MessageSid, errorCode: ErrorCode },
+                'carrier rejected the attachment - MMS-only failure, SMS reachability untouched',
+              );
+              break;
+            }
             const conversation = await conversations.getById(message.conversationId);
             // NATIVE GROUP TEXTS ARE REACHABLE HERE. A classic status callback
             // for a group leg in the pre-marker window resolves to the GROUP

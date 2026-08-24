@@ -906,8 +906,14 @@ describe('Timeline relay-group annotations', () => {
   };
 
   it('shows a "delivered N/M" summary on an outbound relay bubble', () => {
+    // RE-BASELINE (per-recipient delivery, S3.4): RELAY_OUT's c2 leg is `sent`
+    // with NO sentAt, so it ages from msg.at - 2026-06-08, three weeks before
+    // setup.ts's pinned 2026-07-01T12:00:00Z clock - and is stale. The rollup is
+    // therefore branch 3 now, not the neutral count. This is the feature's only
+    // Timeline-level re-baseline and it is deliberately NOT removed by re-dating
+    // the shared fixture: the escalation on a quiet leg IS the feature.
     renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
-    expect(screen.getByText('delivered 1/2')).toBeInTheDocument();
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
     // Team attribution.
     expect(screen.getByText('Team')).toBeInTheDocument();
   });
@@ -995,7 +1001,28 @@ describe('Timeline relay-group annotations', () => {
 
   it('keeps the in-flight rollup neutral while legs are still sending', () => {
     // RELAY_OUT: c1 delivered, c2 only sent — not final, not failed.
-    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+    //
+    // RE-BASELINE (per-recipient delivery, S3.4): this test's INTENT is the
+    // neutral branch, so it gets its own RECENT `at` rather than the shared
+    // fixture's three-week-old one, which is now stale (see the "delivered N/M"
+    // test above). RELAY_OUT is SHARED - spread into six other tests and used
+    // DIRECTLY by two - so re-dating the const would silently un-stale that test
+    // and delete the feature's only Timeline-level re-baseline.
+    //
+    // The instant is COMPUTED from the pinned clock, never a literal: RELAY_OUT.at
+    // is naive-local, so a date string picked to sit "near the pin" would shift by
+    // the machine's UTC offset and go stale on some developers' machines only.
+    const inFlight: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r-inflight',
+      tsMsgId: 'r-inflight',
+      at: new Date(Date.now() - 60_000).toISOString(),
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent' },
+      },
+    };
+    renderTimeline({ items: [inFlight], relayRoster: ROSTER });
     const chip = screen.getByText('delivered 1/2');
     expect(chip.className).toMatch(/toneNeutral/);
   });

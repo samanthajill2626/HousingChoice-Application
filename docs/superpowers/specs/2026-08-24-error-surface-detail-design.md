@@ -1,10 +1,10 @@
 # Error surface detail - design
 
 Date: 2026-08-24
-Status: DRAFT r3 (awaiting human spec review)
+Status: DRAFT r4 (awaiting human spec review)
 Branch: feat/error-surface-detail
 Worktree: W:\tmp\error-surface-detail
-Design review: rounds 1-2 complete (51 findings, 38 accepted, 1 round-1
+Design review: rounds 1-3 complete (60 findings, 47 accepted, 1 round-1
 rejection reversed in round 2). Adjudications:
 `.superpowers/design-review/adjudications.md`
 
@@ -160,9 +160,23 @@ AGENTS.md requires that "All job traffic goes through `jobs.enqueue()` /
 poll-originated jobs the current code does not preserve it. This is a
 correlation-plumbing fix in the spirit of that rule.
 
-NO EXISTING LINE CHANGES SHAPE: `logger.ts:231` resolves
+WHAT CHANGES AND WHAT DOES NOT, precisely - this is the whole risk argument for
+touching shared plumbing, so it must not overstate. Every log line of every
+poll-enqueued job DOES gain a `pollRunId` field, because the mixin spreads the
+whole context (`logger.ts:232`); that is the point of the change. What does NOT
+change is the `correlationId` VALUE: `logger.ts:231` resolves
 `correlationId = jobRunId ?? pollRunId ?? requestId ?? bootId`, and `jobRunId`
 still wins inside a dispatched job.
+
+BLAST RADIUS, verified rather than assumed: `isCompleteEnvelope`
+(`jobs.ts:216-232`) only asserts that `correlationContext` is a non-null object -
+no schema, no key allowlist, no rejection of unknown keys - so envelopes in
+flight and new envelopes both validate. No test pins the key set (the
+`correlationContext` hits in `app/test` are fixtures and one negative case). No
+downstream reader enumerates context keys: `isOrphanLogLine`
+(`logger.ts:251-254`) reads `correlationId` only, the metric filters key on
+`{ $.level >= 50 }` and `{ $.correlationId NOT EXISTS }`, and the dev log ring
+filters on `level`/`msg`/`event`.
 
 NOT DONE: the pivot does not accept `conversationId` / `tenantId` /
 `placementId`. Those are DOMAIN ids; searching by them is a different feature
@@ -253,8 +267,21 @@ The query-value form also keeps the pointer out of the request log:
 `requestLogger.ts:33` logs `req.path`, which excludes the query string.
 
 **RESPONSE**: the flattened record - `err.message`, `err.type`, `err.stack`, the
-fields the call site attached, plus `@log`, `@logStream`, `@ingestionTime` and
-the raw `@message`. Values coerced per fact 5.
+fields the call site attached, plus `@log`, `@logStream` and `@ingestionTime`.
+Values coerced per fact 5.
+
+**THE RAW `@message` IS NEVER RETURNED FOR A PARSED RECORD.** An earlier draft
+returned it alongside the allowlisted fields, which defeated the allowlist
+completely: the response would drop `err.config.params` and
+`err.cause.config.headers.Authorization` from the flattened keys and then hand
+the client the original line still containing them. For a JSON line the flattened
+fields already carry everything of value, so the raw line is pure duplication
+plus a hole.
+
+For a NON-JSON record (kernel OOM, V8 heap OOM, raw stderr) `GetLogRecord`
+returns no application fields and the raw text IS the only content. Those lines
+carry no vendor error object by construction, so the text is surfaced under an
+explicit, capped `rawText` field. `@message` itself is never a response key.
 
 **FIELD RULE - AN ALLOWLIST UNDER `err`, NOT A DENYLIST.** A denylist of
 `err.config.*` / `err.request.*` / `err.response.*` prefixes was specified in r2
@@ -269,6 +296,16 @@ list nor those three prefixes). The rule is two-tier:
 - The `err.*` subtree is ALLOWLISTED to `message`, `stack`, `type`, `name`,
   `code`, `status`, and `response.status`. Everything else beneath `err` is
   dropped AT ANY DEPTH.
+- A SCALAR `err` IS KEPT. Six verified call sites log `err` as a STRING, not an
+  Error: `app/src/services/systemStatus.ts:204` and `:258`,
+  `app/src/services/pushService.ts:188`, `:235`, `:380`, and
+  `app/src/routes/auth.ts:311`. pino's serializer only transforms an Error VALUE,
+  so those arrive as a flat top-level `err` with text and nothing beneath it -
+  matching none of the seven allowed paths, and a faithful path-allowlist would
+  DELETE them. A scalar `err` is by definition the message, and `message` is
+  allowlisted. Note which two call sites those are: `systemStatus.ts:204`/`:258`
+  are this panel's OWN degraded-read diagnostics, so without this clause, when
+  System Status fails to read CloudWatch the detail view would delete the reason.
 
 `response.status` is explicitly kept because `errors.ts:77-82` reads it as the
 vendor discriminator and `status` is one of the three fields in the repo's
@@ -304,8 +341,15 @@ two-property literal typed as the full seam. Adding a required method is a
 
 ### S5 - Correlation trace pivot
 
-New: `GET /api/system/trace` accepting exactly one of `?correlationId=`,
-`?requestId=`, or `?pollRunId=` (admin-only, same router).
+New: `GET /api/system/trace` (admin-only, same router), taking:
+
+- exactly one of `?correlationId=`, `?requestId=`, `?pollRunId=`; and
+- `?at=<ISO timestamp>` - the anchor, REQUIRED. See the window rule below.
+
+**LOG GROUPS**: app + worker. `system` is EXCLUDED deliberately - its kernel
+lines carry no correlation id at all, so scanning it costs bytes for nothing.
+This is the new seam method's first argument (`cloudwatch.ts:106`, `:232-236`)
+and it went unstated across three review rounds; it is a decision, not a default.
 
 **IT DOES NOT REUSE `queryInsights`.** That seam hardcodes `sort @timestamp desc`
 (`cloudwatch.ts:227`), its contract pins NEWEST-FIRST (`:100-106`),
@@ -326,34 +370,75 @@ job run alone - nothing about what enqueued it. `requestId` covers
 request-originated work; `pollRunId` covers poll-originated work and only exists
 on the wire because of S2.
 
-**WINDOW - ANCHORED, NOT ROLLING.** The trace is anchored on the ROW'S TIMESTAMP
-with a bounded bracket around it. It does NOT inherit the panel's rolling window:
+**WINDOW - ANCHORED, NOT ROLLING.** The trace is anchored on the ROW'S TIMESTAMP,
+which S6's link sends as `?at=`. It does NOT inherit the panel's rolling window:
 the list route defaults to 24h (`system.ts:66-75`) while the panel's selector
 goes to 7d (`systemStatus.ts:45`), so a rolling window would return ZERO rows for
 any row older than a day - and an empty trace is indistinguishable from "there
 was no context" on a feature whose entire purpose is context. A rolling window
 would also mislead near its edge.
 
+CONCRETE VALUES, because prose alone left this unbuildable in an earlier draft:
+the bracket is `at - 5 minutes` to `at + 5 minutes`, a stated constant. The seam
+converts both bounds to EPOCH SECONDS - the existing seam warns about this in
+capitals at `cloudwatch.ts:229` ("CRITICAL: Insights StartQuery uses epoch
+SECONDS, not milliseconds") and the new method must honour it.
+
 **SHAPE**: its own row type carrying timestamp, level, message and the
 diagnostic fields an INFO line needs (`method`, `path`, `statusCode`,
 `durationMs`, `jobName`, `jobId`, `hopCount`) - not `ErrorEventView`.
 
-**LIMIT / DEGRADATION**: an explicit row limit, and the same
-`{ available: false, reason }` degraded contract at HTTP 200.
+**LIMIT - A TWO-SIDED BUDGET, because ascending has the symmetric defect.** An
+ascending query with a plain limit keeps the EARLIEST N rows, so on a long
+correlation the failure the operator clicked from is not in its own trace. That
+is more likely than it sounds: S2 makes `pollRunId` a valid pivot, and one poll
+tick fans out to many jobs, so a `pollRunId` trace is the widest of the three by
+construction.
 
-**VALIDATION**: the supplied id is validated as UUID-shaped before entering the
-query string - attacker-influencable input entering a query language. All four
-context ids are `randomUUID()` (`app/src/lib/context.ts:72-87`) and the
-correlation middleware MINTS rather than honors an inbound header
+The budget is therefore split around the anchor: up to N/2 rows at-or-before
+`at`, and up to N/2 after it, merged ascending. This GUARANTEES the anchor line
+is present, which a single-sided limit cannot. When either side is capped the
+response carries an explicit `truncated` flag that S6 must surface - a trace that
+silently omits lines is worse than no trace, because it looks complete.
+
+**DEGRADATION**: the same `{ available: false, reason }` contract at HTTP 200.
+
+**VALIDATION AND ITS TWO DIFFERENT ANSWERS**: a missing id, several ids at once,
+or a missing/unparseable `at` is a **400**, matching the `since` precedent on the
+sibling route (`system.ts:68-72`). A well-formed request whose id is not
+UUID-shaped takes the degraded 200. The two are observably different to the UI,
+so the spec states both rather than leaving a builder to guess.
+
+Ids are validated as UUID-shaped before entering the query string -
+attacker-influencable input entering a query language. All four context ids are
+`randomUUID()` (`app/src/lib/context.ts:72-87`) and the correlation middleware
+MINTS rather than honors an inbound header
 (`app/src/middleware/correlation.ts:14`), so validation cannot reject a
 legitimate id.
 
 **NO NEW IAM**: `logs:StartQuery` is already scoped to `/hc/<env>/*`
 (`infra/modules/ec2/main.tf:288-295`).
 
-### S6 - Dashboard UI
+### S6 - Dashboard wire layer and UI
 
-`dashboard/src/routes/settings/RecentErrors.tsx`.
+FOUR files, not one. The dashboard does NOT share the backend types - it
+hand-maintains a mirror, and every new field stops at the wire without this:
+
+- `dashboard/src/api/types.ts:335-346` - `SystemErrorEvent` is declared
+  independently with FIVE fields. It gains all eight new ones plus the two
+  truncation flags, and response types for both new routes. (The mirroring
+  obligation is stated in the panel's origin spec,
+  `docs/superpowers/specs/2026-06-29-settings-dashboard-design.md:163`.)
+- `dashboard/src/api/endpoints.ts:2088-2108` - holds `getSystemAlarms` and
+  `getSystemErrors` only. Add a client function for each new route. Use the
+  existing `request()` helper with `query: { ... }`: `client.ts:44-52` already
+  builds query strings with `URLSearchParams`, which encodes the pointer's
+  alphabet identically to `encodeURIComponent`, so the transport works with ZERO
+  new encoding code. Do NOT hand-roll a URL and bypass it.
+- `dashboard/src/routes/settings/useSystemStatus.ts:177-230` - where the panel's
+  fetching lives. The per-row detail fetch, its loading/error state and its abort
+  handling belong here, not improvised inside the component.
+- `dashboard/src/routes/settings/RecentErrors.tsx` - the rendering below.
 
 DECIDED: compact row, ONE expander containing everything.
 
@@ -362,7 +447,15 @@ chip, capped message, the trace link, and an expand control.
 
 Expanded (one `GET /api/system/errors/detail`): full `err.message`, `err.type`,
 `err.stack` in its OWN scroll container, remaining fields as a key/value list,
-and the raw record. The stack is bounded and scrolls internally.
+and `rawText` when the record carried one. The stack is bounded and scrolls
+internally.
+
+**THE TRUNCATION INDICATORS ARE RENDERED HERE - they have no other purpose.** S3
+produces one flag per capped field precisely so the UI can say WHICH field was
+cut; a flag that no slice consumes is dead weight. The collapsed row marks the
+capped field visibly and that marker is what invites the expander. Likewise S5's
+`truncated` flag is surfaced in the trace view: an incomplete trace must never
+render as though it were complete.
 
 **ROW KEY**: use `ref`. The current key (`RecentErrors.tsx:127`) collides once
 messages share a truncated 300-char prefix, and React would then mis-associate
@@ -370,7 +463,9 @@ per-row expander state and fetched detail across a refresh. ("Never rendered" in
 S3 means not displayed - it IS used in the view layer.)
 
 **TRACE LINK - WHICH ID, AND THE NULL CASE.** Prefer `requestId`, then
-`pollRunId`, then `correlationId`; the first present one drives the link. OOM
+`pollRunId`, then `correlationId`; the first present one drives the link. The
+link ALSO sends the row's own `timestamp` as `?at=` - without it the route
+cannot bound the query (S5). OOM
 rows are non-JSON, so ALL of them are null there (`cloudwatch.ts:127`,
 `:144-146`) - and those are exactly the rows `systemStatus.ts:239-240`
 synthesises. `RecentErrors.tsx:52` already guards this and the guard must be
@@ -461,9 +556,15 @@ avoids WIDENING it.
   `correlationId` resolution is unchanged inside a dispatched job.
 - Unit: the new adapter seam methods with injected fakes (no AWS); stringified
   coercion on the detail path; the S4 `err` ALLOWLIST - assert that
-  `err.cause.config.headers.Authorization` and `err.config.params` are dropped
-  and that `err.response.status` SURVIVES.
+  `err.cause.config.headers.Authorization` and `err.config.params` are dropped,
+  that `err.response.status` SURVIVES, and that a SCALAR string `err` survives.
+- Unit: S4 never returns a raw `@message` key for a parsed record, and DOES
+  return `rawText` for a non-JSON one.
 - Unit: S4's environment scope check rejects a record from a foreign log group.
+- Unit: S5's two-sided budget - on a correlation with more rows than the limit,
+  assert the ANCHOR line is present and `truncated` is set.
+- Unit: S5's 400-vs-degraded-200 split (missing id / several ids / bad `at` are
+  400; a well-formed request with a non-UUID id is a degraded 200).
 - Unit: admin enforcement on both new routes; validation of `ref` and the trace
   ids (malformed -> degraded response, never an unhandled throw).
 - Unit: the trace query sorts ASCENDING (mirroring the existing
@@ -514,7 +615,8 @@ sites asserting the retired guarantee. Rewrite each to the new posture:
 - `app/src/routes/system.ts:14-18` (router header PII note)
 - `app/src/routes/system.ts:63` ("recent error events (PII-safe)")
 - `dashboard/src/api/endpoints.ts:2095` ("recent error events (PII-safe)")
-- `dashboard/src/api/types.ts:334-346` (`SystemErrorEvent` docblock)
+- `dashboard/src/api/types.ts:334-346` (`SystemErrorEvent` docblock - note this
+  file also gains real FIELDS under S6, not just a comment fix)
 - `dashboard/src/routes/settings/RecentErrors.tsx:1-7` (component header)
 - `dashboard/src/routes/settings/RecentErrors.test.tsx:2`, `:63` (a describe
   block literally named "available:true rendering (PII-safe)")

@@ -33,7 +33,9 @@ import {
   formatTimeWithSeconds,
 } from './format.js';
 import {
+  canEverGoStale,
   deliveryReason,
+  isStaleLeg,
   presentDeliveryStatus,
   presentLegDelivery,
   presentRelayDelivery,
@@ -661,6 +663,81 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
   );
 }
 
+/** The staleness ticker's period. COARSE by design: it drives a RE-RENDER only -
+ *  it fetches nothing and never touches the network - and the boundary it has to
+ *  carry a leg across is 15 minutes wide (STALE_SENT_AFTER_MS), so a minute of
+ *  granularity costs at most a minute of lateness on a 15-minute cue. */
+const STALE_TICK_MS = 60 * 1000;
+
+/** The two clocks ONE bubble presents against, derived in ONE place so the
+ *  timeline's ticker run condition and the bubble's own rendering can never
+ *  disagree about what time it is for a given message.
+ *
+ *  `bubbleNowMs` is WITHHELD (undefined) on an imported row, which is the total
+ *  off switch for staleness - `isStaleLeg` and `canEverGoStale` both return
+ *  false without a clock, whatever `sentAt` a slot carries. That is why an
+ *  imported bubble both renders no escalation AND contributes nothing to the run
+ *  condition (plan D-b / D-c2): deriving it twice is what would let those two
+ *  drift apart.
+ *
+ *  `messageAtMs` may be NaN - `messageInstant` (conversation/useRelayThread.ts)
+ *  answers '' for a message with no provider_ts and a non-ISO tsMsgId. That is
+ *  handled downstream by `canEverGoStale`'s finiteness clause, NOT here: a leg
+ *  with a NaN clock must read as never-ageable rather than as forever-eligible. */
+function bubbleClocks(
+  msg: TimelineMessage,
+  tickNow: number,
+): { messageAtMs: number; bubbleNowMs: number | undefined } {
+  return {
+    messageAtMs: Date.parse(msg.at),
+    bubbleNowMs: msg.imported === true ? undefined : tickNow,
+  };
+}
+
+/**
+ * THE TICKER'S RUN CONDITION, per message: does this bubble render at least one
+ * outbound leg that CAN still go stale but has not yet?
+ *
+ * It is a PREDICATE over the presenter's own two functions, never a shape test.
+ * Four distinct non-terminations have been shipped-and-caught behind this one
+ * line, and each is closed by a specific clause here:
+ *
+ *  1. "any non-terminal leg" - a STALE leg stays non-terminal for ever, so the
+ *     interval would run permanently on exactly the threads this feature
+ *     targets. Closed by `!isStaleLeg(...)`.
+ *  2. "non-terminal AND not-yet-stale" - a `queued` leg with no `sentAt` is BOTH
+ *     for ever (that is the deliberate, human-decided silence), so it would spin
+ *     for ever on a group text after a receipts-webhook outage and on a relay
+ *     message whose fan-out never ran. Closed by `canEverGoStale(...)`, which
+ *     answers false for exactly the rows of the S3 table that have no ageing
+ *     clock.
+ *  3. a WITHHELD clock - an imported bubble's `nowMs` is undefined and must
+ *     contribute NOTHING. Closed by passing the BUBBLE's clock (see
+ *     `bubbleClocks`), not the raw tick.
+ *  4. a clock that parses to NaN - a real handled shape here, not a defensive
+ *     hypothetical. Closed by `canEverGoStale`'s finiteness clause.
+ *
+ * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
+ * helper inside the presenter, so they cannot disagree about which clock a slot
+ * uses. Staleness is monotonic and a real receipt arrives as an SSE refetch
+ * rather than a tick, so the tick only ever has to carry a leg ACROSS the
+ * boundary - never back.
+ *
+ * The gate mirrors what the bubble actually RENDERS (outbound, a non-empty map,
+ * and not a `queued_pending` hold): a leg nothing presents cannot change any
+ * pixel, so it must not buy an interval.
+ */
+function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
+  if (msg.direction !== 'outbound') return false;
+  if (msg.delivery_status === 'queued_pending') return false;
+  const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
+  if (bubbleNowMs === undefined) return false;
+  return Object.values(msg.delivery_recipients ?? {}).some(
+    (slot) =>
+      canEverGoStale(slot, messageAtMs, bubbleNowMs) && !isStaleLeg(slot, messageAtMs, bubbleNowMs),
+  );
+}
+
 function MessageBubble({
   msg,
   onRetry,
@@ -737,8 +814,10 @@ function MessageBubble({
   // NOT folded into the 1:1 call at the top of this component: that call's shape
   // is frozen (two out-of-scope callers depend on presentDeliveryStatus and its
   // `sent`-only rule), so it keeps its own implicit Date.now() default.
-  const messageAtMs = Date.parse(msg.at);
-  const bubbleNowMs = msg.imported === true ? undefined : tickNow;
+  // Derived by the SHARED helper, which is also what the timeline's ticker run
+  // condition walks - so a bubble and the interval that exists to re-render it
+  // can never disagree about this message's clocks.
+  const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
   // Object.entries, not Object.values: the KEYS are who each leg went to, and
   // throwing them away is precisely what left the 2026-08-23 bubble saying
   // "delivered 1/2" about a coin flip the founder lost. The rollup still reads
@@ -1302,8 +1381,9 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // an undefined clock means "staleness off" downstream, so a lazy seed would
   // make the FIRST render of every thread show no escalation at all - and the
   // 2026-08-23 headline case is a founder OPENING a thread whose leg went quiet
-  // hours ago. (No interval yet; that lands with the ticker slice.)
-  const [tickNow] = useState<number>(() => Date.now());
+  // hours ago. The interval below only ever has to carry a leg ACROSS the
+  // boundary while the thread stays open.
+  const [tickNow, setTickNow] = useState<number>(() => Date.now());
   const [channel, setChannel] = useState<'text' | 'email'>('text');
   // The [Text | Email] toggle exists ONLY on a 1:1 contact page (emailChannel
   // present) and NEVER on a relay/group thread. With no address on file the Email
@@ -1486,6 +1566,43 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       return true;
     });
   }, [items, commsOnly]);
+
+  // THE STALENESS TICKER (spec S7 / plan D-c). ONE interval per THREAD, not one
+  // per bubble, bumping the `tickNow` every MessageBubble already reads.
+  //
+  // ARMED ONLY while some RENDERED leg can still cross the 15-minute boundary -
+  // see `hasTickableLeg` for the four non-terminations that predicate closes.
+  // `visible` (not `items`) is what the stream actually renders, and `tickNow` is
+  // in the deps precisely so that the moment the last eligible leg goes stale the
+  // condition flips false, the effect cleans up, and the interval STOPS. That
+  // flip IS the termination proof.
+  const tickerArmed = useMemo(
+    () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow)),
+    [visible, tickNow],
+  );
+  useEffect(() => {
+    if (!tickerArmed) return undefined;
+    const bump = (): void => {
+      setTickNow(Date.now());
+    };
+    // VISIBILITY-GATED, matching GroupTextView.tsx's member poll: re-rendering a
+    // hidden tab only updates pixels nobody is looking at, and thread paging
+    // means the re-rendered timeline grows without bound as staff load older
+    // pages. The focus listener is what makes coming back to the tab immediate,
+    // so the interval only has to cover the tab already in front of them. It
+    // fetches NOTHING - the whole cost is one React render.
+    const onFocus = (): void => {
+      bump();
+    };
+    window.addEventListener('focus', onFocus);
+    const timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') bump();
+    }, STALE_TICK_MS);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(timer);
+    };
+  }, [tickerArmed]);
 
   // Group items into clusters (iMessage-style): a new cluster starts on a new day
   // OR a gap > 1h from the previous item. Each cluster gets a centered time label —

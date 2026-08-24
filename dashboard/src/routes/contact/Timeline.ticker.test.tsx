@@ -1,0 +1,450 @@
+// The staleness TICKER (slice S4) - the one thing that makes an escalation
+// appear on a bubble ALREADY on screen when the 15-minute boundary passes.
+//
+// WHY THIS IS ITS OWN FILE. Fake timers escaping a describe block wedge every
+// `waitFor` in Timeline.test.tsx, which is 1700+ lines and mostly async. Keeping
+// the timers here makes the blast radius of a timer mistake one small file - the
+// same split the repo already uses for Timeline.mms / Timeline.email /
+// Timeline.delivery.
+//
+// THE HAZARD THIS FILE EXISTS TO PIN DOWN. The run condition has failed to
+// terminate four distinct ways across four review rounds (any non-terminal leg;
+// any not-yet-stale leg; a WITHHELD clock; a clock that parses to NaN), so this
+// file proves TERMINATION for every row of the spec's S3 eligibility table plus
+// an imported bubble and a NaN-clock bubble - not just the happy escalation.
+//
+// OBSERVABLE. `vi.getTimerCount()` is deliberately NOT used: it is polluted by
+// CallCard's own setTimeout and by RTL internals. Each absence proof spies on
+// `window.setInterval` and asserts it was never called, and backs that with the
+// behavioural half (advance a long way, nothing escalates). Each test title says
+// which observable it used.
+//
+// TIMER DISCIPLINE. Every test opens with `startFakeClock()`, which releases the
+// shared Date pin (src/test/setup.ts) BEFORE installing fake timers - vitest
+// throws otherwise - and the afterEach restores real timers so setup.ts's
+// beforeEach can re-pin. No hardcoded clock literal anywhere: every fixture
+// instant is derived from the fake clock's own `Date.now()`.
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { Timeline } from './Timeline.js';
+import type { RelayRecipientDelivery, TimelineItem, TimelineMessage } from '../../api/index.js';
+
+const BODY = 'Team reply to the group';
+const LIST_NAME = 'Delivery by recipient';
+
+/** Comfortably past STALE_SENT_AFTER_MS (15 minutes) - derived from the boundary
+ *  it crosses, not from the ticker's own period. */
+const PAST_THE_BOUNDARY_MS = 16 * 60 * 1000;
+/** A long idle stretch, used by the absence proofs' behavioural half. */
+const A_LONG_WHILE_MS = 24 * 60 * 60 * 1000;
+
+const ROSTER = [
+  { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },
+  { contactId: 'c2', phone: '+14045550112', name: 'Lars Landlord' },
+];
+
+function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
+  const items: TimelineItem[] = props.items ?? [];
+  return render(
+    <MemoryRouter>
+      <Timeline
+        status="ready"
+        items={items}
+        source="server"
+        replyToPhone="+14705550148"
+        replyToLabel="most recent"
+        canSend={false}
+        onSend={vi.fn()}
+        relayRoster={ROSTER}
+        {...props}
+      />
+    </MemoryRouter>,
+  );
+}
+
+/** An outbound relay bubble whose `at` is derived from the fixture's own clock.
+ *  `recipients` is the WHOLE map, so each case states exactly the S3-table row
+ *  it exercises. */
+function outboundAt(
+  atMs: number,
+  recipients: Record<string, RelayRecipientDelivery>,
+  extra: Partial<TimelineMessage> = {},
+): TimelineMessage {
+  return {
+    kind: 'message',
+    id: 'r1',
+    at: new Date(atMs).toISOString(),
+    conversationId: 'g1',
+    tsMsgId: 'r1',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    delivery_status: 'sent',
+    body: BODY,
+    relay_sender_key: 'team',
+    delivery_recipients: recipients,
+    ...extra,
+  };
+}
+
+/** Release the shared Date pin, install fake timers, and hand back the instant
+ *  every fixture in the test derives from. */
+function startFakeClock(): number {
+  vi.useRealTimers();
+  vi.useFakeTimers();
+  return Date.now();
+}
+
+/** Spy on the two window methods the ticker uses. Installed AFTER the fake
+ *  timers, so the spy wraps the FAKE setInterval and advanceTimersByTime still
+ *  drives it. The afterEach restores in the mirror order. */
+function spyOnIntervals() {
+  return {
+    set: vi.spyOn(window, 'setInterval'),
+    clear: vi.spyOn(window, 'clearInterval'),
+  };
+}
+
+/** Click the bubble's body text; it bubbles to the bubble div's toggleMeta. */
+function reveal(): void {
+  fireEvent.click(screen.getByText(BODY));
+}
+
+describe('Timeline staleness ticker', () => {
+  afterEach(() => {
+    // Order matters: restoreAllMocks FIRST (it puts the FAKE setInterval back
+    // under the spy), then useRealTimers (which replaces it with the real one).
+    // Inverted, the fake timer functions would leak into the next file.
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('escalates a not-yet-stale leg once the boundary passes - observable: the rendered chip text, with the preserved reveal proving no re-mount and a paging spy proving no refetch', () => {
+    const t0 = startFakeClock();
+    const onLoadOlder = vi.fn();
+    const msg = outboundAt(t0, {
+      c1: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+      c2: { status: 'sent', sentAt: new Date(t0).toISOString() },
+    });
+    renderTimeline({
+      items: [msg],
+      paging: { hasOlder: true, loadingOlder: false, olderPagesLoaded: 0, onLoadOlder },
+    });
+
+    // Fresh: the neutral in-flight rollup, no escalation anywhere.
+    expect(screen.getByText('delivered 1/2')).toBeInTheDocument();
+    reveal();
+    expect(screen.getByRole('list', { name: LIST_NAME })).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+
+    // No reload, no navigation, no inbound message - only time passing.
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    const list = screen.getByRole('list', { name: LIST_NAME });
+    expect(within(list).getByText('Sent - not confirmed')).toBeInTheDocument();
+    // The reveal is MessageBubble-local state: still open means the bubble was
+    // re-rendered, not re-mounted.
+    expect(list).toBeInTheDocument();
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it('STOPS once every eligible leg is stale - observable: window.clearInterval was called with the ticker id and window.setInterval never ran a second time', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [
+        outboundAt(t0, {
+          c1: { status: 'delivered' },
+          c2: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        }),
+      ],
+    });
+
+    // Nothing else in a Timeline render schedules an interval - the absence
+    // proofs below establish that baseline is exactly zero - so this call is the
+    // ticker's.
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+
+    // And it does NOT re-arm: a stale leg stays non-terminal for ever, which is
+    // non-termination #1.
+    act(() => {
+      vi.advanceTimersByTime(A_LONG_WHILE_MS);
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans up on unmount - observable: window.clearInterval was called with the ticker id', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const { unmount } = renderTimeline({
+      items: [
+        outboundAt(t0, {
+          c1: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        }),
+      ],
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    unmount();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+  });
+
+  it('does not tick a HIDDEN tab - observable: the rendered chip text is unchanged while document.visibilityState is hidden, and escalates on the focus that follows', () => {
+    const t0 = startFakeClock();
+    let visibility: DocumentVisibilityState = 'hidden';
+    // jsdom defines visibilityState on Document.prototype, so shadow it with an
+    // own configurable getter rather than vi.spyOn (which needs an own
+    // descriptor). Deleted again below so the override cannot leak.
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+    renderTimeline({
+      items: [
+        outboundAt(t0, {
+          c1: { status: 'delivered' },
+          c2: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        }),
+      ],
+    });
+    expect(screen.getByText('delivered 1/2')).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+    expect(screen.getByText('delivered 1/2')).toBeInTheDocument();
+
+    // Coming back to the tab is immediate - that is what lets the interval only
+    // have to cover the tab already in front of the operator.
+    visibility = 'visible';
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+
+    delete (document as unknown as Record<string, unknown>).visibilityState;
+  });
+});
+
+// --- The termination table -------------------------------------------------
+// One case per row of the spec's S3 eligibility table, plus an imported bubble
+// and a NaN-clock bubble. Every case says whether the interval runs and why.
+
+interface TickerCase {
+  title: string;
+  build: (t0: number) => TimelineMessage;
+}
+
+const ARMING_CASES: TickerCase[] = [
+  {
+    title: 'S3 row 1 - a `sent` leg WITH a parseable sentAt ages from sentAt',
+    build: (t0) =>
+      outboundAt(t0, {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent', sentAt: new Date(t0).toISOString() },
+      }),
+  },
+  {
+    title: 'S3 row 2 - a `sent` leg with NO sentAt ages from the message instant',
+    build: (t0) =>
+      outboundAt(t0, {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent' },
+      }),
+  },
+  {
+    title: 'S3 row 3 - a `queued` leg WITH a parseable sentAt ages from sentAt',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'delivered' },
+          c2: { status: 'queued', sentAt: new Date(t0).toISOString() },
+        },
+        { delivery_status: 'queued' },
+      ),
+  },
+];
+
+const SILENT_CASES: TickerCase[] = [
+  {
+    title:
+      'S3 row 4 - a `queued` leg with NO sentAt never ages (the released hold and the receipts outage), so nothing is scheduled',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'queued' },
+          c2: { status: 'queued' },
+        },
+        { delivery_status: 'queued' },
+      ),
+  },
+  {
+    title: 'S3 row 5 - a `queued_pending` SLOT has not been dispatched, so nothing is scheduled',
+    build: (t0) =>
+      outboundAt(t0, {
+        c1: { status: 'queued_pending' },
+        c2: { status: 'queued_pending', sentAt: new Date(t0).toISOString() },
+      }),
+  },
+  {
+    title:
+      'S3 row 5b - a `queued_pending` PARENT renders no rollup and no rows, so even an otherwise-eligible leg schedules nothing',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        },
+        { delivery_status: 'queued_pending' },
+      ),
+  },
+  {
+    title: 'S3 row 6 - terminal legs (delivered / failed / undelivered) have settled',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+          c2: { status: 'failed', errorCode: '30005' },
+          'phone#+14045550999': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        },
+        { delivery_status: 'delivered' },
+      ),
+  },
+  {
+    title:
+      'an IMPORTED bubble withholds its clock (D-c2), so its legs contribute nothing however quiet they are',
+    build: (t0) =>
+      outboundAt(
+        t0 - PAST_THE_BOUNDARY_MS,
+        {
+          c1: { status: 'sent', sentAt: new Date(t0 - PAST_THE_BOUNDARY_MS).toISOString() },
+          c2: { status: 'sent' },
+        },
+        { imported: true },
+      ),
+  },
+  {
+    title:
+      'a NaN clock - a `sent` leg with no sentAt on a message whose instant does not parse (messageInstant returns an empty string for a non-ISO tsMsgId) - is not eligible, so nothing spins for ever',
+    build: () => ({
+      ...outboundAt(0, { c1: { status: 'sent' }, c2: { status: 'sent' } }, { tsMsgId: 'nosid' }),
+      at: '',
+    }),
+  },
+  {
+    title: 'an INBOUND bubble carrying a map is not an outbound send',
+    build: (t0) =>
+      outboundAt(
+        t0,
+        {
+          c1: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        },
+        { direction: 'inbound' },
+      ),
+  },
+  {
+    title: 'a bubble with NO delivery_recipients map at all has no legs to age',
+    build: (t0) => {
+      const msg = outboundAt(t0, {});
+      delete msg.delivery_recipients;
+      return msg;
+    },
+  },
+];
+
+describe('Timeline staleness ticker - termination table', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it.each(ARMING_CASES)(
+    'ARMS then terminates: $title - observable: window.setInterval called exactly once, then window.clearInterval once the leg is stale',
+    ({ build }) => {
+      const t0 = startFakeClock();
+      const spies = spyOnIntervals();
+      renderTimeline({ items: [build(t0)] });
+      expect(spies.set).toHaveBeenCalledTimes(1);
+      const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+      act(() => {
+        vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+      });
+      expect(screen.getByText(/not confirmed/)).toBeInTheDocument();
+      expect(spies.clear).toHaveBeenCalledWith(tickerId);
+
+      act(() => {
+        vi.advanceTimersByTime(A_LONG_WHILE_MS);
+      });
+      expect(spies.set).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(SILENT_CASES)(
+    'schedules NOTHING: $title - observable: window.setInterval was never called, plus a day of advancing that changes nothing',
+    ({ build }) => {
+      const t0 = startFakeClock();
+      const spies = spyOnIntervals();
+      renderTimeline({ items: [build(t0)] });
+
+      expect(spies.set).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(A_LONG_WHILE_MS);
+      });
+      expect(spies.set).not.toHaveBeenCalled();
+      expect(screen.queryByText(/not confirmed/)).not.toBeInTheDocument();
+    },
+  );
+
+  it('schedules NOTHING for an ALREADY-stale eligible leg - observable: window.setInterval was never called, and the escalation is on the FIRST render with no tick at all', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const quietSince = t0 - PAST_THE_BOUNDARY_MS;
+    renderTimeline({
+      items: [
+        outboundAt(quietSince, {
+          c1: { status: 'delivered' },
+          c2: { status: 'sent', sentAt: new Date(quietSince).toISOString() },
+        }),
+      ],
+    });
+
+    // A stale leg stays non-terminal for ever - non-termination #1. There is
+    // nothing left to carry across the boundary, so there is nothing to schedule.
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+    expect(spies.set).not.toHaveBeenCalled();
+  });
+
+  it('a thread of only CALL cards schedules nothing - observable: window.setInterval was never called (a local mirror of the four getTimerCount tripwires in Timeline.test.tsx)', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    renderTimeline({
+      items: [
+        {
+          kind: 'call',
+          id: 'c-ring',
+          at: new Date(t0).toISOString(),
+          direction: 'outbound',
+          call_status: 'ringing',
+        },
+      ],
+      relayRoster: undefined,
+    });
+    expect(spies.set).not.toHaveBeenCalled();
+  });
+});

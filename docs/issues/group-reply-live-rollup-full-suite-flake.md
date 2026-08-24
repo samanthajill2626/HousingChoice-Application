@@ -9,6 +9,15 @@ created: 2026-08-21
 refs: e2e/tests/dashboard-next/group-text-reply-all.spec.ts:121, dashboard/src/routes/conversation/GroupTextView.tsx, dashboard/src/api/EventStreamProvider.tsx
 ---
 
+**Measurement (2026-08-23, `fix/test-suite-wave3` gate run).** Did NOT
+reproduce: 253/253 green (17.3m), group-text-reply-all included. Same caveat as
+its siblings - one clean run proves little - but note the provenance: this was
+filed off the SAME 2026-08-21 gate run as two since-resolved
+machine-exhaustion issues and the reseed-timeout sighting, whose new phase
+timings show an 8x margin on a healthy machine. If this recurs, follow the
+suggested trace; if the machine was simply sick, it will stay quiet.
+
+
 **Problem.** A bare `npm run e2e` on the environment-visual-identity feature head
 `709a5263` failed the live group-reply assertion after its 60-second poll. The UI
 never showed a finalized per-member delivery rollup without a reload, and the test

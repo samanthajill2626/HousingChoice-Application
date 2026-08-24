@@ -9,6 +9,17 @@ created: 2026-08-21
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:163, e2e/playwright.config.ts:107
 ---
 
+**First healthy-machine measurement (2026-08-23, `fix/test-suite-wave3` gate
+run, 253/253 green, 17.3m).** The instrumentation's first full-suite numbers:
+across every reseed in the run, the WORST case was clearMs=870 + seedMs=2728,
+i.e. ~3.6s total against the 30s budget - an 8x margin under normal full-suite
+load. This strongly supports the environmental reading: the 2026-08-21 sighting
+came from the same degraded gate run that produced two since-resolved
+machine-exhaustion issues (`otel-child-boot-stdout-missing`,
+`performance-config-npm-cmd-enomem`). Stays open until a loaded recurrence
+either does not happen for a while or arrives carrying its phase breakdown.
+
+
 **Instrumented (2026-08-23, `fix/test-suite-wave3`) - still open, awaiting a
 loaded-suite measurement.** The suggested first step is done: `resetLocalData`
 now logs `clearMs` and `seedMs` alongside its existing summary line, so the

@@ -3,6 +3,7 @@ import {
   presentDeliveryStatus,
   presentRelayDelivery,
   deliveryReason,
+  isQuietSince,
   STALE_SENT_AFTER_MS,
 } from './deliveryStatus.js';
 
@@ -30,6 +31,26 @@ describe('presentDeliveryStatus', () => {
   it('treats "sent" as a non-failure waypoint (sent ≠ delivered)', () => {
     expect(presentDeliveryStatus('sent')?.isFailure).toBe(false);
     expect(presentDeliveryStatus('delivered')?.isFailure).toBe(false);
+  });
+});
+
+// The SINGLE clock comparison in this module. `presentDeliveryStatus`'s
+// `sent`-only rule and the new per-leg staleness rule are two thin predicates
+// over this one comparison - one threshold, no divergent copy.
+describe('isQuietSince', () => {
+  const Q0 = Date.parse('2026-08-19T21:28:59.000Z');
+
+  it('is inclusive at exactly STALE_SENT_AFTER_MS and exclusive one millisecond under', () => {
+    expect(isQuietSince(Q0, Q0 + STALE_SENT_AFTER_MS)).toBe(true);
+    expect(isQuietSince(Q0, Q0 + STALE_SENT_AFTER_MS - 1)).toBe(false);
+    expect(isQuietSince(Q0, Q0 + STALE_SENT_AFTER_MS * 100)).toBe(true);
+  });
+
+  it('is false for a clock that is absent or does not parse, however old the reader thinks it is', () => {
+    const forever = Q0 + STALE_SENT_AFTER_MS * 100;
+    expect(isQuietSince(undefined, forever)).toBe(false);
+    expect(isQuietSince(Number.NaN, forever)).toBe(false);
+    expect(isQuietSince(Number.POSITIVE_INFINITY, forever)).toBe(false);
   });
 });
 

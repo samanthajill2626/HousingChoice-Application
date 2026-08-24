@@ -73,6 +73,24 @@ const STALE_SENT_PRESENTATION: DeliveryPresentation = {
 };
 
 /**
+ * THE single clock comparison in this module: has `atMs` been quiet for at least
+ * STALE_SENT_AFTER_MS as of `nowMs`? Inclusive at exactly the threshold.
+ *
+ * One shared COMPARISON, never one shared PREDICATE. `presentDeliveryStatus`
+ * keeps its own `sent`-only gate over this, and `isStaleLeg` encodes the
+ * per-leg eligibility table over the same comparison, so the two rules can
+ * differ in WHICH legs they consider without ever diverging on the threshold.
+ *
+ * `atMs` is `number | undefined` because a caller's clock is genuinely optional
+ * and may be `Date.parse` of a malformed string. Both a missing clock and a
+ * non-finite one answer false: no clock is no evidence of quiet.
+ */
+export function isQuietSince(atMs: number | undefined, nowMs: number): boolean {
+  if (atMs === undefined || !Number.isFinite(atMs)) return false;
+  return nowMs - atMs >= STALE_SENT_AFTER_MS;
+}
+
+/**
  * Map a delivery status to its label/tone/failure-flag, or `null` when there is no
  * status to show (undefined — seed/legacy rows; or an unrecognized value). Returning
  * null keeps the bubble clean instead of inventing a false "Sending…"/failure cue.
@@ -81,6 +99,15 @@ const STALE_SENT_PRESENTATION: DeliveryPresentation = {
  * has gone quiet for STALE_SENT_AFTER_MS presents as unconfirmed instead of
  * "Sent". Omit it and behavior is exactly as before. `nowMs` is injectable for
  * tests.
+ *
+ * CONVENTION DIVERGENCE, deliberate - do NOT harmonise these two:
+ * this function opts out of staleness by WITHHOLDING THE TIMESTAMP (`sentAtMs`).
+ * Its `nowMs` is a DEFAULTED parameter, so passing `undefined` RE-ARMS the real
+ * clock rather than disabling anything. The newer `isStaleLeg` /
+ * `canEverGoStale` / `presentRelayDelivery` / `presentLegDelivery` opt out the
+ * opposite way - by WITHHOLDING THE CLOCK (`nowMs: number | undefined`, where
+ * undefined means staleness is off entirely). Changing this signature would move
+ * the 1:1 rule, which three out-of-module callers depend on.
  */
 export function presentDeliveryStatus(
   status: DeliveryStatus | undefined,
@@ -88,12 +115,7 @@ export function presentDeliveryStatus(
   nowMs: number = Date.now(),
 ): DeliveryPresentation | null {
   if (status === undefined) return null;
-  if (
-    status === 'sent' &&
-    sentAtMs !== undefined &&
-    Number.isFinite(sentAtMs) &&
-    nowMs - sentAtMs >= STALE_SENT_AFTER_MS
-  ) {
+  if (status === 'sent' && isQuietSince(sentAtMs, nowMs)) {
     return STALE_SENT_PRESENTATION;
   }
   return STATUS_PRESENTATION[status] ?? null;

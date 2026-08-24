@@ -48,18 +48,37 @@ it is also the mechanism for D-b.
    meanings for the name `nowMs`. Do not "harmonise" them - changing
    `presentDeliveryStatus`'s signature moves the 1:1 rule, which is forbidden.
    Comment the divergence at both definitions.
-2. **Therefore `presentLegDelivery` must delegate by withholding the
-   TIMESTAMP.** When staleness is disabled it calls
-   `presentDeliveryStatus(slot.status)` with NO second argument. Passing
-   `presentDeliveryStatus(slot.status, someTimestamp, undefined)` silently
-   re-arms `Date.now()` and defeats both D-a and D-b - every `sent` leg on an
-   imported row would read "Sent - not confirmed". This is the single easiest
-   way to build this feature wrong; write the test for it (S1.5).
+2. **Therefore `presentLegDelivery` NEVER delegates the staleness decision at
+   all, on either path.** It decides staleness itself with `isStaleLeg` and
+   returns its own stale presentation; for everything else it calls
+   `presentDeliveryStatus(slot.status)` with NO second argument, **always** -
+   enabled path and disabled path alike, so there is exactly one delegation call
+   shape in the function.
 
-**One clock per bubble.** `MessageBubble` computes its `nowMs` ONCE and passes
-the same value to the rollup, to every row, and to the accessible name. Three
-independent `Date.now()` reads in one render can disagree with each other, which
-is exactly the class of contradiction this feature exists to remove.
+   An earlier draft scoped this rule to "when staleness is disabled" and left
+   the enabled path unspecified, which is the same defect in a second costume:
+   a builder passing `presentDeliveryStatus(slot.status, messageAtMs, nowMs)`
+   on the enabled path gets that function's `sent`-only rule ageing from the
+   MESSAGE clock, which is exactly the released-connect-when-ready-hold false
+   red the whole `sentAt` gate exists to prevent - reachable in production.
+   Test BOTH paths in S1.5, not just the disabled one.
+
+**One clock per bubble - and it is a DIFFERENT value from the ticker's.** Two
+values, two layers, and conflating them implements D-b as a no-op:
+
+- `tickNow` lives in `Timeline` (D-c). It is ALWAYS a number, initialised to
+  `Date.now()` at mount. It exists to force re-renders.
+- `bubbleNowMs` is computed once per `MessageBubble` from `tickNow`, and is
+  `undefined` when `msg.imported === true` (D-b). It is the value passed to the
+  rollup, to every row, and to the accessible name - all three from the same
+  variable, so they cannot disagree.
+
+"Never undefined" applies to `tickNow` ONLY. If a builder reads it as applying
+to the bubble's clock, the imported guard silently does nothing.
+
+**Exception, do not tidy it away:** `Timeline.tsx:577`'s existing 1:1 call keeps
+its own implicit `Date.now()` default and is OUT of the one-clock rule. Folding
+it in would change `presentDeliveryStatus`'s call shape, which trap 1 forbids.
 
 **D-b. The imported guard (spec S5).** `Timeline.tsx` withholds `nowMs` when
 `msg.imported === true`, exactly as the 1:1 path already withholds its timestamp
@@ -103,12 +122,18 @@ helper that builds the `meta` line at `Timeline.tsx:551-560`. No new formatter.
 **Timezone hazard, and how tests avoid it.** `formatTime` renders LOCAL time,
 while `sentAt` and `deliveredAt` are UTC (`Z`-suffixed) provider/server strings
 - unlike `msg.at`, which is naive-local. No suite in this repo pins `TZ`, so an
-exact-string timestamp assertion would be the first timezone-dependent test in
-the codebase and would pass on one machine and fail on another. **New tests
-assert that a timestamp is PRESENT or ABSENT, and match it loosely (a
-time-shaped pattern), never an exact clock string.** Do not add a `TZ` pin to
-the shared setup to make an exact assertion possible; that is a suite-wide
-change for one test.
+HARDCODED timestamp literal would be the first timezone-dependent test in the
+codebase and would pass on one machine and fail on another.
+
+**The rule is: never a hardcoded clock literal. `formatTime(<the fixture's own
+instant>)` as the expected value IS allowed and is preferred** - it is exact,
+offset-proof (it computes the same way the component does), and it is the only
+way to assert the negative that actually matters: that a row shows the LEG's
+`sentAt`/`deliveredAt` rather than a back-filled `msg.at`. An earlier draft
+banned all exact assertions and gave that negative away.
+
+Do not add a `TZ` pin to the shared setup; that is a suite-wide change for one
+test.
 
 **D-f. Writing the queued label in new tests.** The shipped label for `queued`
 carries a non-ASCII ellipsis, and AGENTS.md requires ADDED lines to be ASCII.
@@ -387,13 +412,32 @@ load-bearing - without it the interval never stops for the very legs the human
 decided stay silent. Coarse interval (order of a minute), visibility-gated per
 `GroupTextView.tsx:152-166`, cleaned up on unmount, no network.
 
-**A bubble whose clock is WITHHELD contributes nothing to the run condition**
-(D-c2). An imported row (D-b) has no clock, so every one of its legs is
-non-terminal and can never become stale - which satisfies "non-terminal AND not
-yet stale" for ever and would spin the interval permanently on exactly the
-fixture S3.3 now requires. "Eligible to age" must be evaluated against the SAME
-withheld clock the rows use, not against the slot shape alone. This is the third
-distinct way this run condition has failed to terminate; test it.
+**Define "eligible to age" as a PREDICATE, exported beside `isStaleLeg`, not as
+a shape test.** This run condition has now failed to terminate FOUR distinct
+ways across four review rounds (any non-terminal leg; any not-yet-stale leg; a
+withheld clock; a clock that parses to NaN). Enumerating shapes has failed every
+time, so stop enumerating:
+
+```
+canEverGoStale(slot, messageAtMs, nowMs) =
+    nowMs is defined
+    AND slot.status is one of the stale-capable statuses (sent, queued)
+    AND the clock isStaleLeg WOULD use for this slot is FINITE
+```
+
+Run condition: some rendered outbound leg where
+`canEverGoStale(...) && !isStaleLeg(...)`. Anything else - terminal, imported,
+un-clocked, or already stale - schedules nothing.
+
+The NaN case is real, not defensive: the row clock falls back to the message
+instant, and `messageInstant` returns `''` for a non-ISO `tsMsgId`, with
+`Date.parse('') === NaN`. Under a shape test that leg is "eligible" for ever and
+never stale, so the interval spins for ever. `canEverGoStale` and `isStaleLeg`
+must agree BY CONSTRUCTION about which clock a slot uses - derive both from one
+shared helper that returns the applicable clock, so the two can never drift.
+
+Test termination for every row of the spec's S3 table, plus an imported bubble
+and a NaN-clock bubble.
 
 ### S4.2 Tests
 

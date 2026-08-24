@@ -3,11 +3,28 @@ id: reminder-sentbody-group-and-forcesend-untested
 title: sentBody is snapshotted on all three claimSend paths but only the 1:1 poll path is test-covered
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-06
+resolved: 2026-08-23
 refs: app/src/jobs/tourReminders.ts:788, app/src/jobs/tourReminders.ts:935, app/src/jobs/tourReminders.ts:1148, app/src/repos/tourRemindersRepo.ts:129, app/test/tourReminders.test.ts:707
 ---
+
+**Resolution (2026-08-23, `fix/test-suite-wave3`).** Both suggested pins added,
+each in the existing success test for its path, each composing the expectation
+through the shared `rungBody` helper so a copy change updates rather than
+breaks it:
+
+- group path: the landlord_led every-member test now asserts the claimed row's
+  `sentBody` EQUALS the composed rung body;
+- force-send path: the quiet-hours force-send test asserts the same on its row.
+
+Probed exactly as the issue's reachability section predicted: dropping the
+`body` argument at the group call site fails the first pin
+(`expected undefined to be 'Hey, your tour is set for...'`), and dropping it at
+the force-send site fails the second. Restored, 62/62 green. All three
+claimSend call sites now carry a regression pin.
+
 
 **Problem.** `claimSend(reminderId, claimedAt, sentBody?)`
 (`repos/tourRemindersRepo.ts:129`) snapshots the body composed for THIS send

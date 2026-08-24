@@ -9,6 +9,16 @@ created: 2026-08-21
 refs: e2e/tests/dashboard-next/outbound-mms.spec.ts:163, e2e/playwright.config.ts:107
 ---
 
+**Instrumented (2026-08-23, `fix/test-suite-wave3`) - still open, awaiting a
+loaded-suite measurement.** The suggested first step is done: `resetLocalData`
+now logs `clearMs` and `seedMs` alongside its existing summary line, so the
+next reseed that runs long under full-suite load names its own bottleneck
+(table clearing vs seeding vs a competing job holding the request) instead of
+dying as a bare 30s timeout. No budget was changed - per this issue's own
+warning, a justified budget comes AFTER the phases are measured, and masking a
+stuck reseed with a bigger timeout would be worse than the flake.
+
+
 **Problem.** In a bare `npm run e2e` on feature head `709a5263`, the team group MMS
 media case exhausted the 30-second test timeout inside `beforeEach` while awaiting
 `POST /__dev/reseed?profile=full`. Playwright then disposed the request context. The

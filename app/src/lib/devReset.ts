@@ -93,10 +93,20 @@ export async function resetLocalData(deps: {
   const client = createDynamoClient({ config });
   const doc = createDocumentClient({ config });
   const bases = [...TABLES.map((t) => t.baseName), OUTBOX_TABLE_BASE];
+  // PHASE TIMINGS, logged below. A full-profile reseed once blew a spec's whole
+  // 30s budget inside beforeEach under full-suite load, and the failure carried
+  // no breakdown - nobody could say whether clearing, seeding, or a competing
+  // job held the request, so the issue could only ask for instrumentation.
+  // These make the next slow reseed name its own bottleneck.
+  // See docs/issues/outbound-mms-full-suite-reseed-timeout.md.
+  const clearStarted = Date.now();
   for (const base of bases) {
     await clearTable(doc, client, namespace.tableNameFor(base));
   }
+  const clearMs = Date.now() - clearStarted;
+  const seedStarted = Date.now();
   const count = await seedAll(config.dynamodbEndpoint, profile, namespace);
+  const seedMs = Date.now() - seedStarted;
   // LOCAL dev/e2e convenience ONLY: stamp the founder/admin as the inbound-voice-line
   // holder so inbound-bridge e2e tests pass without a manual UI assignment. The seed
   // cell is the hardcoded `SEED_INBOUND_VOICE_CELL` fake (no env var — the deprecated
@@ -110,7 +120,14 @@ export async function resetLocalData(deps: {
     namespace,
   );
   log.info(
-    { tables: bases.length, seeded: count, profile, inboundVoiceLineStamped: stampedInboundLine },
+    {
+      tables: bases.length,
+      seeded: count,
+      profile,
+      inboundVoiceLineStamped: stampedInboundLine,
+      clearMs,
+      seedMs,
+    },
     'resetLocalData: cleared + reseeded',
   );
 }

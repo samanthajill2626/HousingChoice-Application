@@ -1056,7 +1056,9 @@ describe('today action-queue API (BE6/C7)', () => {
       created_at: iso(-200_000),
       participants: [{ contactId: memberContactId, phone: memberPhone }],
       relay_opted_out_members: {
-        [memberContactId]: { contactId: memberContactId, phone: memberPhone, at: iso(-20_000) },
+        // Legacy/stale annotations may omit their optional phone even though the
+        // hydrated contact still has one.
+        [memberContactId]: { contactId: memberContactId, at: iso(-20_000) },
       },
       relay_optout_flag: 'attention',
     } as ConversationItem);
@@ -1388,6 +1390,33 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(forSug).toMatchObject({ refType: 'contact', who: 'Sug Gest', why: '2 suggestion(s)' });
     const forOne = ai.find((i) => i.refId === 't-one');
     expect(forOne).toMatchObject({ refType: 'contact', who: 'One Only', why: '1 suggestion(s)' });
+  });
+
+  it('formats a phone-only AI-suggestion contact instead of exposing its id', async () => {
+    const contactId = 't-sug-phone-only';
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550105555',
+    });
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: contactId,
+      target: 'voucherSize',
+      suggestedValue: '2',
+      conversationId: 'conv-phone-only',
+    });
+
+    const items = await getItems();
+    const suggestion = items.find(
+      (item) => item.group === 'ai_suggestions' && item.refId === contactId,
+    );
+
+    expect(suggestion).toMatchObject({
+      refType: 'contact',
+      who: '(555) 010-5555',
+      why: '1 suggestion(s)',
+    });
   });
 
   // THE DEFECT THIS PINS (fix wave 5, adversarial 30). Group detection mints a

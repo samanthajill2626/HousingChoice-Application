@@ -176,6 +176,34 @@ describe('Timeline per-recipient delivery rows - who the send actually reached',
     expect(within(list[1] as HTMLElement).queryByText(formatTime(RELAY_AT))).not.toBeInTheDocument();
   });
 
+  it("shows a NON-delivered leg's sentAt even when the slot also carries a deliveredAt", () => {
+    // Pins the `status === 'delivered' &&` clause in `recipientRowTime`, which
+    // decides WHICH of the two clocks a row dates itself by. Nothing else pins
+    // it: every other fixture carrying `deliveredAt` also carries
+    // `status: 'delivered'`, so dropping the clause (`slot.deliveredAt ??
+    // slot.sentAt`) turns no other test red. A row must never date a leg by a
+    // delivery its own status says has not happened.
+    const sentAt = '2026-06-08T09:25:00.000Z';
+    const deliveredAt = '2026-06-08T14:47:00.000Z';
+    const msg: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'sent', sentAt, deliveredAt },
+      },
+    };
+    renderTimeline({ items: [msg], relayRoster: RELAY_ROSTER });
+    reveal('Team reply to the group');
+    const row = rows()[1] as HTMLElement;
+    // Both expectations are derived with formatTime from the fixture's OWN
+    // instants, never a clock literal. The guard here is that the two render
+    // DIFFERENTLY - without it the positive and negative below could both hold
+    // vacuously.
+    expect(formatTime(sentAt)).not.toBe(formatTime(deliveredAt));
+    expect(within(row).getByText(formatTime(sentAt))).toBeInTheDocument();
+    expect(within(row).queryByText(formatTime(deliveredAt))).not.toBeInTheDocument();
+  });
+
   it('shows a stale QUEUED leg as "Queued - not confirmed" AND still shows its sentAt', () => {
     // The row is the answer to "why is the chip red"; withholding the very
     // clock that justifies the red would be its own misread.

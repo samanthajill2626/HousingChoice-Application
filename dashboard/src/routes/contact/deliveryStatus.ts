@@ -118,7 +118,23 @@ export function presentDeliveryStatus(
   if (status === 'sent' && isQuietSince(sentAtMs, nowMs)) {
     return STALE_SENT_PRESENTATION;
   }
-  return STATUS_PRESENTATION[status] ?? null;
+  // OWN-PROPERTY lookup, the same pattern - and for the same reason - as
+  // `ownReason` further down this file. STATUS_PRESENTATION is a plain object
+  // literal, so a bare `STATUS_PRESENTATION[status]` resolves INHERITED
+  // Object.prototype members: 'constructor' yields the Object FUNCTION, which
+  // `??` does not catch, and 'toString' / 'hasOwnProperty' / '__proto__' /
+  // 'valueOf' behave the same way. A delivery status is provider/wire data and
+  // is never a trusted key, so without this the "an unrecognized value => null"
+  // contract stated above is simply FALSE for those five strings.
+  //
+  // Not cosmetic: the returned object has no `label`, and the bubble's
+  // accessible-summary builders (`chipText` / `speakDeliveryText` in
+  // Timeline.tsx) call `.replace` on it unconditionally on every outbound
+  // multi-party bubble - a throw inside render, which blanks the conversation
+  // page.
+  return Object.prototype.hasOwnProperty.call(STATUS_PRESENTATION, status)
+    ? STATUS_PRESENTATION[status]
+    : null;
 }
 
 /** The slice of a relay `delivery_recipients` slot the rollup presenter reads.
@@ -269,9 +285,32 @@ export function isStaleLeg(
  *     ENTIRELY - the exact failure direction this feature exists to prevent. A
  *     bounded late signal is acceptable; a silently absent one is not.
  *
- * Past one whole budget ahead the clock is not measuring the same time we are,
- * and this design prefers SILENCE over a signal computed from a clock we cannot
- * trust - so such a leg ages from nothing.
+ * THE COST, NAMED: this bound is a TRADE, not a neutral guard, and it CHANGES
+ * behaviour rather than merely tightening it.
+ *
+ *  - WHAT IS GIVEN UP. Before the bound, a leg whose clock sat MORE than one
+ *    budget ahead of ours kept the interval armed for ever - so `tickNow` kept
+ *    advancing and that leg DID escalate, late by the skew. With the bound it is
+ *    ineligible at mount; if nothing else on the thread is tickable, `tickNow`
+ *    freezes there and the leg NEVER escalates for the life of the mount, even
+ *    though `clock - nowMs` shrinks in real time and would cross back inside the
+ *    budget. In that band, LATE became NEVER - the same failure direction
+ *    property 2 above rejects, at a different threshold. (The silence is total
+ *    only when the skewed leg is the thread's ONLY tickable content: any
+ *    past-clock leg arms the ticker anyway, `tickNow` advances, and the skewed
+ *    leg becomes eligible on a later tick.)
+ *  - WHY IT IS TAKEN ANYWAY. A clock that far ahead is not measuring the same
+ *    time we are, so a staleness verdict computed from it is not evidence about
+ *    anything - and the alternative on offer is an interval that never
+ *    terminates at all, which costs every OTHER leg on the thread nothing but
+ *    burns a timer for the life of the mount. A bounded miss in a band that
+ *    requires >15 minutes of browser-clock skew is the cheaper side.
+ *  - WHERE THE THRESHOLD SITS. Exactly ONE budget - STALE_SENT_AFTER_MS,
+ *    inclusive at the boundary. Everything at or inside it stays eligible and
+ *    merely late (property 1); only `clock - nowMs > STALE_SENT_AFTER_MS` is
+ *    silenced. Widening the arming side to `2 * STALE_SENT_AFTER_MS` would
+ *    shrink the band and still terminate, at three budgets instead of two - a
+ *    live option if the band is ever observed in practice.
  *
  * `isStaleLeg` is deliberately NOT given this bound. It already answers false
  * for a future clock (it is not yet quiet) and correctly becomes true once that

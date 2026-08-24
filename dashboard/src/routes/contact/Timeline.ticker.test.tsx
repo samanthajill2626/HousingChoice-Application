@@ -501,6 +501,35 @@ describe('Timeline staleness ticker - termination table', () => {
     expect(spies.clear).toHaveBeenCalledWith(tickerId);
   });
 
+  it('ARMS on a MIXED map - one leg opted out, one live and eligible - observable: window.setInterval once, then the chip escalates for the live leg alone', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    // The counterpart to the all-opted-out SILENT case above, and the assertion
+    // that pins WHERE the opted-out filter sits. It lives INSIDE the `.some()`
+    // predicate, per slot, so an opted-out leg removes ITSELF and nothing else.
+    // Hoisted to a whole-map filter - or inverted - this bubble would go silent,
+    // and this is exactly the shape the feature targets: a group where one
+    // member has STOPped and the rest are live.
+    renderTimeline({
+      items: [
+        outboundAt(t0, {
+          c1: { status: 'failed', errorCode: 'contact_opted_out' },
+          c2: { status: 'sent', sentAt: new Date(t0).toISOString() },
+        }),
+      ],
+    });
+    expect(spies.set).toHaveBeenCalledTimes(1);
+    const tickerId: unknown = spies.set.mock.results[0]?.value;
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+    // The opted-out leg is out of the denominator (both presenters key on the
+    // code alone), so the live leg IS the whole count - and it escalated.
+    expect(screen.getByText('delivered 0/1 - 1 not confirmed')).toBeInTheDocument();
+    expect(spies.clear).toHaveBeenCalledWith(tickerId);
+  });
+
   it('a thread of only CALL cards schedules nothing - observable: window.setInterval was never called (a local mirror of the four getTimerCount tripwires in Timeline.test.tsx)', () => {
     const t0 = startFakeClock();
     const spies = spyOnIntervals();

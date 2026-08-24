@@ -10,6 +10,13 @@ import {
   STALE_SENT_AFTER_MS,
 } from './deliveryStatus.js';
 import type { RelayDeliverySlot } from './deliveryStatus.js';
+import type { DeliveryStatus } from '../../api/index.js';
+
+/** Every `Object.prototype` member name a wire `delivery_status` could collide
+ *  with. A status arrives off the provider/webhook path, so it is never trusted
+ *  as a key - the same standard `ownReason` already holds the two reason maps
+ *  to, asserted further down this file. */
+const PROTOTYPE_KEYS = ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf'];
 
 describe('presentDeliveryStatus', () => {
   it('maps each delivery status to label / tone / isFailure', () => {
@@ -35,6 +42,23 @@ describe('presentDeliveryStatus', () => {
   it('treats "sent" as a non-failure waypoint (sent ≠ delivered)', () => {
     expect(presentDeliveryStatus('sent')?.isFailure).toBe(false);
     expect(presentDeliveryStatus('delivered')?.isFailure).toBe(false);
+  });
+
+  // Re-review MEDIUM A - the sibling of the `ownReason` hole this module already
+  // closed for its two reason maps. STATUS_PRESENTATION is a bare object
+  // literal, so `map[status]` resolved INHERITED members: the lookup for
+  // 'constructor' handed back the Object FUNCTION, which `??` does not catch, so
+  // this function's own documented contract ("an unrecognized value => null")
+  // was false for these five strings.
+  //
+  // On the base branch that was cosmetic - React renders an undefined label as
+  // nothing. It is NOT cosmetic here: the bubble's accessible-summary builders
+  // call `.replace` on the label, so a presentation with no `label` throws
+  // inside render and blanks the conversation page.
+  it('never resolves a presentation off Object.prototype - an unrecognized status is null', () => {
+    for (const key of PROTOTYPE_KEYS) {
+      expect(presentDeliveryStatus(key as DeliveryStatus)).toBeNull();
+    }
   });
 });
 
@@ -777,5 +801,16 @@ describe('presentLegDelivery - one recipient row', () => {
   it('returns null for an unrecognised status - the row shows a name and NO state chip, never an invented one', () => {
     const offWire = { status: 'gremlin' } as unknown as RelayDeliverySlot;
     expect(presentLegDelivery(offWire, 'relay', MSG_AT, NOW)).toBeNull();
+  });
+
+  // The DOWNSTREAM half of the prototype-lookup test at the top of this file.
+  // This is the caller the crash actually reached: a leg presentation with an
+  // undefined `label` is handed straight to the bubble's string builders.
+  it('returns null for a status naming an Object.prototype member, on the enabled and disabled clock alike', () => {
+    for (const key of PROTOTYPE_KEYS) {
+      const offWire = { status: key } as unknown as RelayDeliverySlot;
+      expect(presentLegDelivery(offWire, 'relay', MSG_AT, NOW)).toBeNull();
+      expect(presentLegDelivery(offWire, 'group_text', MSG_AT, undefined)).toBeNull();
+    }
   });
 });

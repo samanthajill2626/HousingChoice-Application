@@ -1,12 +1,13 @@
 # Error surface detail - design
 
 Date: 2026-08-24
-Status: DRAFT r4 (awaiting human spec review)
+Status: r5 - REVIEW COMPLETE, awaiting human spec review
 Branch: feat/error-surface-detail
 Worktree: W:\tmp\error-surface-detail
-Design review: rounds 1-3 complete (60 findings, 47 accepted, 1 round-1
-rejection reversed in round 2). Adjudications:
-`.superpowers/design-review/adjudications.md`
+Design review: 4 rounds, the process cap (69 findings, 56 accepted, 1 round-1
+rejection reversed in round 2). The three decision-changing items round 4 raised
+were put to the human and decided 2026-08-24; they are marked HUMAN DECISION
+below. Adjudications: `.superpowers/design-review/adjudications.md`
 
 ## 1. Problem
 
@@ -34,8 +35,14 @@ error call sites overall - most of which write a specific message and read fine.
 ## 2. Decision: the projection is a display control, not a storage control
 
 `err.message` and `err.stack` are ALREADY at rest in CloudWatch. Widening the
-projection adds no new data to any store and creates no new retention
-obligation. It changes only what the panel is willing to render.
+PROJECTION adds no new data to any store and creates no new retention
+obligation; it changes only what the panel is willing to render.
+
+ONE PART OF THIS SPEC DOES WRITE SOMETHING NEW, and this paragraph is where a
+reader decides whether the change touches storage, so it says so here rather than
+only in the non-goals: S2 adds a `pollRunId` field to every poll-enqueued job's
+log lines. That is a deliberate, separately justified exception (see S2), not a
+consequence of the projection widening.
 
 The panel is admin-only and enforced SERVER-side: `createSystemRouter` applies
 `requireRole('admin')` to every `/api/system/*` route
@@ -85,6 +92,13 @@ mutations. Each fact names the record it came from.
 7. `@log` IS `<accountId>:<logGroupName>`, NOT a bare name. Observed:
    `938565869261:/hc/dev/app`. Any mapping must normalise by taking everything
    after the last `:`.
+8. A NON-JSON RECORD RETURNS NO APPLICATION FIELDS. Sampled on a real
+   `/hc/prod/system` record (that group is entirely non-JSON): the response
+   carried ONLY `@`-prefixed metadata (`@message`, `@log`, `@logStream`,
+   `@ingestionTime`, `@timestamp`, `@logGroupId`, entity/account keys) plus
+   `backwardToken`/`forwardToken`. No `err`, no `msg`, no `level`. This is the
+   premise the `rawText` branch in S4 rests on, and it is measured rather than
+   inferred.
 
 ## 4. Scope
 
@@ -193,6 +207,20 @@ S5's pivot is unreachable from the UI (round 2, N2). They are already on the log
 line for the work that has them, because the pino mixin spreads the whole
 context (`logger.ts:232`).
 
+**OPTIONALITY, stated because the existing interface uses all three conventions**
+(`message: string` required, `correlationId: string | null` required-but-nullable,
+`errorCode?: string | null` optional - `cloudwatch.ts:85`, `:87`, `:93`):
+
+- `source` and `ref` are REQUIRED and non-null. Every row has both, and making
+  `source` optional would give the four-value union a fifth de-facto `undefined`
+  state that S6's chip has no branch for - the same defect AJ28 fixed.
+- Everything else follows the `errorCode?: string | null` convention.
+
+CONSEQUENCE THE BUILDER MUST EXPECT: existing fixtures build partial literals
+(`dashboard/src/routes/settings/RecentErrors.test.tsx:67-68`, `:88-92`), so two
+required fields WILL break them under `npm run typecheck` - a required gate.
+Update the fixtures; do not weaken the types to avoid the edit.
+
 **MECHANISM.** None of these can be produced by the current code path:
 
 - The query string (`cloudwatch.ts:227`) must gain `@ptr` and `@log` in `fields`.
@@ -278,10 +306,31 @@ the client the original line still containing them. For a JSON line the flattene
 fields already carry everything of value, so the raw line is pure duplication
 plus a hole.
 
-For a NON-JSON record (kernel OOM, V8 heap OOM, raw stderr) `GetLogRecord`
-returns no application fields and the raw text IS the only content. Those lines
-carry no vendor error object by construction, so the text is surfaced under an
-explicit, capped `rawText` field. `@message` itself is never a response key.
+For a NON-JSON record `GetLogRecord` returns no application fields at all
+(fact 8, measured), so the raw text IS the only content. It is surfaced under an
+explicit `rawText` field, capped at 4000 characters with a truncation flag.
+`@message` itself is never a response key.
+
+**HUMAN DECISION (2026-08-24): host syslog raw text IS in scope.** An earlier
+draft justified `rawText` as safe because those lines "carry no vendor error
+object" - true, but aimed at the wrong threat and false as a description of the
+group. `/hc/<env>/system` is not kernel-OOM lines: it ships the ENTIRE
+`/var/log/messages` unfiltered (`infra/modules/ec2/main.tf:410-411`), so it
+carries sshd, sudo, systemd, docker and cloud-init output, none of it chosen by a
+call site. The panel has only ever shown two synthesized labels from that group
+(`systemStatus.ts:52-53`, `:239-240`).
+
+Showing it is nonetheless the decision, and the reasoning is the one from section
+2, not the false one: the page is admin-only and server-enforced, this is host
+operational data rather than contact PII, and the OOM and host-level rows are
+exactly the ones where a synthesized label tells an operator nothing. What is
+exposed, stated plainly rather than hidden behind a bad justification: whatever
+the host wrote, including command lines from sudo and sshd.
+
+Note the deliberate asymmetry with S5, which EXCLUDES the system group. Both are
+correct: the detail route must admit it because the list merges OOM rows the
+operator can expand, while the trace pivot excludes it because kernel lines carry
+no correlation id. Do not "reconcile" them.
 
 **FIELD RULE - AN ALLOWLIST UNDER `err`, NOT A DENYLIST.** A denylist of
 `err.config.*` / `err.request.*` / `err.response.*` prefixes was specified in r2
@@ -322,14 +371,21 @@ another environment's. REJECT any record whose normalised `@log` is not one of
 `config.errorLogGroupName` / `workerLogGroupName` / `systemLogGroupName`. One
 comparison, and it makes the route's scope independent of the IAM outcome.
 
-**RESPONSE SIZE BOUND**: bounded; an oversized record is truncated with a flag.
+**RESPONSE SIZE BOUND**: 64 KB. An oversized record is truncated with a flag
+rather than streamed whole. (`err.stack` is the field that realistically
+approaches this; the spike's sample record was 799 bytes, which is one
+observation and not a bound.)
 
 **DEGRADATION**: HTTP 200 with `{ available: false, reason }` on a
 local/hermetic stack, a CloudWatch failure, an unresolvable or expired pointer,
 or a failed scope check. Never a 500.
 
-**VALIDATION**: length-bound and charset-validate `ref` before the SDK call;
-malformed input produces the degraded response, never an unhandled throw.
+**VALIDATION - the same two answers as S5, stated so the siblings agree**: a
+MISSING `ref` is a **400**, matching the `since` precedent (`system.ts:68-72`)
+and S5. A PRESENT but malformed `ref` (length or charset) takes the degraded 200,
+never an unhandled throw. The client distinguishes a non-2xx from a degraded 200
+body (`dashboard/src/api/client.ts`), so the two drive different UI paths and
+both must be specified.
 
 **SEAM**: a new method on `CloudWatchClientSeam` (`cloudwatch.ts:97-107`); the
 SDK import stays in the adapter. NOTE THE REAL TEST WORK: `fakeSeam`
@@ -360,7 +416,9 @@ line carries. S5 gets its OWN seam method.
 **ASCENDING SORT IS LOAD-BEARING.** Insights applies `limit` INSIDE the sort, so
 a descending query on a long correlation keeps the lines AFTER the failure and
 drops the ones BEFORE it - the opposite of the purpose. Client-side re-sorting
-cannot recover them. The query sorts ascending server-side.
+cannot recover them, which is why the existing `queryInsights` seam cannot serve
+this route. The result is presented ascending; the QUERY mechanism that produces
+it is specified under LIMIT below, and it is not a single ascending query.
 
 **THREE IDS, because correlationId alone cannot cross the job hop.**
 `logger.ts:231` resolves `correlationId = jobRunId ?? pollRunId ?? requestId ??
@@ -378,28 +436,71 @@ any row older than a day - and an empty trace is indistinguishable from "there
 was no context" on a feature whose entire purpose is context. A rolling window
 would also mislead near its edge.
 
-CONCRETE VALUES, because prose alone left this unbuildable in an earlier draft:
-the bracket is `at - 5 minutes` to `at + 5 minutes`, a stated constant. The seam
-converts both bounds to EPOCH SECONDS - the existing seam warns about this in
+**HUMAN DECISION (2026-08-24): THE BRACKET IS ID-DEPENDENT.** A single
+symmetric +/- 5 minute constant was specified in r4 and CANCELS the cross-hop
+pivot it sits beside, which is the whole reason S2 widened a non-goal. Measured
+gaps between the enqueue and the failure:
+
+- SQS retry span ~8 minutes before the DLQ: `visibility_timeout_seconds = 120`
+  and `maxReceiveCount = 5` (`infra/modules/jobs/main.tf:36`, `:41`), i.e. four
+  redeliveries at 120s plus handler runtime.
+- Delayed enqueue up to ~12 minutes: `delaySeconds` is computed from `opts.runAt`
+  (`jobs.ts:112-114`) and the Phase 1 envelope is "no >12min callers"
+  (`jobs.ts:104`).
+
+So the `job failed` line an operator clicks on the DLQ triage path -
+`RUNBOOK.md:2169`, the panel's headline scenario - can be ~8 minutes after the
+first attempt and ~20 from the enqueue. A 5-minute look-back reaches none of it.
+
+THE RULE:
+
+- `correlationId` pivot: `at - 5 min` to `at + 5 min`. One job run, genuinely
+  local; keep it tight and cheap.
+- `requestId` or `pollRunId` pivot: `at - 30 min` to `at + 5 min`. These are the
+  cross-hop ids by construction and reaching BACKWARDS is their entire purpose.
+
+The look-ahead stays short in both cases: nothing an operator wants is half an
+hour after the failure.
+
+Both bounds convert to EPOCH SECONDS. The existing seam warns about this in
 capitals at `cloudwatch.ts:229` ("CRITICAL: Insights StartQuery uses epoch
-SECONDS, not milliseconds") and the new method must honour it.
+SECONDS, not milliseconds"), and the list path already pins it
+(`cloudwatch.adapter.test.ts:120-121`). A milliseconds-for-seconds slip yields an
+empty trace that degrades silently and is invisible in the hermetic lane, so the
+new method gets its own equivalent assertion.
 
 **SHAPE**: its own row type carrying timestamp, level, message and the
 diagnostic fields an INFO line needs (`method`, `path`, `statusCode`,
 `durationMs`, `jobName`, `jobId`, `hopCount`) - not `ErrorEventView`.
 
-**LIMIT - A TWO-SIDED BUDGET, because ascending has the symmetric defect.** An
-ascending query with a plain limit keeps the EARLIEST N rows, so on a long
-correlation the failure the operator clicked from is not in its own trace. That
-is more likely than it sounds: S2 makes `pollRunId` a valid pivot, and one poll
-tick fans out to many jobs, so a `pollRunId` trace is the widest of the three by
-construction.
+**HUMAN DECISION (2026-08-24): TWO OPPOSITE-SORTED QUERIES.** This REPLACES the
+"the query sorts ascending server-side" sentence above as a description of
+mechanism - that rule was correct as a diagnosis of the descending bug and wrong
+as a single-query design, because ascending has the SYMMETRIC defect: Insights
+applies `limit` inside the sort, so one ascending query returns the EARLIEST N
+rows in the bracket and can drop the failure out of its own trace. That is not
+hypothetical - S2 makes `pollRunId` a valid pivot and one poll tick fans out to
+many jobs, so a `pollRunId` trace is the widest of the three by construction.
 
-The budget is therefore split around the anchor: up to N/2 rows at-or-before
-`at`, and up to N/2 after it, merged ascending. This GUARANTEES the anchor line
-is present, which a single-sided limit cannot. When either side is capped the
-response carries an explicit `truncated` flag that S6 must surface - a trace that
-silently omits lines is worse than no trace, because it looks complete.
+THE MECHANISM - two queries, merged:
+
+- BEFORE: `sort @timestamp desc | limit 25` over `[bracketStart, at]`, then
+  REVERSED client-side.
+- AFTER: `sort @timestamp asc | limit 25` over `(at, bracketEnd]`.
+- Merged ascending into one result of at most 50 rows.
+
+This is the only shape that GUARANTEES the anchor line is present and bounds both
+sides independently; a single-sided limit cannot. The row budget is 25 per side,
+matching `ERROR_EVENT_LIMIT` (`systemStatus.ts:49`) rather than inventing a new
+number.
+
+When EITHER side hits its limit the response carries an explicit `truncated`
+flag, per side, that S6 must surface. A trace that silently omits lines is worse
+than no trace, because it looks complete.
+
+NOTE FOR THE BUILDER: the ascending-sort paragraph above explains WHY the
+original descending seam is unusable here. Do not read it as licensing a single
+ascending query - the two-query mechanism in this paragraph is the design.
 
 **DEGRADATION**: the same `{ available: false, reason }` contract at HTTP 200.
 
@@ -567,11 +668,20 @@ avoids WIDENING it.
   400; a well-formed request with a non-UUID id is a degraded 200).
 - Unit: admin enforcement on both new routes; validation of `ref` and the trace
   ids (malformed -> degraded response, never an unhandled throw).
-- Unit: the trace query sorts ASCENDING (mirroring the existing
-  `sort @timestamp desc` assertion at `cloudwatch.adapter.test.ts:123`).
+- Unit: the trace issues TWO queries with OPPOSITE sorts and merges ascending
+  (mirroring the existing `sort @timestamp desc` assertion at
+  `cloudwatch.adapter.test.ts:123`).
+- Unit: the trace bracket is ID-DEPENDENT - assert `-5min` for a `correlationId`
+  pivot and `-30min` for `requestId`/`pollRunId`, both with `+5min` ahead.
+- Unit: the bracket bounds are converted to EPOCH SECONDS, mirroring the existing
+  `Math.floor(sinceMs / 1000)` assertion at `cloudwatch.adapter.test.ts:120-121`.
+  A milliseconds slip yields an empty trace that degrades silently.
 - Unit: OOM relabeling still wins; dedup with `ref` present AND absent.
 - Component: `RecentErrors` collapsed/expanded, four-value chip, `ref` row key,
-  trace-link id precedence and its absent-id case.
+  trace-link id precedence and its absent-id case, the trace link sending `?at=`.
+- Component: the truncation indicators RENDER - per capped field, and the trace's
+  per-side `truncated` flag. These have no purpose except being shown, so an
+  untested indicator is an unbuilt one.
 - e2e: the panel degrades to "Available in deployed environments." on the
   hermetic stack - the only reachable state without AWS. Extend the existing
   System Status spec.

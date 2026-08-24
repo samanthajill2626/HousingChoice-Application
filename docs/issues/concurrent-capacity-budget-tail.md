@@ -42,3 +42,37 @@ The named-phase precedent already in the tree: pickPlacementStage's page-load
 wait, the reseed clearMs/seedMs timings, the badge route-hold. Budgets that
 fire should keep becoming MECHANISMS where possible and sized budgets only
 where the phase is genuinely load-bound.
+
+---
+
+## The soak ran: 2026-08-24, and it produced NO reds to size
+
+Recovered from the soak worktrees' `e2e/.artifacts/results.json` while retiring
+them, so the numbers survive the cleanup:
+
+| lane | expected | unexpected | flaky | skipped | duration |
+|---|---|---|---|---|---|
+| `soak/dual-a`, lane 16 | 253 | 0 | 0 | 0 | 1147s |
+| `soak/dual-b`, lane 1 | 253 | 0 | 0 | 0 | 1148s |
+
+Two full e2e suites run deliberately concurrently from separate worktrees, both
+finishing green in ~19 minutes. That is the C6 phase-5 "prove it" step, and it
+passed.
+
+**Read this carefully before concluding the budgets are fine.** Both worktrees
+sat at `5dca5d48`, which does NOT contain `6154771e` (SQLite-on-tmpfs replacing
+`-inMemory`) - the fix landed at 16:54, this run finished at 17:38. So the green
+result is from trees WITHOUT the tmpfs fix in their own tracked code, and it is
+not known from these artifacts alone whether a shared container gave them the
+benefit anyway. Do not cite this run as evidence that the tmpfs fix works.
+
+**What it does establish:** dual-suite concurrency is no longer reliably red, so
+the sized list of phase budgets this issue asked for cannot be produced from
+this run - there were no reds to enumerate. The issue stays OPEN because the
+sizing question is unanswered, not because the soak is still owed. The next
+person needs either a reproduction under heavier external load or a decision
+that the contended sightings above were environmental (see the degraded-key
+signature in `npm-test-dynamodb-local-contention`) and this can close.
+
+Raw `results.json` for both lanes was NOT committed (478KB each); only this
+summary survives.

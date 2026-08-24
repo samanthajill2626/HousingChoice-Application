@@ -3,11 +3,29 @@ id: fake-groups-unread-overcount
 title: "Fake phones: group unread badge counts fan-out LEGS, not transcript entries"
 type: improvement
 severity: low
-status: open
+status: resolved
 area: fake-twilio
 created: 2026-07-07
+resolved: 2026-08-24
 refs: fake-twilio/web/src/state/useFakePhones.ts:107, fake-twilio/src/engine/engine.ts:307
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`).** Took the suggested fix:
+`mergeEvent` now bumps unread by the number of NEW transcript-entry ids in the
+incoming snapshot (diffed against the held one), never by `lastActivityAt`
+advancing. Fan-out legs that collapse into one entry count once; delivery-slot
+ticks count zero; a first-seen group counts the entries it arrives with (all
+genuinely unseen - and an empty first snapshot now counts 0 where the old rule
+counted 1).
+
+Probed against the OLD rule: the new burst-collapse test fails `expected 2 to
+be 1` - the filed symptom verbatim - and the empty-first-snapshot test fails
+`expected 1 to be +0`. Restored, 25/25 in the file, 111/111 across the web
+workspace.
+
+The noted accepted corner (a removed member lingering until the next outbound
+burst) is unchanged - it was a bound on roster staleness, not on unread.
+
 
 **Problem (review finding, 2026-07-07 — cosmetic).** Every fan-out leg calls
 `observeOutboundLeg`, which advances the group's `lastActivityAt` and emits one

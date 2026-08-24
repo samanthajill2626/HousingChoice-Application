@@ -123,15 +123,34 @@ describe('startOtel: boots in both modes (child process, unpatched)', () => {
     });
   }
 
+  /**
+   * Everything spawnSync knows about a failed child, for the assertion
+   * messages. On 2026-08-21 both tests failed with empty stdout and the report
+   * said only `expected '' to contain 'OTEL_BOOT_OK'` - while the machine-level
+   * cause (the same run produced uv_os_get_passwd ENOMEM in a sibling suite,
+   * i.e. resource exhaustion, not a code defect; unreproducible once the
+   * machine recovered) sat in the unreported stderr/error fields. A child that
+   * fails to SPAWN reports through `error`, one that dies reports through
+   * `signal`/`stderr`; the assertion must show all of them or the next
+   * environmental event costs another by-hand rerun.
+   */
+  function bootDiagnostics(res: ReturnType<typeof boot>): string {
+    return (
+      `status=${String(res.status)} signal=${String(res.signal)} ` +
+      `spawnError=${res.error ? String(res.error) : '(none)'}\n` +
+      `stderr:\n${res.stderr || '(empty)'}`
+    );
+  }
+
   it('endpoint SET to an unreachable port → boots and exits 0', () => {
     const res = boot({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1' });
-    expect(res.stdout).toContain('OTEL_BOOT_OK');
-    expect(res.status).toBe(0);
+    expect(res.stdout, `no boot marker; ${bootDiagnostics(res)}`).toContain('OTEL_BOOT_OK');
+    expect(res.status, bootDiagnostics(res)).toBe(0);
   });
 
   it('endpoint UNSET → boots and exits 0', () => {
     const res = boot({ OTEL_EXPORTER_OTLP_ENDPOINT: '' });
-    expect(res.stdout).toContain('OTEL_BOOT_OK');
-    expect(res.status).toBe(0);
+    expect(res.stdout, `no boot marker; ${bootDiagnostics(res)}`).toContain('OTEL_BOOT_OK');
+    expect(res.status, bootDiagnostics(res)).toBe(0);
   });
 });

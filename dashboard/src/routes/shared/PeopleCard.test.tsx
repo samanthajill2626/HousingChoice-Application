@@ -536,6 +536,32 @@ describe('PeopleCard - edit mode', () => {
     );
   });
 
+  it('offers a PARTNER through the committed-pick search - the widened fan-out reaches the roster dropdown', async () => {
+    // TYPES_FOR.all gained 'partner' on 2026-08-18 and this picker is the most
+    // consequential consumer: whoever it offers can be added to a live relay
+    // group and texted. The mock is KEYED BY TYPE, so this fails if the
+    // fan-out stops requesting partners OR if a per-surface filter drops the
+    // row on its way to the dropdown.
+    // See docs/issues/partner-widening-consumer-test-gap.md.
+    getAllContacts.mockImplementation((params: { type: string }) =>
+      Promise.resolve(
+        params.type === 'partner'
+          ? [{ contactId: 'c-partner', type: 'partner' as const, firstName: 'Renata', lastName: 'Cole', phone: '+14045550190' }]
+          : [],
+      ),
+    );
+    addTourRosterMember.mockResolvedValue(view());
+    await renderEditing({ roster: view({ members: [view().members[0]!] }) });
+    await userEvent.click(screen.getByRole('button', { name: '+ Add any contact' }));
+    const search = await screen.findByRole('combobox', { name: 'Add any contact' });
+    await userEvent.type(search, 'Renata');
+    await userEvent.click(await screen.findByRole('option', { name: /Renata Cole/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add contact to this tour' }));
+    await waitFor(() =>
+      expect(addTourRosterMember).toHaveBeenCalledWith('tour-abc', { contactId: 'c-partner' }),
+    );
+  });
+
   it('offers Reset only when the roster is customized and no thread exists', async () => {
     resetTourRoster.mockResolvedValue(view());
     const { onApply } = await renderEditing({

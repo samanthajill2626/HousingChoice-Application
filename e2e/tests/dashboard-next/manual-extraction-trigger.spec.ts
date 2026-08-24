@@ -1,12 +1,21 @@
 // Manual extraction trigger - the one e2e that proves the waiver is real.
 //
-// WHY A DEV SEAM AND NOT A SEED ROW (design 7): lean message rows carry `ts` and
-// `tsMsgId` and NO `created_at`, and `created_at` is the field the 30-day cutoff
-// filters on (app/src/jobs/extraction.ts:435-436). The fixed 2026-06-01 lean
-// timestamps therefore exercise the age cutoff not at all. The hermetic lane also
-// runs the FAKE driver, which only extracts from an `EXTRACT:` marker the lean
-// transcript does not carry. `POST /__dev/extraction/message-fixture` plants ONE
-// message with a caller-supplied `created_at` and body; lean stays byte-stable.
+// WHY A DEV SEAM AND NOT A SEED ROW (design 7): the plant needs a caller-chosen
+// `created_at` AND an `EXTRACT:` marker body, and the lean transcript has
+// neither shape - its bodies carry no marker (the hermetic FAKE driver only
+// extracts from one), and its fixed 2026-06-01 timestamps would pin this spec
+// to the seed world instead of to a conversation this test owns.
+// `POST /__dev/extraction/message-fixture` plants ONE message with a
+// caller-supplied `created_at` and body; lean stays byte-stable.
+//
+// (HISTORY: this comment used to say lean rows carry NO `created_at` at all.
+// True until 2026-08-24 - and worse than it sounded: a row with UNDEFINED
+// created_at fails BOTH sides of the cutoff comparison and silently vanishes
+// from the run window, appearing in neither `fresh` nor the age_30d
+// exclusions. The seed now stamps created_at on every message
+// (docs/issues/seed-messages-missing-created-at.md), so seeded rows show up
+// honestly - as age_30d exclusions, their fixed dates being permanently >30d
+// behind any present wall clock.)
 //
 // The NEGATIVE half is the load-bearing one. The automatic run is due and DOES
 // run - it simply cannot see the aged message, so it produces nothing and records

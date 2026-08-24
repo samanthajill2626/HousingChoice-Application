@@ -26,6 +26,14 @@ export interface MovePromptResult {
   rentDetermined?: number;
 }
 
+/** The raw, un-parsed field drafts - what the human has typed so far. */
+export interface MovePromptDraft {
+  rent?: string;
+  outcome?: InspectionOutcome | '';
+  inspectionDate?: string;
+  determinedRent?: string;
+}
+
 export interface MovePromptModalProps {
   mode: MovePromptMode;
   onClose: () => void;
@@ -36,6 +44,21 @@ export interface MovePromptModalProps {
   /** Prefill the input from what's already recorded (in-place stage-data), so the
    *  move still ASKS but never forces re-entry. Per-mode; unrelated keys ignored. */
   initial?: MovePromptResult;
+  /**
+   * OWNER-HELD draft storage, so what the human has typed SURVIVES a remount of
+   * this modal. A 2026-08-24 e2e gate run caught the loss in the wild: the
+   * Schedule-inspection dialog's filled date was EMPTY (and Confirm disabled)
+   * moments after a successful fill - the modal subtree had re-initialized from
+   * `initial` while its owner's `pending` state (and so the open dialog)
+   * survived. A user typing when that trigger fires loses their entry the same
+   * way. The exact remount trigger is load-dependent and unproven
+   * (docs/issues/move-prompt-modal-loses-filled-date-under-load.md); holding
+   * the draft in a parent-owned ref removes the CLASS regardless: state
+   * initializers read it first, setters write through, and the parent resets it
+   * when a NEW prompt opens. A ref, not state - drafts must never re-render the
+   * owner per keystroke.
+   */
+  draftStore?: { current: MovePromptDraft | undefined };
 }
 
 /** Parse the rent input to a positive number, or null when invalid (≤0 / NaN). */
@@ -60,13 +83,42 @@ export function MovePromptModal({
   busy = false,
   lifPending = false,
   initial,
+  draftStore,
 }: MovePromptModalProps): React.JSX.Element {
-  const [rent, setRent] = useState(initial?.finalRent !== undefined ? String(initial.finalRent) : '');
-  const [outcome, setOutcome] = useState<InspectionOutcome | ''>(initial?.inspectionOutcome ?? '');
-  const [inspectionDate, setInspectionDate] = useState(initial?.inspectionDate ?? '');
-  const [determinedRent, setDeterminedRent] = useState(
-    initial?.rentDetermined !== undefined ? String(initial.rentDetermined) : '',
+  // Draft precedence: what the human already TYPED (draftStore, survives a
+  // remount) wins over the recorded prefill (initial). See draftStore's doc.
+  const [rent, setRentState] = useState(
+    draftStore?.current?.rent ?? (initial?.finalRent !== undefined ? String(initial.finalRent) : ''),
   );
+  const [outcome, setOutcomeState] = useState<InspectionOutcome | ''>(
+    draftStore?.current?.outcome ?? initial?.inspectionOutcome ?? '',
+  );
+  const [inspectionDate, setInspectionDateState] = useState(
+    draftStore?.current?.inspectionDate ?? initial?.inspectionDate ?? '',
+  );
+  const [determinedRent, setDeterminedRentState] = useState(
+    draftStore?.current?.determinedRent ??
+      (initial?.rentDetermined !== undefined ? String(initial.rentDetermined) : ''),
+  );
+  const writeDraft = (patch: Partial<MovePromptDraft>): void => {
+    if (draftStore !== undefined) draftStore.current = { ...draftStore.current, ...patch };
+  };
+  const setRent = (value: string): void => {
+    writeDraft({ rent: value });
+    setRentState(value);
+  };
+  const setOutcome = (value: InspectionOutcome | ''): void => {
+    writeDraft({ outcome: value });
+    setOutcomeState(value);
+  };
+  const setInspectionDate = (value: string): void => {
+    writeDraft({ inspectionDate: value });
+    setInspectionDateState(value);
+  };
+  const setDeterminedRent = (value: string): void => {
+    writeDraft({ determinedRent: value });
+    setDeterminedRentState(value);
+  };
   const rentId = useId();
   const groupId = useId();
   const dateId = useId();

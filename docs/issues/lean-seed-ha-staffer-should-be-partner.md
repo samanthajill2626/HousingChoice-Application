@@ -3,11 +3,26 @@ id: lean-seed-ha-staffer-should-be-partner
 title: Lean seed's HA staffer Renee Carter is typed team_member but is a partner by definition
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/seed
 created: 2026-08-17
+resolved: 2026-08-24
 refs: app/src/lib/seed/lean.ts, documentation/GLOSSARY.md
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`).** Retyped to `partner` as
+the one deliberate change this issue asked for, now that the TYPES_FOR.all
+widening is long merged.
+
+Smaller than feared: the "pinned trio byte-identical" constraint turned out
+not to pin her TYPE anywhere - seedData.test.ts, seedPersonaDrift.test.ts, the
+fake-twilio persona registry and every e2e that names her reference her name,
+phone, or persona id, never `team_member`. All 59 tests across the five
+seed-pinning suites passed UNCHANGED through the retype - which is exactly how
+the mistype survived two months, so seedData.test.ts now pins
+`type === 'partner'` on her row with that story attached. Visibility fallout
+across the nine partner surfaces is covered by the branch's full e2e gate.
+
 
 **Problem.** CONFIRMED MISTYPE with a traceable cause (agreed with the human
 2026-08-17). The lean seed's Renee Carter ("HCV Program Specialist",

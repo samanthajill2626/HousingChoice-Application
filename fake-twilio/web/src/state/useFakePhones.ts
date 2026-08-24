@@ -37,9 +37,10 @@ export interface FakeState {
   selected: string | null;
   /** Traffic-inferred relay groups (additive slice; keyed by poolNumber). */
   groups: GroupSnapshot[];
-  /** Per-pool unread TRANSCRIPT-activity count; cleared when that group is
-   *  selected. Mirrors `unreadByNumber` — bumped per group.updated whose
-   *  lastActivityAt advanced (delivery-slot status ticks don't count). */
+  /** Per-pool unread TRANSCRIPT-ENTRY count; cleared when that group is
+   *  selected. Mirrors `unreadByNumber` — bumped by the number of NEW entry
+   *  ids in each group.updated snapshot (fan-out legs that collapse into one
+   *  entry count once; delivery-slot status ticks count zero). */
   groupUnreadByPool: Record<string, number>;
   /** The currently-selected group's pool number, or null. Mutually exclusive
    *  with `selected` — pool numbers and persona numbers are separate keyspaces,
@@ -73,9 +74,10 @@ export const initialState: FakeState = {
  *     by sid within its thread; no-op if the thread/message is unknown.
  *   - persona.added: append the persona.
  *   - group.updated: the event carries the WHOLE recomputed GroupSnapshot —
- *     replace-or-append by poolNumber. A snapshot whose lastActivityAt advanced
- *     (new transcript entry/leg — NOT a delivery-slot tick) on a group that is
- *     NOT currently selected bumps that group's unread.
+ *     replace-or-append by poolNumber. Each NEW transcript-entry id (diffed
+ *     against the held snapshot) on a group that is NOT currently selected
+ *     bumps that group's unread by one; fan-out legs that collapse into an
+ *     existing entry and delivery-slot ticks bump nothing.
  *   - reset: clear threads + groups + both unread maps (personas + selection
  *     are left as-is; the hook re-derives selection validity on its own).
  */
@@ -125,14 +127,23 @@ export function mergeEvent(state: FakeState, event: EngineEvent): FakeState {
       const prev = idx === -1 ? undefined : state.groups[idx];
       const groups =
         idx === -1 ? [...state.groups, group] : state.groups.map((g, i) => (i === idx ? group : g));
-      // Same-format ISO strings compare correctly as strings. Equal timestamps
-      // mean a delivery-slot status tick (no new transcript activity) — no bump.
-      const activityAdvanced = prev === undefined || group.lastActivityAt > prev.lastActivityAt;
+      // Count NEW TRANSCRIPT ENTRIES, never lastActivityAt advances. Every
+      // fan-out leg advances the clock and emits one group.updated, but an
+      // N-member burst COLLAPSES into ONE transcript entry (identical body -
+      // exactly what relay.intro and team replies send), so clock-based
+      // counting showed unread "N" for one message: a team reply to an
+      // 8-member group badged 8 (docs/issues/fake-groups-unread-overcount.md).
+      // Entry ids are stable render keys, so diffing against the held snapshot
+      // counts what a human actually has not seen - which also means a
+      // first-seen group counts every entry it arrives with (all unseen), and
+      // a delivery-slot status tick (no new entry) counts nothing.
+      const prevIds = new Set((prev?.entries ?? []).map((e) => e.id));
+      const newEntries = group.entries.filter((e) => !prevIds.has(e.id)).length;
       let groupUnreadByPool = state.groupUnreadByPool;
-      if (activityAdvanced && group.poolNumber !== state.selectedGroup) {
+      if (newEntries > 0 && group.poolNumber !== state.selectedGroup) {
         groupUnreadByPool = {
           ...state.groupUnreadByPool,
-          [group.poolNumber]: (state.groupUnreadByPool[group.poolNumber] ?? 0) + 1,
+          [group.poolNumber]: (state.groupUnreadByPool[group.poolNumber] ?? 0) + newEntries,
         };
       }
       return { ...state, groups, groupUnreadByPool };

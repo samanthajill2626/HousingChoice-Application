@@ -3513,6 +3513,20 @@ export class Scenario {
    *  button); a pick runs the SAME gated requestMove pipeline. Assumes the caller
    *  has already navigated to the placement. */
   private async pickPlacementStage(stageLabel: string): Promise<void> {
+    // NAME the page-load phase before reaching for the kebab. Two gate runs
+    // (2026-08-23 :318, 2026-08-24 :258) died here as opaque kebab timeouts,
+    // and the preserved failure snapshots showed the real state both times:
+    // <main> holding only `status "Loading"` - the placement bundle fetch had
+    // not finished under two-suite machine load. Waiting for the header first
+    // makes that failure read "the placement page was still Loading", not
+    // "a button would not click"; the kebab click keeps its own budget for
+    // genuinely-menu problems. The keep-alive hardening (app + Vite servers,
+    // 2026-08-24) removed the strongest known cause of a HUNG bundle fetch;
+    // this wait is the witness that says so if another cause exists.
+    await expect(
+      this.placementBanner(),
+      'the placement page did not finish loading (header absent - check <main> for a stuck "Loading" status)',
+    ).toBeVisible({ timeout: 20_000 });
     await this.page.getByRole('button', { name: 'More actions' }).click();
     await this.page.getByRole('button', { name: /^Placement stage/ }).click();
     await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();

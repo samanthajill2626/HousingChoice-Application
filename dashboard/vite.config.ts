@@ -32,8 +32,32 @@ function commitStampPlugin() {
   };
 }
 
+// Keep-alive sockets must OUTLIVE the clients pooling against this server -
+// the browser and Playwright's request contexts both reuse sockets to Vite,
+// and at Node's 5s default the server FINs an idle socket a stalled client
+// loop is about to write into: the request dies as a reset or hangs, with
+// nothing in any log. Same mechanism reproduced 3/3 against fake-twilio on
+// 2026-08-24 and applied to the app server the same day; 65s clears every
+// stall a live e2e test can produce (30s per-test budget) with 2x margin,
+// and headersTimeout must exceed keepAliveTimeout (Node's rule).
+// See docs/issues/app-server-default-keepalive-timeout.md.
+function keepAliveHardeningPlugin(): import('vite').Plugin {
+  return {
+    name: 'keep-alive-hardening',
+    configureServer(server) {
+      const http = server.httpServer as
+        | { keepAliveTimeout: number; headersTimeout: number }
+        | null;
+      if (http !== null) {
+        http.keepAliveTimeout = 65_000;
+        http.headersTimeout = 66_000;
+      }
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), commitStampPlugin()],
+  plugins: [react(), commitStampPlugin(), keepAliveHardeningPlugin()],
   server: {
     // In the e2e stack, DASHBOARD_PORT is set per-lane by e2e-session.mjs so each
     // worktree gets an isolated dashboard port. In `npm run dev` it's unset and we

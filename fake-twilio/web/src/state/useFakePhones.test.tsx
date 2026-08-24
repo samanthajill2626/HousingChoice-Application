@@ -144,12 +144,25 @@ describe('mergeEvent (pure)', () => {
 // The event carries the WHOLE recomputed GroupSnapshot; the merge is
 // replace-or-append by poolNumber (mirroring how threads key by partyNumber).
 
+// Entry fixtures for the unread rule. `id` is the stable render key the
+// reducer diffs on; the collapse scenario reuses one id across events.
+const inboundEntry = (id: string, at: string) =>
+  ({ kind: 'inbound', id, from: '+15550170001', fromLabel: 'Diana Osei', body: 'hey', at }) as const;
+const outboundEntry = (id: string, at: string, recipients: { number: string; state: string }[]) =>
+  ({ kind: 'outbound', id, body: 'team reply', at, recipients }) as unknown as GroupSnapshot['entries'][number];
+
 describe('mergeEvent group.updated (pure)', () => {
-  it('appends a group it has not seen (and counts it as unread activity)', () => {
-    const g = grp();
+  it('appends a group it has not seen, counting every entry it arrives with', () => {
+    const g = grp({ entries: [inboundEntry('e1', '2026-06-15T00:00:00.000Z')] });
     const next = mergeEvent(baseState(), { type: 'group.updated', group: g });
     expect(next.groups).toEqual([g]);
     expect(next.groupUnreadByPool[g.poolNumber]).toBe(1);
+  });
+
+  it('a first-seen group with an EMPTY transcript is not unread', () => {
+    const g = grp({ entries: [] });
+    const next = mergeEvent(baseState(), { type: 'group.updated', group: g });
+    expect(next.groupUnreadByPool[g.poolNumber] ?? 0).toBe(0);
   });
 
   it('replaces the existing group by poolNumber (no duplicate)', () => {
@@ -160,9 +173,12 @@ describe('mergeEvent group.updated (pure)', () => {
     expect(next.groups[0]?.lastActivityAt).toBe('2026-06-15T00:01:00.000Z');
   });
 
-  it('bumps unread when transcript activity advances on a NON-selected group', () => {
-    const g0 = grp({ lastActivityAt: '2026-06-15T00:00:00.000Z' });
-    const g1 = grp({ lastActivityAt: '2026-06-15T00:01:00.000Z' });
+  it('bumps unread by ONE per new transcript entry on a NON-selected group', () => {
+    const g0 = grp({ entries: [inboundEntry('e1', '2026-06-15T00:00:00.000Z')] });
+    const g1 = grp({
+      entries: [inboundEntry('e1', '2026-06-15T00:00:00.000Z'), inboundEntry('e2', '2026-06-15T00:01:00.000Z')],
+      lastActivityAt: '2026-06-15T00:01:00.000Z',
+    });
     const next = mergeEvent(baseState({ groups: [g0], selectedGroup: null }), {
       type: 'group.updated',
       group: g1,
@@ -170,9 +186,37 @@ describe('mergeEvent group.updated (pure)', () => {
     expect(next.groupUnreadByPool[g1.poolNumber]).toBe(1);
   });
 
+  it('an N-member fan-out burst that COLLAPSES into one entry counts ONE, not N', () => {
+    // THE bug this rule replaced (docs/issues/fake-groups-unread-overcount.md):
+    // every leg advances lastActivityAt and emits its own group.updated, but
+    // identical bodies (relay.intro, team replies) collapse into ONE outbound
+    // entry gaining recipients. The old clock-based rule badged a 2-member
+    // group "2" for one team reply; an 8-member group badged "8".
+    const base = grp({ entries: [] });
+    const leg1 = grp({
+      entries: [outboundEntry('o1', '2026-06-15T00:01:00.000Z', [{ number: '+15550170001', state: 'sent' }])],
+      lastActivityAt: '2026-06-15T00:01:00.000Z',
+    });
+    const leg2 = grp({
+      entries: [
+        outboundEntry('o1', '2026-06-15T00:01:00.000Z', [
+          { number: '+15550170001', state: 'sent' },
+          { number: '+15550170003', state: 'sent' },
+        ]),
+      ],
+      lastActivityAt: '2026-06-15T00:01:05.000Z', // the clock DID advance
+    });
+    let state = mergeEvent(baseState({ groups: [base] }), { type: 'group.updated', group: leg1 });
+    state = mergeEvent(state, { type: 'group.updated', group: leg2 });
+    expect(state.groupUnreadByPool[base.poolNumber]).toBe(1);
+  });
+
   it('does NOT bump unread for the SELECTED group', () => {
-    const g0 = grp({ lastActivityAt: '2026-06-15T00:00:00.000Z' });
-    const g1 = grp({ lastActivityAt: '2026-06-15T00:01:00.000Z' });
+    const g0 = grp({ entries: [] });
+    const g1 = grp({
+      entries: [inboundEntry('e1', '2026-06-15T00:01:00.000Z')],
+      lastActivityAt: '2026-06-15T00:01:00.000Z',
+    });
     const next = mergeEvent(
       baseState({ groups: [g0], selectedGroup: g0.poolNumber }),
       { type: 'group.updated', group: g1 },
@@ -180,10 +224,13 @@ describe('mergeEvent group.updated (pure)', () => {
     expect(next.groupUnreadByPool[g1.poolNumber] ?? 0).toBe(0);
   });
 
-  it('does NOT bump unread when lastActivityAt is unchanged (a delivery-slot status tick)', () => {
-    const g0 = grp();
-    const g1 = grp(); // same lastActivityAt — e.g. a recipient chip advanced
-    const next = mergeEvent(baseState({ groups: [g0] }), { type: 'group.updated', group: g1 });
+  it('does NOT bump unread on a delivery-slot status tick (no new entry)', () => {
+    const g0 = grp({ entries: [inboundEntry('e1', '2026-06-15T00:00:00.000Z')] });
+    const g1 = grp({ entries: [inboundEntry('e1', '2026-06-15T00:00:00.000Z')] });
+    const next = mergeEvent(baseState({ groups: [g0], groupUnreadByPool: {} }), {
+      type: 'group.updated',
+      group: g1,
+    });
     expect(next.groupUnreadByPool[g1.poolNumber] ?? 0).toBe(0);
   });
 
@@ -307,11 +354,26 @@ describe('useFakePhones', () => {
     const { result } = renderHook(() => useFakePhones());
     await waitFor(() => expect(result.current.groups).toHaveLength(1));
     act(() => result.current.select('+15550100001'));
-    // Activity on the (not-selected) group bumps its unread.
+    // A NEW transcript entry on the (not-selected) group bumps its unread -
+    // the clock alone no longer does (see the entry-diff rule in mergeEvent).
     act(() =>
       capturedOnEvent?.({
         type: 'group.updated',
-        group: { ...seedGroups[0]!, lastActivityAt: '2026-06-15T00:06:00.000Z' },
+        group: {
+          ...seedGroups[0]!,
+          entries: [
+            ...seedGroups[0]!.entries,
+            {
+              kind: 'inbound',
+              id: 'entry-select-test',
+              from: '+15550170001',
+              fromLabel: 'Diana Osei',
+              body: 'new activity',
+              at: '2026-06-15T00:06:00.000Z',
+            },
+          ],
+          lastActivityAt: '2026-06-15T00:06:00.000Z',
+        },
       }),
     );
     expect(result.current.groupUnreadByPool['+15550160001']).toBe(1);

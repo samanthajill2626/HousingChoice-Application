@@ -178,6 +178,29 @@ describe('ContactsList', () => {
     expect(within(tasha).getByText(/tenant/i)).toBeInTheDocument();
   });
 
+  it('renders a PARTNER row on the All tab with its kind label, surviving the search filter', async () => {
+    // The widened fan-out (TYPES_FOR.all += partner, 2026-08-18) is only worth
+    // anything if the All tab actually SHOWS the row - this is the surface a
+    // human reads. See docs/issues/partner-widening-consumer-test-gap.md.
+    state = {
+      status: 'ready',
+      contacts: [
+        ...CONTACTS,
+        { contactId: 'c-partner', type: 'partner', firstName: 'Renata', lastName: 'Cole', phone: '+14040100010' },
+      ],
+    };
+    renderList('all');
+    const partner = screen.getByRole('link', { name: /Renata Cole/ });
+    expect(partner).toHaveAttribute('href', '/contacts/c-partner');
+    expect(within(partner).getByText(/partner/i)).toBeInTheDocument();
+
+    // And the client-side search does not drop the type.
+    await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'renata');
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByText(/Renata Cole/)).toBeInTheDocument();
+  });
+
   it('falls back to the formatted phone when a contact has no name', () => {
     state = { status: 'ready', contacts: CONTACTS };
     renderList('all');

@@ -3,11 +3,22 @@ id: settings-saved-selector-substring-collision
 title: Settings E2E Saved locator collides with explanatory copy
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e/settings
 created: 2026-08-21
+resolved: 2026-08-23
 refs: e2e/tests/dashboard-next/settings.spec.ts:70, e2e/tests/dashboard-next/settings.spec.ts:81, e2e/tests/dashboard-next/settings.spec.ts:161, dashboard/src/routes/settings/TemplatesSection.tsx:215
 ---
+
+**Resolution (2026-08-23, `fix/test-suite-wave3`).** Took the suggested fix at
+all three call sites: `page.getByRole('status').filter({ hasText: /^Saved$/ })`.
+Added the non-vacuity pin the substring version could never pass: BEFORE the
+first save, the spec now asserts that the colliding prose ("saved" in the
+Templates hint) IS on screen while the new locator matches NOTHING - so the
+badge assertion cannot be satisfied by anything except a real save, and a
+future locator that matches the hint fails the precondition immediately.
+Verified: 3 passed (25.8s), isolated run.
+
 
 **Problem.** The Settings admin E2E uses the substring locator
 `getByText('Saved')` after three template saves. The Templates hint now contains the

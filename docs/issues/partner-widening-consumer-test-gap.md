@@ -3,11 +3,39 @@ id: partner-widening-consumer-test-gap
 title: The partner widening has consumer coverage on only two of eight surfaces
 type: debt
 severity: low
-status: open
+status: resolved
 area: dashboard/contacts
 created: 2026-08-18
+resolved: 2026-08-24
 refs: dashboard/src/routes/contacts/useContacts.ts:57-70, dashboard/src/routes/shared/PeopleCard.tsx:732
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`).** Five of the six uncovered
+surfaces now assert a partner through THEIR OWN rendering and filtering, each
+against a type-keyed mock so the test fails if the fan-out stops requesting
+partners OR the surface drops the row:
+
+- `PeopleCard` (first, per this issue's own ordering - the dropdown that ends
+  in a live send): a partner is searchable, pickable, and lands in
+  `addTourRosterMember`.
+- `ConversationDetail`: the group add-member search offers the partner and
+  posts it with the resolved primary phone - the suite's default mock answered
+  the tenant fan-out only, exactly as this issue described.
+- `ContactsList`: the All tab renders the partner row with its kind label and
+  the client-side search keeps it.
+- `ToursPage` + `ListingDetail`: both use the list as an id->name map, so the
+  assertion is resolution - a row pointing at a partner contact shows the name
+  and never the raw id.
+
+The sixth (`EmailTriage.tsx:238`, the link-to-contact picker) has NO component
+suite to add a fixture to - that is a whole-surface coverage gap, not a
+partner-specific one, and building the suite exceeds this issue's "add a
+fixture to the existing suites" scope. Carried instead as one line here: when
+an EmailTriage component suite exists, give it the same type-keyed partner
+fixture.
+
+2544/2544 across the dashboard workspace.
+
 
 **Problem.** `TYPES_FOR.all` (and `TYPES_FOR.deleted`) gained `'partner'` on the
 contact-create-relay-group branch, so a partner - a caseworker or agency contact

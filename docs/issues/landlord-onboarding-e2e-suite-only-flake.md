@@ -3,11 +3,23 @@ id: landlord-onboarding-e2e-suite-only-flake
 title: landlord-onboarding "unit available" step fails in the full e2e suite but passes alone
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-17
+resolved: 2026-08-24
 refs: e2e/tests/scenarios/landlord-onboarding.spec.ts:95, e2e/scenarios/steps.ts:1559, dashboard/src/routes/listing/ListingDetail.tsx:742
 ---
+
+**Resolution (2026-08-24): a degraded-era artifact that has never recurred.**
+One sighting, 2026-08-17 - inside the window when the 8-day DynamoDB Local
+container was degrading every suite (measured 2026-08-23: 116 leaked tables,
+607s/9-fail vs 65s/0 on a clean key). A 5s render budget on a
+"Voucher size accepted" section is tight only on a starved machine. Zero
+recurrences across 10+ full runs since the container hygiene fixes, including
+two heavily contended runs on 2026-08-24. REOPEN IF the same section-render
+assert times out again on a machine that is not running a second full suite;
+if it does, raise evidence per this issue's own bar (run counts, not one red).
+
 
 **Measurement (2026-08-23, `fix/test-hardening-wave2`).** Did NOT reproduce.
 Two full `npm run e2e` runs on the same commit: 251 passed / 2 failed (21.5m)

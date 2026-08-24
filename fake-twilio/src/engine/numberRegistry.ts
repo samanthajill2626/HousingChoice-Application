@@ -14,6 +14,12 @@ export interface NumberRecord {
   sid: string;
   smsUrl?: string;
   voiceUrl?: string;
+  /**
+   * The Messaging Service this number is attached to as an A2P sender, if any
+   * (the post-buy `attachToMessagingService` step). One service per number -
+   * that is Twilio's own rule (error 21710 on a duplicate attach).
+   */
+  messagingServiceSid?: string;
 }
 
 export interface ProvisionOpts {
@@ -66,6 +72,41 @@ export class NumberRegistry {
     if (!existing) throw new Error(`setWebhooks: ${number} is not a provisioned pool number`);
     if (urls.smsUrl !== undefined) existing.smsUrl = urls.smsUrl;
     if (urls.voiceUrl !== undefined) existing.voiceUrl = urls.voiceUrl;
+  }
+
+  /**
+   * Attach a purchased number to a Messaging Service as an A2P sender - the
+   * fake of `messaging.v1.services(svc).phoneNumbers.create(...)`, the step
+   * `warmOneNumber` finishes every buy with. Until 2026-08-23 this endpoint
+   * did not exist, so every hermetic warm buy died post-purchase with a
+   * swallowed 404 job failure (docs/issues/fake-twilio-messaging-attach-404.md).
+   *
+   * Outcomes mirror the real service's contract, because the adapter branches
+   * on them: 'already' maps to Twilio error 21710, which
+   * attachToMessagingService treats as idempotent success.
+   */
+  attachToMessagingService(
+    serviceSid: string,
+    phoneNumberSid: string,
+  ): { outcome: 'attached' | 'already' | 'unknown_sid'; record?: NumberRecord } {
+    const record = this.getBySid(phoneNumberSid);
+    if (!record) return { outcome: 'unknown_sid' };
+    if (record.messagingServiceSid !== undefined) return { outcome: 'already', record };
+    record.messagingServiceSid = serviceSid;
+    return { outcome: 'attached', record };
+  }
+
+  /** Detach by PN sid. False when the sid is unknown or not attached to `serviceSid`. */
+  detachFromMessagingService(serviceSid: string, phoneNumberSid: string): boolean {
+    const record = this.getBySid(phoneNumberSid);
+    if (!record || record.messagingServiceSid !== serviceSid) return false;
+    delete record.messagingServiceSid;
+    return true;
+  }
+
+  /** Every number currently attached to `serviceSid` (the detach path's list-by-E.164). */
+  listAttachedToMessagingService(serviceSid: string): NumberRecord[] {
+    return [...this.byNumber.values()].filter((r) => r.messagingServiceSid === serviceSid);
   }
 
   get(number: string): NumberRecord | undefined {

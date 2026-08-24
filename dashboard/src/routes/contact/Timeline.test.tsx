@@ -625,10 +625,12 @@ describe('Timeline', () => {
   });
 
   // Prod 2026-08-24: a Verizon mobile delivered 10/10 texts the same week 6/6 of
-  // its MMS died 30005. "Number is invalid" on the picture bubble sent staff
-  // chasing a number that works; the picture-message reading tells them to text
-  // a link instead. The SAME code on a TEXT bubble still means the number is bad.
-  it('reads a 30005 on a PICTURE message as a carrier MMS limit, not an invalid number', () => {
+  // its MMS died 30005. "Number is invalid" on the attachment bubble sent staff
+  // chasing a number that works. The replacement is purely observational - it
+  // does not name a culprit (one prod case was a 72h expiry on an oversized
+  // payload, where nothing rejected anything) and does not promise texts work.
+  // The SAME code on a TEXT bubble still means the number is bad.
+  it('reads a 30005 on an ATTACHMENT as a delivery failure, not an invalid number', () => {
     const failedMms: TimelineItem = {
       ...MESSAGE_OUT,
       id: 'm-mms-fail',
@@ -640,7 +642,7 @@ describe('Timeline', () => {
     };
     renderTimeline({ items: [failedMms] });
     expect(
-      screen.getByText(/Undelivered - Carrier rejected the attachment - texts may still work \(error 30005\)/),
+      screen.getByText(/Undelivered - Attachment didn't get through, texts may still work \(error 30005\)/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Number is invalid/)).not.toBeInTheDocument();
   });
@@ -1028,7 +1030,7 @@ describe('Timeline relay-group annotations', () => {
     };
     renderTimeline({ items: [mmsOneFailed], relayRoster: ROSTER });
     const chip = screen.getByText(
-      /delivered 1\/2 - 1 failed - Carrier rejected the attachment - texts may still work \(error 30005\)/,
+      /delivered 1\/2 - 1 failed - Attachment didn't get through, texts may still work \(error 30005\)/,
     );
     expect(chip.className).toMatch(/toneDanger/);
     expect(screen.queryByText(/Number is invalid/)).not.toBeInTheDocument();

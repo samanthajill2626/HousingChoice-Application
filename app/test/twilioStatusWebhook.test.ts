@@ -413,19 +413,25 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(outbound.delayed).toHaveLength(0); // still never retried
       const warn = capture
         .atLevel(WARN)
-        .find((l) => String(l['msg']).includes('carrier rejected the attachment'));
+        .find((l) => String(l['msg']).includes('attachment did not get through'));
       expect(warn).toBeDefined();
       expect(warn?.['errorCode']).toBe('30005');
     });
 
-    it('30006 on an MMS leg STILL flags - "landline" is a line-type fact, true on any leg', async () => {
-      // The counterpart to the 30005 case above, and deliberately NOT symmetric
-      // with it. A landline receives neither SMS nor MMS, so 30006 reported on a
-      // picture leg is still a true statement about the line - and every 30006
-      // in the prod audit was a real landline. Scoping this one too would only
-      // lose landline detection when the first send to a number carries media,
-      // which is exactly the "texts can never reach them, call instead" case.
-      const { app, world } = makeWebhookHarness();
+    it('30006 on an MMS leg flags NOTHING TOO - "landline OR unreachable carrier" is a disjunction', async () => {
+      // Symmetric with the 30005 case above, and an earlier revision of this
+      // branch got it wrong. 30006 reads "landline or unreachable carrier";
+      // only the first half is a line-type fact, and "unreachable carrier" is
+      // message-type-specific because SMS and MMS traverse different
+      // interconnects. We have ZERO observations of a 30006 on an MMS leg -
+      // every 30006 in the prod audit came from an SMS leg - which is silence
+      // about this case, not evidence for it.
+      //
+      // Decided on the cost asymmetry: scoping loses at most one broadcast
+      // (every consumer of the flag sends text-only, so the next leg is SMS and
+      // flags a real landline then), while not scoping risks a permanent,
+      // invisible exclusion that nothing ever clears.
+      const { app, world, capture } = makeWebhookHarness();
       world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
       await seedOutbound(world, 'MMout0002', { type: 'mms' });
 
@@ -435,10 +441,32 @@ describe('POST /webhooks/twilio/status — transitions', () => {
         statusParams({ MessageSid: 'MMout0002', MessageStatus: 'undelivered', ErrorCode: '30006' }),
       );
 
+      expect(world.flagWrites).toHaveLength(0);
+      const owner = world.contacts.find((c) => c.contactId === 'contact-T')!;
+      expect(owner.sms_unreachable).toBeFalsy();
+      expect(outbound.delayed).toHaveLength(0);
+      const warn = capture
+        .atLevel(WARN)
+        .find((l) => String(l['msg']).includes('attachment did not get through'));
+      expect(warn?.['errorCode']).toBe('30006');
+    });
+
+    it('30006 on an SMS leg still flags - landline detection is unchanged', async () => {
+      // The path that actually catches landlines in prod: 5 of the 6 genuine
+      // sms_unreachable flags were HD Carrier landlines, all caught this way.
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+      await seedOutbound(world, 'SMland01');
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageSid: 'SMland01', MessageStatus: 'undelivered', ErrorCode: '30006' }),
+      );
+
       expect(world.flagWrites).toEqual([
         { contactId: 'contact-T', flag: 'sms_unreachable', value: true },
       ]);
-      expect(outbound.delayed).toHaveLength(0);
     });
 
     it('30005 on an ATTACHED SECONDARY number does NOT flag the owner sms_unreachable (number-scoped); the SAME on the PRIMARY does', async () => {

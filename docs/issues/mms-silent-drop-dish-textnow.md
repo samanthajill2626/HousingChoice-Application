@@ -150,13 +150,29 @@ is closed. It is NOT the fallback below:
   exclusion in `routes/broadcasts.ts` (lines 347 and 661) and
   `services/audienceResolution.ts` (line 141), and matching-property sends run
   through the same seeded broadcast pipeline, so the exposure covers both.
-  30005 is now MMS-scoped. **30006 deliberately is NOT** - "landline or
-  unreachable carrier" is a claim about the LINE TYPE, true whichever leg
-  reports it, and every 30006 in the prod audit was a real landline; scoping it
-  would only lose detection when a landline's first send happens to carry media.
-  Self-correcting for 30005: every consumer of the flag sends TEXT-ONLY, so a
-  number truly dead for SMS stays in the audience for at most one more
-  broadcast, and that leg is SMS.
+  **BOTH codes are now MMS-scoped**: a leg that carried media may never write
+  the flag.
+
+  An intermediate revision scoped only 30005, on the reasoning that 30006 is "a
+  claim about the LINE TYPE, true whichever leg reports it". That was wrong
+  twice over and is recorded here because the error is instructive. Twilio's
+  name for 30006 is "landline OR UNREACHABLE CARRIER" - a disjunction whose
+  second half is message-type-specific, since SMS and MMS traverse different
+  interconnects, which is this entire issue. And the supporting evidence
+  ("every 30006 in the prod audit was a real landline") was drawn entirely from
+  SMS legs: the audit contains ZERO 30006-on-an-MMS-leg samples. That is
+  silence about the case being decided, read as confirmation of it - the same
+  fallacy this document's mechanism paragraph exists to warn against.
+
+  The decision rests on cost asymmetry, not on a claim about what 30006 means.
+  Scoping costs at most ONE broadcast: every consumer of the flag sends
+  TEXT-ONLY, so a landline that slips through is flagged by its next leg, which
+  is SMS - and non-tenants are excluded by those same fences anyway, so the flag
+  never mattered for them. NOT scoping risks a permanent, invisible false
+  exclusion, because nothing ever clears `sms_unreachable` and it has no
+  contact-page surface (option 3 below). A recoverable miss beats an
+  unrecoverable false positive. Landline detection in practice is unchanged:
+  all 6 genuine flags came from SMS legs.
 - **Prod audit and cleanup.** 8 contacts carried `sms_unreachable`; 6 were
   genuine (5 landlines and a non-fixed VoIP line, all caught on SMS legs, all
   with zero delivered SMS ever). 2 were false positives written by an MMS 30005
@@ -171,12 +187,16 @@ is closed. It is NOT the fallback below:
   broadcast; the incident did not happen. Case 3's flag stood ~4 days, case 4's
   ~2.
 - `dashboard/src/routes/contact/deliveryStatus.ts` read 30005 as "Number is
-  invalid" on an attachment bubble, which sends staff chasing a working number.
-  An MMS leg now reads "Carrier rejected the attachment - texts may still work".
-  The hedge is deliberate: 30005 still fires for a genuinely dead number, so a
-  first-ever send that happens to carry an attachment must not leave staff
-  believing the number takes texts. "Attachment", not "picture", because MMS
-  here also carries PDFs.
+  invalid" and 30006 as "That number is a landline" on an attachment bubble,
+  which sends staff chasing a working number. On an MMS leg BOTH now read
+  "Attachment didn't get through, texts may still work" - matching the server
+  arm, which refuses to trust either code from that leg; a chip confidently
+  naming a cause the server just declined to believe would contradict it. On an
+  SMS leg both keep their original readings. The copy is purely observational:
+  it does not say "carrier rejected" (case 4 was a 72h expiry where nothing
+  rejected anything, and two candidate mechanisms put the failure at an
+  aggregator) and does not promise texts work (30005 still fires for a genuinely
+  dead number). "Attachment", not "picture", because MMS here also carries PDFs.
 - `app/src/jobs/broadcastFanOut.ts` has the same arm and was deliberately LEFT
   ALONE: broadcast sends pass no media, so its legs are always SMS. Carries a
   `TODO(mms-silent-drop-dish-textnow):` marker, because per-recipient media on
@@ -215,9 +235,10 @@ is closed. It is NOT the fallback below:
      `sms_unreachable`; `voice_opt_out` is a separate staff-set do-not-call flag
      (`app/src/repos/contactsRepo.ts`). So a landline-flagged contact stays
      callable - the right outcome, but nobody decided it.
-   - **The "prompt voice" half does not exist.** That phrase appears in three
-     comments (`contactsRepo.ts`, `broadcastFanOut.ts` x2) and nowhere else. No
-     badge, no composer note, no Today item, nothing suggests calling.
+   - **The "prompt voice" half does not exist.** That phrase appears in four
+     comments (`repos/contactsRepo.ts`, `jobs/broadcastFanOut.ts` x2,
+     `routes/webhooks/twilio.ts`) and in no executable code anywhere. No badge,
+     no composer note, no Today item, nothing suggests calling.
    - **1:1 texting is not gated either.** `services/sendMessage.ts` refuses only
      on `sms_opt_out`. So staff can sit on a known landline's contact page
      texting into the void indefinitely, watch each send fail, and never be told

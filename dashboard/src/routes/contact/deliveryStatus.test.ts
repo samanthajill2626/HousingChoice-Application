@@ -103,7 +103,7 @@ describe('presentRelayDelivery', () => {
       label: 'delivered 1/2 - 1 failed',
       tone: 'danger',
       isFailure: true,
-      reason: 'Carrier rejected the attachment - texts may still work (error 30005)',
+      reason: "Attachment didn't get through, texts may still work (error 30005)",
     });
   });
 
@@ -160,19 +160,26 @@ describe('deliveryReason', () => {
   // does mean the number is bad.
   it('reads 30005 as an attachment failure on an MMS leg, and as a bad number on an SMS leg', () => {
     expect(deliveryReason('30005', { media: true })).toBe(
-      'Carrier rejected the attachment - texts may still work (error 30005)',
+      "Attachment didn't get through, texts may still work (error 30005)",
     );
     expect(deliveryReason('30005')).toBe('Number is invalid (error 30005)');
     expect(deliveryReason('30005', { media: false })).toBe('Number is invalid (error 30005)');
   });
 
-  // 30006 is deliberately NOT overridden: "landline or unreachable carrier" is a
-  // claim about the LINE TYPE, true whichever leg reports it, and the server-side
-  // twin (app/src/routes/webhooks/twilio.ts) trusts a 30006 from an MMS leg for
-  // exactly that reason. Overriding it here would make the two halves disagree.
-  it('leaves 30006 reading as a landline on an MMS leg - it is a line-type fact', () => {
-    expect(deliveryReason('30006', { media: true })).toBe('That number is a landline (error 30006)');
+  // 30006 is "landline OR unreachable carrier" - a disjunction whose second half
+  // is message-type-specific. On an attachment leg it does not establish a
+  // landline, and the server-side twin (app/src/routes/webhooks/twilio.ts)
+  // declines to write sms_unreachable from an MMS leg for either code. A chip
+  // confidently saying "landline" about a leg the server just refused to trust
+  // would contradict it and would stop staff texting a working number. On an SMS
+  // leg the landline reading stands - that is how every real landline in prod
+  // was caught.
+  it('hedges 30006 on an MMS leg, but keeps the landline reading on an SMS leg', () => {
+    expect(deliveryReason('30006', { media: true })).toBe(
+      "Attachment didn't get through, texts may still work (error 30006)",
+    );
     expect(deliveryReason('30006')).toBe('That number is a landline (error 30006)');
+    expect(deliveryReason('30006', { media: false })).toBe('That number is a landline (error 30006)');
   });
 
   it('leaves every OTHER code alone on an MMS leg', () => {

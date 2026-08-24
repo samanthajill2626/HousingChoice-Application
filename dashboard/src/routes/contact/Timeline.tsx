@@ -580,9 +580,11 @@ function MessageBubble({
   const delivery = outbound
     ? presentDeliveryStatus(msg.delivery_status, msg.imported === true ? undefined : Date.parse(msg.at))
     : null;
-  // `media` scopes the reason copy to the leg that actually failed: a carrier
-  // with no MMS record for a line rejects the picture with 30005 while routing
-  // every text fine, so a picture bubble must not read "Number is invalid".
+  // `media` scopes the reason copy to the leg that actually failed: a 30005 on
+  // an attachment is routinely an MMS-path failure to a line whose texts all
+  // deliver, so an attachment bubble must not read "Number is invalid". WHERE
+  // that path breaks is deliberately unnamed - see
+  // docs/issues/mms-silent-drop-dish-textnow.md.
   const isMms = msg.type === 'mms';
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code, { media: isMms }) : undefined;
 

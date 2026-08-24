@@ -181,19 +181,31 @@ const ERROR_CODE_REASONS: Record<string, string> = {
  * mobile deliver 10/10 texts the same week 6/6 of its MMS died 30005 - so the
  * generic "Number is invalid" sends staff chasing a working number.
  *
- * The copy deliberately states only what we OBSERVED and hedges the rest: 30005
- * still fires for a genuinely dead number, so a first-ever send that happens to
- * be an attachment must not leave staff believing the number takes texts. It
- * says "attachment", not "picture", because MMS here also carries PDFs
+ * The copy is PURELY OBSERVATIONAL and hedged on purpose. It does not say
+ * "carrier rejected": one documented prod case (case 4 in the issue) produced
+ * this same 30005 from a 72h validity-period EXPIRY on an oversized payload,
+ * where nothing rejected anything and the right action was "send fewer files",
+ * and two of the candidate mechanisms put the failure at an aggregator rather
+ * than the carrier. It does not promise texts work either: 30005 still fires for
+ * a genuinely dead number, so a first-ever send that happens to carry an
+ * attachment must not leave staff believing the number takes texts. And it says
+ * "attachment", not "picture", because MMS here also carries PDFs
  * (MMS_ALLOWED_TYPES in Timeline.tsx).
  *
- * 30006 is deliberately ABSENT: "landline or unreachable carrier" is a claim
- * about the line type, true whichever leg reports it, and the server-side twin
- * (app/src/routes/webhooks/twilio.ts) trusts it from an MMS leg for that reason.
- * Adding it here would contradict that arm.
+ * 30006 gets the SAME copy, and for the same reason. Its Twilio name is
+ * "landline OR unreachable carrier" - a disjunction whose second half is
+ * message-type-specific - so on an attachment leg it does NOT establish that
+ * the number is a landline. The server-side twin
+ * (app/src/routes/webhooks/twilio.ts) declines to write `sms_unreachable` from
+ * an MMS leg for either code, and a chip confidently reading "That number is a
+ * landline" about a leg the server just refused to trust would contradict it,
+ * and would stop staff texting a number that may well work. On an SMS leg 30006
+ * keeps its landline reading, which is how every real landline in prod was
+ * caught.
  */
 const MMS_ERROR_CODE_REASONS: Record<string, string> = {
-  '30005': 'Carrier rejected the attachment - texts may still work',
+  '30005': "Attachment didn't get through, texts may still work",
+  '30006': "Attachment didn't get through, texts may still work",
 };
 
 /** Whether the failing leg carried media - an MMS bubble or a relay MMS rollup. */

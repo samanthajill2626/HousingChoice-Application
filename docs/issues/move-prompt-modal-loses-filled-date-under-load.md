@@ -3,11 +3,33 @@ id: move-prompt-modal-loses-filled-date-under-load
 title: The Schedule-inspection move prompt lost a filled date between fill and confirm - a user typing when a live tick lands would lose it too
 type: bug
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-24
+resolved: 2026-08-24
 refs: dashboard/src/routes/placements/MovePromptModal.tsx:190, dashboard/src/routes/placements/PlacementDetail.tsx:719, e2e/scenarios/steps.ts:3544, e2e/tests/scenarios/approval-and-move-in.spec.ts:223
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`, same day).** Fixed
+TRIGGER-INDEPENDENTLY, which matters because the trigger was never proven: the
+typed drafts now live in a parent-owned ref (`draftStore` on MovePromptModal,
+wired from PlacementDetail's `moveDraftRef`), read by the state initializers
+and written through by the setters, reset only when a NEW prompt opens. Any
+remount of the modal subtree - whatever causes it - restores exactly what the
+human had typed, for all four gated fields.
+
+Pinned three ways in MovePromptModal.test.tsx (13/13; placements suite
+241/241): the filled date survives a driven unmount+remount and still
+confirms; the same remount WITHOUT a store loses it (the negative control that
+proves the survival comes from the store); and a draft WINS over the recorded
+prefill after a remount.
+
+Likely-trigger note: the same day's keep-alive hardening (app server + Vite
+dev server, see `app-server-default-keepalive-timeout`) removed the strongest
+known cause of hung/reset requests under suite load - the sibling stuck-at-
+Loading failures in this spec family had exactly that shape. If the date loss
+had a different trigger, the draft store defuses it anyway.
+
 
 **Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
 :223 failed AGAIN in the re-run, but at an EARLIER step ('App: placement is at Awaiting inspection') with a plain-timeout shape - slowness, not necessarily the input-loss mechanism. Keep the two signatures separate when tallying: the empty-field-with-open-dialog snapshot from run 1 is the input-loss evidence; this one is load.

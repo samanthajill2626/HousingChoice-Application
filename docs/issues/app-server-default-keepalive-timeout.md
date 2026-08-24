@@ -3,11 +3,41 @@ id: app-server-default-keepalive-timeout
 title: The app's Express server runs at Node's 5s keepAliveTimeout - the same stalled-client ECONNRESET exposure the fake just fixed, and a known 502 source behind load balancers
 type: bug
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-08-24
+resolved: 2026-08-24
 refs: app/src/index.ts, fake-twilio/src/server.ts
 ---
+
+**Resolution (2026-08-24, `fix/test-suite-wave3`).** Applied to BOTH servers
+the e2e stack fronts requests through:
+
+- the app server (`app/src/index.ts`): keepAliveTimeout 65s / headersTimeout
+  66s, set on the listen() return;
+- the Vite dev server (`dashboard/vite.config.ts`, a configureServer plugin):
+  same values - the browser and Playwright request contexts pool sockets to
+  Vite exactly the way the proxy pools to the app.
+
+The sizing question this issue deferred resolves without knowing the upstream:
+CloudFront's origin keep-alive idle default is 5s and an ALB's is 60s, so 65s
+satisfies origin-outlives-upstream against EITHER - the rule is strict
+inequality, and Node's old 5s default TIED CloudFront's 5s, which is the racy
+configuration. No terraform change involved; this is app-process behaviour.
+
+Immediate motivation beyond prophylaxis: two gate failures (2026-08-23 :318,
+2026-08-24 :258) whose preserved snapshots showed the placement page stuck at
+`status "Loading"` for a full 30s test budget - a hung bundle fetch under
+two-suite load, the exact symptom a proxy writing into a FINned keep-alive
+socket produces. `pickPlacementStage` now also names that phase explicitly
+(waits for the header with its own message) so a recurrence says "the page was
+still Loading", never "a button would not click".
+
+Not re-proven by a dedicated A/B here: the mechanism itself was reproduced 3/3
+vs 0/3 against the fake-twilio server the same day with the identical values
+(see `fake-twilio-control-econnreset-under-suite-load`); these two servers get
+the same physics.
+
 
 **Problem.** While fixing
 [`fake-twilio-control-econnreset-under-suite-load`](./fake-twilio-control-econnreset-under-suite-load.md)

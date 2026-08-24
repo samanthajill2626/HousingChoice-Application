@@ -112,6 +112,24 @@ const app = runWithContext(bootContext, () =>
   buildApp({ config, devRouter, auth: { sessionEpochCache } }),
 );
 
+// Keep-alive sockets must OUTLIVE whatever sits in front of this server, so
+// this side never FINs a connection the other side is about to reuse. At
+// Node's 5s default that race is live on every front-end we have:
+//   - hermetic/e2e + local dev: the Vite dev proxy pools sockets to this
+//     server, and a stalled client loop under suite load writes into a
+//     FINned socket -> reset -> requests that hang or die with no app log
+//     (the mechanism reproduced 3/3 against the fake-twilio server on
+//     2026-08-24; docs/issues/fake-twilio-control-econnreset-under-suite-load.md
+//     has the A/B numbers).
+//   - deployed: CloudFront's origin keep-alive idle default is 5s and an
+//     ALB's is 60s - equal-or-shorter origin timeouts are the classic
+//     intermittent-502 configuration. 65s clears BOTH upstreams with margin,
+//     satisfying origin-outlives-upstream without caring which one fronts us.
+// headersTimeout must exceed keepAliveTimeout (Node's documented rule).
+// See docs/issues/app-server-default-keepalive-timeout.md.
+const KEEP_ALIVE_TIMEOUT_MS = 65_000;
+const HEADERS_TIMEOUT_MS = 66_000;
+
 const server = runWithContext(bootContext, () =>
   app.listen(config.port, () => {
     // Resolved outbound-comms config on the boot line so "why didn't it send" is
@@ -130,6 +148,8 @@ const server = runWithContext(bootContext, () =>
     );
   }),
 );
+server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+server.headersTimeout = HEADERS_TIMEOUT_MS;
 
 function shutdown(signal: NodeJS.Signals): void {
   runWithContext(bootContext, () => {

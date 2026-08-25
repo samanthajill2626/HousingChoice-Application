@@ -43,6 +43,7 @@ function fakeSeam(
   describeAlarms: ReturnType<typeof vi.fn>;
   queryInsights: ReturnType<typeof vi.fn>;
   getLogRecord: ReturnType<typeof vi.fn>;
+  queryTrace: ReturnType<typeof vi.fn>;
 } {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
@@ -54,6 +55,9 @@ function fakeSeam(
           responseTruncated: false,
           logGroup: deployedConfig().errorLogGroupName,
         })),
+    ),
+    queryTrace: vi.fn(
+      impl.queryTrace ?? (async () => ({ lines: [], truncatedBefore: false, truncatedAfter: false })),
     ),
   };
 }

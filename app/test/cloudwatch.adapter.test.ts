@@ -502,3 +502,162 @@ describe('cloudwatch adapter - getLogRecord', () => {
     expect(out.rawTextTruncated).toBe(true);
   });
 });
+
+describe('cloudwatch adapter - queryTrace', () => {
+  function traceSeam(beforeRows: unknown[], afterRows: unknown[]) {
+    const starts: StartQueryCommand[] = [];
+    // Every command in ISSUE ORDER, so a test can prove both queries are started
+    // before either poll runs (the parallel requirement).
+    const order: string[] = [];
+    const send = vi.fn(async (command: unknown) => {
+      if (command instanceof StartQueryCommand) {
+        starts.push(command);
+        order.push('StartQuery');
+        return { queryId: `q${starts.length}` };
+      }
+      order.push('GetQueryResults');
+      const id = (command as GetQueryResultsCommand).input.queryId;
+      return { status: 'Complete', results: id === 'q1' ? beforeRows : afterRows };
+    });
+    const seam = createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: { send } as never,
+    });
+    return { seam, starts, order };
+  }
+  const row = (iso: string) => [
+    { field: '@timestamp', value: iso },
+    { field: '@message', value: JSON.stringify({ level: 30, msg: 'x' }) },
+    { field: '@log', value: `9:${CONFIG.errorLogGroupName}` },
+  ];
+
+  it('uses a -5min bracket for correlationId and -30min for the cross-hop ids', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.000Z');
+    const a = traceSeam([], []);
+    await a.seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', atMs);
+    expect(a.starts[0]!.input.startTime).toBe(Math.floor((atMs - 5 * 60_000) / 1000));
+    const b = traceSeam([], []);
+    await b.seam.queryTrace([CONFIG.errorLogGroupName], 'pollRunId', 'p-1', atMs);
+    expect(b.starts[0]!.input.startTime).toBe(Math.floor((atMs - 30 * 60_000) / 1000));
+  });
+
+  it('splits at second granularity with DISJOINT windows - the anchor second is in BEFORE', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.500Z');
+    const { seam, starts } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', atMs);
+    const before = starts.find((s) => s.input.queryString!.includes('desc'))!;
+    const after = starts.find((s) => s.input.queryString!.includes('asc'))!;
+    expect(before.input.endTime).toBe(Math.floor(atMs / 1000));
+    expect(after.input.startTime).toBe(Math.floor(atMs / 1000) + 1);
+    expect(after.input.startTime!).toBeGreaterThan(before.input.endTime!);
+  });
+
+  it('merges ascending across the two sides', async () => {
+    const { seam } = traceSeam(
+      [row('2026-08-24 09:59:59.000'), row('2026-08-24 09:59:58.000')], // desc side
+      [row('2026-08-24 10:00:01.000')],
+    );
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    const times = out.lines.map((l) => l.timestamp);
+    expect([...times].sort()).toEqual(times);
+  });
+
+  it('flags per-side truncation when a side fills its budget', async () => {
+    const full = Array.from({ length: 25 }, () => row('2026-08-24 09:59:59.000'));
+    const { seam } = traceSeam(full, []);
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(out.truncatedBefore).toBe(true);
+    expect(out.truncatedAfter).toBe(false);
+  });
+
+  it('filters on the id kind, carries @log in fields, and looks 5 min ahead', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.500Z');
+    const { seam, starts } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName, CONFIG.workerLogGroupName], 'requestId', 'r-1', atMs);
+    expect(starts).toHaveLength(2);
+    for (const start of starts) {
+      expect(start.input.logGroupNames).toEqual([CONFIG.errorLogGroupName, CONFIG.workerLogGroupName]);
+      expect(start.input.queryString).toContain('fields @timestamp, @message, @log');
+      expect(start.input.queryString).toContain('filter requestId = "r-1"');
+      expect(start.input.queryString).toContain('limit 25');
+      expect(start.input.limit).toBe(25);
+    }
+    // The look-ahead is the same 5 min for every id kind; only the reach BACK varies.
+    const after = starts.find((s) => s.input.queryString!.includes('asc'))!;
+    expect(after.input.endTime).toBe(Math.ceil((atMs + 5 * 60_000) / 1000));
+  });
+
+  it('issues BOTH queries before either poll (parallel, not sequential)', async () => {
+    const { seam, order } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    // Sequential execution would interleave Start, Get, Start, Get.
+    expect(order).toEqual(['StartQuery', 'StartQuery', 'GetQueryResults', 'GetQueryResults']);
+  });
+
+  it('projects the diagnostic fields an INFO context line carries', async () => {
+    const line = [
+      { field: '@timestamp', value: '2026-08-24 09:59:59.250' },
+      {
+        field: '@message',
+        value: JSON.stringify({
+          level: 30,
+          msg: 'request completed',
+          method: 'POST',
+          path: '/api/messages',
+          statusCode: 500,
+          durationMs: 42,
+          jobName: 'send_message',
+          jobId: 'j-1',
+          hopCount: 2,
+        }),
+      },
+      { field: '@log', value: `9:${CONFIG.workerLogGroupName}` },
+    ];
+    const { seam } = traceSeam([line], []);
+    const out = await seam.queryTrace(
+      [CONFIG.errorLogGroupName, CONFIG.workerLogGroupName],
+      'requestId',
+      'r-1',
+      Date.parse('2026-08-24T10:00:00.000Z'),
+    );
+    expect(out.lines).toEqual([
+      {
+        timestamp: '2026-08-24T09:59:59.250Z',
+        level: 30,
+        message: 'request completed',
+        source: 'worker',
+        method: 'POST',
+        path: '/api/messages',
+        statusCode: 500,
+        durationMs: 42,
+        jobName: 'send_message',
+        jobId: 'j-1',
+        hopCount: 2,
+      },
+    ]);
+  });
+
+  it('degrades an unparseable line at level 30 (an INFO timeline, not the list path 50)', async () => {
+    const line = [
+      { field: '@timestamp', value: '2026-08-24 09:59:59.000' },
+      { field: '@message', value: 'FATAL ERROR: Reached heap limit' },
+      { field: '@log', value: `9:${CONFIG.systemLogGroupName}` },
+    ];
+    const { seam } = traceSeam([line], []);
+    const out = await seam.queryTrace(
+      [CONFIG.errorLogGroupName],
+      'correlationId',
+      'c-1',
+      Date.parse('2026-08-24T10:00:00.000Z'),
+    );
+    expect(out.lines).toEqual([
+      {
+        timestamp: '2026-08-24T09:59:59.000Z',
+        level: 30,
+        message: '(unparseable log line)',
+        source: 'system',
+      },
+    ]);
+  });
+});

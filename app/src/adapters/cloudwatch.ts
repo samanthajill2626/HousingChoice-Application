@@ -201,6 +201,57 @@ export interface LogRecordView {
   logGroup: string;
 }
 
+/** Which correlation id a trace pivots on. All three are minted as randomUUID(). */
+export type TraceIdKind = 'correlationId' | 'requestId' | 'pollRunId';
+
+/**
+ * One line of a correlation trace: an INTERLEAVED app+worker timeline around a
+ * failure, so most of its lines are ordinary INFO context rather than errors.
+ * That is why this is not an ErrorEventView - the list projection drops exactly
+ * the fields a context line carries.
+ *
+ * ACCESSOR SHAPE: like the LIST path and UNLIKE the detail path, this parses the
+ * raw `@message` JSON, where `err` is a NESTED object. Never conflate the two.
+ */
+export interface TraceLineView {
+  /** ISO 8601 of the log event. */
+  timestamp: string;
+  /** pino numeric level; 30 (info) when the line carried none. */
+  level: number;
+  /** The log's short message. */
+  message: string;
+  /** Which configured log group emitted the line. REQUIRED, never null. */
+  source: ErrorSource;
+  /** Request-line context (pino `method`/`path`/`statusCode`/`durationMs`). */
+  method?: string | null;
+  path?: string | null;
+  statusCode?: number | null;
+  durationMs?: number | null;
+  /** Job context (pino `jobName`/`jobId`/`hopCount`) on the worker side. */
+  jobName?: string | null;
+  jobId?: string | null;
+  hopCount?: number | null;
+}
+
+/** A merged trace: ascending lines plus a truncation flag for EACH side. */
+export interface TraceResult {
+  /** Ascending by timestamp, at most 2 x TRACE_SIDE_LIMIT lines. */
+  lines: TraceLineView[];
+  /** True when the BEFORE side filled its budget - earlier lines exist. */
+  truncatedBefore: boolean;
+  /** True when the AFTER side filled its budget - later lines exist. */
+  truncatedAfter: boolean;
+}
+
+/** Trace row budget PER SIDE of the anchor (50 max merged). */
+export const TRACE_SIDE_LIMIT = 25;
+/** correlationId reach-back: one job run, local. */
+const BRACKET_TIGHT_MS = 5 * 60_000;
+/** requestId / pollRunId reach-back - the cross-hop ids (see queryTrace). */
+const BRACKET_WIDE_MS = 30 * 60_000;
+/** Look-ahead, the same for every kind: nothing wanted is 30 min AFTER a failure. */
+const BRACKET_AHEAD_MS = 5 * 60_000;
+
 /** The narrow surface the systemStatus service depends on. */
 export interface CloudWatchClientSeam {
   /** DescribeAlarms filtered by AlarmNamePrefix → mapped alarm views. */
@@ -220,6 +271,15 @@ export interface CloudWatchClientSeam {
    * check `logGroup` against the configured groups before returning it.
    */
   getLogRecord(ref: string): Promise<LogRecordView>;
+  /**
+   * The lines around ONE failure: every log line carrying `id` for the chosen
+   * id kind, anchored on the failing row's own timestamp `atMs` (epoch ms) and
+   * merged ASCENDING. Two Insights queries with OPPOSITE sorts run in parallel
+   * over disjoint windows - see the implementation for why either half alone is
+   * wrong. `id` is interpolated into the query string, so the CALLER must have
+   * validated it (the service does, before this is ever reached).
+   */
+  queryTrace(groups: string[], kind: TraceIdKind, id: string, atMs: number): Promise<TraceResult>;
 }
 
 /** Map a CloudWatch StateValue to the three-value view enum. */
@@ -342,6 +402,61 @@ export function projectErrorEvent(
 }
 
 /**
+ * Project one Insights result ROW to a trace line.
+ *
+ * ACCESSOR SHAPE: like the LIST path and UNLIKE the detail path, this parses the
+ * raw `@message` JSON, so `err` is a NESTED object here.
+ *
+ * The level default is 30 (info), NOT the list path's 50: a trace is mostly
+ * context lines, and calling an unparseable one an error would misread the
+ * timeline. Fields are shared with projectErrorEvent (`sourceOf`, `str`,
+ * `parseInsightsTimestamp`) so the two paths cannot drift apart.
+ */
+function traceLine(row: { field?: string; value?: string }[], config: AppConfig): TraceLineView {
+  let raw = '';
+  let tsValue: string | undefined;
+  let atLog: string | undefined;
+  for (const cell of row) {
+    if (cell.field === '@message') raw = cell.value ?? '';
+    else if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
+    else if (cell.field === '@log') atLog = cell.value ?? undefined;
+  }
+  const timestamp = new Date(parseInsightsTimestamp(tsValue)).toISOString();
+  const source = sourceOf(atLog, config);
+  let parsed: Record<string, unknown>;
+  try {
+    const p: unknown = JSON.parse(raw);
+    if (typeof p !== 'object' || p === null) throw new Error('not an object');
+    parsed = p as Record<string, unknown>;
+  } catch {
+    return { timestamp, level: 30, message: '(unparseable log line)', source };
+  }
+  const err =
+    typeof parsed['err'] === 'object' && parsed['err'] !== null
+      ? (parsed['err'] as Record<string, unknown>)
+      : undefined;
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  return {
+    timestamp,
+    level: typeof parsed['level'] === 'number' ? parsed['level'] : 30,
+    message:
+      str(parsed['msg']) ??
+      str(parsed['message']) ??
+      str(parsed['event']) ??
+      (err !== undefined ? str(err['message']) : str(parsed['err'])) ??
+      '(unparseable log line)',
+    source,
+    method: str(parsed['method']),
+    path: str(parsed['path']),
+    statusCode: num(parsed['statusCode']),
+    durationMs: num(parsed['durationMs']),
+    jobName: str(parsed['jobName']),
+    jobId: str(parsed['jobId']),
+    hopCount: num(parsed['hopCount']),
+  };
+}
+
+/**
  * Parse an Insights @timestamp value ("YYYY-MM-DD HH:MM:SS.mmm" UTC, no zone
  * marker) to epoch ms. Falls back to Date.now() if absent or unparseable.
  */
@@ -404,6 +519,66 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
   const cw = deps.cloudwatch ?? new CloudWatchClient(boundedClientConfig(config.awsRegion));
   const logs = deps.logs ?? new CloudWatchLogsClient(boundedClientConfig(config.awsRegion));
 
+  /**
+   * StartQuery -> poll GetQueryResults -> RAW rows. Shared by every Insights
+   * read here, unchanged from the single-caller original: at most
+   * INSIGHTS_MAX_POLLS x INSIGHTS_POLL_INTERVAL_MS of waiting, then a
+   * best-effort StopQuery and a throw so the service degrades.
+   *
+   * The CALLER owns the query string and BOTH bounds, which are epoch SECONDS -
+   * the list and trace paths deliberately do not share a window convention
+   * (the trace splits on an inclusive second boundary; the list does not).
+   */
+  async function runInsights(
+    logGroupNames: string[],
+    queryString: string,
+    startTimeSec: number,
+    endTimeSec: number,
+    limit: number,
+  ): Promise<{ field?: string; value?: string }[][]> {
+    const startOut = await logs.send(
+      new StartQueryCommand({
+        logGroupNames,
+        startTime: startTimeSec,
+        endTime: endTimeSec,
+        queryString,
+        limit,
+      }),
+    );
+
+    const queryId = startOut.queryId;
+    if (!queryId) throw new Error('Insights StartQuery returned no queryId');
+
+    // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
+    for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {
+      if (poll > 0) {
+        await delay(INSIGHTS_POLL_INTERVAL_MS);
+      }
+      const result = await logs.send(new GetQueryResultsCommand({ queryId }));
+      const status = result.status;
+
+      if (status === 'Complete') {
+        // Each row is an array of { field, value } objects; the projections read
+        // @ptr and @log off it too, so WHOLE rows go back to the caller.
+        return (result.results ?? []).slice(0, limit);
+      }
+
+      if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {
+        throw new Error(`Insights query ${queryId} ended with status: ${status}`);
+      }
+
+      // 'Scheduled' | 'Running' - keep polling
+    }
+
+    // Budget exhausted - best-effort cleanup then degrade.
+    try {
+      await logs.send(new StopQueryCommand({ queryId }));
+    } catch {
+      // Ignore StopQuery errors - we're already in a degraded path.
+    }
+    throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
+  }
+
   return {
     async describeAlarms(prefix) {
       const out = await cw.send(new DescribeAlarmsCommand({ AlarmNamePrefix: prefix }));
@@ -421,48 +596,14 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       const queryString = `fields @timestamp, @message, @ptr, @log | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
 
       // CRITICAL: Insights StartQuery uses epoch SECONDS, not milliseconds.
-      const startOut = await logs.send(
-        new StartQueryCommand({
-          logGroupNames,
-          startTime: Math.floor(sinceMs / 1000),
-          endTime: Math.ceil(Date.now() / 1000),
-          queryString,
-          limit,
-        }),
+      const rows = await runInsights(
+        logGroupNames,
+        queryString,
+        Math.floor(sinceMs / 1000),
+        Math.ceil(Date.now() / 1000),
+        limit,
       );
-
-      const queryId = startOut.queryId;
-      if (!queryId) throw new Error('Insights StartQuery returned no queryId');
-
-      // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
-      for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {
-        if (poll > 0) {
-          await delay(INSIGHTS_POLL_INTERVAL_MS);
-        }
-        const result = await logs.send(new GetQueryResultsCommand({ queryId }));
-        const status = result.status;
-
-        if (status === 'Complete') {
-          const rows = result.results ?? [];
-          // Each row is an array of { field, value } objects; the projection
-          // reads @ptr and @log off it too, so the WHOLE row is passed.
-          return rows.map((row) => projectErrorEvent(row, config)).slice(0, limit);
-        }
-
-        if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {
-          throw new Error(`Insights query ${queryId} ended with status: ${status}`);
-        }
-
-        // 'Scheduled' | 'Running' — keep polling
-      }
-
-      // Budget exhausted — best-effort cleanup then degrade.
-      try {
-        await logs.send(new StopQueryCommand({ queryId }));
-      } catch {
-        // Ignore StopQuery errors — we're already in a degraded path.
-      }
-      throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
+      return rows.map((row) => projectErrorEvent(row, config));
     },
 
     async getLogRecord(ref) {
@@ -499,6 +640,46 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
         ...(rawText !== undefined && { rawText, rawTextTruncated }),
         responseTruncated: enforceBound(fields),
         logGroup: normalizeLogGroup(atLog),
+      };
+    },
+
+    async queryTrace(groups, kind, id, atMs) {
+      // The cross-hop ids reach BACKWARDS by construction: a job's failure can
+      // be ~8 min after its first attempt (SQS 120s visibility x 5 receives)
+      // and ~20 min from its enqueue. A tight symmetric bracket reaches none of
+      // that, which is the case pollRunId propagation exists to serve.
+      const back = kind === 'correlationId' ? BRACKET_TIGHT_MS : BRACKET_WIDE_MS;
+      const startSec = Math.floor((atMs - back) / 1000);
+      const endSec = Math.ceil((atMs + BRACKET_AHEAD_MS) / 1000);
+      // SECOND-GRANULARITY SPLIT. `at` is milliseconds; StartQuery is seconds,
+      // so a split exactly at `at` is inexpressible. Insights `endTime` is
+      // INCLUSIVE (measured), so giving BEFORE the anchor's whole second
+      // guarantees the anchor line is present, and starting AFTER at the NEXT
+      // second keeps the windows DISJOINT - no row appears twice, so no merge
+      // dedup rule is needed. Do NOT use ceil here: that overlaps by a second
+      // and returns the failure line itself from both queries.
+      const anchorSec = Math.floor(atMs / 1000);
+      const fields = 'fields @timestamp, @message, @log';
+      // `id` is validated UUID-shaped by the service before it reaches here.
+      const filter = `filter ${kind} = "${id}"`;
+      // OPPOSITE SORTS, because Insights applies `limit` INSIDE the sort: one
+      // ascending query returns the EARLIEST 25 rows of the bracket and can
+      // drop the failure out of its own trace (and one descending query drops
+      // everything after it).
+      //
+      // Parallel: each Insights poll has a bounded ~8s budget, so sequential
+      // would double the worst-case wait on a user-initiated click.
+      const [beforeRows, afterRows] = await Promise.all([
+        runInsights(groups, `${fields} | ${filter} | sort @timestamp desc | limit ${TRACE_SIDE_LIMIT}`, startSec, anchorSec, TRACE_SIDE_LIMIT),
+        runInsights(groups, `${fields} | ${filter} | sort @timestamp asc | limit ${TRACE_SIDE_LIMIT}`, anchorSec + 1, endSec, TRACE_SIDE_LIMIT),
+      ]);
+      return {
+        lines: [
+          ...beforeRows.map((r) => traceLine(r, config)).reverse(),
+          ...afterRows.map((r) => traceLine(r, config)),
+        ],
+        truncatedBefore: beforeRows.length >= TRACE_SIDE_LIMIT,
+        truncatedAfter: afterRows.length >= TRACE_SIDE_LIMIT,
       };
     },
   };

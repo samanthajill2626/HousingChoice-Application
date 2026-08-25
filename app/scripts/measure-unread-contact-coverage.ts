@@ -108,18 +108,30 @@ function selectEntry(conv: ConversationItem): { kind: string; contactId?: string
   const entries = conv.participants;
   if (!Array.isArray(entries) || entries.length === 0) return { kind: 'noParticipantsArray' };
 
+  // A row can carry BOTH keys: attachEmailToConversation stamps
+  // `participant_email` onto an existing PHONE thread by design. So this is a
+  // phone-then-email CHAIN, not a per-kind branch - which is how the two live
+  // readers already do it. Branching on kind would classify a dual-key row's
+  // resolvable contact as a miss and under-report coverage.
   const phone = conv.participant_phone;
   if (typeof phone === 'string' && phone !== '') {
     const hit = entries.find((p) => p.phone === phone);
-    if (hit === undefined) return { kind: 'noEntryForKey' };
-    return { kind: 'entry', contactId: hit.contactId };
+    if (hit !== undefined) return { kind: 'entry', contactId: hit.contactId };
+    // Fall through to the email rule rather than giving up: on a dual-key row
+    // the entry may be keyed the other way.
   }
 
-  // Email-only thread: the shape is `{contactId, phone: ''}` and there should be
-  // exactly one entry. More than one means we cannot pick, and the spec says
-  // fall back rather than guess - so it is counted as a miss, not as coverage.
-  if (entries.length > 1) return { kind: 'ambiguousEntries' };
-  return { kind: 'entry', contactId: entries[0]?.contactId };
+  const email = conv.participant_email;
+  const hasEmail = typeof email === 'string' && email !== '';
+  if (hasEmail || phone === undefined || phone === '') {
+    // Email side: the shape is `{contactId, phone: ''}` and there should be
+    // exactly one entry. More than one means we cannot pick, and the spec says
+    // fall back rather than guess - counted as a miss, not as coverage.
+    if (entries.length > 1) return { kind: 'ambiguousEntries' };
+    return { kind: 'entry', contactId: entries[0]?.contactId };
+  }
+
+  return { kind: 'noEntryForKey' };
 }
 
 const state = { scanExhausted: false, scanned: 0 };

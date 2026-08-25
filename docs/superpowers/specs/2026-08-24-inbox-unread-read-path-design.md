@@ -163,7 +163,9 @@ is largely unestablished:
   `captureContact` call sites (`twilio.ts:2187`, `voice.ts:606`). The claim in
   section 3 that capture precedes indexing is demonstrable for ONE path of six.
 - Capture failure is swallowed even where it runs.
-- There is no backfill. `app/src/scripts/` does not exist.
+- There is no backfill FOR THIS FIELD. (Draft 2 said "`app/src/scripts/` does not
+  exist" - a wrong-directory non-fact. `app/scripts/` holds four backfills,
+  including one for this very index, which is the pattern to follow.)
 - `contactId: ''` is a live steady-state class the importer can create on an
   established row - see
   [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
@@ -172,7 +174,20 @@ The question: of the 1:1 items the `byUnread` walk returns, what fraction carry
 a participant entry with a NON-EMPTY `contactId` that resolves to a live
 contact?
 
-**This slice is BLOCKED on a human decision, and saying so is the point.** Both
+**RESOLVED 2026-08-25: the human runs it and hands back the number.** The
+instrument now exists - `app/scripts/measure-unread-contact-coverage.ts`,
+read-only, PII-free, gated behind `--confirm` and an explicit `TABLE_PREFIX`. It
+is a SEPARATE script rather than a flag on `profile-inbox.ts`, deliberately:
+that harness is hard-gated to the local lane, and loosening the gate to reuse it
+would remove a guard that exists for good reasons. It implements 4.1.b condition
+1's selection rule rather than an easier one, and counts a non-empty
+`contactId` as coverage only when it RESOLVES. Its classification was verified
+against a synthetic fixture covering every bucket, including a dual-key row.
+
+The record of WHY this needed a ruling is kept below, because it is the reason
+the number will mean anything.
+
+**This slice was BLOCKED on a human decision, and saying so was the point.** Both
 round-2 reviewers independently found that draft 2's version could be satisfied
 while learning nothing. Three things were missing and only one is fixable by an
 engineer:
@@ -217,9 +232,19 @@ not a task.
 Resolve the contact from the `participants` entry already on the conversation
 item and batch through `contacts.getManyByIds`. Five conditions, none optional:
 
-1. **Select the entry by the ROW'S OWN participant key** - the phone for a phone
-   thread, the single entry for an email thread. Do NOT make `participants[0]` a
-   rule: `contactCapture.ts:164` states the opposite in the imperative ("never
+1. **Select the entry by a phone-then-email CHAIN, not a per-kind branch.**
+   Draft 3 said "the phone for a phone thread, the single entry for an email
+   thread", and review found that branches on a partition WHICH DOES NOT EXIST:
+   `attachEmailToConversation` stamps `participant_email` onto an existing PHONE
+   thread by design, and both live readers already handle it as an explicit
+   `findByPhone` then `findByEmail` chain. A per-kind branch has no rule for the
+   dual-key row and turns a resolvable contact into exactly the phantom
+   `unknown` row condition 2 exists to prevent - a new hole created by round 2's
+   fix for a different one.
+
+   So: try the entry matching `participant_phone`; if there is none and the row
+   carries an email, apply the email rule; only then call it a miss. Do NOT make
+   `participants[0]` a rule: `contactCapture.ts:164` states the opposite in the imperative ("never
    `participants[0]`: an entry for another phone is..."), and
    `conversationsRepo.ts:1354-1356` records the convention as "readers key on
    contactId FIRST". Both round-1 reviewers proposed reverting to `[0]`; that
@@ -260,8 +285,9 @@ item and batch through `contacts.getManyByIds`. Five conditions, none optional:
    "laziness" - it is that this preserves `scanPosition == last consumed item`,
    which is what the cursor is minted from. A fixed 100-key batch would keep the
    letter of the bound and LOSE ROWS.
-4. **Failed-batch semantics - OPEN, see section 8.** This is an
-   operator-visible product choice, not a builder's detail.
+4. **Failed-batch semantics - RULED, see section 8 decision 2: fall back to the
+   per-row lookup and keep the badge.** Never silently read a short response as
+   "these rows do not exist".
 5. **Attribution staleness - OPEN, see section 8.**
 
 Two remedies stay ruled out and must not be re-litigated: the per-collect memo
@@ -271,9 +297,13 @@ contact resolution (it re-creates the walk-stop class that makes the badge lie).
 `BatchGetItem` cannot read a GSI, which is why the old `findByPhones` was never
 buildable - but `getManyByIds` reads the base table by key and is fine.
 
-**Acceptance is round-trip COUNT, not wall-clock.** Local DynamoDB timings are
+**Acceptance is round-trip COUNT, not wall-clock** - local DynamoDB timings are
 emulator-bound. Assert call counts as `app/test/inboxFeed.test.ts` already does,
-on a realistic shape and on a residue-wall shape.
+on a realistic shape and on a residue-wall shape, to prove the MECHANISM. Those
+fixture tests cannot establish the SAVING, because they supply the very field
+production may lack; that is 4.1.a's job and this paragraph is subordinate to
+it. Draft 3 left the two statements contradicting each other in different
+sections.
 
 ### 4.2 mark-read-fanout-stale-gsi-skip (med, was high)
 
@@ -403,15 +433,32 @@ last raw item of a `more === false` page is SCANNED - before the visibility test
 bearing for this case and the proxy can be dropped on a proved basis rather than
 deleted on a hunch.
 
-Doing it at scan time also closes the residue draft 2 had written off as
-permanent: the invisible final item. That was the routine shape on this lagging
-index, not an edge case, so closing it is most of the value.
+**Draft 3 then claimed this also closes the invisible-final-item residue. It
+does not, and the claim is withdrawn.** On a cap break the generator's `return()`
+means the trailing invisible item is never SCANNED, and where the consumer is
+not capped the existing code already handles it - so the walk state is identical
+to draft 2's in every reachable case. The repair is still right; it just buys
+the exact-multiple case, not the residue. The residue stands open.
 
-Constraints the builder must respect, both from review: `scanExhausted` lives on
-the walk STATE and is not exposed on `CollectResult`, so "record it" is not a
-one-line change; and the two obvious escapes - dropping the guard outright, or
-adding a fifth contract member - are each forbidden elsewhere in this same
-section. The composed contract goes in writing before the code.
+**And draft 3 forbade its own repair.** It carried a constraint saying that
+dropping the `!capped` guard is "forbidden elsewhere in this section" - which
+was a round-2 CRITIQUE transcribed into the document as a RULE. Dropping that
+proxy IS the prescribed remedy here. That is the same two-correct-things-cancel
+accident one revision later, in the opposite direction, and it is worth naming
+because both instances came from folding review feedback too literally.
+
+**The premise the repair rests on, which nobody had stated:** consumption trails
+scanning by at most one item. That is what makes "the last raw item was scanned"
+a safe stand-in for "supply is exhausted". 4.1.b condition 3's look-ahead buffer
+is precisely the device that can break it - today it is safe only because the
+bound yields at most one candidate per consumed item. So: the invariant is named
+here, condition 3 cites it as its second reason, and whichever of the two slices
+lands second re-proves `consumedAll` AND the cursor position, not merely
+termination and budget. Draft 3's ordering note put the G-slice first, which
+would otherwise prove `consumedAll` in a tree that has no look-ahead in it yet.
+
+One real constraint remains: `scanExhausted` lives on the walk STATE and is not
+exposed on `CollectResult`, so "record it" is not a one-line change.
 
 The 100-item query-page boundary remains a narrower, genuine residue. Say it;
 do not claim it closed.
@@ -523,7 +570,7 @@ behaviour rather than assuming it survived. Given 4.1.a is blocked on decision
 | # | issue | sev | change |
 |---|---|---|---|
 | R1 | unread-deleted-contact-probed-twice-per-page | low | thread the collector's probe into hydration so the row builder reuses it. Lands with G2 - same function. TWO conditions: the carrier is keyed by `conversationId` (the collector evaluates PER THREAD, so a singular "probe result" is wrong), and it must NOT collapse "empty thread" into "read failed" - a cached absence becomes a fallback preview with no timestamp, which can never resurface, producing a drop classified as non-lagged and never retried. Corrected cost: removes ONE EXTRA read, not one of two |
-| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries. Both constants are module-private today, so a boundary test needs them exported - a real change, not a test-only one |
+| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries. Draft 3 said "both constants are module-private"; it is one of each pair - `MAX_INBOX_LIMIT` and `BADGE_COUNT_CAP` are exported, `SEEN_SET_MAX` and `UNREAD_QUERY_PAGE_SIZE` are not - so the export is a smaller change than stated, but still a real one |
 | R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. The floor's stated reason ("it stops `Limit: 0` reaching DynamoDB") is false for all three inbox branches. And once the `< 1` clause lands, the floor is UNREACHABLE DEAD CODE - draft 2 kept it on a corrected-but-still-wrong rationale. DELETE it with the clause, or keep it and say plainly it is defensive-only. Do not keep it with a reason. Retire the now-obsolete do-not-re-sync warning |
 | R4 | inbox-group-truncation-notice-not-reset | low | gate the notice on ready status, matching the shipped precedent 85 lines below it. Reproduction is All/Groups only - the server never sets the flag under `filter=unread`. Scope limit stated in place: this does NOT close the adjacent one-commit filter-change window, which is pre-existing and orthogonal |
 | R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. Two parts: **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - NOTE this part is a new proposal with no approved vehicle and needs its own go; **(B)** ride 4.1's read-through. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in |
@@ -620,9 +667,10 @@ WRITERS of `participants` on the conversation item:
 - The seed modules: `lib/seed/cast.ts`, `lean.ts`, `live.ts`, `matrix.ts`,
   `performance.ts`.
 
-There are further producers of `contactId: ''` beyond the importer. The builder
-enumerates them as part of the measurement in 4.1.a rather than trusting this
-list to be final - two drafts of it were wrong.
+There are further producers of `contactId: ''` beyond the importer. **Enumerating
+them is a STATIC CODE SWEEP and is NOT blocked on decision 6** - draft 3 folded
+it into 4.1.a, which transitively blocked a task that needs no data at all.
+It is its own item, startable now.
 
 **There IS a backfill pattern to follow, and draft 2 said there was not.** That
 claim was a wrong-directory non-fact: `app/src/scripts/` does not exist, but
@@ -636,13 +684,27 @@ its RANGE KEY is a mutation surface even though nothing here means to move it:
 `touchLastActivity` writes `last_activity_at` on every outbound send. A change
 to ordering or to the tie behaviour lands here first.
 
-READERS of `unread_flag` / `unread_count` - content-swept, comment-only matches
-removed: `lib/unreadFeed.ts`, `routes/inbox.ts`, `routes/today.ts`,
-`routes/contacts.ts`, **`routes/api.ts` - `GET /api/unread-counts`, which draft
-1 missed and which is exactly where 4.2's counter-only objection would
-surface**, `lib/markUnread.ts`, `lib/events.ts` (the SSE frame carries
-`unread_count`, and the contact detail view reads it), `webhooks/twilio.ts`,
-`webhooks/voice.ts`, `repos/conversationsRepo.ts`, and the seed modules.
+READERS of `unread_flag` / `unread_count` - **wrong a THIRD time in draft 3, by
+a third method.** Draft 3 listed `webhooks/twilio.ts` and `webhooks/voice.ts` as
+readers when their only content hits are `incrementUnread` CALLS - they are
+WRITERS, and they are precisely the six sites 4.1.a names as the coverage
+problem. The document set that test and then failed it. Corrected list:
+`lib/unreadFeed.ts`, `routes/inbox.ts`, `routes/today.ts`, `routes/contacts.ts`,
+**`routes/api.ts` - `GET /api/unread-counts`, which draft 1 missed and which is
+exactly where 4.2's counter-only objection would surface**, `lib/markUnread.ts`,
+`lib/events.ts` (the SSE frame carries `unread_count`, and the contact detail
+view reads it), `repos/conversationsRepo.ts`, and the seed modules.
+
+Also missing from the writer list and added: `groupConvert.ts`, which changes
+`contactId` VALUES and is the ONLY code anywhere that heals a `contactId: ''`.
+It heals group rosters only, so the 1:1 class does not shrink on its own - which
+is a direct input to decision 6.
+
+**Section 7 has now been wrong three times, by three different methods:** from
+recall, from a grep that swept comments, and from classifying a file by the
+attribute it mentions rather than by what it does with it. The lesson is not
+"sweep harder" - it is that this enumeration wants a mechanical check in the
+build, not another careful read.
 
 Note the two mark-read fan-out filters that 4.2 removes read `unread_count`, not
 `unread_flag`; draft 2 filed them under the wrong attribute. `resetUnread` has
@@ -655,7 +717,11 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
 
 ## 8. Open decisions - these need a human ruling before build
 
-1. **Contact-attribution staleness** (4.1 condition 5). RE-FRAMED after review:
+1. **Contact-attribution staleness** (4.1 condition 5). **This is a SOFT-DELETE
+   VISIBILITY rule, not a display preference** - review made that correction
+   twice and draft 3 failed to apply it, so it is stated plainly here: getting
+   this wrong does not mislabel a row, it decides whether a row the operator
+   should not see appears at all. Weigh it accordingly. RE-FRAMED after review:
    the first draft posed this on a contact-MERGE operation that does not exist
    in this repo, and on the wrong divergence pair. The badge and the unread page
    CANNOT diverge - both go through `collectUnreadRows`. What can diverge is the
@@ -663,11 +729,14 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
    number reassignment and the pointer-aware owner hop, not a merge. The stored
    `participants` value and the pointer can disagree; which one an operator
    should see is a product call.
-2. **Failed-batch semantics** (4.1 condition 4). PROMOTED from a builder detail:
-   this is operator-visible either way. A partial or failed `getManyByIds` can
-   surface as a 500 with no badge at all, or as rows silently attributed to the
-   wrong contact - or the fallback can absorb it at the cost of the round trips
-   the fix exists to save. That trade is not an engineer's to pick quietly.
+2. **RULED 2026-08-25: fall back and keep the badge.** On a short or failed
+   `getManyByIds`, resolve the affected rows through the existing per-row
+   lookup. The operator sees a correct badge and correct rows; the saving
+   disappears for that request only. This preserves today's behaviour exactly
+   when a read degrades, which is the property worth having. The alternatives
+   were a 500 with no badge (loud and wrong) and degrade-to-unknown (quiet and
+   wrong) - review's framing, and a better one than draft 2's "harsh versus
+   safe".
 3. **The form of the indeterminate marker** (G4) - dot, glyph, or restyled
    badge - subject to the hard constraint that it must not be a second sibling
    span carrying the word "unread". Note the blast radius is larger than first
@@ -682,15 +751,19 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
    BUILDER to confirm it. That is unactionable by a builder - it is a human
    item, and it is the one remaining unverified exposure for the counter-only
    class.
-6. **Where the 4.1.a coverage measurement is taken - BLOCKING that slice.** A
-   builder has no legitimate dataset: the hermetic lane is seeded and answers
-   with fixture coverage, dev and prod are off-limits under AGENTS.md, and the
-   local imported dataset is decision 5. The options are to run an extended
-   `profile-inbox` against real data yourself and hand over the number, to
-   authorise a specific read against a specific environment, or to drop the
-   coverage gate and build the read-through with its fallback while accepting
-   that the saving is unproven until it is observed in the wild. Each is
-   defensible; none is an engineer's to choose.
+6. **RULED 2026-08-25: the human runs the coverage measurement and hands back
+   the number.** A builder had no legitimate dataset - the hermetic lane is
+   seeded and answers with fixture coverage, dev and prod are off-limits under
+   AGENTS.md, and the local imported dataset is decision 5. This keeps that
+   boundary intact. The instrument is built; see 4.1.a.
+
+   Recorded for the next reader: the third option considered was "drop the gate
+   and let production tell us". Review found it had NO INSTRUMENT - the badge
+   path deliberately emits no per-request line, the unread log line carries no
+   resolution counts, and the one field that looks like a proxy is explicitly
+   disclaimed for this use. "Unproven until observed in the wild" would have
+   meant "never find out". If that option is ever revisited, it needs telemetry
+   built first.
 
 ## 9. Testing
 

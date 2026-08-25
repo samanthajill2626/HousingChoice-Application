@@ -177,6 +177,28 @@ worst case reached by unlucky data - it is the steady state, and `useInbox`
 re-issues it on every debounced `conversation.updated` while an operator sits on
 the tab.
 
+**Drift audit, same day (`--audit-denorm`), which sized the fix and shrank it:**
+
+| | dev | prod |
+| --- | --- | --- |
+| open 1:1 threads | 636 | 684 |
+| thread type stale "unknown" | 621 | 619 |
+| thread claims resolved but contact is `unknown` | 0 | 0 |
+| display name missing though contact has one | 592 | 579 |
+
+Three things follow, and two of them REMOVE work:
+
+- The stale-`unknown` count confirms the ~610 figure derived independently from
+  the walk measurement. A `type`-only backfill is real work.
+- **The name denormalization is LATENT.** Nothing renders
+  `participant_display_name` - the inbox row's name comes from the hydrated
+  CONTACT. So ~580 missing names cost nothing today and are OUT of scope. Do not
+  "tidy" them into sync; that would buy invariant surface with no reader.
+- **Zero rows have a thread claiming a resolved identity while the contact is
+  `unknown` or `team_member`.** So a `conv.type` pre-filter would not hide a
+  single row that appears today, and the demotion hole - reachable, verified
+  through the API - is a FORWARD guard rather than a repair.
+
 **The cost inverts with triage quality, which is why nobody would predict it.**
 The pager breaks when the page FILLS, so a backlogged tab is cheap (30 rows, 30
 lookups) and a CLEARED tab is expensive (scan everything, find almost nothing).

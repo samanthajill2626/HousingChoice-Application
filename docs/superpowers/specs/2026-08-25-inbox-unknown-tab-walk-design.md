@@ -36,6 +36,52 @@ makes this read cost 693. Two consequences worth stating plainly:
 - **No test with a healthy backlog can see it.** Any fixture that fills a page
   measures the cheap path. A regression test for this must starve the filter.
 
+## 1a. The drift audit, and it SHRANK this design
+
+Run on both environments 2026-08-25 (`--audit-denorm`):
+
+| | dev | prod |
+| --- | --- | --- |
+| open 1:1 threads | 636 | 684 |
+| contact resolved | 636 | 684 |
+| **type: stale "unknown"** | **621** | **619** |
+| type: missing triage (contact is `unknown`) | **0** | **0** |
+| type: team_member | **0** | **0** |
+| name: drifted | 0 | 2 |
+| name: missing but known | 592 | 579 |
+
+Three findings, and two of them REMOVE work from this design.
+
+**1. The name denormalization is LATENT, not live - do not fix it.** The
+planner claimed a stale name is "rendered to an operator as if current". That
+was WRONG and is retracted. The inbox row's name comes from
+`nameFromContact(contact)` on the hydrated contact; `participant_display_name`
+appears in the dashboard only in type definitions and tests, and no component
+renders it. So the ~580 threads with a missing denormalized name cost nothing
+today. By this cluster's own rule - do not build for a cost nobody is paying -
+the name is OUT OF SCOPE, and the fan-out does not need to carry it.
+
+That also simplifies Option A: only `type` needs to become trustworthy. The
+name stays exactly as unreliable as it is now, harmlessly, and no read is
+allowed to start trusting it without its own measurement.
+
+**2. Hole 3 has never fired.** Zero rows in either environment have a contact
+typed `unknown` or `team_member` with a thread claiming a resolved identity. So
+the demotion hole is REACHABLE (verified through the API) but has never
+happened. Consequences: the bidirectional flip is a FORWARD GUARD, not a repair
+of existing data; the backfill does not need to handle that direction; and the
+open `team_member` sub-question in section 6 needs no answer to proceed, because
+its bucket is empty. Keep the count in the drift detector so it stays empty.
+
+**3. The pre-filter would miss nothing today.** That is the same fact read from
+the safety side, and it is the strongest argument for Option A: switching the
+Unknown tab to a `conv.type` pre-filter, AFTER the backfill, would not hide a
+single row that currently appears.
+
+The 621/619 stale-unknown rows confirm the ~610 estimate derived independently
+from the walk measurement. The backfill is real, and it is a `type`-only
+backfill.
+
 ## 2. Root cause, and it is a correctness bug
 
 Of ~627 open `unknown_1to1` conversations in prod, only **17** actually need
@@ -200,28 +246,30 @@ retyped to `landlord_1to1` or `partner_1to1` - and there the change is arguably
 a FIX (a landlord thread should not be collecting tenant tour reminders).
 Verify, do not assume; but this is no longer the most likely regression.
 
-## 6a. The sync problem is broader than `type`
+## 6a. The sync problem, measured
 
-The human's framing, and it is correct: if contact data is being copied onto the
-conversation to make reads fast, then ALL of it has to be kept in sync, and it
-has not been.
+The human's framing was right in principle: if contact data is copied onto the
+conversation to make reads fast, all of it has to stay in sync, and it has not
+been. THREE fields ride the same fan-out - `type`,
+`participant_display_name`, and the `participants[].contactId` link.
 
-THREE contact-derived fields ride the same fan-out, with the same holes:
+**But the measurement narrowed which of them MATTERS**, and that is the point of
+having taken it (section 1a):
 
-| field | what a stale value costs |
-| --- | --- |
-| `type` | the Unknown-tab walk, and threads missing from triage |
-| `participant_display_name` | **an operator sees a WRONG NAME, rendered as if current** |
-| `participants[].contactId` | the link itself; a read that trusts it falls back or misses |
+| field | drift | does anything pay for it? |
+| --- | --- | --- |
+| `type` | 621 dev / 619 prod | YES - the Unknown-tab walk. This is the work. |
+| `participant_display_name` | ~580 missing | NO - nothing renders it. Out of scope. |
+| `participants[].contactId` | 0 dev / 2 prod unusable | NO - effectively clean. |
 
-The name is the one to worry about. A stale `type` costs money and a missed
-triage row; a stale NAME is shown to a person as fact. It has been measured for
-neither until now.
+The rule this cluster keeps re-learning applies to the fix as much as to the
+defect: sync the field a read depends on, and leave the ones nothing reads
+alone. Making all three "correct" would be tidiness bought with invariant
+surface - and invariant surface is what produced this review's only blocking
+finding.
 
-`--audit-denorm` reports all three, replicating the app's own rules exactly
-(`conversationTypeFor`, and `displayNameOf` with its parts-trimmed-before-join
-behaviour). Run it before scoping the backfill: it sizes the work AND tells us
-whether the name has been drifting too.
+If a future read wants to trust the name, it measures first and closes the
+fan-out then.
 
 ## 7. Out of scope
 

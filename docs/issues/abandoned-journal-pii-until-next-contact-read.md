@@ -117,6 +117,18 @@ exhausts the table clears it and wraps to the start. With the cursor the caps ar
 genuine RATE limits - every row is eventually examined, work is deferred, never
 stranded.
 
+ONE EXCEPTION to "the next run resumes from it": a FAILED run CLEARS the stored
+cursor instead. Without that, a cursor the enumeration cannot use - a key shape
+the table stopped accepting, a value that is not JSON - throws on page 1 of every
+future run, and the persist below the page loop is never reached to replace it,
+so the duty stays permanently dead behind a daily ERROR that no amount of waiting
+clears. Clearing means a failed run can never wedge the duty past ITSELF. The
+cost when the failure was merely transient is this cycle's scan progress: the
+next run rescans from the start. That is bounded and ACCEPTED - the same
+bounded-delay trade the wrap already makes, and it re-examines rows rather than
+stranding them. The read side self-heals too: an unparseable stored cursor reads
+as "no cursor" and WARNs once, rather than being handed to the Scan.
+
 CONSTANTS, as built: `JOURNAL_SWEEP_MIN_AGE_MS` = 24h, `MAX_CONTACTS_PER_RUN` =
 25, `MAX_RECOVERY_CALLS_PER_RUN` = 100 (the bound that actually governs write
 volume), `MAX_SCAN_PAGES` = 20, `SCAN_PAGE_LIMIT` = 200. `recoverAbandoned` gains
@@ -131,21 +143,50 @@ without dedup the 25-contact cap would behave as a two-contact cap.
 
 CLAIM-FIRST HONESTY: the cadence stamp lands BEFORE the work and has no release
 path, so a mid-run failure burns the day. That is accepted on the condition that
-the failure is loud, with the level matched to its meaning - alarm-feeding ERROR
-when the body throws or when the post-loop truth check finds persistent actives
-(poison journals, genuine operator attention), but INFO when a cap or the page
-bound merely defers work, because the cursor carries the progress and a bound-hit
-must not become a standing alarm in a mission about alarm noise. The post-loop
-truth check re-reads the contact's journals through the existing `listJournals`
-and WARNs with COUNTS AND IDS ONLY, never values, and only when a row is still
-active, lease-expired and past the age gate. The run emits `suggestion.updated`
+the failure is loud, with the level matched to its meaning. THREE alarm-feeding
+ERROR classes exist, not two: when the body throws; when one or more contacts'
+recovery threw (ONE end-of-run line carrying the count, never one per contact -
+each contact also gets its own WARN and the run continues past it); and when the
+post-loop truth check finds persistent actives (poison journals, genuine operator
+attention). A cap or page bound that merely defers work is INFO, because the
+cursor carries the progress and a bound-hit must not become a standing alarm in a
+mission about alarm noise. The post-loop truth check re-reads the contact's
+journals through the existing `listJournals` and ERRORs with a COUNT only - never
+ids, never values - when a row is still active and PAST THE AGE GATE. Age only,
+with no lease clause, and that is load-bearing rather than an omission:
+`recoverAbandoned`'s `takeover` rewrites `leaseExpiresAt` to now+30s on every
+successful attempt, so every journal the run touched holds a LIVE lease by the
+time the check re-reads it, and a lease clause here would make this ERROR
+structurally unreachable for the exact case it names - a journal whose apply
+keeps failing would be re-read as "not stale" and reported as a clean run, every
+day, forever, with its PII snapshot intact. `claimedAt` is the one staleness
+signal the sweep cannot forge against itself: `takeover` SETs `leaseId` and
+`leaseExpiresAt` and ADDs `fence` and nothing else, `claim()` is the only
+`claimedAt` writer and its condition cannot fire on an ACTIVE journal, and the
+takeover case in `suggestionResolutionRepo.integration.test.ts` pins that. One
+consequence to expect rather than chase: a `takeover` that returns `blocked`
+because a HUMAN grabbed the journal microseconds earlier leaves it active with an
+old claim, so this ERROR can fire on a contact where nothing is wrong. Rare (a
+30s lease against a once-daily run); if it ever proves noisy the fix is to report
+the blocked targets and exclude them, never to restore the lease clause. The run
+emits `suggestion.updated`
 once per contact when any call in its loop reported `stateChanged` (the
 terminating call always reports false), and the event bridge forwards that to app
 SSE in every deployed and lane environment.
 
 RESIDUAL CARRIED FORWARD, unverified: the production `ai_extraction` ItemCount.
-One run examines at most `MAX_SCAN_PAGES * SCAN_PAGE_LIMIT` = 4,000 rows, so a
-full cursor cycle takes ceil(tableRows / 4000) daily runs, and the
+There are TWO cycle bounds, because the page loop also stops as soon as the
+contact cap fills (deliberately - no read capacity burned collecting nothing):
+
+- cap-unbound: a run reads its full page budget, advancing the cursor by
+  `MAX_SCAN_PAGES * SCAN_PAGE_LIMIT` = 4,000 rows, so a full cursor cycle takes
+  ceil(tableRows / 4000) daily runs.
+- cap-bound WORST CASE: a run that fills its 25-contact cap on page 1 advances
+  only `SCAN_PAGE_LIMIT` = 200 rows, so the cycle takes ceil(tableRows / 200)
+  daily runs - 20x longer, and this is the normal shape while a backlog exists.
+
+The cycle length IS the PII-retention bound for qualifying rows dropped at the
+contact cap, so the cap-bound figure is the honest one to plan against. The
 never-permanently-orphaned property holds only while the table grows slower than
-4,000 rows per day. If that table ever reaches 100k+ rows the caps need raising.
-Stated in the module header as well as here.
+a cycle's advance. If that table ever reaches 100k+ rows the caps need raising.
+Stated in the module header as well as here - keep the two figures in step.

@@ -599,6 +599,13 @@ async function auditDenorm(): Promise<void> {
  * this measures that directly rather than assuming it away.
  */
 async function auditTriagePartition(): Promise<void> {
+  // `--no-status-narrow` prices the read the design ACTUALLY proposes. Draft 4's
+  // requirement 1 queries type=unknown with NO status filter, because a contact
+  // created as `unknown` defaults to status 'active' rather than 'needs_review'
+  // - so narrowing on needs_review measures a strictly SMALLER partition than
+  // the one that would be read. Every figure published before this flag existed
+  // priced the narrowed shape.
+  const narrow = !argv.includes('--no-status-narrow');
   const PAGE = 100;
   const MAX_PAGES = 10; // today.ts's TRIAGE_MAX_PAGES - the precedent's budget.
   let queries = 0;
@@ -610,7 +617,7 @@ async function auditTriagePartition(): Promise<void> {
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const read = await contacts.listByType('unknown', {
-      status: 'needs_review',
+      ...(narrow ? { status: 'needs_review' } : {}),
       limit: PAGE,
       ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
     });
@@ -618,7 +625,7 @@ async function auditTriagePartition(): Promise<void> {
     rawRows += read.items.length;
     for (const c of read.items) {
       if ((c as { deleted_at?: unknown }).deleted_at !== undefined) deletedSeen += 1;
-      if (c.status !== 'needs_review') statusMismatch += 1;
+      if (narrow && c.status !== 'needs_review') statusMismatch += 1;
     }
     cursor = read.lastEvaluatedKey;
     if (cursor === undefined) {
@@ -635,7 +642,7 @@ async function auditTriagePartition(): Promise<void> {
   let filteredExhausted = false;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const read = await contacts.listByType('unknown', {
-      status: 'needs_review',
+      ...(narrow ? { status: 'needs_review' } : {}),
       limit: PAGE,
       excludeOrigin: GROUP_DETECTION_ORIGIN,
       ...(fcursor === undefined ? {} : { exclusiveStartKey: fcursor }),
@@ -659,7 +666,9 @@ async function auditTriagePartition(): Promise<void> {
       `  table prefix        ${tablePrefix}`,
       `  page size ${PAGE}, page budget ${MAX_PAGES} (today.ts's own)`,
       '',
-      '  UNFILTERED (type=unknown, status=needs_review):',
+      `  query shape: type=unknown${narrow ? ', status=needs_review (NARROWED - NOT what the design proposes; pass --no-status-narrow)' : " (NO status narrowing - the design's actual read)"}`,
+      '',
+      '  UNFILTERED:',
       `    Queries issued     ${queries}`,
       `    rows returned      ${rawRows}`,
       `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,

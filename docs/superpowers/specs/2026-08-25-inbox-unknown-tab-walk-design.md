@@ -6,7 +6,7 @@ by one reviewer and a revision by the other. Not gated.
 
 Branch: `feat/inbox-unread-cluster`, cut from `main`.
 Issue: [`inbox-filter-tabs-full-walk`](../../issues/inbox-filter-tabs-full-walk.md).
-Reviews: `W:\tmp\handbacks\unknown-tab-review-r1-2026-08-25\`,
+Reviews (4 rounds, 2 reviewers each; rounds 1-2 rejected, rounds 3-4 BUILDABLE): `W:\tmp\handbacks\unknown-tab-review-r1-2026-08-25\`,
 `...-r2-2026-08-25\`.
 
 ## 0. How to read this document
@@ -39,7 +39,15 @@ chunk size 30, one row per contact):
 | contactless rows | 0 | 0 |
 | outcome | partition EXHAUSTED | partition EXHAUSTED |
 
-**What the proposed read costs** (`--audit-triage-partition`):
+**What the proposed read costs** - **CAVEAT, these price the OLD query shape.**
+Every measurement below passes `status: 'needs_review'`, and requirement 1 now
+queries `type=unknown` with NO status narrowing. By class (f)'s own argument
+that is where created unknowns land by DEFAULT, so the real partition is larger
+than these rows show. **Re-measure before building** (`--audit-triage-partition
+--no-status-narrow`). The COST SHAPE - one Query against hundreds of lookups -
+survives; the row counts do not. This is the document's recurring failure caused
+by one of its own fixes, which is why it is flagged rather than quietly
+re-run.
 
 | | dev | prod |
 | --- | --- | --- |
@@ -90,9 +98,13 @@ and its comments are a dated record of how it failed. It needed:
 Draft 2 described this same read as "one Query per page, never a Scan" with
 "none of it a new invariant". Section 1 shows the partition is currently small
 enough that one Query suffices - but the precedent's protections exist for a
-partition that grows, and **the new reader inherits every one of them or
-documents why not.** They are not optional decoration on a working read; they
-are the record of it failing in front of an operator.
+partition that grows, and **the new reader copies each protection WITH ITS REASON, keeping only the
+reasons that still hold.** They are not optional decoration on a working read -
+they are the record of it failing in front of an operator - but at least one of
+them (`excludeOrigin`, section 3) belongs to a two-source union this design does
+not have. "Inherit them all or document why not" was draft 3's instruction and
+it was wrong: copying a protection without its reason is how that blocker got
+in.
 
 ## 3. Coverage: SIX classes, each with a decision
 
@@ -156,12 +168,31 @@ never-shrinks argument draft 2 used against draft 1 applies here, for spam and
 wrong numbers, which are exactly what an operator soft-deletes from a triage
 queue.
 
-**The caveat on (e), and it is the one methodological point worth keeping.**
-Draft 2 wrote "if N is zero the gap is theoretical" - which is the same
-snapshot-as-guarantee move draft 2 itself rejected nine lines earlier. Zero
-today is not zero by construction: the class is produced by a logged
-best-effort failure path, so it measures recent luck. **Decide the second source
-unconditionally, or state that the class is accepted as lost and why.**
+**Class (e) is DECIDED: accepted as lost, and here is why that is defensible.**
+Draft 2 wrote "if N is zero the gap is theoretical", which was the
+snapshot-as-guarantee move it had rejected nine lines earlier - the class is
+produced by a logged best-effort failure path, so zero measures recent luck, not
+structure. Drafts 3 and 4 then demanded the class be "decided unconditionally"
+and never decided it, while section 7 claimed no open questions remained. Both
+round-4 reviewers caught that contradiction.
+
+The decision: **a contactless conversation leaves the TRIAGE QUEUE, not the
+inbox.** The `all` tab still walks the open partition with the existing pager,
+so such a thread stays visible, replyable and reachable - it simply stops
+appearing in a queue built from contacts, which cannot see it by construction.
+Measured zero in both environments, and the mitigation holds at any N. If that
+trade is ever wrong the answer is a second source, and this paragraph is where
+to reopen it.
+
+**Class (g) - the RULE behind class (f), which matters more than the class.**
+`roleFromContact` is a FALL-THROUGH (anything not tenant/landlord/partner is
+`'unknown'`) while `listByType('unknown')` is an EXACT MATCH. Those two
+predicates agree today only on the types that exist today. `ContactType` is a
+closed union with an open plan to extend it, so **any new type silently
+re-creates class (f)'s bug** - present on the tab, absent from the query.
+Requirement 1's live `roleFromContact` check is the structural answer; pin the
+union's exhaustiveness in a test so adding a type fails loudly rather than
+quietly narrowing the queue.
 
 ## 4. The design
 
@@ -179,6 +210,16 @@ Required, each from a measured fact or a review finding:
    `excludeOrigin` (section 3, classes a and f). Take the precedent's OTHER
    protections - a bounded fill loop, a hard cap on the RESULT, and a truncation
    WARN - because those guard a partition that grows and this one does too.
+   **Name the page size and the cap in the build**; they are load-bearing once
+   the status narrowing is dropped, and `Limit` is applied at the index BEFORE
+   any FilterExpression, so a short page is not an empty partition.
+
+   The precedent's STATUS re-check does not carry over (requirement 1 no longer
+   narrows on status), and dropping it silently would breach this document's own
+   rule. Its honest replacement is a live TYPE check on each returned contact:
+   `roleFromContact(contact) === 'unknown'`, the same predicate the tab uses
+   today. That keeps the reader correct if a contact is retyped between the
+   Query and the render, and it closes class (g) below.
 2. **Read the WHOLE capped queue, then sort in memory. Do not try to page it in
    activity order** - that construction does not exist. With `status` supplied
    the range key is a constant, and even without it the index has no activity
@@ -191,15 +232,30 @@ Required, each from a measured fact or a review finding:
    the naive shape is a second forever-growing partition walk with per-row
    hydration. But a resurfacing row is UNREAD BY DEFINITION, and this route
    already consumes `byUnread` - which is bounded, sparse, and exactly the set
-   in question.
+   in question. NOTE it is O(all unread), not O(resurfacing candidates), and it
+   arrives with two bounds this design must arbitrate rather than inherit
+   silently: `maxRows` counts ALL candidates, and the deleted-probe limit calls
+   threads hidden-unread and reports `truncated`. Reuse the unread branch's
+   existing budget and `truncated` contract; do not invent a second bound.
 4. **Discriminate a failed thread read from an empty one - do not swallow it,
    and do not throw.** `contactConversations` returns `[]` for both "every
    thread filtered out" (normal) and "the query threw" (a dropped triage row),
-   so the seam cannot carry the distinction. The nearest precedent is in this
-   same file and is neither: the `filter=unread` contact arm discriminates lag
-   from a real read with ONE AUTHORITATIVE BASE-TABLE READ. Match that shape.
-   Throwing would turn a one-row miss into a whole-tab 500; swallowing silently
-   removes someone from a triage queue.
+   so that seam cannot carry the distinction.
+
+   **Do NOT copy the `filter=unread` arm's discriminator**, which draft 4
+   originally prescribed. That arm resolves the ambiguity with an authoritative
+   base-table read of a conversation id THE INDEX HANDED IT
+   (`inbox.ts:1148-1161`); a reader starting from `byTypeStatus` has no thread
+   id to point a `getById` at. The posture was right and the mechanism was
+   unavailable - this document naming that exact error one section earlier and
+   then committing it is the clearest evidence that the rule needs to be applied
+   deliberately, not just stated.
+
+   The smaller fix: call `conversationsForContact` directly and catch locally,
+   so "threw" and "filtered to nothing" are different CODE PATHS by
+   construction rather than the same empty array. Throwing outward would turn a
+   one-row miss into a whole-tab 500; swallowing silently removes someone from a
+   triage queue.
 5. **The empty state must not look like a failure.** A cleared triage queue is
    the NORMAL zero-row state for this tab, and the inbox failure banner is not
    filter-gated. Getting this wrong reproduces the precedent's own worst
@@ -229,7 +285,7 @@ empty queue.
   nothing. `inboxFeed.test.ts` has read-counting machinery to build on - review
   notes it is a starting point rather than a drop-in, so budget for extending it.
 - Assert reads for a given queue size, never wall-clock.
-- Pin each of the five coverage classes explicitly. They are the behaviour
+- Pin each coverage class in section 3 explicitly. They are the behaviour
   change; the cost is just the reason for it.
 - Pin the LOUD failure posture (requirement 4) - a swallowed error must fail the
   test, not shrink the queue.
@@ -265,9 +321,13 @@ Measured at ZERO in both environments, so there is nothing to clean up - but the
 mechanism is live, and if this design does not land the bug stays. Note it in
 the issue rather than letting it ride only on this document.
 
-**No open product questions remain.** The type-versus-status question draft 2
-escalated is retired by requirement 1, which narrows less rather than deciding
-it.
+**No open product questions remain, and each was CLOSED rather than assumed
+away:** `team_member` by the founder's ruling above; type-versus-status by
+requirement 1 narrowing less rather than deciding it; and class (e) by an
+explicit accept-as-lost with its mitigation stated in section 3. Draft 4
+originally made this claim while class (e) was still undecided two sections
+earlier - both round-4 reviewers caught the contradiction, which is why each
+closure is now named individually rather than asserted in aggregate.
 
 ## 8. Out of scope
 

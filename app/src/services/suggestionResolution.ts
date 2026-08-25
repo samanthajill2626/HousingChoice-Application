@@ -33,6 +33,11 @@ const MAX_RESOLUTION_LOOPS = 6;
  * ladder, so an unbounded pass makes a contact carrying several abandoned
  * journals pay for all of them before any suggestion renders. The remainder is
  * picked up by the next read (docs/issues/ai-run-log-recovery-hook-unbounded).
+ *
+ * This is now the DEFAULT rather than the only budget: recoverAbandoned takes
+ * an optional maxAttempts, and the daily abandoned-journal sweep passes 12. The
+ * rationale above is about a READ - a duty with no page to hold open does not
+ * inherit it.
  */
 const MAX_RECOVERIES_PER_READ = 2;
 
@@ -80,8 +85,18 @@ export interface SuggestionResolutionService {
    * `stateChanged` is a NOTIFY flag - "durable state changed that the dashboard
    * has not been told about" - and is true for a refused (consumed-chip) journal
    * as well as a committed one. See `applyJournal`.
+   *
+   * `maxAttempts` overrides that per-call budget. It exists for the daily
+   * abandoned-journal sweep (log-hygiene spec 9.3), which passes 12 - the size
+   * of the closed DECISION_TARGETS key set - so a poison pair of
+   * persistently-failing journals cannot starve the other ten on a duty that
+   * has no page load to hold open. Omitted (the read path) keeps
+   * MAX_RECOVERIES_PER_READ, so nothing about the contact page changes.
    */
-  recoverAbandoned(contactId: string): Promise<{ recovered: number; stateChanged: boolean }>;
+  recoverAbandoned(
+    contactId: string,
+    opts?: { maxAttempts?: number },
+  ): Promise<{ recovered: number; stateChanged: boolean }>;
 }
 
 export class SuggestionResolutionError extends Error {
@@ -567,8 +582,12 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
   }
 
   return {
-    async recoverAbandoned(contactId) {
+    async recoverAbandoned(contactId, opts) {
       const at = now();
+      // The read path passes nothing and keeps MAX_RECOVERIES_PER_READ; the
+      // daily sweep passes the closed key-set size. Nullish coalescing on
+      // purpose: an explicit 0 is a real budget of zero, not "unset".
+      const budget = opts?.maxAttempts ?? MAX_RECOVERIES_PER_READ;
       let recovered = 0;
       let stateChanged = false;
       let attempted = 0;
@@ -580,7 +599,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         // IO does. ATTEMPTS, not successes: `recovered` only counts wins, so a
         // contact whose journals keep failing would still walk all twelve keys
         // per read - the cost the cap exists to bound.
-        if (attempted >= MAX_RECOVERIES_PER_READ) break;
+        if (attempted >= budget) break;
         attempted += 1;
         try {
           const takeover = await deps.resolutionRepo.takeover({

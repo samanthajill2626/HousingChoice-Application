@@ -786,11 +786,47 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
   // What statuses do the MISSED rows carry? This is the number that decides
   // whether narrowing to needs_review is a silent regression.
   const missedStatuses = new Map<string, number>();
+  // WHY a missed row is missed decides whether this is a design question or a
+  // live bug. `listByType` excludes soft-deleted rows by default, so a
+  // soft-deleted contact is missing for a BENIGN reason. A row that is NOT
+  // soft-deleted, carries type=unknown and status=needs_review, and still does
+  // not come back from the byTypeStatus partition is invisible to EVERY reader
+  // of that partition - including Today's triage block.
+  const missedWhy = new Map<string, number>();
   if (inTabNotPartition.length > 0) {
-    const found = await contacts.getManyByIds(inTabNotPartition.slice(0, 100));
-    for (const id of inTabNotPartition.slice(0, 100)) {
-      const st = String(found.get(id)?.status ?? '(not found)');
+    const probe = inTabNotPartition.slice(0, 100);
+    const found = await contacts.getManyByIds(probe);
+    // The soft-deleted view of the same partition - the one `listByType`
+    // suppresses unless asked.
+    const deletedInPartition = new Set<string>();
+    let dcursor: Record<string, unknown> | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const read = await contacts.listByType('unknown', {
+        status: 'needs_review',
+        limit: 100,
+        deleted: true,
+        ...(dcursor === undefined ? {} : { exclusiveStartKey: dcursor }),
+      });
+      for (const c of read.items) deletedInPartition.add(String(c.contactId));
+      dcursor = read.lastEvaluatedKey;
+      if (dcursor === undefined) break;
+    }
+    for (const id of probe) {
+      const c = found.get(id);
+      const st = String(c?.status ?? '(not found)');
       missedStatuses.set(st, (missedStatuses.get(st) ?? 0) + 1);
+      const softDeleted = (c as { deleted_at?: unknown } | undefined)?.deleted_at !== undefined;
+      const why =
+        c === undefined
+          ? 'contact row not found at all'
+          : softDeleted && deletedInPartition.has(id)
+            ? 'SOFT-DELETED (benign - listByType suppresses these)'
+            : softDeleted
+              ? 'soft-deleted AND absent from the deleted view too'
+              : c.type !== 'unknown'
+                ? `type is ${String(c.type)}, not unknown (tab and partition disagree by design)`
+                : 'NOT deleted, type=unknown - INVISIBLE TO THE byTypeStatus PARTITION';
+      missedWhy.set(why, (missedWhy.get(why) ?? 0) + 1);
     }
   }
   const fmt = (m: Map<string, number>): string[] =>
@@ -815,6 +851,14 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
       '  THE DIFF:',
       `    in tab, NOT in partition    ${inTabNotPartition.length}  <- would be SILENTLY LOST`,
       ...(missedStatuses.size > 0 ? ['      by status:', ...fmt(missedStatuses)] : []),
+      ...(missedWhy.size > 0
+        ? [
+            '      WHY missed:',
+            ...[...missedWhy.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .map(([k, v]) => `        ${String(v).padStart(4)}  ${k}`),
+          ]
+        : []),
       `    in tab, excluded by origin  ${inTabOnlyExcluded.length}  <- lost only if the exclusion is copied`,
       `    in partition, NOT in tab    ${inPartitionNotTab.length}  <- would be NEWLY SHOWN (no open thread?)`,
       '',

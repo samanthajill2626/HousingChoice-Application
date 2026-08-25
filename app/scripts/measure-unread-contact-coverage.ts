@@ -287,18 +287,112 @@ async function auditWalk(): Promise<void> {
       '  by type:',
       ...rows(byType),
       '',
-      `  OPEN partition      ${openTotal}   <- rows the Unknown-tab walk must`,
-      '                            hydrate a contact for, per pass',
+      `  OPEN partition      ${openTotal}   <- the walk's UPPER BOUND, not its cost`,
       '  open, by type:',
       ...rows(openByType),
       '',
-      openTotal >= 200
-        ? `  VERDICT  REAL COST. ~${openTotal} contact lookups per pass, and the hook\n` +
-          '           re-issues it on every debounced SSE event while an operator\n' +
-          '           sits on that tab. Bounding it is worth doing.'
-        : `  VERDICT  SMALL TODAY (${openTotal} rows). Same caution as the badge:\n` +
-          '           do not build for a cost nobody is paying. Re-measure before\n' +
-          '           scoping work off this.',
+      `  VERDICT  UPPER BOUND ONLY - ${openTotal} is the worst case, not the bill.`,
+      '           The pager BREAKS when the page fills, so it only walks this far',
+      '           when FEW rows match. Run --audit-unknown-page for the real',
+      '           per-render cost.',
+      '',
+      '  This verdict used to read "REAL COST" off this number alone. That was',
+      '  wrong in exactly the way the badge issue was wrong - an upper bound',
+      '  reported as a cost - so it now refuses to draw the conclusion and',
+      '  points at the measurement that can.',
+      '',
+    ].join('\n'),
+  );
+}
+
+/**
+ * `--audit-unknown-page` mode. THE measurement for
+ * `inbox-filter-tabs-full-walk`, and it exists because `--audit-walk` reported
+ * an UPPER BOUND as if it were the cost.
+ *
+ * The pager BREAKS when the page fills (`if (rows.length === limit) break
+ * pager`), so it does not walk the whole open partition unconditionally. What
+ * it costs is: conversations scanned - and contact lookups paid - until `limit`
+ * matching rows accumulate. The full walk happens only when FEW rows match.
+ *
+ * That inverts the issue's assumption: a BACKLOGGED Unknown tab is cheap
+ * (fills immediately) and a CLEARED one is expensive (scans everything to find
+ * nothing). Whichever it is has to be measured, not reasoned about - that being
+ * the whole lesson of this cluster.
+ *
+ * This replicates the pager: same partition, same order, same per-conversation
+ * contact resolution, same break condition. Counts only, no PII.
+ */
+async function auditUnknownPage(pageLimit: number): Promise<void> {
+  let scanned = 0;
+  let lookups = 0;
+  let matched = 0;
+  let chunkStartKey: Record<string, unknown> | undefined;
+  let filled = false;
+  let exhausted = false;
+
+  outer: for (;;) {
+    const chunk = await conversations.listByLastActivity({
+      status: 'open',
+      limit: 100,
+      ...(chunkStartKey === undefined ? {} : { exclusiveStartKey: chunkStartKey }),
+    });
+    for (const conv of chunk.items) {
+      scanned += 1;
+      // roleFromContact returns 'unknown' for a MISSING contact as well as for
+      // a contact typed 'unknown', and needsTriage is `role === 'unknown'`.
+      let contact;
+      const entry = conv.participants?.find(
+        (pt) => pt.phone === conv.participant_phone && pt.contactId !== '',
+      );
+      if (entry?.contactId !== undefined && entry.contactId !== '') {
+        const found = await contacts.getManyByIds([entry.contactId]);
+        lookups += 1;
+        contact = found.get(entry.contactId);
+      } else if (typeof conv.participant_phone === 'string' && conv.participant_phone !== '') {
+        contact = await contacts.findByPhone(conv.participant_phone);
+        lookups += 1;
+      }
+      const type = contact?.type;
+      const needsTriage = type !== 'tenant' && type !== 'landlord' && type !== 'partner';
+      if (needsTriage) matched += 1;
+      if (matched === pageLimit) {
+        filled = true;
+        break outer;
+      }
+    }
+    if (chunk.lastEvaluatedKey === undefined) {
+      exhausted = true;
+      break;
+    }
+    chunkStartKey = chunk.lastEvaluatedKey;
+  }
+
+  console.log(
+    [
+      '',
+      'Unknown-tab: cost of ONE page render',
+      '====================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      `  page limit          ${pageLimit}   (the dashboard's own PAGE_LIMIT)`,
+      '',
+      `  conversations scanned  ${scanned}`,
+      `  contact lookups paid   ${lookups}   <- THE COST, per page render`,
+      `  matching rows found    ${matched}`,
+      `  outcome                ${filled ? 'page FILLED' : exhausted ? 'partition EXHAUSTED before filling' : 'stopped'}`,
+      '',
+      filled && lookups <= pageLimit * 3
+        ? '  VERDICT  CHEAP. The page fills quickly, so the "full walk" is an\n' +
+          '           upper bound this data does not reach. Do not scope the\n' +
+          '           unbounded-walk fix off a number nobody is paying.'
+        : '  VERDICT  REAL. The walk goes deep before it can answer, so the\n' +
+          '           unbounded read is being paid on every debounced SSE event\n' +
+          '           while an operator sits on this tab.',
+      '',
+      '  NOTE the inversion: this is EXPENSIVE when few rows match (a cleared',
+      '  tab) and CHEAP when many do (a backlog). Re-measure after any triage',
+      '  push, not just after data growth.',
       '',
     ].join('\n'),
   );
@@ -306,6 +400,11 @@ async function auditWalk(): Promise<void> {
 
 if (argv.includes('--audit-index')) {
   await auditIndex();
+  process.exit(0);
+}
+
+if (argv.includes('--audit-unknown-page')) {
+  await auditUnknownPage(30);
   process.exit(0);
 }
 

@@ -401,7 +401,12 @@ exists; `pre_ring` goes to the inbound-line HOLDER, `missed_call` /
 `voicemail` fan out to EVERY admin. D4 covers exactly this staff
 audience.
 
-Design: the voice pushes adopt the MESSAGE PUSHES' existing naming chain
+Design (operator amendment 2026-08-25: the ROLE WORD IS KEPT - it is
+load-bearing context on an incoming call, and D4's substance is
+full-identity, not role removal; nothing may carry LESS information
+than today's label). The push label is `<Role> - <identity>` where the
+role word is the same one today's masked label leads with, and
+<identity> resolves through the message pushes' naming chain
 (twilio.ts:2284-2290, mirrored :1042-1048) - including its EMPTY-STRING
 guard on rung 2 (spec-r3 H2: `??` alone would select a stored empty
 string) - plus a TERMINAL rung the message chain does not need
@@ -409,13 +414,23 @@ string) - plus a TERMINAL rung the message chain does not need
 phone is `conversation?.participant_phone` and can be undefined; today's
 code always yields a non-empty label and this must too):
 
-    contactDisplayName(contact)
+    identity =
+      contactDisplayName(contact)
       ?? (a non-empty-string check on conversation?.participant_display_name,
           INLINED exactly as the message-push site does it - there is no
           named helper for it in the repo)
       ?? formatPhoneForDisplay(phone)
       ?? phone
-      ?? UNKNOWN_CALLER_LABEL
+
+    label = role !== undefined && identity !== undefined
+      ? `<Role> - <identity>`     (e.g. "Tenant - Jane Doe")
+      : role ?? identity ?? UNKNOWN_CALLER_LABEL
+
+Outcomes vs today, none losing information:
+- known, named:    "Tenant - Jane Doe"        (today "Tenant (Jane D.)")
+- known, nameless: "Tenant - (555) 017-7777"  (today "Tenant")
+- unknown caller:  "(555) 017-7777"           (today the same, via
+  pushCallerLabel's number fallback)
 
 - `contactDisplayName` is the EXISTING push-copy helper
   (`app/src/lib/contactName.ts:65`) - imported, never duplicated (its
@@ -432,12 +447,10 @@ code always yields a non-empty label and this must too):
   pushes - gated `masked !== true` - so `participant_phone` is the real
   caller.)
 - `pushCallerLabel` is deleted (module-private, three readers, clean);
-  comments asserting the masked-push posture are rewritten to cite D4.
-- STATED LOSSES, accepted as D4 parity with the message pushes (which
-  carry no role word): the role prefix disappears for named contacts
-  ("Tenant (Jane D.)" -> "Jane Doe"), and a reviewed-but-nameless
-  contact's push shows the number (via rungs 2-4) instead of a bare role
-  word - exactly what a message push from that contact shows today.
+  comments asserting the masked-push posture are rewritten to cite D4 +
+  the 2026-08-25 role-word amendment. The ROLE comes from the same
+  source today's masked label uses (the contact's role/type as
+  maskedCallerLabel resolves it); only the identity half changes.
 - The STORED `call_party_label`, spoken whisper, thread rendering, and
   outbound originate path are UNCHANGED - `maskedCallerLabel` keeps all
   its other consumers. LOG posture unchanged: payload contents are never

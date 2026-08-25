@@ -64,7 +64,6 @@ import {
   getOwner,
   GroupCursorError,
   type ConversationItem,
-  type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
 } from '../repos/conversationsRepo.js';
@@ -586,6 +585,51 @@ export async function aggregateInbox(
   // multi-number contact never yields two rows on one page).
   const emittedContacts = new Set<string>();
 
+  // --- Read accounting for the assembled-feed log line ------------------------
+  // WHY THIS EXISTS: a zero-row answer is, in the log we ship today, identical
+  // to a healthy one - `count: 0` cannot say whether the partition Query came
+  // back empty or whether every row it returned was dropped during assembly.
+  // Three e2e sightings of a READY-AND-EMPTY All tab were undiagnosable for
+  // exactly that reason (call-inbox-unread-detached-node-flake): the failure
+  // artifacts are browser-side only, and nothing server-side recorded which of
+  // the two happened. `rawScanned` separates those two worlds in one field, and
+  // the per-reason drop counts name WHICH guard consumed the rows when it was
+  // the second. Kept in production, not test-only scaffolding: the same
+  // ambiguity exists in every deployed environment.
+  //
+  // SCOPE, stated because the fields are easy to over-read:
+  //
+  // - They cover the OPEN-PARTITION pager only - filters `all` and `unknown`.
+  //   The `groups` and `unread` branches return through their own log lines and
+  //   carry none of this. The unread line's `scanned` is BUDGET UNITS, not rows,
+  //   so `count: 0, scanned: 0` there still carries the ambiguity this removed
+  //   for `all`. Filed rather than fixed here: see
+  //   docs/issues/inbox-read-accounting-gaps.md.
+  // - `rawScanned == count + sum(drops)` DOES NOT HOLD, in ANY case - including
+  //   the `count: 0` one. `count` includes relay and group rows that no chunk
+  //   Query ever scanned; a page that FILLS stops mid-chunk with the remaining
+  //   items counted in `rawScanned` but never assembled; and `filteredRelay` /
+  //   `filteredGroup` count rows that were never scanned either, so `sum(drops)`
+  //   can EXCEED `rawScanned` (an empty open partition with three filtered relay
+  //   rows logs `rawScanned: 0, drops: {filteredRelay: 3}`). Do not do this
+  //   arithmetic; read the fields as two separate statements - what the
+  //   partition returned, and what assembly discarded.
+  // - `drops` is a NORMAL-TRAFFIC field, not an exception field: `dupContact`
+  //   fires for every extra thread of a multi-number contact on the same page.
+  //   Its absence means nothing was dropped; its presence means nothing is
+  //   wrong.
+  // - `filteredRelay` and `filteredGroup` are PAGE-ONE-ONLY (both merge blocks
+  //   gate on `startKey === undefined`), so their absence on page 2+ carries no
+  //   information at all.
+  let rawScanned = 0;
+  let rawQueries = 0;
+  const drops: Record<string, number> = {};
+  /** Record a drop reason and return the `undefined` the caller was returning. */
+  const dropped = (reason: string): undefined => {
+    drops[reason] = (drops[reason] ?? 0) + 1;
+    return undefined;
+  };
+
   /** All open 1:1 conversations a contact owns, across every phone AND email (cached). */
   const contactConversations = async (contact: ContactItem): Promise<ConversationItem[]> => {
     if (contactConvsCache.has(contact.contactId)) {
@@ -800,7 +844,7 @@ export async function aggregateInbox(
     // shape of exclusion and are ALREADY unreachable here (the pager queries the
     // `open` partition and they live in `group_open`); the explicit case is
     // defense-in-depth so this reader can never treat a group as a 1:1.
-    if (conv.type === 'relay_group' || conv.type === 'group_text') return undefined;
+    if (conv.type === 'relay_group' || conv.type === 'group_text') return dropped('groupKind');
 
     // Email channel v1 (plan F2/F3 BLOCKER): resolve the contact via
     // participant_phone OR participant_email, so an email-only thread folds into
@@ -823,13 +867,13 @@ export async function aggregateInbox(
       // live in the unmatched-email surface only (spec Decision 4). In practice
       // ingestion never creates a contactless email conversation, but be
       // defensive: with no phone there is no unknown identity to show, so skip.
-      if (phone === undefined) return undefined;
+      if (phone === undefined) return dropped('noContactNoPhone');
       // Unread is already carried on the conversation row. A read unknown number
       // cannot pass this filter, so do not fetch a latest message just to reject it.
       // DEAD ARM (spec 4.5): `filter=unread` no longer reaches this function -
       // it returns from the index-backed branch before the pager runs. Kept
       // because `filter` is a runtime value and this is still its right answer.
-      if (filter === 'unread' && unreadOf(conv) === 0) return undefined;
+      if (filter === 'unread' && unreadOf(conv) === 0) return dropped('unreadZeroUnknown');
       // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
       return {
@@ -854,31 +898,42 @@ export async function aggregateInbox(
     // ahead of conversation, message, and placement hydration; only type=unknown
     // contacts can produce a known-contact row for this filter.
     const role = roleFromContact(contact);
-    if (filter === 'unknown' && role !== 'unknown') return undefined;
+    if (filter === 'unknown' && role !== 'unknown') return dropped('unknownFilterRole');
 
     const deleted = isDeleted(contact);
 
-    if (emittedContacts.has(contact.contactId)) return undefined; // one row per page
+    if (emittedContacts.has(contact.contactId)) return dropped('dupContact'); // one row per page
     const convs = await contactConversations(contact);
     const maxConv = newestOf(convs) ?? conv;
     // Represent the contact ONLY at its NEWEST conversation. An older one is
     // skipped — a newer conversation already (or will) emit the row. This is
     // what makes paging split-proof: a contact seen on page 1 (at its newest
     // conv) can never re-emit on page 2 via an older conv.
-    if (maxConv.conversationId !== conv.conversationId) return undefined;
+    // THE IDENTITY GUARD. Counted separately because a stale participant-GSI
+    // image can name a DIFFERENT thread as this contact's newest and suppress
+    // the row the pager is standing on - the read-side shape of
+    // mark-read-fanout-stale-gsi-skip.
+    //
+    // BUT IT IS NOT DIAGNOSTIC OF THAT ON ITS OWN, and a reader grepping the
+    // log must not treat a nonzero count as evidence of GSI lag. It fires
+    // routinely on healthy PAGED reads: `emittedContacts` is per-REQUEST, so
+    // from page 2 on, every contact whose newest conversation was emitted on an
+    // earlier page hits this guard again at its older conversation. Expect it
+    // nonzero whenever multi-thread contacts span a page boundary.
+    if (maxConv.conversationId !== conv.conversationId) return dropped('notNewestConv');
 
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
     // This must use the contact-wide sum, not unreadOf(conv): an older phone or
     // email thread can be unread while the representative newest thread is read.
     // DEAD ARM (spec 4.5), same reason as the unknown-branch arm above.
-    if (filter === 'unread' && unreadSum === 0) return undefined;
+    if (filter === 'unread' && unreadSum === 0) return dropped('unreadZeroContact');
     // Deleted fast-path: nothing unread -> hidden, no message read needed. NOT
     // dead - it still runs for `all` and `unknown`.
-    if (deleted && unreadSum === 0) return undefined;
+    if (deleted && unreadSum === 0) return dropped('deletedNoUnread');
 
     const row = await buildContactRow(contact, convs, maxConv, unreadSum, deleted);
     // undefined here means exactly one thing: resurfacing hid a deleted row.
-    if (row === undefined) return undefined;
+    if (row === undefined) return dropped('resurfaceHidden');
     // The dedupe entry moves CALLER-SIDE with the extraction. It used to sit
     // just above the row literal, which ran iff a row was about to be returned -
     // so this is the same observable behavior at the same moment.
@@ -1424,11 +1479,21 @@ export async function aggregateInbox(
     });
     const chunkStartKeyForThisChunk = chunkStartKey;
     const moreChunks = chunk.lastEvaluatedKey !== undefined;
+    // Counted BEFORE assembly, so a zero-row page says which world it is in:
+    // rawScanned 0 means the byLastActivity 'open' partition itself answered
+    // empty; rawScanned > 0 with count 0 means assembly consumed every row, and
+    // `drops` names the guard that did it.
+    rawQueries += 1;
+    rawScanned += chunk.items.length;
 
     for (let i = 0; i < chunk.items.length; i++) {
       const conv = chunk.items[i]!;
       const row = await rowForConversation(conv);
-      if (row === undefined || !passesFilter(row)) continue;
+      if (row === undefined) continue;
+      if (!passesFilter(row)) {
+        drops['filtered'] = (drops['filtered'] ?? 0) + 1;
+        continue;
+      }
       rows.push(row);
       if (rows.length === limit) {
         // Page full at chunk index i. The resume boundary is the LEK AFTER this
@@ -1503,7 +1568,12 @@ export async function aggregateInbox(
     const relayRows: InboxRow[] = [];
     for (const conv of relayItems) {
       const row = await relayRowFor(conv);
+      // Counted like the pager's own filter drops. On filter=unknown this arm
+      // rejects EVERY relay row (a relay row's needsTriage is always false), so
+      // leaving it uncounted made a zero-row Unknown page look like an empty
+      // partition - the precise confusion these fields exist to break.
       if (passesFilter(row)) relayRows.push(row);
+      else dropped('filteredRelay');
     }
     if (relayRows.length > 0) {
       rows.push(...relayRows);
@@ -1538,7 +1608,18 @@ export async function aggregateInbox(
     // TRUNCATED means "rows this filter would have shown were withheld": the
     // repo's walk budget stopped early, or (page-one only) the cap did.
     groupsTruncated = page.truncated || page.nextCursor !== undefined;
-    const groupRows = page.items.map(groupRowFor).filter(passesFilter);
+    // `filteredGroup` is DEAD TODAY and kept deliberately: only `filter=all`
+    // reaches this block (`groups` and `unread` returned earlier, `unknown` is
+    // gated out above) and `passesFilter` is unconditionally true for `all`, so
+    // the counter can never fire. It exists so a future filter that DOES reach
+    // here cannot silently drop every group row - the shape `filteredRelay`
+    // catches on `unknown` today. Read its absence as "no information", not as
+    // "nothing was dropped".
+    const groupRows = page.items.map(groupRowFor).filter((row) => {
+      if (passesFilter(row)) return true;
+      dropped('filteredGroup');
+      return false;
+    });
     if (groupRows.length > 0) {
       rows.push(...groupRows);
       // Re-sort newest-first (stable) so group rows interleave by last_activity_at.
@@ -1550,7 +1631,25 @@ export async function aggregateInbox(
   }
 
   log.info(
-    { filter, count: rows.length, relayCount, groupCount, hasMore: nextCursor !== null },
+    {
+      filter,
+      count: rows.length,
+      relayCount,
+      groupCount,
+      hasMore: nextCursor !== null,
+      // THE READ ACCOUNTING (see `rawScanned` at the top of this function).
+      // `rawQueries` counts the pager's chunk Queries ONLY - not the boundary
+      // re-query (it re-reads rows already counted), and not the relay list,
+      // the group source, contact resolution or message hydration. It is NOT
+      // the request's round-trip count and must not be used as one: the badge
+      // work in cluster C1 is measured in round trips, and this field would
+      // under-report by orders of magnitude.
+      rawScanned,
+      rawQueries,
+      // Only when something was actually dropped, so an ordinary page keeps a
+      // short line. Counts and reason names only - no phone, no body, no id.
+      ...(Object.keys(drops).length > 0 && { drops }),
+    },
     'inbox feed assembled',
   );
   return { rows, nextCursor, ...(groupsTruncated && { groupsTruncated: true }) };

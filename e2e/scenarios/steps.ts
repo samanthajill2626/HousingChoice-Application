@@ -3523,10 +3523,33 @@ export class Scenario {
     // genuinely-menu problems. The keep-alive hardening (app + Vite servers,
     // 2026-08-24) removed the strongest known cause of a HUNG bundle fetch;
     // this wait is the witness that says so if another cause exists.
-    await expect(
-      this.placementBanner(),
-      'the placement page did not finish loading (header absent - check <main> for a stuck "Loading" status)',
-    ).toBeVisible({ timeout: 20_000 });
+    // ONLY claim a page-load problem if this wait actually spent its budget.
+    // Playwright attributes a TEST-level timeout to whatever assertion is in
+    // flight, so the old unconditional message announced a hung page whenever a
+    // long scenario ran out of its 30s clock here - once 337ms into this 20s
+    // wait, against a page that was loading normally. That misread cost two
+    // investigations and motivated two fixes; see
+    // docs/issues/placement-detail-bundle-fetch-stall.md.
+    const waitStartedAt = Date.now();
+    try {
+      await expect(this.placementBanner()).toBeVisible({ timeout: 20_000 });
+    } catch {
+      const waitedMs = Date.now() - waitStartedAt;
+      // Two-thirds of the budget: comfortably past any normal load, and far
+      // enough from the ceiling that a slow-but-healthy page still reads as a
+      // page-load problem rather than a budget one.
+      throw waitedMs >= 13_000
+        ? new Error(
+            `the placement page did not finish loading (waited ${waitedMs}ms of a 20s budget` +
+              ' - check <main> for a stuck "Loading" status)',
+          )
+        : new Error(
+            `the enclosing TEST ran out of time while this step waited (only ${waitedMs}ms of its own` +
+              " 20s budget elapsed) - this is a test-LENGTH problem, not a page-load hang." +
+              ' Give the test room (test.slow()) rather than hunting a stall;' +
+              ' see docs/issues/placement-detail-bundle-fetch-stall.md.',
+          );
+    }
     await this.page.getByRole('button', { name: 'More actions' }).click();
     await this.page.getByRole('button', { name: /^Placement stage/ }).click();
     await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();

@@ -6,10 +6,14 @@ Branch: feat/error-surface-detail
 Worktree: W:\tmp\error-surface-detail
 
 Design review: 5 rounds, 2 independent reviewers, 87 findings, 74 accepted.
-Full record and rationale for rejected alternatives:
-`.superpowers/design-review/adjudications.md`. This document states requirements;
-it does not argue with earlier drafts. Appendix A carries the alternatives that
-were considered and rejected, for anyone tempted to re-propose them.
+Full decision record, including every rejection with its reasoning:
+`docs/superpowers/reviews/2026-08-24-error-surface-detail-design-review.md`.
+The two final-round reviewer reports are alongside it; among other things they
+carry an independent audit confirming 24 of this spec's code citations.
+
+This document states requirements; it does not argue with earlier drafts.
+Appendix A carries the alternatives that were considered and rejected, for anyone
+tempted to re-propose them.
 
 ## 1. Problem
 

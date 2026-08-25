@@ -155,13 +155,23 @@ describe('per-file DynamoDB Local access keys', () => {
 
   describe('the shared-tables opt-in', () => {
     it('routes a marked file to the WORKTREE key and an unmarked file to its own', () => {
-      const marked = path.join(TEST_DIR, 'devOutbox.integration.test.ts');
-      const unmarked = path.join(TEST_DIR, 'contactsRepo.integration.test.ts');
+      // The marked exemplar is a WRITTEN FIXTURE, not a real suite: the last
+      // in-tree shared-tables suite (devOutbox.integration) was deleted with
+      // /__dev/outbox (remove-dev-outbox-proof-of-send, 2026-08-24), but the
+      // opt-in mechanism must keep working for the next suite that needs it.
+      const dir = mkdtempSync(path.join(tmpdir(), 'hc-marker-'));
+      try {
+        const marked = path.join(dir, 'marked.test.ts');
+        writeFileSync(marked, `// ${SHARED_LOCAL_TABLES_MARKER}\nexport {};\n`);
+        const unmarked = path.join(TEST_DIR, 'contactsRepo.integration.test.ts');
 
-      expect(accessKeyForTestFile(marked, { worktreeKey: 'hctestwork' })).toBe('hctestwork');
-      expect(accessKeyForTestFile(unmarked, { worktreeKey: 'hctestwork' })).toBe(
-        fileAccessKeyId(testFileId(unmarked)),
-      );
+        expect(accessKeyForTestFile(marked, { worktreeKey: 'hctestwork' })).toBe('hctestwork');
+        expect(accessKeyForTestFile(unmarked, { worktreeKey: 'hctestwork' })).toBe(
+          fileAccessKeyId(testFileId(unmarked)),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('treats the marker as a DECLARATION LINE, never as a substring', () => {

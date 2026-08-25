@@ -9,7 +9,7 @@
 //      with "Client:/Staff:" labels (source-attributed dual-channel bridge) + a player.
 //   2. Missed business-line call     -> the caller leaves a voicemail -> a "Voicemail"
 //      card with a SINGLE-channel transcript (no speaker labels) + player, AND the
-//      missed-call auto-text still fires (asserted via /__dev/outbox).
+//      missed-call auto-text still fires (asserted via the fake's thread store).
 //   3. Dropped VI completion webhook -> the card shows "Transcribing..." while the
 //      transcript is pending, then the RECONCILE safety net (lane delay 2s) delivers
 //      it WITHOUT any webhook. This test carries the pending-indicator proof.
@@ -41,7 +41,7 @@
 //     (mirrors relay-group-view.spec.ts; workers:1 / fullyParallel:false = no race).
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { placeCall, listCalls } from '../../fixtures/fakeVoice.js';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { uniqueVoicePhone, callTimeline } from '../../fixtures/voiceSetup.js';
 import { expectTodayReady } from '../../support/today.js';
@@ -186,7 +186,7 @@ test('a missed business-line call takes a voicemail (single-channel transcript +
   // in the outbox means the gate held. Deliberately loose on the pronoun: the
   // founder rewrite of 2026-08-18 made this "Sorry I missed your call", but
   // a2p-compliance.spec.ts restores a "we" variant into the SAME shared lane.
-  const outbox = await getOutbox(api, { to: caller });
+  const outbox = await getOutboundTo(api, { to: caller });
   expect(outbox.some((m) => /missed your call/i.test(m.body ?? ''))).toBe(false);
 
   await page.goto(`${NEXT}/contacts/${contactId}`);

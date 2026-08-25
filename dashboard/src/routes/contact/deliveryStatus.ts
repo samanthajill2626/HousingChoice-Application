@@ -73,6 +73,24 @@ const STALE_SENT_PRESENTATION: DeliveryPresentation = {
 };
 
 /**
+ * THE single clock comparison in this module: has `atMs` been quiet for at least
+ * STALE_SENT_AFTER_MS as of `nowMs`? Inclusive at exactly the threshold.
+ *
+ * One shared COMPARISON, never one shared PREDICATE. `presentDeliveryStatus`
+ * keeps its own `sent`-only gate over this, and `isStaleLeg` encodes the
+ * per-leg eligibility table over the same comparison, so the two rules can
+ * differ in WHICH legs they consider without ever diverging on the threshold.
+ *
+ * `atMs` is `number | undefined` because a caller's clock is genuinely optional
+ * and may be `Date.parse` of a malformed string. Both a missing clock and a
+ * non-finite one answer false: no clock is no evidence of quiet.
+ */
+export function isQuietSince(atMs: number | undefined, nowMs: number): boolean {
+  if (atMs === undefined || !Number.isFinite(atMs)) return false;
+  return nowMs - atMs >= STALE_SENT_AFTER_MS;
+}
+
+/**
  * Map a delivery status to its label/tone/failure-flag, or `null` when there is no
  * status to show (undefined — seed/legacy rows; or an unrecognized value). Returning
  * null keeps the bubble clean instead of inventing a false "Sending…"/failure cue.
@@ -81,6 +99,15 @@ const STALE_SENT_PRESENTATION: DeliveryPresentation = {
  * has gone quiet for STALE_SENT_AFTER_MS presents as unconfirmed instead of
  * "Sent". Omit it and behavior is exactly as before. `nowMs` is injectable for
  * tests.
+ *
+ * CONVENTION DIVERGENCE, deliberate - do NOT harmonise these two:
+ * this function opts out of staleness by WITHHOLDING THE TIMESTAMP (`sentAtMs`).
+ * Its `nowMs` is a DEFAULTED parameter, so passing `undefined` RE-ARMS the real
+ * clock rather than disabling anything. The newer `isStaleLeg` /
+ * `canEverGoStale` / `presentRelayDelivery` / `presentLegDelivery` opt out the
+ * opposite way - by WITHHOLDING THE CLOCK (`nowMs: number | undefined`, where
+ * undefined means staleness is off entirely). Changing this signature would move
+ * the 1:1 rule, which three out-of-module callers depend on.
  */
 export function presentDeliveryStatus(
   status: DeliveryStatus | undefined,
@@ -88,21 +115,239 @@ export function presentDeliveryStatus(
   nowMs: number = Date.now(),
 ): DeliveryPresentation | null {
   if (status === undefined) return null;
-  if (
-    status === 'sent' &&
-    sentAtMs !== undefined &&
-    Number.isFinite(sentAtMs) &&
-    nowMs - sentAtMs >= STALE_SENT_AFTER_MS
-  ) {
+  if (status === 'sent' && isQuietSince(sentAtMs, nowMs)) {
     return STALE_SENT_PRESENTATION;
   }
-  return STATUS_PRESENTATION[status] ?? null;
+  // OWN-PROPERTY lookup, the same pattern - and for the same reason - as
+  // `ownReason` further down this file. STATUS_PRESENTATION is a plain object
+  // literal, so a bare `STATUS_PRESENTATION[status]` resolves INHERITED
+  // Object.prototype members: 'constructor' yields the Object FUNCTION, which
+  // `??` does not catch, and 'toString' / 'hasOwnProperty' / '__proto__' /
+  // 'valueOf' behave the same way. A delivery status is provider/wire data and
+  // is never a trusted key, so without this the "an unrecognized value => null"
+  // contract stated above is simply FALSE for those five strings.
+  //
+  // Not cosmetic: the returned object has no `label`, and the bubble's
+  // accessible-summary builders (`chipText` / `speakDeliveryText` in
+  // Timeline.tsx) call `.replace` on it unconditionally on every outbound
+  // multi-party bubble - a throw inside render, which blanks the conversation
+  // page.
+  return Object.prototype.hasOwnProperty.call(STATUS_PRESENTATION, status)
+    ? STATUS_PRESENTATION[status]
+    : null;
 }
 
-/** The slice of a relay `delivery_recipients` slot the rollup presenter reads. */
+/** The slice of a relay `delivery_recipients` slot the rollup presenter reads.
+ *
+ *  Both clocks are ISO strings off the wire (`api/types.ts` RelayRecipientDelivery)
+ *  and come from DIFFERENT sources: `sentAt` is the PROVIDER's timestamp, written
+ *  only by the two relay send paths after a real send returned, and `deliveredAt`
+ *  is OUR server clock, written only on the `delivered` transition. Never subtract
+ *  one from the other or present the pair as a duration. */
 export interface RelayDeliverySlot {
   status: DeliveryStatus;
   errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
+
+/** Parse an ISO clock string off the wire, or undefined when it is absent or
+ *  does not parse. "PARSEABLE" is load-bearing: a `sentAt` that is present but
+ *  malformed must fall to the NO-CLOCK rows of the table below, where the rule
+ *  is explicit, rather than yielding a NaN clock that silently never ages. */
+function parseWireClock(iso: string | undefined): number | undefined {
+  if (iso === undefined) return undefined;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * THE clock a leg ages from, or undefined when this leg has none. `isStaleLeg`
+ * and `canEverGoStale` are both derived from this ONE helper so they can never
+ * drift about which clock a slot uses.
+ *
+ * The S3 eligibility table, encoded:
+ *
+ *   | leg status     | parseable sentAt | ages from |
+ *   | sent           | yes              | sentAt    |
+ *   | sent           | no               | msg.at    |
+ *   | queued         | yes              | sentAt    |
+ *   | queued         | no               | NOTHING   |
+ *   | queued_pending | either           | NOTHING   |
+ *   | delivered/failed/undelivered | either | NOTHING |
+ *   | any of the above | clock MORE THAN ONE BUDGET AHEAD of nowMs | NOTHING |
+ *
+ * That last row is the FUTURITY bound, and it is the only row this function does
+ * not decide, because it depends on the READING clock rather than on the slot:
+ * it is enforced in `canEverGoStale`, whose doc carries the reasoning. A clock
+ * further ahead of ours than the entire staleness budget is not measuring the
+ * same time we are, so nothing may be inferred from its age.
+ *
+ * Why `sent` may fall back to the message clock but `queued` may NOT: a RELAY
+ * leg cannot reach `sent` without a `sentAt` (the fan-out writes both on one
+ * object, and the DLR path is child-field-only and never clears it), so the
+ * fallback is reached only by a native group-text leg, whose `msg.at` IS its
+ * send time. A `queued` leg with no `sentAt`, by contrast, is exactly the shape
+ * of a released connect-when-ready hold (parent flipped to `queued` before the
+ * fan-out is enqueued, `msg.at` days old) and of a fan-out that never ran. Those
+ * two are BYTE-IDENTICAL, so one answer must serve both, and the decided answer
+ * is silence: a false red on a message that is about to send trains staff to
+ * ignore the cue. The cost is that the whole "our dispatch never happened" class
+ * can never escalate here; the server's own staleness alarm covers it.
+ *
+ * A terminal leg has settled, and a `queued_pending` hold has not been
+ * dispatched, so neither can be overdue.
+ */
+function stalenessClockMs(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+): number | undefined {
+  const legClock = parseWireClock(slot.sentAt);
+  // Exhaustive over DeliveryStatus. The `never` default is deliberate: a future
+  // union member becomes a TYPECHECK FAILURE here rather than silently falling
+  // into a default branch that decides its staleness by accident.
+  switch (slot.status) {
+    case 'sent':
+      return legClock ?? messageAtMs;
+    case 'queued':
+      return legClock;
+    case 'queued_pending':
+    case 'delivered':
+    case 'undelivered':
+    case 'failed':
+      return undefined;
+    default: {
+      const unreachable: never = slot.status;
+      void unreachable;
+      // Unreachable for a well-typed status; an off-wire value has no ageing
+      // clock. The annotation above is what turns a NEW union member into a
+      // typecheck failure instead of a silent staleness decision.
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Has this leg gone quiet? True only when the leg has a clock proving the LEG
+ * ITSELF started (see `stalenessClockMs`) and that clock has been quiet for
+ * STALE_SENT_AFTER_MS.
+ *
+ * CONVENTION, opposite to `presentDeliveryStatus`'s and deliberately so:
+ * staleness is evaluated ONLY when `nowMs` is supplied. With `nowMs` undefined,
+ * this returns false for EVERY slot regardless of `sentAt` - a caller cannot
+ * withhold a per-slot clock, so withholding the READING clock is the only total
+ * off switch, and callers rely on it (an imported row, and every pre-existing
+ * `presentRelayDelivery` call that passes no clock at all).
+ */
+export function isStaleLeg(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+  nowMs: number | undefined,
+): boolean {
+  if (nowMs === undefined) return false;
+  return isQuietSince(stalenessClockMs(slot, messageAtMs), nowMs);
+}
+
+/**
+ * COULD this leg ever become stale later? The ticker's run condition is
+ * `canEverGoStale(...) && !isStaleLeg(...)` - a leg that can never age schedules
+ * nothing, exactly like a terminal one, which is what makes the interval
+ * terminate.
+ *
+ * True iff a clock is supplied AND the leg has an applicable clock that is
+ * FINITE. Finiteness is not defensive: the row clock falls back to the message
+ * instant, and `messageInstant` (conversation/useRelayThread.ts) returns `''`
+ * for a non-ISO `tsMsgId`, whose `Date.parse` is NaN. Under a shape test such a
+ * leg would read "eligible" for ever and never stale, and the interval would
+ * spin for ever.
+ *
+ * The stale-capable statuses (`sent`, `queued`) are implied rather than re-listed:
+ * `stalenessClockMs` returns undefined for every other status, and re-listing
+ * them here is exactly the drift the shared helper exists to prevent.
+ *
+ * THE FUTURITY BOUND, and why it is a BOUND rather than `clock <= nowMs`. Every
+ * ageing clock here is the PROVIDER's; `nowMs` is the OPERATOR'S BROWSER clock.
+ * A browser clock running slow - a stale VM, no NTP, a dead CMOS battery - puts
+ * every freshly-sent leg in the FUTURE, and a future clock answered "eligible"
+ * and "not yet stale" at the same time, so the interval stayed armed for ever
+ * (the fifth shipped non-termination; see `Timeline.tsx`'s run-condition doc).
+ *
+ * Two properties decide the shape of the fix, and BOTH must survive any later
+ * simplification of this clause:
+ *
+ *  1. BOUNDEDNESS. A clock at most one staleness budget ahead of ours is
+ *     ordinary skew. It stays eligible, `nowMs` advances with real time, and the
+ *     leg crosses the boundary within at most TWO budgets (about 30 minutes) -
+ *     so the interval terminates, and the escalation is merely LATE.
+ *  2. NO MISSED ESCALATION. Requiring `clock <= nowMs` instead would make that
+ *     ordinary slow-browser leg INELIGIBLE. Nothing would be armed, so nothing
+ *     would re-render when `nowMs` caught up, and the escalation would be missed
+ *     ENTIRELY - the exact failure direction this feature exists to prevent. A
+ *     bounded late signal is acceptable; a silently absent one is not.
+ *
+ * THE COST, NAMED: this bound is a TRADE, not a neutral guard, and it CHANGES
+ * behaviour rather than merely tightening it.
+ *
+ *  - WHAT IS GIVEN UP. Before the bound, a leg whose clock sat MORE than one
+ *    budget ahead of ours kept the interval armed for ever - so `tickNow` kept
+ *    advancing and that leg DID escalate, late by the skew. With the bound it is
+ *    ineligible at mount; if nothing else on the thread is tickable, `tickNow`
+ *    freezes there and the leg NEVER escalates for the life of the mount, even
+ *    though `clock - nowMs` shrinks in real time and would cross back inside the
+ *    budget. In that band, LATE became NEVER - the same failure direction
+ *    property 2 above rejects, at a different threshold. (The silence is total
+ *    only when the skewed leg is the thread's ONLY tickable content: any
+ *    past-clock leg arms the ticker anyway, `tickNow` advances, and the skewed
+ *    leg becomes eligible on a later tick.)
+ *  - WHY IT IS TAKEN ANYWAY. A clock that far ahead is not measuring the same
+ *    time we are, so a staleness verdict computed from it is not evidence about
+ *    anything - and the alternative on offer is an interval that never
+ *    terminates at all, which costs every OTHER leg on the thread nothing but
+ *    burns a timer for the life of the mount. A bounded miss in a band that
+ *    requires >15 minutes of browser-clock skew is the cheaper side.
+ *  - WHERE THE THRESHOLD SITS. Exactly ONE budget - STALE_SENT_AFTER_MS,
+ *    inclusive at the boundary. Everything at or inside it stays eligible and
+ *    merely late (property 1); only `clock - nowMs > STALE_SENT_AFTER_MS` is
+ *    silenced. Widening the arming side to `2 * STALE_SENT_AFTER_MS` would
+ *    shrink the band and still terminate, at three budgets instead of two - a
+ *    live option if the band is ever observed in practice.
+ *
+ * `isStaleLeg` is deliberately NOT given this bound. It already answers false
+ * for a future clock (it is not yet quiet) and correctly becomes true once that
+ * clock genuinely is. The two functions still agree BY CONSTRUCTION about WHICH
+ * clock a slot uses - they share `stalenessClockMs`, which is the drift this
+ * module guards against - and they do NOT have to agree about futurity, because
+ * `canEverGoStale` answers "should we buy an interval" and is allowed to be the
+ * conservative one.
+ */
+export function canEverGoStale(
+  slot: RelayDeliverySlot,
+  messageAtMs: number | undefined,
+  nowMs: number | undefined,
+): boolean {
+  if (nowMs === undefined) return false;
+  const clock = stalenessClockMs(slot, messageAtMs);
+  if (clock === undefined || !Number.isFinite(clock)) return false;
+  // Inclusive at exactly one budget ahead, mirroring `isQuietSince`'s inclusive
+  // threshold. A NaN clock is already excluded above, so this comparison never
+  // decides anything by NaN's own falsiness.
+  return clock - nowMs <= STALE_SENT_AFTER_MS;
+}
+
+/**
+ * Everything the relay rollup takes besides the slots themselves: the media flag
+ * it forwards to `deliveryReason`, plus the two optional staleness clocks. It
+ * EXTENDS `DeliveryReasonOptions` rather than restating `media`, so the bag can
+ * be handed straight to `deliveryReason` and the two can never disagree about
+ * what "media" means.
+ */
+export interface RelayDeliveryOptions extends DeliveryReasonOptions {
+  /** The message's own instant - the clock a `sent` leg with no `sentAt` ages
+   *  from. See `stalenessClockMs`. */
+  messageAtMs?: number;
+  /** The READING clock. Withholding it turns staleness off entirely; see the
+   *  WITHHELD-CLOCK convention on `isStaleLeg`. */
+  nowMs?: number;
 }
 
 /**
@@ -115,11 +360,35 @@ export interface RelayDeliverySlot {
  * bubble's opt-out note explains them), and counting them would make N/M
  * unreachable — the chip could never finalize. All-opted-out (or no slots) ⇒
  * null: nothing was fanned out, so there is nothing to summarize.
+ *
+ * NEW: a leg that has gone QUIET (see `isStaleLeg`) is counted separately and
+ * turns the chip danger as "J not confirmed" - a bare count is a coin flip, and
+ * the 2026-08-23 drop was lost on exactly that toss. The opted-out exclusion
+ * above covers J as well as N, M and K.
+ *
+ * K and J are DISJOINT by construction: a hard-failed leg is terminal, and
+ * `isStaleLeg` is false for every terminal status. Branch 2's label adds them,
+ * so that disjointness is load-bearing and is asserted in the tests.
+ *
+ * The staleness inputs are OPTIONAL and follow the WITHHELD-CLOCK convention:
+ * with `nowMs` undefined this cannot select the not-confirmed branches at all,
+ * whatever `sentAt` the slots carry, and behaves exactly as it did before. That
+ * is what keeps every pre-existing no-clock assertion honest rather than lucky.
+ * (Note the opposite convention on `presentDeliveryStatus` - see its doc.)
+ *
+ * ONE OPTIONS BAG, not positional arguments. `media` (the MMS reason override)
+ * and the two staleness clocks arrived from two different changes that each
+ * claimed positional argument 2, and a rollup needs BOTH: an attachment leg that
+ * failed 30005 must read as an attachment failure whether or not another leg has
+ * gone quiet. A bag is also what keeps the pre-existing single-argument
+ * assertions - the ones that prove staleness is OFF without a clock - honest
+ * rather than accidentally re-armed by argument-position drift.
  */
 export function presentRelayDelivery(
   slots: RelayDeliverySlot[],
-  opts: DeliveryReasonOptions = {},
+  opts: RelayDeliveryOptions = {},
 ): DeliveryPresentation | null {
+  const { messageAtMs, nowMs } = opts;
   // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
   // suppressed leg as `failed`; the group-text receipts path records what Twilio
   // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
@@ -135,6 +404,7 @@ export function presentRelayDelivery(
     (s) => s.status === 'failed' || s.status === 'undelivered',
   ).length;
   const total = fanned.length;
+  const stale = fanned.filter((s) => isStaleLeg(s, messageAtMs, nowMs)).length;
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
     // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
@@ -148,16 +418,121 @@ export function presentRelayDelivery(
       ),
     );
     return {
-      label: `delivered ${delivered}/${total} - ${failed} failed`,
+      // The reason is appended INLINE after this label by the bubble, so the
+      // counts come first and the reason last: it belongs to the FAILED legs
+      // only, and putting it between the two counts would attach it to the
+      // unconfirmed ones instead.
+      label:
+        stale > 0
+          ? `delivered ${delivered}/${total} - ${failed} failed, ${stale} not confirmed`
+          : `delivered ${delivered}/${total} - ${failed} failed`,
       tone: 'danger',
       isFailure: true,
       ...(reasons.length > 0 && { reason: reasons.join('; ') }),
+    };
+  }
+  if (stale > 0) {
+    // Danger so it draws the eye, but deliberately NOT isFailure: no receipt is
+    // not proof of failure, and isFailure is what offers a Retry that could
+    // double-send a message that actually landed. Same reasoning as
+    // STALE_SENT_PRESENTATION.
+    return {
+      label: `delivered ${delivered}/${total} - ${stale} not confirmed`,
+      tone: 'danger',
+      isFailure: false,
     };
   }
   if (delivered === total) {
     return { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false };
   }
   return { label: `delivered ${delivered}/${total}`, tone: 'neutral', isFailure: false };
+}
+
+/**
+ * Which multi-party product a per-recipient row belongs to. Structurally
+ * identical to - and assignable from - `RosterKind` in `Timeline.tsx`; declared
+ * here rather than imported so this presenter module stays a leaf (the
+ * broadcasts routes import it too, and it must not drag a component in).
+ */
+export type LegRosterKind = 'relay' | 'group_text';
+
+/**
+ * `queued` that never advanced. `presentDeliveryStatus` will NOT produce this:
+ * the 1:1 rule stays `sent`-only, so the per-leg presenter renders it itself.
+ *
+ * It MUST differ from STALE_SENT_PRESENTATION. "Sent - not confirmed" on a leg
+ * the provider never reported sent asserts an event that did not happen. Same
+ * tone and same non-failure reasoning as the `sent` twin.
+ */
+const STALE_QUEUED_PRESENTATION: DeliveryPresentation = {
+  label: 'Queued - not confirmed',
+  tone: 'danger',
+  isFailure: false,
+};
+
+/**
+ * Present ONE recipient's leg of a multi-party send.
+ *
+ * Per-leg state reuses `presentDeliveryStatus` so a leg and a 1:1 message never
+ * disagree about what a status MEANS, with exactly two exceptions this function
+ * owns - the stale labels and the opted-out label. They live here and NOT in
+ * `presentDeliveryStatus`, whose other callers (the EmailCard chip and the
+ * broadcasts recipient badge) must not move.
+ *
+ * THE DELEGATION RULE, and the reason this function exists at all: it NEVER
+ * delegates the staleness decision, on either path. It decides staleness itself
+ * with `isStaleLeg` and returns its own stale presentation; for everything else
+ * it calls `presentDeliveryStatus(slot.status)` with NO second argument,
+ * ALWAYS - enabled path and disabled path alike, so there is exactly one
+ * delegation call shape here. That is correct for all six statuses, because
+ * branch 4 is reached only when the leg is NOT stale, so the plain
+ * STATUS_PRESENTATION label is by construction the right answer.
+ *
+ * Passing `presentDeliveryStatus(slot.status, messageAtMs, nowMs)` instead would
+ * hand that function's `sent`-only rule the MESSAGE clock, and a released
+ * connect-when-ready hold - composed days ago, fanned out seconds ago - would
+ * render instant red. That false red is the exact failure the per-leg `sentAt`
+ * gate exists to prevent, and it is reachable in production.
+ *
+ * Returns null for an unrecognised status: the row then shows the member's name
+ * and NO state chip, never a blank row and never an invented state.
+ */
+export function presentLegDelivery(
+  slot: RelayDeliverySlot,
+  rosterKind: LegRosterKind,
+  messageAtMs?: number,
+  nowMs?: number,
+): DeliveryPresentation | null {
+  // Keyed on the CODE ALONE, exactly as the rollup's denominator filter is, so a
+  // leg excluded from N/M and a leg labelled "not sent" are always the same set.
+  // The relay fan-out records a suppressed leg as `failed` and the group-text
+  // receipts path records Twilio's `undelivered` for a 21610; both mean the same
+  // thing, and `contact_opted_out` is written by us, never by a carrier.
+  //
+  // Deliberately NOT routed through `deliveryReason`, which maps this code to
+  // "Everyone here has opted out - nothing was sent" - copy written for the
+  // message-level AGGREGATE. On the row of the one member in five who opted out
+  // that would be a fresh instance of the misread this feature exists to kill.
+  //
+  // PRODUCT-AWARE, mirroring the split the opt-out note above the rows already
+  // makes, because the mechanism genuinely differs: on a group text Twilio skips
+  // the participant, on a relay the app itself declines to send.
+  if (slot.errorCode === 'contact_opted_out') {
+    return {
+      label:
+        rosterKind === 'group_text'
+          ? 'Not sent - opted out (Twilio skips them)'
+          : 'Not sent - opted out',
+      tone: 'neutral',
+      // Not a failure: nothing was sent, so there is nothing to retry, and the
+      // bubble renders a row's reason only when that row isFailure.
+      isFailure: false,
+    };
+  }
+  if (isStaleLeg(slot, messageAtMs, nowMs)) {
+    return slot.status === 'queued' ? STALE_QUEUED_PRESENTATION : STALE_SENT_PRESENTATION;
+  }
+  return presentDeliveryStatus(slot.status);
 }
 
 /**

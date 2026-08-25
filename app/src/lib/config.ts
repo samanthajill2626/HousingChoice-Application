@@ -19,12 +19,9 @@ export type EmailDriverName = 'ses' | 'console';
 
 export interface AppConfig {
   nodeEnv: string;
-  /** Dev-only test/QA endpoints (dev-login, outbox, reseed) are gated on this.
+  /** Dev-only test/QA endpoints (dev-login, reseed) are gated on this.
    *  MUST be false in production — loadConfig fails fast otherwise. */
   devAuthEnabled: boolean;
-  /** Dev-only: when true, outbound messages are also persisted to the
-   *  hc-local-dev-outbox table for inspection. MUST be false in production. */
-  recordOutbox: boolean;
   /** HTTP listen port for the app process (CloudFront -> EC2 origin targets 8080). */
   port: number;
   logLevel: string;
@@ -527,7 +524,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const workerLogGroupName = `/hc/${appEnv}/worker`;
   const systemLogGroupName = `/hc/${appEnv}/system`;
 
-  // Dev-only endpoints (dev-login, outbox, reseed in later phases) are gated
+  // Dev-only endpoints (dev-login, reseed, the tick seams) are gated
   // behind this flag. It must NEVER be set in production; if it is, refuse to
   // start rather than expose a backdoor. Checked first, before other validation,
   // so the dangerous combination fails fast regardless of what else is missing.
@@ -539,18 +536,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
-  const recordOutbox = ['true', '1', 'yes'].includes((env.MESSAGING_RECORD_OUTBOX ?? '').toLowerCase());
-  if (recordOutbox && nodeEnv === 'production') {
-    throw new Error(
-      'MESSAGING_RECORD_OUTBOX is set while NODE_ENV=production — refusing to start. The dev ' +
-        'message outbox persists message bodies (PII) and must never run in production.',
-    );
-  }
-
   // Dev-only Twilio REST redirect (fake-twilio host). MUST NOT be set in
-  // production; mirrors the DEV_AUTH_ENABLED / MESSAGING_RECORD_OUTBOX dev-only
-  // gates above and is checked here, before the other prod-wiring validation, so
-  // the dangerous combination fails fast on the right error.
+  // production; mirrors the DEV_AUTH_ENABLED dev-only gate above and is checked
+  // here, before the other prod-wiring validation, so the dangerous combination
+  // fails fast on the right error.
   const twilioApiBaseUrl = env.TWILIO_API_BASE_URL?.trim();
   if (twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 && nodeEnv === 'production') {
     throw new Error(
@@ -1279,7 +1268,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     nodeEnv,
     devAuthEnabled,
-    recordOutbox,
     port,
     logLevel: env.LOG_LEVEL ?? 'info',
     cfOriginSecret: cfOriginSecret ?? DEV_ORIGIN_SECRET_DEFAULT,

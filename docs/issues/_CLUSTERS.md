@@ -67,7 +67,7 @@ SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
 | med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | contributor 2 of the badge high - **cheapest, biggest win, sequence FIRST** |
 | med | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | same budget/walk-stop logic |
 | med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | the flag the truncation path emits |
-| med | [unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md) | the coverage gate that would have caught both highs |
+| ~~med~~ | ~~[unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md)~~ | **RESOLVED 2026-08-21** by the `globalSetup` throw - this row was stale when C1 was scoped. C1 is TWELVE open issues, not thirteen |
 | low | [unread-load-more-empty-on-exact-multiple](./unread-load-more-empty-on-exact-multiple.md) | same paging arithmetic |
 | low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | same constants |
 | low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8) |

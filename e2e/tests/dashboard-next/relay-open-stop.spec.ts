@@ -1,6 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { postInboundSms, twimlMessageBody } from '../../fixtures/fakeTwilio.js';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { postInboundSms, twimlMessageBody, getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the filed keyword-reply copy (no drift): the spec reads
 // the app catalog directly, mirroring the lifecycle spec's cross-package import.
@@ -19,9 +18,9 @@ import { expectTodayReady } from '../../support/today.js';
 //     docs/issues/twilio-standard-optout-double-reply.md): Twilio's Advanced Opt-Out
 //     sends the confirmations, configured with the copy filed in the app catalog. The
 //     inbound is still POSTed OURSELVES (postInboundSms) so the TwiML can be read back
-//     and asserted EMPTY. After a bare STOP the outbox gains ZERO rows, as before.
-//   - Fan-out reach/skip is asserted with outbox `since`-diffs (legs go through the
-//     recording send wrapper -> /__dev/outbox). "B/C received nothing new" = an empty
+//     and asserted EMPTY. After a bare STOP the proof-of-send gains ZERO rows, as before.
+//   - Fan-out reach/skip is asserted with proof-of-send `since`-diffs (legs land in the
+//     fake-twilio thread store -> getOutboundTo). "B/C received nothing new" = an empty
 //     since-diff; a delivered member is a positive poll (expectOutboxIncludes).
 //   - The create-time intro SMS to every member CONTAINS the substring "STOP"
 //     (relay.intro compliance footer), so we NEVER assert on the bare word "STOP" in
@@ -47,9 +46,9 @@ const INTRO_NEEDLE = 'Use this group text';
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
 // numbers (the "019" exchange, whose area segment tracks the buy hint - see
 // POOL_NUMBER_RE in e2e/scenarios/steps.ts) or the seeded rosters. A shared
-// incrementing counter keeps
-// every phone AND every inbound MessageSid unique across the run (unique numbers are
-// also what keeps the never-reset fake + the outbox free of cross-test contamination).
+// incrementing counter keeps every phone AND every inbound MessageSid unique
+// across the run (unique numbers are what keep the fake's thread store - reset
+// only once per suite, at preflight - free of cross-test contamination).
 let uid = 0;
 function uniquePhone(): string {
   uid += 1;
@@ -82,8 +81,8 @@ async function devLogin(page: Page): Promise<void> {
   await expectTodayReady(page);
 }
 
-/** Poll the dev outbox until a message to `phone` whose body includes `needle`
- *  (optionally FROM `from`) is observed. */
+/** Poll the fake's thread store until an outbound message to `phone` whose body
+ *  includes `needle` (optionally FROM `from`) is observed. */
 async function expectOutboxIncludes(
   request: APIRequestContext,
   phone: string,
@@ -93,7 +92,7 @@ async function expectOutboxIncludes(
   await expect
     .poll(
       async () => {
-        const msgs = await getOutbox(request, { to: phone });
+        const msgs = await getOutboundTo(request, { to: phone });
         return msgs.some(
           (m) => (m.body ?? '').includes(needle) && (from === undefined || m.from === from),
         );
@@ -162,8 +161,8 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
   // fan-out for the bare keyword (so no worker job exists to relay it); the settle lets
   // a broken relay betray itself. An empty since-diff to EITHER member is the proof.
   await new Promise((r) => setTimeout(r, 2_000));
-  expect(await getOutbox(request, { to: memberB.phone, since: t0 })).toHaveLength(0);
-  expect(await getOutbox(request, { to: memberC.phone, since: t0 })).toHaveLength(0);
+  expect(await getOutboundTo(request, { to: memberB.phone, since: t0 })).toHaveLength(0);
+  expect(await getOutboundTo(request, { to: memberC.phone, since: t0 })).toHaveLength(0);
 
   // --- Act 2: member B sends group content -> reaches C, SKIPS the opted-out A. B is
   //     the sender, so B is excluded from its own fan-out (reach here is C only). ---
@@ -178,7 +177,7 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
   expect(send1.status).toBe(200);
   await expectOutboxIncludes(request, memberC.phone, tok1, pool); // C reached (happens-after barrier)
   await new Promise((r) => setTimeout(r, 2_000)); // let A's (skipped) slot settle in the same pass
-  const aGot1 = (await getOutbox(request, { to: aPhone, since: t1 })).filter((m) =>
+  const aGot1 = (await getOutboundTo(request, { to: aPhone, since: t1 })).filter((m) =>
     (m.body ?? '').includes(tok1),
   );
   expect(aGot1, 'opted-out A must be skipped on the fan-out').toHaveLength(0);

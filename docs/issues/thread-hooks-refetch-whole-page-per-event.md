@@ -9,6 +9,24 @@ created: 2026-08-13
 refs: dashboard/src/routes/conversation/useRelayThread.ts:196, dashboard/src/routes/conversation/useRelayThread.ts:238, dashboard/src/routes/conversation/useGroupThread.ts:128, dashboard/src/routes/conversation/useGroupThread.ts:188, dashboard/src/routes/contact/useContactTimeline.ts:141, dashboard/src/routes/contact/useContactTimeline.ts:318, dashboard/src/routes/placements/usePlacements.ts:244
 ---
 
+**CORRECTION 2026-08-24: this is no longer the leading explanation for
+[`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md)
+sighting 1, and it is not evidence for anything in C1.** That issue attributed
+its "element was detached, retrying" signature to this churn. The reproduction
+on 2026-08-24 showed a different mechanism producing the identical signature -
+the node detaches because the list is replaced by an EMPTY one, a stale-filter
+page installed by `useInbox` - and the fix for that took the spec from a
+1-in-38 failure rate to 250/250.
+
+Stated at that strength deliberately: sighting 1 ran on a different branch under
+different load and left no artifact that can settle which mechanism it was, so
+"NOT this" would over-claim in the same direction the resolved issue has already
+had to retreat from once. What matters here is only that R11 must not be
+sequenced as if a flake depended on it.
+
+This issue keeps its own merits: a list should not re-render wholesale to
+deliver one changed row.
+
 **Problem.** Every conversation-shaped hook answers an SSE event by re-fetching
 the whole page it already has, then replacing its state wholesale. One new
 inbound text costs a full re-read of up to 50 messages the client is already

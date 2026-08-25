@@ -1,5 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { driveConnectingGroupToOpen, type RelayConversation } from '../../fixtures/relayConnect.js';
 // Single source of truth for the relay intro copy (no drift): the spec reads the
 // app catalog directly, the same cross-package import tour-roster.spec.ts uses.
@@ -115,10 +115,10 @@ async function expectOutboxIncludes(
   await expect
     .poll(
       async () => {
-        const msgs = await getOutbox(request, { to: phone });
+        const msgs = await getOutboundTo(request, { to: phone });
         return msgs.some((m) => (m.body ?? '').includes(needle) && m.from === from);
       },
-      { timeout: 15_000, message: `outbox to ${phone} never carried the relay intro` },
+      { timeout: 15_000, message: `thread store to ${phone} never carried the relay intro` },
     )
     .toBe(true);
 }

@@ -13,7 +13,7 @@
 // How we drive + verify:
 //   - dev-login (va@example.com → the navigator; founder@example.com → admin).
 //   - Verify the navigator's cell FOR REAL: verify-start → read the 6-digit code
-//     from /__dev/outbox (the SMS the app actually sent) → verify-confirm.
+//     from the fake's thread store (the SMS the app actually sent) → verify-confirm.
 //   - Originate via POST /api/contacts/:id/call → { callSid }.
 //   - Resolve the fake's paused outbound call by that callSid (findOutboundCall)
 //     and assert to=NAVIGATOR cell, from=BUSINESS number; press '1' to bridge.
@@ -44,7 +44,7 @@ import {
   pressCall,
   findOutboundCall,
 } from '../../fixtures/fakeVoice.js';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { reseed } from '../../fixtures/reseed.js';
 // SHARED voice setup/drive helpers — one source of truth also used by the
 // diagram-driven landlord-onboarding scenario (e2e/scenarios/steps.ts).
@@ -167,7 +167,7 @@ test('§9.1 originate rings the navigator cell from the business number, bridges
   const api = page.request;
   await devLoginAs(page, 'va@example.com');
 
-  // The navigator verifies their OWN cell first (real verify-start → outbox code → confirm).
+  // The navigator verifies their OWN cell first (real verify-start → thread-store code → confirm).
   const navCell = uniquePhone();
   await verifyCell(api, navCell);
 
@@ -450,8 +450,8 @@ test('§9.7 PII: the target appears only as a dialed <Number> leg — never in a
 //   2. Injecting DialCallStatus=no-answer directly via the signed /voice/status
 //      webhook (signature validation is disabled in the local e2e stack — the
 //      handler still processes it, logs a warning, and proceeds).
-//   3. Asserting the handler returned 200 (it ran) AND /__dev/outbox records
-//      NO outbound text to the contact's phone after the miss.
+//   3. Asserting the handler returned 200 (it ran) AND the fake's thread store
+//      records NO outbound text to the contact's phone after the miss.
 //
 // Why direct-POST rather than the fake engine: the engine's `pressDigit` on
 // an outbound call drives the full bridge chain synchronously and always marks
@@ -499,14 +499,14 @@ test('§9.8 outbound-missed regression guard (I-1): a no-answer outbound call mu
   // the auto-text fired — but it would also mean the test is inconclusive.
   expect(statusCode).toBe(200);
 
-  // THE REGRESSION INVARIANT: /__dev/outbox must NOT have sent the contact any
+  // THE REGRESSION INVARIANT: the thread store must NOT show the contact any
   // text since the call started. The `since` filter is RFC-3339 compatible so it
   // excludes any noise from prior tests.
   // Allow a brief moment for any fire-and-forget async work to settle before
   // asserting the absence of a text (the prior missed-call auto-text was queued
   // as a job — this gap lets a broken implementation betray itself).
   await new Promise((r) => setTimeout(r, 2_000));
-  const outboxAfter = await getOutbox(api, { to: targetPhone, since: callStartedAt });
+  const outboxAfter = await getOutboundTo(api, { to: targetPhone, since: callStartedAt });
   expect(
     outboxAfter,
     'BUG REGRESSION (I-1): a missed outbound call fired the "we missed you" auto-text — the `direction !== "outbound"` guard in /voice/status is broken',
@@ -695,13 +695,13 @@ test('§flex settings voice: human-format cell `404-982-4978` normalizes on blur
   await expect(page.getByText(/We texted a 6-digit code to/i)).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText('(404) 982-4978')).toBeVisible();
 
-  // --- Step 3: read the code from the outbox (the app sent it to +14049824978) ---
+  // --- Step 3: read the code from the thread store (the app sent it to +14049824978) ---
   const E164_CELL = '+14049824978';
   let verifyCode: string | undefined;
   await expect
     .poll(
       async () => {
-        const msgs = await getOutbox(api, { to: E164_CELL });
+        const msgs = await getOutboundTo(api, { to: E164_CELL });
         for (const m of msgs) {
           const match = /(\d{6})/.exec(m.body ?? '');
           if (match) { verifyCode = match[1]; }
@@ -711,8 +711,8 @@ test('§flex settings voice: human-format cell `404-982-4978` normalizes on blur
       { timeout: 10_000 },
     )
     .toBeTruthy();
-  // The outbox entry is addressed to the E.164 +14049824978 — stored value is E.164.
-  const outboxMsgs = await getOutbox(api, { to: E164_CELL });
+  // The thread entry is addressed to the E.164 +14049824978 — stored value is E.164.
+  const outboxMsgs = await getOutboundTo(api, { to: E164_CELL });
   expect(outboxMsgs.length).toBeGreaterThan(0);
   expect(outboxMsgs.some((m) => m.to === E164_CELL)).toBe(true);
 

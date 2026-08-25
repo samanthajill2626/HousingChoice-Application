@@ -1,7 +1,8 @@
 // Vitest globalTeardown - drops THIS worktree's hc-local- tables after the run,
 // the counterpart to globalSetup.ts's ensureKeyedLocalTables.
 //
-// WHY (2026-08-16): nothing ever deleted these. DynamoDB Local runs -inMemory
+// WHY (2026-08-16): nothing ever deleted these. DynamoDB Local ran -inMemory
+// at the time (disk-backed since 2026-08-24; the isolation story is unchanged)
 // WITHOUT -sharedDb, so it keeps a separate database per (accessKeyId, region)
 // - every worktree's vitest key (hctest<hash>) and every e2e lane key
 // (hclane<L>) gets its own database of ~23 tables. Tables were created once and
@@ -26,8 +27,9 @@
 // WHAT THIS STILL DOES NOT FIX: the databases of DELETED worktrees and
 // abandoned lanes. DynamoDB Local exposes no way to enumerate or drop a
 // database, only its tables under a key you already hold, and a deleted
-// worktree takes its ledger with it. Those are reclaimed ONLY by an operator
-// stopping the container (scripts/db.mjs warns when it is stale).
+// worktree takes its ledger with it. Since the 2026-08-24 disk-backed
+// migration those orphans are FILES, and scripts/db.mjs prunes any untouched
+// for 7+ days on db:start - no operator restart involved.
 //
 // CONCURRENCY (rewritten 2026-08-23, when per-file keys became MACHINE-WIDE).
 // The worktree key is still private to this worktree, but the per-file keys the
@@ -175,7 +177,8 @@ async function withAccessKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
  * cannot see. The ledger names the databases that were really used - see
  * `app/test/helpers/dynamoKeyLedger.ts` for why they are RECORDED rather than
  * enumerated (walking all ~327 per-file keys would materialise a database for
- * each, at ~0.6-1.1 MiB apiece that -inMemory keeps until the container stops).
+ * each - measured ~0.6-1.1 MiB apiece under the old -inMemory shape; since
+ * 2026-08-24 a materialised database is a disk FILE, cheaper but still real).
  *
  * Markers are dropped as they are swept, so the ledger stays bounded: a marker
  * outlives its run only when that run was interrupted, which is exactly when
@@ -244,7 +247,8 @@ export async function dropKeyedLocalTables(opts: {
   }
 
   // Reachability probe - a stopped container has already discarded everything
-  // (-inMemory), so there is nothing to drop and nothing to warn loudly about.
+  // (or, since disk-backed 2026-08-24, is simply unreachable), so there is
+  // nothing to drop right now and nothing to warn loudly about.
   try {
     await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
   } catch {

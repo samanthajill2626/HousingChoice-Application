@@ -12,7 +12,6 @@ import { seedAll, seedInboundVoiceLineHolder, SEED_INBOUND_VOICE_CELL, type Seed
 import { tableName, type AppConfig } from './config.js';
 import { createDynamoClient, createDocumentClient } from './dynamo.js';
 import { TABLES } from './tables.js';
-import { OUTBOX_TABLE_BASE } from '../adapters/recordingMessaging.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 
 export interface TableNamespace {
@@ -43,7 +42,7 @@ async function clearTable(
     const desc = await client.send(new DescribeTableCommand({ TableName: physical }));
     keyNames = (desc.Table?.KeySchema ?? []).map((k) => k.AttributeName!).filter(Boolean);
   } catch {
-    return; // table doesn't exist (e.g. outbox never created) — nothing to clear
+    return; // table doesn't exist — nothing to clear
   }
   let startKey: Record<string, unknown> | undefined;
   do {
@@ -92,7 +91,7 @@ export async function resetLocalData(deps: {
   }
   const client = createDynamoClient({ config });
   const doc = createDocumentClient({ config });
-  const bases = [...TABLES.map((t) => t.baseName), OUTBOX_TABLE_BASE];
+  const bases = TABLES.map((t) => t.baseName);
   // PHASE TIMINGS, logged below. A full-profile reseed once blew a spec's whole
   // 30s budget inside beforeEach under full-suite load, and the failure carried
   // no breakdown - nobody could say whether clearing, seeding, or a competing

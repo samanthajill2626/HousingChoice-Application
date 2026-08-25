@@ -90,7 +90,7 @@ export default defineConfig({
       // origin-secret header — so these ride the SAME proxy (same target +
       // x-origin-verify) as /api and /auth.
       '/public': appProxy,
-      // Dev-only endpoints (outbox, reseed, ping, dev-login). Only reachable
+      // Dev-only endpoints (reseed, ping, dev-login). Only reachable
       // when the app is started with DEV_AUTH_ENABLED=1 (the hermetic dev/e2e
       // stack). Mounted on the app; Vite proxies requests through so the UI +
       // e2e specs can reach them at the baseURL (:5174).

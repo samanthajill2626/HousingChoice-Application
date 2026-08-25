@@ -1014,7 +1014,69 @@ describe('GroupTextView - the composer (S5)', () => {
     ]);
     renderAt('gt-1');
     await waitFor(() => expect(screen.getByText('heading over')).toBeInTheDocument());
-    expect(screen.getByText(/delivered 1\/2/)).toBeInTheDocument();
+    // TIGHTENED (S5). This used to read `getByText(/delivered 1\/2/)`, an
+    // unanchored substring regex - and this fixture's `+...0112` leg is `sent`
+    // with NO `sentAt`, so it ages from `msg.at`, which `messageInstant` takes
+    // from `provider_ts` (2026-06-17), fourteen days before setup.ts's pinned
+    // 2026-07-01T12:00:00Z. The chip therefore escalates to
+    // `delivered 1/2 - 1 not confirmed`, and RTL joins the span's text nodes
+    // before regex-testing, so the OLD locator matched the escalated string too
+    // and could not fail either way. Assert the whole string: the escalation on
+    // a quiet leg IS the feature, and this is the one assertion on this surface
+    // that proves it.
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+  });
+
+  // The GROUP-TEXT key convention, end to end through the real view. Timeline's
+  // own suite covers phone-keyed rows against a hand-built roster prop; this
+  // proves the roster GroupTextView actually derives from `getGroupMembers`
+  // (GroupTextView.tsx:310-314) resolves a `phone#<E164>` slot to the member's
+  // NAME - the failure this feature exists to prevent is a founder reading a
+  // bare number, or a blank row, on the surface where every key is phone-scoped.
+  //
+  // Mocks: only `getConversationMessages` is overridden, and `beforeEach`
+  // already re-arms it with `.mockReset().mockResolvedValue([])` (:133), so a
+  // plain `.mockResolvedValue([...])` here leaves no undefined window. That is
+  // the file's established idiom and the thing that keeps
+  // `conversationdetail-members-mock-suite-flake` unreachable - do NOT call
+  // `mockReset()` inside a test without re-arming it.
+  it('names each phone-keyed recipient and their state once the bubble is revealed', async () => {
+    getConversationMessages.mockResolvedValue([
+      {
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:00:00.000Z#IM2',
+        direction: 'outbound',
+        author: 'teammate',
+        type: 'sms',
+        body: 'we are five minutes out',
+        delivery_status: 'sent',
+        provider_ts: '2026-06-17T10:00:00.000Z',
+        delivery_recipients: {
+          // Reverse of roster order on purpose: the rows must come back in
+          // ROSTER order, not map order.
+          'phone#+14045550112': { status: 'sent' },
+          'phone#+14045550111': { status: 'delivered' },
+        },
+      } as unknown as Message,
+    ]);
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('we are five minutes out')).toBeInTheDocument());
+    // The list is CONDITIONALLY rendered, so the absence check is only
+    // meaningful beside the reveal that follows it.
+    expect(screen.queryByRole('list', { name: 'Delivery by recipient' })).not.toBeInTheDocument();
+    // The bubble is a bare div with no role or name; clicking the body text
+    // bubbles up to its toggleMeta.
+    fireEvent.click(screen.getByText('we are five minutes out'));
+    const list = await screen.findByRole('list', { name: 'Delivery by recipient' });
+    const recipients = within(list).getAllByRole('listitem');
+    expect(recipients).toHaveLength(2);
+    // Scoped to the rows: the Details pane's member list carries these names too.
+    expect(recipients[0]).toHaveTextContent('Ann Tenant');
+    expect(recipients[0]).toHaveTextContent('Delivered');
+    expect(recipients[1]).toHaveTextContent('Marcus Landlord');
+    expect(recipients[1]).toHaveTextContent('Sent - not confirmed');
+    // No row claims a membership it cannot know - both keys match the roster.
+    expect(within(list).queryByText(/former member/)).not.toBeInTheDocument();
   });
 });
 

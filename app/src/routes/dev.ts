@@ -2,11 +2,10 @@
 // NODE_ENV !== 'production' (gated by lib/devRoutes.ts; config.ts fails fast if
 // the flag is ever set in production). Exposes a liveness probe and a dev-login
 // that mints a REAL session for a seeded user, mirroring the OAuth callback.
-// Also exposes the recorded-message outbox, reseed, and a deterministic
-// tour-reminder tick for e2e testing.
+// Also exposes reseed and a deterministic tour-reminder tick for e2e testing.
 import { randomUUID } from 'node:crypto';
 import { Router, json } from 'express';
-import { PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
 import {
@@ -26,7 +25,6 @@ import {
   type UserRole,
   type UsersRepo,
 } from '../repos/usersRepo.js';
-import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessaging.js';
 import { resetLocalData } from '../lib/devReset.js';
 import { resetPerformanceData } from '../lib/performanceSeed.js';
 import { resolvePerformanceSeedConfig, type PerformanceSeedInput } from '../lib/seed/performance.js';
@@ -181,16 +179,20 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // probe) AND surfaces the hermetic-stack config flags the e2e preflight
   // (e2e/support/preflight.ts) asserts on. This is what catches a STALE or
   // hand-started stack being silently reused via Playwright's
-  // reuseExistingServer: an app booted WITHOUT MESSAGING_RECORD_OUTBOX=1 has no
-  // outbox-recording wrapper, so every send skips the dev-outbox and outbox.spec
-  // fails with a baffling `Received: 0`. Flags only — booleans/enum/prefix,
-  // never secrets or PII.
+  // reuseExistingServer: an app booted with the wrong driver or sending flags
+  // makes every send assertion fail with a baffling `Received: 0`. Flags only —
+  // booleans/enum/prefix, never secrets or PII.
   router.get('/__dev/ping', (_req, res) => {
     res.status(200).json({
       dev: true,
-      recordOutbox: config.recordOutbox,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
+      // TRUE only when Twilio REST is redirected at a fake host - the
+      // hermetic-stack discriminator the preflight keys on. A hand-started
+      // LIVE dev stack (real Twilio + real SES) matches every other flag
+      // here, so without this it would be reused silently. (Replaced the
+      // recordOutbox flag, remove-dev-outbox-proof-of-send 2026-08-24.)
+      twilioApiBaseUrlSet: Boolean(config.twilioApiBaseUrl),
       emailDriver: config.emailDriver,
       emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,
@@ -295,30 +297,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     res.status(200).json({ userId: user.userId, email: user.email, role: user.role });
   });
 
-  // DEPRECATED proof-of-send log — outbound-only. New tests should assert against
-  // the fake-twilio thread store (GET /control/threads on the fake-twilio service),
-  // which captures both directions + delivery status. Retained only so the three
-  // pre-existing green specs don't churn; do not extend.
-  // TODO(remove-dev-outbox-proof-of-send): migrate those 3 specs, then delete this + the driver.
-  // GET /__dev/outbox?to=&since= — recorded outbound messages (newest last).
-  router.get('/__dev/outbox', async (req, res) => {
-    const table = tableName(OUTBOX_TABLE_BASE);
-    let items: OutboxRecord[] = [];
-    try {
-      const out = await doc.send(new ScanCommand({ TableName: table }));
-      items = (out.Items ?? []) as OutboxRecord[];
-    } catch {
-      items = []; // table not created yet (nothing sent) — empty outbox
-    }
-    const to = typeof req.query['to'] === 'string' ? req.query['to'] : undefined;
-    const since = typeof req.query['since'] === 'string' ? req.query['since'] : undefined;
-    if (to) items = items.filter((m) => m.to === to);
-    if (since) items = items.filter((m) => m.createdAt >= since);
-    items.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
-    res.status(200).json({ messages: items });
-  });
-
-  // POST /__dev/reseed[?profile=full] — wipe local tables (incl. outbox) and
+  // POST /__dev/reseed[?profile=full] — wipe local tables and
   // re-seed. `profile` defaults to 'lean' (the byte-stable e2e/dev world);
   // `?profile=full` additionally seeds the extended cast + matrix + live items,
   // which the relay-group-view e2e needs for the live relay group
@@ -381,8 +360,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   let tickDeps = deps.tourReminderDeps;
   const tourReminderDeps = (): RunDueTourRemindersDeps => {
     // Built lazily on the first tick — mirrors worker.ts's tourReminderDeps
-    // construction exactly (createMessagingAdapter honors
-    // MESSAGING_RECORD_OUTBOX, so hermetic-e2e sends stay outbox-visible).
+    // construction exactly (createMessagingAdapter, so hermetic-e2e sends land
+    // in the fake-twilio thread store like every other send).
     tickDeps ??= {
       tourRemindersRepo: createTourRemindersRepo({ logger: log }),
       toursRepo: createToursRepo({ logger: log }),
@@ -453,8 +432,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   let nudgeTickDeps = deps.placementNudgeDeps;
   const placementNudgeDeps = (): RunDuePlacementNudgesDeps => {
     // Built lazily on the first tick — mirrors worker.ts's placementNudgeDeps
-    // construction exactly (createMessagingAdapter honors MESSAGING_RECORD_OUTBOX
-    // via the send service, so hermetic-e2e sends stay outbox-visible).
+    // construction exactly (createMessagingAdapter via the send service, so
+    // hermetic-e2e sends land in the fake-twilio thread store).
     nudgeTickDeps ??= {
       placementNudgesRepo: createPlacementNudgesRepo({ logger: log }),
       placementsRepo: createPlacementsRepo({ logger: log }),
@@ -938,7 +917,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // FROM the pool number through the real fan-out adapter, and the fake infers
   // the group from that traffic (pure dynamic inference — no static mirror). The
   // dev.mjs boot POSTs this once under `--mock --seeded` (NOT wired into
-  // /__dev/reseed — that keeps the e2e outbox byte-stable).
+  // /__dev/reseed — that keeps the e2e seed world byte-stable).
   //
   // The replay enqueues the intro with persist:false (LEGS-ONLY): a REAL
   // provisioning intro persists a system-announcement row in the thread

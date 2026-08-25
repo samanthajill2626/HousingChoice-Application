@@ -251,8 +251,19 @@ export async function runProfiler(
       return 0;
     }
     config = parsed.config;
-  } catch {
-    stderr('configuration_invalid\n');
+  } catch (error) {
+    // Keep the machine-greppable token first, but carry the parser's reason:
+    // hiding it once cost an operator a source-dive to discover that --self-qa
+    // needs explicit --cold-repeats=1 --warm-repeats=1
+    // (docs/issues/perf-cli-configuration-invalid-swallows-reason.md).
+    // Parser messages never echo option VALUES, but "--<name> is not
+    // supported" echoes the user-typed option NAME - so the reason only
+    // surfaces when it fits a conservative charset/length, else the bare
+    // token stands (the pinned no-value-leak guard in cli.test.ts holds
+    // either way).
+    const raw = error instanceof Error ? error.message : '';
+    const reason = /^[A-Za-z0-9 ,._=-]{1,120}$/.test(raw) ? `: ${raw}` : '';
+    stderr(`configuration_invalid${reason}\n`);
     return 1;
   }
 
@@ -1034,6 +1045,7 @@ interface DefaultLifecycle {
   ownerToken: string;
   appBaseUrl: string;
   dashboardBaseUrl: string;
+  ports: { app: number; dashboard: number; fake: number; publicBase: number };
   tablePrefix: string;
   assertAlive(): void;
   cleanup(): Promise<import('./lifecycle.js').LifecycleCleanupResult>;
@@ -1318,11 +1330,17 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
       const selectedRoutes = runConfig.selfQa === null
         ? routesModule.ROUTES
         : selfQaModule.routesForSelfQa(runConfig.selfQa, routesModule.ROUTES);
+      // The proof-of-send count rides the fake-twilio thread store (the
+      // /__dev/outbox replacement). Self-QA is hermetic-only (checked below),
+      // so the owned lifecycle - and its fake port - is always present here.
+      const proofOfSendUrl = activeLifecycle === null
+        ? null
+        : `http://127.0.0.1:${activeLifecycle.ports.fake}/control/threads`;
       if (runConfig.selfQa !== null) {
         if (runConfig.target !== 'hermetic' || runConfig.seed === null) throw new Error('self_qa_target_invalid');
         const privateFixtures = seedModule.resolvePerformanceSelfQaFixtures(runConfig.seed);
         selfQaBindings = await selfQaModule.proveSelfQaFixtures(privateFixtures, selfQaApi);
-        selfQaBefore = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+        selfQaBefore = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi, proofOfSendUrl!);
       }
       const coldDom: ResolverDom = {
         hasExactLink: async () => true,
@@ -1419,7 +1437,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           }
         }
         result.outOfSampleWrites.push(...supplemental.outOfSampleWrites);
-        const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+        const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi, proofOfSendUrl!);
         const attempts = [
           ...selfQaModule.attemptsFromSamples(result.samples),
           ...supplemental.attempts,

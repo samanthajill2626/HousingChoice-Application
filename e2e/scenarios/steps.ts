@@ -1125,7 +1125,7 @@ export class Scenario {
    * Moves, in order:
    *   1. SETUP (idempotent) — the seeded VA (the logged-in navigator) needs a VERIFIED
    *      cell or the originate route 409s `cell_not_verified`. A fresh scenario VA has
-   *      none, so verify one via the shared self-service path (verify-start → outbox
+   *      none, so verify one via the shared self-service path (verify-start → thread-store
    *      code → verify-confirm) using a unique cell number. `activeNavCell` guards it so
    *      a re-call in the same scenario reuses the already-verified cell.
    *   2. PLACE — navigate to the active landlord contact page, open CallMenu.tsx, click

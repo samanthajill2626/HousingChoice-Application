@@ -1,6 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { listThreads, type FakeThread } from '../../fixtures/fakeTwilio.js';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { listThreads, getOutboundTo, type FakeThread } from '../../fixtures/fakeTwilio.js';
 import { fakeUrl } from '../../support/urls.js';
 import { expectTodayReady } from '../../support/today.js';
 
@@ -35,10 +34,10 @@ import { expectTodayReady } from '../../support/today.js';
 // did not actually exercise the connecting branch fails loudly instead of passing
 // vacuously.
 //
-// OBSERVABILITY: outbound legs are proven via BOTH the fake-twilio thread store
-// (listThreads - both directions + per-recipient delivery state incl. errorCode)
-// and the app outbox (getOutbox - the D13 "nothing sent while connecting" absence
-// proof). The warmed number is discovered via the admin GET /api/pool-numbers
+// OBSERVABILITY: outbound legs are proven via the fake-twilio thread store
+// (listThreads - both directions + per-recipient delivery state incl. errorCode;
+// getOutboundTo - the D13 "nothing sent while connecting" absence proof). The
+// warmed number is discovered via the admin GET /api/pool-numbers
 // inventory (state 'warming'); firing readiness is the fake's POST
 // /control/register-number (the T9 seam that drives warming -> active).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -231,8 +230,8 @@ test('connect-when-ready: a connecting group queues a team send, then opens + de
 
   // The intro is DEFERRED on the connecting path (no number to send from): nothing
   // has been sent to either member yet. This absence is half of the D13 proof.
-  expect(await getOutbox(request, { to: tenant.phone })).toHaveLength(0);
-  expect(await getOutbox(request, { to: landlord.phone })).toHaveLength(0);
+  expect(await getOutboundTo(request, { to: tenant.phone })).toHaveLength(0);
+  expect(await getOutboundTo(request, { to: landlord.phone })).toHaveLength(0);
 
   // --- Assert (UI): the dashboard renders a distinct "Connecting" state and the
   //     composer stays usable (per T11). ---
@@ -258,10 +257,10 @@ test('connect-when-ready: a connecting group queues a team send, then opens + de
   // queued_pending). The whole outbox is empty (D13: no send before registered).
   await page.waitForTimeout(2_000);
   expect(
-    await getOutbox(request, { to: tenant.phone }),
+    await getOutboundTo(request, { to: tenant.phone }),
     'a connecting-group compose must NOT send',
   ).toHaveLength(0);
-  expect(await getOutbox(request, { to: landlord.phone })).toHaveLength(0);
+  expect(await getOutboundTo(request, { to: landlord.phone })).toHaveLength(0);
 
   // --- Act: discover the warmed number (bought+recorded async by the warm job)
   //     and fire the readiness signal. ---
@@ -345,13 +344,13 @@ test('connect-when-ready: a connecting group queues a team send, then opens + de
   // Outbox corroboration: every recorded send belongs to THIS group's members and
   // none is failed - the only sends that ever happened were the intro + the flushed
   // queued message, AFTER the number registered.
-  const tenantOutbox = await getOutbox(request, { to: tenant.phone });
-  const landlordOutbox = await getOutbox(request, { to: landlord.phone });
+  const tenantOutbox = await getOutboundTo(request, { to: tenant.phone });
+  const landlordOutbox = await getOutboundTo(request, { to: landlord.phone });
   expect(tenantOutbox.length, 'the tenant received sends only after registration').toBeGreaterThan(0);
   expect(landlordOutbox.length).toBeGreaterThan(0);
   for (const m of [...tenantOutbox, ...landlordOutbox]) {
     expect(m.from, 'every send is FROM the warmed dedicated number').toBe(warmedNumber);
-    expect(m.status, 'no send failed').not.toBe('failed');
-    expect(m.status).not.toBe('undelivered');
+    expect(m.state, 'no send failed').not.toBe('failed');
+    expect(m.state).not.toBe('undelivered');
   }
 });

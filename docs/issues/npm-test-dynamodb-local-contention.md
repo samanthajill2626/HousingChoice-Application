@@ -678,3 +678,28 @@ Related: [`unread-index-integration-coverage-requires-local-dynamo`](./unread-in
 (a green `npm test` does not prove byUnread index semantics - that suite
 self-skips without DynamoDB Local, which is the other half of "the gate does not
 mean what it looks like").
+
+---
+
+## Cross-reference: a FOURTH cause shipped 2026-08-24 (`6154771e`)
+
+Recorded here because this issue's own history is the same symptom collecting
+three different explanations, and the fix below landed on a branch
+(`fix/dynamodb-local-disk-backed`) that has since been retired.
+
+`-inMemory` was replaced with SQLite on TMPFS plus `-Xmx2g`. The dual-suite soak
+failed BOTH isolated lanes on the same test at the same instant - a raw API GET
+hanging 30s with no browser involved - and the shared DynamoDB Local JVM was
+found at 5.9GiB RSS / 124% CPU while idle. `-inMemory` holds every table in the
+JVM heap and deletes never return it, so a heavy multi-agent day ratchets the
+collector into stop-the-world pauses that stall every lane at once. Three shapes
+were measured on the full app suite: `-inMemory` ~65-90s but with the ratchet;
+`-dbPath` on container disk 405s (fsync, rejected); `-dbPath` on tmpfs 72.9s,
+329/329, 19MB across 55 files after a whole run.
+
+**This does NOT close this issue** and no status was changed on it. It removes
+the heap-ratchet cause, which is distinct from both the per-file-keys cause
+above and the remaining `UpdateTable` `InternalFailure` tail. Whether the
+degraded-key signature quoted in `AGENTS.md` (~9x slower, ~9 files failing on
+pure timeouts) still reproduces under tmpfs has not been re-measured - do that
+before citing those numbers again.

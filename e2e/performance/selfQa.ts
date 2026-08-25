@@ -214,8 +214,13 @@ function conversationUnread(value: unknown, id: string): number {
 export async function reduceSelfQaSnapshot(
   bindings: Readonly<SelfQaFixtureBindings>,
   api: SelfQaApi,
+  // Absolute URL of the fake-twilio thread store (GET /control/threads) - the
+  // proof-of-send surface. The 'outbox' scalar counts its messages; a read-only
+  // sampling run must leave that count unchanged. (Replaced the deprecated
+  // /__dev/outbox app route, remove-dev-outbox-proof-of-send.)
+  proofOfSendUrl: string,
 ): Promise<SelfQaSnapshot> {
-  const [inboxPage, contactConversation, conversation, unmatchedPage, tourGroup, placementGroup, outbox] =
+  const [inboxPage, contactConversation, conversation, unmatchedPage, tourGroup, placementGroup, proofOfSend] =
     await Promise.all([
       api.get('/api/inbox', { filter: 'all', limit: '30' }),
       api.get(`/api/conversations/${bindings.conversation_detail}`),
@@ -223,13 +228,18 @@ export async function reduceSelfQaSnapshot(
       api.get('/api/unmatched-email', { filter: 'unmatched' }),
       api.get(`/api/conversations/${bindings.tour_group}`),
       api.get(`/api/conversations/${bindings.placement_group}`),
-      api.get('/__dev/outbox'),
+      api.get(proofOfSendUrl),
     ]);
   const unmatched = rows(unmatchedPage, 'rows').find((row) => row.unmatchedId === bindings.unmatched_email);
-  const messages = object(outbox).messages;
-  if (unmatched === undefined || typeof unmatched.read !== 'boolean' || !Array.isArray(messages)) {
+  const threads = object(proofOfSend).threads;
+  if (unmatched === undefined || typeof unmatched.read !== 'boolean' || !Array.isArray(threads)) {
     throw new Error('self_qa_snapshot_failed');
   }
+  const sendCount = threads.reduce((total: number, thread) => {
+    const messages = object(thread).messages;
+    if (!Array.isArray(messages)) throw new Error('self_qa_snapshot_failed');
+    return total + messages.length;
+  }, 0);
   return new Map<SelfQaSurface, number | boolean>([
     ['contact_detail', unreadFromInbox(inboxPage, 'contactId', bindings.contact_detail)],
     ['conversation_detail', conversationUnread(contactConversation, bindings.conversation_detail)],
@@ -237,7 +247,7 @@ export async function reduceSelfQaSnapshot(
     ['unmatched_email', unmatched.read],
     ['tour_group', conversationUnread(tourGroup, bindings.tour_group)],
     ['placement_group', conversationUnread(placementGroup, bindings.placement_group)],
-    ['outbox', messages.length],
+    ['outbox', sendCount],
   ]);
 }
 

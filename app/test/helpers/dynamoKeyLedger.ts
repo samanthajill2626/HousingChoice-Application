@@ -19,7 +19,8 @@
 //   ListTables x400 under those SAME keys    925ms, container RSS +1 MiB
 //
 // A ListTables under a key nobody has used MATERIALISES that database, at
-// roughly 0.6-1.1 MiB that `-inMemory` only reclaims when the container stops.
+// roughly 0.6-1.1 MiB under the old `-inMemory` shape (a disk FILE since the
+// 2026-08-24 disk-backed migration - cheaper, but still permanent-per-key).
 // A worktree has ~327 test files and only ~53 of them touch DynamoDB, so a
 // blind walk of every per-file key would permanently allocate ~200 MiB per
 // worktree to look for tables that cannot exist - re-creating the exact

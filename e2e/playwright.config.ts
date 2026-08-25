@@ -108,7 +108,7 @@ export default defineConfig({
   timeout: slowMo > 0 ? 30_000 + slowMo * 150 : 30_000,
   // Fail fast (with an actionable message) if the stack under test is stale or
   // misconfigured — e.g. a hand-started session reused via reuseExistingServer
-  // that lacks outbox recording. See support/preflight.ts.
+  // with the wrong driver or sending flags. See support/preflight.ts.
   globalSetup: './support/preflight.ts',
   fullyParallel: false,
   workers: 1,

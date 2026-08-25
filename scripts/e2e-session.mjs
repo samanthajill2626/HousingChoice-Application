@@ -8,7 +8,14 @@
 // path kills each tracked child directly — full Linux/CI teardown is validated
 // separately when CI is set up.
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  watchFile,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
@@ -123,13 +130,12 @@ const childEnv = {
   MEDIA_S3_ENDPOINT: process.env.MEDIA_S3_ENDPOINT ?? LOCAL_S3_ENDPOINT,
   PUBLIC_BASE_URL: publicBaseUrl,
   DEV_AUTH_ENABLED: '1',
-  MESSAGING_RECORD_OUTBOX: '1',
   // The public surface ships a strict per-IP abuse fence (default 5 req / 60s)
   // on its unauthenticated, SMS-spending routes. That's correct for prod, but a
   // single e2e run legitimately drives /public/* far more often than that from
   // ONE IP (every flyer teaser load + housing-fair POST + details reveal across
-  // the public-pages, outbox, settings, and tenant-onboarding specs share the
-  // window) — so the default trips and 429s cascade into "no longer available"
+  // the public-pages, proof-of-send, settings, and tenant-onboarding specs share
+  // the window) — so the default trips and 429s cascade into "no longer available"
   // funnels + missing welcomes. Raise the ceiling for the hermetic suite ONLY
   // (this never touches a deployed env); an externally-set value still wins.
   PUBLIC_RATE_LIMIT_MAX: process.env.PUBLIC_RATE_LIMIT_MAX ?? '100000',
@@ -258,9 +264,104 @@ function log(msg) {
   process.stdout.write(`[e2e-session] ${msg}\n`);
 }
 
+/**
+ * Where to persist each child's stdout/stderr, or '' for the default.
+ *
+ * WHY THIS EXISTS: children run with stdio 'inherit', so their output goes to
+ * this launcher's stdout - and under `npm run e2e` Playwright's webServer does
+ * not capture that, so the app log is DISCARDED. A failing spec therefore
+ * preserves browser-side artifacts only, which is precisely why three sightings
+ * of an empty inbox read could not be told apart from a healthy one
+ * (docs/issues/call-inbox-unread-detached-node-flake.md).
+ *
+ * OPT-IN, so a normal run behaves exactly as before: set E2E_CHILD_LOG_DIR to a
+ * directory and each child also appends to <dir>/<name>.log. Output is still
+ * forwarded to this process's stdout either way.
+ *
+ * TWO LIMITS, stated so nobody trusts this further than it goes:
+ *
+ * - THE LAST FEW LINES CAN BE LOST. Under `npm run e2e` Playwright tears the
+ *   webServer down with a tree-kill, so `shutdown()` below never runs (see its
+ *   own comment) and nothing flushes what is still in the sink's queue or in
+ *   the unread OS pipe buffer. With plain 'inherit' the child writes to the
+ *   inherited fd and no intermediary can lose anything; this path adds a buffer
+ *   that dies with the process. For a hang or a timeout - the cases this exists
+ *   for - the interesting lines are seconds old and already on disk. For a
+ *   crash in the final instant, prefer `npm run e2e:session`, which shuts down
+ *   properly.
+ * - `runOnce()` children (db-create, db-seed, the builds) still use 'inherit'
+ *   and are NOT captured. Only the long-lived services are.
+ *
+ * NOT OBSERVATIONALLY NEUTRAL, either: switching a child from 'inherit' to
+ * 'pipe' makes its stdout a pipe rather than a TTY, so `isTTY` goes false and
+ * stdout becomes block-buffered. Pino already emits JSON here so the FORMAT does
+ * not change, but a tool that pretty-prints for a TTY would, and buffering
+ * shifts when lines appear. Do not use this variable to reproduce a
+ * timing-sensitive symptom and then reason from the timings.
+ */
+const childLogDir = process.env['E2E_CHILD_LOG_DIR'] ?? '';
+
 function spawnNode(name, args, cwd = repoRoot, envOverride = undefined) {
   const env = envOverride ? { ...childEnv, ...envOverride } : childEnv;
+  if (childLogDir === '') {
+    return spawnNodeInherit(name, args, cwd, env);
+  }
+  mkdirSync(childLogDir, { recursive: true });
+  const child = spawn(process.execPath, args, {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const sink = createWriteStream(path.join(childLogDir, `${name}.log`), { flags: 'a' });
+  // A LOG SINK MUST NEVER TAKE THE LAUNCHER DOWN. An EACCES / ENOSPC / EBUSY on
+  // this file arrives as an 'error' event, and an unhandled one on a
+  // WriteStream is fatal - which would kill a whole e2e lane to protect a
+  // diagnostic. Report and carry on; the run matters more than its log.
+  let sinkBroken = false;
+  sink.on('error', (err) => {
+    sinkBroken = true;
+    log(`child log sink for ${name} failed, continuing without it: ${String(err)}`);
+  });
+  // `end: false` ON BOTH, and this is not a style choice. Piping two readables
+  // into one writable with the default `end: true` means the FIRST stream to
+  // EOF calls sink.end(), and Node then unpipes every other source when the
+  // sink finishes - so the second stream's remaining output is discarded
+  // silently, with no error even if you are listening for one. stderr losing
+  // its tail is the exact opposite of what a failure log is for.
+  child.stdout.pipe(sink, { end: false });
+  child.stderr.pipe(sink, { end: false });
+  child.stdout.pipe(process.stdout);
+  child.stderr.pipe(process.stderr);
+  // 'close', NOT 'exit'. 'exit' fires when the PROCESS ends; 'close' fires once
+  // its stdio streams are closed too, and the two are not the same moment -
+  // Node documents 'close' as existing precisely because stdio can outlive
+  // 'exit' when a process shares it with children. These children do: Vite runs
+  // esbuild as a child service, and app/worker run under tsx. Ending the sink on
+  // 'exit' would drop whatever a grandchild wrote afterwards - reintroducing,
+  // four lines below the comment that warns about it, the same silent
+  // truncation `{ end: false }` was added to remove.
+  child.once('close', () => {
+    if (!sinkBroken) sink.end();
+  });
+  // A run separator, because `flags: 'a'` accumulates sessions into one file and
+  // an undelimited concatenation of three runs is close to unreadable. The
+  // timestamp is the launcher's, which is the same clock the child's pino lines
+  // use, and the pid is what makes the next caveat survivable.
+  //
+  // CAVEAT on `e2e:restart`: the dying child's final lines can still be draining
+  // through its own sink when this separator is written, so a crash tail can
+  // appear BELOW the separator for the run that replaced it. Both writes are
+  // O_APPEND so nothing corrupts - but attribute by pid, not by position.
+  sink.write(`\n===== ${name} started ${new Date().toISOString()} (pid ${child.pid}) =====\n`);
+  return trackChild(name, child);
+}
+
+function spawnNodeInherit(name, args, cwd, env) {
   const child = spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
+  return trackChild(name, child);
+}
+
+function trackChild(name, child) {
   child.on('exit', (code, signal) => {
     children.delete(name);
     if (!shuttingDown) log(`${name} exited (code=${code} signal=${signal})`);

@@ -40,7 +40,6 @@ vi.mock('../src/lib/config.js', () => ({
     tablePrefix: 'hc-local-',
     // --- the rest are unused by seedMedia; satisfy the type with dummies ---
     devAuthEnabled: false,
-    recordOutbox: false,
     port: 8080,
     logLevel: 'silent',
     cfOriginSecret: 'test-secret',

@@ -849,7 +849,7 @@ code change to it is picked up.
 | Verb | Purpose |
 |---|---|
 | `POST /control/send-as-party` | Inject an inbound text/MMS as a party → fires a signed `/webhooks/twilio/sms` at the app |
-| `GET  /control/threads` | List every thread (both directions + delivery status) — the `/__dev/outbox` superset |
+| `GET  /control/threads` | List every thread (both directions + delivery status) — THE proof-of-send surface |
 | `POST /control/personas/ad-hoc` | Mint a throwaway caller number |
 | `POST /control/delivery-outcome` | Set the next outbound message's delivery profile (normal / stall / fail + ErrorCode) |
 | `POST /control/reset` | Clear threads + cancel in-flight status timers (wired into `e2e:reseed`) |

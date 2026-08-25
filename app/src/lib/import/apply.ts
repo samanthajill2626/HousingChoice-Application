@@ -161,7 +161,8 @@ export interface ApplyOptions {
    * process.env, which is what the CLI wants. Integration tests pass a unique
    * prefix so they can create and drop their OWN tables — vitest runs files in
    * parallel, and dropping the shared `hc-local-` tables mid-run breaks whatever
-   * neighbouring suite is using them (it broke devOutbox.integration).
+   * neighbouring suite is using them (historically it broke the since-deleted
+   * devOutbox.integration suite).
    */
   env?: NodeJS.ProcessEnv;
 }

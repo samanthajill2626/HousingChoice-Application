@@ -114,9 +114,8 @@ test.describe('Settings — admin path', () => {
     });
     expect(submit.ok()).toBeTruthy();
 
-    // PROOF OF SEND via the fake-twilio thread store (the preferred, more reliable
-    // capture vs. the deprecated /__dev/outbox): the welcome lands as an outbound
-    // message in this phone's thread with the operator's interpolated copy.
+    // PROOF OF SEND via the fake-twilio thread store: the welcome lands as an
+    // outbound message in this phone's thread with the operator's interpolated copy.
     await expect
       .poll(
         async () => {
@@ -167,8 +166,8 @@ test.describe('Settings — admin path', () => {
     await expect(page.getByRole('button', { name: 'Trace', exact: true })).toHaveCount(0);
 
     // --- Restore the welcome-text to a neutral copy that still interpolates
-    // {firstName} so later specs (e.g. outbox.spec, which only checks the first
-    // name appears) stay green. The form can't UNSET welcomeText (empty = "leave
+    // {firstName} so later specs (e.g. proof-of-send.spec, which checks the
+    // "Reply STOP" line) stay green. The form can't UNSET welcomeText (empty = "leave
     // default", never PUT), so we overwrite with a benign default-like string. ---
     await page.getByRole('tab', { name: 'Templates' }).click();
     // Keep "Reply STOP" so the A2P/CTIA floor accepts it; keep "thanks for stopping

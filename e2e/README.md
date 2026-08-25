@@ -525,8 +525,8 @@ on `localhost`, causing a false "free" and a double-bind. Forcing IPv4 throughou
 the lane stack eliminates this class of failure.
 
 ## Requirements
-- Docker running (DynamoDB Local). The launcher sets `DEV_AUTH_ENABLED=1` and
-  `MESSAGING_RECORD_OUTBOX=1` so dev-login and the message outbox are available.
+- Docker running (DynamoDB Local). The launcher sets `DEV_AUTH_ENABLED=1` so
+  dev-login and the dev seams are available.
 - **Env vars:** the session launcher reads only `process.env` (hermetic/reproducible) and does NOT merge a local `.env` the way `npm run dev -- --local` does — so `TABLE_PREFIX`/`DYNAMODB_ENDPOINT` overrides in `.env` won't affect `e2e:session`.
 - **Windows note:** killing the background task alone can leave the reparented node tree running on `:8080`/`:5173`. The launcher now auto-exits when its parent dies (parent-death watch), and `npm run e2e:stop` or the next `npm run e2e:session` (self-heal) also clean up any stale processes.
 - **Browsers:** see [Setup](#setup-first-time) — the suite uses bundled Chromium
@@ -541,7 +541,8 @@ the lane stack eliminates this class of failure.
 4. Authenticate the MCP browser: `POST /auth/dev-login` `{ "email": "va@example.com" }`
    (proxied via the dashboard URL), or navigate the UI. Then drive with the Playwright MCP
    (navigate, snapshot, click, fill, screenshot).
-5. Assert outbound texts via `GET /__dev/outbox?to=<phone>`.
+5. Assert outbound texts via the fake's thread store: `GET <fake-url>/control/threads`
+   (in specs, `getOutboundTo(request, { to, since })` from `fixtures/fakeTwilio.ts`).
 6. After a change: backend → `npm run e2e:restart`; data → `npm run e2e:reseed`;
    then re-drive (the browser keeps its page) or run a spec subset.
 7. Before claiming done: `npm run e2e` (full suite, green).
@@ -553,10 +554,9 @@ router module is not even imported there.
 
 - `POST /auth/dev-login` - mint a real session without Google.
 - `GET  /__dev/ping` - stack-identity probe (the preflight's staleness check).
-- `GET  /__dev/outbox` - DEPRECATED proof-of-send. Group sends are INVISIBLE to
-  it (they leave through the Conversations adapter, not the messaging one);
-  assert those against the fake's threads and the per-member chips instead.
 - `POST /__dev/reseed[?profile=full]` - clean slate. Logs the browser out.
+  (Proof-of-send is NOT here any more: the deprecated `/__dev/outbox` log was
+  removed 2026-08-24 - assert sends against the fake's thread store instead.)
 - `GET  /__dev/logtail?level=&since=&contains=&event=` - the app process's
   WARN+ERROR ring buffer, and the ONLY way a spec can assert on an app log line.
   The response carries `capturing`: an empty `lines` from a stack that never
@@ -575,7 +575,7 @@ claimed the cadence period.
 
 ## Layout
 - `playwright.config.ts` - one `chromium` project, reporters, `webServer` (which runs `scripts/e2e-session.mjs`).
-- `fixtures/` - `outbox` (`getOutbox`, deprecated), `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts + the Conversations inspectors), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
 - `support/` - `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup), `viewport.ts`.
 - `tests/` - `dashboard-next/`, `flows/`, `scenarios/`, plus two loose specs.
 - `scenarios/` - `steps.ts`, the sequence-diagram vocabulary.

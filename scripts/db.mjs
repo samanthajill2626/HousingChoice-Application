@@ -3,9 +3,27 @@
 //   npm run db:start  -> ensure the container exists + is running, wait for port
 //   npm run db:stop   -> stop it (container is kept; db:start restarts it)
 //
-// The container runs -inMemory: ALL DATA RESETS when the container stops or
-// restarts — re-run `npm run db:create && npm run db:seed` (or `npm run dev`,
-// which does both) after any restart.
+// DISK-BACKED, NOT -inMemory (changed 2026-08-24). -inMemory kept every table
+// in the JVM HEAP, deletes never returned memory (measured: DeleteTable
+// reclaimed ~nothing; a heavy multi-run day ratcheted RSS 2.5GiB -> 5.9GiB),
+// and the endgame was a GC spiral whose stop-the-world pauses stalled EVERY
+// lane at once - the 2026-08-24 dual-suite soak caught both lanes failing the
+// same test at the same instant on a raw 30s API hang. With -dbPath the data
+// lives in per-database SQLite FILES on a tmpfs mount: the JVM heap stays
+// small (capped -Xmx2g, so pressure fails LOUDLY as an OOM rather than as a
+// silent slow-motion spiral), writes run at memory speed (plain disk measured
+// ~5x slower from fsync alone), and a database is finally something that can
+// be DELETED - freed files return RAM instantly, unlike the old heap.
+//
+// Consequences of the tmpfs-backed shape:
+//   - stop/start still WIPES data (tmpfs dies with the container), exactly the
+//     semantics this file always documented;
+//   - the "restart to reclaim memory" operator chore is gone BY CONSTRUCTION:
+//     the JVM heap is capped, freed database files return RAM instantly, and
+//     SQLite reuses freed pages so a file never grows past its peak working
+//     set - the cumulative ratchet cannot form;
+//   - orphaned per-key databases (deleted worktrees, dead lanes) are pruned
+//     in place on db:start - see pruneOrphanedDatabases - not by restarting.
 //
 // NO -sharedDb: each (accessKeyId, region) pair gets its OWN database and its
 // own SQLite write lock, so concurrent suites don't serialize through one lock
@@ -88,15 +106,27 @@ async function waitForEndpoint(endpoint, timeoutMs = 30_000) {
 }
 
 /**
- * True when an existing container was created with the legacy -sharedDb flag
- * (one SQLite database + ONE write lock shared by every lane — the structural
- * contention fixed by per-lane access keys; see
- * docs/issues/dynamodb-local-cross-worktree-test-contention.md). Such a
- * container must be recreated: docker start would resurrect the old args.
+ * True when an existing container was created with args this repo has since
+ * moved off - docker start would resurrect the old args, so such a container
+ * must be recreated (same rollout shape as the 2026-07-02 -sharedDb
+ * migration):
+ *   - `-sharedDb`: one SQLite database + ONE write lock shared by every lane
+ *     (docs/issues/dynamodb-local-cross-worktree-test-contention.md);
+ *   - `-inMemory`: every table in JVM heap, never reclaimed, ending in the
+ *     GC-spiral stall the 2026-08-24 soak caught (see the header).
  * @param {string[]} args
  */
 export function containerArgsAreStale(args) {
-  return args.includes('-sharedDb');
+  // Two match modes, both load-bearing:
+  //   - SUBSTRING for the legacy markers, so they are caught even inside an
+  //     sh-wrapper string (an interim 2026-08-24 shape ran the whole command
+  //     as ONE '-c' element);
+  //   - ELEMENT-EXACT for the required flags, so that same sh-wrapper interim
+  //     shape (plain-disk, ~5x slower) is ALSO flagged and upgraded to the
+  //     canonical tmpfs shape, whose flags are real argv elements.
+  const joined = args.join(' ');
+  if (joined.includes('-sharedDb') || joined.includes('-inMemory')) return true;
+  return !(args.includes('-dbPath') && args.includes('-Xmx2g'));
 }
 
 /** JVM args the container was created with (docker inspect .Args). */
@@ -106,82 +136,98 @@ async function containerArgs() {
 }
 
 /**
- * Days after which a running container is worth flagging. Long uptime is the
- * one accumulation the per-run teardowns CANNOT reclaim: DynamoDB Local exposes
- * no way to enumerate or drop a database, only tables under a key you already
- * hold, so the databases of DELETED worktrees and abandoned lanes are
- * unreachable forever. They are also the ones nobody will ever tear down.
- * Stopping the container is the only thing that frees them (-inMemory).
+ * Days a per-key database FILE may go unmodified before db:start prunes it.
+ * Disk-backed, an orphaned database (deleted worktree, dead lane) is just an
+ * untouched .db file - the API still cannot enumerate or drop a DATABASE, but
+ * the filesystem can, which retires the old "only a restart frees them" chore.
+ * 7 days is far beyond any live lane's idle time (every run touches its files)
+ * and short enough that orphans never pile up.
  */
-const STALE_UPTIME_DAYS = 3;
+const PRUNE_UNTOUCHED_DAYS = 7;
 
-/** Container start time (docker inspect .State.StartedAt), or null. */
-async function containerStartedAt() {
+/** In-container directory holding the per-database SQLite files (-dbPath). */
+const DB_DATA_DIR = '/home/dynamodblocal/data';
+
+/**
+ * Delete per-key database files nothing has touched in PRUNE_UNTOUCHED_DAYS.
+ *
+ * SAFE BY MTIME, not by name: a LIVE lane's files are written by every run, so
+ * only genuinely orphaned databases (deleted worktrees, dead lanes) age past
+ * the threshold. Runs inside the container (busybox find is in the image's
+ * base), and is BEST-EFFORT - pruning is hygiene, and a failure here must
+ * never block a boot.
+ */
+async function pruneOrphanedDatabases() {
   try {
-    const { stdout } = await docker('inspect', '--format', '{{.State.StartedAt}}', CONTAINER_NAME);
-    const t = Date.parse(stdout.trim());
-    return Number.isFinite(t) ? t : null;
+    const { stdout } = await docker(
+      'exec', CONTAINER_NAME, 'find', DB_DATA_DIR, '-maxdepth', '1', '-name', '*.db',
+      '-mtime', `+${PRUNE_UNTOUCHED_DAYS}`, '-print', '-delete',
+    );
+    const pruned = stdout.split('\n').filter((line) => line.trim().length > 0);
+    if (pruned.length > 0) {
+      console.log(
+        `db:start — pruned ${pruned.length} orphaned database file(s) untouched for ` +
+          `${PRUNE_UNTOUCHED_DAYS}+ days (deleted worktrees / dead lanes)`,
+      );
+    }
   } catch {
-    return null;
+    // Best-effort: an exec failure (container mid-restart, old image without
+    // find) costs only disk hygiene, never a boot.
   }
 }
 
-/**
- * WARN ONLY - never acts. Restarting wipes every lane's in-memory tables, so
- * whether to do it is an OPERATOR call (a neighbour's stack may be live). This
- * only makes the cost visible, because a stale container's symptom is
- * misleading: integration tests time out at their budget in a full run and pass
- * solo in milliseconds, which reads as a real regression. Observed 2026-08-16
- * on an 8-day-old container - 15 failures, all green after a restart, no code
- * change.
- * @param {number|null} startedAtMs
- * @param {number} nowMs
- */
-export function staleUptimeDays(startedAtMs, nowMs) {
-  if (startedAtMs === null) return null;
-  const days = (nowMs - startedAtMs) / 86_400_000;
-  return days >= STALE_UPTIME_DAYS ? days : null;
-}
-
 /** Idempotent start: running -> no-op; stopped -> start; absent -> run.
- *  A legacy -sharedDb container is removed + recreated (WIPES its in-memory
- *  tables — every lane/dev stack must reseed; sequenced in the rollout note of
- *  docs/superpowers/plans/2026-07-02-dynamodb-lane-keys.md). */
+ *  A container created with STALE args (-sharedDb, or the pre-2026-08-24
+ *  -inMemory shape) is removed + recreated - that wipes its data and every
+ *  lane/dev stack must reseed, the same rollout shape as the 2026-07-02
+ *  -sharedDb migration. */
 export async function ensureDbStarted() {
   await assertDaemonUp();
   let state = await containerState();
   if (state !== 'absent' && containerArgsAreStale(await containerArgs())) {
     console.warn(
-      `db:start — ${CONTAINER_NAME} was created with the legacy -sharedDb flag; ` +
-        'recreating it WITHOUT -sharedDb (per-access-key databases). ' +
-        'ALL in-memory tables are wiped — every lane/dev stack must reseed.',
+      `db:start — ${CONTAINER_NAME} was created with stale args (legacy -sharedDb, or ` +
+        'the pre-2026-08-24 -inMemory shape whose JVM-heap ratchet ended in GC-spiral ' +
+        'stalls); recreating it disk-backed. ALL existing tables are wiped — every ' +
+        'lane/dev stack must reseed.',
     );
     await docker('rm', '-f', CONTAINER_NAME);
     state = 'absent';
   }
   if (state === 'running') {
     console.log(`db:start — ${CONTAINER_NAME} already running`);
-    const staleDays = staleUptimeDays(await containerStartedAt(), Date.now());
-    if (staleDays !== null) {
-      console.warn(
-        `db:start — ${CONTAINER_NAME} has been up ${staleDays.toFixed(1)} days. Databases for ` +
-          'DELETED worktrees and abandoned lanes are unreachable (DynamoDB Local cannot ' +
-          'enumerate or drop a database) and accumulate until the container stops. A stale ' +
-          'container makes integration tests time out at their budget in full runs while ' +
-          'passing solo in milliseconds. If suites are flaking that way, consider ' +
-          '`npm run db:stop && npm run db:start` — but ONLY when no other lane or dev stack ' +
-          'is live: it wipes every in-memory table and they must all reseed.',
-      );
-    }
+    await pruneOrphanedDatabases();
   } else if (state === 'stopped') {
     console.log(`db:start — starting existing container ${CONTAINER_NAME}`);
     await startExisting();
   } else {
-    console.log(`db:start — creating container ${CONTAINER_NAME} (in-memory; data resets on stop)`);
+    console.log(
+      `db:start — creating container ${CONTAINER_NAME} (SQLite on tmpfs: memory-speed, ` +
+        'heap-capped, data resets on stop)',
+    );
     try {
+      // THE SHAPE, and why every piece is load-bearing (2026-08-24):
+      //   --mount tmpfs: the SQLite files live in RAM-backed tmpfs, so writes
+      //     run at memory speed - plain disk measured ~5x slower on the full
+      //     app suite (405s vs a ~65-90s baseline) from fsync cost alone.
+      //     tmpfs memory is KERNEL memory, not JVM heap: freed files return
+      //     RAM instantly, SQLite reuses freed pages inside a file (size
+      //     stabilises at peak working set, never cumulative), and the
+      //     GC-spiral stall of the -inMemory era cannot rebuild. size=6g is a
+      //     hard, LOUD ceiling (writes fail) far above any observed data set.
+      //     tmpfs-mode=1777 lets the image's non-root dynamodblocal user write.
+      //   -Xmx2g: with data out of the heap, 2g is generous headroom, and a
+      //     hard cap turns heap pressure into a visible OOM rather than a
+      //     silent slowdown that stalls every lane at once.
+      //   JVM flags precede -jar; the mount point is created by docker, so no
+      //   entrypoint override is needed.
+      // Tmpfs dies with the container: stop/start now WIPES data again, same
+      // operational semantics the repo always documented for this container.
       await docker(
         'run', '-d', '--name', CONTAINER_NAME, '-p', '8000:8000',
-        'amazon/dynamodb-local', '-jar', 'DynamoDBLocal.jar', '-inMemory',
+        '--mount', `type=tmpfs,destination=${DB_DATA_DIR},tmpfs-size=6g,tmpfs-mode=1777`,
+        'amazon/dynamodb-local',
+        '-Xmx2g', '-jar', 'DynamoDBLocal.jar', '-dbPath', DB_DATA_DIR,
       );
     } catch (err) {
       // ANOTHER STARTER WON. Two e2e sessions starting from COLD at the same
@@ -210,7 +256,7 @@ export async function stopDb() {
     return;
   }
   await docker('stop', CONTAINER_NAME);
-  console.log(`db:stop — ${CONTAINER_NAME} stopped (in-memory data discarded)`);
+  console.log(`db:stop — ${CONTAINER_NAME} stopped (tmpfs-backed: data discarded, as before)`);
 }
 
 // CLI dispatch (node scripts/db.mjs start|stop) — skipped when imported.

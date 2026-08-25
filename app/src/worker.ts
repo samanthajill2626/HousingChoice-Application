@@ -333,8 +333,8 @@ function startPoll(pollName: string, run: (nowIso: string) => Promise<unknown>):
     sendMessageService: createSendMessageService({ config, logger }),
     // GROUP-route reminders (landlord_led/pm_team with a group thread) send
     // directly per member from the pool number — same construction the relay
-    // handlers use (createMessagingAdapter honors MESSAGING_RECORD_OUTBOX, so
-    // hermetic-e2e group sends stay outbox-visible).
+    // handlers use (createMessagingAdapter, so hermetic-e2e group sends land in
+    // the fake-twilio thread store like every other send).
     adapter: createMessagingAdapter({ config, logger }),
     // Same shared A2P bucket every other worker send path meters through
     // (relay fan-out/intro, broadcast) — the COMBINED outbound rate must stay

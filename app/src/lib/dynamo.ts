@@ -32,7 +32,8 @@ const recordedLocalKeys = new Set<string>();
  * key - and therefore its own database - the teardown can no longer find those
  * tables by looking under one key. It cannot walk every per-file key either:
  * a ListTables under an unused key MATERIALISES that database at ~0.6-1.1 MiB
- * that `-inMemory` reclaims only on container stop. Recording the keys that
+ * (heap under the old -inMemory shape; a disk file since 2026-08-24) that
+ * nothing reclaims automatically. Recording the keys that
  * were really used is what makes the sweep both complete and free.
  * See app/test/helpers/dynamoKeyLedger.ts for the measurements.
  *

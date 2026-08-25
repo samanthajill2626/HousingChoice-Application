@@ -1,6 +1,5 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
-import { sendAsParty, registerParty } from '../../fixtures/fakeTwilio.js';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { sendAsParty, registerParty, getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the final "group is closed" copy (no drift).
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
@@ -116,7 +115,7 @@ async function expectOutboxIncludes(
   await expect
     .poll(
       async () => {
-        const msgs = await getOutbox(request, { to: phone });
+        const msgs = await getOutboundTo(request, { to: phone });
         return msgs.some(
           (m) => (m.body ?? '').includes(needle) && (from === undefined || m.from === from),
         );
@@ -133,7 +132,7 @@ async function expectOutboxExcludes(
   phone: string,
   needle: string,
 ): Promise<void> {
-  const msgs = await getOutbox(request, { to: phone });
+  const msgs = await getOutboundTo(request, { to: phone });
   expect(
     msgs.some((m) => (m.body ?? '').includes(needle)),
     `outbox to ${phone} should NOT carry: ${needle}`,

@@ -252,25 +252,22 @@ const CONTACT_DELETED_WALK = Object.freeze([
   required('/api/contacts', ['deleted', 'limit', 'type']),
   conditional('/api/contacts', ['cursor', 'deleted', 'limit', 'type']),
 ]);
-const PLACEMENT_CONTACT_LIVE_WALK = Object.freeze([
-  required('/api/contacts', ['type']),
-  conditional('/api/contacts', ['cursor', 'type']),
-]);
-const PLACEMENT_CONTACT_DELETED_WALK = Object.freeze([
-  required('/api/contacts', ['deleted', 'type']),
-  conditional('/api/contacts', ['cursor', 'deleted', 'type']),
-]);
+// The Placements list's contact walk converged on the standard CONTACT_*_WALK
+// shapes when the pagination sweep (2026-08-21) added `limit` to every list
+// read - the un-limited placement variants no longer occur on the wire
+// (verified against perf report 20260825T013322163Z-1034c5df).
+// `limit` rides every list read since the pagination sweep (2026-08-21).
 const UNIT_LIVE_WALK = Object.freeze([
-  required('/api/units'),
-  conditional('/api/units', ['cursor']),
+  required('/api/units', ['limit']),
+  conditional('/api/units', ['cursor', 'limit']),
 ]);
 const UNIT_DELETED_WALK = Object.freeze([
-  required('/api/units', ['deleted']),
-  conditional('/api/units', ['cursor', 'deleted']),
+  required('/api/units', ['deleted', 'limit']),
+  conditional('/api/units', ['cursor', 'deleted', 'limit']),
 ]);
 const TODAY_GETS = Object.freeze([
   required('/api/today', ['day', 'toursFrom', 'toursTo']),
-  conditional('/api/placements'),
+  conditional('/api/placements', ['limit']),
   conditional('/api/conversations'),
   conditional('/api/tours', ['from', 'to']),
 ]);
@@ -284,10 +281,10 @@ const TOUR_LIST_ACTIVE_GETS = Object.freeze([
 ]);
 const TOUR_LIST_CLOSED_GETS = TOUR_LIST_ACTIVE_GETS;
 const PLACEMENT_LIST_GETS = Object.freeze([
-  required('/api/placements'),
-  conditional('/api/placements', ['cursor']),
-  ...PLACEMENT_CONTACT_LIVE_WALK,
-  ...PLACEMENT_CONTACT_DELETED_WALK,
+  required('/api/placements', ['limit']),
+  conditional('/api/placements', ['cursor', 'limit']),
+  ...CONTACT_LIVE_WALK,
+  ...CONTACT_DELETED_WALK,
   ...UNIT_LIVE_WALK,
   ...UNIT_DELETED_WALK,
 ]);
@@ -308,17 +305,26 @@ const SYSTEM_GETS = Object.freeze([
 const AI_RUN_GETS = Object.freeze([required('/api/system/flags'), required('/api/ai-runs', ['scope'])]);
 const NUMBER_GETS = Object.freeze([required('/api/settings'), required('/api/pool-numbers')]);
 
+// The comms rails on tour/placement detail (useTourChannels /
+// usePlacementChannels) batch-read unread totals; which id parameters ride the
+// query depends on the roster's channel mix, so every arity is conditional.
+const UNREAD_COUNTS_GETS = Object.freeze([
+  conditional('/api/unread-counts'),
+  conditional('/api/unread-counts', ['contactIds']),
+  conditional('/api/unread-counts', ['conversationIds']),
+  conditional('/api/unread-counts', ['contactIds', 'conversationIds']),
+]);
 const CONTACT_DETAIL_BASE_GETS = Object.freeze([
   required('/api/contacts/:contactId'), required('/api/contacts/:contactId/suggestions'),
   required('/api/users/me'), required('/api/contacts/:contactId/timeline'),
-  required('/api/placements'), required('/api/units'),
-  required('/api/contacts/:contactId/listings-sent'), required('/api/contacts/:contactId/media'),
+  required('/api/placements', ['limit']), required('/api/units', ['limit']),
+  required('/api/contacts/:contactId/listings-sent'), required('/api/contacts/:contactId/media', ['limit']),
   required('/api/contacts/:contactId/relay-groups'), required('/api/contacts/:contactId/group-threads'),
   ...CONTACT_LIVE_WALK,
-  conditional('/api/conversations'), conditional('/api/conversations/:conversationId/messages'),
+  conditional('/api/conversations'), conditional('/api/conversations/:conversationId/messages', ['limit']),
 ]);
 const UNIT_DETAIL_BASE_GETS = Object.freeze([
-  required('/api/units/:unitId'), required('/api/units'), required('/api/placements'),
+  required('/api/units/:unitId'), required('/api/units', ['limit']), required('/api/placements', ['limit']),
   required('/api/units/:unitId/related'), required('/api/units/:unitId/recipients'),
   required('/api/units/:unitId/similar'), required('/api/units/:unitId/activity'),
   required('/api/tours', ['unitId']), ...CONTACT_LIVE_WALK, ...CONTACT_DELETED_WALK,
@@ -327,23 +333,27 @@ const TOUR_DETAIL_BASE_GETS = Object.freeze([
   required('/api/tours/:tourId'), required('/api/units/:unitId'), required('/api/contacts/:contactId'),
   required('/api/tours/:tourId/roster'), required('/api/conversations'),
   required('/api/tours/:tourId/activity', ['limit']), required('/api/tours/:tourId/reminders'),
+  conditional('/api/conversations/:conversationId/messages', ['limit']),
+  ...UNREAD_COUNTS_GETS,
 ]);
 const PLACEMENT_DETAIL_BASE_GETS = Object.freeze([
   required('/api/placements/:placementId'), required('/api/units/:unitId'), required('/api/contacts/:contactId'),
   required('/api/placements/:placementId/roster'), required('/api/conversations'),
   required('/api/placements/:placementId/history', ['limit']), required('/api/placements/:placementId/nudges'),
+  conditional('/api/conversations/:conversationId/messages', ['limit']),
+  ...UNREAD_COUNTS_GETS,
 ]);
 const GROUP_THREAD_GETS = Object.freeze([
   required('/api/conversations/:conversationId'), required('/api/conversations/:conversationId/members'),
-  required('/api/conversations/:conversationId/messages'), required('/api/conversations/:conversationId/scheduled'),
+  required('/api/conversations/:conversationId/messages', ['limit']), required('/api/conversations/:conversationId/scheduled'),
 ]);
 const PERSON_THREAD_GETS = Object.freeze([
   required('/api/contacts/:contactId/timeline'), conditional('/api/conversations'),
-  conditional('/api/conversations/:conversationId/messages'),
+  conditional('/api/conversations/:conversationId/messages', ['limit']),
 ]);
 const CONVERSATION_DETAIL_GETS = Object.freeze([
   required('/api/conversations/:conversationId'), required('/api/conversations/:conversationId/members'),
-  required('/api/conversations/:conversationId/messages'), required('/api/conversations/:conversationId/scheduled'),
+  required('/api/conversations/:conversationId/messages', ['limit']), required('/api/conversations/:conversationId/scheduled'),
   ...CONTACT_LIVE_WALK,
 ]);
 const BROADCAST_DETAIL_GETS = Object.freeze([required('/api/broadcasts/:broadcastId/results')]);

@@ -949,7 +949,10 @@ describe('top-level profiler sequencing', () => {
     })).resolves.toBe(1);
     expect(loadRuntime).not.toHaveBeenCalled();
     expect(invalidStdout).not.toHaveBeenCalled();
-    expect(invalidStderr.mock.calls).toEqual([['configuration_invalid\n']]);
+    // The reason now rides along (issue perf-cli-configuration-invalid-
+    // swallows-reason), but option VALUES must still never leak - the
+    // sentinel filename below is the pin.
+    expect(invalidStderr.mock.calls).toEqual([['configuration_invalid: scale must be an integer within its allowed bounds\n']]);
     expect(JSON.stringify(invalidStderr.mock.calls)).not.toContain('invalid-config-sentinel');
 
     const stdout = vi.fn();

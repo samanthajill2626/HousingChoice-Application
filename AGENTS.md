@@ -152,6 +152,24 @@ commands from the feature worktree:
 2. `npm test`
 3. `npm run smoke`
 4. `npm run e2e`
+5. `npx eslint <every file the branch touches>`
+
+**Gate 5 is SCOPED TO TOUCHED FILES, and deliberately so.** Lint on this repo
+is not yet clean: as of 2026-08-24 `npm run lint` reports 117 errors across 65
+files on `main`, all pre-existing. A repo-wide gate declared today would fail
+every branch on day one, which does not make anyone lint - it teaches everyone
+to skip the gate. So the rule is the same ratchet the ASCII rule already uses:
+on a pre-existing dirty file, only what you TOUCH must be clean. Lint the paths
+in your diff, and leave the rest.
+
+Run it on the file list from `git diff --name-only` (source files only - the
+config ignores dist/node_modules and does not lint Markdown). A branch that
+introduces a new lint error in a file it edited is not done, whatever the other
+four gates say.
+
+The backlog is [`lint-backlog-repo-wide`](docs/issues/lint-backlog-repo-wide.md).
+When it reaches zero, promote this gate to a bare `npm run lint` and delete this
+paragraph.
 
 `npm run typecheck` is a separate required gate. Vitest and Playwright run through
 esbuild/tsx, which strip types without checking them. Never pipe a gate command; a

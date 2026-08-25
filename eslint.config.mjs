@@ -14,6 +14,28 @@ export default tseslint.config(
   {
     files: ['**/*.ts', '**/*.tsx'],
     extends: [tseslint.configs.recommended],
+    rules: {
+      // HONOUR THE `_` CONVENTION. This codebase already marks a deliberately
+      // unused binding by prefixing it with an underscore - an interface method
+      // that must keep its signature while ignoring an argument, a destructure
+      // that skips a field, a catch that does not read its error. The rule was
+      // running with its defaults, which know nothing about that convention, so
+      // 70 of the 126 unused-var errors in the 2026-08-24 backlog count were
+      // reporting bindings whose names already SAID "unused on purpose".
+      //
+      // Turning those into noise is what taught people to ignore lint output,
+      // which is how the other 56 - the real ones - accumulated unnoticed. The
+      // rule stays an ERROR for every name that does not opt out.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+        },
+      ],
+    },
   },
   // React hooks linting — dashboard only (the only React workspace). The
   // plugin's presets still ship in legacy (eslintrc) shape, so we register the

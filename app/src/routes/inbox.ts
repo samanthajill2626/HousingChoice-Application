@@ -64,7 +64,6 @@ import {
   getOwner,
   GroupCursorError,
   type ConversationItem,
-  type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
 } from '../repos/conversationsRepo.js';

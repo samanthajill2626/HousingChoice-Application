@@ -68,7 +68,10 @@ export function registerGroupRailJobHandler(deps: GroupRailJobDeps = {}): void {
       // data is. The service that produced it already logs the SHAPE of the
       // failure (a `missing` COUNT, not the numbers), and the full string is
       // persisted on the row by `recordRailFailure`, where it belongs. Same
-      // posture as the tracked `telemetry-phone-in-url-pii` gate.
+      // posture as the phone-in-URL class tracked in
+      // docs/issues/phone-in-url-paths-structural.md (its telemetry half -
+      // masking at every request-path log sink and on both OTel span
+      // directions - shipped 2026-08-25).
       log.warn(
         {
           event: 'group_rail_job_incomplete',

@@ -20,6 +20,12 @@ no name" is now implemented SIX times in `app/src`:
 - `app/src/lib/contactName.ts` `contactDisplayName` - the new canonical export,
   added by inbound-message-push for push copy.
 
+Update (2026-08-25, `feat/log-hygiene`): the VOICE pushes are now a second
+push-copy consumer of `contactDisplayName` - `pushCallerIdentity` in
+`app/src/routes/webhooks/voice.ts` imports it rather than adding a seventh copy -
+so the canonical export has two consumers and the five private copies below still
+stand.
+
 `firstName`/`lastName` are not declared fields on `ContactItem`; they ride its
 index signature, so every copy has to be defensive about non-string values in
 the same way, and each one gets to be defensive slightly differently. That is

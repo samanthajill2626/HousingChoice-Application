@@ -3,9 +3,10 @@ id: push-failure-status-not-surfaced
 title: A non-Gone push failure carries no HTTP status anywhere, so an oversize-payload rejection is indistinguishable from a vendor blip
 type: bug
 severity: low
-status: open
+status: resolved
 area: app/push
 created: 2026-08-17
+resolved: 2026-08-25
 refs: app/src/adapters/webPush.ts:28, app/src/adapters/webPush.ts:157, app/src/services/pushService.ts:207, app/src/lib/pushText.ts, docs/superpowers/specs/2026-08-16-inbound-message-push-design.md
 ---
 
@@ -47,3 +48,36 @@ inbound-message-push branch: that log line is on the SHARED per-device loop, and
 the current spec (section 3.1) freezes sendToUser's log lines for the voice
 paths. Changing the line's fields is a voice-path change and needs its own
 review, however benign.
+
+**Resolution (2026-08-25).** The freeze named in the paragraph above is
+superseded by the log-hygiene review, which is the "own review" this needed, and
+the fix shipped on `feat/log-hygiene` as the issue's SECOND suggested option.
+
+The shared per-device transient-failure WARN in `services/pushService.ts` now
+logs two things instead of `(err as Error).message`: the error OBJECT under the
+wired `err` key, and a top-level `pushStatusCode` lifted as
+`(err as { statusCode?: number }).statusCode`. Logging the raw object is safe
+only because the same branch's serializer (`app/src/lib/logSerializers.ts`)
+allowlists `instanceof Error` values, and `statusCode` rides that allowlist
+automatically - so a 413, a 429 and a 500 are now distinguishable in CloudWatch
+by `pushStatusCode` at the top level and by `err.type` / `err.statusCode` /
+`err.message` inside the serialized error. The `WebPushError`'s constant message
+no longer erases the diagnostic.
+
+The field is `pushStatusCode`, NOT `statusCode`, deliberately: the request logger
+already owns top-level `statusCode` for HTTP response status, and a second
+meaning on the same key would poison every query over it.
+
+`SendOutcome` is UNCHANGED - the issue's first option (adding a
+`{ result: 'failed'; statusCode?: number }` variant to
+`app/src/adapters/webPush.ts`) was not taken, because the whole diagnostic
+already reaches the log through the error object and the adapter contract did not
+need to move to get it.
+
+Three sibling payloads on the same loop were converted in the same pass, so the
+service no longer logs an error as a bare string anywhere: the
+non-allowlisted-endpoint prune WARN, the Gone-prune WARN, and the
+broadcast-to-one-user WARN all now carry the error object under `err`. Tests
+assert serialized-line FIELDS rather than object identity, because the serializer
+transforms Error values on the way to the line. Nothing about the PII posture
+changed: `pushStatusCode` is an integer and no payload content is logged.

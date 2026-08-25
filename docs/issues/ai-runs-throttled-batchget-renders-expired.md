@@ -3,10 +3,11 @@ id: ai-runs-throttled-batchget-renders-expired
 title: A throttled ai_runs BatchGet renders as "Expired run", indistinguishable from a TTL-reaped record
 type: bug
 severity: low
-status: open
+status: resolved
 area: app/ai-run-log
 created: 2026-08-09
-refs: app/src/repos/aiRunsRepo.ts:157, app/src/repos/aiRunsRepo.ts:164, app/src/repos/aiRunsRepo.ts:308, app/src/routes/aiRuns.ts:67, dashboard/src/routes/settings/aiRuns/AiRunList.tsx:46
+resolved: 2026-08-25
+refs: app/src/repos/aiRunsRepo.ts:169, app/src/repos/aiRunsRepo.ts:194, app/src/repos/aiRunsRepo.ts:345, app/src/routes/aiRuns.ts:195, dashboard/src/api/types.ts:245, dashboard/src/routes/settings/aiRuns/AiRunList.tsx:58
 ---
 
 **Problem.** The run list resolves its pointers through a BatchGet that gives
@@ -38,3 +39,55 @@ a distinct marker (for example `unavailable: true` alongside the existing
 rather than an expired one. A cheaper interim step is to keep the shape and only
 make the failure loud - `log.error` plus a response-level flag the pane can
 surface as "some rows could not be loaded".
+
+**Resolution (2026-08-25).** The full fix shipped on `feat/log-hygiene`, not the
+cheaper interim step.
+
+`batchGetRuns` now returns `{ found, unprocessedRunIds }` instead of a bare map.
+The unprocessed keys were CHUNK-LOCAL and discarded before; they are now
+accumulated across every 100-key chunk into a `Set`, with the `run#` prefix
+stripped by `runIdOfItemId`, a new exported inverse of `runItemId`. The
+once-per-call WARN survives verbatim in message and field name and now keys on
+the distinct-runId count. `listByEntity` maps found pointers to live entries as
+before, pointers in `unprocessedRunIds` to expired entries carrying
+`unavailable: true`, and everything else to a plain expired entry - so
+"unresolved because throttled" and "unresolved because reaped" are now different
+values on the wire, which is what the issue asked for.
+
+SHAPE, chosen against the obvious alternative: ONE non-live union member with an
+OPTIONAL discriminant - `{ runId; sortKey; expired: true; unavailable?: true }` -
+on BOTH the server union (`AiRunListEntry`) and the hand-kept wire duplicate
+(`dashboard/src/api/types.ts`), moved in the same commit. Two separate union
+members do not typecheck at the truthiness-narrowed renderers, and with the
+optional form every consumer that is NOT updated degrades gracefully to today's
+expired rendering - no crash, no 500, no compile error. The route's expired arm
+spreads the flag in the house `!== undefined` form.
+
+The dashboard renders the unavailable case as distinct NON-INTERACTIVE text -
+`Run <id> temporarily unavailable - reload the page to retry` - inside the
+existing expired-row style. This is a deliberate DEVIATION from the issue's
+"render the unavailable case as a retryable row": there is NO per-row button. A
+third button breaks `ai-run-log.spec.ts`'s one-button-per-row pin and
+`AiRunsSection.test.tsx`'s singular Retry query, and more importantly
+`useAiRuns.retry()` resets to page 1, so an in-place row retry would LIE about
+what it does. The copy names the browser reload instead, because the list's own
+Retry control renders only in the error state, not the ready state this row
+appears in. The copy also deliberately avoids the word "expired", which an
+existing test queries for.
+
+Coverage: repo cases force UnprocessedKeys exhaustion through a fake doc client
+(a fixed-two leftover set, a genuinely-absent row asserted by KEY absence rather
+than by an undefined value, and cross-chunk accumulation over 150 keys
+withholding one row from each chunk); a route case pins the exact serialized row
+and that a reaped row carries no flag at all; a dashboard component case asserts
+the copy renders, does not match `/expired/i`, and contains no button. No new e2e
+spec: this state needs sustained DynamoDB throttling that a hermetic lane cannot
+produce, and it adds no interactive control.
+
+REFS CORRECTED. Every `:NNN` in the Problem section above was read at filing
+(2026-08-09) and has drifted twice since - `routes/aiRuns.ts:67` now points at
+unrelated code entirely. The frontmatter `refs` now cite this branch's anchors:
+`aiRunsRepo.ts:169` (batchGetRuns), `:194` (the leftover WARN), `:345` (the
+listByEntity mapping), `routes/aiRuns.ts:195` (the expired arm),
+`dashboard/src/api/types.ts:245` (the wire union), and `AiRunList.tsx:58` (the
+row). Re-locate by the quoted code, not by the number.

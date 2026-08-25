@@ -1,7 +1,10 @@
 # Log hygiene: vendor errors, PII, and alarm noise (cluster C3)
 
-Date: 2026-08-24 (v4 after adversarial doc review rounds 1-3)
-Status: DRAFT - awaiting round-4 (terminal-cap) review + human review gate
+Date: 2026-08-24 (v5; adversarial doc review rounds 1-4 complete - round
+4 was the terminal round under the hard cap, and its three surgical
+decision-changes are folded in here UN-re-reviewed, flagged as such at
+the human gate)
+Status: DRAFT - awaiting the human review gate
 Branch: feat/log-hygiene (worktree W:\tmp\log-hygiene, cut from main @6e707348)
 Review artifacts: .superpowers/design-review/ (spec-r1-a.md, spec-r1-b.md,
 spec-r2.md, adjudications.md)
@@ -225,11 +228,14 @@ lint rule cannot gate):
    `summarizeError(err)`/`errFields(err)` call results are neither
    catch bindings nor Error-typed, so the domain conventions stay
    unflagged and the exception allowlist genuinely starts EMPTY.
-   POSITIVE CONTROL, required (spec-r3 H3): the test compiles a
-   known-bad fixture (an in-test source string logging
-   `{ ctx: { err } }` from a catch clause) through the same program
-   configuration and asserts the guard FLAGS it - so a misconfigured
-   ts.Program fails loud instead of passing empty.
+   POSITIVE CONTROL, required (spec-r3 H3, sharpened r4 H3 - same
+   CONFIGURATION is not the same PROGRAM): the known-bad fixture (a
+   source string logging `{ ctx: { err } }` from a catch clause) is
+   overlaid INTO the real program over app/src via a CompilerHost that
+   adds one virtual file, so ONE program answers both questions and a
+   misconfigured ts.Program fails the canary loudly. The test ALSO
+   asserts the real program's health directly: non-zero source-file
+   count and no unresolved-module diagnostics.
    KNOWN LIMITS, stated in the test header per the tourCopyCallSites
    precedent: a payload hoisted into a const and passed as an
    identifier, a spread of a helper's return, a catch variable laundered
@@ -404,7 +410,9 @@ phone is `conversation?.participant_phone` and can be undefined; today's
 code always yields a non-empty label and this must too):
 
     contactDisplayName(contact)
-      ?? (nonEmptyString(conversation?.participant_display_name))
+      ?? (a non-empty-string check on conversation?.participant_display_name,
+          INLINED exactly as the message-push site does it - there is no
+          named helper for it in the repo)
       ?? formatPhoneForDisplay(phone)
       ?? phone
       ?? UNKNOWN_CALLER_LABEL
@@ -553,26 +561,39 @@ v4 returns to the Scan with the honesty fixes. Why the index loses:
   once-a-day consumer.
 
 The Scan, with its costs stated: one paginated Scan per day,
-`FilterExpression: begins_with(#id, :p) AND #state = :active AND
-#claimedAt <= :cutoff` (`state` is reserved - alias it; `:cutoff` is
-`new Date(nowMs - 24h).toISOString()`). The filter applies AFTER the
-page read, so `Limit` bounds RCU per page, not matches per page; pages
-are capped at `MAX_SCAN_PAGES = 20` with `Limit: 200` (up to 4000 rows
-examined per run - far above any realistic journal count). Cost is
-proportional to TABLE size (dism#/due#/sugg# rows included), not the
-working set - accepted at daily cadence; this is the system's first
-recurring production Scan and says so here. Every run sees every row,
-so nothing is ever orphaned: caps defer work to tomorrow, never strand
-it. `dynamodb:Scan` is already granted (verified round 1).
+`FilterExpression: begins_with(#id, :p) AND #state = :active` (`state`
+is reserved - alias it). THE AGE GATE IS APPLIED IN THE APPLICATION,
+not in the FilterExpression (round-4 H2: a server-side filter never
+returns the excluded row, so no fail-toward-scrub rule could run there,
+and a non-ISO value would be decided by ASCII ordering): a returned row
+qualifies when `Date.parse(claimedAt) <= nowMs - 24h`, and an
+UNPARSEABLE `claimedAt` QUALIFIES (fail-toward-scrub) - a rule that is
+now actually implementable and testable. The cost of app-side gating is
+negligible: active journals are the small working set; the two
+server-side clauses do the real narrowing.
 
-INVARIANT, asserted rather than hedged (round-3 verification):
+Paging: `SCAN_PAGE_LIMIT = 200`, at most `MAX_SCAN_PAGES = 20` per run
+(a 1MB page can return fewer than 200 items - the bound is RCU, not a
+row promise). CURSOR (round-4 H1 - without it the page cap ORPHANS
+whatever hashes past the truncation point, permanently, because a Scan
+restarts from the table's internal ordering every run while tombstones
+occupy the same prefix): the run persists its final `LastEvaluatedKey`
+in a dedicated settings row (`journal-sweep-cursor`) and the NEXT run
+resumes from it, clearing the cursor when a run exhausts the table
+(wrap to start). The caps are then genuine RATE limits: every row is
+eventually examined, work is deferred, never stranded. Cost is
+proportional to TABLE size across a full cycle (dism#/due#/sugg# rows
+included) - accepted at daily cadence; this is the system's first
+recurring production Scan and says so here. `dynamodb:Scan` is already
+granted (verified round 1).
+
+INVARIANT, asserted rather than hedged (rounds 3-4 verification):
 `claimedAt` is ALWAYS `new Date().toISOString()` in production - its
-only writers go through the service's `now()` default, and the
-injectable `deps.now` is wired only from test seams. The string compare
-above is therefore chronologically correct. The sweep treats an
-unparseable `claimedAt` as qualifying (fail-toward-scrub). Note the
-attribute name also appears on extraction `due#` rows - harmless, the
-`begins_with` filter excludes them.
+only writer is `claim()`, fed by the service's `now()` default; the
+injectable `deps.now` is wired only from test seams; the field is
+required on active rows. Note the attribute name also appears on
+extraction `due#` rows - harmless, the `begins_with` filter excludes
+them.
 
 ### 9.3 The duty
 
@@ -587,19 +608,25 @@ attribute name also appears on extraction `due#` rows - harmless, the
   write IS the cross-process dedup, and concurrent sweeps that commit
   domain decisions would be worse than a burned day): the cadence stamp
   lands BEFORE the work and has no release path, so a mid-run failure
-  burns the day. Accepted ON CONDITION the failure is loud, and "loud"
-  covers MORE than throws (spec-r3 H4): the sweep logs alarm-feeding
-  ERROR when (a) its body throws, OR (b) the run ends with work known to
-  remain - a cap was hit, the page bound was hit, or the post-loop truth
-  check found persistent actives - naming the counts and that the next
-  natural retry is tomorrow (or a force tick). NAMED EDIT: reading the
-  cadence state needs a read method for period records (the existing
-  getGroupTimestamp is typed to the liveness union only) - or the duty
-  simply relies on the claim's conditional failure, which needs no read.
+  burns the day. Accepted ON CONDITION the failure is loud, with the
+  level matched to the meaning (spec-r3 H4 + spec-r4 M1): alarm-feeding
+  ERROR when (a) the body throws, or (b) the post-loop truth check finds
+  persistent actives (poison journals - genuine operator attention);
+  INFO when a cap or the page bound defers work (routine rate limiting -
+  the cursor carries the progress, so a bound-hit must NOT become a
+  standing alarm in a mission about alarm noise). Counts and the
+  next-retry note ride every such line. MECHANISM PICKED (spec-r4 M3):
+  the duty relies on the claim's conditional failure alone - no cadence
+  read, no new settings read method, no read-union widening.
 - Caps, named: `MAX_CONTACTS_PER_RUN = 25`,
   `MAX_RECOVERY_CALLS_PER_RUN = 100` (the bound that actually governs
   write volume - spec-r3 M5), `JOURNAL_SWEEP_MIN_AGE_MS = 24h`,
-  `MAX_SCAN_PAGES = 20`, `SCAN_PAGE_LIMIT = 200`.
+  `MAX_SCAN_PAGES = 20`, `SCAN_PAGE_LIMIT = 200`. EXPECTED BINDING
+  (spec-r4 L1): in normal operation NONE binds (the working set is a
+  handful of journals); during a backlog drain `MAX_CONTACTS_PER_RUN`
+  is the one designed to bind first - it is the 25/day drain rate 9.1
+  promises - with `MAX_RECOVERY_CALLS_PER_RUN` the backstop when
+  contacts need many loop iterations.
 - Contact selection: the Scan returns JOURNAL ROWS; contactIds are
   DEDUPLICATED across the run before dispatch (one contact owns up to 12
   journals; without dedup the 25-contact cap is a ~2-contact cap -
@@ -658,11 +685,12 @@ rungs including the empty-string guard and the terminal fallback; the
 enumerated founderTriage updates; NEW voicemail push body pin),
 aiRunsRepo split + route serialization + optional-discriminant shape
 (house `!== undefined` spread form), journal sweep (fake repo/service:
-scan paging + filter, contact dedup, age gate + unparseable-claimedAt
-fail-toward-scrub, all five caps, maxAttempts pass-through, post-loop
-truth check, OR'd SSE emit, cadence claim + force, loud-failure ERROR
-including the work-remaining non-throw case). The static guard's
-positive-control canary is part of its own test.
+scan paging, cursor persist/resume/wrap, contact dedup, APP-SIDE age
+gate + unparseable-claimedAt fail-toward-scrub, all five caps,
+maxAttempts pass-through, post-loop truth check, OR'd SSE emit, cadence
+claim + force, ERROR-vs-INFO level mapping incl. the persistent-actives
+non-throw ERROR). The static guard's overlay canary + real-program
+health assertions are part of its own test.
 Dashboard: AiRunList unavailable-row component test. E2E: no NEW spec
 required (no new interactive control; rationale per section); the build
 may cheaply extend an existing logtail-based assertion where one already

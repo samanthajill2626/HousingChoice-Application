@@ -493,7 +493,7 @@ describe('cloudwatch adapter - getLogRecord', () => {
     expect(out.responseTruncated).toBe(false);
   });
 
-  it('trims an oversized field to the cap and leaves the small ones whole', async () => {
+  it('gives an oversized stack the REMAINING budget, not a fixed 512 cap, and leaves the small ones whole', async () => {
     const out = await seamFor({
       '@log': `9:${CONFIG.errorLogGroupName}`,
       'err.stack': 'S'.repeat(RESPONSE_BOUND_BYTES + 10),
@@ -501,7 +501,51 @@ describe('cloudwatch adapter - getLogRecord', () => {
     }).getLogRecord('PTR');
     expect(out.responseTruncated).toBe(true);
     expect(out.fields['msg']).toBe('small');
-    expect(out.fields['err.stack']!.length).toBeLessThanOrEqual(512);
+    // The stack is diagnostic, so it gets what is left rather than being cut to
+    // an arbitrary 512 - but it still has to fit.
+    expect(out.fields['err.stack']!.length).toBeGreaterThan(512);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('keeps the DIAGNOSIS whole and drops the noise when a record cannot fit', async () => {
+    // The failure mode this ordering exists to prevent: uniform clipping cut
+    // err.message to a single character while thousands of bytes of unread
+    // noise survived - destroying the one field the row was opened for.
+    const record: Record<string, string> = {
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'RestException [HTTP 404] Failed to execute request',
+      'err.type': 'RestException',
+      jobName: 'relay.warmNumber',
+      correlationId: 'c-123',
+    };
+    for (let i = 0; i < 20000; i++) record[`noise.field.${i}`] = 'x'.repeat(500);
+
+    const out = await seamFor(record).getLogRecord('PTR');
+
+    expect(out.fields['err.message']).toBe('RestException [HTTP 404] Failed to execute request');
+    expect(out.fields['err.type']).toBe('RestException');
+    expect(out.fields['jobName']).toBe('relay.warmNumber');
+    expect(out.fields['correlationId']).toBe('c-123');
+    expect(out.responseTruncated).toBe(true);
+    expect(out.droppedFields!).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('fits a pathological record in milliseconds, not seconds - guards against a quadratic regression', async () => {
+    // Node is single-threaded, so a slow trim blocks EVERY request, webhook and
+    // job dispatch in the process. Two earlier shapes measured 11.3s and 35.8s
+    // of synchronous block on records inside CloudWatch's own 256 KB event
+    // ceiling, and both passed a correctness-only suite. The budget below has
+    // ~30x headroom over the current implementation, so it flags a return to
+    // per-key whole-object re-serialisation without being timing-flaky.
+    const record: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 12000; i++) record[`a.b.c${i}`] = 'x'.repeat(9);
+
+    const startedAt = Date.now();
+    const out = await seamFor(record).getLogRecord('PTR');
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(1000);
     expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
   });
 

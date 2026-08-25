@@ -380,6 +380,8 @@ export interface SystemLogRecord {
   rawText?: string;
   rawTextTruncated?: boolean;
   responseTruncated: boolean;
+  /** How many fields the server dropped to fit its byte bound; absent when none. */
+  droppedFields?: number;
   logGroup: string;
 }
 

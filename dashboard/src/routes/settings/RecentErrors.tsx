@@ -135,7 +135,11 @@ function ErrorDetail({ state }: { state: ReturnType<typeof useErrorDetail> }): R
         <p className={styles.truncated}>Raw text was cut off (limit reached).</p>
       ) : null}
       {record.responseTruncated ? (
-        <p className={styles.truncated}>Some fields were cut off (response limit reached).</p>
+        <p className={styles.truncated}>
+          {record.droppedFields !== undefined && record.droppedFields > 0
+            ? `Some fields were cut off and ${record.droppedFields} were omitted entirely (response limit reached) - the full record is in CloudWatch.`
+            : 'Some fields were cut off (response limit reached).'}
+        </p>
       ) : null}
       <p className={styles.errorCorrelation}>log group: {record.logGroup}</p>
     </div>

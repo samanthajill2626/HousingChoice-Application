@@ -132,6 +132,19 @@ describe('span attribute masking hooks', () => {
     });
   });
 
+  it('incoming: a URL ending in a BARE ? emits url.path only - no fabricated empty query', () => {
+    withSemconv('http', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a?',
+        headers: { host: 'h' },
+      } as never);
+      // The instrumentation gates url.query on a truthy search string, so the
+      // key is ABSENT rather than empty. Asserting the whole object pins that.
+      expect(attrs).toEqual({ 'url.path': '/a' });
+      expect('url.query' in attrs).toBe(false);
+    });
+  });
+
   it('incoming ("http/dup"): emits BOTH families', () => {
     withSemconv('http/dup', () => {
       const attrs = maskIncomingSpanAttributes({

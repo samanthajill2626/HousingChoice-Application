@@ -84,7 +84,12 @@ export function maskIncomingSpanAttributes(request: unknown): Attributes {
     if (families.stable) {
       const q = masked.indexOf('?');
       out['url.path'] = q === -1 ? masked : masked.slice(0, q);
-      if (q !== -1) out['url.query'] = masked.slice(q + 1);
+      // A URL ending in a BARE '?' has an empty query, and the instrumentation
+      // gates url.query on a truthy `parsedUrl.search` - it emits the key not
+      // at all. Emitting '' would FABRICATE an attribute onto the span, which
+      // is the one thing these hooks exist to avoid.
+      const query = q === -1 ? '' : masked.slice(q + 1);
+      if (query.length > 0) out['url.query'] = query;
     }
     return out;
   } catch {

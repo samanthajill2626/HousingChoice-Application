@@ -320,7 +320,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
       return confirmed.phone === phone
         || contactPhones(confirmed).some((entry) => entry.phone === phone);
     } catch (err) {
-      // `err`, not `error`: pino serializes an Error only under `err`.
+      // `err` by house convention: err/error/cause/reason are ALL serializer-wired.
       deps.logger.warn(
         { err, contactId },
         'phone ownership pre-check failed (advisory, proceeding)',
@@ -347,7 +347,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         ...(journal.actorId !== undefined && { by: journal.actorId }),
       });
     } catch (err) {
-      // `err`, not `error`: pino serializes an Error only under `err`.
+      // `err` by house convention: err/error/cause/reason are ALL serializer-wired.
       deps.logger.warn(
         { err, contactId: journal.contactId, target: journal.target },
         'ai run verdict stamp failed (best-effort)',
@@ -458,7 +458,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
                   await stampVerdict(journal, 'superseded');
                 }
               } catch (err) {
-                // `err`, not `error`: pino serializes an Error only under `err`.
+                // `err` by house convention: err/error/cause/reason are ALL serializer-wired.
                 // Ids and the error only: never the value under review.
                 deps.logger.warn(
                   { err, contactId: journal.contactId, target: journal.target },
@@ -522,7 +522,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
               nextPhase: 'activity_recorded',
             });
           } catch (err) {
-            // `err`, not `error`: pino serializes an Error only under `err`.
+            // `err` by house convention: err/error/cause/reason are ALL serializer-wired.
             deps.logger.error(
               { err, contactId: journal.contactId, target: journal.target },
               'suggestion resolution activity failed (best-effort)',

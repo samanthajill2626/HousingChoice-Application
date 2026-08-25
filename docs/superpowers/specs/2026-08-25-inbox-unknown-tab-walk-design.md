@@ -65,6 +65,26 @@ That also simplifies Option A: only `type` needs to become trustworthy. The
 name stays exactly as unreliable as it is now, harmlessly, and no read is
 allowed to start trusting it without its own measurement.
 
+**READ THAT AS NARROWLY AS IT IS WRITTEN - it is about ONE field.** The founder
+pushed back on "nothing reads the name" from lived experience (renaming a
+contact does not update GROUP titles), and he was right. There is a SECOND
+denormalized name, `participants[].name` on the roster, and it is a different
+field with the opposite exposure: it is rendered in group titles and member
+chips, and it reaches OUTBOUND MESSAGE CONTENT through `relayFanOut`'s intro
+body and sender prefix. Nothing refreshes it on rename either.
+
+| field | drift | rendered? | in scope here? |
+| --- | --- | --- | --- |
+| `participant_display_name` (1:1) | ~580 missing | NO | no - costless |
+| `participants[].name` (group roster) | UNMEASURED | **YES, incl. outbound** | no - its own issue |
+
+Filed as
+[`group-roster-name-snapshot-never-refreshed`](../../issues/group-roster-name-snapshot-never-refreshed.md)
+at `high`. It is out of scope for THIS design, but not because it is harmless -
+because it is a separate defect on a separate field with a separate fix. The
+drift audit never saw it: it walks 1:1 threads and skips group rows entirely,
+which is a gap in the instrument, not evidence of health.
+
 **2. Hole 3 has never fired.** Zero rows in either environment have a contact
 typed `unknown` or `team_member` with a thread claiming a resolved identity. So
 the demotion hole is REACHABLE (verified through the API) but has never

@@ -185,7 +185,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
           // next send retries the prune.
           failed += 1;
           log.warn(
-            { userId, kind, err: (err as Error).message },
+            { userId, kind, err },
             'push: pruning a non-allowlisted endpoint failed - kept, not sent',
           );
           continue;
@@ -216,7 +216,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
             // failed. The subscription stays and the next send retries it.
             failed += 1;
             log.warn(
-              { userId, kind, err: (pruneErr as Error).message },
+              { userId, kind, err: pruneErr },
               'push: pruning a Gone endpoint failed - kept, retried on the next send',
             );
             continue;
@@ -232,7 +232,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
         // on; one dead device must not fail the whole notification.
         failed += 1;
         log.warn(
-          { userId, kind, err: (err as Error).message },
+          { userId, kind, err, pushStatusCode: (err as { statusCode?: number }).statusCode },
           'push: send to one device failed (transient) — kept subscription',
         );
       }
@@ -377,7 +377,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
           // `record.endpoint` throw before the per-device try.
           failed += subs.length;
           log.warn(
-            { userId: user.userId, kind: notification.kind, err: (err as Error).message },
+            { userId: user.userId, kind: notification.kind, err },
             'push: broadcast to one user failed - continuing',
           );
         }

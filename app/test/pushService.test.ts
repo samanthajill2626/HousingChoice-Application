@@ -244,6 +244,101 @@ describe('pushService.sendToUser', () => {
     // The non-PII kind IS logged.
     expect(serialized).toContain('missed_call');
   });
+
+  it('a transient device failure logs the error OBJECT and pushStatusCode', async () => {
+    // Log-hygiene spec 6.2. This WARN used to carry `err: <string>`, throwing
+    // away the push service's status code - the one field that separates a 413
+    // payload-too-large from a 500 blip. The safe serializer makes the OBJECT
+    // loggable, and the code is ALSO lifted to a top-level field for cheap
+    // querying: pushStatusCode, NOT statusCode, because the request logger owns
+    // top-level statusCode for HTTP response statuses.
+    const config = loadConfig(VAPID_ENV);
+    const fakeUsers = makeFakeUsersRepo([
+      testUserItem({
+        push_subscriptions: [
+          { ...sub('https://fcm.googleapis.com/fcm/send/a'), created_at: '2026-06-01T00:00:00.000Z' },
+        ],
+      }),
+    ]);
+    const capture = createLogCapture();
+    const adapter: WebPushAdapter = {
+      async sendToSubscription() {
+        throw Object.assign(new Error('Received unexpected response code'), { statusCode: 413 });
+      },
+    };
+    const service = createPushService({
+      config,
+      usersRepo: fakeUsers.repo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'missed_call',
+      payload: { title: 'x' },
+    });
+
+    expect(result).toMatchObject({ sent: 0, pruned: 0, failed: 1 });
+    const warn = capture.atLevel(40).find((l) => /send to one device failed/.test(String(l['msg'])));
+    expect(warn).toBeDefined();
+    // FIELDS, never object identity: the serializer transforms Error values on
+    // their way to the line, so the captured `err` is the allowlist projection.
+    const err = warn!['err'] as Record<string, unknown>;
+    expect(err['type']).toBe('Error');
+    expect(err['statusCode']).toBe(413);
+    expect(String(err['message'])).toContain('Received unexpected response code');
+    expect(warn!['pushStatusCode']).toBe(413);
+  });
+
+  it('a failed Gone-prune logs the error under err with its message intact', async () => {
+    // The sibling conversion: the prune-write WARN carried the message string
+    // only, so a DynamoDB fault arrived with no type, no code and no stack.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById(userId: string) {
+        return {
+          userId,
+          email: `${userId}@example.com`,
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              ...sub('https://fcm.googleapis.com/fcm/send/dead'),
+              created_at: '2026-06-01T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+      async removePushSubscription() {
+        throw new Error('prune-boom');
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({
+      'https://fcm.googleapis.com/fcm/send/dead': { result: 'gone' },
+    });
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'test',
+      payload: { title: 'x' },
+    });
+
+    expect(result).toMatchObject({ sent: 0, pruned: 0, failed: 1 });
+    const warn = capture
+      .atLevel(40)
+      .find((l) => /pruning a Gone endpoint failed/.test(String(l['msg'])));
+    expect(warn).toBeDefined();
+    const err = warn!['err'] as Record<string, unknown>;
+    expect(err['type']).toBe('Error');
+    expect(err['message']).toBe('prune-boom');
+  });
 });
 
 /** An allowlisted (FCM) push endpoint for the named device. */

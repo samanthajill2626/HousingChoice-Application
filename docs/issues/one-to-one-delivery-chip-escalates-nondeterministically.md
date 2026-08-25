@@ -84,6 +84,22 @@ size:
 Either way the two clocks now living in one component should be documented at the
 component level, not only inside the presenter.
 
+**Widened 2026-08-24, planner review.** The set of causes that re-render the
+chip grew when the ticker's frozen-clock defect was fixed (`Timeline.tsx`, the
+`useEffect` on `visible`). The refresh trigger is "the RENDERED set changed",
+which is deliberately broader than "an item arrived" - it must also cover a
+paged prepend and a thread switch, both of which are only a `visible` identity
+change. A consequence is that toggling a DISPLAY FILTER (`commsOnly`) now
+refreshes the clock too, so a staff action unrelated to delivery can change what
+this chip says.
+
+That direction is benign - the chip can only become MORE current, never less -
+but it is one more thread-dependent input to the behaviour this issue is about,
+and option 2 above ("deliberately first-render-only") is harder to state
+honestly now that a filter toggle is also a render cause. Pinned by
+`Timeline.ticker.test.tsx`'s display-filter case so the breadth is not narrowed
+back by someone who reads the trigger as "an item arrived".
+
 Related, same branch and same surface:
 [`message-bubble-reveal-not-keyboard-reachable`](./message-bubble-reveal-not-keyboard-reachable.md)
 (the reveal that hides the per-recipient rows this chip summarises) and

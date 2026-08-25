@@ -1699,9 +1699,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // everything has delivered (so the ticker never arms and the clock is pinned
   // at mount), leave it open, then send.
   //
-  // Refreshing on the RENDERED SET is sufficient: while the ticker is disarmed,
-  // no leg can cross the boundary without a new item arriving, because a leg
-  // that could cross it is exactly what keeps the ticker armed.
+  // Refreshing on the RENDERED SET closes that deadlock: after any commit where
+  // the rendered set changed, this clock is at most one tick period old, which
+  // is far inside the futurity bound's budget, so the two can no longer
+  // reinforce each other. A leg that could cross the boundary is also exactly
+  // what keeps the ticker armed, so while it is disarmed an ARRIVING item is
+  // normally the only thing that can change the answer.
+  //
+  // ONE EXCEPTION, and it is deliberate - do NOT read this as a reason to delete
+  // the futurity bound. A leg whose clock sits MORE than one budget in the
+  // future (a badly skewed browser clock) is ineligible now and would become
+  // eligible as real time passes, with no item arriving to re-evaluate it. That
+  // is the disclosed LATE-becomes-NEVER trade `canEverGoStale` already documents,
+  // not a new hole: the bound is what keeps ordinary skew escalating late
+  // instead of never, and removing it costs far more than it buys.
   //
   // The functional update returning `prev` unchanged is load-bearing, not
   // defensive: a parent that hands us a fresh `items` array on every render

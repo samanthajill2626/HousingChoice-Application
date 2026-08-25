@@ -571,6 +571,55 @@ describe('Timeline staleness ticker - termination table', () => {
     expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
   });
 
+  // The refresh trigger is "the RENDERED set changed", which is deliberately
+  // broader than "an item arrived" - `visible` also changes identity when a
+  // display filter is toggled. Pinned because it is the one shape the rerender
+  // test above does not reach, and because the breadth is load-bearing: the
+  // trigger has to cover a paged prepend and a thread switch, both of which are
+  // also just a `visible` identity change. A staff toggle therefore re-evaluates
+  // arming, which can only make a chip MORE current, never less.
+  it('re-evaluates arming when a display filter changes the rendered set, not only when an item arrives - observable: window.setInterval is called after the toggle', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const settled = outboundAt(t0, {
+      c1: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+      c2: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+    });
+    const view = renderTimeline({ items: [settled], commsOnly: false });
+    expect(spies.set).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(20 * 60 * 1000);
+    });
+
+    // Same items, different FILTER - and a leg that is now live on screen.
+    const tNew = Date.now();
+    const arrived = outboundAt(
+      tNew,
+      {
+        c1: { status: 'delivered', deliveredAt: new Date(tNew).toISOString() },
+        c2: { status: 'sent', sentAt: new Date(tNew).toISOString() },
+      },
+      { id: 'r2', tsMsgId: 'r2', body: 'here is the flyer' },
+    );
+    view.rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={[settled, arrived]}
+          source="server"
+          replyToPhone="+14705550148"
+          replyToLabel="most recent"
+          canSend={false}
+          onSend={vi.fn()}
+          relayRoster={ROSTER}
+          commsOnly
+        />
+      </MemoryRouter>,
+    );
+    expect(spies.set).toHaveBeenCalledTimes(1);
+  });
+
   it('ARMS on a MIXED map - one leg opted out, one live and eligible - observable: window.setInterval once, then the chip escalates for the live leg alone', () => {
     const t0 = startFakeClock();
     const spies = spyOnIntervals();

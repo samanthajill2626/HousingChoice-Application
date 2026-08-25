@@ -516,10 +516,16 @@ mirror - so without the wire layer every new field stops at the server.
 - A NEW trace view component alongside it - see below.
 
 **COLLAPSED ROW**: timestamp, level, the four-value source chip, `jobName` or
-`event` chip, the capped `message`, `errType` when present, the trace link, and
-an expand control. `errMessage` is NOT rendered separately in the collapsed row -
-`message` already carries the error text via the fallback ladder in the case
-where they differ, and rendering both duplicates it.
+`event` chip, the capped `message`, `errType` when present, `errMessage` when
+present, the trace link, and an expand control.
+
+`errMessage` IS rendered, on its own line under `message`. S3 leaves it null
+whenever the fallback ladder already sourced `message` from `err.message`, so the
+two can never duplicate each other - and when it IS populated it carries
+different information: for a job failure `message` reads
+"job failed: relay.warmNumber" while `errMessage` is the vendor text saying what
+actually went wrong. That text is the point of the feature. It is also the only
+place `errMessageTruncated` can be surfaced.
 
 **EXPANDED** (one `GET /api/system/errors/detail`): full `err.message`,
 `err.type`, `err.stack` in its OWN scroll container, remaining fields as a

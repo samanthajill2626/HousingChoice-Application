@@ -11,6 +11,10 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { Logger } from '../lib/logger.js';
+// Phone-bearing routes put a real E.164 number in req.path (log-hygiene 4).
+// Only the LOG field below is masked; the two routing comparisons above it
+// stay on the raw path.
+import { maskPhonesInText } from '../lib/phone.js';
 
 function secretsMatch(provided: string, expected: string): boolean {
   const a = Buffer.from(provided);
@@ -50,7 +54,7 @@ export function originSecretMiddleware(opts: OriginSecretOptions): RequestHandle
         {
           remoteIp: req.socket.remoteAddress ?? null,
           method: req.method,
-          path: req.path,
+          path: maskPhonesInText(req.path),
           reason: typeof provided === 'string' ? 'origin secret mismatch' : 'origin secret missing',
         },
         'request rejected by origin-secret validator',

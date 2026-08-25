@@ -34,6 +34,8 @@
 // fallback covers local/dev where there is no proxy.
 import type { Request, RequestHandler } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+// Phone-bearing routes put a real E.164 number in req.path (log-hygiene 4).
+import { maskPhonesInText } from '../lib/phone.js';
 import type { AuthedRequest } from './auth.js';
 
 export interface RateLimitOptions {
@@ -110,7 +112,7 @@ export function createRateLimit(opts: RateLimitOptions): RequestHandler {
       // NEVER log PII: the key is an IP (network identifier, not PII per se),
       // but we log it truncated and never log any request body.
       log.warn(
-        { path: req.path, method: req.method, max, windowMs, retryAfterSec },
+        { path: maskPhonesInText(req.path), method: req.method, max, windowMs, retryAfterSec },
         'rate limit exceeded on public surface',
       );
       res.status(429).json({ error: 'rate_limited' });

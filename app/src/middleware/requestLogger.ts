@@ -7,6 +7,9 @@
 import type { RequestHandler } from 'express';
 import { getContext, runWithContext } from '../lib/context.js';
 import type { Logger } from '../lib/logger.js';
+// Phone-bearing routes put a real E.164 number in req.path; both lines below
+// mask it (log-hygiene spec section 4).
+import { maskPhonesInText } from '../lib/phone.js';
 
 const SAFE_HEADER_ALLOWLIST = [
   'host',
@@ -31,7 +34,7 @@ export function requestLoggerMiddleware(log: Logger): RequestHandler {
     log.info(
       {
         method: req.method,
-        path: req.path,
+        path: maskPhonesInText(req.path),
         remoteIp: req.socket.remoteAddress ?? null,
         // Raw header value — spoofable until validated against CloudFront.
         xff: typeof xff === 'string' ? xff : Array.isArray(xff) ? xff.join(', ') : null,
@@ -55,7 +58,7 @@ export function requestLoggerMiddleware(log: Logger): RequestHandler {
         log.info(
           {
             method: req.method,
-            path: req.path,
+            path: maskPhonesInText(req.path),
             statusCode: res.statusCode,
             durationMs: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6),
           },

@@ -140,6 +140,86 @@ function selectEntry(conv: ConversationItem): { kind: string; contactId?: string
   return { kind: 'noEntryForKey' };
 }
 
+/**
+ * `--audit-index` mode. A coverage figure taken over a handful of rows means
+ * nothing, and the first real run returned 0 rows in dev and 2 in prod - so the
+ * question stopped being "what fraction resolve" and became "is the sparse
+ * index actually near-empty, or is it UNDER-REPORTING".
+ *
+ * Those are different problems with the same appearance. A thread carrying
+ * `unread_count > 0` with no `unread_flag` is invisible to the walk, is the
+ * counter-only class the mark-read fan-out fix was warned about, and would make
+ * every coverage number taken here a measurement of the wrong population.
+ *
+ * This is a full table Scan, so it is opt-in and not part of the default run.
+ * Counts only - no PII, same as everything else here.
+ */
+async function auditIndex(): Promise<void> {
+  const { ScanCommand } = await import('@aws-sdk/lib-dynamodb');
+  const table = `${tablePrefix}conversations`;
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  const n = {
+    total: 0,
+    flagPresent: 0,
+    counterPositive: 0,
+    consistentUnread: 0,
+    counterOnly: 0,
+    flagOnly: 0,
+  };
+  do {
+    const page = await doc.send(
+      new ScanCommand({
+        TableName: table,
+        ProjectionExpression: 'unread_flag, unread_count',
+        ...(ExclusiveStartKey === undefined ? {} : { ExclusiveStartKey }),
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      n.total += 1;
+      const hasFlag = item.unread_flag !== undefined && item.unread_flag !== null;
+      const count = Number(item.unread_count ?? 0);
+      if (hasFlag) n.flagPresent += 1;
+      if (count > 0) n.counterPositive += 1;
+      if (hasFlag && count > 0) n.consistentUnread += 1;
+      if (!hasFlag && count > 0) n.counterOnly += 1;
+      if (hasFlag && count <= 0) n.flagOnly += 1;
+    }
+    ExclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey !== undefined);
+
+  console.log(
+    [
+      '',
+      'byUnread index consistency audit',
+      '================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      '',
+      `  conversations       ${n.total}`,
+      `  unread_flag set     ${n.flagPresent}   <- what the walk can see`,
+      `  unread_count > 0    ${n.counterPositive}`,
+      '',
+      `  consistent unread   ${n.consistentUnread}  (flag AND counter)`,
+      `  COUNTER-ONLY        ${n.counterOnly}  <- INVISIBLE to the walk; the class`,
+      '                            the mark-read fan-out fix was warned about',
+      `  flag-only           ${n.flagOnly}  (flag with a zero/absent counter)`,
+      '',
+      n.counterOnly === 0
+        ? '  VERDICT  Index agrees with the counters. A small walk means the'
+        : '  VERDICT  UNDER-REPORTING. The walk cannot see every unread thread,',
+      n.counterOnly === 0
+        ? '           inbox really is near-empty, not that the index is lying.'
+        : '           so any coverage figure taken here measures the wrong population.',
+      '',
+    ].join('\n'),
+  );
+}
+
+if (argv.includes('--audit-index')) {
+  await auditIndex();
+  process.exit(0);
+}
+
 const state = { scanExhausted: false, scanned: 0 };
 for await (const conv of iterateUnreadConversations({ conversations, logger }, { budget }, state)) {
   tally.scanned += 1;
@@ -184,14 +264,30 @@ const pct = (n: number): string =>
   oneToOne === 0 ? 'n/a' : `${((n / oneToOne) * 100).toFixed(1)}%`;
 
 const coverage = oneToOne === 0 ? 0 : (resolved / oneToOne) * 100;
+/**
+ * MINIMUM SAMPLE. The thresholds were fixed in advance so the number could not
+ * be rationalised afterwards - but a threshold with no minimum sample is not a
+ * guard, it is a confident-sounding coin flip. The first real run returned 2
+ * rows in prod and printed "HIGH", which is exactly the failure this constant
+ * now prevents: 2 of 2 resolving tells you nothing about 2000.
+ *
+ * 30 is a convention, not a calculation, and it is deliberately stated as such.
+ * Below it the script reports the counts and refuses to render a verdict.
+ */
+const MIN_SAMPLE = 30;
+
 const verdict =
   oneToOne === 0
     ? 'NO DATA - the walk returned no 1:1 unread rows; this number means nothing'
-    : coverage >= 95
-      ? 'HIGH - build the read-through; the fallback is a tail case'
-      : coverage <= 80
-        ? 'LOW - fix the capture paths and backfill FIRST (needs its own go)'
-        : 'MIXED - escalate with this number rather than picking';
+    : oneToOne < MIN_SAMPLE
+      ? `INSUFFICIENT SAMPLE - ${oneToOne} row(s) cannot support any verdict (min ${MIN_SAMPLE}).\n` +
+        '           Run --audit-index to find out whether the index is genuinely\n' +
+        '           near-empty or under-reporting; those need different answers.'
+      : coverage >= 95
+        ? 'HIGH - build the read-through; the fallback is a tail case'
+        : coverage <= 80
+          ? 'LOW - fix the capture paths and backfill FIRST (needs its own go)'
+          : 'MIXED - escalate with this number rather than picking';
 
 console.log(
   [

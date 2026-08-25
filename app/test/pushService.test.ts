@@ -1061,9 +1061,10 @@ describe('pushService.sendToAll', () => {
   });
 
   it('never delays a refresh that follows a SUCCESSFUL one', async () => {
-    // Non-regression guard: the floor is stamped only when an attempt FAILS,
-    // so a successful one leaves no stamp at all and the 60s cache TTL is the
-    // only thing deciding when the next Scan runs.
+    // Non-regression guard: the floor is stamped on every attempt, successes
+    // included, but the 60s cache TTL is longer than the 30s floor - so by the
+    // time a post-success refresh is due, the stamp is always older than the
+    // floor and the Scan runs immediately.
     const config = loadConfig(VAPID_ENV);
     const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
     const { adapter } = fakeAdapter({});
@@ -1085,15 +1086,17 @@ describe('pushService.sendToAll', () => {
   });
 
   it('does NOT drop a second broadcast issued while the first COLD-START scan is in flight', async () => {
-    // The floor was once stamped BEFORE `await users.listAll()`, which made it
-    // fence in-flight attempts as well as failed ones. On a cold process the
-    // second call then saw no cache AND a millisecond-old stamp, took the
-    // floored arm, found nothing servable, and dropped the notification at
-    // debug - invisible in both deployed envs, where LOG_LEVEL is info. The
-    // window is the length of a users-table Scan and it opens on every process
-    // start and every deploy, i.e. exactly when a burst of queued webhooks
-    // lands. listAll is held on a gate here so both calls are provably inside
-    // that window.
+    // The floor is stamped BEFORE `await users.listAll()`, so it fences the
+    // calls that arrive while an attempt is still in flight as well as the ones
+    // that follow a failure. On a cold process the second call therefore sees
+    // no cache AND a millisecond-old stamp - and it used to take the floored
+    // arm, find nothing servable, and drop the notification at debug,
+    // invisible in both deployed envs, where LOG_LEVEL is info. The window is
+    // the length of a users-table Scan and it opens on every process start and
+    // every deploy, i.e. exactly when a burst of queued webhooks lands. The
+    // floored arm now JOINS the attempt already in flight and re-reads the
+    // cache, so ONE Scan serves both callers and neither is dropped. listAll is
+    // held on a gate here so both calls are provably inside that window.
     const config = loadConfig(VAPID_ENV);
     let release: () => void = () => {};
     const scanInFlight = new Promise<void>((resolve) => {
@@ -1140,14 +1143,60 @@ describe('pushService.sendToAll', () => {
     release();
     const [resultA, resultB] = await Promise.all([a, b]);
 
-    // Neither call is fenced by the other: each runs its own Scan (the
-    // pre-floor behavior) and each fans out.
-    expect(listAllCalls).toBe(2);
+    // ONE Scan, TWO fan-outs: B joined A's attempt and read the cache A wrote,
+    // so nothing is dropped and nothing is scanned twice.
+    expect(listAllCalls).toBe(1);
     expect(resultA).toMatchObject({ users: 1, attempted: 1, sent: 1 });
     expect(resultB).toMatchObject({ users: 1, attempted: 1, sent: 1 });
     expect(sentTo).toEqual([ep('a1'), ep('a1')]);
     // A dropped broadcast was silent; a delivered one raises nothing either.
     expect(capture.atLevel(40)).toHaveLength(0);
     expect(capture.atLevel(50)).toHaveLength(0);
+  });
+
+  it('joins a SLOW FAILING scan: one attempt, one ERROR, both broadcasts zeroed', async () => {
+    // The alarm-flood shape the floor exists for, at its hardest: the failure
+    // is SLOW (a throttle or a timeout, not an instant ValidationException), so
+    // the second broadcast arrives while the first attempt is still running.
+    // Stamping before the await fences that caller and the join makes the fence
+    // safe - B never starts a second Scan and never logs a second ERROR, and
+    // both calls still return the zeroed drop the empty-cache arm owes them.
+    const config = loadConfig(VAPID_ENV);
+    let failTheScan: () => void = () => {};
+    const scanInFlight = new Promise<never>((_resolve, reject) => {
+      failTheScan = () => reject(new Error('ProvisionedThroughputExceededException'));
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        await scanInFlight;
+        return [];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // Both issued before either can settle: A suspends inside listAll, then B
+    // runs its gate check against the stamp A just wrote.
+    const a = service.sendToAll(note);
+    const b = service.sendToAll(note);
+    failTheScan();
+    const [resultA, resultB] = await Promise.all([a, b]);
+
+    const zeroed = { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+    expect(listAllCalls).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+    expect(capture.atLevel(40)).toHaveLength(0);
+    expect(resultA).toEqual(zeroed);
+    expect(resultB).toEqual(zeroed);
   });
 });

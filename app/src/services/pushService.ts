@@ -140,28 +140,21 @@ export function createPushService(deps: PushServiceDeps): PushService {
   const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
   let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
   /**
-   * Floor between listAll retries after a FAILED attempt (log-hygiene spec
-   * 6.1): one ERROR/WARN + one Scan attempt per ~30s window PER INSTANCE
-   * (about six instances exist per process), instead of one per inbound
-   * message. Stamped ONLY at the top of the catch below - never before the
-   * await - so an attempt that SUCCEEDS leaves no floor behind at all and the
-   * 60s cache TTL is the only thing governing the next refresh.
+   * Floor between listAll ATTEMPTS (log-hygiene spec 6.1): one Scan attempt +
+   * one ERROR/WARN per ~30s window PER INSTANCE (about six instances exist per
+   * process), instead of one per inbound message. Stamped on every attempt,
+   * immediately BEFORE it starts; a successful refresh naturally resets the
+   * cadence, because the 60s TTL then decides when the next one is due.
    *
-   * FAILURE-stamped, not attempt-stamped, and that distinction is the whole
-   * point. Stamping before `await users.listAll()` floored the calls that
-   * arrived while the FIRST Scan of a cold process was still in flight: they
-   * saw no cache AND a millisecond-old stamp, so they took the floored arm,
-   * found nothing servable, and DROPPED the notification at debug. LOG_LEVEL
-   * is info in both deployed envs, so the drop was completely invisible - and
-   * the window opens on every process start and every deploy, exactly when a
-   * burst of queued webhooks lands.
-   *
-   * TWO ACCEPTED RESIDUALS: (a) several calls arriving during ONE slow FAILING
-   * attempt can each attempt and each log, because the stamp only lands when
-   * that attempt finally rejects - the floor bounds the sends that FOLLOW a
-   * known failure, which is the alarm-noise case it exists for; (b) concurrent
-   * cold-start calls can each run their own listAll, which is exactly the
-   * pre-floor behavior and delivers every notification.
+   * STAMPING BEFORE THE AWAIT IS WHY `refreshInFlight` EXISTS. The stamp fences
+   * the calls that arrive while an attempt is STILL RUNNING, so on a cold
+   * process a second sendToAll used to see no cache AND a millisecond-old
+   * stamp, take the floored arm, find nothing servable, and DROP the
+   * notification at debug - invisible in both deployed envs, where LOG_LEVEL is
+   * info, and the window opens on every process start and every deploy, exactly
+   * when a burst of queued webhooks lands. A floored caller now JOINS the
+   * attempt already in flight instead of guessing: never a second Scan, never a
+   * second log line, and never a drop while a usable answer is on its way.
    *
    * READ THE CATCH ARMS BELOW WITH THIS IN MIND: they still leave `fetchedAt`
    * untouched on failure, so the refresh IS retried and the age keeps counting
@@ -169,7 +162,8 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * riding the very next send.
    */
   const REFRESH_RETRY_FLOOR_MS = 30_000;
-  let lastRefreshFailureAt: number | undefined;
+  let lastRefreshAttemptAt: number | undefined;
+  let refreshInFlight: Promise<void> | undefined;
 
   /**
    * The shared per-device loop: allowlist prune, send, Gone prune, transient
@@ -323,15 +317,20 @@ export function createPushService(deps: PushServiceDeps): PushService {
 
       if (usersCache === undefined || now() - usersCache.fetchedAt >= USERS_CACHE_TTL_MS) {
         const floored =
-          lastRefreshFailureAt !== undefined && now() - lastRefreshFailureAt < REFRESH_RETRY_FLOOR_MS;
+          lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
         if (!floored) {
+          lastRefreshAttemptAt = now();
+          // PUBLISH the attempt before awaiting it, so a floored caller has
+          // something to join. The joinable copy neutralizes BOTH settlements -
+          // it is not the error handler, the try/catch below is - so joining it
+          // can never reject into someone else's call.
+          const attempt = users.listAll();
+          refreshInFlight = attempt.then(() => undefined, () => undefined).finally(() => {
+            refreshInFlight = undefined;
+          });
           try {
-            usersCache = { items: await users.listAll(), fetchedAt: now() };
+            usersCache = { items: await attempt, fetchedAt: now() };
           } catch (err) {
-            // Open the floor window HERE, ahead of the three arms below, so
-            // every failure route stamps exactly once and no successful
-            // attempt ever does. See REFRESH_RETRY_FLOOR_MS above.
-            lastRefreshFailureAt = now();
             // A lookup failure must never break the caller (the send is
             // fire-and-forget off a webhook/ingest path): it is logged, never
             // thrown, exactly as the voice founder lookup does.
@@ -370,9 +369,16 @@ export function createPushService(deps: PushServiceDeps): PushService {
             );
           }
         } else {
-          // Inside the floor after a failed attempt: the window-opening line
-          // already told the operator. Serve the cache when it is inside the
-          // stale bound; otherwise drop quietly (debug, not warn/error).
+          // FLOORED, which means one of two things. Either an attempt is STILL
+          // IN FLIGHT - so join it and read the cache state it settles, rather
+          // than guessing from a cache that has not been written yet: the
+          // attempter's own continuation (the line that assigns usersCache) is
+          // scheduled ahead of this join's, so the join wakes to the settled
+          // state. Or the last attempt already FAILED, and its window-opening
+          // line has already told the operator. Either way, what follows is the
+          // same: serve the cache when it is inside the stale bound; otherwise
+          // drop quietly (debug, not warn/error).
+          if (refreshInFlight !== undefined) await refreshInFlight;
           if (usersCache === undefined || now() - usersCache.fetchedAt >= STALE_SERVE_MAX_MS) {
             log.debug(
               { kind: notification.kind },

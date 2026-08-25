@@ -1061,10 +1061,9 @@ describe('pushService.sendToAll', () => {
   });
 
   it('never delays a refresh that follows a SUCCESSFUL one', async () => {
-    // Non-regression guard: the floor is stamped on every attempt, successes
-    // included, but the 60s cache TTL is longer than the 30s floor - so by the
-    // time a post-success refresh is due, the stamp is always older than the
-    // floor and the Scan runs immediately.
+    // Non-regression guard: the floor is stamped only when an attempt FAILS,
+    // so a successful one leaves no stamp at all and the 60s cache TTL is the
+    // only thing deciding when the next Scan runs.
     const config = loadConfig(VAPID_ENV);
     const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
     const { adapter } = fakeAdapter({});
@@ -1083,5 +1082,72 @@ describe('pushService.sendToAll', () => {
     t = 60_000;
     await service.sendToAll(note);
     expect(world.calls.listAll).toBe(2);
+  });
+
+  it('does NOT drop a second broadcast issued while the first COLD-START scan is in flight', async () => {
+    // The floor was once stamped BEFORE `await users.listAll()`, which made it
+    // fence in-flight attempts as well as failed ones. On a cold process the
+    // second call then saw no cache AND a millisecond-old stamp, took the
+    // floored arm, found nothing servable, and dropped the notification at
+    // debug - invisible in both deployed envs, where LOG_LEVEL is info. The
+    // window is the length of a users-table Scan and it opens on every process
+    // start and every deploy, i.e. exactly when a burst of queued webhooks
+    // lands. listAll is held on a gate here so both calls are provably inside
+    // that window.
+    const config = loadConfig(VAPID_ENV);
+    let release: () => void = () => {};
+    const scanInFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        await scanInFlight;
+        return [
+          {
+            userId: 'usr_a',
+            email: 'usr_a@example.com',
+            role: 'admin',
+            status: 'active',
+            created_at: '2026-08-16T00:00:00.000Z',
+            push_subscriptions: [
+              {
+                endpoint: ep('a1'),
+                keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+                created_at: '2026-08-16T00:00:00.000Z',
+              },
+            ],
+          },
+        ];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // Both issued before either can resolve: A suspends inside listAll, then B
+    // runs its gate check with the cache still empty.
+    const a = service.sendToAll(note);
+    const b = service.sendToAll(note);
+    release();
+    const [resultA, resultB] = await Promise.all([a, b]);
+
+    // Neither call is fenced by the other: each runs its own Scan (the
+    // pre-floor behavior) and each fans out.
+    expect(listAllCalls).toBe(2);
+    expect(resultA).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(resultB).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(sentTo).toEqual([ep('a1'), ep('a1')]);
+    // A dropped broadcast was silent; a delivered one raises nothing either.
+    expect(capture.atLevel(40)).toHaveLength(0);
+    expect(capture.atLevel(50)).toHaveLength(0);
   });
 });

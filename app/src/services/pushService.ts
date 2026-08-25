@@ -140,11 +140,28 @@ export function createPushService(deps: PushServiceDeps): PushService {
   const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
   let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
   /**
-   * Floor between listAll ATTEMPTS after a failure (log-hygiene spec 6.1):
-   * one ERROR/WARN + one Scan attempt per ~30s window PER INSTANCE (about
-   * six instances exist per process), instead of one per inbound message.
-   * Stamped on every attempt; a successful refresh naturally resets the
-   * cadence because the TTL then governs.
+   * Floor between listAll retries after a FAILED attempt (log-hygiene spec
+   * 6.1): one ERROR/WARN + one Scan attempt per ~30s window PER INSTANCE
+   * (about six instances exist per process), instead of one per inbound
+   * message. Stamped ONLY at the top of the catch below - never before the
+   * await - so an attempt that SUCCEEDS leaves no floor behind at all and the
+   * 60s cache TTL is the only thing governing the next refresh.
+   *
+   * FAILURE-stamped, not attempt-stamped, and that distinction is the whole
+   * point. Stamping before `await users.listAll()` floored the calls that
+   * arrived while the FIRST Scan of a cold process was still in flight: they
+   * saw no cache AND a millisecond-old stamp, so they took the floored arm,
+   * found nothing servable, and DROPPED the notification at debug. LOG_LEVEL
+   * is info in both deployed envs, so the drop was completely invisible - and
+   * the window opens on every process start and every deploy, exactly when a
+   * burst of queued webhooks lands.
+   *
+   * TWO ACCEPTED RESIDUALS: (a) several calls arriving during ONE slow FAILING
+   * attempt can each attempt and each log, because the stamp only lands when
+   * that attempt finally rejects - the floor bounds the sends that FOLLOW a
+   * known failure, which is the alarm-noise case it exists for; (b) concurrent
+   * cold-start calls can each run their own listAll, which is exactly the
+   * pre-floor behavior and delivers every notification.
    *
    * READ THE CATCH ARMS BELOW WITH THIS IN MIND: they still leave `fetchedAt`
    * untouched on failure, so the refresh IS retried and the age keeps counting
@@ -152,7 +169,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * riding the very next send.
    */
   const REFRESH_RETRY_FLOOR_MS = 30_000;
-  let lastRefreshAttemptAt: number | undefined;
+  let lastRefreshFailureAt: number | undefined;
 
   /**
    * The shared per-device loop: allowlist prune, send, Gone prune, transient
@@ -306,12 +323,15 @@ export function createPushService(deps: PushServiceDeps): PushService {
 
       if (usersCache === undefined || now() - usersCache.fetchedAt >= USERS_CACHE_TTL_MS) {
         const floored =
-          lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
+          lastRefreshFailureAt !== undefined && now() - lastRefreshFailureAt < REFRESH_RETRY_FLOOR_MS;
         if (!floored) {
-          lastRefreshAttemptAt = now();
           try {
             usersCache = { items: await users.listAll(), fetchedAt: now() };
           } catch (err) {
+            // Open the floor window HERE, ahead of the three arms below, so
+            // every failure route stamps exactly once and no successful
+            // attempt ever does. See REFRESH_RETRY_FLOOR_MS above.
+            lastRefreshFailureAt = now();
             // A lookup failure must never break the caller (the send is
             // fire-and-forget off a webhook/ingest path): it is logged, never
             // thrown, exactly as the voice founder lookup does.

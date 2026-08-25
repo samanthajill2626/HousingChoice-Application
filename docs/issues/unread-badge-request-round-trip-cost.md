@@ -2,12 +2,63 @@
 id: unread-badge-request-round-trip-cost
 title: The unread badge pays one contact Query per 1:1 index item SCANNED, unbounded to 2,000
 type: debt
-severity: high
-status: open
+severity: low
+status: deferred
 area: app/inbox
 created: 2026-08-21
 updated: 2026-08-25
+deferred: 2026-08-25
 refs: app/src/lib/unreadFeed.ts:534, app/src/lib/unreadFeed.ts:568, app/src/routes/inbox.ts:1674, app/src/repos/contactsRepo.ts:912, app/src/repos/contactsRepo.ts:941, app/src/repos/conversationsRepo.ts:179, app/src/routes/today.ts:1086
+---
+
+**DEFERRED 2026-08-25, `high` -> `low`, on MEASURED data. The defect below is
+real and correctly described. Nobody is paying for it.**
+
+The cost is per 1:1 item SCANNED on the sparse `byUnread` walk, so it is a
+function of how many threads are unread AT ONCE - not of how much data exists.
+Measured on both deployed environments the same day this was adjudicated, with
+`app/scripts/measure-unread-contact-coverage.ts`:
+
+| env | conversations | unread rows the walk sees | counter-only (invisible) |
+| --- | --- | --- | --- |
+| dev | 774 | 0 | 0 |
+| prod | 885 | 1 | 0 |
+
+So the walk costs about ONE Query, not two thousand, and the index is honest -
+the audit confirmed the counters agree with the sparse flag in both
+environments, so this is a genuinely empty inbox rather than an under-reporting
+index.
+
+**Why this will not drift back on its own, which is why it is deferred and not
+merely postponed.** Unread here is per-CONVERSATION and shared across operators,
+so the walk length is bounded by how fast the inbox is cleared, not by growth.
+Ten times the conversations still leaves a walk of ~1 while operators keep up.
+There is no data-growth curve that reaches the filed cost.
+
+**REOPEN IF EITHER OF THESE HAPPENS:**
+
+1. **Unread becomes PER-USER.** That multiplies index rows by operator count and
+   makes the walk grow with people instead of with attention. It is a deliberate
+   schema decision, so it is a trigger that can actually fire - unlike a date.
+2. **An audit shows sustained unread depth in the hundreds.** Re-run
+   `npx tsx app/scripts/measure-unread-contact-coverage.ts --confirm --audit-index`;
+   it costs nothing and is worth a glance during any future inbox work.
+
+**Do not reopen this on the amplification argument alone.** The remedy was
+sound - resolve the contact from `participants[].contactId` and batch it - and
+the analysis below stands. What was missing was anyone paying the cost. Note
+also that deferring this removes the `contactId` denormalization from the
+roadmap, which
+[`inbox-filter-tabs-full-walk`](./inbox-filter-tabs-full-walk.md) was relying on
+as its part (B); that issue needs its own remedy now, and its walk is over the
+OPEN partition rather than the unread index, so its cost profile is different
+and must be measured separately rather than inherited from here.
+
+The importer defect found while specifying this fix
+([`import-blanks-conversation-participant-contactid`](./import-blanks-conversation-participant-contactid.md))
+stays OPEN and is unaffected: it corrupts participant links whether or not
+anything reads them.
+
 ---
 
 **Re-adjudicated 2026-08-25 against `main` @88ac7b36.** The premise that blocked

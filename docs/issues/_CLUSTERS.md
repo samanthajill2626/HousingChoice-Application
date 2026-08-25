@@ -23,6 +23,12 @@ invites re-filing:
 Plus [ported-number-not-on-a2p-campaign](./ported-number-not-on-a2p-campaign.md)
 closed as genuinely resolved. Net: 283 -> 276 open, 9 open highs.
 
+**2026-08-25: that high count is now stale by at least two.** C1's
+`unread-badge-request-round-trip-cost` was deferred to `low` on measured data and
+`mark-read-fanout-stale-gsi-skip` dropped to `med`, so C1 has NO high left. The
+per-cluster counts below were not re-derived; re-derive before using this file
+to pick work.
+
 **Deliberately NOT merged:** the five `relay-duplicate-*` issues share one file
 and one feature but describe five different defects with five different remedies
 and five recorded design decisions. Same for the three `load-older-*` issues.
@@ -43,8 +49,22 @@ generated artifact.
 
 ## C1 - Inbox unread read path: stale-GSI correctness + read amplification
 
-**Highs:** [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md),
-[mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md)
+**Highs: NONE, as of 2026-08-25.** Both are gone, and neither on a whim.
+[unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md)
+is DEFERRED at `low` on measured data - dev 774 conversations / 0 unread rows,
+prod 885 / 1, zero counter-only in either, so the walk it optimises costs about
+ONE Query rather than the filed 2000.
+[mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) is
+`med`: the skip is sticky, not permanent.
+
+**The cluster's most valuable fix is now
+[inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md)** - it reads the
+OPEN partition rather than the sparse unread index, so unlike the badge it is
+paying a real per-pass cost today, and `useInbox` re-issues it on every debounced
+SSE event while an operator sits on that tab. **Measure it before scoping work
+off it** (`--audit-walk` on
+`app/scripts/measure-unread-contact-coverage.ts`); that instruction is the
+badge's lesson, paid for.
 
 **Shared surface:** `app/src/lib/unreadFeed.ts` (`collectUnreadRows`),
 `app/src/routes/inbox.ts`, `app/src/routes/contacts.ts`,
@@ -71,15 +91,28 @@ generated artifact.
 > size), so the fill loop was never "contributor 2" of the badge and sequencing
 > it first would have measured no badge improvement; and the badge's blocking
 > premise - that no `contactId` exists on the conversation item - is false.
-> `participants[].contactId` is written by `contactCapture` before the row is
-> ever indexed, `today.ts` already reads it off this same walk, and
-> `contacts.getManyByIds` shipped 2026-08-21.
+> `participants[].contactId` exists on the item and `contacts.getManyByIds`
+> shipped 2026-08-21.
+>
+> TWO SUPPORTING CLAIMS IN THAT PARAGRAPH WERE LATER WITHDRAWN and must not be
+> scoped off: `contactCapture` claims the link before indexing on only ONE of
+> six `incrementUnread` paths, and `today.ts` reads `participants[0]` as a RULE
+> and drives its deleted-contact skip from it - a bug to file, not precedent.
+> The premise held without them, and the fix was cut anyway on measured data.
 
-The two highs are NOT the same walk. The badge is a read amplification on the
-`byUnread` walk - one contact resolved per index item SCANNED, unbounded to
-2000. The mark-read fan-out is a WRITE path that trusts a lagging
+The two former highs are NOT the same walk. The badge was a read amplification
+on the `byUnread` walk - one contact resolved per index item SCANNED, unbounded
+to 2000. The mark-read fan-out is a WRITE path that trusts a lagging
 `byParticipantPhone` image. They share a cluster because they share the unread
 state, not a code path.
+
+**And the real relationship between them runs the other way from how this
+cluster was scoped.** The fan-out skip is what strands threads permanently in
+the sparse index; a residue wall is the ONLY thing that would make the badge
+walk long. So the write-path fix does not ride the read-path fix - it is what
+prevents the read-path cost from ever arriving. Fixing 
+[mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) is what
+keeps the deferred badge issue deferred.
 
 **Re-sliced 2026-08-25.** The four issues marked `[gen]` below are not four
 independent riders. They are one tangle in the collect generator's exit and
@@ -91,8 +124,8 @@ single coherent flag contract.
 
 | sev | issue | why it rides along |
 |---|---|---|
-| high | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | anchor - one serial `findByPhone` per index item scanned; fix is the `contactId` read-through |
-| med | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - conditional write; `high -> med`, the skip is not permanent (five later events re-drive it) |
+| ~~high~~ low | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | **DEFERRED 2026-08-25 on measured data** - real defect, nobody paying for it. Reopen if unread becomes PER-USER, or if an audit shows sustained unread depth in the hundreds. Its cut also removed the `contactId` denormalization, which `inbox-filter-tabs-full-walk` had been riding |
+| med | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - conditional write; `high -> med`, the skip is sticky but not permanent. Its counter-only objection is now CLOSED on direct evidence: zero counter-only rows in dev or prod on 2026-08-25 |
 | med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | `[gen]` - page path only, NOT the badge; both filed remedies disproven |
 | low | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | `[gen]` - `med -> low`; the exits are already mutually exclusive |
 | med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | `[gen]` - four producers, one boolean, exactly one consumer mis-served |
@@ -101,7 +134,7 @@ single coherent flag contract.
 | low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | filed symptom is INVERTED and never reproduced; retitled to the real invariant |
 | low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8); carrier must be keyed by `conversationId` |
 | low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing; the `aiRuns` line it says to copy has since changed |
-| medium | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium` - the last unbounded read on the route; rides the badge's `contactId` fix |
+| medium | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium` - **the cluster's top cost item now.** Last unbounded read on the route, over the OPEN partition. Its part (B) is gone with the badge's cut and it needs its own remedy. MEASURE FIRST |
 | low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice; All/Groups tabs only |
 | low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | THREE renderers, not two; one crosses a package boundary, group threads bypass `deriveLatest` |
 

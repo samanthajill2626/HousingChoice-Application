@@ -21,7 +21,9 @@ Cluster C1 is one read path seen from several angles: the sparse `byUnread`
 index walk that backs the nav badge and the Unread tab, the two mark-read
 fan-outs that maintain it, and the open-partition pager that backs every other
 tab. The human scoped this mission to sweep the WHOLE cluster rather than the
-two highs alone.
+two highs alone. NOTE both of those highs have since moved: one was cut on
+measured data (4.1) and the other downgraded to `med` (4.2), so this cluster no
+longer has a `high` in it at all.
 
 Thirteen issues were listed under C1. One
 (`unread-index-integration-coverage-requires-local-dynamo`) is already
@@ -59,8 +61,8 @@ Every `filter=all` response in the failing iteration carried a full page. The
 emptying request came from the browser (Chrome user-agent), not the test's API
 helper. Fixed in `52ebafc8`; verification is a re-soak of the same spec.
 
-**What this changes for the rest of the mission.** The two highs are real - but
-they were not what made the row vanish, and the mission must not claim
+**What this changes for the rest of the mission.** The two highs were real as
+DESCRIPTIONS - but they were not what made the row vanish, and the mission must not claim
 otherwise. Note that "built exactly as their issues prescribe" stood here until
 2026-08-25 and did not survive the re-adjudication in section 3; half the
 cluster's prescriptions turned out to be wrong. Specifically:
@@ -126,184 +128,72 @@ Two premises the old draft was built on are false, and both are load-bearing:
   Two supporting arguments this section originally made have since been
   WITHDRAWN and must not be repeated downstream: that `captureContact` claims
   the link before `incrementUnread` indexes the row (true on one of six paths -
-  see 4.1.a), and that `today.ts:1086` reading it off the same walk is
+  section 4.1), and that `today.ts:1086` reading it off the same walk is
   reassuring precedent (it reads `participants[0]` as a RULE and drives the
-  deleted-contact skip from it, which is a bug to file, not a precedent). The
-  premise survives without them; the field exists. How OFTEN it is usable is
-  4.1.a's question, and it is open.
+  deleted-contact skip from it, which is a bug to file, not a precedent).
 
-## 4. The two anchors
+  All of which is now moot for this mission: the premise was true, the field
+  does exist, and the fix was cut anyway because the cost is not being paid.
+  Kept here because "the blocking premise was false" is still the right reading
+  of the issue, and because it is the clearest example in this document of an
+  argument that survived four rounds of scrutiny while the question underneath
+  it went unasked.
 
-### 4.1 unread-badge-request-round-trip-cost (high)
+## 4. The one anchor
 
-The defect is one serial `findByPhone` GSI Query per 1:1 index item SCANNED,
-unbounded to `UNREAD_WALK_LIMIT` = 2000. The row cap cannot fire inside a
-residue wall, and the deleted-contact probe bound stops MESSAGE reads only,
-never the contact lookups - it also sits downstream of an already-paid Query.
-This is the app's highest-frequency request.
+### 4.1 unread-badge-request-round-trip-cost - CUT 2026-08-25, on measured data
 
-**Human ruling 2026-08-25 (first pass): build the read-through directly, no
-measurement gate.** The earlier "measure, then decide by rule" ruling had been
-given on the two false premises in section 3 and was void.
+**This was the cluster's only `high`. It is now deferred at `low`, and nothing
+in this mission builds for it.** The defect was real and correctly described:
+the badge pays one serial contact Query per 1:1 item SCANNED on the sparse
+`byUnread` walk, unbounded to 2000. What was never established is that anybody
+pays it.
 
-**Human ruling 2026-08-25 (revised, after review round 1): MEASURE FIRST.** Not
-to decide whether to fix it - the defect is real and the read-through is the
-right shape - but because a review finding showed the fix could ship green and
-save nothing, and the stated acceptance could not have detected that. The
-ruling was not wrong when it was made; the fact that changed it did not exist
-yet.
+Measured on both deployed environments with
+`app/scripts/measure-unread-contact-coverage.ts`, built for this decision:
 
-### 4.1.a The measurement slice - runs BEFORE any read-through code
+| env | conversations | unread rows the walk sees | counter-only (invisible) |
+| --- | --- | --- | --- |
+| dev | 774 | 0 | 0 |
+| prod | 885 | 1 | 0 |
 
-Reviewer A found, and the author verified, that the coverage this fix depends on
-is largely unestablished:
+The walk costs about ONE Query. The index audit confirms the counters agree with
+the sparse flag in both environments, so this is a genuinely empty inbox and not
+an under-reporting index - a distinction that would have pointed at the opposite
+plan, which is why it was checked before concluding anything.
 
-- There are SIX `incrementUnread` call sites (`twilio.ts:709`, `:1018`,
-  `:1787`, `:2258`, `voice.ts:400`, `inboundEmail.ts:749`) and TWO
-  `captureContact` call sites (`twilio.ts:2187`, `voice.ts:606`). The claim in
-  section 3 that capture precedes indexing is demonstrable for ONE path of six.
-- Capture failure is swallowed even where it runs.
-- There is no backfill FOR THIS FIELD. (Draft 2 said "`app/src/scripts/` does not
-  exist" - a wrong-directory non-fact. `app/scripts/` holds four backfills,
-  including one for this very index, which is the pattern to follow.)
-- `contactId: ''` is a live steady-state class the importer can create on an
-  established row - see
-  [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
+**Why no time-based trigger would be honest.** Unread here is per-CONVERSATION
+and shared across operators, so walk length is bounded by how fast the inbox is
+cleared, not by data growth. Ten times the conversations still leaves a walk of
+~1 while operators keep up. The reopen conditions are therefore written on the
+issue as a schema change (unread becoming PER-USER, which makes the walk grow
+with people rather than with attention) or a measured unread depth in the
+hundreds - triggers that can actually fire.
 
-The question: of the 1:1 items the `byUnread` walk returns, what fraction carry
-a participant entry with a NON-EMPTY `contactId` that resolves to a live
-contact?
+**What falls away with it,** and this is the part worth reading rather than the
+cut itself:
 
-**RESOLVED 2026-08-25: the human runs it and hands back the number.** The
-instrument now exists - `app/scripts/measure-unread-contact-coverage.ts`,
-read-only, PII-free, gated behind `--confirm` and an explicit `TABLE_PREFIX`. It
-is a SEPARATE script rather than a flag on `profile-inbox.ts`, deliberately:
-that harness is hard-gated to the local lane, and loosening the gate to reuse it
-would remove a guard that exists for good reasons. It implements 4.1.b condition
-1's selection rule rather than an easier one, and counts a non-empty
-`contactId` as coverage only when it RESOLVES. Its classification was verified
-against a synthetic fixture covering every bucket, including a dual-key row.
+- The `contactId` denormalization, and with it the whole of Invariant 2 in
+  section 7 - the schema-adjacent invariant that produced this review's one
+  surviving blocking finding.
+- Open decisions on attribution staleness and failed-batch semantics. Both were
+  real questions about a mechanism that no longer exists here. The failed-batch
+  ruling (fall back, keep the badge) is recorded on the issue for whenever it is
+  reopened, rather than discarded.
+- R5's part (B). It was riding this denormalization and now needs its own
+  remedy; see section 6.
 
-The record of WHY this needed a ruling is kept below, because it is the reason
-the number will mean anything.
+**What does NOT fall away:**
+[`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md)
+stays open. It was found while specifying this fix, and it corrupts participant
+links whether or not anything reads them.
 
-**This slice was BLOCKED on a human decision, and saying so was the point.** Both
-round-2 reviewers independently found that draft 2's version could be satisfied
-while learning nothing. Three things were missing and only one is fixable by an
-engineer:
-
-- **No threshold.** "High" versus "low or mixed" named no number and no
-  classifier. Proposed and fixed in advance so the result cannot be
-  rationalised afterwards: **>= 95% usable is high; <= 80% is low; anything
-  between is mixed and escalates.** These are proposals, not rulings.
-- **No vehicle.** Nothing in the repo measures `contactId` coverage today.
-  `app/scripts/profile-inbox.ts` is the nearest harness and already instruments
-  both `aggregateInbox` and `countUnreadRows`, but it is hard-gated to
-  `localhost:8000` and `hc-local-` tables. Extending it is small work.
-- **No legitimate dataset - THIS is the human decision.** The hermetic lane is
-  seeded, so it answers with the fixture coverage the slice exists to distrust.
-  Dev and prod are off-limits to an agent under AGENTS.md. The founder's local
-  imported dataset is exactly the interesting shape and is named as a human item
-  in decision 5. So a builder cannot legitimately take this measurement at all,
-  and draft 2's fix for one review finding reintroduced another.
-
-See section 8 decision 6. Until it is answered, this slice is a specification,
-not a task.
-
-**The decision rule, once a dataset exists:**
-
-- **High coverage** - build the read-through as specified below; the fallback is
-  a tail case.
-- **Low coverage** - the read-through is NOT the first change. Fix the capture
-  paths and add a backfill FIRST, because a fallback that fires on most rows is
-  today's cost with extra code in front of it. NOTE that branch is an unscoped
-  expansion in its own right - four capture paths plus a backfill across two
-  environments is infrastructure work needing its own human go, not a
-  continuation of this mission.
-- **Mixed** - escalate with the number rather than picking.
-- **Either way** - the fallback ships, and acceptance measures SAVED round trips
-  on real-shaped data. Draft 2 contradicted itself here, telling the builder to
-  use real-shaped data in one sentence and the existing fixture-based call-count
-  tests in another. The fixture tests remain valid for the mechanism; they
-  cannot establish the saving.
-
-### 4.1.b The read-through
-
-Resolve the contact from the `participants` entry already on the conversation
-item and batch through `contacts.getManyByIds`. Five conditions, none optional:
-
-1. **Select the entry by a phone-then-email CHAIN, not a per-kind branch.**
-   Draft 3 said "the phone for a phone thread, the single entry for an email
-   thread", and review found that branches on a partition WHICH DOES NOT EXIST:
-   `attachEmailToConversation` stamps `participant_email` onto an existing PHONE
-   thread by design, and both live readers already handle it as an explicit
-   `findByPhone` then `findByEmail` chain. A per-kind branch has no rule for the
-   dual-key row and turns a resolvable contact into exactly the phantom
-   `unknown` row condition 2 exists to prevent - a new hole created by round 2's
-   fix for a different one.
-
-   So: try the entry matching `participant_phone`; if there is none and the row
-   carries an email, apply the email rule; only then call it a miss. Do NOT make
-   `participants[0]` a rule: `contactCapture.ts:164` states the opposite in the imperative ("never
-   `participants[0]`: an entry for another phone is..."), and
-   `conversationsRepo.ts:1354-1356` records the convention as "readers key on
-   contactId FIRST". Both round-1 reviewers proposed reverting to `[0]`; that
-   was rejected and the continuing reviewer withdrew the proposal in round 2 -
-   while correcting the basis of my rejection, which matters. "It would
-   reintroduce the positional bug" is NOT true for the class actually in
-   dispute: an email-only row has exactly one entry, so "the single entry" and
-   `[0]` are the same expression there. `[0]` is unsafe as a GENERAL rule and
-   merely unremarkable on that row.
-
-   **The gap that leaves, and how it closes.** "The single entry" is an
-   assertion, not a selector, and its natural implementation IS `[0]` - so the
-   rule degenerates into the thing it forbids. Close it explicitly: **if an
-   email thread carries more than one entry, do not pick. Fall back to
-   `findByEmail` and log it.**
-
-   `today.ts:1086` is now resolved and stops being cited as precedent either
-   way: it DOES use `[0]` as a rule, and it drives the deleted-contact skip from
-   it. That is a bug to file on its own, not evidence for anything here.
-2. **Fall back on any UNUSABLE `contactId`, empty string included.** The
-   un-backfilled shape is `''`, not `undefined`. An empty string is not a valid
-   key: it throws on `BatchGetItem`, and a default batch helper can drop the
-   WHOLE 100-key chunk rather than one row - degrading up to 100 unread rows to
-   phantom `unknown` rows, which is the exact symptom this cluster exists to
-   remove. Filter empties out BEFORE the batch. Fall back to `findByPhone` for a
-   phone thread and `findByEmail` for an email thread.
-
-   **What draft 2 got wrong here:** it also prescribed "use the existing
-   `requireComplete` semantics", which quietly DECIDES the open question in
-   decision 2 below, and decides it the harshest way. `requireComplete` throws,
-   and the badge path deliberately does not catch - so a partial batch would
-   become a 500 with no badge at all, replacing today's degrade-to-no-contact.
-   Both round-2 reviewers caught this. A condition list headed "none optional"
-   must not contain a decision the same document calls open. The choice is
-   decision 2's; this condition only requires that whatever is chosen, a short
-   response is never silently read as "these rows do not exist".
-3. **Bound the look-ahead** by `maxRows - candidates.length`. The reason is not
-   "laziness" - it is that this preserves `scanPosition == last consumed item`,
-   which is what the cursor is minted from. A fixed 100-key batch would keep the
-   letter of the bound and LOSE ROWS.
-4. **Failed-batch semantics - RULED, see section 8 decision 2: fall back to the
-   per-row lookup and keep the badge.** Never silently read a short response as
-   "these rows do not exist".
-5. **Attribution staleness - OPEN, see section 8.**
-
-Two remedies stay ruled out and must not be re-litigated: the per-collect memo
-(implemented and removed - it can never hit, because the claim arbiters
-guarantee at most one OPEN conversation per participant key), and bounding
-contact resolution (it re-creates the walk-stop class that makes the badge lie).
-`BatchGetItem` cannot read a GSI, which is why the old `findByPhones` was never
-buildable - but `getManyByIds` reads the base table by key and is fine.
-
-**Acceptance is round-trip COUNT, not wall-clock** - local DynamoDB timings are
-emulator-bound. Assert call counts as `app/test/inboxFeed.test.ts` already does,
-on a realistic shape and on a residue-wall shape, to prove the MECHANISM. Those
-fixture tests cannot establish the SAVING, because they supply the very field
-production may lack; that is 4.1.a's job and this paragraph is subordinate to
-it. Draft 3 left the two statements contradicting each other in different
-sections.
+**The lesson this cut is really about.** Four rounds of adjudication and review
+sharpened a remedy for a cost nobody was paying, and not one of the thirteen
+re-adjudicators, two spec reviewers or the planner asked "how long is the walk
+today" until the instrument existed. Every participant checked whether the fix
+was CORRECT. Nobody checked whether it was NEEDED. That question is cheaper than
+all of the others and it belongs first.
 
 ### 4.2 mark-read-fanout-stale-gsi-skip (med, was high)
 
@@ -449,13 +339,13 @@ because both instances came from folding review feedback too literally.
 
 **The premise the repair rests on, which nobody had stated:** consumption trails
 scanning by at most one item. That is what makes "the last raw item was scanned"
-a safe stand-in for "supply is exhausted". 4.1.b condition 3's look-ahead buffer
-is precisely the device that can break it - today it is safe only because the
-bound yields at most one candidate per consumed item. So: the invariant is named
-here, condition 3 cites it as its second reason, and whichever of the two slices
-lands second re-proves `consumedAll` AND the cursor position, not merely
-termination and budget. Draft 3's ordering note put the G-slice first, which
-would otherwise prove `consumedAll` in a tree that has no look-ahead in it yet.
+a safe stand-in for "supply is exhausted".
+
+The device that could have broken it - the read-through's look-ahead buffer -
+went away with section 4.1, so the premise now holds unconditionally and the
+G-slice is the only thing touching this loop. **Name the invariant in the code
+anyway.** It is load-bearing, it was invisible to three rounds of review, and
+the next person to add a buffer here will not have this document open.
 
 One real constraint remains: `scanExhausted` lives on the walk STATE and is not
 exposed on `CollectResult`, so "record it" is not a one-line change.
@@ -561,11 +451,10 @@ share the branch chain is G1 and G2, which land before G3.
 
 Each is its own commit so a red gate stays attributable.
 
-**Ordering that draft 2 left unstated:** 4.1.b's read-through and G2's
-single-iterator restructure touch the SAME loop. They must not be interleaved,
-and whichever lands second re-proves the other's termination and budget
-behaviour rather than assuming it survived. Given 4.1.a is blocked on decision
-6, G2 is the one that can start.
+**Ordering:** with the read-through cut, G2's single-iterator restructure is the
+only change to this loop, so the interleaving hazard draft 2 left unstated has
+gone with it. G2 starts first regardless - everything else in the slice composes
+against the contract it establishes.
 
 | # | issue | sev | change |
 |---|---|---|---|
@@ -573,7 +462,7 @@ behaviour rather than assuming it survived. Given 4.1.a is blocked on decision
 | R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries. Draft 3 said "both constants are module-private"; it is one of each pair - `MAX_INBOX_LIMIT` and `BADGE_COUNT_CAP` are exported, `SEEN_SET_MAX` and `UNREAD_QUERY_PAGE_SIZE` are not - so the export is a smaller change than stated, but still a real one |
 | R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. The floor's stated reason ("it stops `Limit: 0` reaching DynamoDB") is false for all three inbox branches. And once the `< 1` clause lands, the floor is UNREACHABLE DEAD CODE - draft 2 kept it on a corrected-but-still-wrong rationale. DELETE it with the clause, or keep it and say plainly it is defensive-only. Do not keep it with a reason. Retire the now-obsolete do-not-re-sync warning |
 | R4 | inbox-group-truncation-notice-not-reset | low | gate the notice on ready status, matching the shipped precedent 85 lines below it. Reproduction is All/Groups only - the server never sets the flag under `filter=unread`. Scope limit stated in place: this does NOT close the adjacent one-commit filter-change window, which is pre-existing and orthogonal |
-| R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. Two parts: **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - NOTE this part is a new proposal with no approved vehicle and needs its own go; **(B)** ride 4.1's read-through. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in |
+| R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - a new proposal, needs its own go, and review found it would light the unfiltered inbox failure banner on an empty All/Unknown page unless that is solved first. **(B) is GONE** - it was riding 4.1's read-through, which was cut, so this issue needs its own remedy rather than an inherited one. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in. **MEASURE BEFORE BUILDING.** This walk is over the OPEN partition, not the sparse unread index, so its cost profile is completely different from the badge's and must NOT be inherited from it - but the badge is exactly why this line exists: a `high` was carried for four rounds before anyone asked how long the walk was. `--audit-walk` sizes it; run it first |
 | R6 | inbox-imported-call-outcome-normalization | low | **Human ruling: all THREE renderers, plus group threads.** The filed remedy is unreachable for the rows it targets - the importer writes no call status and the derive path short-circuits on it before any outcome handling, so it would ship green having changed nothing. Order: make the status optional on the preview input (the body survives it - the ringing/in-progress checks are equality tests that are simply false for undefined), add a fourth derive-arm for a status-less row with a normalizable outcome gated on an empty fallback preview, THEN promote the shared helpers, and extend to the group-row builders, which read the stored preview directly and never call the derive path. **The duration-guard change from `< 0` to `<= 0` is REMOVED from this rider** - it would break a shipped pin asserting that a zero duration renders as `0s`, and a zero-second call is a real, renderable value. The defect was never the guard. **WHERE the shared helper lives is NOT assumed:** the repo states in ten to twelve places (the first draft said five) that the dashboard cannot import from `app/src`, and no app runtime module imports from `dashboard/src` today - the only proven cross-package reach is app-side TESTS importing a pure dashboard module. The builder must PROVE the chosen location under `npm run smoke`, which is the gate that catches exactly this class of resolution gap, with the established mirror-plus-drift-guard pattern as the named fallback if no single home resolves |
 **R11 is CUT.** The old draft's last rider - merge the refetched inbox page onto
 existing rows by `rowKey` - was re-adjudicated on 2026-08-25 and does not
@@ -624,60 +513,19 @@ projection on every pager row, the visibility predicate, **`today.ts` - a third
 consumer of the unread iterator that the old draft did not enumerate** - and the
 two fan-outs' own filters, which is what 4.2 removes.
 
-**Invariant 2 - `contactId` on the conversation item becomes load-bearing for a
-read path** (4.1). This was conditional in the old draft; it is now REQUIRED,
-because the read-through is approved.
+**Invariant 2 is GONE.** It said `contactId` on the conversation item becomes
+load-bearing for a read path, and it went with section 4.1's cut - no read path
+depends on that field any more. It is worth recording what it cost while it
+existed: this enumeration was wrong three times in three drafts (from recall,
+from a grep that swept comments, and by classifying a file on the attribute it
+mentions rather than what it does with it), it produced this review's one
+surviving blocking finding, and it turned up a live importer bug that is now
+filed on its own merits. All of that work was spent enumerating the mutation
+surfaces of a field that, in the end, nothing was going to read.
 
-**This enumeration was WRONG in the first draft and both reviewers caught it.**
-It named a contact-MERGE operation that does not exist in this repo, named
-soft-delete and restore which do not touch `participants` at all, and OMITTED
-the importer - the one writer that actually rewrites the field. It also asserted
-`participants` is "write-once", which is false. It is rewritten below from a
-code sweep rather than from recall, which is the only way this rule works.
+The importer defect stays open regardless:
+[`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
 
-**This list was wrong TWICE.** Draft 1 wrote it from recall. Draft 2 wrote it
-from `grep -l` over identifiers, which swept COMMENTS - it listed
-`services/sendMessage.ts` as an unread reader on the strength of a comment
-reading "Outbound NEVER touches unread_count", and listed
-`adapters/groupConversations.ts` as a participants writer when that adapter
-builds a Twilio Conversations roster with a different shape entirely and never
-writes this table. Draft 3 below is swept on CONTENT and each entry was opened
-and read. If a fourth draft is needed, that is a signal the method is still
-wrong, not the list.
-
-WRITERS of `participants` on the conversation item:
-
-- `conversationsRepo` - the versioned rewrite (`:1196`), the plain rewrite
-  (`:1597`), the two group-membership writes (`:2550`, `:2591`), the two
-  group-creation writes (`:1885`, `:2329`), and **`:1357`
-  (`createOrGetByParticipantEmail`) - the writer that CREATES the email-only
-  shape `{contactId, phone: ''}` that 4.1.b condition 1 exists to handle.** Both
-  earlier drafts missed it, which is why condition 1 was wrong in draft 1.
-- `setParticipantsIfAbsent` - the conditional claim, guarded on
-  `attribute_not_exists(participants)`, so it CANNOT repair a present-but-blank
-  entry.
-- `contactCapture` - claims the link, best-effort, and swallows failure.
-- **`import/apply.ts:1095` - an UNCONDITIONAL overwrite on the 1:1 path**, whose
-  value falls back to an empty string. The group path guards the identical
-  clause; the 1:1 path does not. Filed separately as
-  [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
-- `routes/public.ts:286` - the housing-fair intake claim.
-- `routes/contacts.ts:1800` - the email-thread creation path.
-- `routes/api.ts:2099` - `backfillGroupTextRoster`.
-- The seed modules: `lib/seed/cast.ts`, `lean.ts`, `live.ts`, `matrix.ts`,
-  `performance.ts`.
-
-There are further producers of `contactId: ''` beyond the importer. **Enumerating
-them is a STATIC CODE SWEEP and is NOT blocked on decision 6** - draft 3 folded
-it into 4.1.a, which transitively blocked a task that needs no data at all.
-It is its own item, startable now.
-
-**There IS a backfill pattern to follow, and draft 2 said there was not.** That
-claim was a wrong-directory non-fact: `app/src/scripts/` does not exist, but
-`app/scripts/` does and holds `backfill-unread-flag.ts` among four backfills.
-What does not exist is a backfill for THIS field. The distinction matters
-because 4.2's counter-only argument leans on the unread-flag backfill having
-run.
 
 **Invariant 3 - the `byUnread` index itself.** The whole cluster reads it, so
 its RANGE KEY is a mutation surface even though nothing here means to move it:
@@ -687,7 +535,8 @@ to ordering or to the tie behaviour lands here first.
 READERS of `unread_flag` / `unread_count` - **wrong a THIRD time in draft 3, by
 a third method.** Draft 3 listed `webhooks/twilio.ts` and `webhooks/voice.ts` as
 readers when their only content hits are `incrementUnread` CALLS - they are
-WRITERS, and they are precisely the six sites 4.1.a names as the coverage
+WRITERS, and they are precisely the six `incrementUnread` sites the cut section
+4.1 named as the coverage
 problem. The document set that test and then failed it. Corrected list:
 `lib/unreadFeed.ts`, `routes/inbox.ts`, `routes/today.ts`, `routes/contacts.ts`,
 **`routes/api.ts` - `GET /api/unread-counts`, which draft 1 missed and which is
@@ -717,26 +566,16 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
 
 ## 8. Open decisions - these need a human ruling before build
 
-1. **Contact-attribution staleness** (4.1 condition 5). **This is a SOFT-DELETE
-   VISIBILITY rule, not a display preference** - review made that correction
-   twice and draft 3 failed to apply it, so it is stated plainly here: getting
-   this wrong does not mislabel a row, it decides whether a row the operator
-   should not see appears at all. Weigh it accordingly. RE-FRAMED after review:
-   the first draft posed this on a contact-MERGE operation that does not exist
-   in this repo, and on the wrong divergence pair. The badge and the unread page
-   CANNOT diverge - both go through `collectUnreadRows`. What can diverge is the
-   Unread feed against the All / Unknown tabs, and the real operations are a
-   number reassignment and the pointer-aware owner hop, not a merge. The stored
-   `participants` value and the pointer can disagree; which one an operator
-   should see is a product call.
-2. **RULED 2026-08-25: fall back and keep the badge.** On a short or failed
-   `getManyByIds`, resolve the affected rows through the existing per-row
-   lookup. The operator sees a correct badge and correct rows; the saving
-   disappears for that request only. This preserves today's behaviour exactly
-   when a read degrades, which is the property worth having. The alternatives
-   were a 500 with no badge (loud and wrong) and degrade-to-unknown (quiet and
-   wrong) - review's framing, and a better one than draft 2's "harsh versus
-   safe".
+1. **Contact-attribution staleness - WITHDRAWN 2026-08-25.** It was a question
+   about the read-through's contact selection, and section 4.1 was cut. Its
+   substance is preserved on the issue for whenever that reopens, including the
+   correction review had to make twice: it is a SOFT-DELETE VISIBILITY rule, not
+   a display preference - getting it wrong does not mislabel a row, it decides
+   whether a row the operator should not see appears at all.
+2. **Failed-batch semantics - WITHDRAWN 2026-08-25**, same reason. The ruling
+   that was given (fall back to the per-row lookup and keep the badge) is
+   recorded on the issue rather than discarded, so a reopen does not re-litigate
+   it.
 3. **The form of the indeterminate marker** (G4) - dot, glyph, or restyled
    badge - subject to the hard constraint that it must not be a second sibling
    span carrying the word "unread". Note the blast radius is larger than first
@@ -747,15 +586,25 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
    (B) alone. Review also found that as specified it would light the unfiltered
    inbox failure banner on an empty All / Unknown page, so part (A) needs that
    solved before it is buildable at all.
-5. **The founder's local imported dataset** (4.2). The first draft told the
-   BUILDER to confirm it. That is unactionable by a builder - it is a human
-   item, and it is the one remaining unverified exposure for the counter-only
-   class.
+5. **The founder's local imported dataset** (4.2) - LARGELY ANSWERED. The
+   counter-only class measured ZERO in both dev and prod on 2026-08-25, which is
+   direct evidence where previously there was only a hand-typed RUNBOOK line.
+   The local imported dataset was never measured (it holds no unread data), so
+   it remains the one unverified corner - but the class is now empirically empty
+   everywhere it could be checked, which is enough for 4.2 to proceed with the
+   guard rather than being blocked on it.
 6. **RULED 2026-08-25: the human runs the coverage measurement and hands back
    the number.** A builder had no legitimate dataset - the hermetic lane is
    seeded and answers with fixture coverage, dev and prod are off-limits under
    AGENTS.md, and the local imported dataset is decision 5. This keeps that
-   boundary intact. The instrument is built; see 4.1.a.
+   boundary intact.
+
+   **ANSWERED, and it ended the slice it was gating.** dev 774 conversations /
+   0 unread; prod 885 / 1; zero counter-only rows in either. The walk costs about
+   one Query, so section 4.1 was cut rather than built. The instrument
+   (`app/scripts/measure-unread-contact-coverage.ts`) is kept - it is now the
+   cheapest way to answer this issue's reopen condition, and its `--audit-walk`
+   mode sizes R5's read the same way BEFORE anything is built for that one.
 
    Recorded for the next reader: the third option considered was "drop the gate
    and let production tell us". Review found it had NO INSTRUMENT - the badge

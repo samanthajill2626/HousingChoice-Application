@@ -215,8 +215,102 @@ async function auditIndex(): Promise<void> {
   );
 }
 
+/**
+ * `--audit-walk` mode. Sizes the OPEN-PARTITION walk that backs the inbox's
+ * All and Unknown tabs - a different read from the sparse unread index, and the
+ * one `inbox-filter-tabs-full-walk` is about.
+ *
+ * This exists because the badge measurement taught an expensive lesson: a cost
+ * filed as high can turn out to be entirely hypothetical. The Unknown tab is
+ * now the cluster's candidate for "the read that actually costs something", so
+ * it gets measured BEFORE anything is built for it, not after.
+ *
+ * What matters is the number of rows the walk must HYDRATE, not the number it
+ * ends up showing: the walk resolves a contact per open conversation to decide
+ * whether the row belongs on the tab at all.
+ *
+ * Full Scan, counts only, no PII.
+ */
+async function auditWalk(): Promise<void> {
+  const { ScanCommand } = await import('@aws-sdk/lib-dynamodb');
+  const table = `${tablePrefix}conversations`;
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  const byStatus = new Map<string, number>();
+  const byType = new Map<string, number>();
+  const openByType = new Map<string, number>();
+  let total = 0;
+  let openTotal = 0;
+
+  const bump = (m: Map<string, number>, k: string): void => {
+    m.set(k, (m.get(k) ?? 0) + 1);
+  };
+
+  do {
+    const page = await doc.send(
+      new ScanCommand({
+        TableName: table,
+        ProjectionExpression: '#s, #t',
+        ExpressionAttributeNames: { '#s': 'status', '#t': 'type' },
+        ...(ExclusiveStartKey === undefined ? {} : { ExclusiveStartKey }),
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      total += 1;
+      const status = typeof item.status === 'string' ? item.status : '(none)';
+      const type = typeof item.type === 'string' ? item.type : '(none)';
+      bump(byStatus, status);
+      bump(byType, type);
+      if (status === 'open') {
+        openTotal += 1;
+        bump(openByType, type);
+      }
+    }
+    ExclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey !== undefined);
+
+  const rows = (m: Map<string, number>): string[] =>
+    [...m.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `    ${k.padEnd(22)}${v}`);
+
+  console.log(
+    [
+      '',
+      'open-partition walk size (All / Unknown tabs)',
+      '============================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      '',
+      `  conversations       ${total}`,
+      '',
+      '  by status:',
+      ...rows(byStatus),
+      '',
+      '  by type:',
+      ...rows(byType),
+      '',
+      `  OPEN partition      ${openTotal}   <- rows the Unknown-tab walk must`,
+      '                            hydrate a contact for, per pass',
+      '  open, by type:',
+      ...rows(openByType),
+      '',
+      openTotal >= 200
+        ? `  VERDICT  REAL COST. ~${openTotal} contact lookups per pass, and the hook\n` +
+          '           re-issues it on every debounced SSE event while an operator\n' +
+          '           sits on that tab. Bounding it is worth doing.'
+        : `  VERDICT  SMALL TODAY (${openTotal} rows). Same caution as the badge:\n` +
+          '           do not build for a cost nobody is paying. Re-measure before\n' +
+          '           scoping work off this.',
+      '',
+    ].join('\n'),
+  );
+}
+
 if (argv.includes('--audit-index')) {
   await auditIndex();
+  process.exit(0);
+}
+
+if (argv.includes('--audit-walk')) {
+  await auditWalk();
   process.exit(0);
 }
 

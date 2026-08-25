@@ -36,7 +36,27 @@ export function memberKey(member: ConversationParticipant): string {
     : phoneMemberKey(member);
 }
 
-/** Find a current roster member using either supported stable-key convention. */
+/** Find a current roster member using either supported stable-key convention:
+ *  a member answers to EITHER its contactId or its phone-scoped key. First match
+ *  wins, in roster order.
+ *
+ *  THE ONE MATCHER. `senderLabel` (who authored a bubble), `relayCallSummary`
+ *  (who placed a relay call) and `recipientLabel.ts` (who one delivery row
+ *  names) all resolve a key through this function; a second copy is exactly the
+ *  drift docs/issues/one-key-discriminator-defined-in-three-places.md is about.
+ *  It deliberately does NOT handle the `'team'` / `'system'` sentinels - those
+ *  are `senderLabel`'s early returns and stay there.
+ *
+ *  GUARDED on both fields (A25 / adversarial 28). The types say
+ *  `contactId: string` / `phone: string`, but the relay view seeds its roster
+ *  straight from `header.participants` - the raw passthrough ConversationDetail
+ *  documents as arriving in more than one wire shape. This runs for EVERY bubble
+ *  in BOTH timelines, so an off-shape field here does not blank one chip: it
+ *  throws and blanks the whole conversation page.
+ *
+ *  NO NORMALISATION: no trim, no case fold, no re-normalisation of the phone
+ *  half. Both sides are compared raw with `===`, because the write side
+ *  guarantees E.164 on both halves. */
 export function findMemberByKey(
   senderKey: string | undefined,
   roster: ConversationParticipant[] | undefined,
@@ -92,9 +112,20 @@ export function senderLabel(
   if (senderKey === 'system') return 'Automated';
   const member = findMemberByKey(senderKey, roster);
   if (member === undefined) return undefined;
+  // GUARDED for the same reason, and against the same wire shape, as the fields
+  // in the matcher (adversarial 28): `name` is the field most likely to arrive
+  // off-shape from the raw passthrough, and `member.name?.trim()` throws on a
+  // non-string non-null value - blanking the whole conversation page, not one
+  // chip.
   const name = typeof member.name === 'string' ? member.name.trim() : '';
   if (name.length > 0) return name;
   // Preserve the shipped Relay message behavior: its nameless sender chip stays
   // absent. Native group texts and Relay CALLS use the shared phone fallback.
+  //
+  // `memberDisplayLabel` is NOT interchangeable with `groupMemberLabel`
+  // (lib/groupThread.ts), which looks byte-identical: that one falls back to the
+  // RAW phone when `formatPhoneDisplay` returns '', where this returns
+  // `undefined` (no attribution line). The test at memberAttribution.test.ts:175
+  // pins that difference.
   return kind === 'group_text' ? memberDisplayLabel(member) : undefined;
 }

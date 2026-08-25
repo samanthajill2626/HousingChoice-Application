@@ -144,19 +144,26 @@ export async function runJournalSweep(
     // FilterExpression could never see an excluded row, so fail-toward-scrub
     // would be unimplementable, and a non-ISO claimedAt would be decided by
     // ASCII ordering).
-    const qualifies = (row: { leaseExpiresAt: string; claimedAt: string }): boolean => {
-      if (Date.parse(row.leaseExpiresAt) > nowMs) return false; // live lease
-      const claimedMs = Date.parse(row.claimedAt);
-      // Unparseable -> NaN -> comparison false -> QUALIFIES (fail-toward-scrub).
-      return !(Number.isFinite(claimedMs) && nowMs - claimedMs < JOURNAL_SWEEP_MIN_AGE_MS);
-    };
-    // The AGE HALF of that gate, alone. The post-loop truth check uses THIS
-    // and never `qualifies` - see the comment on the truth check for why the
-    // lease clause cannot appear there. Same fail-toward-scrub rule: an
-    // unparseable claimedAt is past the gate.
+    //
+    // ONE DEFINITION of the age rule, here, used by BOTH the enumeration gate
+    // and the post-loop truth check. Duplicating it would let the two drift
+    // into selecting contacts nothing then alarms on, or alarming on contacts
+    // nothing selected - and the suite could not catch that, because the two
+    // are exercised by separate describes with separate fixtures.
+    // Fail-toward-scrub: an unparseable claimedAt is NaN, so the comparison is
+    // false and the row counts as PAST the gate.
     const pastTheAgeGate = (claimedAt: string): boolean => {
       const claimedMs = Date.parse(claimedAt);
       return !(Number.isFinite(claimedMs) && nowMs - claimedMs < JOURNAL_SWEEP_MIN_AGE_MS);
+    };
+    // Enumeration gates on the lease AS WELL as the age. The truth check uses
+    // `pastTheAgeGate` alone and never this - see the comment on the truth check
+    // for why the lease clause cannot appear there. Keep the lease test in its
+    // NEGATED form: an unparseable lease is NaN, NaN > nowMs is false, so the
+    // row falls through to the age half and can still qualify.
+    const qualifies = (row: { leaseExpiresAt: string; claimedAt: string }): boolean => {
+      if (Date.parse(row.leaseExpiresAt) > nowMs) return false; // live lease
+      return pastTheAgeGate(row.claimedAt);
     };
     const contacts: string[] = [];
     const seen = new Set<string>();
@@ -197,8 +204,11 @@ export async function runJournalSweep(
       // cycle for a transient blip. One bad contact is now a WARN plus a
       // counter, and the run continues; the loud claimed-then-failed contract
       // survives as the end-of-run ERROR below.
+      // OUTSIDE the try, because a decision this contact's EARLIER recovery
+      // call already committed has to reach the dashboard even when a LATER
+      // call throws - see the catch.
+      let stateChanged = false;
       try {
-        let stateChanged = false;
         let completedCleanly = false;
         for (;;) {
           if (calls >= MAX_RECOVERY_CALLS_PER_RUN) { budgetExhausted = true; break; }
@@ -241,6 +251,15 @@ export async function runJournalSweep(
           log.warn({ err, contactId }, 'journal sweep: truth-check read failed (best-effort)');
         }
       } catch (err) {
+        // NOTIFY FIRST, count second. The throw does not roll anything back: a
+        // recovery call that returned before it committed this contact's
+        // abandoned decision for real - contact/phone writes, permanent dism#
+        // tombstones, audit rows - and only the NEXT call's read was throttled.
+        // Emitting here keeps the dashboard from being the one thing a partial
+        // failure silently costs; a duplicate emit would only be a redundant
+        // refresh, whereas a missing one leaves stale rows on screen until
+        // something else touches the contact.
+        if (stateChanged) events.emit('suggestion.updated', { contactId });
         outcome.failedContacts += 1;
         log.warn(
           { err, contactId },

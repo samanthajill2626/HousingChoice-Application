@@ -535,6 +535,38 @@ describe('journal sweep: one contact failing never abandons its siblings', () =>
     expect(h.log.error.mock.calls[0]![0]).toMatchObject({ failedContacts: 1, contactsVisited: 3 });
     expect(String(h.log.error.mock.calls[0]![1])).toContain('retried on the next run');
   });
+
+  it('still EMITS when an EARLIER call committed and a LATER one threw', async () => {
+    // The first call really did commit this contact's abandoned decision -
+    // contact/phone writes, permanent dism# tombstones, audit rows - and only
+    // the second call's BatchGet was throttled. The throw rolls none of that
+    // back, so the dashboard still has to hear about it: with the emit sitting
+    // only after the inner loop, the unwind went straight past it and the
+    // committed change showed as stale rows until something else touched the
+    // contact.
+    const results = [{ recovered: 2, stateChanged: true }];
+    const h = harness({
+      pages: [{ rows: [row({ contactId: 'partial' })] }],
+      recover: async () => {
+        const next = results.shift();
+        if (next === undefined) throw new Error('batchget throttled');
+        return next;
+      },
+    });
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(h.recoverCalls).toHaveLength(2);
+    expect(outcome.recovered).toBe(2);
+    expect(outcome.failedContacts).toBe(1);
+    // Exactly once, and for THIS contact - the catch must not double-emit what
+    // the normal path already sent.
+    expect(h.emit.mock.calls).toEqual([['suggestion.updated', { contactId: 'partial' }]]);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(String(h.log.warn.mock.calls[0]![1])).toContain('recovery threw for this contact');
+    // The throw still costs the truth check - that half is unchanged.
+    expect(h.journalCalls).toEqual([]);
+  });
 });
 
 // --- 10. A failed body ----------------------------------------------------

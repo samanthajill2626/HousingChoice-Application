@@ -11,7 +11,7 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FOUNDER_MISSED_CALL_AUTOTEXT, WELCOME_SMS } from '../src/lib/smsCompliance.js';
 import {
   createSettingsRepo,
@@ -736,10 +736,19 @@ describe('settingsRepo - the journal-sweep Scan cursor', () => {
     // enumeration never reached the persist that would have replaced it, so
     // the duty stayed dead behind a daily ERROR that no waiting could clear.
     const { doc } = statefulSettingsDoc();
-    const repo = createSettingsRepo({ doc });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const repo = createSettingsRepo({ doc, logger: log as never });
     await repo.putJournalSweepCursor('not-json-at-all');
 
     expect(await repo.getJournalSweepCursor()).toBeUndefined();
+    // And it SAYS so. A silent self-heal leaves the operator with no way to
+    // tell a restarted cycle from a completed one - the run that follows a
+    // cleared cursor looks exactly like a healthy wrap.
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(String(log.warn.mock.calls[0]![1])).toContain('unparseable');
+    // Never the value itself: it is garbage of unknown provenance, and this key
+    // is a Scan position over rows that carry a PII snapshot.
+    expect(JSON.stringify(log.warn.mock.calls[0])).not.toContain('not-json-at-all');
   });
 
   it('clearing an absent cursor is a no-op, not a throw (the common exhausted case)', async () => {

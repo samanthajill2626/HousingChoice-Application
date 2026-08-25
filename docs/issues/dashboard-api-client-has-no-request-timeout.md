@@ -24,10 +24,18 @@ The `status === 'error'` branch right below it renders a real `role="alert"`
 states correctly. It just never REACHES the error branch when the promise never
 settles.
 
-Observed 2026-08-25 on `b535a7fa`: two gate runs failed with the placement page
-holding `<main>` at `status "Loading"` for a full 20s wait. The preserved
-accessibility snapshot shows the alert absent and the spinner present, which is
-how we know the fetch stalled rather than failed. A user in that state sees an
+**CORRECTION (2026-08-25).** This issue was originally filed citing two gate
+failures where the placement page held `<main>` at `status "Loading"`, and
+claimed they proved a stalled fetch. **They do not, and that evidence is
+withdrawn.** Traces later showed no stalled request anywhere - those failures
+were a test-budget overrun, and the spinner was simply a page navigated to a few
+hundred ms earlier. See
+[`placement-detail-bundle-fetch-stall`](./placement-detail-bundle-fetch-stall.md).
+
+The defect here is nonetheless real, because it is a property of the code rather
+than of that incident: there is no timeout, so a request that never settles
+leaves the component in its loading state forever. What is missing is a
+confirmed sighting, not the mechanism. A user in that state would see an
 indefinite spinner with no error, no retry affordance, and no indication
 anything is wrong.
 
@@ -50,14 +58,8 @@ are plausibly slow-by-design and would need an explicit override:
 - A retry affordance on PlacementDetail's error branch (currently terminal -
   the only recovery is a manual reload).
 
-**Deliberately NOT a fix for the stall itself.** Bounding the fetch converts an
-opaque 30s hang into a fast, legible error; it does not stop whatever is
-stalling the request. That cause is unknown and tracked separately - see
-[`placement-stage-more-actions-suite-only-flake`](./placement-stage-more-actions-suite-only-flake.md),
-whose pre-registered reopen condition (the NAMED page-load message firing in a
-gate run) was met on 2026-08-25.
-
-**Related diagnosability gap.** `e2e/playwright.config.ts` sets `retries: 0`
-with `trace: 'on-first-retry'`, so traces are never captured on a gate failure.
-All four sightings of the stall so far have no network evidence, which is why
-"was the request even sent?" is still open.
+**Priority.** Lower than when filed. With the e2e failures explained by budget
+overrun, this is a robustness gap with no observed incident behind it - real
+for a flaky mobile client or a dropped connection behind CloudFront, but not
+urgent, and it should be sized as ordinary hardening rather than an incident
+fix.

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-v2 after adversarial plan review round 1 (adjudications:
+v3 after adversarial plan review rounds 1-2 (adjudications:
 .superpowers/design-review/adjudications.md).
 
 **Goal:** Close the C3 log-hygiene cluster: structurally safe vendor-error
@@ -257,8 +257,10 @@ function allowlist(err: Error, depth: number): Record<string, unknown> {
   const declared = typeof err.name === 'string' && err.name.length > 0 ? err.name : undefined;
   const constructed = err.constructor?.name;
   const out: Record<string, unknown> = {
-    // pino's field name for the error class is `type` - kept so existing
-    // CloudWatch queries keep working. Declared-name preference: rule 3.
+    // pino's FIELD NAME for the error class is `type` - the key is kept so
+    // existing CloudWatch queries still parse; the VALUE now prefers the
+    // declared name (pino emitted the constructor), which changes what
+    // vendor-class lines carry. Declared-name preference: rule 3.
     type:
       declared !== undefined && declared !== 'Error'
         ? declared
@@ -377,6 +379,10 @@ describe('log sanitization - the credential class is structurally closed', () =>
       const joined = lines.join('');
       expect(joined).not.toContain('U0tmYWtlOnNlY3JldGZha2U=');
       expect(joined).not.toContain('15551230000');
+      // ABSENT, not censored: under the pre-serializer redact list the err
+      // key would show [REDACTED] here - this line is what makes the probe
+      // discriminating on `err` (the other three keys leak outright).
+      expect(joined).not.toContain('[REDACTED]');
       expect(joined).toContain('ECONNRESET'); // message survives
     });
   }
@@ -414,8 +420,11 @@ describe('log sanitization - the credential class is structurally closed', () =>
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cd app && npx vitest run test/logSanitization.test.ts`
-Expected: FAIL - the `error`/`cause`/`reason` cases leak the sentinel (no
-serializer yet); the `err` case shows `[REDACTED]` instead of absence.
+Expected: FAIL - the `error`/`cause`/`reason` cases leak the sentinel
+outright (their paths are NOT in the redact list), and the `err` case
+fails on the `[REDACTED]`-absence assertion (the redact list censors that
+key today, so the sentinel itself is already absent there - the censor
+marker is the discriminator).
 
 - [ ] **Step 3: Wire the serializer**
 
@@ -624,31 +633,39 @@ function scanProgram({ program, checker }: GuardProgram): string[] {
   return findings;
 }
 
+// ONE program answers all three questions (a full app/src compile is
+// expensive; building it two or three times inside `npm test` is not worth
+// paying - review round 2). The canary rides the real program; health
+// diagnostics and the allowlist scan simply filter it out.
 describe('logger call-site guard', () => {
+  const gp = buildProgram(true);
+  const findings = scanProgram(gp);
+
   it('the real program is healthy: files resolved, no unresolved-module diagnostics', () => {
-    const gp = buildProgram(false);
-    const sourceCount = gp.program.getSourceFiles().filter((f) => !f.isDeclarationFile).length;
+    const sourceCount = gp.program
+      .getSourceFiles()
+      .filter((f) => !f.isDeclarationFile && !f.fileName.endsWith(CANARY_NAME)).length;
     expect(sourceCount).toBeGreaterThan(50);
     // TS2307 = cannot find module. A misconfigured program resolves nothing,
     // reports these, and would otherwise scan an empty world and pass.
     const unresolved = ts
       .getPreEmitDiagnostics(gp.program)
-      .filter((d) => d.code === 2307)
+      .filter((d) => d.code === 2307 && !(d.file?.fileName.endsWith(CANARY_NAME) ?? false))
       .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
     expect(unresolved).toEqual([]);
   });
 
   it('the canary overlaid into the REAL program is flagged (positive control)', () => {
-    const findings = scanProgram(buildProgram(true));
     expect(findings.some((f) => f.includes(CANARY_NAME))).toBe(true);
   });
 
   it('app/src has no error logged outside a wired key (allowlist starts EMPTY)', () => {
-    const findings = scanProgram(buildProgram(false));
     // Reviewed exceptions: EXACT `file:line key` strings with a justifying
     // comment each. Starts empty (spec section 3).
     const ALLOWLIST = new Set<string>([]);
-    const unexpected = findings.filter((f) => !ALLOWLIST.has(f));
+    const unexpected = findings
+      .filter((f) => !f.includes(CANARY_NAME))
+      .filter((f) => !ALLOWLIST.has(f));
     expect(unexpected).toEqual([]);
   });
 });
@@ -662,10 +679,11 @@ empty-allowlist case reports findings, each is a REAL discovery - fix the
 call site in a SEPARATE commit staged WITH this test (rewire to a wired
 key; record in the Task 4 sweep table); never allowlist to get green. If
 the canary case fails, the guard is broken - fix the guard, never the
-canary. NOTE this test compiles app/src twice; if it exceeds the default
-vitest timeout, raise the per-test timeout in this file (e.g.
-`it('...', { timeout: 120_000 }, ...)`) rather than shrinking the program.
-Then `npm run typecheck`.
+canary. NOTE this test compiles app/src ONCE (module-scope program shared
+by the three cases); a full compile is still seconds - if it exceeds the
+default vitest timeout, raise the per-file timeout (vitest `testTimeout`
+in a describe-level config or per-it option) rather than shrinking the
+program. Then `npm run typecheck`.
 
 - [ ] **Step 3: Commit**
 
@@ -726,21 +744,24 @@ neighboring case's setup):
 it('a transient device failure logs the error OBJECT and pushStatusCode', async () => {
   // adapter.sendToSubscription rejects with:
   const failure = Object.assign(new Error('Received unexpected response code'), { statusCode: 413 });
-  // ...drive sendToUser at one subscription; then assert on the logger fake:
-  // warn was called with a payload whose `err` is the SAME failure object
-  // (or, if the harness captures serialized lines, whose err.statusCode is 413)
-  // and whose `pushStatusCode` is 413.
+  // ...drive sendToUser at one subscription; then assert on the captured
+  // WARN payload. IMPORTANT: after Task 2 the serializer transforms Error
+  // values, so NEVER assert object identity on `err`. Assert FIELDS:
+  //  - vi.fn()-payload harness: warn's first arg has err instanceof Error
+  //    (pre-serialization payloads keep the object) AND pushStatusCode 413.
+  //  - serialized-line harness: the parsed line has err.type === 'Error',
+  //    err.statusCode === 413, and pushStatusCode === 413.
+  // Open the file's harness FIRST and pick the matching branch.
 });
-it('a failed Gone-prune logs the error object under err', async () => {
-  // users.removePushSubscription rejects; assert the warn payload's `err`
-  // is the rejection object, not a string.
+it('a failed Gone-prune logs the error under err with its message intact', async () => {
+  // users.removePushSubscription rejects with new Error('prune-boom');
+  // assert the warn payload's err carries message 'prune-boom' (field
+  // assertion per the harness branch above - never identity).
 });
 ```
 
-Make both concrete against the file's real harness shape (open the file
-first; if its logger is a vi.fn()-backed fake, assert on `mock.calls`; if
-it captures serialized lines, parse them). Run red:
-`cd app && npx vitest run test/pushService.test.ts`.
+Run red: `cd app && npx vitest run test/pushService.test.ts` (red because
+today those payloads carry `err: <string>` and no `pushStatusCode`).
 
 - [ ] **Step 3: Convert the four payloads.** In each, ONLY the payload
 object changes - message strings are NOT retyped (two contain non-ASCII
@@ -862,11 +883,9 @@ git commit -m "feat(pii): maskPhonesInText - E.164 masking for log sinks and spa
   full-URL log sink there; the `url` locals feed signature computation,
   never a logger.
 - Create: `app/test/requestLoggerMask.test.ts` (no requestLogger test file
-  exists today - review-verified)
-- Modify: `app/test/errorSummary.test.ts` (one new case beside the
-  existing createExpressErrorHandler coverage; grep
-  `createExpressErrorHandler` under app/test to confirm where that lives
-  and put the case there)
+  exists today, and no app/test file covers createExpressErrorHandler
+  directly - review-verified; BOTH new masking cases live in this one new
+  file, self-contained)
 
 **Interfaces:**
 - Consumes: `maskPhonesInText` (Task 5).
@@ -908,12 +927,11 @@ describe('requestLogger phone masking', () => {
 });
 ```
 
-And one case beside the express-error-handler coverage: build
-`createExpressErrorHandler(log)` over a capture logger, invoke it with
-`(new Error('boom'), { method: 'PATCH', path: '/api/contacts/c1/phones/+14045551234' } as never, resFake, next)`
-where resFake has `headersSent: false`, `status()` returning
-`{ json() {} }`; assert the captured ERROR line contains `+1...34` and not
-the raw digits.
+And a second case IN THE SAME FILE: import `createExpressErrorHandler`
+from `../src/lib/errors.js`, build it over a capture logger, invoke it with
+`(new Error('boom'), { method: 'PATCH', path: '/api/contacts/c1/phones/+14045551234' } as never, resFake as never, () => {})`
+where resFake is `{ headersSent: false, status: () => ({ json: () => {} }) }`;
+assert the captured ERROR line contains `+1...34` and not the raw digits.
 
 - [ ] **Step 2: Run red** (the masking helper exists but the sinks are
 unmasked - both new cases fail on the raw digits).
@@ -934,7 +952,7 @@ LOGGER payload fields change.
 
 - [ ] **Step 4: Run green + suites + typecheck**
 
-`cd app && npx vitest run test/requestLoggerMask.test.ts test/errorSummary.test.ts`
+`cd app && npx vitest run test/requestLoggerMask.test.ts`
 then the full app suite (middleware suites may pin raw paths - update any
 red case WITH its file). Then `npm run typecheck`.
 
@@ -942,8 +960,8 @@ red case WITH its file). Then `npm run typecheck`.
 
 ```bash
 git status
-git add app/src/middleware/requestLogger.ts app/src/lib/errors.ts app/src/middleware/rateLimit.ts app/src/middleware/csrfOrigin.ts app/src/middleware/originSecret.ts app/src/middleware/twilioSignature.ts app/test/requestLoggerMask.test.ts app/test/errorSummary.test.ts
-git commit -m "feat(pii): mask E.164 segments at every request-path log sink" -- app/src/middleware/requestLogger.ts app/src/lib/errors.ts app/src/middleware/rateLimit.ts app/src/middleware/csrfOrigin.ts app/src/middleware/originSecret.ts app/src/middleware/twilioSignature.ts app/test/requestLoggerMask.test.ts app/test/errorSummary.test.ts
+git add app/src/middleware/requestLogger.ts app/src/lib/errors.ts app/src/middleware/rateLimit.ts app/src/middleware/csrfOrigin.ts app/src/middleware/originSecret.ts app/src/middleware/twilioSignature.ts app/test/requestLoggerMask.test.ts
+git commit -m "feat(pii): mask E.164 segments at every request-path log sink" -- app/src/middleware/requestLogger.ts app/src/lib/errors.ts app/src/middleware/rateLimit.ts app/src/middleware/csrfOrigin.ts app/src/middleware/originSecret.ts app/src/middleware/twilioSignature.ts app/test/requestLoggerMask.test.ts
 ```
 
 (Add any updated middleware test files to the same commit.)
@@ -961,55 +979,95 @@ git commit -m "feat(pii): mask E.164 segments at every request-path log sink" --
 - Produces: `maskIncomingSpanAttributes(request)`,
   `maskOutgoingSpanAttributes(request)` - exported pure functions.
 
-SEMCONV RULE (review round 1: the instrumentation defaults to the OLD
-attribute family and only sets `url.*` when `OTEL_SEMCONV_STABILITY_OPT_IN`
-enables the stable/dup mode; returning a key the instrumentation never set
-FABRICATES it): the hooks ALWAYS emit the old family (`http.url`,
-`http.target`) and ADDITIONALLY emit the stable family (`url.path`/
-`url.query` incoming, `url.full` outgoing) ONLY when
-`process.env.OTEL_SEMCONV_STABILITY_OPT_IN` is a non-empty string
-containing `http`. State this in the module comment.
+SEMCONV RULE (review rounds 1-2; returning a key the active mode never
+sets FABRICATES it): `OTEL_SEMCONV_STABILITY_OPT_IN` is a COMMA-SEPARATED
+token list matched EXACTLY (the instrumentation's own parser matches whole
+tokens - `http-anything` must NOT activate anything):
+- token `http/dup` present -> BOTH families are emitted by the
+  instrumentation -> the hooks emit both, masked.
+- else token `http` present -> STABLE family ONLY (`url.path`/`url.query`
+  incoming, `url.full` outgoing) - the old `http.url`/`http.target` are
+  NOT set in this mode and must not be fabricated.
+- else (default) -> OLD family ONLY (`http.url`, `http.target`).
+State this in the module comment; the mode helper returns which families
+are active and both hooks consult it.
 
 - [ ] **Step 1: Failing tests**
 
 ```ts
 import { maskIncomingSpanAttributes, maskOutgoingSpanAttributes } from '../src/lib/otel.js';
 
+function withSemconv(value: string | undefined, fn: () => void): void {
+  const prev = process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+  if (value === undefined) delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+  else process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] = value;
+  try { fn(); } finally {
+    if (prev === undefined) delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+    else process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] = prev;
+  }
+}
+
 describe('span attribute masking hooks', () => {
-  it('incoming (default semconv): masks and emits ONLY the old family', () => {
-    delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
-    const attrs = maskIncomingSpanAttributes({
-      url: '/api/contacts/c1/phones/+14045551234?x=%2B15551230000',
-      headers: { host: 'app.example.com' },
-    } as never);
-    expect(attrs).toEqual({
-      'http.url': 'http://app.example.com/api/contacts/c1/phones/+1...34?x=%2B1...00',
-      'http.target': '/api/contacts/c1/phones/+1...34?x=%2B1...00',
+  it('incoming (default): masks and emits ONLY the old family', () => {
+    withSemconv(undefined, () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/api/contacts/c1/phones/+14045551234?x=%2B15551230000',
+        headers: { host: 'app.example.com' },
+      } as never);
+      expect(attrs).toEqual({
+        'http.url': 'http://app.example.com/api/contacts/c1/phones/+1...34?x=%2B1...00',
+        'http.target': '/api/contacts/c1/phones/+1...34?x=%2B1...00',
+      });
     });
   });
-  it('incoming (stable opt-in): also emits masked url.path/url.query', () => {
-    process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] = 'http';
-    try {
+  it('incoming (stable-only "http"): emits ONLY masked url.path/url.query', () => {
+    withSemconv('http', () => {
       const attrs = maskIncomingSpanAttributes({
         url: '/a/+14045551234?x=1',
         headers: { host: 'h' },
-      } as never) as Record<string, string>;
-      expect(attrs['url.path']).toBe('/a/+1...34');
-      expect(attrs['url.query']).toBe('x=1');
-    } finally {
-      delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
-    }
+      } as never);
+      expect(attrs).toEqual({ 'url.path': '/a/+1...34', 'url.query': 'x=1' });
+    });
   });
-  it('outgoing (default semconv): masks and emits ONLY the old family', () => {
-    delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
-    const attrs = maskOutgoingSpanAttributes({
-      hostname: 'api.twilio.com',
-      path: '/2010-04-01/Messages.json?To=%2B15551230000',
-      protocol: 'https:',
-    } as never);
-    expect(attrs).toEqual({
-      'http.url': 'https://api.twilio.com/2010-04-01/Messages.json?To=%2B1...00',
-      'http.target': '/2010-04-01/Messages.json?To=%2B1...00',
+  it('incoming ("http/dup"): emits BOTH families', () => {
+    withSemconv('http/dup', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['http.target']).toBe('/a/+1...34');
+      expect(attrs['url.path']).toBe('/a/+1...34');
+    });
+  });
+  it('a token that merely CONTAINS http activates nothing stable', () => {
+    withSemconv('http-anything,database', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['url.path']).toBeUndefined();
+      expect(attrs['http.target']).toBe('/a/+1...34');
+    });
+  });
+  it('outgoing (default): masks and emits ONLY the old family', () => {
+    withSemconv(undefined, () => {
+      const attrs = maskOutgoingSpanAttributes({
+        hostname: 'api.twilio.com',
+        path: '/2010-04-01/Messages.json?To=%2B15551230000',
+        protocol: 'https:',
+      } as never);
+      expect(attrs).toEqual({
+        'http.url': 'https://api.twilio.com/2010-04-01/Messages.json?To=%2B1...00',
+        'http.target': '/2010-04-01/Messages.json?To=%2B1...00',
+      });
+    });
+  });
+  it('outgoing (stable-only "http"): emits ONLY masked url.full', () => {
+    withSemconv('http', () => {
+      const attrs = maskOutgoingSpanAttributes({
+        hostname: 'h', path: '/p/+14045551234', protocol: 'https:',
+      } as never);
+      expect(attrs).toEqual({ 'url.full': 'https://h/p/+1...34' });
     });
   });
   it('never throws on malformed request objects (no-op-safe)', () => {
@@ -1041,22 +1099,37 @@ import type { Attributes } from '@opentelemetry/api';
 // any failure returns {} and the span exports with raw attributes rather
 // than not at all (the log sinks are masked independently).
 
-function stableSemconvActive(): boolean {
-  const v = process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
-  return typeof v === 'string' && v.includes('http');
+/**
+ * Which semconv attribute families the instrumentation emits, from
+ * OTEL_SEMCONV_STABILITY_OPT_IN parsed as COMMA-SEPARATED WHOLE TOKENS
+ * (matching the instrumentation's own parser - a token merely containing
+ * 'http' activates nothing): 'http/dup' -> both; 'http' -> stable only;
+ * default -> old only. Emitting a key the active mode never sets would
+ * FABRICATE it onto the span.
+ */
+function activeFamilies(): { old: boolean; stable: boolean } {
+  const tokens = (process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] ?? '')
+    .split(',')
+    .map((t) => t.trim());
+  if (tokens.includes('http/dup')) return { old: true, stable: true };
+  if (tokens.includes('http')) return { old: false, stable: true };
+  return { old: true, stable: false };
 }
 
 export function maskIncomingSpanAttributes(request: unknown): Attributes {
   try {
-    const req = request as { url?: unknown; headers?: { host?: unknown } };
+    const req = request as { url?: unknown; headers?: { host?: unknown }; socket?: { encrypted?: unknown } };
     if (typeof req?.url !== 'string' || req.url.length === 0) return {};
+    const families = activeFamilies();
     const masked = maskPhonesInText(req.url);
     const host = typeof req.headers?.host === 'string' ? req.headers.host : 'localhost';
-    const out: Record<string, string> = {
-      'http.url': `http://${host}${masked}`,
-      'http.target': masked,
-    };
-    if (stableSemconvActive()) {
+    const scheme = req.socket?.encrypted === true ? 'https' : 'http';
+    const out: Record<string, string> = {};
+    if (families.old) {
+      out['http.url'] = `${scheme}://${host}${masked}`;
+      out['http.target'] = masked;
+    }
+    if (families.stable) {
       const q = masked.indexOf('?');
       out['url.path'] = q === -1 ? masked : masked.slice(0, q);
       if (q !== -1) out['url.query'] = masked.slice(q + 1);
@@ -1071,6 +1144,7 @@ export function maskOutgoingSpanAttributes(request: unknown): Attributes {
   try {
     const req = request as { host?: unknown; hostname?: unknown; path?: unknown; protocol?: unknown };
     if (typeof req?.path !== 'string' || req.path.length === 0) return {};
+    const families = activeFamilies();
     const path = maskPhonesInText(req.path);
     const host =
       typeof req.hostname === 'string' && req.hostname.length > 0
@@ -1080,8 +1154,12 @@ export function maskOutgoingSpanAttributes(request: unknown): Attributes {
           : 'unknown';
     const protocol = typeof req.protocol === 'string' ? req.protocol : 'https:';
     const full = `${protocol}//${host}${path}`;
-    const out: Record<string, string> = { 'http.url': full, 'http.target': path };
-    if (stableSemconvActive()) out['url.full'] = full;
+    const out: Record<string, string> = {};
+    if (families.old) {
+      out['http.url'] = full;
+      out['http.target'] = path;
+    }
+    if (families.stable) out['url.full'] = full;
     return out;
   } catch {
     return {};
@@ -1455,6 +1533,11 @@ Consumer sites:
 - Rewrite the doc comments on both send functions (they assert the masked
   posture as current law - cite D4 + the 2026-08-25 role-word amendment,
   as the new helper's comment does).
+- Update `app/src/lib/contactName.ts`'s SCOPE GUARD comment (the
+  "consumed by the inbound-message PUSH sites only" sentence): the voice
+  pushes are now the SECOND push-copy consumer; the guard against
+  re-pointing the five older private copies stays verbatim. Stage
+  contactName.ts with this task's commit.
 - Check `UNKNOWN_CALLER_LABEL` is still used somewhere in voice.ts after
   the edit; if the import goes unused, the new helper uses it - it will
   not.
@@ -1470,8 +1553,8 @@ and re-check).
 
 ```bash
 git status
-git add app/src/routes/webhooks/voice.ts app/test/founderTriage.test.ts
-git commit -m "feat(voice): push labels carry role + full identity (D4 + role-word amendment)" -- app/src/routes/webhooks/voice.ts app/test/founderTriage.test.ts
+git add app/src/routes/webhooks/voice.ts app/src/lib/contactName.ts app/test/founderTriage.test.ts
+git commit -m "feat(voice): push labels carry role + full identity (D4 + role-word amendment)" -- app/src/routes/webhooks/voice.ts app/src/lib/contactName.ts app/test/founderTriage.test.ts
 ```
 
 (Stage pushCallerIdentity.test.ts too if you created it.)
@@ -1626,9 +1709,14 @@ claims independently of the four group ids (existing claim tests show the
 harness); cursor round-trips (put string -> get; put undefined -> get
 undefined). Implement the constant + union member + the two methods
 (Get/Put on the settings table; putJournalSweepCursor(undefined) issues a
-Delete or REMOVEs the attribute - either, tested). Run green; typecheck;
-commit (`feat(settings): journal-sweep cadence id + scan cursor record`,
-explicit paths).
+Delete or REMOVEs the attribute - either, tested). ALSO update the union's
+own doc comment: it currently reads "The four cadence record ids - closed,
+like the liveness union above" - it becomes five, and the comment notes
+the journal-sweep id rides the same claim mechanism despite the GROUP_
+naming convention of its siblings (the mechanism is generic; the names are
+historical). Run green; typecheck; commit
+(`feat(settings): journal-sweep cadence id + scan cursor record`, explicit
+paths).
 
 - [ ] **Step 2: listActiveResolutionRows (TDD, integration).** Copy the
 harness of an existing suggestionResolutionRepo integration test. Seed one
@@ -1648,18 +1736,35 @@ comparison with `const budget = opts?.maxAttempts ?? MAX_RECOVERIES_PER_READ;`
 JSDoc. Run green (`npx vitest run` on the file that covers
 recoverAbandoned - grep found it in Step 0); typecheck; commit.
 
+CURSOR POLICY (review round 2 - the v2 rewind LIVELOCKED on a page of
+persistently-failing contacts): the cursor ALWAYS advances past pages the
+run has read; it never rewinds. Qualifying rows dropped because the
+contact cap filled mid-page are re-found when the cursor WRAPS (cleared on
+exhaustion, next cycle rescans from the start) - a bounded delay of at
+most one full cursor cycle, never a livelock and never permanent
+orphaning; persistently-failing contacts are separately alarmed by the
+truth check's ERROR. When the cap fills, the run STOPS READING further
+pages (no read capacity burned collecting nothing). DRAIN MODEL, stated:
+DynamoDB `Limit` bounds rows EVALUATED per page (RCU), not matches - a
+page of 200 mostly-tombstone rows can contribute zero journals - so the
+25-contacts-per-day rate of spec 9.1 is a CAP, and the real drain rate is
+min(cap, qualifying rows the cursor passes per run).
+
 - [ ] **Step 4: journalSweep.ts (TDD with fakes).** Failing tests in
-`app/test/journalSweep.test.ts` (plain object fakes for the four deps):
+`app/test/journalSweep.test.ts` (plain object fakes for the four deps;
+fake pages are ROWS-SPARSE - a realistic page yields few qualifying rows):
 1. cadence: claim -> false: nothing runs, outcome.ran false. force: true
-   -> notBefore = now -> runs.
+   -> notBefore = now -> runs. claim THROWS -> WARN logged (not ERROR),
+   outcome.ran false, promise resolves.
 2. app-side age gate: lease-expired row claimed 1h ago does NOT qualify;
    25h ago DOES; claimedAt 'garbage' DOES (fail-toward-scrub).
 3. contact dedup: 12 rows for one contact -> ONE contact visited.
-4. contact cap mid-page: a page with 30 qualifying contacts -> 25 visited,
-   deferral logged INFO (assert `info` fake called with the deferral
-   message), and the persisted cursor is the cursor that LED INTO that page
-   (re-examined next run), not past it.
-5. clean exhaustion: pages run out -> putJournalSweepCursor(undefined).
+4. cap mid-page, cursor advances: page 1 yields 25 qualifying contacts
+   plus a 26th qualifying row -> 25 visited, deferral INFO logged, the
+   persisted cursor is page 1's nextCursor (PAST the page - no rewind),
+   and NO further page is read.
+5. clean exhaustion: pages run out -> putJournalSweepCursor(undefined);
+   with no drops and no budget cut, NO deferral INFO.
 6. recovery loop + SSE: recoverAbandoned returns {recovered:2,
    stateChanged:true} then {recovered:0, stateChanged:false} -> called
    twice with `{ maxAttempts: 12 }`, ONE `suggestion.updated` emit.
@@ -1736,7 +1841,10 @@ export interface JournalSweepOutcome {
 
 function buildDefaultService(log: Logger): SuggestionResolutionService {
   // The exact construction routes/suggestions.ts uses (its factory needs
-  // all four repos; the seams default).
+  // all four repos; the seams default). NOTE createContactsRepo comes from
+  // a C1-mission file - IMPORTING is fine (edits are what is forbidden);
+  // at the Task 14 merge reconcile, verify its factory signature survived
+  // the C1 merge unchanged.
   return createSuggestionResolutionService({
     contactsRepo: createContactsRepo({ logger: log }),
     extractionRepo: createExtractionRepo({ logger: log }),
@@ -1756,11 +1864,18 @@ export async function runJournalSweep(
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: log });
   const now = new Date(nowIso).toISOString();
   const nowMs = Date.parse(now);
-  // Claim OUTSIDE the body's catch: a claim-throw propagates to the poll
-  // loop's ordinary swallow (the groupGuardrails shape) instead of minting
-  // a daily alarm out of a DynamoDB blip on every 30s poll.
+  // The claim gets its OWN catch at WARN: a DynamoDB blip on the claim is
+  // transient (the next 30s poll retries) and must not feed the error
+  // alarm - the poll loop would otherwise log the rejection at error level
+  // every tick. The loud ERROR below is reserved for a claimed-then-failed
+  // run, whose retry really is a day away.
   const notBefore = opts.force === true ? now : new Date(nowMs - JOURNAL_SWEEP_PERIOD_MS).toISOString();
-  if (!(await settings.claimGroupPeriod(JOURNAL_SWEEP_LAST_RUN_AT_ID, now, notBefore))) return outcome;
+  try {
+    if (!(await settings.claimGroupPeriod(JOURNAL_SWEEP_LAST_RUN_AT_ID, now, notBefore))) return outcome;
+  } catch (err) {
+    log.warn({ err }, 'journal sweep: cadence claim failed (transient) - next poll retries');
+    return outcome;
+  }
   outcome.ran = true;
   try {
     const repo = deps.resolutionRepo ?? createSuggestionResolutionRepo({ logger: log });
@@ -1782,25 +1897,22 @@ export async function runJournalSweep(
     let cursor = await settings.getJournalSweepCursor();
     let pages = 0;
     let exhausted = false;
-    let pageCutShort = false;
-    while (pages < MAX_SCAN_PAGES) {
-      const cursorBeforePage = cursor;
+    let droppedQualifying = false;
+    // The cursor ALWAYS advances past pages this run has read - never a
+    // rewind (a rewind livelocks on a page of persistently-failing
+    // contacts). Rows dropped because the cap filled are re-found when the
+    // cursor wraps: bounded delay, no orphaning. Stop reading once the cap
+    // fills - no read capacity burned collecting nothing.
+    while (pages < MAX_SCAN_PAGES && contacts.length < MAX_CONTACTS_PER_RUN) {
       const page = await repo.listActiveResolutionRows({ ...(cursor !== undefined && { cursor }), limit: SCAN_PAGE_LIMIT });
       pages += 1;
       for (const row of page.rows) {
         if (!qualifies(row)) continue;
         if (seen.has(row.contactId)) continue;
-        if (contacts.length >= MAX_CONTACTS_PER_RUN) {
-          // This page holds qualifying work we cannot take - the cursor must
-          // NOT advance past it, or the dropped rows wait a full table cycle.
-          pageCutShort = true;
-          cursor = cursorBeforePage;
-          break;
-        }
+        if (contacts.length >= MAX_CONTACTS_PER_RUN) { droppedQualifying = true; continue; }
         seen.add(row.contactId);
         contacts.push(row.contactId);
       }
-      if (pageCutShort) break;
       cursor = page.nextCursor;
       if (cursor === undefined) { exhausted = true; break; }
     }
@@ -1844,14 +1956,14 @@ export async function runJournalSweep(
       }
     }
 
-    outcome.deferred = pageCutShort || !exhausted || budgetExhausted || contacts.length >= MAX_CONTACTS_PER_RUN;
+    outcome.deferred = !exhausted || budgetExhausted || droppedQualifying;
     if (outcome.deferred) {
       // Routine rate limiting - the cursor carries the progress. INFO, never
       // ERROR: a standing daily alarm nothing can clear is the exact noise
       // class this mission removes.
       log.info(
-        { contactsVisited: outcome.contactsVisited, pages, exhausted, budgetExhausted },
-        'journal sweep: work deferred to the next run (caps/pages) - cursor persisted',
+        { contactsVisited: outcome.contactsVisited, pages, exhausted, budgetExhausted, droppedQualifying },
+        'journal sweep: work deferred to the next run (caps/pages)',
       );
     }
     log.info(

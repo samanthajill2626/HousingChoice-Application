@@ -134,29 +134,77 @@ residue wall, and the deleted-contact probe bound stops MESSAGE reads only,
 never the contact lookups - it also sits downstream of an already-paid Query.
 This is the app's highest-frequency request.
 
-**Human ruling 2026-08-25: build the read-through directly. No measurement
-gate.** The earlier "measure, then decide by rule" ruling was given on the two
-false premises in section 3 and is void.
+**Human ruling 2026-08-25 (first pass): build the read-through directly, no
+measurement gate.** The earlier "measure, then decide by rule" ruling had been
+given on the two false premises in section 3 and was void.
+
+**Human ruling 2026-08-25 (revised, after review round 1): MEASURE FIRST.** Not
+to decide whether to fix it - the defect is real and the read-through is the
+right shape - but because a review finding showed the fix could ship green and
+save nothing, and the stated acceptance could not have detected that. The
+ruling was not wrong when it was made; the fact that changed it did not exist
+yet.
+
+### 4.1.a The measurement slice - runs BEFORE any read-through code
+
+Reviewer A found, and the author verified, that the coverage this fix depends on
+is largely unestablished:
+
+- There are SIX `incrementUnread` call sites (`twilio.ts:709`, `:1018`,
+  `:1787`, `:2258`, `voice.ts:400`, `inboundEmail.ts:749`) and TWO
+  `captureContact` call sites (`twilio.ts:2187`, `voice.ts:606`). The claim in
+  section 3 that capture precedes indexing is demonstrable for ONE path of six.
+- Capture failure is swallowed even where it runs.
+- There is no backfill. `app/src/scripts/` does not exist.
+- `contactId: ''` is a live steady-state class the importer can create on an
+  established row - see
+  [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
+
+Measure, on a real dataset rather than on fixtures the author controls: of the
+1:1 items the `byUnread` walk returns, what fraction carry a participant entry
+with a NON-EMPTY `contactId` that resolves to a live contact?
+
+**The decision rule, fixed in advance so the number cannot be rationalised
+afterwards:**
+
+- **High coverage** - build the read-through as specified below; the
+  `findByPhone` fallback is a tail case.
+- **Low or mixed coverage** - the read-through is NOT the first change. Fix the
+  capture paths and add the backfill FIRST, because a fallback that fires on
+  most rows is the current cost with extra code in front of it.
+- **Either way** - the fallback ships, and the acceptance measures the SAVED
+  round trips on real-shaped data, never on fixtures that supply the very field
+  production may lack.
+
+### 4.1.b The read-through
 
 Resolve the contact from the `participants` entry already on the conversation
-item and batch through `contacts.getManyByIds`, collapsing ~100 Queries into
-~1 BatchGet. Five conditions, none optional:
+item and batch through `contacts.getManyByIds`. Five conditions, none optional:
 
-1. **Match by PHONE, not `participants[0]`.** The array is not ordered by
-   relevance and `[0]` is not guaranteed to be the participant the row is about.
-2. **Keep a `findByPhone` fallback** for rows whose participant entry carries no
-   `contactId` - un-backfilled rows must degrade, not disappear.
-3. **Bound the look-ahead** by `maxRows - candidates.length` so the lazy
-   generator contract survives. An unbounded batch would defeat the laziness the
-   walk depends on.
-4. **Decide failed-batch semantics explicitly.** A partial BatchGet response
-   must not read as "these rows do not exist" - see
-   [`batch-read-absence-ambiguity`](../../issues/) for why this class of
-   conversion is where absence and failure get conflated.
-5. **Rule on staleness - OPEN, see section 8.** `participants` is write-once
-   while `findByPhone` hops to the current owner, so after a contact merge or a
-   number reassignment the badge and the page can attribute the same row to
-   different contacts. This is a product call, not an engineering one.
+1. **Select the entry by the ROW'S OWN participant key** - the phone for a phone
+   thread, the single entry for an email thread. Do NOT make `participants[0]` a
+   rule: `contactCapture.ts:164` states the opposite in the imperative ("never
+   `participants[0]`: an entry for another phone is..."), and
+   `conversationsRepo.ts:1354-1356` records the convention as "readers key on
+   contactId FIRST". Both reviewers proposed reverting to `[0]` on the strength
+   of `today.ts:1086`; that was rejected, and if `today.ts` relies on `[0]` as a
+   RULE it is the outlier and wants its own look. A 1:1 thread having exactly
+   one entry is a consequence, not the selector.
+2. **Fall back to `findByPhone` on any UNUSABLE `contactId`, empty string
+   included.** The un-backfilled shape is `''`, not `undefined`. An empty string
+   is not a valid key: it throws on `BatchGetItem`, and a default batch helper
+   can drop the WHOLE 100-key chunk rather than one row - degrading up to 100
+   unread rows to phantom `unknown` rows, which is the exact symptom this
+   cluster exists to remove. Filter empties out before the batch, and use the
+   existing `requireComplete` semantics rather than treating a short response as
+   absence.
+3. **Bound the look-ahead** by `maxRows - candidates.length`. The reason is not
+   "laziness" - it is that this preserves `scanPosition == last consumed item`,
+   which is what the cursor is minted from. A fixed 100-key batch would keep the
+   letter of the bound and LOSE ROWS.
+4. **Failed-batch semantics - OPEN, see section 8.** This is an
+   operator-visible product choice, not a builder's detail.
+5. **Attribution staleness - OPEN, see section 8.**
 
 Two remedies stay ruled out and must not be re-litigated: the per-collect memo
 (implemented and removed - it can never hit, because the claim arbiters
@@ -185,9 +233,12 @@ increment and `byParticipantPhone` still shows the pre-increment
 `unread_count: 0` - and closes it with an authoritative base-table point read.
 The WRITE path never got the same treatment.
 
-**Severity high -> med.** The skip is sticky but not permanent: five later
-events re-drive the fan-out or reset by `conversationId`, and the row stays
-visible in the Unread tab meanwhile. Do not carry the `contacts.ts` permanence
+**Severity high -> med.** The skip is sticky but not permanent: later events
+re-drive the fan-out or reset by `conversationId`, and the row stays visible in
+the Unread tab meanwhile. Review narrowed this - the "five later events" of the
+first draft are largely four retries of the SAME defective route, which weakens
+the argument without reversing it. The row staying visible is what carries the
+downgrade, not the number of re-drives. Do not carry the `contacts.ts` permanence
 argument across - that fan-out genuinely never re-runs; these two do.
 
 Add `resetUnreadIfUnread` to `conversationsRepo`, call it UNFILTERED from both
@@ -196,8 +247,15 @@ fan-outs, treat `ConditionalCheckFailedException` as "already read", and emit
 the issue's original prescription:
 
 - **Compose the condition as `attribute_exists(conversationId) AND
-  attribute_exists(unread_flag)`.** The single clause collapses "row missing"
-  into "already read", and both call sites swallow the exception silently.
+  attribute_exists(unread_flag)`, AND request
+  `ReturnValuesOnConditionCheckFailure`.** The two-conjunct form is correct as a
+  GUARD but useless as a DIAGNOSTIC on its own: DynamoDB returns one
+  `ConditionalCheckFailedException` and does not name the failing conjunct, so
+  "row missing" and "already read" remain indistinguishable - which is what the
+  clause was added to separate. The identical expression already ships elsewhere
+  in the repo disambiguating nothing. The issue file prescribed the return-values
+  mechanism; the first draft of this spec kept the clause and dropped the
+  mechanism, which is a fair example of satisfying the letter of a fix.
 - **The "spends neither" capacity claim is deleted.** A failed conditional write
   saves the item mutation, the stream record and the SSE fan-out - not WCUs.
 - **Name the cost it adds.** This turns zero writes into N conditional writes
@@ -210,17 +268,23 @@ with no flag, re-creating the unclearable-thread bug on a different class. That
 class is empirically empty: the 2026-08-17 backfill dry run skipped 771/771 in
 dev and 786/786 in prod. The remaining exposure is the founder's local
 `hc-local-` dataset, which the RUNBOOK still lists as owing `db:update-gsis`
-plus backfill. **The builder must confirm it or say so in the handback** - this
-is exactly the guard that gets added by omission rather than by decision.
+plus backfill. The first draft told the BUILDER to confirm it; review pointed
+out a builder cannot, so it is a human item - section 8, decision 5. Note also
+that the 771/786 evidence is a hand-typed RUNBOOK line, not a machine artifact.
+This is exactly the guard that gets added by omission rather than by decision.
 
 The two call sites are `POST /api/inbox/read` (phone in the BODY - the old draft
 named a `/unknown/:phone/read` route that does not exist) and
 `POST /api/inbox/:contactId/read`.
 
-Regression test: the `stalePositiveOnFirstRead` seam in
-`app/test/inboxApi.test.ts` already stages a stale image; point it at the read
-routes with a stale ZERO and assert on `world.unreadResets`. Mutation-probe by
-restoring the filter. `resetUnreadIfUnread`'s conditional-failure behaviour is
+Regression test: **not** a repoint of the `stalePositiveOnFirstRead` seam. The
+first draft prescribed that, and review showed it cannot stage this defect - it
+stales ONE call, is phone-only (so it never exercises
+`findByParticipantEmail`), lives in a mark-UNREAD describe, and stages an image
+that is physically impossible for this path. Use the contact-soft-delete test's
+staging pattern instead, which the issue file already named and the first draft
+dropped. Whatever is written, mutation-probe it by restoring the filter - and if
+the probe does not go red, the test is not testing this. `resetUnreadIfUnread`'s conditional-failure behaviour is
 proved against the real repo in the
 `app/test/updateCallStatus.integration.test.ts` pattern, because the fakes
 cannot carry DynamoDB condition semantics.
@@ -233,11 +297,20 @@ agents independently proposed edits to the same few lines of
 or unreachable precisely because of the coupling. They ship as ONE slice with
 ONE flag contract, not as four riders sequenced against each other.
 
-The contract has four members: `capped`, `scanExhausted`, `truncated`, and a new
-`consumedAll`. Today `truncated` is derived as `!capped && !scanExhausted`, the
-budget exit never writes `scanExhausted`, and a consumer that breaks at the cap
-leaves the generator suspended at its `yield` so the line that would set
-`scanExhausted` never runs at all.
+The contract has four members: `capped`, `scanExhausted`, `truncated` and
+`consumedAll`. **`consumedAll` is NOT new** - the first draft said it was, and
+that was wrong. It ships today as `consumedAll: !capped && state.scanExhausted`,
+and `scanExhausted` lives on the walk STATE, not on the collect result. Today
+`truncated` is derived as `!capped && !scanExhausted`, the budget exit never
+writes `scanExhausted`, and a consumer that breaks at the cap leaves the
+generator suspended at its `yield`, so the line that would set `scanExhausted`
+never runs at all.
+
+**Do not derive `consumedAll` from `scanExhausted` alone.** That deletes the
+`!capped` guard it carries today, and the reason for that guard is written in
+place next to it - conflating the two made every under-budget dataset report
+wrongly. The obvious later "simplification" turns this into ROW LOSS. Whatever
+the slice does, that guard survives or its removal is proved safe in writing.
 
 ### G1 - the natural end is undetectable (`unread-load-more-empty-on-exact-multiple`)
 
@@ -248,10 +321,15 @@ green having altered nothing - and the only mechanical way to make it non-no-op
 capped page, including the nav badge's wire.
 
 Three coordinated edits instead: set `scanExhausted` before yielding a final
-page's last item; derive `consumedAll` from it alone while `truncated` keeps its
-`!capped` guard; and record `consumedAll` before the page-full break in the
-route. **Residue, stated rather than hidden:** a supply that ends exactly on a
-100-item query-page boundary still cannot be detected without an extra Query.
+page's last item; keep `consumedAll`'s `!capped` guard rather than replacing it;
+and record `consumedAll` before the page-full break in the route.
+
+**Residue, corrected.** The first draft named the wrong one. The hook cannot
+fire when the final page's last RAW item is invisible - filtered, lagged, or
+dropped - which is the ROUTINE shape on this lagging index, not an edge case. So
+G1 closes the case where the last item is visible and leaves the invisible-tail
+case open. The 100-item query-page boundary is a second, narrower residue. Say
+both; claim neither is closed.
 
 Also corrected: the issue's "renders no affordance" claim went stale on
 2026-08-17. The notice now renders "There are older unread threads not shown
@@ -278,6 +356,16 @@ Remedy 3 is the only sound shape and is now IN scope (the old draft put it out):
 thread ONE iterator through the loop. It needs explicit `.next()` pulls, because
 `for await ... break` closes the generator by design.
 
+**But "sound" is not "free", and the first draft asserted it without the
+contract.** One iterator means one SHARED `UnreadWalkState` across what used to
+be independent collects, which invalidates `remainingBudget`, `truncated`, and
+the fill loop's WRITTEN termination proof - all three are currently correct
+BECAUSE each collect starts fresh. The slice must re-establish the termination
+proof rather than inherit it, and state the composed contract: what the budget
+means across iterations, which exit sets which flag, and why the loop still
+terminates. A ticker in this repo once failed to terminate five different ways
+after a similar "obviously equivalent" restructure.
+
 Routine cost today is ~3x at the dashboard's `PAGE_LIMIT` = 30; the ~90x figure
 is a `limit=1` ceiling and is not the everyday shape.
 
@@ -292,11 +380,20 @@ field that is already single-meaning and read by nobody.
 Add `truncatedUnreachable`, set ONLY by the depth cap and the unresolved-drop
 path, never by the budget exit. Two conditions, neither skippable:
 
-- **OR-across-the-session semantics.** The drop meaning is a session fact;
-  copying `truncated`'s replace-per-page semantics would clear it on the first
-  "Load more".
-- **Client defaults to `truncatedUnreachable ?? truncated`**, so an old backend
-  degrades to today's loud-but-imprecise notice rather than to silence.
+- **OR-across-the-session semantics, WITH AN EXPLICIT RESET RULE.** The drop
+  meaning is a session fact, so copying `truncated`'s replace-per-page semantics
+  would clear it on the first "Load more". But an OR with no reset reproduces
+  R4's defect - a notice that outlives the state it describes - on the brand-new
+  flag, in the same slice that fixes R4. Reset on the same lifecycle event R4's
+  gate uses: a filter change, and a fresh first page.
+- **The wire must distinguish "this backend does not know the flag" from "this
+  backend says false".** A bare `truncatedUnreachable ?? truncated` default does
+  NOT achieve the split it was added for: with this file's optional-true wire
+  style, a NEW backend exiting on the budget sends no flag at all, which is
+  byte-identical to an OLD backend - so the false notice renders anyway and the
+  whole server-side split is cancelled at the client. Send an explicit `false`
+  on the new field, or carry a version marker. Keep the `??` default only for
+  the genuinely-old-backend case it was meant for.
 
 The "un-pageable page with rows" worry is closed by branch ordering - the depth
 cap is tested before the budget exit, so a budget-minted cursor is always
@@ -331,11 +428,11 @@ Each is its own commit so a red gate stays attributable.
 | # | issue | sev | change |
 |---|---|---|---|
 | R1 | unread-deleted-contact-probed-twice-per-page | low | thread the collector's probe into hydration so the row builder reuses it. Lands with G2 - same function. TWO conditions: the carrier is keyed by `conversationId` (the collector evaluates PER THREAD, so a singular "probe result" is wrong), and it must NOT collapse "empty thread" into "read failed" - a cached absence becomes a fallback preview with no timestamp, which can never resurface, producing a drop classified as non-lagged and never retried. Corrected cost: removes ONE EXTRA read, not one of two |
-| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower |
-| R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. Keep the floor as a FALLBACK, not deleted: it is what stops `Limit: 0` reaching DynamoDB. Retire the now-obsolete do-not-re-sync warning |
+| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries |
+| R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. Keep the floor as a FALLBACK rather than deleting it - but NOT for the reason the first draft gave. "It is what stops `Limit: 0` reaching DynamoDB" is false for all three inbox branches; the floor's value is that a degenerate input lands on a defined page size instead of a defined error. Retire the now-obsolete do-not-re-sync warning |
 | R4 | inbox-group-truncation-notice-not-reset | low | gate the notice on ready status, matching the shipped precedent 85 lines below it. Reproduction is All/Groups only - the server never sets the flag under `filter=unread`. Scope limit stated in place: this does NOT close the adjacent one-commit filter-change window, which is pre-existing and orthogonal |
 | R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. Two parts: **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - NOTE this part is a new proposal with no approved vehicle and needs its own go; **(B)** ride 4.1's read-through. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in |
-| R6 | inbox-imported-call-outcome-normalization | low | **Human ruling: all THREE renderers, plus group threads.** The filed remedy is unreachable for the rows it targets - the importer writes no call status and the derive path short-circuits on it before any outcome handling, so it would ship green having changed nothing. Order: make the status optional on the preview input (the body survives it - the ringing/in-progress checks are equality tests that are simply false for undefined), add a fourth derive-arm for a status-less row with a normalizable outcome gated on an empty fallback preview, THEN promote the shared helpers, and extend to the group-row builders, which read the stored preview directly and never call the derive path. Fix the duration guard from `< 0` to `<= 0`. **WHERE the shared helper lives is NOT assumed:** the repo states in five places that the dashboard cannot import from `app/src`, and no app runtime module imports from `dashboard/src` today - the only proven cross-package reach is app-side TESTS importing a pure dashboard module. The builder must PROVE the chosen location under `npm run smoke`, which is the gate that catches exactly this class of resolution gap, with the established mirror-plus-drift-guard pattern as the named fallback if no single home resolves |
+| R6 | inbox-imported-call-outcome-normalization | low | **Human ruling: all THREE renderers, plus group threads.** The filed remedy is unreachable for the rows it targets - the importer writes no call status and the derive path short-circuits on it before any outcome handling, so it would ship green having changed nothing. Order: make the status optional on the preview input (the body survives it - the ringing/in-progress checks are equality tests that are simply false for undefined), add a fourth derive-arm for a status-less row with a normalizable outcome gated on an empty fallback preview, THEN promote the shared helpers, and extend to the group-row builders, which read the stored preview directly and never call the derive path. **The duration-guard change from `< 0` to `<= 0` is REMOVED from this rider** - it would break a shipped pin asserting that a zero duration renders as `0s`, and a zero-second call is a real, renderable value. The defect was never the guard. **WHERE the shared helper lives is NOT assumed:** the repo states in ten to twelve places (the first draft said five) that the dashboard cannot import from `app/src`, and no app runtime module imports from `dashboard/src` today - the only proven cross-package reach is app-side TESTS importing a pure dashboard module. The builder must PROVE the chosen location under `npm run smoke`, which is the gate that catches exactly this class of resolution gap, with the established mirror-plus-drift-guard pattern as the named fallback if no single home resolves |
 **R11 is CUT.** The old draft's last rider - merge the refetched inbox page onto
 existing rows by `rowKey` - was re-adjudicated on 2026-08-25 and does not
 survive. All three findings are independently verifiable in the tree:
@@ -386,28 +483,83 @@ consumer of the unread iterator that the old draft did not enumerate** - and the
 two fan-outs' own filters, which is what 4.2 removes.
 
 **Invariant 2 - `contactId` on the conversation item becomes load-bearing for a
-read path** (4.1). This was conditional in the old draft. It is now REQUIRED,
+read path** (4.1). This was conditional in the old draft; it is now REQUIRED,
 because the read-through is approved.
 
-Every surface that writes `contactId` onto a conversation must be enumerated as
-an explicit task or watch item: claim, merge, soft-delete, restore,
-reassignment, and the pointer-aware owner hop - plus a backfill and a read path
-that tolerates un-backfilled rows. The staleness question in 4.1 condition 5
-lives on this invariant: `participants` is write-once, the pointer hop is not.
+**This enumeration was WRONG in the first draft and both reviewers caught it.**
+It named a contact-MERGE operation that does not exist in this repo, named
+soft-delete and restore which do not touch `participants` at all, and OMITTED
+the importer - the one writer that actually rewrites the field. It also asserted
+`participants` is "write-once", which is false. It is rewritten below from a
+code sweep rather than from recall, which is the only way this rule works.
+
+WRITERS of `participants` (swept, not recalled):
+
+- `conversationsRepo` - the versioned rewrite (`:1196`, `SET participants = :p,
+  participants_version = :nextV`), the plain rewrite (`:1597`), and the two
+  group-membership writes (`:2550`, `:2591`).
+- `setParticipantsIfAbsent` - the conditional claim, guarded on
+  `attribute_not_exists(participants)`, so it CANNOT repair a present-but-blank
+  entry.
+- `contactCapture` - claims the link, best-effort, and swallows failure.
+- **`import/apply.ts:1095` - an UNCONDITIONAL overwrite on the 1:1 path**, whose
+  value falls back to an empty string. The group path guards the identical
+  clause; the 1:1 path does not. Filed separately as
+  [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
+- `routes/public.ts:286` - the housing-fair intake claim.
+- The seed casts (`lib/seed/cast.ts`, `lean.ts`, `live.ts`) and
+  `adapters/groupConversations.ts`.
+
+Plus, because the read-through has no source of truth to fall back on
+otherwise: a BACKFILL, which does not exist today.
+
+**Invariant 3 - the `byUnread` index itself.** The whole cluster reads it, so
+its RANGE KEY is a mutation surface even though nothing here means to move it:
+`touchLastActivity` writes `last_activity_at` on every outbound send. A change
+to ordering or to the tie behaviour lands here first.
+
+READERS of `unread_flag` / `unread_count` (swept): `lib/unreadFeed.ts`,
+`routes/inbox.ts`, `routes/today.ts`, `routes/contacts.ts`, **`routes/api.ts` -
+`GET /api/unread-counts`, which the first draft missed and which is exactly
+where 4.2's counter-only objection would surface**, `lib/markUnread.ts`,
+`lib/events.ts` (the SSE frame carries `unread_count`, and the contact detail
+view reads it), `services/sendMessage.ts`, `webhooks/twilio.ts`,
+`webhooks/voice.ts`, `repos/conversationsRepo.ts`, `lib/tables.ts`, and the four
+seed modules.
+
+WATCH ITEM: the unread backfill's `remove` arm can manufacture the exact
+invariant break 4.2 is closing. It is unowned and needs a named owner before
+4.2 lands.
 
 ## 8. Open decisions - these need a human ruling before build
 
-1. **Contact-attribution staleness after a merge or number reassignment**
-   (4.1). `participants` is write-once; `findByPhone` follows the current owner.
-   Which wins? Choosing the write-once value makes the badge cheap and
-   occasionally wrong after a merge; choosing the pointer keeps them agreeing
-   and costs the Query back on those rows. This is a product call.
-2. **The form of the indeterminate marker** (G4) - dot, glyph, or restyled
+1. **Contact-attribution staleness** (4.1 condition 5). RE-FRAMED after review:
+   the first draft posed this on a contact-MERGE operation that does not exist
+   in this repo, and on the wrong divergence pair. The badge and the unread page
+   CANNOT diverge - both go through `collectUnreadRows`. What can diverge is the
+   Unread feed against the All / Unknown tabs, and the real operations are a
+   number reassignment and the pointer-aware owner hop, not a merge. The stored
+   `participants` value and the pointer can disagree; which one an operator
+   should see is a product call.
+2. **Failed-batch semantics** (4.1 condition 4). PROMOTED from a builder detail:
+   this is operator-visible either way. A partial or failed `getManyByIds` can
+   surface as a 500 with no badge at all, or as rows silently attributed to the
+   wrong contact - or the fallback can absorb it at the cost of the round trips
+   the fix exists to save. That trade is not an engineer's to pick quietly.
+3. **The form of the indeterminate marker** (G4) - dot, glyph, or restyled
    badge - subject to the hard constraint that it must not be a second sibling
-   span carrying the word "unread".
-3. **R5 part (A)** - budget + cursor + `truncated` on the unknown pager is a new
+   span carrying the word "unread". Note the blast radius is larger than first
+   stated: 4-5 locator sites across 3+ spec files, including the Email leaf, and
+   the invariant is not pinned in the geometry test.
+4. **R5 part (A)** - budget + cursor + `truncated` on the unknown pager is a new
    proposal, not an adjudicated remedy. It needs its own go or it drops to part
-   (B) alone.
+   (B) alone. Review also found that as specified it would light the unfiltered
+   inbox failure banner on an empty All / Unknown page, so part (A) needs that
+   solved before it is buildable at all.
+5. **The founder's local imported dataset** (4.2). The first draft told the
+   BUILDER to confirm it. That is unactionable by a builder - it is a human
+   item, and it is the one remaining unverified exposure for the counter-only
+   class.
 
 ## 9. Testing
 

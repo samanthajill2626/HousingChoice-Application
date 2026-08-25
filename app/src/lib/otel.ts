@@ -65,10 +65,16 @@ function activeFamilies(): { old: boolean; stable: boolean } {
 
 /**
  * The instrumentation's own getAbsoluteUrl REDACTS the values of these query
- * parameters (its DEFAULT_REDACTED_QUERY_PARAMS) before writing url
- * attributes. Hook attributes are assigned LAST, so an unredacted
- * reconstruction here would silently OVERWRITE that control (adversarial
- * review, phase 6) - re-apply the same list to everything we rebuild.
+ * parameters (its DEFAULT_REDACTED_QUERY_PARAMS) on OUTGOING client spans.
+ * Hook attributes are assigned LAST, so an unredacted reconstruction here
+ * would silently OVERWRITE that control (adversarial review, phase 6) -
+ * re-apply the same list to everything we rebuild. Precision (re-review
+ * R-5): for the INCOMING hook this is additional hardening, not parity -
+ * the library does not redact incoming url attributes; the literal regex
+ * matches literal (non-percent-encoded) parameter NAMES only, which is how
+ * signed URLs are emitted in practice; and the port rule approximates
+ * getAbsoluteUrl (an explicit :443 on an http: URL is treated as default
+ * where the library would keep it) - accepted, this app makes no such call.
  */
 const SIGNED_QUERY_PARAM_RE = /([?&](?:sig|Signature|AWSAccessKeyId|X-Goog-Signature)=)[^&#]*/g;
 

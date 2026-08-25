@@ -43,13 +43,18 @@
 // (comfortably true at this product's scale; if ai_extraction is ever 100k+
 // rows the caps need raising).
 //
-// TWO ACCEPTED RESIDUALS: (a) the cursor is persisted BEFORE the recovery
+// THREE ACCEPTED RESIDUALS: (a) the cursor is persisted BEFORE the recovery
 // loop, so a mid-run crash advances past contacts this run never recovered -
 // they remain ACTIVE rows and the wrap revisits them (same bounded delay);
 // (b) a PERMANENTLY failing cadence claim (missing settings table, IAM
 // regression) leaves the duty parked at one WARN per 30s poll with no ERROR -
 // loud in the logs, not in the alarm; acceptable because a broken settings
-// table alarms through every other consumer of it.
+// table alarms through every other consumer of it; (c) a PERMANENTLY failing
+// cursor persist (same settings-table class as (b)) parks the scan window -
+// a failed SET re-reads the same page daily, a failed CLEAR resumes
+// mid-table daily and the head window waits for a successful write - behind
+// one WARN per day, with `deferred: true` reported honestly rather than a
+// clean wrap. Same acceptance basis as (b).
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import {
@@ -189,6 +194,7 @@ export async function runJournalSweep(
       cursor = page.nextCursor;
       if (cursor === undefined) { exhausted = true; break; }
     }
+    let cursorPersistFailed = false;
     try {
       await settings.putJournalSweepCursor(exhausted ? undefined : cursor);
     } catch (err) {
@@ -197,12 +203,16 @@ export async function runJournalSweep(
       // single-item settings write jumped to the run-level catch - zero
       // contacts recovered, the already-claimed period burned, and the
       // self-heal there then CLEARED the cursor, discarding this run's scan
-      // progress too. A failed persist costs only cursor advance: tomorrow's
-      // run re-reads the same page (bounded - the same trade the wrap makes),
-      // and the contacts THIS run enumerated still get recovered below.
+      // progress too. A failed persist costs only cursor advance - a failed
+      // SET re-reads this page tomorrow, a failed CLEAR resumes mid-table
+      // tomorrow (residual (c) in the header) - and the contacts THIS run
+      // enumerated still get recovered below. The flag keeps `deferred`
+      // honest: a run whose window did not persist must never report a clean
+      // wrap.
+      cursorPersistFailed = true;
       log.warn(
-        { err },
-        'journal sweep: persisting the scan cursor failed (best-effort) - the next run re-reads this page',
+        { err, exhausted },
+        'journal sweep: persisting the scan cursor failed (best-effort) - scan progress not saved',
       );
     }
 
@@ -293,7 +303,7 @@ export async function runJournalSweep(
       );
     }
 
-    outcome.deferred = !exhausted || budgetExhausted || droppedQualifying;
+    outcome.deferred = !exhausted || budgetExhausted || droppedQualifying || cursorPersistFailed;
     if (outcome.deferred) {
       // Routine rate limiting - the cursor carries the progress. INFO, never
       // ERROR: a standing daily alarm nothing can clear is the exact noise

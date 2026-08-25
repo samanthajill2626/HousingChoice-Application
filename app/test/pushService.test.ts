@@ -1328,4 +1328,123 @@ describe('pushService.sendToAll', () => {
     expect(warns).toHaveLength(1);
     expect('pushStatusCode' in warns[0]!).toBe(false);
   });
+
+  it('a hostile statusCode ACCESSOR cannot break the never-rejects invariant either (re-review R-4)', async () => {
+    // `?.` still invokes a getter - the second hostile shape the null test
+    // does not cover.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById() {
+        return {
+          userId: 'usr_a',
+          email: 'usr_a@example.com',
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              endpoint: ep('a1'),
+              keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+              created_at: '2026-08-16T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as UsersRepo;
+    const hostile = new Error('vendor blip');
+    Object.defineProperty(hostile, 'statusCode', {
+      get() {
+        throw new Error('trap');
+      },
+      enumerable: true,
+    });
+    const adapter = {
+      async sendToSubscription() {
+        throw hostile;
+      },
+    } as never;
+    const capture = createLogCapture();
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+
+    const result = await service.sendToUser('usr_a', { kind: 'test', payload: { title: 'x' } });
+
+    expect(result).toMatchObject({ configured: true, attempted: 1, sent: 0, failed: 1 });
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect('pushStatusCode' in warns[0]!).toBe(false);
+  });
+
+  it('an older Scan settling LAST cannot overwrite a newer attempt\'s cache (re-review R-3)', async () => {
+    // Overlapping attempts are legal (a Scan can outlive the 30s floor); the
+    // cache write is ordered by ATTEMPT START, not settle order - without the
+    // guard the old list resurfaced under a fresher fetchedAt and hid a
+    // just-added device for up to an extra TTL.
+    const config = loadConfig(VAPID_ENV);
+    let clock = 0;
+    let releaseOldScan: () => void = () => {};
+    const oldScan = new Promise<void>((resolve) => {
+      releaseOldScan = resolve;
+    });
+    let releaseNewScan: () => void = () => {};
+    const newScan = new Promise<void>((resolve) => {
+      releaseNewScan = resolve;
+    });
+    const userWith = (endpoint: string) => ({
+      userId: 'usr_a',
+      email: 'usr_a@example.com',
+      role: 'admin',
+      status: 'active',
+      created_at: '2026-08-16T00:00:00.000Z',
+      push_subscriptions: [
+        { endpoint, keys: { p256dh: 'p', auth: 'a' }, created_at: '2026-08-16T00:00:00.000Z' },
+      ],
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        if (listAllCalls === 1) {
+          await oldScan;
+          return [userWith(ep('old1'))];
+        }
+        await newScan;
+        return [userWith(ep('new1'))];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => clock,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    const a = service.sendToAll(note); // t=0, attempt 1 (old data, slow)
+    clock = 31_000;
+    const c = service.sendToAll(note); // past the floor: attempt 2 (new data)
+    releaseNewScan();
+    const resultC = await c; // attempt 2 wrote the cache first
+    releaseOldScan();
+    const resultA = await a; // attempt 1 settles LAST - must NOT overwrite
+    clock = 40_000; // inside attempt 2's TTL: no refresh, serve the cache
+    const resultD = await service.sendToAll(note);
+
+    expect(listAllCalls).toBe(2);
+    expect(resultC).toMatchObject({ users: 1, sent: 1 });
+    expect(resultA).toMatchObject({ users: 1, sent: 1 });
+    expect(resultD).toMatchObject({ users: 1, sent: 1 });
+    // THE PIN: nothing ever fans out to the OLD list once the newer attempt
+    // has published.
+    expect(sentTo.every((endpoint) => endpoint === ep('new1'))).toBe(true);
+    expect(capture.atLevel(50)).toHaveLength(0);
+  });
 });

@@ -138,7 +138,12 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * bound (D10 / section 5) rather than "for the whole outage".
    */
   const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
-  let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
+  // `scannedAt` is the ATTEMPT-START stamp of the Scan that produced the
+  // items - the write guard below compares it so an older Scan settling late
+  // cannot overwrite a newer attempt's data with a fresher fetchedAt
+  // (re-review R-3: overlapping attempts are legal when a Scan outlives the
+  // 30s floor).
+  let usersCache: { items: UserItem[]; fetchedAt: number; scannedAt: number } | undefined;
   /**
    * Floor between listAll ATTEMPTS (log-hygiene spec 6.1): one Scan attempt +
    * one ERROR/WARN per ~30s window PER INSTANCE (about six instances exist per
@@ -153,8 +158,13 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * notification at debug - invisible in both deployed envs, where LOG_LEVEL is
    * info, and the window opens on every process start and every deploy, exactly
    * when a burst of queued webhooks lands. A floored caller now JOINS the
-   * attempt already in flight instead of guessing: never a second Scan, never a
-   * second log line, and never a drop while a usable answer is on its way.
+   * attempt already in flight instead of guessing: at most one Scan attempt
+   * per 30s floor window PER INSTANCE, and never a drop while a usable answer
+   * is on its way. NOT "never a second Scan": a Scan that outlives the floor
+   * legitimately overlaps its successor - the join slot is identity-guarded
+   * so the LATEST attempt stays joinable, and the cache write is
+   * ordered-by-attempt so an older Scan settling late cannot overwrite newer
+   * data (see the guard at the assignment below).
    *
    * READ THE CATCH ARMS BELOW WITH THIS IN MIND: they still leave `fetchedAt`
    * untouched on failure, so the refresh IS retried and the age keeps counting
@@ -256,16 +266,24 @@ export function createPushService(deps: PushServiceDeps): PushService {
         // correlated (the logger mixin stamps the correlationId) and move
         // on; one dead device must not fail the whole notification.
         failed += 1;
-        // Optional-chained through the cast: a `throw null` from an injected
-        // adapter must not turn this catch into its own TypeError - the
-        // docblock above promises this helper never rejects per device.
-        const pushStatusCode = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+        // Guarded BOTH ways (re-review R-4): optional chaining covers a
+        // `throw null`, and the try covers a hostile `statusCode` ACCESSOR -
+        // `?.` still invokes a getter, and the docblock above promises this
+        // helper never rejects per device. The never-rejects invariant
+        // outranks the diagnostic field.
+        let pushStatusCode: number | undefined;
+        try {
+          const raw = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+          if (typeof raw === 'number') pushStatusCode = raw;
+        } catch {
+          pushStatusCode = undefined;
+        }
         log.warn(
           {
             userId,
             kind,
             err,
-            ...(typeof pushStatusCode === 'number' && { pushStatusCode }),
+            ...(pushStatusCode !== undefined && { pushStatusCode }),
           },
           'push: send to one device failed (transient) — kept subscription',
         );
@@ -328,7 +346,8 @@ export function createPushService(deps: PushServiceDeps): PushService {
         const floored =
           lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
         if (!floored) {
-          lastRefreshAttemptAt = now();
+          const attemptStartedAt = now();
+          lastRefreshAttemptAt = attemptStartedAt;
           try {
             // The listAll CALL sits inside the try: the production repo cannot
             // throw synchronously (async fn), but this function's contract is
@@ -351,7 +370,15 @@ export function createPushService(deps: PushServiceDeps): PushService {
             void published.finally(() => {
               if (refreshInFlight === published) refreshInFlight = undefined;
             });
-            usersCache = { items: await attempt, fetchedAt: now() };
+            const items = await attempt;
+            // ORDERED-BY-ATTEMPT write (re-review R-3): only publish these
+            // items when no LATER attempt has already written the cache - an
+            // older Scan settling last would otherwise overwrite newer user
+            // data under a fresher fetchedAt, hiding a just-added device for
+            // up to an extra TTL.
+            if (usersCache === undefined || usersCache.scannedAt <= attemptStartedAt) {
+              usersCache = { items, fetchedAt: now(), scannedAt: attemptStartedAt };
+            }
           } catch (err) {
             // A lookup failure must never break the caller (the send is
             // fire-and-forget off a webhook/ingest path): it is logged, never

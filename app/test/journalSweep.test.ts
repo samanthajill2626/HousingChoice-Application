@@ -640,7 +640,43 @@ describe('journal sweep: a failed run', () => {
     expect(h.emit).toHaveBeenCalledWith('suggestion.updated', { contactId: 'contact-1' });
     const warnMsgs = h.log.warn.mock.calls.map((c) => String(c[1]));
     expect(warnMsgs.some((m) => m.includes('persisting the scan cursor failed'))).toBe(true);
+    // A run whose window did not persist must not report a clean wrap - this
+    // was the CLEAR branch (single page, exhausted), where an unflagged
+    // failure silently freezes the head window (re-review R-1).
+    expect(outcome.deferred).toBe(true);
     // No run-level ERROR: this is a deferral, not a burned day.
+    const errorMsgs = h.log.error.mock.calls.map((c) => String(c[1]));
+    expect(errorMsgs.some((m) => m.includes('run failed'))).toBe(false);
+  });
+
+  it('a failed cursor SET is deferred too, and recovery still runs (re-review R-1)', async () => {
+    // The SET branch: pages never exhaust (every page returns a nextCursor),
+    // so the persist writes a real cursor - and its failure must produce the
+    // same honest deferral as the CLEAR branch.
+    let recoverCallsForContact = 0;
+    const h = harness({
+      listRows: async () => ({ rows: [row()], nextCursor: '{"itemId":"resolve#next"}' }),
+      recover: async () => {
+        recoverCallsForContact += 1;
+        return recoverCallsForContact === 1
+          ? { recovered: 1, stateChanged: false }
+          : { recovered: 0, stateChanged: false };
+      },
+    });
+    h.deps.settingsRepo = {
+      ...(h.deps.settingsRepo as NonNullable<JournalSweepDeps['settingsRepo']>),
+      async putJournalSweepCursor() {
+        throw new Error('ProvisionedThroughputExceededException');
+      },
+    };
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(outcome.ran).toBe(true);
+    expect(outcome.deferred).toBe(true);
+    expect(outcome.recovered).toBe(1);
+    const warnMsgs = h.log.warn.mock.calls.map((c) => String(c[1]));
+    expect(warnMsgs.some((m) => m.includes('persisting the scan cursor failed'))).toBe(true);
     const errorMsgs = h.log.error.mock.calls.map((c) => String(c[1]));
     expect(errorMsgs.some((m) => m.includes('run failed'))).toBe(false);
   });

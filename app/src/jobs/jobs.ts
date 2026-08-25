@@ -173,6 +173,12 @@ function buildEnvelope(jobName: string, payload: unknown): JobEnvelope {
   // at dispatch; hopCount/traceparent travel as top-level envelope fields.
   const correlationContext: CorrelationContext = {
     ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
+    // pollRunId travels so a poll-enqueued job's failure can be traced back to
+    // the tick that enqueued it. Without it the whole worker-poll class (tour
+    // reminders, placement nudges, roster actions, extraction, group
+    // guardrails) has NO upstream id on its log lines, because dispatchJob
+    // mints a fresh jobRunId that wins the correlationId ladder.
+    ...(ctx.pollRunId !== undefined && { pollRunId: ctx.pollRunId }),
     ...(ctx.conversationId !== undefined && { conversationId: ctx.conversationId }),
     ...(ctx.tenantId !== undefined && { tenantId: ctx.tenantId }),
     ...(ctx.placementId !== undefined && { placementId: ctx.placementId }),

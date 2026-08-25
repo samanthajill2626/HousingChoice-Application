@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
+  type OutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
+import { type JobEnvelope } from '../src/jobs/types.js';
 import {
   _resetForTests,
   configureJobsClock,
@@ -389,5 +391,46 @@ describe('jobs: the dispatcher log line names what failed', () => {
     const failure = errors.find((l) => l.msg.startsWith('job failed'));
     expect(failure?.msg).toBe('job failed: test.explodes');
     expect(failure?.obj['jobName']).toBe('test.explodes');
+  });
+});
+
+describe('jobs: the envelope carries the poll tick that enqueued it', () => {
+  beforeEach(() => {
+    _resetForTests();
+    configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('propagates pollRunId into the envelope so a poll-enqueued job can be traced back', async () => {
+    const captured: JobEnvelope[] = [];
+    configureOutboundQueue({
+      enqueue: async (envelope: JobEnvelope) => {
+        captured.push(envelope);
+      },
+    } as unknown as OutboundQueueAdapter);
+    defineJobHandler('test.polled', async () => {});
+    await runWithContext({ pollRunId: 'poll-abc' }, async () => {
+      await enqueue('test.polled', { hello: 'world' });
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.correlationContext).toEqual({ pollRunId: 'poll-abc' });
+  });
+
+  it('does not invent a pollRunId when the context has none', async () => {
+    const captured: JobEnvelope[] = [];
+    configureOutboundQueue({
+      enqueue: async (envelope: JobEnvelope) => {
+        captured.push(envelope);
+      },
+    } as unknown as OutboundQueueAdapter);
+    defineJobHandler('test.requested', async () => {});
+    await runWithContext({ requestId: 'req-1' }, async () => {
+      await enqueue('test.requested', {});
+    });
+    expect(captured[0]!.correlationContext).toEqual({ requestId: 'req-1' });
+    expect(captured[0]!.correlationContext).not.toHaveProperty('pollRunId');
   });
 });

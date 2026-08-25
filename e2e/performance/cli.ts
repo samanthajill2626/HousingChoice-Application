@@ -251,8 +251,19 @@ export async function runProfiler(
       return 0;
     }
     config = parsed.config;
-  } catch {
-    stderr('configuration_invalid\n');
+  } catch (error) {
+    // Keep the machine-greppable token first, but carry the parser's reason:
+    // hiding it once cost an operator a source-dive to discover that --self-qa
+    // needs explicit --cold-repeats=1 --warm-repeats=1
+    // (docs/issues/perf-cli-configuration-invalid-swallows-reason.md).
+    // Parser messages never echo option VALUES, but "--<name> is not
+    // supported" echoes the user-typed option NAME - so the reason only
+    // surfaces when it fits a conservative charset/length, else the bare
+    // token stands (the pinned no-value-leak guard in cli.test.ts holds
+    // either way).
+    const raw = error instanceof Error ? error.message : '';
+    const reason = /^[A-Za-z0-9 ,._=-]{1,120}$/.test(raw) ? `: ${raw}` : '';
+    stderr(`configuration_invalid${reason}\n`);
     return 1;
   }
 

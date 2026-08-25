@@ -57,12 +57,20 @@ const CONTACT_DELETED_SHAPES = [
   '/api/contacts?deleted&limit&type#required',
   '/api/contacts?cursor&deleted&limit&type#conditional',
 ] as const;
-const UNIT_SHAPES = ['/api/units?#required', '/api/units?cursor#conditional'] as const;
-const UNIT_DELETED_SHAPES = ['/api/units?deleted#required', '/api/units?cursor&deleted#conditional'] as const;
+const UNIT_SHAPES = ['/api/units?limit#required', '/api/units?cursor&limit#conditional'] as const;
+const UNIT_DELETED_SHAPES = ['/api/units?deleted&limit#required', '/api/units?cursor&deleted&limit#conditional'] as const;
+// The comms-rail batch read on tour/placement detail; every id arity is
+// conditional (which parameters ride depends on the roster's channel mix).
+const UNREAD_COUNT_SHAPES = [
+  '/api/unread-counts?#conditional',
+  '/api/unread-counts?contactIds#conditional',
+  '/api/unread-counts?conversationIds#conditional',
+  '/api/unread-counts?contactIds&conversationIds#conditional',
+] as const;
 
 const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> = {
   '/': [
-    '/api/today?day&toursFrom&toursTo#required', '/api/placements?#conditional',
+    '/api/today?day&toursFrom&toursTo#required', '/api/placements?limit#conditional',
     '/api/conversations?#conditional', '/api/tours?from&to#conditional',
   ],
   '/contacts': CONTACT_SHAPES,
@@ -84,9 +92,8 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     ...UNIT_DELETED_SHAPES.map((value) => value.replace('#required', '#conditional')),
   ],
   '/placements': [
-    '/api/placements?#required', '/api/placements?cursor#conditional',
-    '/api/contacts?type#required', '/api/contacts?cursor&type#conditional',
-    '/api/contacts?deleted&type#required', '/api/contacts?cursor&deleted&type#conditional',
+    '/api/placements?limit#required', '/api/placements?cursor&limit#conditional',
+    ...CONTACT_SHAPES, ...CONTACT_DELETED_SHAPES,
     ...UNIT_SHAPES, ...UNIT_DELETED_SHAPES,
   ],
   'inbox-all': ['/api/inbox?filter&limit#required#inbox_page_all'],
@@ -112,15 +119,15 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   '/contacts/:contactId': [
     '/api/contacts/:contactId?#required', '/api/contacts/:contactId/suggestions?#required',
     '/api/users/me?#required', '/api/contacts/:contactId/timeline?#required',
-    '/api/placements?#required', '/api/units?#required',
-    '/api/contacts/:contactId/listings-sent?#required', '/api/contacts/:contactId/media?#required',
+    '/api/placements?limit#required', '/api/units?limit#required',
+    '/api/contacts/:contactId/listings-sent?#required', '/api/contacts/:contactId/media?limit#required',
     '/api/contacts/:contactId/relay-groups?#required', '/api/contacts/:contactId/group-threads?#required',
     ...CONTACT_SHAPES,
-    '/api/conversations?#conditional', '/api/conversations/:conversationId/messages?#conditional',
+    '/api/conversations?#conditional', '/api/conversations/:conversationId/messages?limit#conditional',
     '/api/tours?tenantId#required',
   ],
   '/listings/:unitId': [
-    '/api/units/:unitId?#required', '/api/units?#required', '/api/placements?#required',
+    '/api/units/:unitId?#required', '/api/units?limit#required', '/api/placements?limit#required',
     '/api/units/:unitId/related?#required', '/api/units/:unitId/recipients?#required',
     '/api/units/:unitId/similar?#required', '/api/units/:unitId/activity?#required',
     '/api/tours?unitId#required', ...CONTACT_SHAPES, ...CONTACT_DELETED_SHAPES,
@@ -130,19 +137,21 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/tours/:tourId?#required', '/api/units/:unitId?#required', '/api/contacts/:contactId?#required',
     '/api/tours/:tourId/roster?#required', '/api/conversations?#required',
     '/api/tours/:tourId/activity?limit#required', '/api/tours/:tourId/reminders?#required',
+    '/api/conversations/:conversationId/messages?limit#conditional', ...UNREAD_COUNT_SHAPES,
     '/api/conversations/:conversationId?#required', '/api/conversations/:conversationId/members?#required',
-    '/api/conversations/:conversationId/messages?#required', '/api/conversations/:conversationId/scheduled?#required',
+    '/api/conversations/:conversationId/messages?limit#required', '/api/conversations/:conversationId/scheduled?#required',
   ],
   '/placements/:placementId': [
     '/api/placements/:placementId?#required', '/api/units/:unitId?#required', '/api/contacts/:contactId?#required',
     '/api/placements/:placementId/roster?#required', '/api/conversations?#required',
     '/api/placements/:placementId/history?limit#required', '/api/placements/:placementId/nudges?#required',
+    '/api/conversations/:conversationId/messages?limit#conditional', ...UNREAD_COUNT_SHAPES,
     '/api/conversations/:conversationId?#required', '/api/conversations/:conversationId/members?#required',
-    '/api/conversations/:conversationId/messages?#required', '/api/conversations/:conversationId/scheduled?#required',
+    '/api/conversations/:conversationId/messages?limit#required', '/api/conversations/:conversationId/scheduled?#required',
   ],
   '/conversations/:conversationId': [
     '/api/conversations/:conversationId?#required', '/api/conversations/:conversationId/members?#required',
-    '/api/conversations/:conversationId/messages?#required', '/api/conversations/:conversationId/scheduled?#required',
+    '/api/conversations/:conversationId/messages?limit#required', '/api/conversations/:conversationId/scheduled?#required',
     ...CONTACT_SHAPES,
   ],
   '/broadcasts/:broadcastId': ['/api/broadcasts/:broadcastId/results?#required'],

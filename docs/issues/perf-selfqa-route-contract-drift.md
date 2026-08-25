@@ -3,12 +3,28 @@ id: perf-selfqa-route-contract-drift
 title: Perf self-QA fails on route-contract drift - /api/unread-counts is undeclared
 type: bug
 severity: medium
-status: open
+status: resolved
 area: e2e/performance
 created: 2026-08-24
 updated: 2026-08-24
 refs: e2e/performance/templates.ts, e2e/performance/routes.ts, dashboard/src/api/endpoints.ts
 ---
+
+**RESOLVED 2026-08-24 (branch `fix/perf-selfqa-route-contract`).**
+`/api/unread-counts` declared in ENDPOINT_TEMPLATES and, as conditional
+contracts covering all four id arities, on the tour/placement detail surfaces
+(its only callers: useTourChannels / usePlacementChannels). The pagination
+sweep's `limit` drift is folded into every affected tuple (units/placements
+list walks, contact media, thread messages); the placement list's contact walk
+collapsed onto the standard CONTACT_*_WALK shapes whose un-limited variants no
+longer occur on the wire. The 71 aborted-but-declared rows needed no policy
+change: they were flagged only because their SHAPES were undeclared -
+assertObservedGets accepts declared shapes regardless of outcome. Verified:
+the same locked invocation that failed (report 20260825T013322163Z-1034c5df)
+now reports `status: "pass"` (report 20260825T015943179Z-a2fe7d4c) with
+endpointSubset, noUnmatchedApi, and outboxUnchanged all true.
+
+Original issue text below, kept for history.
 
 **Problem.** The first recorded self-QA profiler run
 (`npm run perf:pages -- hermetic --self-qa=full --cold-repeats=1 --warm-repeats=1`,

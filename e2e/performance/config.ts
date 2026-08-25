@@ -121,6 +121,7 @@ export function renderProfilerHelp(): string {
     '  npm run perf:pages -- hermetic --scale=1 --long-conversation-messages=2000',
     '  npm run perf:pages -- hermetic --large-broadcast-recipients=1000',
     '  npm run perf:pages -- hermetic --scale=7 --print-config',
+    '  npm run perf:pages -- hermetic --self-qa=full --cold-repeats=1 --warm-repeats=1',
     '  npm run perf:pages -- local --base-url=http://localhost:5174',
     '  npm run perf:pages -- hosted-dev --base-url=https://dev.example.test --headed',
     '',

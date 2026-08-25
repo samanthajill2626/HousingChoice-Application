@@ -1,3 +1,17 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-08-24).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+>
+> One drift is known already: the ticker described in S7 gained a clock-refresh on the rendered
+> item set during the merge review, because the arming clock froze the first time the ticker
+> disarmed. The `.superpowers/` artifacts this file cites - the adjudications, the review reports
+> and the gate evidence - were gitignored and died with the worktree. They are archived outside
+> the repo at `W:\tmp\_archive\per-recipient-delivery-2026-08-24\`.
+
 # Per-recipient delivery visibility on multi-party message bubbles
 
 Status: DESIGN rev 4 (folds design review rounds 1-3 - 48 findings, 46 accepted)

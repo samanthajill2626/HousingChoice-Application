@@ -165,21 +165,63 @@ rotting again, and it is the same script that found the problem.
 - Five gates bare from the worktree: typecheck, test, smoke, e2e, and `npx
   eslint` on the branch's own touched files.
 
-## 6. Open questions for the human
+## 6. Human rulings, 2026-08-25
 
-1. **Does a demoted contact's thread belong back in triage?** Option A hole 3
-   says the data is wrong today either way, but the product answer is not
-   obvious: demoting someone to `team_member` arguably means their thread should
-   NOT reappear in a triage queue. If it should not, the fix is to make the
-   pre-filter's source explicit rather than to flip the type back.
-2. **Backfill of ~610 rows** - dev and prod, and it is an operator action under
-   the repo's infrastructure rules. Needs an explicit go, dry-run first.
-3. **Is `unknown_1to1` semantically "we do not know who this is" or "this thread
-   started before we knew"?** Several readers treat it as a permissive fallback
-   (`c.type === 'tenant_1to1' || c.type === 'unknown_1to1'` appears in tour
-   reminders, placement nudges and the contact timeline). Retyping stale rows
-   NARROWS those matches. Verify each of those readers still behaves after a
-   backfill - this is the most likely place for a quiet regression.
+**Q1 - a thread whose contact goes back to UNKNOWN returns to triage. RULED
+YES.** With an important narrowing from the human: "demoted" means going back to
+`unknown` specifically. It does NOT mean tenant -> landlord (a re-resolution,
+which should retype the thread to the new identity) or tenant -> team_member.
+
+VERIFIED reachable, so this is a live bug and not a hypothetical: the API
+accepts `type: 'unknown'`, and `routes/contacts.ts` explicitly resets the status
+to `needs_review` when it does. A contact can therefore be flagged for review
+while its thread stays typed `tenant_1to1` and never appears in the Unknown tab.
+
+**STILL OPEN, and split out because the ruling does not cover it:**
+`conversationTypeFor` maps `team_member` to no 1:1 type exactly as it maps
+`unknown`, so the naive reading would drag team-member threads into triage too.
+A team member is a KNOWN person and almost certainly does not belong in a triage
+queue. `--audit-denorm` now counts these separately rather than hiding them
+inside one number - decide it on that count.
+
+**Q2 - backfill CONFIRMED needed.** Still an operator action under the repo's
+infrastructure rules: explicit go, dry-run first, and the numbers from
+`--audit-denorm` should size it before anyone writes it.
+
+**Q3 - `unknown_1to1` means BOTH** "we do not know who this is" AND "this thread
+predates knowing", because a large share of these were imported. RULED by the
+human.
+
+Consequence for the permissive readers, which is now a narrower risk than
+feared: tour reminders, placement nudges and the contact timeline all match
+`tenant_1to1 || unknown_1to1`, so retyping a stale thread to `tenant_1to1` keeps
+matching them. The behaviour only changes where a stale `unknown_1to1` is
+retyped to `landlord_1to1` or `partner_1to1` - and there the change is arguably
+a FIX (a landlord thread should not be collecting tenant tour reminders).
+Verify, do not assume; but this is no longer the most likely regression.
+
+## 6a. The sync problem is broader than `type`
+
+The human's framing, and it is correct: if contact data is being copied onto the
+conversation to make reads fast, then ALL of it has to be kept in sync, and it
+has not been.
+
+THREE contact-derived fields ride the same fan-out, with the same holes:
+
+| field | what a stale value costs |
+| --- | --- |
+| `type` | the Unknown-tab walk, and threads missing from triage |
+| `participant_display_name` | **an operator sees a WRONG NAME, rendered as if current** |
+| `participants[].contactId` | the link itself; a read that trusts it falls back or misses |
+
+The name is the one to worry about. A stale `type` costs money and a missed
+triage row; a stale NAME is shown to a person as fact. It has been measured for
+neither until now.
+
+`--audit-denorm` reports all three, replicating the app's own rules exactly
+(`conversationTypeFor`, and `displayNameOf` with its parts-trimmed-before-join
+behaviour). Run it before scoping the backfill: it sizes the work AND tells us
+whether the name has been drifting too.
 
 ## 7. Out of scope
 

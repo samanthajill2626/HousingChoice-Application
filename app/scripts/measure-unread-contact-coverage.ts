@@ -398,8 +398,150 @@ async function auditUnknownPage(pageLimit: number): Promise<void> {
   );
 }
 
+/**
+ * `--audit-denorm` mode. THREE contact-derived fields are copied onto the
+ * conversation row so the inbox can render without a join: the thread `type`,
+ * `participant_display_name`, and the `participants[].contactId` link. All
+ * three are maintained by ONE fan-out, from the contact-update route, and that
+ * fan-out has known holes - it follows only the contact's scalar PRIMARY phone,
+ * contact CREATE never runs it, and a demotion back to `unknown` writes nothing.
+ *
+ * So the question is not whether they drift but how far. A stale `type` costs
+ * a walk; a stale NAME is rendered to an operator as if it were current, which
+ * is worse. This measures both, plus how many rows carry a usable link at all.
+ *
+ * Replicates the app's own rules exactly: `conversationTypeFor` (team_member
+ * and unknown map to no 1:1 type, so the honest thread type is `unknown_1to1`)
+ * and `displayNameOf` (parts trimmed BEFORE the join, empty -> null).
+ *
+ * Full walk of the open partition, counts only, no PII - names are compared,
+ * never printed.
+ */
+async function auditDenorm(): Promise<void> {
+  const expectedTypeFor = (t: string | undefined): string =>
+    t === 'tenant'
+      ? 'tenant_1to1'
+      : t === 'landlord'
+        ? 'landlord_1to1'
+        : t === 'partner'
+          ? 'partner_1to1'
+          : 'unknown_1to1';
+  const nameOf = (c: { firstName?: unknown; lastName?: unknown } | undefined): string | null => {
+    const first = typeof c?.firstName === 'string' ? c.firstName.trim() : '';
+    const last = typeof c?.lastName === 'string' ? c.lastName.trim() : '';
+    const joined = [first, last].filter((x) => x.length > 0).join(' ');
+    return joined.length > 0 ? joined : null;
+  };
+
+  const n = {
+    open: 0,
+    resolvedContact: 0,
+    noUsableLink: 0,
+    linkViaPhoneOnly: 0,
+    typeDrift: 0,
+    typeDriftStaleUnknown: 0,
+    typeDriftMissingTriage: 0,
+    typeDriftTeamMember: 0,
+    nameDrift: 0,
+    nameMissingButKnown: 0,
+  };
+  let chunkStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const chunk = await conversations.listByLastActivity({
+      status: 'open',
+      limit: 100,
+      ...(chunkStartKey === undefined ? {} : { exclusiveStartKey: chunkStartKey }),
+    });
+    for (const conv of chunk.items) {
+      if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
+      n.open += 1;
+      const entry = conv.participants?.find(
+        (pt) => pt.phone === conv.participant_phone && pt.contactId !== '',
+      );
+      let contact;
+      if (entry?.contactId !== undefined && entry.contactId !== '') {
+        contact = (await contacts.getManyByIds([entry.contactId])).get(entry.contactId);
+      } else if (typeof conv.participant_phone === 'string' && conv.participant_phone !== '') {
+        contact = await contacts.findByPhone(conv.participant_phone);
+        if (contact !== undefined) n.linkViaPhoneOnly += 1;
+      }
+      if (contact === undefined) {
+        n.noUsableLink += 1;
+        continue;
+      }
+      n.resolvedContact += 1;
+
+      const expected = expectedTypeFor(contact.type as string | undefined);
+      if (conv.type !== expected) {
+        n.typeDrift += 1;
+        if (conv.type === 'unknown_1to1') n.typeDriftStaleUnknown += 1;
+        else if (expected === 'unknown_1to1') {
+          // SPLIT DELIBERATELY. `conversationTypeFor` maps BOTH `unknown` and
+          // `team_member` to no 1:1 type, but they are not the same product
+          // question: a contact explicitly set back to `unknown` is flagged
+          // `needs_review` and belongs in triage, while a `team_member` is a
+          // known person who almost certainly does not. Counting them together
+          // would hide that distinction inside a single number.
+          if (contact.type === 'team_member') n.typeDriftTeamMember += 1;
+          else n.typeDriftMissingTriage += 1;
+        }
+      }
+
+      const want = nameOf(contact as { firstName?: unknown; lastName?: unknown });
+      const have = typeof conv.participant_display_name === 'string'
+        ? conv.participant_display_name
+        : null;
+      if (want !== null && have === null) n.nameMissingButKnown += 1;
+      else if (want !== null && have !== null && want !== have) n.nameDrift += 1;
+    }
+    chunkStartKey = chunk.lastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (chunkStartKey !== undefined);
+
+  console.log(
+    [
+      '',
+      'Denormalized contact data on conversations - drift audit',
+      '=======================================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      '',
+      `  open 1:1 threads       ${n.open}`,
+      `    contact resolved     ${n.resolvedContact}`,
+      `    NO usable link       ${n.noUsableLink}  <- no contactId and no contact by phone`,
+      `    link only via phone  ${n.linkViaPhoneOnly}  <- participants[] carried no usable contactId`,
+      '',
+      '  THREAD TYPE (costs the Unknown-tab walk):',
+      `    drifted              ${n.typeDrift}`,
+      `      stale "unknown"    ${n.typeDriftStaleUnknown}  <- contact IS typed; thread still unknown_1to1`,
+      `      missing triage     ${n.typeDriftMissingTriage}  <- contact is UNKNOWN (needs_review); thread claims resolved`,
+      `      team_member        ${n.typeDriftTeamMember}  <- known person, probably should NOT be in triage; see design Q1`,
+      '',
+      '  DISPLAY NAME (rendered to the operator as if current):',
+      `    drifted              ${n.nameDrift}  <- thread shows a DIFFERENT name than the contact`,
+      `    missing but known    ${n.nameMissingButKnown}  <- contact has a name; thread falls back to phone`,
+      '',
+      n.typeDrift === 0 && n.nameDrift === 0 && n.nameMissingButKnown === 0
+        ? '  VERDICT  IN SYNC. The fan-out is holding; a backfill would be a no-op.'
+        : '  VERDICT  OUT OF SYNC. The fan-out is not holding these fields, so any\n' +
+          '           read that TRUSTS them inherits the drift. Backfill, then close\n' +
+          '           the holes, then re-run this as the drift detector.',
+      '',
+      '  The `missing triage` line is the one to read twice: those threads are',
+      '  invisible to the Unknown tab TODAY, so they are a correctness bug',
+      '  already, independent of any performance work.',
+      '',
+    ].join('\n'),
+  );
+}
+
 if (argv.includes('--audit-index')) {
   await auditIndex();
+  process.exit(0);
+}
+
+if (argv.includes('--audit-denorm')) {
+  await auditDenorm();
   process.exit(0);
 }
 

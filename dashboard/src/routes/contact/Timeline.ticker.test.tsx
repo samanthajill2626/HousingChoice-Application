@@ -501,6 +501,76 @@ describe('Timeline staleness ticker - termination table', () => {
     expect(spies.clear).toHaveBeenCalledWith(tickerId);
   });
 
+  // REGRESSION (planner review, 2026-08-24). The ticker's `tickNow` is not only
+  // the re-render trigger - it is ALSO the clock every staleness decision is
+  // measured against, and its only writer lives INSIDE the interval. So the
+  // moment the ticker disarms, the clock FREEZES for the lifetime of the mounted
+  // Timeline, and `canEverGoStale`'s futurity bound then refuses to re-arm for
+  // any leg whose clock is more than one budget newer than that freeze. The two
+  // reinforce each other: frozen clock -> nothing eligible -> no interval ->
+  // clock stays frozen.
+  //
+  // The reachable case is the ordinary one, and it is the incident's own shape
+  // with a longer gap: staff open a thread where everything has already
+  // delivered (so the ticker NEVER arms and the clock is pinned at mount), leave
+  // it open, and send later. Every test in this file before this one mounted
+  // fresh, where `tickNow === Date.now()` by construction - which is exactly why
+  // the suite was structurally blind to it.
+  it('re-arms for a leg that arrives long after the ticker disarmed - observable: the chip escalates for the NEW leg, proving the arming clock is not frozen at mount', () => {
+    const t0 = startFakeClock();
+    const spies = spyOnIntervals();
+    const settled = outboundAt(t0, {
+      c1: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+      c2: { status: 'delivered', deliveredAt: new Date(t0).toISOString() },
+    });
+    const view = renderTimeline({ items: [settled] });
+
+    // Nothing can escalate, so nothing is armed - and therefore nothing will
+    // ever bump the clock again on its own.
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
+    expect(spies.set).not.toHaveBeenCalled();
+
+    // Staff leave the thread open for longer than one budget.
+    const IDLE_MS = 20 * 60 * 1000;
+    act(() => {
+      vi.advanceTimersByTime(IDLE_MS);
+    });
+
+    // A new team message lands by SSE refetch. Its leg is FRESH - `sentAt` is
+    // now - which under a frozen clock reads as a full budget INTO THE FUTURE.
+    const tNew = Date.now();
+    const arrived = outboundAt(
+      tNew,
+      {
+        c1: { status: 'delivered', deliveredAt: new Date(tNew).toISOString() },
+        c2: { status: 'sent', sentAt: new Date(tNew).toISOString() },
+      },
+      { id: 'r2', tsMsgId: 'r2', body: 'here is the flyer' },
+    );
+    view.rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={[settled, arrived]}
+          source="server"
+          replyToPhone="+14705550148"
+          replyToLabel="most recent"
+          canSend={false}
+          onSend={vi.fn()}
+          relayRoster={ROSTER}
+        />
+      </MemoryRouter>,
+    );
+
+    // The new leg is live and not yet stale, so the ticker MUST arm for it.
+    expect(spies.set).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(PAST_THE_BOUNDARY_MS);
+    });
+    expect(screen.getByText('delivered 1/2 - 1 not confirmed')).toBeInTheDocument();
+  });
+
   it('ARMS on a MIXED map - one leg opted out, one live and eligible - observable: window.setInterval once, then the chip escalates for the live leg alone', () => {
     const t0 = startFakeClock();
     const spies = spyOnIntervals();

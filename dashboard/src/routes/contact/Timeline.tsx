@@ -1686,6 +1686,34 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // in the deps precisely so that the moment the last eligible leg goes stale the
   // condition flips false, the effect cleans up, and the interval STOPS. That
   // flip IS the termination proof.
+  // THE ARMING CLOCK MUST NEVER BE OLDER THAN THE ITEM SET IT JUDGES.
+  // `tickNow` is not only the re-render trigger; it is also the clock every
+  // staleness decision is measured against, and its only other writer lives
+  // INSIDE the interval below. So once the ticker disarms, nothing refreshes it,
+  // and a leg arriving later is judged against a frozen clock - which
+  // `canEverGoStale`'s futurity bound reads as a budget INTO THE FUTURE and
+  // refuses to arm for. The two reinforce each other: frozen clock -> nothing
+  // eligible -> no interval -> the clock stays frozen, for the lifetime of the
+  // mount and across thread switches, because this component is not keyed by
+  // conversation. The reachable case is the ordinary one - open a thread where
+  // everything has delivered (so the ticker never arms and the clock is pinned
+  // at mount), leave it open, then send.
+  //
+  // Refreshing on the RENDERED SET is sufficient: while the ticker is disarmed,
+  // no leg can cross the boundary without a new item arriving, because a leg
+  // that could cross it is exactly what keeps the ticker armed.
+  //
+  // The functional update returning `prev` unchanged is load-bearing, not
+  // defensive: a parent that hands us a fresh `items` array on every render
+  // would otherwise bump -> re-render -> bump for ever. Bailing out under one
+  // tick period makes that loop impossible while still bounding the clock's
+  // staleness to a single period.
+  useEffect(() => {
+    setTickNow((prev) => {
+      const now = Date.now();
+      return now - prev >= STALE_TICK_MS ? now : prev;
+    });
+  }, [visible]);
   const tickerArmed = useMemo(
     () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow)),
     [visible, tickNow],

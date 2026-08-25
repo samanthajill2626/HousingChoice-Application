@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom';
 import type {
   ContactEmail,
   ConversationParticipant,
+  RelayRecipientDelivery,
   TimelineCall,
   TimelineItem,
   TimelineMessage,
@@ -31,8 +32,15 @@ import {
   formatTime,
   formatTimeWithSeconds,
 } from './format.js';
-import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
-import type { DeliveryTone } from './deliveryStatus.js';
+import {
+  canEverGoStale,
+  deliveryReason,
+  isStaleLeg,
+  presentDeliveryStatus,
+  presentLegDelivery,
+  presentRelayDelivery,
+} from './deliveryStatus.js';
+import type { DeliveryPresentation, DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
 import {
@@ -40,6 +48,7 @@ import {
   memberDisplayLabel,
   senderLabel as resolveSenderLabel,
 } from '../../lib/memberAttribution.js';
+import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
@@ -440,6 +449,133 @@ const TONE_CLASS: Record<DeliveryTone, string | undefined> = {
   danger: styles.toneDanger,
 };
 
+/** The <ul>'s accessible name. Shared by the render and by e2e/unit locators, so
+ *  the list is reached with getByRole('list', { name }) rather than a test id. */
+const RECIPIENT_LIST_LABEL = 'Delivery by recipient';
+
+/** One rendered row of the per-recipient delivery breakdown. */
+interface RecipientRow {
+  /** The delivery_recipients map key - contactId, or `phone#<E164>`. */
+  key: string;
+  slot: RelayRecipientDelivery;
+  /** Who this row names (lib/recipientLabel) - never blank, and silent about
+   *  membership unless the roster actually supports the claim. */
+  name: RecipientLabel;
+  /** The row's own clock, already formatted; '' when the leg has none. */
+  when: string;
+}
+
+/**
+ * The row's timestamp: `deliveredAt` on a delivered leg, else `sentAt` on ANY
+ * leg that carries one - not only a `sent` leg.
+ *
+ * Restricting it to `sent` would render a stale `Queued - not confirmed` row as
+ * a red state with NO time while the identical fact one status over showed one,
+ * and the row exists to answer "why is the chip red". A group-text leg has
+ * neither clock (it is never given a `sentAt`), so many rows correctly show a
+ * state with no time - NEVER back-filled from the message's own instant, which
+ * would present a message-level fact as a per-leg one.
+ *
+ * formatTime returns '' for an unparseable instant, so the caller renders the
+ * time element only for a non-empty string rather than a dangling separator.
+ */
+function recipientRowTime(slot: RelayRecipientDelivery): string {
+  const iso =
+    slot.status === 'delivered' && slot.deliveredAt !== undefined ? slot.deliveredAt : slot.sentAt;
+  return iso === undefined ? '' : formatTime(iso);
+}
+
+/**
+ * Order the map's entries for display: ROSTER order first, then every slot whose
+ * key matches no roster member, in MAP-KEY order.
+ *
+ * The match reuses `findMemberByKey` - the same matcher `senderLabel`,
+ * `relayCallSummary` and `resolveRecipientLabel` use - so a row can never sort as
+ * "unmatched" while it renders a member's name.
+ *
+ * The `Array.isArray` guard is DEFENCE IN DEPTH, not a response to an observed
+ * wire shape: these rosters arrive off raw passthroughs, and the guard holds the
+ * same standard as the pre-existing `typeof` field guards in
+ * `memberAttribution.ts`. It is NOT a page-level guarantee - `GroupReplyNote` in
+ * this file calls `roster.map` on the same prop with no guard - so do not read it
+ * as one.
+ */
+function orderRecipientRows(
+  entries: Array<[string, RelayRecipientDelivery]>,
+  roster: ConversationParticipant[] | undefined,
+): RecipientRow[] {
+  const members = Array.isArray(roster) ? roster : [];
+  return entries
+    .map(([key, slot], index) => {
+      const member = members.length > 0 ? findMemberByKey(key, members) : undefined;
+      const rank = member === undefined ? Number.MAX_SAFE_INTEGER : members.indexOf(member);
+      return { key, slot, name: resolveRecipientLabel(key, roster), when: recipientRowTime(slot), rank, index };
+    })
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ key, slot, name, when }) => ({ key, slot, name, when }));
+}
+
+/** The chip's visible string: the presenter's label with the reason appended
+ *  inline, exactly as both chip spans render it. */
+function chipText(presentation: DeliveryPresentation, reason: string | undefined): string {
+  return reason !== undefined ? `${presentation.label} - ${reason}` : presentation.label;
+}
+
+/**
+ * Rewrite a visible delivery string for a SCREEN READER: `1/2` becomes `1 of 2`
+ * (a bare slash is ambiguous read aloud) and the ` - ` separator this file uses
+ * everywhere becomes a comma, which reads as a pause instead of a dash.
+ *
+ * The wording itself is NEVER re-cased or re-worded - the presenters own it, and
+ * a second spelling here would be free to drift from the visible one.
+ */
+function speakDeliveryText(text: string): string {
+  return text.replace(/(\d+)\/(\d+)/g, '$1 of $2').split(' - ').join(', ');
+}
+
+/**
+ * The delivery chip's accessible name (spec S6): the visible label, then each
+ * recipient and their state.
+ *
+ * WHY IT EXISTS: the bubble reveal is a div `onClick` with no keyboard path, so
+ * a screen-reader user cannot open the disclosure the rows live in. The name
+ * puts the same facts on the always-rendered chip. CONSEQUENCE, and it is not
+ * obvious: the S2 resolution above runs UNCONDITIONALLY on every outbound
+ * multi-party bubble, revealed or not.
+ *
+ * It takes the SAME clock as the chip it names. A name computed against a
+ * different clock than its own visible label is a contradiction a reader cannot
+ * resolve. It takes the SAME `media` flag for the same reason: a 30005 on an
+ * attachment leg must read "Attachment didn't get through" here, on the visible
+ * row, and on the rollup chip alike. One `isMms`, three consumers.
+ *
+ * Case-3 clause: with NO roster and every slot contactId-keyed there is nothing
+ * to say about anyone, so the name carries only the count rather than reciting
+ * "Unnamed recipient" N times.
+ */
+function recipientSummaryName(
+  headline: string,
+  rows: RecipientRow[],
+  rosterKind: RosterKind,
+  messageAtMs: number | undefined,
+  nowMs: number | undefined,
+  media: boolean,
+): string {
+  const spoken = speakDeliveryText(headline);
+  const anonymous = rows.every((r) => r.name.match === 'unidentified' && !r.name.phoneKeyed);
+  if (rows.length === 0 || anonymous) return spoken;
+  const recital = rows.map((row) => {
+    const who = row.name.note !== undefined ? `${row.name.label}, ${row.name.note}` : row.name.label;
+    const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, nowMs);
+    // A null presentation (an unrecognised wire status) names the person and
+    // claims no state - never a blank row, never an invented one.
+    if (leg === null) return `${who}.`;
+    const legReason = leg.isFailure ? deliveryReason(row.slot.errorCode, { media }) : undefined;
+    return `${who}: ${speakDeliveryText(chipText(leg, legReason))}.`;
+  });
+  return `${spoken}. ${recital.join(' ')}`;
+}
+
 /** Call tone -> chip color class. DELIBERATELY separate from TONE_CLASS above:
  *  that map is typed Record<DeliveryTone, ...> so it cannot hold 'warning', and
  *  it points at the DELIVERY palette, which is a different green (--c-success)
@@ -536,20 +672,126 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
   );
 }
 
+/** The staleness ticker's period. COARSE by design: it drives a RE-RENDER only -
+ *  it fetches nothing and never touches the network - and the boundary it has to
+ *  carry a leg across is 15 minutes wide (STALE_SENT_AFTER_MS), so a minute of
+ *  granularity costs at most a minute of lateness on a 15-minute cue. */
+const STALE_TICK_MS = 60 * 1000;
+
+/** The two clocks ONE bubble presents against, derived in ONE place so the
+ *  timeline's ticker run condition and the bubble's own rendering can never
+ *  disagree about what time it is for a given message.
+ *
+ *  `bubbleNowMs` is WITHHELD (undefined) on an imported row, which is the total
+ *  off switch for staleness - `isStaleLeg` and `canEverGoStale` both return
+ *  false without a clock, whatever `sentAt` a slot carries. That is why an
+ *  imported bubble both renders no escalation AND contributes nothing to the run
+ *  condition (plan D-b / D-c2): deriving it twice is what would let those two
+ *  drift apart.
+ *
+ *  `messageAtMs` may be NaN - `messageInstant` (conversation/useRelayThread.ts)
+ *  answers '' for a message with no provider_ts and a non-ISO tsMsgId. That is
+ *  handled downstream by `canEverGoStale`'s finiteness clause, NOT here: a leg
+ *  with a NaN clock must read as never-ageable rather than as forever-eligible. */
+function bubbleClocks(
+  msg: TimelineMessage,
+  tickNow: number,
+): { messageAtMs: number; bubbleNowMs: number | undefined } {
+  return {
+    messageAtMs: Date.parse(msg.at),
+    bubbleNowMs: msg.imported === true ? undefined : tickNow,
+  };
+}
+
+/**
+ * THE TICKER'S RUN CONDITION, per message: does this bubble render at least one
+ * outbound leg that CAN still go stale but has not yet?
+ *
+ * It is a PREDICATE over the presenter's own two functions, never a shape test.
+ * Four distinct non-terminations have been shipped-and-caught behind this one
+ * line, and each is closed by a specific clause here:
+ *
+ *  1. "any non-terminal leg" - a STALE leg stays non-terminal for ever, so the
+ *     interval would run permanently on exactly the threads this feature
+ *     targets. Closed by `!isStaleLeg(...)`.
+ *  2. "non-terminal AND not-yet-stale" - a `queued` leg with no `sentAt` is BOTH
+ *     for ever (that is the deliberate, human-decided silence), so it would spin
+ *     for ever on a group text after a receipts-webhook outage and on a relay
+ *     message whose fan-out never ran. Closed by `canEverGoStale(...)`, which
+ *     answers false for exactly the rows of the S3 table that have no ageing
+ *     clock.
+ *  3. a WITHHELD clock - an imported bubble's `nowMs` is undefined and must
+ *     contribute NOTHING. Closed by passing the BUBBLE's clock (see
+ *     `bubbleClocks`), not the raw tick.
+ *  4. a clock that parses to NaN - a real handled shape here, not a defensive
+ *     hypothetical. Closed by `canEverGoStale`'s finiteness clause.
+ *  5. a clock in the FUTURE - the ageing clocks are the PROVIDER's and `nowMs`
+ *     is the OPERATOR'S BROWSER clock, so a browser running slow puts every
+ *     freshly-sent leg ahead of us, where it is "eligible" and "not yet stale"
+ *     at once. Closed by `canEverGoStale`'s FUTURITY BOUND, which keeps ordinary
+ *     skew eligible (so the escalation is late, never missed) and drops a clock
+ *     more than one whole staleness budget ahead. Read that function's doc
+ *     before touching the bound.
+ *
+ * `canEverGoStale` and `isStaleLeg` derive their clock from one shared private
+ * helper inside the presenter, so they cannot disagree about which clock a slot
+ * uses. Staleness is monotonic and a real receipt arrives as an SSE refetch
+ * rather than a tick, so the tick only ever has to carry a leg ACROSS the
+ * boundary - never back.
+ *
+ * The gate mirrors what the bubble actually RENDERS: a leg nothing presents
+ * cannot change any pixel, so it must not buy an interval. FIVE clauses carry
+ * that mirror, and each one names a real rendering decision made elsewhere:
+ *
+ *  - OUTBOUND only, and a non-empty `delivery_recipients` map, which is
+ *    `showRecipients` / the rollup guard in `MessageBubble`.
+ *  - NOT a `queued_pending` hold, which suppresses both the rollup and the rows.
+ *  - NOT an `email` row. `StreamItem` routes `type === 'email'` to `EmailCard`,
+ *    which renders no rollup, no rows and no legs at all - while the server
+ *    (`app/src/routes/contactTimeline.ts`) attaches `delivery_recipients` to a
+ *    message of ANY type. Latent today (no email carries such a map), and the
+ *    check is on the TYPE for exactly the reason the routing is: this predicate
+ *    must move whenever that switch does.
+ *  - NOT an OPTED-OUT leg. `presentRelayDelivery` filters `contact_opted_out`
+ *    out of its counts and `presentLegDelivery` short-circuits on the code
+ *    BEFORE any staleness test, so neither the chip nor the row can ever change
+ *    for such a leg however long it sits there.
+ */
+function hasTickableLeg(msg: TimelineMessage, tickNow: number): boolean {
+  if (msg.direction !== 'outbound') return false;
+  if (msg.type === 'email') return false;
+  if (msg.delivery_status === 'queued_pending') return false;
+  const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
+  if (bubbleNowMs === undefined) return false;
+  return Object.values(msg.delivery_recipients ?? {}).some(
+    (slot) =>
+      slot.errorCode !== 'contact_opted_out' &&
+      canEverGoStale(slot, messageAtMs, bubbleNowMs) &&
+      !isStaleLeg(slot, messageAtMs, bubbleNowMs),
+  );
+}
+
 function MessageBubble({
   msg,
   onRetry,
   relayRoster,
   rosterKind = 'relay',
+  tickNow,
 }: {
   msg: TimelineMessage;
   onRetry?: (msg: TimelineMessage) => void;
   /** Present in the relay-group view → enables sender attribution + delivered N/M. */
   relayRoster?: ConversationParticipant[];
-  /** Which product the roster belongs to. Only the sender chip reads it: a
-   *  nameless `group_text` member is attributed by formatted number (spec 4.2),
-   *  while relay keeps its prior no-line rendering (invariant 6). */
+  /** Which product the roster belongs to. Read by the sender chip (a nameless
+   *  `group_text` member is attributed by formatted number, spec 4.2, while
+   *  relay keeps its prior no-line rendering, invariant 6) and by the per-leg
+   *  presenter, whose opted-out copy is product-aware for the same reason the
+   *  opt-out note below is. */
   rosterKind?: RosterKind;
+  /** The TIMELINE's clock, hosted once per thread and ALWAYS a number. It is not
+   *  read directly: see `bubbleNowMs` below, which is the value this bubble
+   *  actually presents against. */
+  tickNow: number;
 }): React.JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
@@ -598,6 +840,28 @@ function MessageBubble({
   const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
     (r) => r.errorCode === 'contact_opted_out',
   ).length;
+  // ONE CLOCK PER BUBBLE, and it is a DIFFERENT value from the timeline's tick.
+  // `tickNow` is always a number and exists to force re-renders; `bubbleNowMs` is
+  // what this bubble PRESENTS against, and it is WITHHELD on an imported row.
+  // Withholding the clock is the total off switch for staleness (isStaleLeg
+  // returns false for every slot without it, whatever `sentAt` the slot carries),
+  // which is the same guarantee the 1:1 call above gets by withholding its
+  // TIMESTAMP - the two functions take opposite conventions on the name `nowMs`,
+  // see their docs. The rollup, every row and the accessible name all read this
+  // ONE variable, so they cannot disagree about what time it is.
+  //
+  // NOT folded into the 1:1 call at the top of this component: that call's shape
+  // is frozen (two out-of-scope callers depend on presentDeliveryStatus and its
+  // `sent`-only rule), so it keeps its own implicit Date.now() default.
+  // Derived by the SHARED helper, which is also what the timeline's ticker run
+  // condition walks - so a bubble and the interval that exists to re-render it
+  // can never disagree about this message's clocks.
+  const { messageAtMs, bubbleNowMs } = bubbleClocks(msg, tickNow);
+  // Object.entries, not Object.values: the KEYS are who each leg went to, and
+  // throwing them away is precisely what left the 2026-08-23 bubble saying
+  // "delivered 1/2" about a coin flip the founder lost. The rollup still reads
+  // them in MAP order, exactly as it did.
+  const recipientEntries = Object.entries(msg.delivery_recipients ?? {});
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
   // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery
   // as ONE rollup chip (counting up while in flight, green "Delivered N/N" once
@@ -609,14 +873,56 @@ function MessageBubble({
   // message's own "Queued - will send when connected" chip is the honest state.
   const deliveredSummary =
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
-      ? presentRelayDelivery(Object.values(msg.delivery_recipients), { media: isMms })
+      ? presentRelayDelivery(
+          recipientEntries.map(([, slot]) => slot),
+          { media: isMms, messageAtMs, nowMs: bubbleNowMs },
+        )
       : null;
+  const recipientRows = orderRecipientRows(recipientEntries, relayRoster);
+  // THE LIST'S GATE - ONE predicate, evaluated INDEPENDENTLY of the rollup's
+  // value. Deliberately NOT `deliveredSummary !== null`: presentRelayDelivery
+  // returns null for an ALL-OPTED-OUT map as well as an empty one, so gating on
+  // the rollup would delete the opted-out rows in the one case where those
+  // members are the ONLY information the bubble has. There the chip states the
+  // aggregate, the note counts, and the rows NAME - three elements, three jobs.
+  const showRecipients =
+    outbound && recipientEntries.length > 0 && msg.delivery_status !== 'queued_pending';
+  // Spec S6. The name goes on whichever chip ACTUALLY RENDERS: the rollup chip
+  // when there is one, else - and only on a branch-0 bubble, i.e. a non-empty map
+  // whose legs all opted out - the message-level chip, which is the only chip
+  // that bubble has. A bubble with NO map at all gets neither, which is what
+  // keeps the repo's single unnamed-<img> guard honest.
+  const rollupName =
+    deliveredSummary !== null
+      ? recipientSummaryName(
+          chipText(deliveredSummary, deliveredSummary.reason),
+          recipientRows,
+          rosterKind,
+          messageAtMs,
+          bubbleNowMs,
+          isMms,
+        )
+      : undefined;
   // Multi-party attribution: who authored this message ("Team" or a member's
   // name), resolved through the SHARED resolver so a relay bubble and a native
   // group_text bubble render identically. Undefined on a 1:1 bubble (no
   // relay_sender_key) -> no attribution line.
   const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster, rosterKind);
   const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
+  // The branch-0 half of the S6 rule. `showRecipients && deliveredSummary === null`
+  // is exactly "a non-empty map, outbound, not a queued_pending hold, and the
+  // rollup still came back null" - which only happens when every leg opted out.
+  const messageChipName =
+    showRecipients && deliveredSummary === null && delivery !== null
+      ? recipientSummaryName(
+          chipText(delivery, reason),
+          recipientRows,
+          rosterKind,
+          messageAtMs,
+          bubbleNowMs,
+          isMms,
+        )
+      : undefined;
 
   // The transport - number - time line is hidden by default; a click/tap on the
   // bubble reveals it (the grouped time labels give the at-a-glance time). Don't
@@ -658,21 +964,86 @@ function MessageBubble({
           <span
             className={`${styles.status} ${toneClass}`}
             {...(reason !== undefined && { title: reason })}
+            {...(messageChipName !== undefined && { role: 'img', 'aria-label': messageChipName })}
           >
             {delivery.label}
             {reason !== undefined ? ` - ${reason}` : ''}
           </span>
         ) : null}
         {deliveredSummary !== null ? (
+          // role="img" is what makes the name stick: a bare <span> maps to
+          // role=generic, on which ARIA PROHIBITS an author-provided name, so a
+          // plain aria-label is the one construct guaranteed not to work.
+          // role="img" makes the chip a leaf that supports a name, and the title
+          // stays for mouse users. Precedent: AutoBadge.tsx.
           <span
             className={`${styles.status} ${TONE_CLASS[deliveredSummary.tone] ?? ''}`}
             {...(deliveredSummary.reason !== undefined && { title: deliveredSummary.reason })}
+            {...(rollupName !== undefined && { role: 'img', 'aria-label': rollupName })}
           >
             {deliveredSummary.label}
             {deliveredSummary.reason !== undefined ? ` - ${deliveredSummary.reason}` : ''}
           </span>
         ) : null}
       </div>
+      {/* Who the send actually reached. CONDITIONALLY RENDERED on the reveal -
+       *  NOT the meta line's display:none - so presence/absence is a real unit
+       *  assertion in a css:false environment and no hidden row TEXT sits in the
+       *  DOM for a page-scoped e2e getByText to match. A SIBLING of .meta, never
+       *  a child: a <ul> inside that flex row fights margin-left:auto on .status.
+       *
+       *  WHAT THIS DOES NOT MEAN. A collapsed bubble is not silent about its
+       *  recipients: spec S6 puts the same per-recipient facts on the
+       *  always-rendered chip as an `aria-label` ATTRIBUTE (`rollupName` /
+       *  `messageChipName` above, computed unconditionally), and S6 consequence 3
+       *  states that DELIBERATELY - it is what gives a screen-reader user, who
+       *  cannot open this disclosure at all, the names. So the guarantee here is
+       *  about rendered TEXT ONLY, which is exactly what the unit negatives and
+       *  the e2e `toHaveCount(0)` / `toContainText` assertions read.
+       *
+       *  The rows do NOT stopPropagation, deliberately. They are children of the
+       *  bubble whose onClick is the toggle, so clicking a row collapses the list
+       *  - ordinary disclosure behavior, and locked decision 1 forbids a second
+       *  click target inside the bubble. The two OTHER interactive children opt
+       *  out, which makes adding it here look defensive; do not. Staff selecting
+       *  a phone number are already protected by toggleMeta's early return. */}
+      {showRecipients && revealed ? (
+        <ul className={styles.recipientList} aria-label={RECIPIENT_LIST_LABEL}>
+          {recipientRows.map((row) => {
+            const leg = presentLegDelivery(row.slot, rosterKind, messageAtMs, bubbleNowMs);
+            // A reason renders only when THIS row's own presentation isFailure,
+            // mirroring the message-level rule. An errorCode does NOT imply
+            // failure: the fan-out writes a transient carrier code onto a leg it
+            // is still retrying, and printing that beside it is its own misread.
+            //
+            // `{ media: isMms }` is REQUIRED, not decorative. Without it a 30005
+            // on an attachment leg reads "Number is invalid" beside a named
+            // member - the un-hedged copy the MMS fix removed from the rollup -
+            // so this NEW surface would contradict the message-level chip
+            // directly above it. One `isMms` feeds the rollup, this row and the
+            // accessible name, so the three cannot disagree.
+            const legReason =
+              leg?.isFailure === true
+                ? deliveryReason(row.slot.errorCode, { media: isMms })
+                : undefined;
+            return (
+              <li key={row.key} className={styles.recipientRow}>
+                <span className={styles.recipientName}>
+                  {row.name.note !== undefined ? `${row.name.label} - ${row.name.note}` : row.name.label}
+                </span>
+                {leg !== null ? (
+                  <span className={`${styles.recipientState ?? ''} ${TONE_CLASS[leg.tone] ?? ''}`}>
+                    {chipText(leg, legReason)}
+                  </span>
+                ) : null}
+                {row.when.length > 0 ? (
+                  <span className={styles.recipientTime}>{row.when}</span>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
       {optedOutCount > 0 ? (
         // A27(a). The FRAMING is per product, because the mechanism is per
         // product. A relay send really is relayed - we fan a message out to each
@@ -1047,11 +1418,16 @@ function StreamItem({
   onRetry,
   relayRoster,
   rosterKind,
+  tickNow,
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
   relayRoster?: ConversationParticipant[];
   rosterKind?: RosterKind;
+  /** The timeline's clock, passed straight through to MessageBubble. Required,
+   *  not optional: an undefined clock means "staleness off" downstream, so a
+   *  missed prop would silently disable the escalation rather than fail. */
+  tickNow: number;
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
@@ -1062,6 +1438,7 @@ function StreamItem({
         <MessageBubble
           msg={item}
           onRetry={onRetry}
+          tickNow={tickNow}
           {...(relayRoster !== undefined && { relayRoster })}
           {...(rosterKind !== undefined && { rosterKind })}
         />
@@ -1109,6 +1486,14 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   } = props;
   const emailChannel = props.emailChannel;
   const hasEmail = (emailChannel?.emails.length ?? 0) > 0;
+  // ONE clock per THREAD, not one per bubble, reaching every bubble by the same
+  // prop path rosterKind already uses. INITIALISED AT MOUNT and never undefined:
+  // an undefined clock means "staleness off" downstream, so a lazy seed would
+  // make the FIRST render of every thread show no escalation at all - and the
+  // 2026-08-23 headline case is a founder OPENING a thread whose leg went quiet
+  // hours ago. The interval below only ever has to carry a leg ACROSS the
+  // boundary while the thread stays open.
+  const [tickNow, setTickNow] = useState<number>(() => Date.now());
   const [channel, setChannel] = useState<'text' | 'email'>('text');
   // The [Text | Email] toggle exists ONLY on a 1:1 contact page (emailChannel
   // present) and NEVER on a relay/group thread. With no address on file the Email
@@ -1291,6 +1676,82 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       return true;
     });
   }, [items, commsOnly]);
+
+  // THE STALENESS TICKER (spec S7 / plan D-c). ONE interval per THREAD, not one
+  // per bubble, bumping the `tickNow` every MessageBubble already reads.
+  //
+  // ARMED ONLY while some RENDERED leg can still cross the 15-minute boundary -
+  // see `hasTickableLeg` for the four non-terminations that predicate closes.
+  // `visible` (not `items`) is what the stream actually renders, and `tickNow` is
+  // in the deps precisely so that the moment the last eligible leg goes stale the
+  // condition flips false, the effect cleans up, and the interval STOPS. That
+  // flip IS the termination proof.
+  // THE ARMING CLOCK MUST NEVER BE OLDER THAN THE ITEM SET IT JUDGES.
+  // `tickNow` is not only the re-render trigger; it is also the clock every
+  // staleness decision is measured against, and its only other writer lives
+  // INSIDE the interval below. So once the ticker disarms, nothing refreshes it,
+  // and a leg arriving later is judged against a frozen clock - which
+  // `canEverGoStale`'s futurity bound reads as a budget INTO THE FUTURE and
+  // refuses to arm for. The two reinforce each other: frozen clock -> nothing
+  // eligible -> no interval -> the clock stays frozen, for the lifetime of the
+  // mount and across thread switches, because this component is not keyed by
+  // conversation. The reachable case is the ordinary one - open a thread where
+  // everything has delivered (so the ticker never arms and the clock is pinned
+  // at mount), leave it open, then send.
+  //
+  // Refreshing on the RENDERED SET closes that deadlock: after any commit where
+  // the rendered set changed, this clock is at most one tick period old, which
+  // is far inside the futurity bound's budget, so the two can no longer
+  // reinforce each other. A leg that could cross the boundary is also exactly
+  // what keeps the ticker armed, so while it is disarmed an ARRIVING item is
+  // normally the only thing that can change the answer.
+  //
+  // ONE EXCEPTION, and it is deliberate - do NOT read this as a reason to delete
+  // the futurity bound. A leg whose clock sits MORE than one budget in the
+  // future (a badly skewed browser clock) is ineligible now and would become
+  // eligible as real time passes, with no item arriving to re-evaluate it. That
+  // is the disclosed LATE-becomes-NEVER trade `canEverGoStale` already documents,
+  // not a new hole: the bound is what keeps ordinary skew escalating late
+  // instead of never, and removing it costs far more than it buys.
+  //
+  // The functional update returning `prev` unchanged is load-bearing, not
+  // defensive: a parent that hands us a fresh `items` array on every render
+  // would otherwise bump -> re-render -> bump for ever. Bailing out under one
+  // tick period makes that loop impossible while still bounding the clock's
+  // staleness to a single period.
+  useEffect(() => {
+    setTickNow((prev) => {
+      const now = Date.now();
+      return now - prev >= STALE_TICK_MS ? now : prev;
+    });
+  }, [visible]);
+  const tickerArmed = useMemo(
+    () => visible.some((i) => i.kind === 'message' && hasTickableLeg(i, tickNow)),
+    [visible, tickNow],
+  );
+  useEffect(() => {
+    if (!tickerArmed) return undefined;
+    const bump = (): void => {
+      setTickNow(Date.now());
+    };
+    // VISIBILITY-GATED, matching GroupTextView.tsx's member poll: re-rendering a
+    // hidden tab only updates pixels nobody is looking at, and thread paging
+    // means the re-rendered timeline grows without bound as staff load older
+    // pages. The focus listener is what makes coming back to the tab immediate,
+    // so the interval only has to cover the tab already in front of them. It
+    // fetches NOTHING - the whole cost is one React render.
+    const onFocus = (): void => {
+      bump();
+    };
+    window.addEventListener('focus', onFocus);
+    const timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') bump();
+    }, STALE_TICK_MS);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(timer);
+    };
+  }, [tickerArmed]);
 
   // Group items into clusters (iMessage-style): a new cluster starts on a new day
   // OR a gap > 1h from the previous item. Each cluster gets a centered time label —
@@ -1579,6 +2040,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                     key={`${item.kind}:${item.id}:${ii}`}
                     item={item}
                     onRetry={onRetrySurfaced}
+                    tickNow={tickNow}
                     {...(relayRoster !== undefined && { relayRoster })}
                     rosterKind={rosterKind}
                   />

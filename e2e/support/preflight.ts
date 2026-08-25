@@ -11,15 +11,13 @@ import { appUrl, dashboardUrl, fakeUrl } from './urls.js';
  * Why this exists: `reuseExistingServer` (playwright.config.ts) will happily
  * reuse ANY process already listening on :5174 — including a stale or
  * hand-started session booted with the wrong env. The canonical failure: an app
- * started WITHOUT `MESSAGING_RECORD_OUTBOX=1` has no outbox-recording wrapper,
- * so every outbound send silently skips the dev-outbox and `outbox.spec.ts`
- * fails with a mystifying `Received: 0` — with nothing in the spec output
- * pointing at the real cause (the stack, not the code). This preflight queries
- * `/__dev/ping` (which echoes the stack's config flags) and turns that class of
- * failure into a single, ACTIONABLE error before any spec runs.
+ * started with the wrong messaging driver or sending flags makes every send
+ * assertion fail with a mystifying `Received: 0` — with nothing in the spec
+ * output pointing at the real cause (the stack, not the code). This preflight
+ * queries `/__dev/ping` (which echoes the stack's config flags) and turns that
+ * class of failure into a single, ACTIONABLE error before any spec runs.
  */
 const EXPECTED = {
-  recordOutbox: true,
   messagingDriver: 'twilio',
   smsSendingEnabled: true,
   // Email-channel v1 (A7): the hermetic stack runs the SES driver pointed at the
@@ -76,8 +74,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
         `Playwright reuses an already-running server (reuseExistingServer), so a session started ` +
         `by hand or with the wrong env gets reused SILENTLY. Fix: stop it with \`npm run e2e:stop\` ` +
         `(plus any stray app on :8080/:5174/:8889) and re-run — the launcher (scripts/e2e-session.mjs) ` +
-        `bakes in the correct env. Note: recordOutbox=false means NO outbox recording, which makes ` +
-        `outbox.spec.ts fail with "Received: 0".`,
+        `bakes in the correct env.`,
     );
   }
 

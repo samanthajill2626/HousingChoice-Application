@@ -16,7 +16,7 @@
 // Conventions mirror scheduled-visibility.spec.ts: Team acts through the REAL
 // dashboard UI, inbound + pure setup ride the API seam, contacts are fresh and
 // timestamped (no per-test reseed), and proof-of-send is asserted against the
-// fake-twilio thread store (never the deprecated /__dev/outbox).
+// fake-twilio thread store.
 //
 // TIMING CONTRACT (the part that makes this deterministic at ANY wall clock):
 //   - The panel's suppression estimate is computed against the SERVER'S WALL

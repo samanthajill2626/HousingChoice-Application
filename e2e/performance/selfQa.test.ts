@@ -41,6 +41,10 @@ function api(values: Readonly<Record<string, unknown>>): SelfQaApi {
   return { get: async (path) => values[path] ?? {} };
 }
 
+// The absolute thread-store URL the CLI passes in production; any fixed string
+// works here since the mock api keys on it verbatim.
+const PROOF_OF_SEND_URL = 'http://127.0.0.1:8889/control/threads';
+
 const inbox = {
   rows: [
     { kind: 'contact', contactId: RAW.contact_detail, unreadCount: 2 },
@@ -70,7 +74,7 @@ function fixtureApi(overrides: Readonly<Record<string, unknown>> = {}): SelfQaAp
     '/api/tours': { tours: [{ tourId: 'raw-tour-a' }] },
     '/api/placements': { placements: [{ placementId: 'raw-placement-a' }] },
     '/api/unmatched-email': { rows: [{ unmatchedId: RAW.unmatched_email, read: false }] },
-    '/__dev/outbox': { messages: [] },
+    [PROOF_OF_SEND_URL]: { threads: [] },
     ...overrides,
   });
 }
@@ -196,7 +200,7 @@ describe('self-QA fixture and state guardian', () => {
   });
 
   it('reduces only the named six scalars and outbox count, then reports safe unchanged booleans', async () => {
-    const before = await reduceSelfQaSnapshot(bindings, fixtureApi());
+    const before = await reduceSelfQaSnapshot(bindings, fixtureApi(), PROOF_OF_SEND_URL);
     expect([...before.values()]).toEqual([2, 2, 2, false, 2, 2, 0]);
     const safe = compareSelfQaSnapshots(before, new Map(before));
     expect(safe.every((row) => row.unchanged)).toBe(true);
@@ -207,7 +211,7 @@ describe('self-QA fixture and state guardian', () => {
   });
 
   it('reports a before/after mismatch without either value', async () => {
-    const before = await reduceSelfQaSnapshot(bindings, fixtureApi());
+    const before = await reduceSelfQaSnapshot(bindings, fixtureApi(), PROOF_OF_SEND_URL);
     const after = new Map(before);
     after.set('inbox_row', 0);
     expect(compareSelfQaSnapshots(before, after)).toContainEqual({ surface: 'inbox_row', unchanged: false });

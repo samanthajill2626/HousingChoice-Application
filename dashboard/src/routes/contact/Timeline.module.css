@@ -350,6 +350,46 @@
   outline-offset: 1px;
 }
 
+/* Per-recipient delivery breakdown on a multi-party outbound bubble: one row per
+ * member of the delivery_recipients map, in roster order. Rendered only while the
+ * bubble is revealed - a CONDITIONAL RENDER in the component, not a display rule
+ * here, so a collapsed bubble carries no per-recipient claims in the DOM at all.
+ *
+ * A SIBLING of .meta, never a child: .meta is a flex row and .status pins itself
+ * to its right edge with margin-left:auto, which a nested <ul> would fight.
+ * Nothing else in this module styles a list, so the reset is explicit. Per-leg
+ * state colour comes from the same .toneX classes the chips use (via TONE_CLASS),
+ * so "Delivered" is the same green on a row as on a 1:1 bubble. */
+.recipientList {
+  list-style: none;
+  margin: var(--sp-1) 0 0;
+  padding: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.recipientRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+}
+
+/* The name takes the slack so the state and the time trail at the right edge,
+ * matching the chip's alignment in the meta row above. */
+.recipientName {
+  flex: 1 1 auto;
+  color: var(--c-text);
+}
+
+.recipientState {
+  font-weight: var(--fw-medium);
+}
+
+.recipientTime {
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- Milestone pins ------------------------------------------------------- */
 
 .evt {

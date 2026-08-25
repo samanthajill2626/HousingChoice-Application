@@ -134,7 +134,7 @@ tears down the dev loop.
 ### Re-hydrating after a manual reseed
 
 The replay is deliberately **NOT** wired into `POST /__dev/reseed` — reseed must
-stay byte-stable for the e2e outbox assertions. So if you reseed a **running**
+stay byte-stable for the e2e proof-of-send assertions. So if you reseed a **running**
 stack with the full profile, the seeded relay group won't reappear in the fake
 until you re-fire the replay yourself:
 

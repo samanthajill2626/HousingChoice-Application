@@ -1,6 +1,6 @@
 // email-channel B4 / ADJ-8: reseed clears the unmatched_email side-door store
-// WITHOUT any explicit dev.ts edit. resetLocalData (devReset.ts:75-77) clears
-// EVERY TABLES base (+ the outbox) before re-seeding, and B3 registered
+// WITHOUT any explicit dev.ts edit. resetLocalData (devReset.ts) clears
+// EVERY TABLES base before re-seeding, and B3 registered
 // unmatched_email in TABLES - so a reseed wipes any side-door rows automatically.
 //
 // This is a deterministic MECHANISM proof (no DynamoDB, no seedAll) rather than a
@@ -11,12 +11,11 @@
 // (F23), so after a reseed the table is empty.
 import { describe, expect, it } from 'vitest';
 import { TABLES } from '../src/lib/tables.js';
-import { OUTBOX_TABLE_BASE } from '../src/adapters/recordingMessaging.js';
 
 describe('reseed clears unmatched_email (ADJ-8, F23)', () => {
-  it("resetLocalData's clear-set (every TABLES base + the outbox) includes unmatched_email", () => {
-    // Mirror the exact array resetLocalData iterates to clear tables (devReset.ts:75).
-    const clearSet = [...TABLES.map((t) => t.baseName), OUTBOX_TABLE_BASE];
+  it("resetLocalData's clear-set (every TABLES base) includes unmatched_email", () => {
+    // Mirror the exact array resetLocalData iterates to clear tables (devReset.ts).
+    const clearSet = TABLES.map((t) => t.baseName);
     expect(clearSet).toContain('unmatched_email');
   });
 

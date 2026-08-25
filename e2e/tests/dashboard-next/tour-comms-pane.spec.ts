@@ -144,8 +144,7 @@ async function createTour(
 }
 
 /** Proof-of-send: EXACTLY one outbound leg carrying `bodyPart` reached `phone`
- *  from the app number (the preferred fake-twilio thread store, not the
- *  deprecated /__dev/outbox). */
+ *  from the app number (the fake-twilio thread store). */
 async function expectOneOutboundTo(
   request: APIRequestContext,
   phone: string,

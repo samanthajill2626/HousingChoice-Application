@@ -23,7 +23,6 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/auth/login',
   '/auth/logout',
   '/auth/me',
-  '/__dev/outbox',
   '/__dev/performance/reseed',
   '/__dev/ping',
   '/__dev/reseed',

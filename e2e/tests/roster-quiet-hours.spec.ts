@@ -9,8 +9,7 @@
 //      DEFERRAL as the default - and taking that default opens NOTHING: no
 //      thread, no text, and a pending banner saying when it will happen. Then
 //      the operator overrides with "Send now anyway" and the intro really goes
-//      out (proved against the fake-twilio thread store, never the deprecated
-//      /__dev/outbox - worklist A12).
+//      out (proved against the fake-twilio thread store - worklist A12).
 //
 //   2. THE DEFERRED ADD, both ways it can end. Against a LIVE relay group: the
 //      add defers (the person is deliberately NOT a member yet - membership

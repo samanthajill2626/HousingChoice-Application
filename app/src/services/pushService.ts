@@ -159,8 +159,11 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * info, and the window opens on every process start and every deploy, exactly
    * when a burst of queued webhooks lands. A floored caller now JOINS the
    * attempt already in flight instead of guessing: at most one Scan attempt
-   * per 30s floor window PER INSTANCE, and never a drop while a usable answer
-   * is on its way. NOT "never a second Scan": a Scan that outlives the floor
+   * per 30s floor window PER INSTANCE, and a floored caller never drops while
+   * THE ATTEMPT IT JOINED can still answer - a caller that joined attempt N
+   * can still drop if N fails while a LATER attempt is in flight (it wakes to
+   * an empty cache and does not re-join; accepted, the next send retries).
+   * NOT "never a second Scan": a Scan that outlives the floor
    * legitimately overlaps its successor - the join slot is identity-guarded
    * so the LATEST attempt stays joinable, and the cache write is
    * ordered-by-attempt so an older Scan settling late cannot overwrite newer

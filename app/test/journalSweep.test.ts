@@ -649,10 +649,13 @@ describe('journal sweep: a failed run', () => {
     expect(errorMsgs.some((m) => m.includes('run failed'))).toBe(false);
   });
 
-  it('a failed cursor SET is deferred too, and recovery still runs (re-review R-1)', async () => {
+  it('a failed cursor SET still recovers and WARNs (re-review R-1, SET branch)', async () => {
     // The SET branch: pages never exhaust (every page returns a nextCursor),
-    // so the persist writes a real cursor - and its failure must produce the
-    // same honest deferral as the CLEAR branch.
+    // so the persist writes a real cursor. NOTE the deferred assertion below
+    // is NOT the R-1 pin on this branch - !exhausted already forces deferred
+    // true here; the discriminating deferred pin is the CLEAR-branch test
+    // above. This case earns its keep on the WARN and the recovery still
+    // running.
     let recoverCallsForContact = 0;
     const h = harness({
       listRows: async () => ({ rows: [row()], nextCursor: '{"itemId":"resolve#next"}' }),

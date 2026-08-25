@@ -309,8 +309,8 @@ export async function runJournalSweep(
       // ERROR: a standing daily alarm nothing can clear is the exact noise
       // class this mission removes.
       log.info(
-        { contactsVisited: outcome.contactsVisited, pages, exhausted, budgetExhausted, droppedQualifying },
-        'journal sweep: work deferred to the next run (caps/pages)',
+        { contactsVisited: outcome.contactsVisited, pages, exhausted, budgetExhausted, droppedQualifying, cursorPersistFailed },
+        'journal sweep: work deferred to the next run',
       );
     }
     log.info(

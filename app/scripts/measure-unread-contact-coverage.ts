@@ -721,6 +721,11 @@ if (argv.includes('--audit-index')) {
  * whole point.
  */
 async function auditTabVsPartition(pageLimit: number): Promise<void> {
+  // Same flag as --audit-triage-partition, and for the same reason: draft 4's
+  // requirement 1 queries type=unknown with NO status narrowing. Left narrowed,
+  // this diff reports every `active` unknown as "in tab, NOT in partition" -
+  // losses the design would never actually incur.
+  const narrow = !argv.includes('--no-status-narrow');
   // 1. Walk the open partition exactly as the pager does, collecting the
   //    contact ids the tab would show. No page limit here - we want the whole
   //    set, not the first page, because a row missing from page 3 is still
@@ -768,7 +773,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
     let cursor: Record<string, unknown> | undefined;
     for (let page = 0; page < 10; page += 1) {
       const read = await contacts.listByType('unknown', {
-        status: 'needs_review',
+        ...(narrow ? { status: 'needs_review' } : {}),
         limit: 100,
         ...(excludeOrigin ? { excludeOrigin: GROUP_DETECTION_ORIGIN } : {}),
         ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
@@ -811,7 +816,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
     let dcursor: Record<string, unknown> | undefined;
     for (let page = 0; page < 10; page += 1) {
       const read = await contacts.listByType('unknown', {
-        status: 'needs_review',
+        ...(narrow ? { status: 'needs_review' } : {}),
         limit: 100,
         deleted: true,
         ...(dcursor === undefined ? {} : { exclusiveStartKey: dcursor }),
@@ -848,6 +853,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
       '==============================================',
       `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
       `  table prefix        ${tablePrefix}`,
+      `  query shape         type=unknown${narrow ? ', status=needs_review (NARROWED - NOT the design; pass --no-status-narrow)' : " (NO status narrowing - the design's read)"}`,
       '',
       `  tab would show (by contact)   ${tabContactIds.size}`,
       '    their statuses:',

@@ -8,7 +8,14 @@
 // path kills each tracked child directly — full Linux/CI teardown is validated
 // separately when CI is set up.
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  watchFile,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
@@ -258,9 +265,47 @@ function log(msg) {
   process.stdout.write(`[e2e-session] ${msg}\n`);
 }
 
+/**
+ * Where to persist each child's stdout/stderr, or '' for the default.
+ *
+ * WHY THIS EXISTS: children run with stdio 'inherit', so their output goes to
+ * this launcher's stdout - and under `npm run e2e` Playwright's webServer does
+ * not capture that, so the app log is DISCARDED. A failing spec therefore
+ * preserves browser-side artifacts only, which is precisely why three sightings
+ * of an empty inbox read could not be told apart from a healthy one
+ * (docs/issues/call-inbox-unread-detached-node-flake.md).
+ *
+ * OPT-IN, so a normal run behaves exactly as before: set E2E_CHILD_LOG_DIR to a
+ * directory and each child also appends to <dir>/<name>.log. Output is still
+ * forwarded to this process's stdout either way.
+ */
+const childLogDir = process.env['E2E_CHILD_LOG_DIR'] ?? '';
+
 function spawnNode(name, args, cwd = repoRoot, envOverride = undefined) {
   const env = envOverride ? { ...childEnv, ...envOverride } : childEnv;
+  if (childLogDir === '') {
+    return spawnNodeInherit(name, args, cwd, env);
+  }
+  mkdirSync(childLogDir, { recursive: true });
+  const child = spawn(process.execPath, args, {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const sink = createWriteStream(path.join(childLogDir, `${name}.log`), { flags: 'a' });
+  child.stdout.pipe(sink);
+  child.stderr.pipe(sink);
+  child.stdout.pipe(process.stdout);
+  child.stderr.pipe(process.stderr);
+  return trackChild(name, child);
+}
+
+function spawnNodeInherit(name, args, cwd, env) {
   const child = spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
+  return trackChild(name, child);
+}
+
+function trackChild(name, child) {
   child.on('exit', (code, signal) => {
     children.delete(name);
     if (!shuttingDown) log(`${name} exited (code=${code} signal=${signal})`);

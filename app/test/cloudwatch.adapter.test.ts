@@ -24,6 +24,7 @@ import {
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
   PINO_WARN_INSIGHTS_FILTER,
+  projectErrorEvent,
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
@@ -123,6 +124,9 @@ describe('cloudwatch adapter — queryInsights', () => {
     expect(startCmd.input.queryString).toContain('sort @timestamp desc');
     expect(startCmd.input.queryString).toContain('limit');
     expect(startCmd.input.queryString).toContain(filterExpr);
+    // The widened projection needs the log-event pointer and its log group.
+    expect(startCmd.input.queryString).toContain('@ptr');
+    expect(startCmd.input.queryString).toContain('@log');
 
     // Result: 1 event returned
     expect(events).toHaveLength(1);
@@ -312,5 +316,58 @@ describe('cloudwatch adapter — queryInsights', () => {
     // PINO_WARN_INSIGHTS_FILTER widens to warn+ (level ≥ 40)
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('level');
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('40');
+  });
+});
+
+describe('projectErrorEvent - widened projection', () => {
+  const line = (o: Record<string, unknown>) => JSON.stringify(o);
+  const row = (msg: string, ptr = 'PTR1', atLog = `9:${CONFIG.errorLogGroupName}`) => [
+    { field: '@timestamp', value: '2026-08-24 10:00:00.000' },
+    { field: '@message', value: msg },
+    { field: '@ptr', value: ptr },
+    { field: '@log', value: atLog },
+  ];
+
+  it('reads a NESTED err object, not a dotted key', () => {
+    const ev = projectErrorEvent(
+      row(line({ level: 50, msg: 'job failed: relay.warm', err: { message: 'boom', type: 'RestException' } })),
+      CONFIG,
+    );
+    expect(ev.errMessage).toBe('boom');
+    expect(ev.errType).toBe('RestException');
+  });
+
+  it('derives source from the CONFIGURED group names, not a suffix', () => {
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', `9:${CONFIG.workerLogGroupName}`), CONFIG).source).toBe('worker');
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', `9:${CONFIG.systemLogGroupName}`), CONFIG).source).toBe('system');
+    // A DIFFERENT environment's app group must NOT read as 'app'.
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', '9:/hc/otherenv/app'), CONFIG).source).toBe('unknown');
+  });
+
+  it('caps message and errMessage independently, each with its own flag', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, msg: 'x'.repeat(400), err: { message: 'short' } })), CONFIG);
+    expect(ev.message).toHaveLength(300);
+    expect(ev.messageTruncated).toBe(true);
+    expect(ev.errMessage).toBe('short');
+    expect(ev.errMessageTruncated).toBe(false);
+  });
+
+  it('falls back msg -> event -> err.message -> placeholder', () => {
+    expect(projectErrorEvent(row(line({ level: 50, event: 'relay_provisioning_failed' })), CONFIG).message).toBe('relay_provisioning_failed');
+    expect(projectErrorEvent(row(line({ level: 50, err: { message: 'only this' } })), CONFIG).message).toBe('only this');
+    expect(projectErrorEvent(row(line({ level: 50 })), CONFIG).message).toBe('(unparseable log line)');
+  });
+
+  it('does not duplicate the text when message came FROM err.message', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, err: { message: 'only this' } })), CONFIG);
+    expect(ev.message).toBe('only this');
+    expect(ev.errMessage).toBeNull();
+  });
+
+  it('carries ref, requestId and pollRunId', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, msg: 'x', requestId: 'r-1', pollRunId: 'p-1' })), CONFIG);
+    expect(ev.ref).toBe('PTR1');
+    expect(ev.requestId).toBe('r-1');
+    expect(ev.pollRunId).toBe('p-1');
   });
 });

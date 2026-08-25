@@ -247,8 +247,8 @@ describe('systemStatus.getErrors — degradation + window', () => {
 
   it('deployed-like + a working seam → available:true with the events passed through', async () => {
     const events = [
-      { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', correlationId: 'c1' },
-      { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'error', correlationId: null },
+      { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', messageTruncated: false, correlationId: 'c1', errMessageTruncated: false, source: 'app' as const, ref: 'PTR-1' },
+      { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'error', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-2' },
     ];
     const seam = fakeSeam({ queryInsights: async () => events });
     const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
@@ -317,8 +317,12 @@ describe('systemStatus.getErrors — degradation + window', () => {
       timestamp: '2026-07-21T20:04:31.000Z',
       level: 50,
       message: 'twilio relay-recipient delivery failed (undelivered/failed)',
+      messageTruncated: false,
       correlationId: 'c-30034',
       errorCode: '30034',
+      errMessageTruncated: false,
+      source: 'app' as const,
+      ref: 'PTR-3',
     };
     const seam = fakeSeam({
       queryInsights: async (_groups, filterExpr) =>
@@ -340,13 +344,13 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const seam = fakeSeam({
       queryInsights: async (logGroupNames, filterExpr) => {
         if (filterExpr === OOM_SYSTEM_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-4' }];
         }
         if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-5' }];
         }
         if (filterExpr === PINO_ERROR_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', correlationId: 'c1' }];
+          return [{ timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', messageTruncated: false, correlationId: 'c1', errMessageTruncated: false, source: 'app' as const, ref: 'PTR-6' }];
         }
         return [];
       },
@@ -391,7 +395,7 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const seam = fakeSeam({
       queryInsights: async (_logGroupNames, filterExpr) => {
         if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-7' }];
         }
         return [];
       },
@@ -405,7 +409,7 @@ describe('systemStatus.getErrors — degradation + window', () => {
 
   it('deduplicates OOM events that have the same timestamp+label', async () => {
     const config = deployedConfig();
-    const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null };
+    const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-8' };
     // Both the V8 OOM query and pino query return a dup-timestamp event
     const seam = fakeSeam({
       queryInsights: async (_logGroupNames, filterExpr) => {

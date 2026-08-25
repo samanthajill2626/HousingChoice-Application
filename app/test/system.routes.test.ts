@@ -131,7 +131,18 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
     }),
     getErrors: vi.fn<SystemStatusService['getErrors']>(async () => ({
       available: true,
-      events: [{ timestamp: '2026-06-29T00:00:00.000Z', level: 50, message: 'boom', correlationId: 'c1' }],
+      events: [
+        {
+          timestamp: '2026-06-29T00:00:00.000Z',
+          level: 50,
+          message: 'boom',
+          messageTruncated: false,
+          correlationId: 'c1',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-R1',
+        },
+      ],
     })),
   };
 
@@ -156,7 +167,18 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       available: true,
-      events: [{ timestamp: '2026-06-29T00:00:00.000Z', level: 50, message: 'boom', correlationId: 'c1' }],
+      events: [
+        {
+          timestamp: '2026-06-29T00:00:00.000Z',
+          level: 50,
+          message: 'boom',
+          messageTruncated: false,
+          correlationId: 'c1',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-R1',
+        },
+      ],
     });
     expect(getErrors).toHaveBeenCalledWith('7d', { includeWarnings: false });
   });

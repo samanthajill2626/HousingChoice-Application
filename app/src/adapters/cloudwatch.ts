@@ -75,22 +75,54 @@ export interface AlarmView {
   stateUpdatedAt: string;
 }
 
-/** One error log event, projected to the PII-SAFE fields ONLY. */
+/** Which configured log group an event came from. Never suffix-matched. */
+export type ErrorSource = 'app' | 'worker' | 'system' | 'unknown';
+
+/** Field cap for `message` and `errMessage`. Each carries its OWN flag. */
+export const FIELD_CAP = 300;
+
+/**
+ * One error log event, projected to the fields the dashboard renders.
+ *
+ * PII POSTURE (changed 2026-08-24): this projection is a DISPLAY control, not a
+ * storage control - every field here was already at rest in CloudWatch, and the
+ * panel that renders it is admin-only and server-enforced. Credentials are a
+ * separate concern, handled by the allowlist on the DETAIL path.
+ */
 export interface ErrorEventView {
   /** ISO 8601 of the log event. */
   timestamp: string;
-  /** pino numeric level (≥ 50 for error/fatal). */
+  /** pino numeric level (>= 50 for error/fatal). */
   level: number;
-  /** The log's short message (pino `msg`) — never a body/PII payload. */
+  /** The log's short message, capped at FIELD_CAP characters. */
   message: string;
+  /** True when `message` hit FIELD_CAP and was cut. */
+  messageTruncated: boolean;
   /** The correlation id, when the event carried one; null otherwise. */
   correlationId: string | null;
   /**
-   * The provider error code the event carried (pino `errorCode`), when present —
-   * e.g. a Twilio "30034". PII-SAFE (a numeric/short code, never a body). Absent
-   * (undefined) on events that carried no code.
+   * The provider error code the event carried (pino `errorCode`), when present -
+   * e.g. a Twilio "30034". Absent (undefined) on events that carried no code.
    */
   errorCode?: string | null;
+  /** The job whose failure produced the line (pino `jobName`). */
+  jobName?: string | null;
+  /** The structured event name (pino `event`), when the line carried one. */
+  event?: string | null;
+  /** The error type (`err.type`, falling back to `err.name`). */
+  errType?: string | null;
+  /** `err.message`, capped at FIELD_CAP - null when `message` already IS it. */
+  errMessage?: string | null;
+  /** True when `errMessage` hit FIELD_CAP and was cut. */
+  errMessageTruncated: boolean;
+  /** The HTTP request id, when the line carried one - a trace pivot key. */
+  requestId?: string | null;
+  /** The worker poll-run id, when the line carried one - a trace pivot key. */
+  pollRunId?: string | null;
+  /** Which configured log group produced the event. REQUIRED, never null. */
+  source: ErrorSource;
+  /** The raw Insights `@ptr` for this event. REQUIRED, never null. */
+  ref: string;
 }
 
 /** The narrow surface the systemStatus service depends on. */
@@ -101,7 +133,8 @@ export interface CloudWatchClientSeam {
    * Logs Insights query across one or more log groups with an arbitrary filter
    * expression, since `sinceMs` (epoch ms). Returns up to `limit` events,
    * NEWEST-FIRST (Insights natively supports `sort @timestamp desc | limit N`).
-   * PII-safe: each result row projected through projectErrorEvent.
+   * Each result ROW is projected through projectErrorEvent - an admin-only
+   * display projection, not a redaction boundary (see ErrorEventView).
    */
   queryInsights(logGroupNames: string[], filterExpr: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
 }
@@ -113,38 +146,116 @@ function mapAlarmState(state: StateValue | string | undefined): AlarmView['state
   return 'INSUFFICIENT_DATA';
 }
 
+/** `@log` is `<accountId>:<logGroupName>` - take everything after the last ':'. */
+export function normalizeLogGroup(atLog: string): string {
+  const at = atLog.lastIndexOf(':');
+  return at === -1 ? atLog : atLog.slice(at + 1);
+}
+
+function sourceOf(atLog: string | undefined, config: AppConfig): ErrorSource {
+  if (atLog === undefined) return 'unknown';
+  const name = normalizeLogGroup(atLog);
+  // Compare against the CONFIGURED names, not suffixes: /hc/prod/app must not
+  // read as 'app' when this process is dev.
+  if (name === config.errorLogGroupName) return 'app';
+  if (name === config.workerLogGroupName) return 'worker';
+  if (name === config.systemLogGroupName) return 'system';
+  return 'unknown';
+}
+
+function capped(value: string): { value: string; truncated: boolean } {
+  return value.length > FIELD_CAP
+    ? { value: value.slice(0, FIELD_CAP), truncated: true }
+    : { value, truncated: false };
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
 /**
- * Project a parsed pino log line to the PII-SAFE error view. Only `level`,
- * `msg`/`message`, and `correlationId` are read off the JSON — everything else
- * (bodies, phones, names, emails, arbitrary fields) is deliberately dropped.
- * A non-JSON / off-shape message degrades to a generic line rather than
- * leaking the raw text.
+ * Project one Insights result ROW to the view the dashboard renders.
+ *
+ * PII POSTURE (changed 2026-08-24): this is a DISPLAY control, not a storage
+ * control - every field here was already at rest in CloudWatch. The panel is
+ * admin-only and server-enforced. Credentials are handled separately, by the
+ * allowlist on the DETAIL path (getLogRecord below).
+ *
+ * ACCESSOR SHAPE: this path parses the raw `@message` JSON, where `err` is a
+ * NESTED object. `obj['err.message']` is undefined here; the dotted form
+ * belongs to the GetLogRecord path only.
  */
-function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorEventView {
-  const timestamp = new Date(eventTimestampMs).toISOString();
-  let level = 50;
-  let message = '(unparseable log line)';
-  let correlationId: string | null = null;
-  let errorCode: string | null = null;
-  try {
-    const parsed: unknown = JSON.parse(rawMessage);
-    if (typeof parsed === 'object' && parsed !== null) {
-      const obj = parsed as Record<string, unknown>;
-      if (typeof obj['level'] === 'number') level = obj['level'];
-      // pino's short message is `msg`; tolerate a `message` alias too.
-      const msg = obj['msg'] ?? obj['message'];
-      if (typeof msg === 'string' && msg.length > 0) message = msg;
-      const cid = obj['correlationId'];
-      if (typeof cid === 'string' && cid.length > 0) correlationId = cid;
-      // A provider error code (Twilio 30034 etc.) — PII-safe; string or number.
-      const ec = obj['errorCode'];
-      if (typeof ec === 'string' && ec.length > 0) errorCode = ec;
-      else if (typeof ec === 'number') errorCode = String(ec);
-    }
-  } catch {
-    // Non-JSON line — keep the generic message; never surface the raw text.
+export function projectErrorEvent(
+  row: { field?: string; value?: string }[],
+  config: AppConfig,
+): ErrorEventView {
+  let raw = '';
+  let tsValue: string | undefined;
+  let ptr = '';
+  let atLog: string | undefined;
+  for (const cell of row) {
+    if (cell.field === '@message') raw = cell.value ?? '';
+    else if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
+    else if (cell.field === '@ptr') ptr = cell.value ?? '';
+    else if (cell.field === '@log') atLog = cell.value ?? undefined;
   }
-  return { timestamp, level, message, correlationId, errorCode };
+
+  const base = {
+    timestamp: new Date(parseInsightsTimestamp(tsValue)).toISOString(),
+    correlationId: null as string | null,
+    errorCode: null as string | null,
+    source: sourceOf(atLog, config),
+    ref: ptr,
+  };
+
+  let parsed: Record<string, unknown>;
+  try {
+    const p: unknown = JSON.parse(raw);
+    if (typeof p !== 'object' || p === null) throw new Error('not an object');
+    parsed = p as Record<string, unknown>;
+  } catch {
+    // The LIST path deliberately does NOT surface raw text - that property is
+    // preserved and pinned by an existing assertion. Raw text is reachable
+    // through the detail path instead.
+    return {
+      ...base,
+      level: 50,
+      message: '(unparseable log line)',
+      messageTruncated: false,
+      errMessageTruncated: false,
+    };
+  }
+
+  const err =
+    typeof parsed['err'] === 'object' && parsed['err'] !== null
+      ? (parsed['err'] as Record<string, unknown>)
+      : undefined;
+  // A SCALAR err is the message itself - six call sites log `err: e.message`.
+  const errMessageRaw = err !== undefined ? str(err['message']) : str(parsed['err']);
+
+  const chosen =
+    str(parsed['msg']) ?? str(parsed['message']) ?? str(parsed['event']) ?? errMessageRaw ?? '(unparseable log line)';
+  const msgCap = capped(chosen);
+  // When `message` came FROM err.message they are the same string; leave
+  // errMessage null so the row does not render the same text twice.
+  const errCap = errMessageRaw !== null && errMessageRaw !== chosen ? capped(errMessageRaw) : null;
+
+  const ec = parsed['errorCode'];
+  return {
+    ...base,
+    level: typeof parsed['level'] === 'number' ? parsed['level'] : 50,
+    message: msgCap.value,
+    messageTruncated: msgCap.truncated,
+    correlationId: str(parsed['correlationId']),
+    errorCode: typeof ec === 'number' ? String(ec) : str(ec),
+    jobName: str(parsed['jobName']),
+    event: str(parsed['event']),
+    errType: err !== undefined ? (str(err['type']) ?? str(err['name'])) : null,
+    errMessage: errCap?.value ?? null,
+    errMessageTruncated: errCap?.truncated ?? false,
+    requestId: str(parsed['requestId']),
+    pollRunId: str(parsed['pollRunId']),
+  };
 }
 
 /**
@@ -224,7 +335,7 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
 
     async queryInsights(logGroupNames, filterExpr, sinceMs, limit) {
       // Build an Insights query string: filter + newest-first + limit.
-      const queryString = `fields @timestamp, @message | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
+      const queryString = `fields @timestamp, @message, @ptr, @log | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
 
       // CRITICAL: Insights StartQuery uses epoch SECONDS, not milliseconds.
       const startOut = await logs.send(
@@ -250,18 +361,9 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
 
         if (status === 'Complete') {
           const rows = result.results ?? [];
-          return rows
-            .map((row) => {
-              // Each row is an array of { field, value } objects.
-              let message = '';
-              let tsValue: string | undefined;
-              for (const cell of row) {
-                if (cell.field === '@message') message = cell.value ?? '';
-                if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
-              }
-              return projectErrorEvent(message, parseInsightsTimestamp(tsValue));
-            })
-            .slice(0, limit);
+          // Each row is an array of { field, value } objects; the projection
+          // reads @ptr and @log off it too, so the WHOLE row is passed.
+          return rows.map((row) => projectErrorEvent(row, config)).slice(0, limit);
         }
 
         if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {

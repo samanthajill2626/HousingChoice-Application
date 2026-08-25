@@ -336,7 +336,34 @@ Each is its own commit so a red gate stays attributable.
 | R4 | inbox-group-truncation-notice-not-reset | low | gate the notice on ready status, matching the shipped precedent 85 lines below it. Reproduction is All/Groups only - the server never sets the flag under `filter=unread`. Scope limit stated in place: this does NOT close the adjacent one-commit filter-change window, which is pre-existing and orthogonal |
 | R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. Two parts: **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - NOTE this part is a new proposal with no approved vehicle and needs its own go; **(B)** ride 4.1's read-through. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in |
 | R6 | inbox-imported-call-outcome-normalization | low | **Human ruling: all THREE renderers, plus group threads.** The filed remedy is unreachable for the rows it targets - the importer writes no call status and the derive path short-circuits on it before any outcome handling, so it would ship green having changed nothing. Order: make the status optional on the preview input (the body survives it - the ringing/in-progress checks are equality tests that are simply false for undefined), add a fourth derive-arm for a status-less row with a normalizable outcome gated on an empty fallback preview, THEN promote the shared helpers, and extend to the group-row builders, which read the stored preview directly and never call the derive path. Fix the duration guard from `< 0` to `<= 0`. **WHERE the shared helper lives is NOT assumed:** the repo states in five places that the dashboard cannot import from `app/src`, and no app runtime module imports from `dashboard/src` today - the only proven cross-package reach is app-side TESTS importing a pure dashboard module. The builder must PROVE the chosen location under `npm run smoke`, which is the gate that catches exactly this class of resolution gap, with the established mirror-plus-drift-guard pattern as the named fallback if no single home resolves |
-| R7 | thread-hooks-refetch-whole-page-per-event | med | inbox half only - see 5.7. **PENDING re-adjudication at the time of writing**; its two unresolved review objections are being verified and this row is provisional until they are ruled on |
+**R11 is CUT.** The old draft's last rider - merge the refetched inbox page onto
+existing rows by `rowKey` - was re-adjudicated on 2026-08-25 and does not
+survive. All three findings are independently verifiable in the tree:
+
+- **Its justification describes today's behaviour, not a change.** The list is
+  already keyed with a stable identity function and a reconcile never passes
+  through the loading status, so an unchanged row already keeps its DOM node AND
+  its component instance - provable by a row's local state surviving a
+  reconcile. The implied re-render win is uncollectable regardless: the row has
+  no memo and the row array is derived unmemoized on every render.
+- **It breaks a deliberate invariant.** `serverRowCount` is a statement about
+  the SERVER PAGE, judged against a server-page flag. An accumulating merge
+  makes the early-end-empty condition unreachable, breaks its documented
+  complement, and - the half nobody had noticed - removes any rule by which a
+  row LEAVES the list, which is the Unread tab's entire job.
+- **Decisively: it saves nothing.** It still requests the same page with the
+  same limit and only changes how the response is installed. Zero round trips
+  and zero bytes saved, on an issue titled "re-read the entire open page on
+  every SSE event".
+
+The issue's real remedy - apply the event instead of refetching - is BLOCKED on
+the inbox today because the update event carries no `contactId`, which the
+hook's own comment already says. That is the issue's true shape, and it is
+recorded there. It is not this mission's work.
+
+This is the fourth remedy in the cluster that would have shipped green having
+changed nothing, and the second whose stated justification described the current
+code rather than a defect.
 
 ## 7. Invariant surfaces
 
@@ -404,8 +431,10 @@ lives on this invariant: `participants` is write-once, the pointer hop is not.
 
 ## 10. Out of scope
 
-- The three conversation hooks of `thread-hooks-refetch-whole-page-per-event`
-  (human ruling); the inbox half only, and see R7's pending status.
+- ALL of `thread-hooks-refetch-whole-page-per-event`, both halves. The three
+  conversation hooks were already out by the human's ruling; the inbox half is
+  now out too, on evidence - see "R11 is CUT" in section 6. The issue stays open
+  with its true shape recorded.
 - Re-litigating the accepted trade that Retry is ineffective on a truncated
   page, or the silent undercount inside the residue wall past the probe bound.
 - The `scanned` field RENAME in the unread log line - it depends on G2's budget

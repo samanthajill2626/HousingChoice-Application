@@ -3,13 +3,17 @@
 // `phone:<E164>` memberKeys) puts a real number in `req.path`, and every
 // middleware that logs the path copied it verbatim into CloudWatch.
 //
-// Every sink is pinned here, not just the ones that were easy to reach: the
-// request logger's pair of lines, all three express-error-handler arms, and one
-// representative sink in each of the four middleware files that log a path. One
-// case per file is enough where a file's sinks share the import-and-wrap
-// pattern, because what a regression would drop is the `maskPhonesInText` call
-// itself. Each case drives the real middleware over a minimal phone-bearing req
-// fake, satisfying whatever guard that middleware needs to reach its log line.
+// All FOURTEEN sinks are pinned here, not just the ones that were easy to
+// reach: the request logger's pair of lines, all three express-error-handler
+// arms, one rejection sink each in rateLimit, csrfOrigin and originSecret, and
+// ALL THREE arms of EACH twilioSignature export - the unconfigured production
+// ERROR, the unconfigured dev pass-through WARN, and the signature-rejected
+// WARN. One case per file is enough where a file's sinks share the
+// import-and-wrap pattern, because what a regression would drop is the
+// `maskPhonesInText` call itself; the twilioSignature arms get one case each
+// because they are three different branches, not three copies of one. Each case
+// drives the real middleware over a minimal phone-bearing req fake, satisfying
+// whatever guard that middleware needs to reach its log line.
 import { describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { DestinationStream } from 'pino';
@@ -236,6 +240,78 @@ describe('middleware phone masking: the rejection sinks', () => {
       () => {},
     );
 
+    expectMasked(lines);
+  });
+});
+
+// The UNCONFIGURED arms of both twilioSignature exports. They are reached
+// before any validation runs - no authToken and no publicBaseUrl - and they are
+// the two arms an operator is most likely to meet, because a token rotation
+// that lands half-applied produces exactly this state. The production arm is
+// the only ERROR (level 50) among the fourteen sinks, i.e. the only one that
+// feeds the error-log alarm with a path it did not mask.
+describe('middleware phone masking: the twilioSignature UNCONFIGURED arms', () => {
+  const unconfiguredReq = (): unknown => ({
+    method: 'POST',
+    path: PHONE_PATH,
+    originalUrl: PHONE_PATH,
+    headers: {},
+    body: {},
+    socket: { remoteAddress: '127.0.0.1' },
+  });
+
+  it('twilioSignature (form): the unconfigured production ERROR carries a masked path', () => {
+    const { lines, log } = loggerCapture();
+    const middleware = twilioSignatureMiddleware({ nodeEnv: 'production', logger: log });
+
+    let passedThrough = false;
+    middleware(unconfiguredReq() as never, rejectingRes() as never, (() => {
+      passedThrough = true;
+    }) as never);
+
+    // Fail CLOSED: the request is answered 403, never handed on.
+    expect(passedThrough).toBe(false);
+    expectMasked(lines);
+  });
+
+  it('twilioSignature (form): the unconfigured dev pass-through WARN carries a masked path', () => {
+    const { lines, log } = loggerCapture();
+    const middleware = twilioSignatureMiddleware({ nodeEnv: 'test', logger: log });
+
+    let passedThrough = false;
+    middleware(unconfiguredReq() as never, rejectingRes() as never, (() => {
+      passedThrough = true;
+    }) as never);
+
+    // Outside production the request IS handed on - the WARN is the whole
+    // signal, so it is the one that must not carry a raw number.
+    expect(passedThrough).toBe(true);
+    expectMasked(lines);
+  });
+
+  it('twilioSignature (json): the unconfigured production ERROR carries a masked path', () => {
+    const { lines, log } = loggerCapture();
+    const middleware = twilioJsonSignatureMiddleware({ nodeEnv: 'production', logger: log });
+
+    let passedThrough = false;
+    middleware(unconfiguredReq() as never, rejectingRes() as never, (() => {
+      passedThrough = true;
+    }) as never);
+
+    expect(passedThrough).toBe(false);
+    expectMasked(lines);
+  });
+
+  it('twilioSignature (json): the unconfigured dev pass-through WARN carries a masked path', () => {
+    const { lines, log } = loggerCapture();
+    const middleware = twilioJsonSignatureMiddleware({ nodeEnv: 'test', logger: log });
+
+    let passedThrough = false;
+    middleware(unconfiguredReq() as never, rejectingRes() as never, (() => {
+      passedThrough = true;
+    }) as never);
+
+    expect(passedThrough).toBe(true);
     expectMasked(lines);
   });
 });

@@ -165,6 +165,14 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(takeover.status).toBe('taken_over');
     if (takeover.status !== 'taken_over') throw new Error('takeover failed');
     expect(takeover.journal.fence).toBe(2);
+    // ...and claimedAt is EXACTLY what claim() wrote. takeover SETs leaseId and
+    // leaseExpiresAt and ADDs fence, nothing else. The daily journal sweep's
+    // post-loop truth check DEPENDS on that: it re-reads journals it has just
+    // taken over, and the claim age is the one staleness signal it cannot forge
+    // against itself. A takeover that started stamping claimedAt would silence
+    // that poison-journal ERROR forever - and every case in journalSweep.test.ts
+    // would stay green, because none of them calls takeover.
+    expect(takeover.journal.claimedAt).toBe(claimed.journal.claimedAt);
 
     expect(await resolutions.commitContactEffect({
       token: tokenFor(claimed.journal),

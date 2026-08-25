@@ -39,15 +39,9 @@ chunk size 30, one row per contact):
 | contactless rows | 0 | 0 |
 | outcome | partition EXHAUSTED | partition EXHAUSTED |
 
-**What the proposed read costs** - **CAVEAT, these price the OLD query shape.**
-Every measurement below passes `status: 'needs_review'`, and requirement 1 now
-queries `type=unknown` with NO status narrowing. By class (f)'s own argument
-that is where created unknowns land by DEFAULT, so the real partition is larger
-than these rows show. **Re-measure before building** (`--audit-triage-partition
---no-status-narrow`). The COST SHAPE - one Query against hundreds of lookups -
-survives; the row counts do not. This is the document's recurring failure caused
-by one of its own fixes, which is why it is flagged rather than quietly
-re-run.
+**What the proposed read costs** - re-measured 2026-08-25 with
+`--no-status-narrow`, so these price the query requirement 1 ACTUALLY proposes
+(`type=unknown`, no status filter):
 
 | | dev | prod |
 | --- | --- | --- |
@@ -64,6 +58,27 @@ identities, not counts):
 | in tab, NOT in partition | 0 | 4 - ALL soft-deleted (benign) |
 | in tab, excluded by origin | 0 | 0 |
 | in partition, NOT in tab | 1 | 0 |
+
+Both verdicts on the corrected query shape: dev **SETS RECONCILE**, prod
+**RECONCILE WITH ONE REQUIREMENT** (the soft-delete resurfacing of requirement
+3). No unexplained losses in either environment, and no new coverage class
+surfaced by widening.
+
+Dev's single "in partition, NOT in tab" row is a contact with no open non-relay
+thread. It would NOT be newly shown: `contactConversations` filters to open
+non-relay threads, so that contact yields no `maxConv` and therefore no row -
+the same mechanism that makes class (a)'s threadless stubs harmless.
+
+**Widening the query cost NOTHING.** The re-run returned byte-identical counts
+to the narrowed one - 16/13 dev, 7/4 prod - so there are currently ZERO
+`(unknown, active)` contacts in either environment. The planner predicted the
+partition would grow and it did not move.
+
+Read that correctly, because this document has twice mishandled a measured zero:
+widening is **free today and correct by construction**. Class (f) is
+structurally reachable - a contact created as `unknown` defaults to `active` -
+it simply happens to be empty right now. The zero is a reason widening is cheap,
+NOT a reason to narrow again.
 
 **The cost case is settled**: ~684 lookups across 24 Queries to return at most 8
 rows, versus 7 rows in 1 Query. The row sets reconcile once soft-delete is

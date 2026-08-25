@@ -46,7 +46,7 @@ if (!argv.includes('--confirm')) {
       'It writes nothing and prints no PII, but you should know which',
       'environment you are measuring before the numbers mean anything.',
       '',
-      `  endpoint:     ${process.env.DYNAMODB_ENDPOINT ?? '(AWS default resolution)'}`,
+      `  endpoint:     ${(process.env.DYNAMODB_ENDPOINT ?? '').trim() === '' ? '(AWS default resolution)' : process.env.DYNAMODB_ENDPOINT}`,
       `  table prefix: ${process.env.TABLE_PREFIX ?? '(unset)'}`,
       '',
       'Re-run with --confirm once that is the target you meant.',
@@ -63,7 +63,13 @@ if (!Number.isInteger(budget) || budget < 1) {
   process.exit(2);
 }
 
-const endpoint = process.env.DYNAMODB_ENDPOINT;
+// An EMPTY string is treated as unset, not as an endpoint. This matters: the
+// most likely way to run this wrong is from a shell that still has
+// DYNAMODB_ENDPOINT set from local work, and the natural way to clear it in
+// PowerShell (`$env:DYNAMODB_ENDPOINT = ''`) leaves an empty string behind. An
+// empty endpoint would otherwise be handed to the SDK as a real one.
+const rawEndpoint = process.env.DYNAMODB_ENDPOINT;
+const endpoint = rawEndpoint === undefined || rawEndpoint.trim() === '' ? undefined : rawEndpoint;
 const tablePrefix = process.env.TABLE_PREFIX;
 if (tablePrefix === undefined || tablePrefix === '') {
   console.error('TABLE_PREFIX must be set explicitly - refusing to guess.');

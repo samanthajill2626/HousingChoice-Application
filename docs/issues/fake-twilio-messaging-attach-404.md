@@ -42,7 +42,9 @@ run had them on every warm buy).
 implements the number search + purchase + `/control/register-number` seams but
 NOT the Messaging Service PhoneNumbers attach endpoint, so on the hermetic
 stack every warm buy dies AFTER purchase + `createWarming` with
-`RestException [HTTP 404] Failed to execute request` - `"msg":"job failed"`
+`RestException [HTTP 404] Failed to execute request` -
+`"msg":"job failed: relay.warmNumber"` (the dispatcher message names the job as
+of 2026-08-24; older stored events read `"msg":"job failed"`)
 then swallowed by the in-process dispatcher ("SQS producer cannot observe
 consumer failure"). Observed 22 times inside a fully GREEN e2e run
 (2026-08-03, area-code-preference gates) and again during live self-QA on a

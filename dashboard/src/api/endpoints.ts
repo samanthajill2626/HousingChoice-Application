@@ -63,8 +63,10 @@ import type {
   SuggestionItem,
   SuggestionRequestIdentity,
   SystemAlarmsResult,
+  SystemErrorDetailResult,
   SystemErrorsResult,
   SystemFlags,
+  SystemTraceResult,
   TenantStatus,
   TodayResponse,
   TransitionSource,
@@ -2092,9 +2094,13 @@ export function getSystemAlarms(signal?: AbortSignal): Promise<SystemAlarmsResul
 }
 
 /**
- * GET /api/system/errors?since=&warnings= — recent error events (PII-safe) or
+ * GET /api/system/errors?since=&warnings= - recent error events or
  * { available:false, reason }. `includeWarnings` opts into the level≥40 firehose;
  * Twilio delivery failures show either way.
+ *
+ * ADMIN-ONLY, enforced SERVER-side; a row MAY carry contact PII or host data by
+ * the deliberate 2026-08-24 decision. Credentials are excluded by the detail
+ * path's `err` allowlist.
  */
 export function getSystemErrors(
   since: '1h' | '24h' | '7d',
@@ -2103,6 +2109,36 @@ export function getSystemErrors(
 ): Promise<SystemErrorsResult> {
   return request<SystemErrorsResult>('/api/system/errors', {
     query: { since, ...(includeWarnings && { warnings: 'true' }) },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/**
+ * GET /api/system/errors/detail?ref=... - the complete log record behind one row.
+ * `ref` is a raw CloudWatch pointer containing `+` and `=`; it MUST go through
+ * `request()`'s `query` option, which builds the string with URLSearchParams and
+ * percent-encodes them. A hand-rolled URL would let Express's `qs` parser decode
+ * a literal `+` as a space and corrupt the pointer.
+ */
+export function getSystemErrorDetail(
+  ref: string,
+  signal?: AbortSignal,
+): Promise<SystemErrorDetailResult> {
+  return request<SystemErrorDetailResult>('/api/system/errors/detail', {
+    query: { ref },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/system/trace - the lines around one failure, anchored on its timestamp. */
+export function getSystemTrace(
+  kind: 'correlationId' | 'requestId' | 'pollRunId',
+  id: string,
+  at: string,
+  signal?: AbortSignal,
+): Promise<SystemTraceResult> {
+  return request<SystemTraceResult>('/api/system/trace', {
+    query: { [kind]: id, at },
     ...(signal !== undefined && { signal }),
   });
 }

@@ -1,18 +1,31 @@
 // M1.4 System Status adapter (adapters/cloudwatch.ts) — the ONLY place the
-// CloudWatch + CloudWatch Logs SDKs are imported. Exercises both narrow reads
+// CloudWatch + CloudWatch Logs SDKs are imported. Exercises every narrow read
 // against INJECTED fake SDK clients (no AWS, no creds, no network):
 //
 //   describeAlarms(prefix)   DescribeAlarms → AlarmView mapping (state/name/ISO,
 //                            AlarmNamePrefix passed straight through)
-//   queryInsights(...)       StartQuery → poll GetQueryResults → PII-SAFE projection
-//                            (timestamp, level, message, correlationId ONLY),
-//                            newest-first (Insights yields newest-first natively)
+//   queryInsights(...)       StartQuery -> poll GetQueryResults -> the WIDENED
+//                            list projection (timestamp, level, source, ref,
+//                            job/event, err type + message, request/poll ids,
+//                            correlationId), newest-first (Insights yields
+//                            newest-first natively). The LIST path still never
+//                            surfaces RAW log text: an unparseable line
+//                            degrades to '(unparseable log line)'.
+//   getLogRecord(ref)        GetLogRecord -> the COMPLETE record behind ONE row,
+//                            `err` keys filtered by ERR_ALLOWLIST (credentials
+//                            out) and the response byte-bounded. This path DOES
+//                            hand back raw text for a non-JSON line, and MAY
+//                            carry contact PII - deliberate, admin-only, per the
+//                            2026-08-24 decision.
+//   queryTrace(...)          two opposite-sorted Insights queries in parallel ->
+//                            the lines around one failure, merged ascending.
 //
 // The fakes implement `.send(command)` and inspect the command's `input` — so we
 // assert the exact SDK request the adapter builds, and feed back canned SDK
 // output to assert the projection.
 import { DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
 import {
+  GetLogRecordCommand,
   GetQueryResultsCommand,
   StartQueryCommand,
   StopQueryCommand,
@@ -24,6 +37,9 @@ import {
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
   PINO_WARN_INSIGHTS_FILTER,
+  projectErrorEvent,
+  RAW_TEXT_CAP,
+  RESPONSE_BOUND_BYTES,
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
@@ -123,6 +139,9 @@ describe('cloudwatch adapter — queryInsights', () => {
     expect(startCmd.input.queryString).toContain('sort @timestamp desc');
     expect(startCmd.input.queryString).toContain('limit');
     expect(startCmd.input.queryString).toContain(filterExpr);
+    // The widened projection needs the log-event pointer and its log group.
+    expect(startCmd.input.queryString).toContain('@ptr');
+    expect(startCmd.input.queryString).toContain('@log');
 
     // Result: 1 event returned
     expect(events).toHaveLength(1);
@@ -312,5 +331,444 @@ describe('cloudwatch adapter — queryInsights', () => {
     // PINO_WARN_INSIGHTS_FILTER widens to warn+ (level ≥ 40)
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('level');
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('40');
+  });
+});
+
+describe('projectErrorEvent - widened projection', () => {
+  const line = (o: Record<string, unknown>) => JSON.stringify(o);
+  const row = (msg: string, ptr = 'PTR1', atLog = `9:${CONFIG.errorLogGroupName}`) => [
+    { field: '@timestamp', value: '2026-08-24 10:00:00.000' },
+    { field: '@message', value: msg },
+    { field: '@ptr', value: ptr },
+    { field: '@log', value: atLog },
+  ];
+
+  it('reads a NESTED err object, not a dotted key', () => {
+    const ev = projectErrorEvent(
+      row(line({ level: 50, msg: 'job failed: relay.warm', err: { message: 'boom', type: 'RestException' } })),
+      CONFIG,
+    );
+    expect(ev.errMessage).toBe('boom');
+    expect(ev.errType).toBe('RestException');
+  });
+
+  it('derives source from the CONFIGURED group names, not a suffix', () => {
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', `9:${CONFIG.workerLogGroupName}`), CONFIG).source).toBe('worker');
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', `9:${CONFIG.systemLogGroupName}`), CONFIG).source).toBe('system');
+    // A DIFFERENT environment's app group must NOT read as 'app'.
+    expect(projectErrorEvent(row(line({ level: 50, msg: 'x' }), 'P', '9:/hc/otherenv/app'), CONFIG).source).toBe('unknown');
+  });
+
+  it('caps message and errMessage independently, each with its own flag', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, msg: 'x'.repeat(400), err: { message: 'short' } })), CONFIG);
+    expect(ev.message).toHaveLength(300);
+    expect(ev.messageTruncated).toBe(true);
+    expect(ev.errMessage).toBe('short');
+    expect(ev.errMessageTruncated).toBe(false);
+  });
+
+  it('falls back msg -> event -> err.message -> placeholder', () => {
+    expect(projectErrorEvent(row(line({ level: 50, event: 'relay_provisioning_failed' })), CONFIG).message).toBe('relay_provisioning_failed');
+    expect(projectErrorEvent(row(line({ level: 50, err: { message: 'only this' } })), CONFIG).message).toBe('only this');
+    expect(projectErrorEvent(row(line({ level: 50 })), CONFIG).message).toBe('(unparseable log line)');
+  });
+
+  it('does not duplicate the text when message came FROM err.message', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, err: { message: 'only this' } })), CONFIG);
+    expect(ev.message).toBe('only this');
+    expect(ev.errMessage).toBeNull();
+  });
+
+  it('carries ref, requestId and pollRunId', () => {
+    const ev = projectErrorEvent(row(line({ level: 50, msg: 'x', requestId: 'r-1', pollRunId: 'p-1' })), CONFIG);
+    expect(ev.ref).toBe('PTR1');
+    expect(ev.requestId).toBe('r-1');
+    expect(ev.pollRunId).toBe('p-1');
+  });
+});
+
+describe('cloudwatch adapter - getLogRecord', () => {
+  const seamFor = (logRecord: Record<string, string>) =>
+    createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: fakeCw({ logRecord }) as never,
+    });
+
+  it('keeps the allowlisted err fields including response.status', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'boom',
+      'err.type': 'RestException',
+      'err.response.status': '404',
+      msg: 'job failed: relay.warm',
+    }).getLogRecord('PTR');
+    expect(out.fields['err.message']).toBe('boom');
+    expect(out.fields['err.response.status']).toBe('404');
+    expect(out.fields['msg']).toBe('job failed: relay.warm');
+  });
+
+  it('drops every other err nest AT ANY DEPTH, including err.cause', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'boom',
+      'err.config.params': 'To=%2B14045551234',
+      'err.config.url': 'https://api.twilio.com/x',
+      'err.cause.config.headers.Authorization': 'Basic c2lkOnNlY3JldA==',
+    }).getLogRecord('PTR');
+    expect(out.fields['err.config.params']).toBeUndefined();
+    expect(out.fields['err.config.url']).toBeUndefined();
+    expect(out.fields['err.cause.config.headers.Authorization']).toBeUndefined();
+  });
+
+  it('KEEPS a scalar string err - six call sites log err as a message', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      err: 'Insights query failed',
+      msg: 'system status: Logs Insights query failed',
+    }).getLogRecord('PTR');
+    expect(out.fields['err']).toBe('Insights query failed');
+  });
+
+  it('never returns @message or AWS transport metadata for a PARSED record', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@message': '{"msg":"x","err":{"config":{"url":"secret"}}}',
+      '@logGroupId': 'g',
+      backwardToken: 'b/1',
+      forwardToken: 'f/1',
+      msg: 'x',
+    }).getLogRecord('PTR');
+    expect(out.fields['@message']).toBeUndefined();
+    expect(out.fields['@logGroupId']).toBeUndefined();
+    expect(out.fields['backwardToken']).toBeUndefined();
+    expect(out.rawText).toBeUndefined();
+  });
+
+  it('does NOT hand back the raw line when a JSON record had all its err nests denied', async () => {
+    // The record parses and has app fields, but EVERY err.* key was dropped.
+    // Gating rawText on "no app fields" instead of "not parseable" would return
+    // @message here - which still contains the nest the allowlist just removed.
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@message': '{"err":{"config":{"url":"https://api.twilio.com/secret"}}}',
+      'err.config.url': 'https://api.twilio.com/secret',
+    }).getLogRecord('PTR');
+    expect(out.rawText).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain('secret');
+  });
+
+  it('returns capped rawText for a NON-JSON record', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.systemLogGroupName}`,
+      '@message': 'Out of memory: Killed process 123 (node)',
+      '@timestamp': '1787000000000',
+    }).getLogRecord('PTR');
+    expect(out.rawText).toContain('Out of memory');
+    expect(out.rawTextTruncated).toBe(false);
+  });
+
+  it('passes the ref through as the SDK logRecordPointer', async () => {
+    const logs = fakeCw({ logRecord: { '@log': `9:${CONFIG.errorLogGroupName}`, msg: 'x' } });
+    await createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: logs as never,
+    }).getLogRecord('PTR-abc');
+    const sent = logs.send.mock.calls[0]![0] as GetLogRecordCommand;
+    expect(sent).toBeInstanceOf(GetLogRecordCommand);
+    expect(sent.input.logRecordPointer).toBe('PTR-abc');
+  });
+
+  it('normalises @log to the bare group name and passes @logStream through', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@logStream': 'app/2026-08-24',
+      '@ingestionTime': '1787000000000',
+      msg: 'x',
+    }).getLogRecord('PTR');
+    expect(out.logGroup).toBe(CONFIG.errorLogGroupName);
+    expect(out.fields['@logStream']).toBe('app/2026-08-24');
+    expect(out.fields['@ingestionTime']).toBe('1787000000000');
+    expect(out.responseTruncated).toBe(false);
+  });
+
+  it('gives an oversized stack the REMAINING budget, not a fixed 512 cap, and leaves the small ones whole', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.stack': 'S'.repeat(RESPONSE_BOUND_BYTES + 10),
+      msg: 'small',
+    }).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(out.fields['msg']).toBe('small');
+    // The stack is diagnostic, so it gets what is left rather than being cut to
+    // an arbitrary 512 - but it still has to fit.
+    expect(out.fields['err.stack']!.length).toBeGreaterThan(512);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('keeps the DIAGNOSIS whole and drops the noise when a record cannot fit', async () => {
+    // The failure mode this ordering exists to prevent: uniform clipping cut
+    // err.message to a single character while thousands of bytes of unread
+    // noise survived - destroying the one field the row was opened for.
+    const record: Record<string, string> = {
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'RestException [HTTP 404] Failed to execute request',
+      'err.type': 'RestException',
+      jobName: 'relay.warmNumber',
+      correlationId: 'c-123',
+    };
+    for (let i = 0; i < 20000; i++) record[`noise.field.${i}`] = 'x'.repeat(500);
+
+    const out = await seamFor(record).getLogRecord('PTR');
+
+    expect(out.fields['err.message']).toBe('RestException [HTTP 404] Failed to execute request');
+    expect(out.fields['err.type']).toBe('RestException');
+    expect(out.fields['jobName']).toBe('relay.warmNumber');
+    expect(out.fields['correlationId']).toBe('c-123');
+    expect(out.responseTruncated).toBe(true);
+    expect(out.droppedFields!).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('fits a pathological record in milliseconds, not seconds - guards against a quadratic regression', async () => {
+    // Node is single-threaded, so a slow trim blocks EVERY request, webhook and
+    // job dispatch in the process. Two earlier shapes measured 11.3s and 35.8s
+    // of synchronous block on records inside CloudWatch's own 256 KB event
+    // ceiling, and both passed a correctness-only suite. The budget below has
+    // ~30x headroom over the current implementation, so it flags a return to
+    // per-key whole-object re-serialisation without being timing-flaky.
+    const record: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 12000; i++) record[`a.b.c${i}`] = 'x'.repeat(9);
+
+    const startedAt = Date.now();
+    const out = await seamFor(record).getLogRecord('PTR');
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(1000);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('CONVERGES on the byte bound when MANY fields are oversized, not just one', async () => {
+    // One 512-char pass fits a single huge stack but not 200 of them: 200 x 512
+    // is 102,400 bytes against a 65,536 bound, which used to return
+    // responseTruncated:true over a payload the bound had not bounded.
+    const many: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 200; i++) many[`field${i}`] = 'x'.repeat(2000);
+    const out = await seamFor(many).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('DROPS fields when the weight is in the KEY NAMES, not the values', async () => {
+    // The last-resort branch, which the halving passes alone cannot reach: no
+    // value here exceeds even a one-char cap by much, so every pass trims a few
+    // bytes and the record still does not fit - 3000 keys x 40 chars is ~162 KB
+    // of NAMES against a 65,536 bound. Only dropping whole fields closes it.
+    const wide: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 3000; i++) wide[`f${String(i).padStart(4, '0')}_${'k'.repeat(34)}`] = 'v'.repeat(8);
+    const inputCount = Object.keys(wide).length;
+    const out = await seamFor(wide).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+    // Fields actually LEFT, not merely got shorter - that is the drop loop.
+    expect(Object.keys(out.fields).length).toBeLessThan(inputCount);
+  });
+
+  it('DROPS a bare err whose value is a JSON object - the whole nest would ride out on one key', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      err: '{"config":{"headers":{"Authorization":"Basic x"}}}',
+      msg: 'job failed: relay.warm',
+    }).getLogRecord('PTR');
+    expect(out.fields['err']).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain('Authorization');
+    // The rest of the record still comes back - only the object err is refused.
+    expect(out.fields['msg']).toBe('job failed: relay.warm');
+  });
+
+  it('caps rawText at RAW_TEXT_CAP and flags it', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.systemLogGroupName}`,
+      '@message': 'x'.repeat(RAW_TEXT_CAP + 50),
+    }).getLogRecord('PTR');
+    expect(out.rawText).toHaveLength(RAW_TEXT_CAP);
+    expect(out.rawTextTruncated).toBe(true);
+  });
+});
+
+describe('cloudwatch adapter - queryTrace', () => {
+  function traceSeam(beforeRows: unknown[], afterRows: unknown[]) {
+    const starts: StartQueryCommand[] = [];
+    // Every command in ISSUE ORDER, so a test can prove both queries are started
+    // before either poll runs (the parallel requirement).
+    const order: string[] = [];
+    const send = vi.fn(async (command: unknown) => {
+      if (command instanceof StartQueryCommand) {
+        starts.push(command);
+        order.push('StartQuery');
+        return { queryId: `q${starts.length}` };
+      }
+      order.push('GetQueryResults');
+      const id = (command as GetQueryResultsCommand).input.queryId;
+      return { status: 'Complete', results: id === 'q1' ? beforeRows : afterRows };
+    });
+    const seam = createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: { send } as never,
+    });
+    return { seam, starts, order };
+  }
+  const row = (iso: string, ptr = 'TPTR-1') => [
+    { field: '@timestamp', value: iso },
+    { field: '@message', value: JSON.stringify({ level: 30, msg: 'x' }) },
+    { field: '@log', value: `9:${CONFIG.errorLogGroupName}` },
+    { field: '@ptr', value: ptr },
+  ];
+
+  it('uses a -5min bracket for correlationId and -30min for the cross-hop ids', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.000Z');
+    const a = traceSeam([], []);
+    await a.seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', atMs);
+    expect(a.starts[0]!.input.startTime).toBe(Math.floor((atMs - 5 * 60_000) / 1000));
+    const b = traceSeam([], []);
+    await b.seam.queryTrace([CONFIG.errorLogGroupName], 'pollRunId', 'p-1', atMs);
+    expect(b.starts[0]!.input.startTime).toBe(Math.floor((atMs - 30 * 60_000) / 1000));
+  });
+
+  it('splits at second granularity with DISJOINT windows - the anchor second is in BEFORE', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.500Z');
+    const { seam, starts } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', atMs);
+    const before = starts.find((s) => s.input.queryString!.includes('desc'))!;
+    const after = starts.find((s) => s.input.queryString!.includes('asc'))!;
+    expect(before.input.endTime).toBe(Math.floor(atMs / 1000));
+    expect(after.input.startTime).toBe(Math.floor(atMs / 1000) + 1);
+    expect(after.input.startTime!).toBeGreaterThan(before.input.endTime!);
+  });
+
+  it('merges ascending across the two sides', async () => {
+    const { seam } = traceSeam(
+      [row('2026-08-24 09:59:59.000'), row('2026-08-24 09:59:58.000')], // desc side
+      [row('2026-08-24 10:00:01.000')],
+    );
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    const times = out.lines.map((l) => l.timestamp);
+    expect([...times].sort()).toEqual(times);
+  });
+
+  it('flags per-side truncation when a side fills its budget', async () => {
+    const full = Array.from({ length: 25 }, () => row('2026-08-24 09:59:59.000'));
+    const { seam } = traceSeam(full, []);
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(out.truncatedBefore).toBe(true);
+    expect(out.truncatedAfter).toBe(false);
+  });
+
+  it('filters on the id kind, carries @log in fields, and looks 5 min ahead', async () => {
+    const atMs = Date.parse('2026-08-24T10:00:00.500Z');
+    const { seam, starts } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName, CONFIG.workerLogGroupName], 'requestId', 'r-1', atMs);
+    expect(starts).toHaveLength(2);
+    for (const start of starts) {
+      expect(start.input.logGroupNames).toEqual([CONFIG.errorLogGroupName, CONFIG.workerLogGroupName]);
+      // @ptr on BOTH sides: the view marks its anchor by ref, not by timestamp.
+      expect(start.input.queryString).toContain('fields @timestamp, @message, @log, @ptr');
+      expect(start.input.queryString).toContain('filter requestId = "r-1"');
+      expect(start.input.queryString).toContain('limit 25');
+      expect(start.input.limit).toBe(25);
+    }
+    // The look-ahead is the same 5 min for every id kind; only the reach BACK varies.
+    const after = starts.find((s) => s.input.queryString!.includes('asc'))!;
+    expect(after.input.endTime).toBe(Math.ceil((atMs + 5 * 60_000) / 1000));
+  });
+
+  it('issues BOTH queries before either poll (parallel, not sequential)', async () => {
+    const { seam, order } = traceSeam([], []);
+    await seam.queryTrace([CONFIG.errorLogGroupName], 'correlationId', 'c-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    // Sequential execution would interleave Start, Get, Start, Get.
+    expect(order).toEqual(['StartQuery', 'StartQuery', 'GetQueryResults', 'GetQueryResults']);
+  });
+
+  it('projects the diagnostic fields an INFO context line carries', async () => {
+    const line = [
+      { field: '@timestamp', value: '2026-08-24 09:59:59.250' },
+      {
+        field: '@message',
+        value: JSON.stringify({
+          level: 30,
+          msg: 'request completed',
+          method: 'POST',
+          path: '/api/messages',
+          statusCode: 500,
+          durationMs: 42,
+          jobName: 'send_message',
+          jobId: 'j-1',
+          hopCount: 2,
+        }),
+      },
+      { field: '@log', value: `9:${CONFIG.workerLogGroupName}` },
+      { field: '@ptr', value: 'TPTR-9' },
+    ];
+    const { seam } = traceSeam([line], []);
+    const out = await seam.queryTrace(
+      [CONFIG.errorLogGroupName, CONFIG.workerLogGroupName],
+      'requestId',
+      'r-1',
+      Date.parse('2026-08-24T10:00:00.000Z'),
+    );
+    expect(out.lines).toEqual([
+      {
+        timestamp: '2026-08-24T09:59:59.250Z',
+        level: 30,
+        message: 'request completed',
+        source: 'worker',
+        method: 'POST',
+        path: '/api/messages',
+        statusCode: 500,
+        durationMs: 42,
+        jobName: 'send_message',
+        jobId: 'j-1',
+        hopCount: 2,
+        ref: 'TPTR-9',
+      },
+    ]);
+  });
+
+  it('degrades an unparseable line at level 30 (an INFO timeline, not the list path 50)', async () => {
+    const line = [
+      { field: '@timestamp', value: '2026-08-24 09:59:59.000' },
+      { field: '@message', value: 'FATAL ERROR: Reached heap limit' },
+      { field: '@log', value: `9:${CONFIG.systemLogGroupName}` },
+      { field: '@ptr', value: 'TPTR-OOM' },
+    ];
+    const { seam } = traceSeam([line], []);
+    const out = await seam.queryTrace(
+      [CONFIG.errorLogGroupName],
+      'correlationId',
+      'c-1',
+      Date.parse('2026-08-24T10:00:00.000Z'),
+    );
+    expect(out.lines).toEqual([
+      {
+        timestamp: '2026-08-24T09:59:59.000Z',
+        level: 30,
+        message: '(unparseable log line)',
+        source: 'system',
+        // Even the degraded branch carries its ref - the anchor can BE the
+        // unparseable OOM line, and it still has to be markable.
+        ref: 'TPTR-OOM',
+      },
+    ]);
+  });
+
+  it('carries the per-line ref through the merge, so the view can mark its anchor exactly', async () => {
+    const { seam } = traceSeam(
+      [row('2026-08-24 09:59:59.000', 'TPTR-BEFORE')],
+      [row('2026-08-24 10:00:01.000', 'TPTR-AFTER')],
+    );
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(out.lines.map((l) => l.ref)).toEqual(['TPTR-BEFORE', 'TPTR-AFTER']);
   });
 });

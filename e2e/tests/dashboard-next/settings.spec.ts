@@ -156,6 +156,14 @@ test.describe('Settings — admin path', () => {
     // The alarms block exposes a manual refresh affordance (the 60s-while-visible
     // auto-refresh is unit-tested); it's present even in the degraded state.
     await expect(page.getByRole('button', { name: 'Refresh alarms' })).toBeVisible();
+    // The widened error rows carry two per-row controls - "Show all" expands the
+    // COMPLETE log record behind a row, "Trace" pivots to the lines around it -
+    // but both are rendered INSIDE a row, and the degraded state has no rows. So
+    // in the hermetic lane the Recent errors block offers neither affordance,
+    // and that is the only reachable state here. (exact on 'Trace' so the name
+    // cannot substring-match some unrelated future control and fail spuriously.)
+    await expect(page.getByRole('button', { name: 'Show all' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Trace', exact: true })).toHaveCount(0);
 
     // --- Restore the welcome-text to a neutral copy that still interpolates
     // {firstName} so later specs (e.g. proof-of-send.spec, which checks the

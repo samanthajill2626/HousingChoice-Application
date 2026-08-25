@@ -42,10 +42,23 @@ function fakeSeam(
 ): CloudWatchClientSeam & {
   describeAlarms: ReturnType<typeof vi.fn>;
   queryInsights: ReturnType<typeof vi.fn>;
+  getLogRecord: ReturnType<typeof vi.fn>;
+  queryTrace: ReturnType<typeof vi.fn>;
 } {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
     queryInsights: vi.fn(impl.queryInsights ?? (async () => [])),
+    getLogRecord: vi.fn(
+      impl.getLogRecord ??
+        (async () => ({
+          fields: {},
+          responseTruncated: false,
+          logGroup: deployedConfig().errorLogGroupName,
+        })),
+    ),
+    queryTrace: vi.fn(
+      impl.queryTrace ?? (async () => ({ lines: [], truncatedBefore: false, truncatedAfter: false })),
+    ),
   };
 }
 
@@ -234,6 +247,60 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
   });
 
+  it('one SLOW source does not discard the others - the errors still render, flagged as partial', async () => {
+    // The live dev failure this exists to prevent: the kernel-OOM query over
+    // /hc/<env>/system took 17.9s against the poll budget while the pino errors
+    // query had already succeeded in 3.9s. Under Promise.all the timeout threw
+    // away the successful result and the whole panel degraded - showing the
+    // not-deployed notice on a deployed environment that had errors to show.
+    const pinoEvent = {
+      timestamp: '2026-08-25T10:00:00.000Z',
+      level: 50,
+      message: 'job failed: relay.warmNumber',
+      messageTruncated: false,
+      correlationId: 'c1',
+      errMessageTruncated: false,
+      source: 'app' as const,
+      ref: 'PTR-1',
+    };
+    const seam = fakeSeam({
+      queryInsights: async (_groups: string[], filterExpr: string) => {
+        if (filterExpr === OOM_SYSTEM_INSIGHTS_FILTER) {
+          throw new Error('Insights query abc did not complete within 75 polls');
+        }
+        return filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [pinoEvent] : [];
+      },
+    });
+
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.message).toBe('job failed: relay.warmNumber');
+    // The gap is STATED, never silent: a short list that looks whole is the
+    // worst thing this panel can render.
+    expect(result.partialSources).toEqual(['system-oom']);
+  });
+
+  it('degrades only when EVERY source fails - an empty panel from zero working queries would read as "no errors"', async () => {
+    const seam = fakeSeam({
+      queryInsights: async () => {
+        throw new Error('Insights query abc did not complete within 75 polls');
+      },
+    });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+    expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
+  });
+
+  it('omits partialSources entirely when every source succeeds', async () => {
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.partialSources).toBeUndefined();
+  });
+
   it('the pino-error query reads BOTH the app and worker log groups (worker-side errors - extraction, reminder pollers - must reach the panel)', async () => {
     const config = deployedConfig();
     const seam = fakeSeam({ queryInsights: async () => [] });
@@ -247,8 +314,8 @@ describe('systemStatus.getErrors — degradation + window', () => {
 
   it('deployed-like + a working seam → available:true with the events passed through', async () => {
     const events = [
-      { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', correlationId: 'c1' },
-      { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'error', correlationId: null },
+      { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', messageTruncated: false, correlationId: 'c1', errMessageTruncated: false, source: 'app' as const, ref: 'PTR-1' },
+      { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'error', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-2' },
     ];
     const seam = fakeSeam({ queryInsights: async () => events });
     const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
@@ -317,8 +384,12 @@ describe('systemStatus.getErrors — degradation + window', () => {
       timestamp: '2026-07-21T20:04:31.000Z',
       level: 50,
       message: 'twilio relay-recipient delivery failed (undelivered/failed)',
+      messageTruncated: false,
       correlationId: 'c-30034',
       errorCode: '30034',
+      errMessageTruncated: false,
+      source: 'app' as const,
+      ref: 'PTR-3',
     };
     const seam = fakeSeam({
       queryInsights: async (_groups, filterExpr) =>
@@ -340,13 +411,13 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const seam = fakeSeam({
       queryInsights: async (logGroupNames, filterExpr) => {
         if (filterExpr === OOM_SYSTEM_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-4' }];
         }
         if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-5' }];
         }
         if (filterExpr === PINO_ERROR_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', correlationId: 'c1' }];
+          return [{ timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', messageTruncated: false, correlationId: 'c1', errMessageTruncated: false, source: 'app' as const, ref: 'PTR-6' }];
         }
         return [];
       },
@@ -391,7 +462,7 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const seam = fakeSeam({
       queryInsights: async (_logGroupNames, filterExpr) => {
         if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
-          return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+          return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-7' }];
         }
         return [];
       },
@@ -403,23 +474,71 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result.events[0]!.message).toBe('V8 heap out of memory');
   });
 
-  it('deduplicates OOM events that have the same timestamp+label', async () => {
+  // The two halves of the dedup contract, split apart because they pull in
+  // OPPOSITE directions and one fixture cannot show both. `ref` (the Insights
+  // @ptr) is the IDENTITY: it is stable across separate queries (measured
+  // 2026-08-24), so the same log event matched by two queries collapses - and
+  // there is deliberately NO timestamp+message fallback, so two DISTINCT events
+  // that happen to share a second and a label are two rows.
+  it('collapses ONE log event that reaches the merge twice - the shared ref decides', async () => {
     const config = deployedConfig();
-    const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null };
-    // Both the V8 OOM query and pino query return a dup-timestamp event
+    // The merge is a plain concatenation of three query results, and the pino
+    // and V8-OOM queries scan the SAME two groups, so one @ptr can arrive more
+    // than once. Identical copies collapse on the shared ref.
+    //
+    // NOT covered by this: the same event matched by pino AND the OOM query,
+    // where the OOM relabel rewrites `message`. Those copies are no longer
+    // identical, so BOTH survive - by design (a relabeled OOM row reads
+    // differently and is worth its slot), and the RecentErrors row key is
+    // composite precisely so that same-ref pair still renders correctly.
+    const same = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: 'boom', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-8' };
     const seam = fakeSeam({
-      queryInsights: async (_logGroupNames, filterExpr) => {
-        if (filterExpr === OOM_APP_INSIGHTS_FILTER) return [dup];
-        // pino returns same timestamp but different message → not a true dup (different key)
-        return [];
-      },
+      queryInsights: async (_logGroupNames, filterExpr) =>
+        filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [same, { ...same }] : [],
     });
     const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable');
-    // V8 OOM query → 1 event; pino → 0; system → 0 → total 1 unique
     expect(result.events).toHaveLength(1);
-    expect(result.events[0]!.message).toBe('V8 heap out of memory');
+    expect(result.events[0]!.ref).toBe('PTR-8');
+  });
+
+  it('keeps two DISTINCT OOM events that share a timestamp AND a label - ref is the identity', async () => {
+    const config = deployedConfig();
+    const oom = (ref: string) => ({ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref });
+    const seam = fakeSeam({
+      queryInsights: async (_logGroupNames, filterExpr) =>
+        filterExpr === OOM_APP_INSIGHTS_FILTER ? [oom('PTR-8'), oom('PTR-9')] : [],
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    // Two crashes in the same second are two crashes. Both carry the V8 label.
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map((e) => e.ref).sort()).toEqual(['PTR-8', 'PTR-9']);
+    expect(result.events.every((e) => e.message === 'V8 heap out of memory')).toBe(true);
+  });
+
+  it('keeps two same-instant rows from different log groups apart', async () => {
+    const view = (ref: string, source: 'app' | 'worker') => ({
+      timestamp: '2026-08-24T10:00:00.000Z',
+      level: 50,
+      message: 'boom',
+      messageTruncated: false,
+      correlationId: null,
+      errorCode: null,
+      errMessageTruncated: false,
+      source,
+      ref,
+    });
+    const seam = fakeSeam({
+      queryInsights: async (_groups: string[], filterExpr: string) =>
+        filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [view('PTR-A', 'app'), view('PTR-B', 'worker')] : [],
+    });
+    const svc = makeService({ config: deployedConfig(), cloudwatch: seam });
+    const res = await svc.getErrors('1h');
+    expect(res.available).toBe(true);
+    expect(res.available && res.events).toHaveLength(2);
   });
 
   it('local env: unavailable_local WITH NO queryInsights call (all queries skipped)', async () => {
@@ -446,5 +565,142 @@ describe('isSystemErrorWindow', () => {
     for (const bad of ['2h', '', '30d', 'all', undefined, 24, null]) {
       expect(isSystemErrorWindow(bad)).toBe(false);
     }
+  });
+});
+
+describe('systemStatus.getErrorDetail', () => {
+  it('rejects a record from a foreign log group', async () => {
+    const svc = makeService({
+      config: deployedConfig(),
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => ({ fields: { msg: 'x' }, responseTruncated: false, logGroup: '/hc/prod/app' }),
+      }),
+    });
+    expect(await svc.getErrorDetail('A'.repeat(32))).toEqual({ available: false, reason: 'out_of_scope' });
+  });
+
+  it('returns the record for an in-scope log group', async () => {
+    const config = deployedConfig();
+    const svc = makeService({
+      config,
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => ({ fields: { msg: 'x' }, responseTruncated: false, logGroup: config.errorLogGroupName }),
+      }),
+    });
+    const res = await svc.getErrorDetail('A'.repeat(32));
+    expect(res.available).toBe(true);
+    expect(res.available && res.record.fields['msg']).toBe('x');
+  });
+
+  it('accepts the worker and system groups too', async () => {
+    const config = deployedConfig();
+    for (const logGroup of [config.workerLogGroupName, config.systemLogGroupName]) {
+      const svc = makeService({
+        config,
+        cloudwatch: fakeSeam({
+          getLogRecord: async () => ({ fields: {}, responseTruncated: false, logGroup }),
+        }),
+      });
+      expect((await svc.getErrorDetail('A'.repeat(32))).available, logGroup).toBe(true);
+    }
+  });
+
+  it('degrades a malformed ref without calling AWS', async () => {
+    const getLogRecord = vi.fn();
+    const svc = makeService({ config: deployedConfig(), cloudwatch: fakeSeam({ getLogRecord }) });
+    expect(await svc.getErrorDetail('!!!')).toEqual({ available: false, reason: 'invalid_ref' });
+    expect(getLogRecord).not.toHaveBeenCalled();
+  });
+
+  it('local env: unavailable_local BEFORE ref validation, with no seam call', async () => {
+    const seam = fakeSeam();
+    // A malformed ref proves the ORDER: the local short-circuit wins over invalid_ref.
+    const res = await makeService({ config: localConfig(), cloudwatch: seam }).getErrorDetail('!!!');
+    expect(res).toEqual({ available: false, reason: 'unavailable_local' });
+    expect(seam.getLogRecord).not.toHaveBeenCalled();
+  });
+
+  it('deployed + the seam throws -> cloudwatch_error (never an exception)', async () => {
+    const svc = makeService({
+      config: deployedConfig(),
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => {
+          throw new Error('ThrottlingException');
+        },
+      }),
+    });
+    expect(await svc.getErrorDetail('A'.repeat(32))).toEqual({ available: false, reason: 'cloudwatch_error' });
+  });
+});
+
+describe('systemStatus.getTrace', () => {
+  const DEPLOYED_CONFIG = deployedConfig();
+  const UUID = '11111111-2222-4333-8444-555555555555';
+
+  it('validates the id before calling AWS', async () => {
+    const queryTrace = vi.fn();
+    const svc = makeService({ config: DEPLOYED_CONFIG, cloudwatch: fakeSeam({ queryTrace }) });
+    expect(await svc.getTrace('correlationId', 'not-a-uuid', Date.now()))
+      .toEqual({ available: false, reason: 'invalid_id' });
+    expect(queryTrace).not.toHaveBeenCalled();
+  });
+
+  it('queries app and worker but NOT the system group', async () => {
+    const seen: string[][] = [];
+    const svc = makeService({
+      config: DEPLOYED_CONFIG,
+      cloudwatch: fakeSeam({
+        queryTrace: async (g: string[]) => { seen.push(g); return { lines: [], truncatedBefore: false, truncatedAfter: false }; },
+      }),
+    });
+    await svc.getTrace('correlationId', UUID, Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(seen[0]).toEqual([DEPLOYED_CONFIG.errorLogGroupName, DEPLOYED_CONFIG.workerLogGroupName]);
+  });
+
+  it('passes the kind, id and anchor through and returns both truncation flags', async () => {
+    const line = { timestamp: '2026-08-24T09:59:59.000Z', level: 30, message: 'ctx', source: 'app' as const, ref: 'TPTR-1' };
+    const queryTrace = vi.fn(async () => ({ lines: [line], truncatedBefore: true, truncatedAfter: false }));
+    const svc = makeService({ config: DEPLOYED_CONFIG, cloudwatch: fakeSeam({ queryTrace }) });
+    const atMs = Date.parse('2026-08-24T10:00:00.000Z');
+
+    expect(await svc.getTrace('pollRunId', UUID, atMs)).toEqual({
+      available: true,
+      lines: [line],
+      truncatedBefore: true,
+      truncatedAfter: false,
+    });
+    expect(queryTrace).toHaveBeenCalledWith(
+      [DEPLOYED_CONFIG.errorLogGroupName, DEPLOYED_CONFIG.workerLogGroupName],
+      'pollRunId',
+      UUID,
+      atMs,
+    );
+  });
+
+  it('local env: unavailable_local BEFORE id validation, with no seam call', async () => {
+    const seam = fakeSeam();
+    // A malformed id proves the ORDER: the local short-circuit wins over invalid_id.
+    const res = await makeService({ config: localConfig(), cloudwatch: seam }).getTrace(
+      'requestId',
+      'not-a-uuid',
+      Date.now(),
+    );
+    expect(res).toEqual({ available: false, reason: 'unavailable_local' });
+    expect(seam.queryTrace).not.toHaveBeenCalled();
+  });
+
+  it('deployed + the seam throws -> cloudwatch_error (never an exception)', async () => {
+    const svc = makeService({
+      config: DEPLOYED_CONFIG,
+      cloudwatch: fakeSeam({
+        queryTrace: async () => {
+          throw new Error('ThrottlingException');
+        },
+      }),
+    });
+    expect(await svc.getTrace('requestId', UUID, Date.now())).toEqual({
+      available: false,
+      reason: 'cloudwatch_error',
+    });
   });
 });

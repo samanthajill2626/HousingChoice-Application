@@ -123,10 +123,13 @@ export interface FakeThread {
 /**
  * The proof-of-send read: every outbound message the app dispatched to `to`,
  * oldest-first, straight from the fake's thread store. The replacement for the
- * removed `/__dev/outbox` (`getOutbox`) — same `{ to, since }` ergonomics, same
- * `createdAt >= since` filter — but wire-level: it also sees TwiML auto-replies
- * and Conversations fan-out legs, which the app-side outbox was structurally
- * blind to, and each message carries its live delivery `state`.
+ * removed `/__dev/outbox` (`getOutbox`) — same `{ to, since }` ergonomics and
+ * `createdAt >= since` shape, but STRICTER: the old outbox stamped createdAt
+ * from the fake's RFC-1123 date_created (second-truncated, up to 999ms of
+ * backdating that could silently exclude a fresh send from a since-diff),
+ * while the thread store stamps full-millisecond ISO. Also wire-level: it sees
+ * TwiML auto-replies and Conversations fan-out legs, which the app-side outbox
+ * was structurally blind to, and each message carries its live delivery `state`.
  */
 export async function getOutboundTo(
   request: APIRequestContext,
@@ -298,6 +301,9 @@ export async function listThreads(request: APIRequestContext): Promise<FakeThrea
   return (await res.json()).threads as FakeThread[];
 }
 
-export async function resetFake(request: APIRequestContext): Promise<void> {
-  await request.post(`${FAKE_BASE}/control/reset`, { data: {} });
-}
+// There is deliberately NO resetFake helper here. The fake's /control/reset is
+// a ONCE-PER-SUITE operation owned by support/preflight.ts (globalSetup): it
+// also wipes the Conversations rail and the opt-out list
+// (fake-twilio/src/engine/conversationsEngine.ts listens for the reset event),
+// so a spec calling it mid-suite would pull state out from under every spec
+// after it. Scope assertions with getOutboundTo's `since` instead.

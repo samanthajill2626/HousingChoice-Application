@@ -42,7 +42,7 @@ async function clearTable(
     const desc = await client.send(new DescribeTableCommand({ TableName: physical }));
     keyNames = (desc.Table?.KeySchema ?? []).map((k) => k.AttributeName!).filter(Boolean);
   } catch {
-    return; // table doesn't exist (e.g. outbox never created) — nothing to clear
+    return; // table doesn't exist — nothing to clear
   }
   let startKey: Record<string, unknown> | undefined;
   do {

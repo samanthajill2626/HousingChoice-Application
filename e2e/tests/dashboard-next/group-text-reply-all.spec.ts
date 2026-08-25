@@ -13,11 +13,11 @@ import { expectTodayReady } from '../../support/today.js';
 // SPEC 2 - reply-all: ONE send, every handset, per-member delivery.
 //
 // A17 IS BINDING AND SHAPES EVERY ASSERTION HERE. A group send leaves through
-// the Conversations adapter, which the recording messaging driver does not
-// wrap, so `/__dev/outbox` is STRUCTURALLY BLIND to it. Proving delivery
-// against the outbox would produce a spec that fails for the wrong reason
-// today and passes for the wrong reason tomorrow. Proof comes from the fake
-// phones' own threads and from the per-member chips the receipts drive.
+// the Conversations adapter, which the app-side proof-of-send log this repo
+// once carried (`/__dev/outbox`, removed 2026-08-24) was STRUCTURALLY BLIND
+// to - it would have failed for the wrong reason today and passed for the
+// wrong reason tomorrow. Proof comes from the fake phones' own threads and
+// from the per-member chips the receipts drive.
 //
 // The last assertion is the one worth stating plainly: NO unknown-provider-SID
 // ERROR. A Conversations send persists its message under an IMxx, and any code

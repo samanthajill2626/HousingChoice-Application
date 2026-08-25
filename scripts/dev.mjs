@@ -691,8 +691,9 @@ const { result } = concurrently(commands, {
 //
 // Best-effort + fire-and-forget: a slow/failed app boot only logs a warning and
 // NEVER tears down the dev loop (this runs alongside `await result` below, not
-// before it). NOT wired into /__dev/reseed — that keeps the e2e outbox byte-stable
-// (after a manual reseed, re-POST the seam yourself; see fake-twilio/README.md).
+// before it). NOT wired into /__dev/reseed — that keeps the e2e seed world
+// byte-stable (after a manual reseed, re-POST the seam yourself; see
+// fake-twilio/README.md).
 if (mockEnabled && seedEnabled && mode === 'local') {
   void (async () => {
     const appBase = 'http://localhost:8080';

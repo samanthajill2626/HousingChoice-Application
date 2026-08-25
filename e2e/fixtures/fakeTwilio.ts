@@ -97,21 +97,47 @@ export function twimlMessageBody(twiml: string): string | undefined {
   return m ? unescapeXml(m[1]!) : undefined;
 }
 
+export interface FakeThreadMessage {
+  sid: string;
+  direction: 'inbound' | 'outbound';
+  /** Sender E.164 — the app/pool number for outbound, the party for inbound.
+   *  Always on the wire (fake-twilio ThreadMessage); surfaced so tour-group
+   *  assertions can prove a send came FROM the masked pool number. */
+  from: string;
+  /** Recipient E.164 — always on the wire (see `from`). */
+  to: string;
+  body?: string;
+  state: string;
+  mediaUrls?: string[];
+  /** Twilio ErrorCode, present only once the message resolved to a failure state. */
+  errorCode?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface FakeThread {
   partyNumber: string;
-  messages: Array<{
-    sid: string;
-    direction: 'inbound' | 'outbound';
-    /** Sender E.164 — the app/pool number for outbound, the party for inbound.
-     *  Always on the wire (fake-twilio ThreadMessage); surfaced so tour-group
-     *  assertions can prove a send came FROM the masked pool number. */
-    from: string;
-    /** Recipient E.164 — always on the wire (see `from`). */
-    to: string;
-    body?: string;
-    state: string;
-    mediaUrls?: string[];
-  }>;
+  messages: FakeThreadMessage[];
+}
+
+/**
+ * The proof-of-send read: every outbound message the app dispatched to `to`,
+ * oldest-first, straight from the fake's thread store. The replacement for the
+ * removed `/__dev/outbox` (`getOutbox`) — same `{ to, since }` ergonomics, same
+ * `createdAt >= since` filter — but wire-level: it also sees TwiML auto-replies
+ * and Conversations fan-out legs, which the app-side outbox was structurally
+ * blind to, and each message carries its live delivery `state`.
+ */
+export async function getOutboundTo(
+  request: APIRequestContext,
+  opts: { to: string; since?: string },
+): Promise<FakeThreadMessage[]> {
+  const threads = await listThreads(request);
+  const thread = threads.find((t) => t.partyNumber === opts.to);
+  if (!thread) return [];
+  return thread.messages.filter(
+    (m) => m.direction === 'outbound' && (!opts.since || m.createdAt >= opts.since),
+  );
 }
 
 /**

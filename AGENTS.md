@@ -61,7 +61,7 @@ the work is done, and add or extend a spec for new behavior.
   the Playwright MCP. After a backend change run `npm run e2e:restart`; use
   `npm run e2e:reseed` for a clean slate and `npm run e2e:stop` to end.
 - Dev-only, hermetic-local-only helpers (structurally absent in deployed envs):
-  `POST /auth/dev-login`, `GET /__dev/outbox`, `POST /__dev/reseed`, and
+  `POST /auth/dev-login`, `POST /__dev/reseed`, and
   `GET /__dev/ping`.
 - Write specs with accessibility-first selectors (`getByRole` / `getByLabel`); see
   [`e2e/support/selectors.md`](e2e/support/selectors.md). Docker is required for

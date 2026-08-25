@@ -1034,6 +1034,7 @@ interface DefaultLifecycle {
   ownerToken: string;
   appBaseUrl: string;
   dashboardBaseUrl: string;
+  ports: { app: number; dashboard: number; fake: number; publicBase: number };
   tablePrefix: string;
   assertAlive(): void;
   cleanup(): Promise<import('./lifecycle.js').LifecycleCleanupResult>;
@@ -1318,11 +1319,17 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
       const selectedRoutes = runConfig.selfQa === null
         ? routesModule.ROUTES
         : selfQaModule.routesForSelfQa(runConfig.selfQa, routesModule.ROUTES);
+      // The proof-of-send count rides the fake-twilio thread store (the
+      // /__dev/outbox replacement). Self-QA is hermetic-only (checked below),
+      // so the owned lifecycle - and its fake port - is always present here.
+      const proofOfSendUrl = activeLifecycle === null
+        ? null
+        : `http://127.0.0.1:${activeLifecycle.ports.fake}/control/threads`;
       if (runConfig.selfQa !== null) {
         if (runConfig.target !== 'hermetic' || runConfig.seed === null) throw new Error('self_qa_target_invalid');
         const privateFixtures = seedModule.resolvePerformanceSelfQaFixtures(runConfig.seed);
         selfQaBindings = await selfQaModule.proveSelfQaFixtures(privateFixtures, selfQaApi);
-        selfQaBefore = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+        selfQaBefore = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi, proofOfSendUrl!);
       }
       const coldDom: ResolverDom = {
         hasExactLink: async () => true,
@@ -1419,7 +1426,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           }
         }
         result.outOfSampleWrites.push(...supplemental.outOfSampleWrites);
-        const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+        const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi, proofOfSendUrl!);
         const attempts = [
           ...selfQaModule.attemptsFromSamples(result.samples),
           ...supplemental.attempts,

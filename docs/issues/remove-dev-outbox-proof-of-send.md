@@ -3,12 +3,33 @@ id: remove-dev-outbox-proof-of-send
 title: Remove the deprecated /__dev/outbox proof-of-send log + RecordingMessagingDriver
 type: debt
 severity: low
-status: open
+status: resolved
 area: app/dev-harness
 created: 2026-06-18
-updated: 2026-08-23
-refs: app/src/routes/dev.ts:88, app/src/adapters/recordingMessaging.ts:42, app/src/adapters/messaging.ts, e2e/fixtures/outbox.ts
+updated: 2026-08-24
+refs: app/src/routes/dev.ts, app/src/adapters/messaging.ts, e2e/fixtures/fakeTwilio.ts
 ---
+
+**RESOLVED 2026-08-24 (branch `feat/remove-dev-outbox`).** Every consumer now
+asserts against the fake-twilio thread store, and the whole outbox surface is
+deleted:
+
+- New `getOutboundTo(request, { to, since })` in `e2e/fixtures/outbox.ts`'s
+  replacement home `e2e/fixtures/fakeTwilio.ts` - same ergonomics as the old
+  `getOutbox` (including the `createdAt >= since` filter), wire-level source.
+- Migrated: 9 spec files (relay x4, voice x2, contact-create-relay-group,
+  public-pages, flows/outbox -> flows/proof-of-send), the `voiceSetup` fixture,
+  the perf self-QA snapshot (`reduceSelfQaSnapshot` now takes the thread-store
+  URL; the `outbox` surface key and `outboxUnchanged` report field keep their
+  names), and the e2e preflight (no `recordOutbox` expectation).
+- Deleted: the `/__dev/outbox` route, `RecordingMessagingDriver` + its
+  `messaging.ts` wiring, `config.recordOutbox` + the `MESSAGING_RECORD_OUTBOX`
+  env + its prod guard, the outbox entry in `devReset`'s clear set, and the
+  `devOutbox.integration` / `recordingMessaging.integration` suites.
+- `db-create.ts` keeps a legacy-cleanup drop of the literal `dev-outbox` table
+  so stacks that predate the removal still tear down completely.
+
+Original issue text below, kept for history.
 
 **SCOPE CORRECTION (2026-08-23): "three specs" is badly stale - reliance has
 roughly QUINTUPLED since filing, despite the do-not-extend marker.** Measured by

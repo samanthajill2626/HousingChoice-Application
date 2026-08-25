@@ -1,5 +1,5 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { getOutboundTo } from '../../fixtures/fakeTwilio.js';
 // The final "group is closed" copy (single source of truth) - close now sends it.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 import { expectTodayReady } from '../../support/today.js';
@@ -127,10 +127,10 @@ test('Team reply fans out to every member on the pool number (headline)', async 
     await expect
       .poll(
         async () => {
-          const msgs = await getOutbox(request, { to: memberPhone });
+          const msgs = await getOutboundTo(request, { to: memberPhone });
           return msgs.filter((m) => (m.body ?? '').includes(token) && m.from === POOL).length;
         },
-        { timeout: 15_000, message: `fan-out to ${memberPhone} not observed in outbox` },
+        { timeout: 15_000, message: `fan-out to ${memberPhone} not observed in the thread store` },
       )
       .toBe(1);
   }
@@ -212,7 +212,7 @@ test('Close group: final message sent to both, number kept, composer hard-disabl
   // vacuous "nothing arrived yet" check: by the time the Closed pill renders the
   // close request has completed server-side.
   for (const memberPhone of [DIANA_PHONE, GLORIA_PHONE]) {
-    const msgs = await getOutbox(request, { to: memberPhone });
+    const msgs = await getOutboundTo(request, { to: memberPhone });
     expect(
       msgs.some((m) => (m.body ?? '').includes(CLOSED_COPY)),
       `no close message should reach ${memberPhone}`,

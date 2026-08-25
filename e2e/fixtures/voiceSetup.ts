@@ -4,9 +4,9 @@
 //
 //   - verifyCell / readVerifyCode : verify the CURRENT session user's cell FOR
 //     REAL (spec §7) — verify-start sends a 6-digit SMS code (dispatched via the
-//     fake), which we read back from /__dev/outbox → verify-confirm. This is the
-//     exact self-service path a navigator uses before placing masked calls; the
-//     originate route 409s `cell_not_verified` without it.
+//     fake), which we read back from the fake's thread store → verify-confirm.
+//     This is the exact self-service path a navigator uses before placing masked
+//     calls; the originate route 409s `cell_not_verified` without it.
 //   - driveBridge : press '1' on the paused navigator leg and wait for the bridge
 //     to complete (whisper accept → <Dial> the target from the business number →
 //     <Dial action> summary → recording), exactly as a navigator pressing 1 on
@@ -15,10 +15,10 @@
 //     assertions share.
 //
 // Both consumers pass their own APIRequestContext (page.request), which carries the
-// live session cookie + the :5174 baseURL — so getOutbox's relative /__dev/outbox
-// and the ${NEXT} API calls resolve against the same authenticated stack.
+// live session cookie + the :5174 baseURL — the ${NEXT} API calls resolve against
+// the authenticated stack, while getOutboundTo targets the fake host absolutely.
 import { expect, type APIRequestContext } from '@playwright/test';
-import { getOutbox } from './outbox.js';
+import { getOutboundTo } from './fakeTwilio.js';
 import { pressCall, type FakeCall } from './fakeVoice.js';
 
 /** The dashboard dev-server origin — resolved per-lane by playwright.config.ts. */
@@ -33,13 +33,13 @@ export function uniqueVoicePhone(): string {
   return `+1555${stamp}${String(voiceSeq).padStart(2, '0')}`;
 }
 
-/** Poll /__dev/outbox for the verification SMS to `cell` and extract its 6-digit code. */
+/** Poll the fake's thread store for the verification SMS to `cell` and extract its 6-digit code. */
 export async function readVerifyCode(api: APIRequestContext, cell: string): Promise<string> {
   let code: string | undefined;
   await expect
     .poll(
       async () => {
-        const msgs = await getOutbox(api, { to: cell });
+        const msgs = await getOutboundTo(api, { to: cell });
         for (const m of msgs) {
           const match = /(\d{6})/.exec(m.body ?? '');
           if (match) code = match[1];
@@ -55,14 +55,14 @@ export async function readVerifyCode(api: APIRequestContext, cell: string): Prom
 /**
  * Verify the CURRENT session user's cell FOR REAL (spec §7): verify-start sends a
  * 6-digit SMS code (which the app really dispatches via the fake) → we read it from
- * /__dev/outbox → verify-confirm stamps cell_verified_at. Returns the verified cell.
+ * the fake's thread store → verify-confirm stamps cell_verified_at. Returns the verified cell.
  * This is the exact self-service path a navigator uses before placing masked calls.
  */
 export async function verifyCell(api: APIRequestContext, cell: string): Promise<string> {
   const start = await api.post(`${NEXT}/api/users/me/cell/verify-start`, { data: { cell } });
   expect(start.status(), await start.text()).toBe(200);
 
-  // The app really sent the code SMS — read it back from the recorded outbox.
+  // The app really sent the code SMS — read it back from the fake's thread store.
   const code = await readVerifyCode(api, cell);
   const confirm = await api.post(`${NEXT}/api/users/me/cell/verify-confirm`, { data: { code } });
   expect(confirm.status(), await confirm.text()).toBe(200);

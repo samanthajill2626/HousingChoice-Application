@@ -15,7 +15,6 @@ import { createDynamoClient } from '../src/lib/dynamo.js';
 import { tableName } from '../src/lib/config.js';
 import { ensureTable, deleteTableIfExists } from '../src/lib/dynamoAdmin.js';
 import { TABLES } from '../src/lib/tables.js';
-import { OUTBOX_TABLE_BASE } from '../src/adapters/recordingMessaging.js';
 
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
 
@@ -65,13 +64,14 @@ export async function dropAllTables(endpoint: string): Promise<void> {
       await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: physicalName });
       console.log(`  dropped  ${physicalName}`);
     }
-    // The dev-outbox is created ON DEMAND by adapters/recordingMessaging.ts and
-    // is deliberately NOT in the TABLES manifest, so the loop above cannot see
-    // it. Dropping it here keeps teardown COMPLETE - without this a run leaves
-    // exactly one table behind (caught 2026-08-16 by counting tables after a
-    // full suite: 22 dropped, 1 survivor). Absent on a stack that never
-    // recorded an outbox send, and deleteTableIfExists tolerates that.
-    const outboxTable = tableName(OUTBOX_TABLE_BASE);
+    // LEGACY CLEANUP: the removed RecordingMessagingDriver
+    // (remove-dev-outbox-proof-of-send, 2026-08-24) used to lazily create a
+    // dev-outbox table outside the TABLES manifest, so the loop above cannot
+    // see one left behind by an older stack. Dropping it by literal name keeps
+    // teardown COMPLETE on such stacks; deleteTableIfExists tolerates absence
+    // everywhere else. Safe to delete this block once no lane predates the
+    // removal.
+    const outboxTable = tableName('dev-outbox');
     await deleteTableIfExists(client, outboxTable);
     await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: outboxTable });
     console.log(`  dropped  ${outboxTable}`);

@@ -1,8 +1,4 @@
 // MessagingAdapter — the ONLY place the Twilio SDK is imported (adapter rule).
-// NOTE: RecordingMessagingDriver is imported at the bottom (after exports it
-// needs) to avoid a circular-dependency issue at the module graph level.
-// recordingMessaging.ts imports only TYPES from this file, so there is no
-// runtime cycle.
 //
 // Twilio **Programmable Messaging** only — NOT the Conversations product
 // (intentional deviation, README "Deviations" table 2026-06-12): every
@@ -32,7 +28,6 @@ import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
-import { RecordingMessagingDriver } from './recordingMessaging.js';
 import { createRedirectingHttpClient } from './twilioHttpClient.js';
 
 export interface SendMessageParams {
@@ -1190,8 +1185,5 @@ export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): M
       logger: deps.logger,
     });
   })();
-  if (config.recordOutbox) {
-    return new RecordingMessagingDriver({ inner: base, config, logger: deps.logger });
-  }
   return base;
 }

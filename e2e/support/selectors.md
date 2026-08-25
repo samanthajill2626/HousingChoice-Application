@@ -145,6 +145,6 @@ touch target on the ROW container, never on a button (the glyph buttons are
 ~18-42px wide by design - spec 6.7 says the ROW is the target).
 
 ## Dev-only assertions (not UI)
-- Outbox: `getOutbox(request, { to, since })` → `GET /__dev/outbox`.
+- Proof-of-send: `getOutboundTo(request, { to, since })` → the fake-twilio thread store (`GET /control/threads`).
 - Reset: `reseed(request)` → `POST /__dev/reseed`.
 - Stack identity: `GET /__dev/ping` → `{ dev: true }`.

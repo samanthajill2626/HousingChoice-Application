@@ -51,20 +51,6 @@ describe('dev gating — config', () => {
     ).toBe(false);
   });
 
-  it('parses MESSAGING_RECORD_OUTBOX truthy values outside production', () => {
-    for (const v of ['true', '1', 'yes', 'TRUE']) {
-      expect(
-        loadConfig({ NODE_ENV: 'test', MESSAGING_RECORD_OUTBOX: v, CF_ORIGIN_SECRET: SECRET }).recordOutbox,
-      ).toBe(true);
-    }
-    expect(loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }).recordOutbox).toBe(false);
-  });
-
-  it('fails fast when MESSAGING_RECORD_OUTBOX is set in production', () => {
-    expect(() =>
-      loadConfig({ NODE_ENV: 'production', MESSAGING_RECORD_OUTBOX: '1' }),
-    ).toThrow(/MESSAGING_RECORD_OUTBOX/);
-  });
 });
 
 describe('dev gating — router', () => {
@@ -90,7 +76,6 @@ describe('dev gating — router', () => {
     // detect a stale/misconfigured reused stack — keep them on the response.
     expect(res.body).toEqual({
       dev: true,
-      recordOutbox: config.recordOutbox,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
       emailDriver: config.emailDriver,

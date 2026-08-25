@@ -277,6 +277,27 @@ function log(msg) {
  * OPT-IN, so a normal run behaves exactly as before: set E2E_CHILD_LOG_DIR to a
  * directory and each child also appends to <dir>/<name>.log. Output is still
  * forwarded to this process's stdout either way.
+ *
+ * TWO LIMITS, stated so nobody trusts this further than it goes:
+ *
+ * - THE LAST FEW LINES CAN BE LOST. Under `npm run e2e` Playwright tears the
+ *   webServer down with a tree-kill, so `shutdown()` below never runs (see its
+ *   own comment) and nothing flushes what is still in the sink's queue or in
+ *   the unread OS pipe buffer. With plain 'inherit' the child writes to the
+ *   inherited fd and no intermediary can lose anything; this path adds a buffer
+ *   that dies with the process. For a hang or a timeout - the cases this exists
+ *   for - the interesting lines are seconds old and already on disk. For a
+ *   crash in the final instant, prefer `npm run e2e:session`, which shuts down
+ *   properly.
+ * - `runOnce()` children (db-create, db-seed, the builds) still use 'inherit'
+ *   and are NOT captured. Only the long-lived services are.
+ *
+ * NOT OBSERVATIONALLY NEUTRAL, either: switching a child from 'inherit' to
+ * 'pipe' makes its stdout a pipe rather than a TTY, so `isTTY` goes false and
+ * stdout becomes block-buffered. Pino already emits JSON here so the FORMAT does
+ * not change, but a tool that pretty-prints for a TTY would, and buffering
+ * shifts when lines appear. Do not use this variable to reproduce a
+ * timing-sensitive symptom and then reason from the timings.
  */
 const childLogDir = process.env['E2E_CHILD_LOG_DIR'] ?? '';
 
@@ -292,10 +313,46 @@ function spawnNode(name, args, cwd = repoRoot, envOverride = undefined) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const sink = createWriteStream(path.join(childLogDir, `${name}.log`), { flags: 'a' });
-  child.stdout.pipe(sink);
-  child.stderr.pipe(sink);
+  // A LOG SINK MUST NEVER TAKE THE LAUNCHER DOWN. An EACCES / ENOSPC / EBUSY on
+  // this file arrives as an 'error' event, and an unhandled one on a
+  // WriteStream is fatal - which would kill a whole e2e lane to protect a
+  // diagnostic. Report and carry on; the run matters more than its log.
+  let sinkBroken = false;
+  sink.on('error', (err) => {
+    sinkBroken = true;
+    log(`child log sink for ${name} failed, continuing without it: ${String(err)}`);
+  });
+  // `end: false` ON BOTH, and this is not a style choice. Piping two readables
+  // into one writable with the default `end: true` means the FIRST stream to
+  // EOF calls sink.end(), and Node then unpipes every other source when the
+  // sink finishes - so the second stream's remaining output is discarded
+  // silently, with no error even if you are listening for one. stderr losing
+  // its tail is the exact opposite of what a failure log is for.
+  child.stdout.pipe(sink, { end: false });
+  child.stderr.pipe(sink, { end: false });
   child.stdout.pipe(process.stdout);
   child.stderr.pipe(process.stderr);
+  // 'close', NOT 'exit'. 'exit' fires when the PROCESS ends; 'close' fires once
+  // its stdio streams are closed too, and the two are not the same moment -
+  // Node documents 'close' as existing precisely because stdio can outlive
+  // 'exit' when a process shares it with children. These children do: Vite runs
+  // esbuild as a child service, and app/worker run under tsx. Ending the sink on
+  // 'exit' would drop whatever a grandchild wrote afterwards - reintroducing,
+  // four lines below the comment that warns about it, the same silent
+  // truncation `{ end: false }` was added to remove.
+  child.once('close', () => {
+    if (!sinkBroken) sink.end();
+  });
+  // A run separator, because `flags: 'a'` accumulates sessions into one file and
+  // an undelimited concatenation of three runs is close to unreadable. The
+  // timestamp is the launcher's, which is the same clock the child's pino lines
+  // use, and the pid is what makes the next caveat survivable.
+  //
+  // CAVEAT on `e2e:restart`: the dying child's final lines can still be draining
+  // through its own sink when this separator is written, so a crash tail can
+  // appear BELOW the separator for the run that replaced it. Both writes are
+  // O_APPEND so nothing corrupts - but attribute by pid, not by position.
+  sink.write(`\n===== ${name} started ${new Date().toISOString()} (pid ${child.pid}) =====\n`);
   return trackChild(name, child);
 }
 

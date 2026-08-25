@@ -71,6 +71,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
       <span data-testid="loadingMore">{String(s.loadingMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
+      <button onClick={() => s.retry()}>retry</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
           <button onClick={() => s.markRead(r)}>read:{rowKey(r)}</button>
@@ -645,11 +646,186 @@ describe('useInbox - the unread feed truncation flag', () => {
 
     expect(screen.getByTestId('status')).toHaveTextContent('ready');
     expect(screen.getByTestId('count')).toHaveTextContent('3');
-    // And no request was spent on a filter the operator has left.
-    const filtersAfterSwitch = getInbox.mock.calls
-      .map((c) => (c[0] as { filter: InboxFilter }).filter)
-      .slice(1);
-    expect(filtersAfterSwitch).not.toContain('unread');
+    // And no request was spent on a filter the operator has left. Asserted off
+    // the LAST call rather than a positional slice: a positional assertion
+    // silently depends on exactly one request having been made before the
+    // switch, which StrictMode's double-invoke would break for reasons that
+    // have nothing to do with this behaviour.
+    expect(getInbox).toHaveBeenCalledTimes(2);
+    const lastFilter = (getInbox.mock.calls.at(-1)?.[0] as { filter: InboxFilter }).filter;
+    expect(lastFilter).toBe('all');
+  });
+
+  // ADVERSARIAL REVIEW FINDING 3. The SUCCESS path refuses a page on two axes -
+  // the optimistic-mutation generation and the filter - while the FAILURE path
+  // checked only the filter, under a comment claiming both branches refused
+  // alike. They did not, and the asymmetry is reachable without any filter
+  // change at all: a background reconcile that FAILS discards a healthy list
+  // the operator is looking at, including a mark-read they just committed.
+  //
+  // `loadMore`'s .catch is deliberately non-destructive for this exact reason.
+  // A reconcile nobody asked for has even less licence to destroy good state.
+  it('a FAILED background reconcile does not discard a committed mark-read', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // A background reconcile starts FIRST and is still on the wire - that
+    // ordering is the whole point, because it is what captures the pre-commit
+    // generation.
+    let failReconcile: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          failReconcile = () => rej(new ApiError(500, 'http_500', 'boom'));
+        }),
+    );
+    act(() => {
+      sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(getInbox).toHaveBeenCalledTimes(2);
+
+    // NOW the operator marks the row read; the POST resolves and commits.
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+
+    // ...and only then does the in-flight reconcile fail.
+    await act(async () => {
+      failReconcile();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // The list the operator is looking at survives, and so does their action.
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+  });
+
+  // CONFORMANCE REVIEW FINDING 1. `genRef` is not filter-scoped, so an
+  // optimistic commit for a row on the filter the operator LEFT invalidates the
+  // page the filter they arrived at is currently fetching. The effect already
+  // set status 'loading' and nothing else re-fetches, so the new tab strands on
+  // a spinner until an unrelated SSE event happens along.
+  //
+  // Pre-existing, but the stale-reconcile fix made it REACHABLE: the stale
+  // timer used to fire at +300ms and drag the tab to 'ready' (with the wrong
+  // filter's rows - the defect that fix closed). Cancelling that timer removed
+  // the accident that was covering this.
+  it('an optimistic commit on the PREVIOUS filter does not strand the new one', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          releaseRead = () => res();
+        }),
+    );
+    const { rerender } = render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // Mark read on Unread - the POST is still in flight...
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    // ...the operator switches to All, and then BACK to Unread. The round trip
+    // is the point: a guard that compares filter IDENTITY sees 'unread' again
+    // and concludes nothing changed, so it bumps the generation and invalidates
+    // the page this tab is currently fetching. Identities recur; epochs do not.
+    // "Mark read, peek at All, come back" is an ordinary triage gesture, and
+    // browser back/forward steps through filters by design.
+    getInbox.mockImplementationOnce(() => new Promise(() => {})); // All, never settles
+    rerender(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+
+    let releaseArrived: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          // unreadCount > 0: we land back on the Unread tab, which narrows the
+          // list client-side, so a read row would be filtered out and the
+          // assertion below would fail for a reason unrelated to the defect.
+          releaseArrived = () => res(pageOf([mkRow({ contactId: 'c2', unreadCount: 3 })]));
+        }),
+    );
+    rerender(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+
+    // ...and the mark-read commits FIRST, bumping the generation.
+    await act(async () => {
+      releaseRead();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseArrived();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // The page for the tab the operator is ACTUALLY on must install. Stranding
+    // on 'loading' - a spinner with no Retry, since Retry lives under the error
+    // state - with no request in flight is the defect.
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+  });
+
+  // RE-REVIEW, the residue BOTH reviewers and I missed on the first pass: the
+  // strand needs no filter change at all, and its end state is worse than the
+  // symptom this branch set out to fix - a permanent spinner, and Retry does not
+  // exist under `status: loading`, so there is no affordance left.
+  //
+  // The structural point: `fetchFirstPage` treats "a mutation committed while I
+  // was on the wire" as DISCARD MY PAGE AND SET NO STATE. That is only safe when
+  // some other fetch is guaranteed to follow - true for a background reconcile
+  // over a list already on screen, FALSE for any fetch that set 'loading' first
+  // (the filter effect, and retry). Nothing re-issues those.
+  it('a mark-read committing under RETRY does not strand the tab on a spinner', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          releaseRead = () => res();
+        }),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // Mark read; the POST hangs.
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+
+    // A background reconcile fails BEFORE the POST resolves, so the generation
+    // has not moved yet and the error state is legitimately reached.
+    getInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    act(() => {
+      sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never);
+    });
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
+
+    // The operator hits Retry. Its page is on the wire...
+    let releaseRetry: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseRetry = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+        }),
+    );
+    act(() => screen.getByRole('button', { name: 'retry' }).click());
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('loading'));
+
+    // ...and the mark-read commits first, legitimately bumping the generation
+    // for THIS filter. Retry's own page must still land: discarding it leaves
+    // nothing on screen and nothing in flight.
+    await act(async () => {
+      releaseRead();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseRetry();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
   });
 
   // The OTHER reset A10 names. Kept on the SAME filter (a reconcile refetch that

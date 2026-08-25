@@ -18,25 +18,37 @@ was resolved the same day, and the cause was not the read path at all: it was
 (`feat/inbox-unread-read-path` @52ebafc8). "A whole open-partition read
 answered empty" never happened - the server served full pages throughout.
 
-The two halves of THIS issue now sit differently, and neither is verifiable
-today:
+**BOTH HALVES ARE NOW UNEXPLAINED.** An earlier version of this update called
+the `inbox-markread.spec.ts` half "plausibly the same defect". A re-review
+checked that against the harness rather than the spec text, and the stale-page
+mechanism CANNOT REACH IT. Three independent reasons:
 
-- `inbox-markread.spec.ts` is PLAUSIBLY the same defect. It clicks Unread, then
-  All, with inbound traffic in flight. A stale ALL page installed while the
-  Unread tab is showing gets narrowed CLIENT-SIDE to unread rows only
-  (`useInbox` applies `filter === 'unread' ? patched.filter(r => r.unreadCount > 0)`),
-  so a page fetched before the inbound landed renders as no row at all - which
-  is exactly this issue's symptom, and it sticks until the next event.
-- `deleted-contact-resurfacing.spec.ts` is NOT explained by it. That spec
-  reaches the inbox by `page.goto`, a fresh mount, where no timer survives to
-  go stale.
+- `e2e/playwright.config.ts` sets `fullyParallel: false, workers: 1`, so there
+  is no cross-spec SSE traffic on the lane.
+- The SSE endpoint writes `: connected` and nothing else on connect - no
+  snapshot, no replay, no Last-Event-ID catch-up. The `conversation.updated` for
+  the spec's own inbound fires during `sendAsParty`, BEFORE `devLogin` opens an
+  EventSource, so it is gone.
+- `page.goto('/inbox')` remounts the app and opens a fresh EventSource anyway.
 
-It has not reproduced in 8+ full runs, including two heavily contended ones, so
-neither half can be confirmed or refuted by re-running today. Closing it on the
-resemblance would be guessing. It stays open with the mechanism named, and a
-recurrence AFTER @52ebafc8 is now a much sharper datum than it was: if it is
-the markread half, it should be gone; if it recurs there anyway, the stale-page
-explanation is wrong and something else is live.
+The mechanism needs an event landing between the All-tab fetch and the Unread
+click. This spec produces none. `deleted-contact-resurfacing.spec.ts` was never
+explained by it either (a fresh mount, no timer to go stale).
+
+The only channel not ruled out is the WORKER emitting an unrelated
+`conversation.updated` - a scheduled send, a reminder - inside that window.
+Unverified, and recorded only so the next person does not have to re-derive it.
+
+**And the prediction that stood here has been deleted, not hedged**, because it
+inverted the inference: it said a recurrence on the markread half after
+`@52ebafc8` would mean the stale-page explanation was wrong. That explanation
+was never live for this spec, so a recurrence would say nothing at all about the
+fix - and a future reader would have drawn a false conclusion from real
+evidence. That is the exact failure this whole file is a monument to.
+
+Neither half has reproduced in 8+ full runs, including two heavily contended
+ones. Both stay open with NO candidate mechanism, which is a worse position than
+this issue was in yesterday, and an honest one.
 
 The original routing note is left below for the record.
 

@@ -170,11 +170,25 @@ export function useInbox(filter: InboxFilter): InboxState {
   // would compare EQUAL and commit. The identity of the filter is the only
   // thing the closure carries that the ref can be checked against.
   const activeFilterRef = useRef(filter);
+  // The rendered status, readable from inside a fetch callback without making
+  // `fetchFirstPage` depend on it. It decides whether the generation guard below
+  // has anything to protect: see the guard for why that matters.
+  //
+  // Written through `applyStatus` and NEVER through `setStatus` directly, so the
+  // ref cannot drift from the state. A `useEffect` mirror would look tidier and
+  // be wrong: effects flush after commit, and a fetch continuation resolving in
+  // that gap would read the previous status and take the opposite branch.
+  const statusRef = useRef<InboxStatus>('loading');
   // The pending debounced reconcile, declared up here (rather than beside
   // `scheduleRefetch` below) so the filter-change effect can cancel it. Its
   // clearing effect has empty deps and therefore only ever ran on UNMOUNT,
   // which is what let a reconcile outlive the filter that scheduled it.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** The ONLY way this hook changes `status` - keeps `statusRef` atomic with it. */
+  const applyStatus = useCallback((next: InboxStatus) => {
+    statusRef.current = next;
+    setStatus(next);
+  }, []);
   const clearPendingRefetch = useCallback(() => {
     if (debounceRef.current !== undefined) {
       clearTimeout(debounceRef.current);
@@ -189,7 +203,25 @@ export function useInbox(filter: InboxFilter): InboxState {
     const gen = genRef.current;
     try {
       const pageData = await getInbox({ filter, limit: PAGE_LIMIT }, controller.signal);
-      if (controller.signal.aborted || gen !== genRef.current) return;
+      if (controller.signal.aborted) return;
+      // THE GENERATION GUARD PROTECTS A LIST, NOT A SPINNER.
+      //
+      // Discarding a pre-mutation page is right when there is a rendered list
+      // whose committed state it would clobber. It is WRONG when the screen is
+      // showing a spinner, because nothing re-issues a discarded page: the
+      // filter effect and `retry` both set 'loading' and then fetch exactly
+      // once. Discarding there leaves no rows, no request in flight, and no
+      // Retry (that affordance lives under `status: error`) - a permanently
+      // stuck tab, which is a worse outcome than the stale-page bug this hook
+      // was just fixed for.
+      //
+      // Reachable without any filter change: mark read, a background reconcile
+      // fails, the operator hits Retry, and the POST commits while Retry's page
+      // is on the wire. Installing that page instead is safe - the optimistic
+      // patch still overlays it, and mark-read emits `conversation.updated`, so
+      // a reconcile follows within the debounce window and corrects any count
+      // the page carried stale.
+      if (gen !== genRef.current && statusRef.current === 'ready') return;
       // A page for a filter we have LEFT is refused, never installed.
       //
       // HONEST STATUS: no test can currently fail by deleting this line, and
@@ -208,14 +240,29 @@ export function useInbox(filter: InboxFilter): InboxState {
       setCursor(pageData.nextCursor);
       setGroupsTruncated(pageData.groupsTruncated === true);
       setTruncated(pageData.truncated === true);
-      setStatus('ready');
+      applyStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
       }
-      // Same refusal on both failure branches: a 404 or a 500 answering a filter
-      // we have left must not move THIS filter's state either.
-      if (filter !== activeFilterRef.current) return;
+      // THE SAME TWO AXES THE SUCCESS PATH REFUSES ON, and for the same reason.
+      // This branch previously checked only the filter while claiming to check
+      // both, and the missing generation check was reachable with no filter
+      // change at all: a background reconcile that started before an optimistic
+      // mark-read committed, and then FAILED, replaced a healthy list - and the
+      // operator's just-committed action - with the inbox error state. The 404
+      // arm below is worse, since it also empties `base`.
+      //
+      // RESIDUE, stated because the next reader will otherwise trust the
+      // principle over the code: this does NOT make a failed reconcile
+      // non-destructive in general. A background 500 with no mutation in flight
+      // still blanks a healthy rendered list into the inbox error state, which
+      // is what `loadMore`'s deliberately empty .catch refuses to do for a page
+      // the operator actually asked for. Whether a background failure should
+      // surface at all is a product decision rather than a defect, so it is
+      // filed (docs/issues/inbox-reconcile-failure-blanks-list.md) rather than
+      // decided here.
+      if (gen !== genRef.current || filter !== activeFilterRef.current) return;
       if (err instanceof ApiError && err.status === 404) {
         // C8 backend slice isn't live yet → honest pending state (not an error).
         firstPageGenRef.current += 1;
@@ -225,12 +272,12 @@ export function useInbox(filter: InboxFilter): InboxState {
         // Reset with the rest: a stale `truncated` from a previous unread page
         // would make this legitimately empty page render the FAILURE state.
         setTruncated(false);
-        setStatus('pending');
+        applyStatus('pending');
         return;
       }
-      setStatus('error');
+      applyStatus('error');
     }
-  }, [filter]);
+  }, [filter, applyStatus]);
 
   // Initial load + full reload whenever the filter changes. The synchronous
   // reset clears four independent state atoms (status/base/cursor/pending) on a
@@ -249,7 +296,7 @@ export function useInbox(filter: InboxFilter): InboxState {
     activeFilterRef.current = filter;
     clearPendingRefetch();
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setStatus('loading');
+    applyStatus('loading');
     setBase([]);
     setCursor(null);
     setGroupsTruncated(false);
@@ -262,12 +309,12 @@ export function useInbox(filter: InboxFilter): InboxState {
     setPending(new Map());
     void fetchFirstPage();
     return () => abortRef.current?.abort();
-  }, [fetchFirstPage, filter, clearPendingRefetch]);
+  }, [fetchFirstPage, filter, clearPendingRefetch, applyStatus]);
 
   const retry = useCallback(() => {
-    setStatus('loading');
+    applyStatus('loading');
     void fetchFirstPage();
-  }, [fetchFirstPage]);
+  }, [fetchFirstPage, applyStatus]);
 
   const loadMore = useCallback(() => {
     if (cursor === null || loadingMore) return;
@@ -387,6 +434,26 @@ export function useInbox(filter: InboxFilter): InboxState {
       }
       if (resolved === undefined) return; // unaddressable - don't fake success
       const { read, clearKey } = resolved;
+      // The filter EPOCH this mutation belongs to. `genRef` is global to the
+      // hook, so without this the commit below invalidates the in-flight first
+      // page of whatever filter the operator moved to - and since the filter
+      // effect has already set status 'loading' and nothing re-fetches, that tab
+      // strands on a SPINNER, with no Retry (that lives under `status: error`)
+      // until an unrelated event arrives. The mutation is real either way; it
+      // simply has no authority over a list it was never part of.
+      //
+      // AN EPOCH, NOT AN IDENTITY, and the difference is a live bug not a nicety:
+      // filter identities RECUR. Mark read on All, glance at Unread, come back
+      // to All - an ordinary triage gesture, and one the browser's back button
+      // performs by design - and an identity check sees 'all' again, concludes
+      // nothing changed, and strands the tab it was meant to protect.
+      // `filterGenRef` already counts filter-effect runs and never repeats.
+      //
+      // Note this is the MIRROR of the argument at `activeFilterRef` above: a
+      // counter cannot serve THAT case because the stale closure reads it after
+      // the bump, while here the read happens at CLICK time, before any bump,
+      // which is exactly what a counter handles and an identity does not.
+      const mutationGen = filterGenRef.current;
       setPatch(key, { unreadCount: 0 });
       // Past the unread>0 and addressability guards, so this row really is one
       // the badge counts: decrement it now, and let the next reconcile fetch
@@ -394,8 +461,12 @@ export function useInbox(filter: InboxFilter): InboxState {
       noteRowsCleared([clearKey]);
       read()
         .then(() => {
-          genRef.current += 1; // commit wins over any in-flight pre-commit refetch
-          // Commit to base so clearing the patch doesn't reveal a stale count.
+          // Commit wins over any in-flight pre-commit refetch of the list this
+          // mutation was made against - and only that list.
+          if (filterGenRef.current === mutationGen) genRef.current += 1;
+          // Commit to base regardless: if the operator has moved to a filter
+          // that also shows this row, zeroing it there is correct, and on a list
+          // that does not contain it the map is a no-op.
           setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 0 } : r)));
         })
         .catch(() => {
@@ -430,10 +501,14 @@ export function useInbox(filter: InboxFilter): InboxState {
         flag = () => markInboxUnread({ phone });
       }
       if (flag === undefined) return; // unaddressable - don't fake success
+      // Same filter-EPOCH scoping as markRead above, for the same reason and
+      // with the same A-to-B-to-A trap - this generation bump would otherwise
+      // strand the tab the operator moved to.
+      const mutationGen = filterGenRef.current;
       setPatch(key, { unreadCount: 1 });
       flag()
         .then(() => {
-          genRef.current += 1;
+          if (filterGenRef.current === mutationGen) genRef.current += 1;
           setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 1 } : r)));
         })
         .catch(() => {

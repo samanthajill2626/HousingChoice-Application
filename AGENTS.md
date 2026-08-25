@@ -77,6 +77,20 @@ the work is done, and add or extend a spec for new behavior.
 - MCP artifacts belong in `.playwright-mcp/` (gitignored). Explicit screenshot
   filenames must be prefixed with `.playwright-mcp/`; unnamed artifacts already land
   there.
+- **A failing spec preserves BROWSER-side artifacts only.** Playwright's
+  webServer does not capture the launcher's stdout, so the app, worker, Vite and
+  fake-twilio logs are discarded - which is why three sightings of an empty
+  inbox could not be told apart from a healthy one until someone went looking
+  for a server-side log that was never written. Set `E2E_CHILD_LOG_DIR` to a
+  directory and each long-lived child also appends to `<dir>/<name>.log`:
+
+  ```
+  E2E_CHILD_LOG_DIR=.artifacts/child-logs npm run e2e
+  ```
+
+  Use it whenever you are chasing an intermittent failure, and read
+  `scripts/e2e-session.mjs`'s note on what it does not capture (the final
+  instant under a tree-kill teardown, and the one-shot seed/build children).
 - Run Playwright only through the e2e workspace (`npm run e2e`). A stray/root
   Playwright invocation can target the human's live lane.
 
@@ -152,20 +166,57 @@ commands from the feature worktree:
 2. `npm test`
 3. `npm run smoke`
 4. `npm run e2e`
-5. `npx eslint <every file the branch touches>`
+5. `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
 
-**Gate 5 is SCOPED TO TOUCHED FILES, and deliberately so.** Lint on this repo
-is not yet clean: as of 2026-08-24 `npm run lint` reports 117 errors across 65
-files on `main`, all pre-existing. A repo-wide gate declared today would fail
-every branch on day one, which does not make anyone lint - it teaches everyone
-to skip the gate. So the rule is the same ratchet the ASCII rule already uses:
-on a pre-existing dirty file, only what you TOUCH must be clean. Lint the paths
-in your diff, and leave the rest.
+**Gate 5 is NO NEW LINT ERRORS IN THE FILES YOU TOUCHED - not a clean repo, and
+not a clean file.** Lint here is not yet clean: as of 2026-08-24 `npm run lint`
+reports 117 errors across 65 files, all pre-existing. A repo-wide gate would
+fail every branch on day one, and a whole-FILE gate would fail any one-line
+change to those 65 files on somebody else's debt. Neither makes anyone lint;
+both teach people to skip the gate. So the rule is the ratchet the ASCII rule
+already uses: on a pre-existing dirty file, only what you TOUCH must be clean.
 
-Run it on the file list from `git diff --name-only` (source files only - the
-config ignores dist/node_modules and does not lint Markdown). A branch that
-introduces a new lint error in a file it edited is not done, whatever the other
-four gates say.
+Read that command carefully; it has two traps, both of which produce a
+convincing but meaningless result.
+
+- A bare `git diff --name-only` lists UNSTAGED changes. At gate time your branch
+  is committed and clean, so it returns NOTHING and the gate passes having
+  checked zero files. `main...HEAD` is what lists the branch's own files.
+- **If that list comes back EMPTY (a docs-only branch), SKIP the gate.** Do not
+  run `npx eslint` with no path arguments: it lints the ENTIRE REPO and fails on
+  the 117 pre-existing errors below, which looks like your branch broke
+  something and is the fastest way to teach someone that gate 5 is noise.
+
+The extension filter is there so Markdown paths do not produce a wall of
+"File ignored because no matching configuration" warnings; they are harmless
+but they bury a real finding.
+
+The command above is bash. It works as written in PowerShell too (the
+subexpression splats to an argv array) but NOT in `cmd`. The empty-list trap
+bites identically in both shells - an empty array splats to zero arguments, and
+`npx eslint` goes repo-wide.
+
+How to read the result:
+
+- Clean, exit 0 - done.
+- Errors reported - attribute them by BASELINE COMPARISON: run the same command
+  on the same paths at the merge base and diff the two outputs. Anything present
+  now and absent there is YOURS and is BLOCKING. The rest are pre-existing:
+  leave them (fixing unrelated errors in a shared repo is its own change) and
+  NAME them in your handback so the next person does not re-diagnose them as
+  yours.
+
+**Attribute by baseline, not by line number.** Reading the reported lines
+against your diff is a shortcut that fails on the single most common shape:
+delete the last USE of an import and `no-unused-vars` fires on the IMPORT line,
+which your diff never touched. By line number that reads as pre-existing and
+ships - and an unused import often means the code that used it was deleted by
+mistake, so it is exactly the error worth catching.
+
+**Known hole: the config lints `.ts` and `.tsx` only.** There is no base JS
+block, so `npx eslint` on a `.mjs` / `.js` file exits 0 having checked NOTHING -
+no rules, no warning, no "file ignored" notice. Do not read a green gate on a
+script file as a lint pass. Tracked with the backlog below.
 
 The backlog is [`lint-backlog-repo-wide`](docs/issues/lint-backlog-repo-wide.md).
 When it reaches zero, promote this gate to a bare `npm run lint` and delete this

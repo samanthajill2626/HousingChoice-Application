@@ -16,9 +16,12 @@ export default tseslint.config(
     extends: [tseslint.configs.recommended],
     rules: {
       // HONOUR THE `_` CONVENTION. This codebase already marks a deliberately
-      // unused binding by prefixing it with an underscore - an interface method
-      // that must keep its signature while ignoring an argument, a destructure
-      // that skips a field, a catch that does not read its error. The rule was
+      // unused binding by prefixing it with an underscore - overwhelmingly an
+      // interface method or handler that must keep its signature while ignoring
+      // an argument. (`caughtErrorsIgnorePattern` and
+      // `destructuredArrayIgnorePattern` match ZERO sites today; they are here
+      // so the convention holds uniformly if those shapes appear, not because
+      // they are carrying weight now.) The rule was
       // running with its defaults, which know nothing about that convention, so
       // 70 of the 126 unused-var errors in the 2026-08-24 backlog count were
       // reporting bindings whose names already SAID "unused on purpose".

@@ -24,8 +24,11 @@ unnoticed; so had 186 others.
 the repo, precisely so the rule could be enforced from day one instead of
 waiting on this backlog. This issue is that backlog.
 
-**Counts at filing** (after the `argsIgnorePattern` config fix below, which
-removed 70 of them in one line):
+**Counts at filing.** On `main` as it stood, with the rule at its defaults, the
+number was **187 errors across 106 files**. The table below is what remains
+AFTER the `argsIgnorePattern` config fix described below, which removed 70 of
+them in one line - so quote 117 only alongside that config, and 187 for `main`
+before it.
 
 | rule | errors |
 |---|---|
@@ -43,6 +46,14 @@ removed 70 of them in one line):
 
 Plus 37 warnings, most of them unused `eslint-disable` directives - suppressions
 for problems that no longer exist, which are worth deleting on sight.
+
+**A hole in the coverage, not just the count:** `eslint.config.mjs` declares
+rules for `**/*.ts` and `**/*.tsx` only. There is no base JS block, so
+`npx eslint` on a `.mjs` / `.js` file exits 0 having checked NOTHING - no rules,
+no warning, no "file ignored" notice. Everything under `scripts/` is currently
+unlinted and silently so, which also makes AGENTS.md gate 5 vacuous for those
+files. Adding a base JS config will surface a fresh error count nobody has seen;
+do it as its own step, not folded into a burn-down of the TypeScript errors.
 
 **Already done, 2026-08-24.** The rule was running with its defaults, so it knew
 nothing about the `_`-prefix convention this codebase uses to mark a
@@ -62,12 +73,19 @@ kind of judgement and mixing them makes review impossible:
    the code that used it was deleted by mistake, which is a bug, not a tidy-up.
 2. The 33 `no-explicit-any` need real types and are the only genuinely
    expensive group.
-3. The 26 `react-hooks/*` errors are correctness-adjacent - `set-state-in-effect`
-   and `refs` are exactly the class that produced
-   [`schedule-tour-form-test-flake`](./schedule-tour-form-test-flake.md) and the
-   stale-ref bug in
-   [`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md).
-   Treat these as bug triage, not lint cleanup, and do them first.
+3. The 24 `react-hooks/*` errors are correctness-adjacent - `set-state-in-effect`,
+   `refs`, `purity` and `immutability` are rules about state that changes when
+   nobody expects it. Worth treating as bug triage rather than lint cleanup.
+
+   **But do not oversell that.** An earlier draft of this file claimed these
+   were "exactly the class" that produced
+   [`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md),
+   and the adversarial review of the branch that fixed it checked: **no rule in
+   this backlog would have caught that bug.** It was a stale closure over a
+   `useCallback` plus a clearing effect with empty deps - `react-hooks/refs`
+   does not apply, and `exhaustive-deps` would not have fired either, because
+   the dep array was complete. Prioritise this group on the merits of the rules
+   themselves, not on a resemblance nobody verified.
 4. The 2 `no-restricted-syntax` are `fs.readFileSync` in
    `app/src/lib/import/{airtableSource,quoSource}.ts`, hitting the Phase 0
    stream.pipeline ban. Either they are genuine violations of a binding

@@ -596,6 +596,31 @@ export async function aggregateInbox(
   // the per-reason drop counts name WHICH guard consumed the rows when it was
   // the second. Kept in production, not test-only scaffolding: the same
   // ambiguity exists in every deployed environment.
+  //
+  // SCOPE, stated because the fields are easy to over-read:
+  //
+  // - They cover the OPEN-PARTITION pager only - filters `all` and `unknown`.
+  //   The `groups` and `unread` branches return through their own log lines and
+  //   carry none of this. The unread line's `scanned` is BUDGET UNITS, not rows,
+  //   so `count: 0, scanned: 0` there still carries the ambiguity this removed
+  //   for `all`. Filed rather than fixed here: see
+  //   docs/issues/inbox-read-accounting-gaps.md.
+  // - `rawScanned == count + sum(drops)` DOES NOT HOLD, in ANY case - including
+  //   the `count: 0` one. `count` includes relay and group rows that no chunk
+  //   Query ever scanned; a page that FILLS stops mid-chunk with the remaining
+  //   items counted in `rawScanned` but never assembled; and `filteredRelay` /
+  //   `filteredGroup` count rows that were never scanned either, so `sum(drops)`
+  //   can EXCEED `rawScanned` (an empty open partition with three filtered relay
+  //   rows logs `rawScanned: 0, drops: {filteredRelay: 3}`). Do not do this
+  //   arithmetic; read the fields as two separate statements - what the
+  //   partition returned, and what assembly discarded.
+  // - `drops` is a NORMAL-TRAFFIC field, not an exception field: `dupContact`
+  //   fires for every extra thread of a multi-number contact on the same page.
+  //   Its absence means nothing was dropped; its presence means nothing is
+  //   wrong.
+  // - `filteredRelay` and `filteredGroup` are PAGE-ONE-ONLY (both merge blocks
+  //   gate on `startKey === undefined`), so their absence on page 2+ carries no
+  //   information at all.
   let rawScanned = 0;
   let rawQueries = 0;
   const drops: Record<string, number> = {};
@@ -884,11 +909,17 @@ export async function aggregateInbox(
     // skipped — a newer conversation already (or will) emit the row. This is
     // what makes paging split-proof: a contact seen on page 1 (at its newest
     // conv) can never re-emit on page 2 via an older conv.
-    // THE IDENTITY GUARD, and the one drop path the stale-participant-GSI high
-    // already implicates: `convs` resolves through byParticipantPhone /
-    // byParticipantEmail, which lag independently of byLastActivity, so a stale
+    // THE IDENTITY GUARD. Counted separately because a stale participant-GSI
     // image can name a DIFFERENT thread as this contact's newest and suppress
-    // the row the pager is standing on. Counted separately for that reason.
+    // the row the pager is standing on - the read-side shape of
+    // mark-read-fanout-stale-gsi-skip.
+    //
+    // BUT IT IS NOT DIAGNOSTIC OF THAT ON ITS OWN, and a reader grepping the
+    // log must not treat a nonzero count as evidence of GSI lag. It fires
+    // routinely on healthy PAGED reads: `emittedContacts` is per-REQUEST, so
+    // from page 2 on, every contact whose newest conversation was emitted on an
+    // earlier page hits this guard again at its older conversation. Expect it
+    // nonzero whenever multi-thread contacts span a page boundary.
     if (maxConv.conversationId !== conv.conversationId) return dropped('notNewestConv');
 
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
@@ -1537,7 +1568,12 @@ export async function aggregateInbox(
     const relayRows: InboxRow[] = [];
     for (const conv of relayItems) {
       const row = await relayRowFor(conv);
+      // Counted like the pager's own filter drops. On filter=unknown this arm
+      // rejects EVERY relay row (a relay row's needsTriage is always false), so
+      // leaving it uncounted made a zero-row Unknown page look like an empty
+      // partition - the precise confusion these fields exist to break.
       if (passesFilter(row)) relayRows.push(row);
+      else dropped('filteredRelay');
     }
     if (relayRows.length > 0) {
       rows.push(...relayRows);
@@ -1572,7 +1608,18 @@ export async function aggregateInbox(
     // TRUNCATED means "rows this filter would have shown were withheld": the
     // repo's walk budget stopped early, or (page-one only) the cap did.
     groupsTruncated = page.truncated || page.nextCursor !== undefined;
-    const groupRows = page.items.map(groupRowFor).filter(passesFilter);
+    // `filteredGroup` is DEAD TODAY and kept deliberately: only `filter=all`
+    // reaches this block (`groups` and `unread` returned earlier, `unknown` is
+    // gated out above) and `passesFilter` is unconditionally true for `all`, so
+    // the counter can never fire. It exists so a future filter that DOES reach
+    // here cannot silently drop every group row - the shape `filteredRelay`
+    // catches on `unknown` today. Read its absence as "no information", not as
+    // "nothing was dropped".
+    const groupRows = page.items.map(groupRowFor).filter((row) => {
+      if (passesFilter(row)) return true;
+      dropped('filteredGroup');
+      return false;
+    });
     if (groupRows.length > 0) {
       rows.push(...groupRows);
       // Re-sort newest-first (stable) so group rows interleave by last_activity_at.
@@ -1591,9 +1638,12 @@ export async function aggregateInbox(
       groupCount,
       hasMore: nextCursor !== null,
       // THE READ ACCOUNTING (see `rawScanned` at the top of this function).
-      // `rawQueries` counts the pager's chunk Queries only - the one-off
-      // boundary re-query that recovers a mid-chunk resume key re-reads rows
-      // already counted, so folding it in would double-count them.
+      // `rawQueries` counts the pager's chunk Queries ONLY - not the boundary
+      // re-query (it re-reads rows already counted), and not the relay list,
+      // the group source, contact resolution or message hydration. It is NOT
+      // the request's round-trip count and must not be used as one: the badge
+      // work in cluster C1 is measured in round trips, and this field would
+      // under-report by orders of magnitude.
       rawScanned,
       rawQueries,
       // Only when something was actually dropped, so an ordinary page keeps a

@@ -26,8 +26,98 @@
 // standard env seam to tune it (no sampling code here).
 
 import type { NodeSDKConfiguration } from '@opentelemetry/sdk-node';
+import type { Attributes } from '@opentelemetry/api';
+// phone.ts is a zero-import, side-effect-free leaf, so importing it here does
+// not violate this module's load-first contract above (nothing it pulls in can
+// touch express/http before instrumentation patches them).
+import { maskPhonesInText } from './phone.js';
 
 let started = false;
+
+// SPAN URL MASKING (log-hygiene spec section 4). Hook attributes are
+// Object.assign'd LAST by the instrumentation, so a masked value OVERWRITES
+// the raw one. SEMCONV: the instrumentation emits the OLD family
+// (http.url/http.target) by default and the stable url.* family only under
+// OTEL_SEMCONV_STABILITY_OPT_IN - emitting a key the active mode never sets
+// would FABRICATE it, so the stable keys are gated on that env. No-op-safe:
+// any failure returns {} and the span exports with raw attributes rather
+// than not at all (the log sinks are masked independently).
+
+/**
+ * Which semconv attribute families the instrumentation emits, from
+ * OTEL_SEMCONV_STABILITY_OPT_IN parsed as COMMA-SEPARATED WHOLE TOKENS
+ * (matching the instrumentation's own parser - a token merely containing
+ * 'http' activates nothing): 'http/dup' -> both; 'http' -> stable only;
+ * default -> old only. Emitting a key the active mode never sets would
+ * FABRICATE it onto the span.
+ */
+function activeFamilies(): { old: boolean; stable: boolean } {
+  // Lowercased to match the instrumentation's own parser, which lowercases
+  // every entry - OTEL_SEMCONV_STABILITY_OPT_IN=HTTP puts IT in stable
+  // mode, so a case-sensitive match here would ship raw phones in url.*.
+  const tokens = (process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] ?? '')
+    .split(',')
+    .map((t) => t.trim().toLowerCase());
+  if (tokens.includes('http/dup')) return { old: true, stable: true };
+  if (tokens.includes('http')) return { old: false, stable: true };
+  return { old: true, stable: false };
+}
+
+/** startIncomingSpanHook: masked overrides for the SERVER span's URL attributes. */
+export function maskIncomingSpanAttributes(request: unknown): Attributes {
+  try {
+    const req = request as {
+      url?: unknown;
+      headers?: { host?: unknown };
+      socket?: { encrypted?: unknown };
+    };
+    if (typeof req?.url !== 'string' || req.url.length === 0) return {};
+    const families = activeFamilies();
+    const masked = maskPhonesInText(req.url);
+    const host = typeof req.headers?.host === 'string' ? req.headers.host : 'localhost';
+    const scheme = req.socket?.encrypted === true ? 'https' : 'http';
+    const out: Record<string, string> = {};
+    if (families.old) {
+      out['http.url'] = `${scheme}://${host}${masked}`;
+      out['http.target'] = masked;
+    }
+    if (families.stable) {
+      const q = masked.indexOf('?');
+      out['url.path'] = q === -1 ? masked : masked.slice(0, q);
+      if (q !== -1) out['url.query'] = masked.slice(q + 1);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** startOutgoingSpanHook: masked overrides for the CLIENT span's URL attributes. */
+export function maskOutgoingSpanAttributes(request: unknown): Attributes {
+  try {
+    const req = request as { host?: unknown; hostname?: unknown; path?: unknown; protocol?: unknown };
+    if (typeof req?.path !== 'string' || req.path.length === 0) return {};
+    const families = activeFamilies();
+    const path = maskPhonesInText(req.path);
+    const host =
+      typeof req.hostname === 'string' && req.hostname.length > 0
+        ? req.hostname
+        : typeof req.host === 'string' && req.host.length > 0
+          ? req.host
+          : 'unknown';
+    const protocol = typeof req.protocol === 'string' ? req.protocol : 'https:';
+    const full = `${protocol}//${host}${path}`;
+    const out: Record<string, string> = {};
+    if (families.old) {
+      out['http.url'] = full;
+      out['http.target'] = path;
+    }
+    if (families.stable) out['url.full'] = full;
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 function endpointOf(env: NodeJS.ProcessEnv): string | undefined {
   const raw = env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
@@ -58,7 +148,13 @@ export async function buildOtelSdkConfig(
 
   const config: Partial<NodeSDKConfiguration> = {
     serviceName,
-    instrumentations: [new HttpInstrumentation(), new ExpressInstrumentation()],
+    instrumentations: [
+      new HttpInstrumentation({
+        startIncomingSpanHook: maskIncomingSpanAttributes,
+        startOutgoingSpanHook: maskOutgoingSpanAttributes,
+      }),
+      new ExpressInstrumentation(),
+    ],
   };
 
   const endpoint = endpointOf(env);

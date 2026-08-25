@@ -2881,6 +2881,19 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async putSystemSidMarker(providerSid, kind) {
+      // 30-day TTL in EPOCH SECONDS - the unit this table's `expires_at`
+      // attribute is written in everywhere else (see the parked-SES-event
+      // doc block above: "an `expires_at` (epoch seconds) TTL backstop").
+      // DynamoDB TTL silently ignores a non-numeric attribute, so an ISO
+      // string here would look written and never reap.
+      //
+      // syssid# markers are read-only acks with NO consume step
+      // (getSystemSidMarker reads, never deletes), so TTL is deliberately
+      // their ONLY reaper - the stated exception to the TTL-is-only-a-backstop
+      // rule enumerated in lib/tables.ts (log-hygiene spec section 5). Rows
+      // written before this change carry no TTL and persist; the count is tiny
+      // (cell verifications).
+      const expiresAt = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
       await doc.send(
         new PutCommand({
           TableName: table,
@@ -2889,10 +2902,14 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             tsMsgId: 'ptr',
             kind,
             created_at: new Date().toISOString(),
+            expires_at: expiresAt,
           },
         }),
       );
-      log.info({ providerSid, kind }, 'system-send SID marker written');
+      // debug, not info: the dev intro replay writes one marker per member per
+      // boot, and a log-hygiene change must not trade N ERRORs for N INFOs.
+      // The /status webhook's per-DLR INFO ack is what stays observable.
+      log.debug({ providerSid, kind }, 'system-send SID marker written');
     },
 
     async getSystemSidMarker(providerSid) {

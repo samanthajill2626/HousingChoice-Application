@@ -259,6 +259,25 @@ export async function sendRelayAnnouncement(
       });
       sentCount += 1;
 
+      if (!persist) {
+        // Legs-only mode (the dev intro replay) skips the delivery slot AND the
+        // relaysid pointer, so this leg's DLRs would terminate in the /status
+        // webhook's alarm-feeding unknown-SID ERROR. A system-SID marker
+        // resolves them to the INFO ack instead (log-hygiene spec section 5).
+        // OWN try/catch, WARN on failure: a marker write must never fail the
+        // announcement, and must never fall into the send catch below (which
+        // would log a spurious send-failure ERROR) - the voiceApi
+        // cell-verification precedent.
+        try {
+          await deps.messagesRepo.putSystemSidMarker(result.providerSid, kind);
+        } catch (err) {
+          log.warn(
+            { err, conversationId, kind, memberKey: logSafeMemberKey(member) },
+            'relayAnnouncement: system-SID marker write failed (best-effort) - DLRs for this leg will ERROR',
+          );
+        }
+      }
+
       if (persist && tsMsgId !== undefined) {
         await markSlot(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
           status: result.status === 'queued' ? 'queued' : 'sent',

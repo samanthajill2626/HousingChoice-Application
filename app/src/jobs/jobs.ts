@@ -329,7 +329,7 @@ export async function dispatchJob(rawEvent: unknown): Promise<void> {
           jobId: envelope.jobId,
           durationMs: Math.round(performance.now() - startedAt),
         },
-        'job failed',
+        `job failed: ${envelope.jobName}`,
       );
       throw err;
     }

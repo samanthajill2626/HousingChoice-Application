@@ -1992,6 +1992,8 @@ export function createFakeWorld(): FakeWorld {
   const settings: OrgSettings = { ...DEFAULT_ORG_SETTINGS };
   /** Group-texting liveness records (spec 8.2), keyed by settingId. */
   const groupTimestamps = new Map<string, string>();
+  /** The abandoned-journal sweep's Scan cursor (log-hygiene spec 9.2). */
+  let journalSweepCursor: string | undefined;
   const settingsRepo: SettingsRepo = {
     async getOrgSettings() {
       return { ...settings };
@@ -2041,6 +2043,15 @@ export function createFakeWorld(): FakeWorld {
       if (stored !== undefined && stored > notBefore) return false;
       groupTimestamps.set(id, at);
       return true;
+    },
+    // Abandoned-journal sweep Scan cursor (log-hygiene spec 9.2). No webhook
+    // path drives the sweep; kept as a plain in-memory cell so the world fake
+    // still satisfies SettingsRepo. undefined CLEARS, like the real REMOVE.
+    async putJournalSweepCursor(cursor) {
+      journalSweepCursor = cursor;
+    },
+    async getJournalSweepCursor() {
+      return journalSweepCursor;
     },
   };
 

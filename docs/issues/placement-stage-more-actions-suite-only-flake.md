@@ -2,13 +2,21 @@
 id: placement-stage-more-actions-suite-only-flake
 title: approval-and-move-in times out waiting for the placement page's "More actions" button in full-suite runs, and passes solo
 type: bug
-severity: low
-status: resolved
+severity: med
+status: open
 area: e2e
 created: 2026-08-23
-resolved: 2026-08-24
-refs: e2e/scenarios/steps.ts:3516, e2e/tests/scenarios/approval-and-move-in.spec.ts:318
+reopened: 2026-08-25
+refs: e2e/scenarios/steps.ts:3529, e2e/tests/scenarios/approval-and-move-in.spec.ts:223, e2e/tests/scenarios/tours.spec.ts:93, docs/issues/evidence/placement-page-load-hang/2026-08-25-run2-failure.json
 ---
+
+**REOPENED 2026-08-25 on this issue's own stated trigger.** The NAMED
+page-load message - "the placement page did not finish loading (header absent
+- check `<main>` for a stuck 'Loading' status)" - fired in a gate run. Per the
+resolution note below, that means a hung bundle fetch SURVIVES the keep-alive
+fix and has a second cause. Severity raised from `low` to `med`: this is no
+longer a one-test click race, it has now been seen four times across three
+branches, and it reddens a required gate.
 
 **RESOLVED (2026-08-24): the mystery this issue preserved artifacts for is
 solved, and it was never a click race.** Both sightings' failure snapshots
@@ -35,6 +43,54 @@ bundle fetch survives the keep-alive fix and has a second cause worth its own
 diagnosis. A recurrence of the OLD opaque kebab-click shape would instead mean
 the readiness wait regressed.
 
+
+**Sightings 3 and 4 (2026-08-25, `feat/error-surface-detail` @b535a7fa, two
+consecutive full-gate runs).** Both hit the NAMED page-load message. The branch
+changes only the System Status read path, which `isLocalEnv` short-circuits in
+the hermetic lane, so its diff cannot reach this code.
+
+| run | started | result | failing test | timed out |
+|---|---|---|---|---|
+| 3 | 17:0x | 253/1, 19.7m | `tours.spec.ts:93` (landlord-led -> placement) | 30s |
+| 4 | 17:27:48 | 253/1, 21.7m | `approval-and-move-in.spec.ts:223` (inspection FAILS -> Lost) | 30s at 17:41:37.990 |
+
+Record for sighting 4 preserved at
+`docs/issues/evidence/placement-page-load-hang/2026-08-25-run2-failure.json`.
+Sighting 3's `results.json` and BOTH runs' screenshots were lost - a third run
+was started before the artifacts were copied aside, and Playwright clears
+`test-results/` on start. That is the exact loss this issue's copy-first
+instruction exists to prevent; do not start another run before preserving.
+
+**DIFFERENT FILES, ONE CODE PATH - do not read the two as unrelated.** Sighting
+4 failed inside `pickPlacementStage` (`steps.ts:3529`). Sighting 3's
+`tours.spec.ts:93` reaches `expectPlacementStage('Send application')` at
+`:150`, which navigates to the same `/placements/:id` and waits on the same
+`placementBanner()`. The compare-failing-FILES rule in AGENTS.md is scoped to
+the `npm test` DynamoDB contention signature; applied to e2e it hides a shared
+helper and turns one recurring defect into two "unrelated" blips.
+
+**Ruled out, with evidence, so the next investigator does not repeat it:**
+
+- NOT concurrency from another worktree. A concurrent `inbox-unread-cluster`
+  run did exist, but it started 17:46:41 - **4m33s AFTER** sighting 4's test had
+  already timed out at ~17:42:08. Overlapping windows are not causation; check
+  ORDERING before blaming a neighbour.
+- NOT DynamoDB Local accumulation. Measured during the same window: 255 MB in a
+  6 GB tmpfs, 124 databases, 1.92 GiB of a 31 GiB limit, ~21% CPU, and the
+  harness already drops lane tables on stop and prunes orphans at 7 days.
+  Per-key databases mean no shared write lock. Nothing near a threshold.
+
+**One open lead worth pulling.** Lane 4's `hclane4_us-east-1.db` measured 48 MB
+against lane 15's 10 MB - a PER-LANE file that grows across reseeds. That fits
+the monotonic within-worktree slowdown (17.9m -> 19.7m -> 21.7m across three
+runs of the identical suite) better than shared-container load does.
+
+**THE DIAGNOSTIC THAT WOULD SETTLE THIS WAS NOT CAPTURED.**
+`E2E_CHILD_LOG_DIR` was unset on both runs, so the app / Vite / worker logs
+were discarded - and those are the only evidence that distinguishes a SLOW
+bundle fetch from a HUNG one. AGENTS.md says to set it when chasing an
+intermittent failure. **Set it on the next reproduction attempt before doing
+anything else.**
 
 **Sighting 2 (2026-08-24, `fix/test-suite-wave3` gate RE-run, 250/3, 27.4m).**
 A SECOND test in the same file hit the same signature: approval-and-move-in.spec.ts:258 (rent-rejection -> Lost) timed out with the More-actions kebab 'resolved' but never 'visible, enabled and stable'. Same mechanism surface, different test - the flake is per-MACHINERY, not per-test.

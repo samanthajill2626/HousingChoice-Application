@@ -49,7 +49,12 @@ generated artifact.
 
 ## C1 - Inbox unread read path: stale-GSI correctness + read amplification
 
-**Highs: NONE, as of 2026-08-25.** Both are gone, and neither on a whim.
+**Highs: ONE, and it is not either of the two this cluster was scoped around.**
+[inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) was raised
+`medium` -> `high` on 2026-08-25 after measurement: an Unknown-tab page render
+EXHAUSTS the open partition every time - 693 contact lookups to return 17 rows
+in prod, 637 for 13 in dev - and the hook re-issues it on every debounced SSE
+event. The two originally-filed highs are gone, and neither on a whim.
 [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md)
 is DEFERRED at `low` on measured data - dev 774 conversations / 0 unread rows,
 prod 885 / 1, zero counter-only in either, so the walk it optimises costs about
@@ -134,7 +139,7 @@ single coherent flag contract.
 | low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | filed symptom is INVERTED and never reproduced; retitled to the real invariant |
 | low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8); carrier must be keyed by `conversationId` |
 | low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing; the `aiRuns` line it says to copy has since changed |
-| medium | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium` - **the cluster's top cost item now.** Last unbounded read on the route, over the OPEN partition. Its part (B) is gone with the badge's cut and it needs its own remedy. MEASURE FIRST |
+| **high** | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium -> HIGH` on measured data (693 lookups per render, 17 rows returned; partition exhausted every pass). **The cluster's anchor now.** Root cause is the `conv.type` divergence, now sized: ~610 open rows claim `unknown_1to1` while their contact is typed. Cost INVERTS with triage quality - a cleared tab is the expensive one. Last unbounded read on the route, over the OPEN partition. Its part (B) is gone with the badge's cut and it needs its own remedy. MEASURE FIRST |
 | low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice; All/Groups tabs only |
 | low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | THREE renderers, not two; one crosses a package boundary, group threads bypass `deriveLatest` |
 

@@ -2,7 +2,7 @@
 id: inbox-filter-tabs-full-walk
 title: The Unknown inbox tab walks every open conversation, unbounded, when matches are sparse
 type: debt
-severity: medium
+severity: high
 status: open
 area: app
 created: 2026-08-03
@@ -161,6 +161,59 @@ other half.**
     hydration does not. See the cost-model correction above. The bullet's
     closing claim - that "a triage flag or second sparse index remains the
     escalation" - is disproven above and must not be built.
+
+**MEASURED 2026-08-25 on both deployed environments. It is worse than filed,
+and `medium` -> `high`.** One Unknown-tab page render, replicating the pager
+exactly (`--audit-unknown-page` on
+`app/scripts/measure-unread-contact-coverage.ts`):
+
+| env | open conversations | conversations scanned | contact lookups PAID | matching rows | outcome |
+| --- | --- | --- | --- | --- | --- |
+| dev | 637 | 637 | 637 | 13 | partition EXHAUSTED before filling |
+| prod | 693 | 693 | 693 | 17 | partition EXHAUSTED before filling |
+
+**The partition is exhausted on EVERY render.** The unbounded walk is not a
+worst case reached by unlucky data - it is the steady state, and `useInbox`
+re-issues it on every debounced `conversation.updated` while an operator sits on
+the tab.
+
+**The cost inverts with triage quality, which is why nobody would predict it.**
+The pager breaks when the page FILLS, so a backlogged tab is cheap (30 rows, 30
+lookups) and a CLEARED tab is expensive (scan everything, find almost nothing).
+Good triage discipline makes this read worse. The planner predicted "cheap,
+probably ~30 lookups" from the fact that 627 of 693 open rows are typed
+`unknown_1to1`, and the measurement refuted it outright.
+
+**The root cause is the divergence this issue already names, now sized.** Only
+17 of ~627 open `unknown_1to1` conversations actually need triage - so roughly
+610 carry a conversation `type` that says "unknown" while their contact has long
+since been typed. The walk is expensive precisely BECAUSE `conv.type` is stale:
+it cannot serve as a cheap pre-filter when 90% of the partition wrongly claims
+to be unknown.
+
+That reframes the remedy. Two shapes are now worth designing against, and
+neither is the one originally filed:
+
+1. **Fix the divergence and let `conv.type` become a usable pre-filter.** Retype
+   the conversation when its contact is typed - which `POST /api/contacts`
+   already fails to do, one of the three divergence sites named below. This
+   fixes a correctness bug and the read cost together, with no new index. It
+   needs the invariant maintained in BOTH directions before the pager may trust
+   it, and a backfill for the ~610 stale rows.
+2. **A correctly-maintained sparse `needs_triage` flag with its own GSI** - the
+   same shape as `byUnread`, turning 693 lookups into one Query returning 17
+   items. Note the earlier objection to a denormalized hint was that
+   `conv.type` is ALREADY that denormalization and is already broken; a new
+   attribute maintained by the contact-type write path is a different
+   proposition, but it carries the full invariant-enumeration burden.
+
+Part (A) of the earlier remedy (budget + cursor + `truncated`) still bounds the
+damage and needs no schema change, but note what it does to the operator with
+these numbers: a budget would return a handful of rows and a cursor, making them
+page repeatedly through a tab that has 17 rows in it. Bounding an unbounded read
+is right; it is not by itself a fix.
+
+---
 
 **Re-adjudicated 2026-08-25 against main @88ac7b36.** The unbounded
 `filter=unknown` walk still reproduces and the severity rises low -> medium, but

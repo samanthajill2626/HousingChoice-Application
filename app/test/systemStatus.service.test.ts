@@ -420,23 +420,49 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result.events[0]!.message).toBe('V8 heap out of memory');
   });
 
-  it('deduplicates OOM events that have the same timestamp+label', async () => {
+  // The two halves of the dedup contract, split apart because they pull in
+  // OPPOSITE directions and one fixture cannot show both. `ref` (the Insights
+  // @ptr) is the IDENTITY: it is stable across separate queries (measured
+  // 2026-08-24), so the same log event matched by two queries collapses - and
+  // there is deliberately NO timestamp+message fallback, so two DISTINCT events
+  // that happen to share a second and a label are two rows.
+  it('collapses ONE log event that reaches the merge twice - the shared ref decides', async () => {
     const config = deployedConfig();
-    const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-8' };
-    // Both the V8 OOM query and pino query return a dup-timestamp event
+    // The merge is a plain concatenation of three query results, and the pino
+    // and V8-OOM queries scan the SAME two groups, so one @ptr can arrive more
+    // than once. Identical copies collapse on the shared ref.
+    //
+    // NOT covered by this: the same event matched by pino AND the OOM query,
+    // where the OOM relabel rewrites `message`. Those copies are no longer
+    // identical, so BOTH survive - by design (a relabeled OOM row reads
+    // differently and is worth its slot), and the RecentErrors row key is
+    // composite precisely so that same-ref pair still renders correctly.
+    const same = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: 'boom', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref: 'PTR-8' };
     const seam = fakeSeam({
-      queryInsights: async (_logGroupNames, filterExpr) => {
-        if (filterExpr === OOM_APP_INSIGHTS_FILTER) return [dup];
-        // pino returns same timestamp but different message → not a true dup (different key)
-        return [];
-      },
+      queryInsights: async (_logGroupNames, filterExpr) =>
+        filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [same, { ...same }] : [],
     });
     const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable');
-    // V8 OOM query → 1 event; pino → 0; system → 0 → total 1 unique
     expect(result.events).toHaveLength(1);
-    expect(result.events[0]!.message).toBe('V8 heap out of memory');
+    expect(result.events[0]!.ref).toBe('PTR-8');
+  });
+
+  it('keeps two DISTINCT OOM events that share a timestamp AND a label - ref is the identity', async () => {
+    const config = deployedConfig();
+    const oom = (ref: string) => ({ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', messageTruncated: false, correlationId: null, errMessageTruncated: false, source: 'app' as const, ref });
+    const seam = fakeSeam({
+      queryInsights: async (_logGroupNames, filterExpr) =>
+        filterExpr === OOM_APP_INSIGHTS_FILTER ? [oom('PTR-8'), oom('PTR-9')] : [],
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    // Two crashes in the same second are two crashes. Both carry the V8 label.
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map((e) => e.ref).sort()).toEqual(['PTR-8', 'PTR-9']);
+    expect(result.events.every((e) => e.message === 'V8 heap out of memory')).toBe(true);
   });
 
   it('keeps two same-instant rows from different log groups apart', async () => {

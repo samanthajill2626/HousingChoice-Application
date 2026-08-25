@@ -140,6 +140,13 @@ export function installProcessErrorHandlers(
  * `req.route.path` alone is MOUNT-RELATIVE, so it is prefixed with `req.baseUrl`.
  * `req.route` is unset for middleware, body-parser and URIError failures, which
  * take the literal `(unrouted)` token.
+ *
+ * INVARIANT THE baseUrl HALF RESTS ON: every router in app/src mounts on a
+ * LITERAL prefix (swept 2026-08-25: zero parameterised mounts). Express sets
+ * `baseUrl` to the matched prefix with ACTUAL VALUES SUBSTITUTED, so a router
+ * mounted at, say, `/:contactId/phones` would put the concrete id straight back
+ * into `msg` - the very outcome the paragraph above refuses. Keep mounts
+ * literal, or template `req.baseUrl` here before a parameterised one lands.
  */
 function routeLabel(req: { baseUrl?: string; route?: { path?: string } }): string {
   const path = req.route?.path;

@@ -108,6 +108,14 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
 
   const TRACE_ID_KINDS = ['correlationId', 'requestId', 'pollRunId'] as const;
 
+  // The SHAPE the 400 below promises. Date.parse alone also accepts "1 Jan 2020"
+  // and other implementation-defined forms, which would make the message a lie
+  // about what this route takes; the prefix test plus a non-NaN parse keeps the
+  // two honest. Deliberately a PREFIX (through the minutes), so seconds,
+  // milliseconds and any zone suffix stay optional - the dashboard sends a full
+  // toISOString(), and narrowing further would refuse a legitimate anchor.
+  const ISO_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
   // GET /api/system/trace - the lines around one failure. Exactly one id kind
   // plus a required `at` anchor; MISSING or ambiguous parameters are a 400
   // (matching `since`), while a present-but-malformed id degrades at 200.
@@ -118,7 +126,8 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
       return;
     }
     const rawAt = req.query['at'];
-    const atMs = typeof rawAt === 'string' ? Date.parse(rawAt) : Number.NaN;
+    const atMs =
+      typeof rawAt === 'string' && ISO_AT_PATTERN.test(rawAt) ? Date.parse(rawAt) : Number.NaN;
     if (Number.isNaN(atMs)) {
       res.status(400).json({ error: 'at must be an ISO 8601 timestamp' });
       return;

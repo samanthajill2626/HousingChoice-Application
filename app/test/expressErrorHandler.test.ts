@@ -70,6 +70,20 @@ describe('express error handler messages', () => {
     expect(lines[0]!.msg).toContain('(unrouted)');
   });
 
+  it('uses (unrouted) on the URIError branch too - the route matcher throws BEFORE any handler', () => {
+    const { lines, log } = capture();
+    const handler = createExpressErrorHandler(log);
+    // A malformed %-escape makes Express's matcher throw in decodeURIComponent,
+    // so req.route is never set: this branch yields method + (unrouted) EVERY
+    // time, which is exactly why it needs its own guard.
+    const req = { method: 'GET', path: '/api/x', baseUrl: '' };
+    handler(new URIError('bad'), req as never, fakeRes(false) as never, () => {});
+    const line = lines[0];
+    expect(line).toBeDefined();
+    expect(line!.msg).toContain('(unrouted)');
+    expect(line!.msg.startsWith('malformed URI in request - rejected as 400')).toBe(true);
+  });
+
   it('gives the headers-already-sent branch a DISTINCT message', () => {
     const { lines, log } = capture();
     const handler = createExpressErrorHandler(log);

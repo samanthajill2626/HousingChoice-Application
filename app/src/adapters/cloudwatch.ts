@@ -143,7 +143,18 @@ export interface ErrorEventView {
  * `err.config.params`, `err.config.baseURL` and `err.config.auth` are NOT
  * redacted at rest. A denylist here would inherit that failure mode and
  * `err.cause.config.headers.Authorization` would walk straight through it.
- * An allowlist closes the class by construction, including nests nobody has met.
+ *
+ * WHAT THIS CLOSES, EXACTLY. By construction it closes the whole `err.*`
+ * subtree (any depth, including nests nobody has met) PLUS an object-valued
+ * bare `err` - see isAllowedKey, which re-reads the value rather than trusting
+ * the key. What it does NOT close is every OTHER key: non-`err` fields pass
+ * through BY DESIGN, because app-authored fields are the point of the detail
+ * view. A vendor error logged under a non-`err` key (`log.error({ response })`,
+ * `log.error({ error: e })`) is therefore OUTSIDE this control and is owned by
+ * write-time redaction plus call-site discipline; a sweep of every
+ * log.error/warn/fatal in app/src on 2026-08-25 found zero live cases (the two
+ * `error:` hits are refusal-code STRINGS). Do not read the allowlist as a
+ * whole-record redaction boundary; it is the `err` boundary.
  *
  * `response.status` is kept deliberately: lib/errors.ts reads it as the vendor
  * discriminator and `status` is one of the three fields in the repo's
@@ -158,28 +169,81 @@ export const RAW_TEXT_CAP = 4000;
 /** Detail response bound in BYTES (Buffer.byteLength, not string length). */
 export const RESPONSE_BOUND_BYTES = 65536;
 
-/** AWS transport metadata - never returned to the client. */
+/**
+ * AWS transport metadata - never returned to the client.
+ *
+ * `@log`, `@logStream` and `@ingestionTime` are DELIBERATELY not in here: they
+ * are the host metadata that tells an operator which group and stream the
+ * record came from, which is most of the value of the expanded row. `@log` is
+ * `<accountId>:<logGroupName>`, so the AWS account id is visible to whoever can
+ * read this panel - acceptable because the panel is admin-only and
+ * server-enforced, and stated here so it stays a decision rather than a leak.
+ */
 const DROPPED_PREFIXES = ['@aws.', '@entity.', '@data_'];
 const DROPPED_KEYS = new Set([
   '@message', '@timestamp', '@logGroupId', '@logStreamId', 'backwardToken', 'forwardToken',
 ]);
 
-function isAllowedKey(key: string): boolean {
-  if (key === 'err') return true;                        // scalar err: the message itself
+/**
+ * Decide one record key/value pair. The VALUE matters for exactly one key:
+ * bare `err`. Six call sites log `err` as a plain string message, which is why
+ * it is admitted at all - but GetLogRecord only dot-flattens what it flattened,
+ * and an `err` handed back UNFLATTENED (a nesting-depth or field-count limit on
+ * discovery would do it) would carry the entire vendor object - `config.headers.
+ * Authorization` included - past the allowlist that exists to stop exactly that.
+ * So an `err` whose value parses to a JSON OBJECT is dropped; a scalar survives.
+ */
+function isAllowedKey(key: string, value: string): boolean {
+  if (key === 'err') return !isJsonObject(value);        // scalar err: the message itself
   if (key.startsWith('err.')) return ERR_ALLOWLIST.includes(key);
   if (DROPPED_KEYS.has(key)) return false;
   if (DROPPED_PREFIXES.some((p) => key.startsWith(p))) return false;
   return true;                                           // app-authored field
 }
 
-/** Trim `fields` until the serialized response is within the byte bound. */
+/** Does this string parse to a JSON object (or array)? Non-JSON is `false`. */
+function isJsonObject(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Trim `fields` until the serialized response is within the byte bound, and
+ * report whether anything was trimmed or dropped.
+ *
+ * CONVERGES rather than trimming once: a single longest-first pass at 512 chars
+ * fits one huge stack, but ~128 surviving fields of 512 bytes each still exceed
+ * 64 KiB, which used to return `true` over a payload the bound had not actually
+ * bounded (measured: 200 fields x 2000 chars -> 104,291 bytes). So the cap
+ * halves and the pass repeats, and if even a one-char cap is not enough (the KEY
+ * NAMES alone can overflow) the longest remaining fields are DROPPED.
+ *
+ * MUTATES ITS ARGUMENT on purpose: there is exactly ONE caller (getLogRecord,
+ * which built the object and has not handed it out yet), so copying would buy
+ * nothing. `rawText` rides OUTSIDE this budget by design - it carries its own
+ * RAW_TEXT_CAP - so the true response ceiling is RESPONSE_BOUND_BYTES + 4000.
+ */
 function enforceBound(fields: Record<string, string>): boolean {
-  if (Buffer.byteLength(JSON.stringify(fields), 'utf8') <= RESPONSE_BOUND_BYTES) return false;
+  const size = (): number => Buffer.byteLength(JSON.stringify(fields), 'utf8');
+  if (size() <= RESPONSE_BOUND_BYTES) return false;
   // Longest-first, so one huge stack is trimmed before many small fields.
-  const keys = Object.keys(fields).sort((a, b) => fields[b]!.length - fields[a]!.length);
-  for (const key of keys) {
-    if (Buffer.byteLength(JSON.stringify(fields), 'utf8') <= RESPONSE_BOUND_BYTES) break;
-    fields[key] = fields[key]!.slice(0, 512);
+  const longestFirst = (): string[] =>
+    Object.keys(fields).sort((a, b) => fields[b]!.length - fields[a]!.length);
+  for (let cap = 512; cap >= 1; cap = Math.floor(cap / 2)) {
+    for (const key of longestFirst()) {
+      if (size() <= RESPONSE_BOUND_BYTES) return true;
+      if (fields[key]!.length > cap) fields[key] = fields[key]!.slice(0, cap);
+    }
+  }
+  // Every value is now at most one character and it STILL does not fit, so the
+  // key names are the weight. Drop the longest-named fields until it does.
+  for (const key of Object.keys(fields).sort((a, b) => b.length - a.length)) {
+    if (size() <= RESPONSE_BOUND_BYTES) return true;
+    delete fields[key];
   }
   return true;
 }
@@ -617,23 +681,25 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
     async getLogRecord(ref) {
       const out = await logs.send(new GetLogRecordCommand({ logRecordPointer: ref }));
       const record = (out.logRecord ?? {}) as Record<string, string>;
+      // MEASURED (planner spike, 2026-08-24, real AWS account): GetLogRecord
+      // responses from BOTH /hc/dev/app and /hc/prod/system carried `@log`,
+      // valued `<accountId>:<logGroupName>`. The service's env-scope check reads
+      // the group this yields, so the whole boundary rests on that presence -
+      // and it fails CLOSED: were AWS ever to omit `@log`, normalizeLogGroup('')
+      // is '', no configured group matches, and every row degrades to
+      // `out_of_scope` rather than escaping the scope check.
       const atLog = record['@log'] ?? '';
       // PARSEABILITY, not field count, decides rawText. A JSON record whose err
       // nests were ALL denied still has zero surviving err fields - returning
       // its raw line would hand back exactly what the allowlist just removed.
       const rawMessage = record['@message'] ?? '';
-      let isJson = false;
-      try {
-        const p: unknown = JSON.parse(rawMessage);
-        isJson = typeof p === 'object' && p !== null;
-      } catch {
-        isJson = false;
-      }
+      const isJson = isJsonObject(rawMessage);
 
       const fields: Record<string, string> = {};
       for (const [key, value] of Object.entries(record)) {
-        if (!isAllowedKey(key)) continue;
-        fields[key] = String(value);
+        const text = String(value);
+        if (!isAllowedKey(key, text)) continue;
+        fields[key] = text;
       }
 
       let rawText: string | undefined;
@@ -660,12 +726,21 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       const startSec = Math.floor((atMs - back) / 1000);
       const endSec = Math.ceil((atMs + BRACKET_AHEAD_MS) / 1000);
       // SECOND-GRANULARITY SPLIT. `at` is milliseconds; StartQuery is seconds,
-      // so a split exactly at `at` is inexpressible. Insights `endTime` is
-      // INCLUSIVE (measured), so giving BEFORE the anchor's whole second
-      // guarantees the anchor line is present, and starting AFTER at the NEXT
-      // second keeps the windows DISJOINT - no row appears twice, so no merge
-      // dedup rule is needed. Do NOT use ceil here: that overlaps by a second
-      // and returns the failure line itself from both queries.
+      // so a split exactly at `at` is inexpressible.
+      //
+      // MEASURED, NOT ASSUMED (planner spike, 2026-08-24, real AWS account): an
+      // Insights query with startTime == endTime == 1787022602 RETURNED a real
+      // event whose epoch ms was 1787022602554 - i.e. `endTime: T` covers the
+      // WHOLE second T.000-T.999, not the instant T*1000. So BEFORE's
+      // endTime = floor(atMs / 1000) is inclusive AND gapless (the anchor's
+      // own mid-second line is inside it), and AFTER's startTime = floor + 1
+      // keeps the two windows DISJOINT - no row appears twice, so the merge
+      // needs no dedup rule. Do NOT use ceil for BEFORE: that overlaps by a
+      // second and returns the failure line itself from both queries.
+      //
+      // queryInsights' ceil'd endTime 60 lines up is NOT a contradiction: its
+      // window ends at "now", where rounding UP merely includes the current
+      // partial second. Both are correct under the same inclusive semantics.
       const anchorSec = Math.floor(atMs / 1000);
       const fields = 'fields @timestamp, @message, @log';
       // `id` is validated UUID-shaped by the service before it reaches here.

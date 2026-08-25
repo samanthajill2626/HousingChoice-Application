@@ -505,6 +505,29 @@ describe('cloudwatch adapter - getLogRecord', () => {
     expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
   });
 
+  it('CONVERGES on the byte bound when MANY fields are oversized, not just one', async () => {
+    // One 512-char pass fits a single huge stack but not 200 of them: 200 x 512
+    // is 102,400 bytes against a 65,536 bound, which used to return
+    // responseTruncated:true over a payload the bound had not bounded.
+    const many: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 200; i++) many[`field${i}`] = 'x'.repeat(2000);
+    const out = await seamFor(many).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('DROPS a bare err whose value is a JSON object - the whole nest would ride out on one key', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      err: '{"config":{"headers":{"Authorization":"Basic x"}}}',
+      msg: 'job failed: relay.warm',
+    }).getLogRecord('PTR');
+    expect(out.fields['err']).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain('Authorization');
+    // The rest of the record still comes back - only the object err is refused.
+    expect(out.fields['msg']).toBe('job failed: relay.warm');
+  });
+
   it('caps rawText at RAW_TEXT_CAP and flags it', async () => {
     const out = await seamFor({
       '@log': `9:${CONFIG.systemLogGroupName}`,

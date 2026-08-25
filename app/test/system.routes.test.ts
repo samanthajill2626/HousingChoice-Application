@@ -278,6 +278,13 @@ describe('GET /api/system/trace', () => {
     expect((await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&at=nonsense`))).status).toBe(400);
   });
 
+  it('400s on a NON-ISO date Date.parse would otherwise accept, so the 400 message stays true', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&at=1 Jan 2020`));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('ISO 8601');
+  });
+
   it('400s when at is missing entirely - the anchor is REQUIRED, never defaulted', async () => {
     const { app } = makeWebhookHarness();
     expect((await auth(request(app).get(`/api/system/trace?correlationId=${UUID}`))).status).toBe(400);

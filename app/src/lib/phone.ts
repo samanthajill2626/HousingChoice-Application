@@ -75,3 +75,22 @@ export function formatPhoneForDisplay(e164: string | undefined): string | undefi
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : e164;
 }
+
+// maskPhonesInText - SERVER-ONLY log/span masking helper (log-hygiene spec
+// section 4). NOT part of the dashboard mirror contract declared at the top
+// of this file: the dashboard copy does NOT gain it (it masks log sinks and
+// span attributes, which only the server has).
+//
+// Masks E.164-shaped runs - `+` (or its URL-encoded `%2B`/`%2b`) followed by
+// 8-15 digits - down to first digit + `...` + last two, e.g. `+14045551234`
+// -> `+1...34` (the leading digit is the NANP country code in this app's
+// traffic; non-NANP numbers keep their first digit the same way). 8 is the
+// floor so short non-phone tokens (`+123`) survive untouched.
+const PHONE_RUN_RE = /(\+|%2[Bb])(\d{8,15})/g;
+
+/** Mask every E.164-shaped run in a string; phone-free input is returned as-is. */
+export function maskPhonesInText(text: string): string {
+  return text.replace(PHONE_RUN_RE, (_m, prefix: string, digits: string) => {
+    return `${prefix}${digits.charAt(0)}...${digits.slice(-2)}`;
+  });
+}

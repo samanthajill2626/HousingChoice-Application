@@ -46,6 +46,7 @@ import { loadConfig, type AppConfig } from '../../lib/config.js';
 import { formatPhoneForDisplay } from '../../lib/phone.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
 import { callPreview } from '../../lib/callPreview.js';
+import { contactDisplayName } from '../../lib/contactName.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { resolveMessage } from '../../messages/index.js';
 import {
@@ -126,20 +127,47 @@ function maskedPartyLabel(member: ConversationParticipant | undefined, contact: 
  */
 
 /**
- * The PUSH-ONLY caller label. For a KNOWN caller it's the masked role/name (as
- * stored). For an UNKNOWN caller we surface the caller's formatted phone number
- * instead of a useless "Unknown caller" — the founder asked to see who's
- * calling, and a push lands on the founder's OWN authenticated device. This is
+ * The PUSH-ONLY caller label (log-hygiene spec section 7; operator ruling D4
+ * 2026-08-16 + the role-word amendment 2026-08-25): staff-facing pushes carry
+ * FULL caller identity like a native phone app - lock-screen privacy is the
+ * DEVICE's job, and a push lands on a staff member's OWN authenticated device.
+ * The ROLE word is KEPT (load-bearing context on an incoming call); the identity
+ * half is the message pushes' naming chain plus a terminal fallback so the label
+ * is never empty and never undefined. Nothing here carries LESS than the masked
+ * label it replaced: a nameless known caller now reads "Tenant - (555) 017-7777"
+ * where it used to read "Tenant".
+ *
  * NOT a guardrail break: PHASE1_CHANGE_ORDER_2 item 5 forbids the real caller's
- * number on the founder-bridge DIAL LEG (caller ID stays the business number)
- * and §9 keeps it out of logs/stored records — both unchanged. The number lives
- * ONLY in this ephemeral push payload; the call entity's call_party_label, the
- * logs, and the dial caller ID all stay masked. Falls back to the masked label
- * when no number is available.
+ * number on the founder-bridge DIAL LEG (caller ID stays the business number),
+ * and doc section 9 keeps identity out of logs and stored records - both
+ * unchanged. The STORED call_party_label, the spoken whisper, thread rendering,
+ * and the outbound originate path all keep the MASKED posture
+ * (lib/voiceMasking.ts); this label exists ONLY in the ephemeral push payload
+ * and is never logged. Exported for direct unit tests.
  */
-function pushCallerLabel(maskedLabel: string, callerPhone: string | undefined): string {
-  if (maskedLabel !== UNKNOWN_CALLER_LABEL) return maskedLabel;
-  return formatPhoneForDisplay(callerPhone) ?? maskedLabel;
+export function pushCallerIdentity(
+  contact: ContactItem | undefined,
+  conversation: ConversationItem | undefined,
+  phone: string | undefined,
+): string {
+  const identity =
+    contactDisplayName(contact) ??
+    // The EMPTY-STRING guard is load-bearing and is inlined exactly as the
+    // message-push site inlines it (there is no named helper for it in the
+    // repo): a stored empty display name would be SELECTED by a bare `??`.
+    (typeof conversation?.participant_display_name === 'string' &&
+    conversation.participant_display_name.length > 0
+      ? conversation.participant_display_name
+      : undefined) ??
+    formatPhoneForDisplay(phone) ??
+    // TERMINAL rung, guarded the same way: participant_phone can be '' (email
+    // participants), and a bare `?? phone` would select it and emit an empty
+    // body. formatPhoneForDisplay returns the input unchanged for a
+    // non-NANP/unparseable number, so this rung only carries the odd shapes.
+    (typeof phone === 'string' && phone.length > 0 ? phone : undefined);
+  const role = roleWordForContact(contact);
+  if (role !== undefined && identity !== undefined) return `${role} - ${identity}`;
+  return role ?? identity ?? UNKNOWN_CALLER_LABEL;
 }
 
 /**
@@ -683,10 +711,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the push lands AHEAD of the cell ringing. sendPreRingPush is already fully
     // error-trapped internally, so the extra .catch is belt-and-braces (an
     // unexpected throw can never become an unhandled rejection). PII (doc §9):
-    // masked label only, never the raw From; the send never blocks/fails the
-    // bridge.
-    // The push (holder's own device) surfaces the caller's number when the
-    // caller is UNKNOWN; the stored entry above keeps the masked callerLabel.
+    // the identity rides the ephemeral payload ONLY and never a log line; the
+    // send never blocks or fails the bridge.
+    // The push (holder's own device) carries the caller's ROLE + FULL identity
+    // via pushCallerIdentity (D4 + the 2026-08-25 role-word amendment); the
+    // stored entry above keeps the masked callerLabel, and logs stay masked.
     // Voice Phase 1 (spec §6): the pre-ring targets the HOLDER (the user whose
     // cell is ringing), not all admins. By here holderCell is defined (the
     // no-holder path returned above), so `holder` is defined too — the guard is
@@ -697,7 +726,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         holderUserId,
         conversation.conversationId,
         CallSid,
-        pushCallerLabel(callerLabel, From),
+        pushCallerIdentity(callerContact, conversation, From),
       ).catch((err: unknown) => {
         log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
       });
@@ -796,8 +825,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   /**
    * Send the PRE-RING push to the inbound-voice-line HOLDER (the user whose cell
-   * is ringing — spec §6). kind 'pre_ring'; the body is the MASKED caller label
-   * (e.g. "Incoming call — Tenant (Jane D.)") — NEVER the raw From (PII, doc §9).
+   * is ringing - spec section 6). kind 'pre_ring'; the body is the caller's ROLE
+   * + FULL identity from pushCallerIdentity (operator ruling D4 2026-08-16 + the
+   * role-word amendment 2026-08-25), e.g. "Tenant - Jane Doe". That identity is
+   * PUSH-ONLY: it never reaches a log line, the stored call_party_label, or the
+   * dial caller ID (PII, doc section 9).
    * Best-effort: a push failure never blocks the bridge.
    */
   async function sendPreRingPush(
@@ -2229,7 +2261,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   /**
    * Send the MISSED-CALL push to every founder (admin user). kind 'missed_call';
-   * masked body (the call's call_party_label, a role/name — NEVER a raw phone);
+   * the body carries the caller's ROLE + FULL identity from pushCallerIdentity
+   * (operator ruling D4 2026-08-16 + the role-word amendment 2026-08-25) - a
+   * push-only label that never reaches a log line or the stored call entity;
    * actions built from settings.quickReplies (max 2). The SW deep-links a
    * missed_call tap to /quick-reply/<callId>. Best-effort.
    */
@@ -2239,19 +2273,26 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.info({ callSid }, 'founder triage: no admin users to missed-call push');
       return;
     }
-    // The masked caller label is on the persisted call entry (set at bridge
-    // time). For a KNOWN caller it's role+name and we use it as-is; for an
-    // UNKNOWN caller, surface the caller's number in this push (the founder's
-    // own device) via pushCallerLabel — the caller's number is the founder-
-    // bridge conversation's participant_phone (= the inbound From). The stored
-    // entry stays masked; the number never enters logs/storage/the dial leg.
-    const entry = await messages.getByProviderSid(callSid);
-    const storedLabel =
-      typeof entry?.call_party_label === 'string' && entry.call_party_label.length > 0
-        ? entry.call_party_label
-        : UNKNOWN_CALLER_LABEL;
+    // The push label is DERIVED FRESH here rather than read off the persisted
+    // call entry's masked call_party_label: this push carries the role + full
+    // identity, which the stored (deliberately masked) label cannot supply. The
+    // caller's number is the founder-bridge conversation's participant_phone
+    // (= the inbound From); relay/masked calls cannot reach this push, so that
+    // phone is the real caller. The stored entry stays masked, and the number
+    // never enters logs, storage, or the dial leg.
     const conversation = await conversations.getById(conversationId);
-    const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
+    // Best-effort contact resolve for the full name; any failure falls through
+    // the chain to the number.
+    let callerContact: ContactItem | undefined;
+    const callerPhone = conversation?.participant_phone;
+    if (typeof callerPhone === 'string' && callerPhone.length > 0) {
+      try {
+        callerContact = await contacts.findByPhone(callerPhone);
+      } catch {
+        callerContact = undefined;
+      }
+    }
+    const callerLabel = pushCallerIdentity(callerContact, conversation, callerPhone);
 
     // Quick-replies → up to 2 notification actions (sw.js slices to 2 anyway).
     // The action ids (qr-0 / qr-1) index the RAW quickReplies array; the SW
@@ -2296,11 +2337,12 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   /**
    * Send the "New voicemail" push to every founder (admin user). Sibling of
-   * sendMissedCallPush - identical masked posture: the call_party_label (a
-   * role/name, NEVER a raw phone), an unknown caller's number surfaced ONLY on
-   * the founder's own device via pushCallerLabel. kind 'voicemail'; no quick-reply
-   * actions (a voicemail is read, not quick-replied). Best-effort - a per-founder
-   * failure is logged and never propagates (the recording is already safe).
+   * sendMissedCallPush - identical posture: the caller's ROLE + FULL identity
+   * from pushCallerIdentity (operator ruling D4 2026-08-16 + the role-word
+   * amendment 2026-08-25), push-only and never logged or stored. kind
+   * 'voicemail'; no quick-reply actions (a voicemail is read, not
+   * quick-replied). Best-effort - a per-founder failure is logged and never
+   * propagates (the recording is already safe).
    */
   async function sendVoicemailPush(conversationId: string, callSid: string): Promise<void> {
     const founders = await resolveFounders();
@@ -2308,13 +2350,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.info({ callSid }, 'voicemail: no admin users to push');
       return;
     }
-    const entry = await messages.getByProviderSid(callSid);
-    const storedLabel =
-      typeof entry?.call_party_label === 'string' && entry.call_party_label.length > 0
-        ? entry.call_party_label
-        : UNKNOWN_CALLER_LABEL;
+    // Derived fresh, exactly as sendMissedCallPush does (see its note): the
+    // stored call_party_label is deliberately masked and cannot supply the full
+    // identity this push carries.
     const conversation = await conversations.getById(conversationId);
-    const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
+    let callerContact: ContactItem | undefined;
+    const callerPhone = conversation?.participant_phone;
+    if (typeof callerPhone === 'string' && callerPhone.length > 0) {
+      try {
+        callerContact = await contacts.findByPhone(callerPhone);
+      } catch {
+        callerContact = undefined;
+      }
+    }
+    const callerLabel = pushCallerIdentity(callerContact, conversation, callerPhone);
     const payload = {
       title: 'New voicemail',
       body: `New voicemail - ${callerLabel}`,

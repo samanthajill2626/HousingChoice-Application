@@ -213,34 +213,36 @@ Good triage discipline makes this read worse. The planner predicted "cheap,
 probably ~30 lookups" from the fact that 627 of 693 open rows are typed
 `unknown_1to1`, and the measurement refuted it outright.
 
-**The root cause is the divergence this issue already names, now sized.** Only
-17 of ~627 open `unknown_1to1` conversations actually need triage - so roughly
-610 carry a conversation `type` that says "unknown" while their contact has long
-since been typed. The walk is expensive precisely BECAUSE `conv.type` is stale:
-it cannot serve as a cheap pre-filter when 90% of the partition wrongly claims
-to be unknown.
+**The walk is expensive because it must hydrate a contact per conversation to
+decide anything.** `needsTriage` is `roleFromContact(contact) === 'unknown'` - a
+fact that lives on the CONTACT, not the thread - so the pager resolves a contact
+for every open row and discards almost all of them. At most 8 rows survive in
+prod, out of 684 lookups.
 
-That reframes the remedy. Two shapes are now worth designing against, and
-neither is the one originally filed:
+**BOTH remedies previously proposed here are WITHDRAWN.** They are recorded
+because someone will otherwise re-propose them:
 
-1. **Fix the divergence and let `conv.type` become a usable pre-filter.** Retype
-   the conversation when its contact is typed - which `POST /api/contacts`
-   already fails to do, one of the three divergence sites named below. This
-   fixes a correctness bug and the read cost together, with no new index. It
-   needs the invariant maintained in BOTH directions before the pager may trust
-   it, and a backfill for the ~610 stale rows.
-2. **A correctly-maintained sparse `needs_triage` flag with its own GSI** - the
-   same shape as `byUnread`, turning 693 lookups into one Query returning 17
-   items. Note the earlier objection to a denormalized hint was that
-   `conv.type` is ALREADY that denormalization and is already broken; a new
-   attribute maintained by the contact-type write path is a different
-   proposition, but it carries the full invariant-enumeration burden.
+1. ~~Retype conversations so `conv.type` becomes a usable pre-filter.~~
+   WITHDRAWN. `today.ts:779` already branches on `conv.type`, so the backfill it
+   needs is an operator-visible product change, not a repair. It also makes a
+   denormalization load-bearing for what an operator sees, where a skipped row
+   fails SILENTLY, and it optimises the constant on a partition that never
+   shrinks - nothing closes a 1:1 thread.
+2. ~~A sparse `needs_triage` flag with its own GSI.~~ WITHDRAWN as unnecessary,
+   not as unsound: it would add an attribute and an index to reproduce a
+   partition the CONTACTS table already has.
 
-Part (A) of the earlier remedy (budget + cursor + `truncated`) still bounds the
-damage and needs no schema change, but note what it does to the operator with
-these numbers: a budget would return a handful of rows and a cursor, making them
-page repeatedly through a tab that has 17 rows in it. Bounding an unbounded read
-is right; it is not by itself a fix.
+**The current design reads the triage queue directly** - the contacts
+`byTypeStatus` partition, which the repo already documents as "the human triage
+queue". Measured at 7 rows in ONE Query in prod against 684 lookups across 24
+Queries today. See
+[`2026-08-25-inbox-unknown-tab-walk-design.md`](../superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md);
+it is on draft 3 and carries the five coverage classes that switch entails.
+
+The budget + cursor + `truncated` bound still belongs on the existing pager as a
+safety net - an unbounded read should not exist even when it is cheap - but with
+a queue of 8 rows it would page an operator through almost nothing, so it is not
+a fix by itself.
 
 ---
 

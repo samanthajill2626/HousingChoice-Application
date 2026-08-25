@@ -11,7 +11,8 @@ self-contained and verified (250/250 on the spec that reproduced at 1-in-38),
 and holding it behind a twelve-issue build would both delay an
 operator-visible fix and produce a diff too large to review well.
 
-Branch: `feat/inbox-unread-read-path`, cut from `main` @5355b7ae.
+Branch: `feat/inbox-unread-cluster`, cut from `main` @88ac7b36. (Section 2's
+shipped work was `feat/inbox-unread-read-path`, cut from `main` @5355b7ae.)
 Cluster: [`docs/issues/_CLUSTERS.md`](../../issues/_CLUSTERS.md) section C1.
 
 ## 1. What this mission is
@@ -118,11 +119,18 @@ Two premises the old draft was built on are false, and both are load-bearing:
   decision on re-measuring it - a plan that would have measured no badge
   improvement, because none was structurally possible.
 - **The badge's blocking premise - "no `contactId` on the conversation item to
-  batch with" - is false.** `participants` carries `{contactId, phone}`;
-  `captureContact` claims the link BEFORE `incrementUnread` indexes the row;
-  `today.ts:1086` already reads it off this same walk; and
+  batch with" - is false.** `participants` carries `{contactId, phone}`, and
   `contacts.getManyByIds` shipped 2026-08-21, the same day the issue asserted
   the tool did not exist.
+
+  Two supporting arguments this section originally made have since been
+  WITHDRAWN and must not be repeated downstream: that `captureContact` claims
+  the link before `incrementUnread` indexes the row (true on one of six paths -
+  see 4.1.a), and that `today.ts:1086` reading it off the same walk is
+  reassuring precedent (it reads `participants[0]` as a RULE and drives the
+  deleted-contact skip from it, which is a bug to file, not a precedent). The
+  premise survives without them; the field exists. How OFTEN it is usable is
+  4.1.a's question, and it is open.
 
 ## 4. The two anchors
 
@@ -160,21 +168,49 @@ is largely unestablished:
   established row - see
   [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
 
-Measure, on a real dataset rather than on fixtures the author controls: of the
-1:1 items the `byUnread` walk returns, what fraction carry a participant entry
-with a NON-EMPTY `contactId` that resolves to a live contact?
+The question: of the 1:1 items the `byUnread` walk returns, what fraction carry
+a participant entry with a NON-EMPTY `contactId` that resolves to a live
+contact?
 
-**The decision rule, fixed in advance so the number cannot be rationalised
-afterwards:**
+**This slice is BLOCKED on a human decision, and saying so is the point.** Both
+round-2 reviewers independently found that draft 2's version could be satisfied
+while learning nothing. Three things were missing and only one is fixable by an
+engineer:
 
-- **High coverage** - build the read-through as specified below; the
-  `findByPhone` fallback is a tail case.
-- **Low or mixed coverage** - the read-through is NOT the first change. Fix the
-  capture paths and add the backfill FIRST, because a fallback that fires on
-  most rows is the current cost with extra code in front of it.
-- **Either way** - the fallback ships, and the acceptance measures the SAVED
-  round trips on real-shaped data, never on fixtures that supply the very field
-  production may lack.
+- **No threshold.** "High" versus "low or mixed" named no number and no
+  classifier. Proposed and fixed in advance so the result cannot be
+  rationalised afterwards: **>= 95% usable is high; <= 80% is low; anything
+  between is mixed and escalates.** These are proposals, not rulings.
+- **No vehicle.** Nothing in the repo measures `contactId` coverage today.
+  `app/scripts/profile-inbox.ts` is the nearest harness and already instruments
+  both `aggregateInbox` and `countUnreadRows`, but it is hard-gated to
+  `localhost:8000` and `hc-local-` tables. Extending it is small work.
+- **No legitimate dataset - THIS is the human decision.** The hermetic lane is
+  seeded, so it answers with the fixture coverage the slice exists to distrust.
+  Dev and prod are off-limits to an agent under AGENTS.md. The founder's local
+  imported dataset is exactly the interesting shape and is named as a human item
+  in decision 5. So a builder cannot legitimately take this measurement at all,
+  and draft 2's fix for one review finding reintroduced another.
+
+See section 8 decision 6. Until it is answered, this slice is a specification,
+not a task.
+
+**The decision rule, once a dataset exists:**
+
+- **High coverage** - build the read-through as specified below; the fallback is
+  a tail case.
+- **Low coverage** - the read-through is NOT the first change. Fix the capture
+  paths and add a backfill FIRST, because a fallback that fires on most rows is
+  today's cost with extra code in front of it. NOTE that branch is an unscoped
+  expansion in its own right - four capture paths plus a backfill across two
+  environments is infrastructure work needing its own human go, not a
+  continuation of this mission.
+- **Mixed** - escalate with the number rather than picking.
+- **Either way** - the fallback ships, and acceptance measures SAVED round trips
+  on real-shaped data. Draft 2 contradicted itself here, telling the builder to
+  use real-shaped data in one sentence and the existing fixture-based call-count
+  tests in another. The fixture tests remain valid for the mechanism; they
+  cannot establish the saving.
 
 ### 4.1.b The read-through
 
@@ -186,18 +222,40 @@ item and batch through `contacts.getManyByIds`. Five conditions, none optional:
    rule: `contactCapture.ts:164` states the opposite in the imperative ("never
    `participants[0]`: an entry for another phone is..."), and
    `conversationsRepo.ts:1354-1356` records the convention as "readers key on
-   contactId FIRST". Both reviewers proposed reverting to `[0]` on the strength
-   of `today.ts:1086`; that was rejected, and if `today.ts` relies on `[0]` as a
-   RULE it is the outlier and wants its own look. A 1:1 thread having exactly
-   one entry is a consequence, not the selector.
-2. **Fall back to `findByPhone` on any UNUSABLE `contactId`, empty string
-   included.** The un-backfilled shape is `''`, not `undefined`. An empty string
-   is not a valid key: it throws on `BatchGetItem`, and a default batch helper
-   can drop the WHOLE 100-key chunk rather than one row - degrading up to 100
-   unread rows to phantom `unknown` rows, which is the exact symptom this
-   cluster exists to remove. Filter empties out before the batch, and use the
-   existing `requireComplete` semantics rather than treating a short response as
-   absence.
+   contactId FIRST". Both round-1 reviewers proposed reverting to `[0]`; that
+   was rejected and the continuing reviewer withdrew the proposal in round 2 -
+   while correcting the basis of my rejection, which matters. "It would
+   reintroduce the positional bug" is NOT true for the class actually in
+   dispute: an email-only row has exactly one entry, so "the single entry" and
+   `[0]` are the same expression there. `[0]` is unsafe as a GENERAL rule and
+   merely unremarkable on that row.
+
+   **The gap that leaves, and how it closes.** "The single entry" is an
+   assertion, not a selector, and its natural implementation IS `[0]` - so the
+   rule degenerates into the thing it forbids. Close it explicitly: **if an
+   email thread carries more than one entry, do not pick. Fall back to
+   `findByEmail` and log it.**
+
+   `today.ts:1086` is now resolved and stops being cited as precedent either
+   way: it DOES use `[0]` as a rule, and it drives the deleted-contact skip from
+   it. That is a bug to file on its own, not evidence for anything here.
+2. **Fall back on any UNUSABLE `contactId`, empty string included.** The
+   un-backfilled shape is `''`, not `undefined`. An empty string is not a valid
+   key: it throws on `BatchGetItem`, and a default batch helper can drop the
+   WHOLE 100-key chunk rather than one row - degrading up to 100 unread rows to
+   phantom `unknown` rows, which is the exact symptom this cluster exists to
+   remove. Filter empties out BEFORE the batch. Fall back to `findByPhone` for a
+   phone thread and `findByEmail` for an email thread.
+
+   **What draft 2 got wrong here:** it also prescribed "use the existing
+   `requireComplete` semantics", which quietly DECIDES the open question in
+   decision 2 below, and decides it the harshest way. `requireComplete` throws,
+   and the badge path deliberately does not catch - so a partial batch would
+   become a 500 with no badge at all, replacing today's degrade-to-no-contact.
+   Both round-2 reviewers caught this. A condition list headed "none optional"
+   must not contain a decision the same document calls open. The choice is
+   decision 2's; this condition only requires that whatever is chosen, a short
+   response is never silently read as "these rows do not exist".
 3. **Bound the look-ahead** by `maxRows - candidates.length`. The reason is not
    "laziness" - it is that this preserves `scanPosition == last consumed item`,
    which is what the cursor is minted from. A fixed 100-key batch would keep the
@@ -255,7 +313,12 @@ the issue's original prescription:
   clause was added to separate. The identical expression already ships elsewhere
   in the repo disambiguating nothing. The issue file prescribed the return-values
   mechanism; the first draft of this spec kept the clause and dropped the
-  mechanism, which is a fair example of satisfying the letter of a fix.
+  mechanism, which is a fair example of satisfying the letter of a fix. **State
+  the READING, not just the flag** - naming `ReturnValuesOnConditionCheckFailure`
+  without saying how the returned item is interpreted repeats the same omission
+  one level down. The in-repo precedent is `poolNumbersRepo.ts:564` and `:580`:
+  an absent item means the row is gone, a present item without the attribute
+  means already read.
 - **The "spends neither" capacity claim is deleted.** A failed conditional write
   saves the item mutation, the stream record and the SSE fan-out - not WCUs.
 - **Name the cost it adds.** This turns zero writes into N conditional writes
@@ -320,16 +383,38 @@ green having altered nothing - and the only mechanical way to make it non-no-op
 (dropping `!capped` from `truncated`) flips `truncated` on for every ordinary
 capped page, including the nav badge's wire.
 
-Three coordinated edits instead: set `scanExhausted` before yielding a final
-page's last item; keep `consumedAll`'s `!capped` guard rather than replacing it;
-and record `consumedAll` before the page-full break in the route.
+**Draft 2's replacement was itself a no-op, and the author caused it.** It
+prescribed "set `scanExhausted` before yielding a final page's last item" AND
+"keep `consumedAll`'s `!capped` guard". Those two accepted fixes cancel: in the
+exact-multiple case the page fills, so `capped` is true, so
+`consumedAll = !capped && scanExhausted` is false no matter when
+`scanExhausted` was set - and on the cap-break path both `truncated` and
+`consumedAll` are already pinned by `capped` anyway. Both round-2 reviewers
+found this independently. It is the FIFTH remedy in this cluster that would have
+shipped green having changed nothing, and the only one produced by the
+adjudication rather than inherited from an issue file. Two fixes can each be
+correct and still cancel; that is what an adjudication has to check and this one
+did not.
 
-**Residue, corrected.** The first draft named the wrong one. The hook cannot
-fire when the final page's last RAW item is invisible - filtered, lagged, or
-dropped - which is the ROUTINE shape on this lagging index, not an edge case. So
-G1 closes the case where the last item is visible and leaves the invisible-tail
-case open. The 100-item query-page boundary is a second, narrower residue. Say
-both; claim neither is closed.
+**The repair, which is better than either input.** `!capped` is a PROXY for "we
+stopped early", and the proxy is what fails here. Set `scanExhausted` when the
+last raw item of a `more === false` page is SCANNED - before the visibility test
+- rather than when a visible item is yielded. Then the guard is no longer load
+bearing for this case and the proxy can be dropped on a proved basis rather than
+deleted on a hunch.
+
+Doing it at scan time also closes the residue draft 2 had written off as
+permanent: the invisible final item. That was the routine shape on this lagging
+index, not an edge case, so closing it is most of the value.
+
+Constraints the builder must respect, both from review: `scanExhausted` lives on
+the walk STATE and is not exposed on `CollectResult`, so "record it" is not a
+one-line change; and the two obvious escapes - dropping the guard outright, or
+adding a fifth contract member - are each forbidden elsewhere in this same
+section. The composed contract goes in writing before the code.
+
+The 100-item query-page boundary remains a narrower, genuine residue. Say it;
+do not claim it closed.
 
 Also corrected: the issue's "renders no affordance" claim went stale on
 2026-08-17. The notice now renders "There are older unread threads not shown
@@ -384,8 +469,12 @@ path, never by the budget exit. Two conditions, neither skippable:
   meaning is a session fact, so copying `truncated`'s replace-per-page semantics
   would clear it on the first "Load more". But an OR with no reset reproduces
   R4's defect - a notice that outlives the state it describes - on the brand-new
-  flag, in the same slice that fixes R4. Reset on the same lifecycle event R4's
-  gate uses: a filter change, and a fresh first page.
+  flag, in the same slice that fixes R4. Reset on a filter change and on a fresh
+  first page. NOTE draft 2 said "the same lifecycle event R4's gate uses", which
+  is wrong twice: R4 uses a render-time STATUS GATE, not an event, and an SSE
+  reconcile installs a fresh first page - so under this rule the flag is wiped
+  by ordinary background traffic and "session fact" overstates what it is. Say
+  what it actually is: sticky across paging, cleared on a fresh first page.
 - **The wire must distinguish "this backend does not know the flag" from "this
   backend says false".** A bare `truncatedUnreachable ?? truncated` default does
   NOT achieve the split it was added for: with this file's optional-true wire
@@ -425,11 +514,17 @@ share the branch chain is G1 and G2, which land before G3.
 
 Each is its own commit so a red gate stays attributable.
 
+**Ordering that draft 2 left unstated:** 4.1.b's read-through and G2's
+single-iterator restructure touch the SAME loop. They must not be interleaved,
+and whichever lands second re-proves the other's termination and budget
+behaviour rather than assuming it survived. Given 4.1.a is blocked on decision
+6, G2 is the one that can start.
+
 | # | issue | sev | change |
 |---|---|---|---|
 | R1 | unread-deleted-contact-probed-twice-per-page | low | thread the collector's probe into hydration so the row builder reuses it. Lands with G2 - same function. TWO conditions: the carrier is keyed by `conversationId` (the collector evaluates PER THREAD, so a singular "probe result" is wrong), and it must NOT collapse "empty thread" into "read failed" - a cached absence becomes a fallback preview with no timestamp, which can never resurface, producing a drop classified as non-lagged and never retried. Corrected cost: removes ONE EXTRA read, not one of two |
-| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries |
-| R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. Keep the floor as a FALLBACK rather than deleting it - but NOT for the reason the first draft gave. "It is what stops `Limit: 0` reaching DynamoDB" is false for all three inbox branches; the floor's value is that a degenerate input lands on a defined page size instead of a defined error. Retire the now-obsolete do-not-re-sync warning |
+| R2 | seen-set-max-equals-max-inbox-limit | low | **Filed symptom INVERTED and never reproduced** - the comparison has been a strict `>` since the first commit, and the maximum limit reaches the DEEPEST feed, not the shallowest. Real finding: `MAX_INBOX_LIMIT <= SEEN_SET_MAX` is a load-bearing invariant on its boundary with zero margin, undocumented and untested. Fix is comments at both constants plus one boundary test. Raising the cap fixes nothing and breaks an existing test; clamping makes the feed shallower. TWO review corrections: the boundary test as the issue words it CANNOT FAIL for the behaviour it names, so it must be written to fail when the invariant is violated (raise the limit past the cap in the test and watch paging die) rather than merely to pass today - a guard with no failing mode is the mission's own named anti-pattern; and `BADGE_COUNT_CAP == UNREAD_QUERY_PAGE_SIZE` is a SECOND unpinned coincidence carrying a load-bearing premise (it is why the badge cannot benefit from G2), so it rides this same remedy: comment both pairs, pin both boundaries. Both constants are module-private today, so a boundary test needs them exported - a real change, not a test-only one |
+| R3 | inbox-parselimit-empty-one-row | low | take the FULL current `aiRuns` predicate including the `< 1` clause - the line the issue quotes has since been hardened, and copying it alone would leave `?limit=0` and `?limit=-5` behind. The floor's stated reason ("it stops `Limit: 0` reaching DynamoDB") is false for all three inbox branches. And once the `< 1` clause lands, the floor is UNREACHABLE DEAD CODE - draft 2 kept it on a corrected-but-still-wrong rationale. DELETE it with the clause, or keep it and say plainly it is defensive-only. Do not keep it with a reason. Retire the now-obsolete do-not-re-sync warning |
 | R4 | inbox-group-truncation-notice-not-reset | low | gate the notice on ready status, matching the shipped precedent 85 lines below it. Reproduction is All/Groups only - the server never sets the flag under `filter=unread`. Scope limit stated in place: this does NOT close the adjacent one-commit filter-change window, which is pre-existing and orthogonal |
 | R5 | inbox-filter-tabs-full-walk | **medium** | `low -> medium`. The last unbounded read on the route, re-issued on every debounced event while an operator sits on the tab. Cost model in the file was stale by ~1.5 orders of magnitude. Two parts: **(A)** give the unknown pager the budget + cursor + `truncated` contract the unread branch already has - NOTE this part is a new proposal with no approved vehicle and needs its own go; **(B)** ride 4.1's read-through. The filed remedy (sparse GSI or denormalized triage hint) is DISPROVEN - that denormalization already exists as a conversation `type` and is already divergent from the derived value at three reachable sites, so indexing it would bake the divergence in |
 | R6 | inbox-imported-call-outcome-normalization | low | **Human ruling: all THREE renderers, plus group threads.** The filed remedy is unreachable for the rows it targets - the importer writes no call status and the derive path short-circuits on it before any outcome handling, so it would ship green having changed nothing. Order: make the status optional on the preview input (the body survives it - the ringing/in-progress checks are equality tests that are simply false for undefined), add a fourth derive-arm for a status-less row with a normalizable outcome gated on an empty fallback preview, THEN promote the shared helpers, and extend to the group-row builders, which read the stored preview directly and never call the derive path. **The duration-guard change from `< 0` to `<= 0` is REMOVED from this rider** - it would break a shipped pin asserting that a zero duration renders as `0s`, and a zero-second call is a real, renderable value. The defect was never the guard. **WHERE the shared helper lives is NOT assumed:** the repo states in ten to twelve places (the first draft said five) that the dashboard cannot import from `app/src`, and no app runtime module imports from `dashboard/src` today - the only proven cross-package reach is app-side TESTS importing a pure dashboard module. The builder must PROVE the chosen location under `npm run smoke`, which is the gate that catches exactly this class of resolution gap, with the established mirror-plus-drift-guard pattern as the named fallback if no single home resolves |
@@ -493,11 +588,24 @@ the importer - the one writer that actually rewrites the field. It also asserted
 `participants` is "write-once", which is false. It is rewritten below from a
 code sweep rather than from recall, which is the only way this rule works.
 
-WRITERS of `participants` (swept, not recalled):
+**This list was wrong TWICE.** Draft 1 wrote it from recall. Draft 2 wrote it
+from `grep -l` over identifiers, which swept COMMENTS - it listed
+`services/sendMessage.ts` as an unread reader on the strength of a comment
+reading "Outbound NEVER touches unread_count", and listed
+`adapters/groupConversations.ts` as a participants writer when that adapter
+builds a Twilio Conversations roster with a different shape entirely and never
+writes this table. Draft 3 below is swept on CONTENT and each entry was opened
+and read. If a fourth draft is needed, that is a signal the method is still
+wrong, not the list.
 
-- `conversationsRepo` - the versioned rewrite (`:1196`, `SET participants = :p,
-  participants_version = :nextV`), the plain rewrite (`:1597`), and the two
-  group-membership writes (`:2550`, `:2591`).
+WRITERS of `participants` on the conversation item:
+
+- `conversationsRepo` - the versioned rewrite (`:1196`), the plain rewrite
+  (`:1597`), the two group-membership writes (`:2550`, `:2591`), the two
+  group-creation writes (`:1885`, `:2329`), and **`:1357`
+  (`createOrGetByParticipantEmail`) - the writer that CREATES the email-only
+  shape `{contactId, phone: ''}` that 4.1.b condition 1 exists to handle.** Both
+  earlier drafts missed it, which is why condition 1 was wrong in draft 1.
 - `setParticipantsIfAbsent` - the conditional claim, guarded on
   `attribute_not_exists(participants)`, so it CANNOT repair a present-but-blank
   entry.
@@ -507,25 +615,39 @@ WRITERS of `participants` (swept, not recalled):
   clause; the 1:1 path does not. Filed separately as
   [`import-blanks-conversation-participant-contactid`](../../issues/import-blanks-conversation-participant-contactid.md).
 - `routes/public.ts:286` - the housing-fair intake claim.
-- The seed casts (`lib/seed/cast.ts`, `lean.ts`, `live.ts`) and
-  `adapters/groupConversations.ts`.
+- `routes/contacts.ts:1800` - the email-thread creation path.
+- `routes/api.ts:2099` - `backfillGroupTextRoster`.
+- The seed modules: `lib/seed/cast.ts`, `lean.ts`, `live.ts`, `matrix.ts`,
+  `performance.ts`.
 
-Plus, because the read-through has no source of truth to fall back on
-otherwise: a BACKFILL, which does not exist today.
+There are further producers of `contactId: ''` beyond the importer. The builder
+enumerates them as part of the measurement in 4.1.a rather than trusting this
+list to be final - two drafts of it were wrong.
+
+**There IS a backfill pattern to follow, and draft 2 said there was not.** That
+claim was a wrong-directory non-fact: `app/src/scripts/` does not exist, but
+`app/scripts/` does and holds `backfill-unread-flag.ts` among four backfills.
+What does not exist is a backfill for THIS field. The distinction matters
+because 4.2's counter-only argument leans on the unread-flag backfill having
+run.
 
 **Invariant 3 - the `byUnread` index itself.** The whole cluster reads it, so
 its RANGE KEY is a mutation surface even though nothing here means to move it:
 `touchLastActivity` writes `last_activity_at` on every outbound send. A change
 to ordering or to the tie behaviour lands here first.
 
-READERS of `unread_flag` / `unread_count` (swept): `lib/unreadFeed.ts`,
-`routes/inbox.ts`, `routes/today.ts`, `routes/contacts.ts`, **`routes/api.ts` -
-`GET /api/unread-counts`, which the first draft missed and which is exactly
-where 4.2's counter-only objection would surface**, `lib/markUnread.ts`,
-`lib/events.ts` (the SSE frame carries `unread_count`, and the contact detail
-view reads it), `services/sendMessage.ts`, `webhooks/twilio.ts`,
-`webhooks/voice.ts`, `repos/conversationsRepo.ts`, `lib/tables.ts`, and the four
-seed modules.
+READERS of `unread_flag` / `unread_count` - content-swept, comment-only matches
+removed: `lib/unreadFeed.ts`, `routes/inbox.ts`, `routes/today.ts`,
+`routes/contacts.ts`, **`routes/api.ts` - `GET /api/unread-counts`, which draft
+1 missed and which is exactly where 4.2's counter-only objection would
+surface**, `lib/markUnread.ts`, `lib/events.ts` (the SSE frame carries
+`unread_count`, and the contact detail view reads it), `webhooks/twilio.ts`,
+`webhooks/voice.ts`, `repos/conversationsRepo.ts`, and the seed modules.
+
+Note the two mark-read fan-out filters that 4.2 removes read `unread_count`, not
+`unread_flag`; draft 2 filed them under the wrong attribute. `resetUnread` has
+four callers, and the one the severity downgrade leans on is `api.ts:2318` -
+name it rather than counting re-drives.
 
 WATCH ITEM: the unread backfill's `remove` arm can manufacture the exact
 invariant break 4.2 is closing. It is unowned and needs a named owner before
@@ -560,6 +682,15 @@ invariant break 4.2 is closing. It is unowned and needs a named owner before
    BUILDER to confirm it. That is unactionable by a builder - it is a human
    item, and it is the one remaining unverified exposure for the counter-only
    class.
+6. **Where the 4.1.a coverage measurement is taken - BLOCKING that slice.** A
+   builder has no legitimate dataset: the hermetic lane is seeded and answers
+   with fixture coverage, dev and prod are off-limits under AGENTS.md, and the
+   local imported dataset is decision 5. The options are to run an extended
+   `profile-inbox` against real data yourself and hand over the number, to
+   authorise a specific read against a specific environment, or to drop the
+   coverage gate and build the read-through with its fallback while accepting
+   that the saving is unproven until it is observed in the wild. Each is
+   defensible; none is an engineer's to choose.
 
 ## 9. Testing
 

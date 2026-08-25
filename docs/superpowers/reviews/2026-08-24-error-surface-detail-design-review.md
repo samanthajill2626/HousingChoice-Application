@@ -914,6 +914,11 @@ enumeration also contradicted its own truncation paragraph about whether
 RESOLUTION: the collapsed row renders `message` plus `errType`; `errMessage` is
 not rendered separately there, so the duplicate case cannot arise.
 
+SUPERSEDED (2026-08-25): the spec was amended after this adjudication - S6
+"errMessage IS rendered, on its own line under message" with the S3
+single-render rule preventing duplication. The shipped row follows the amended
+spec. See the spec's S6 COLLAPSED ROW section.
+
 ### AJ72. AWS transport metadata would ship (B7 LOW)
 
 ACCEPT. Fact 8 newly documented `backwardToken`/`forwardToken`, `@logGroupId`,

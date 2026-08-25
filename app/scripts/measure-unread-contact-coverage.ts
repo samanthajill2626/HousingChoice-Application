@@ -862,9 +862,34 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
       `    in tab, excluded by origin  ${inTabOnlyExcluded.length}  <- lost only if the exclusion is copied`,
       `    in partition, NOT in tab    ${inPartitionNotTab.length}  <- would be NEWLY SHOWN (no open thread?)`,
       '',
-      inTabNotPartition.length === 0 && contactlessRows === 0
-        ? '  VERDICT  SETS RECONCILE. A contact-side read loses nothing the tab shows today.'
-        : '  VERDICT  SETS DIVERGE. Switching source silently changes what the operator sees. Every row above must be explained before the source changes - a missed triage row is invisible by construction.',
+      // A detector that cries wolf on an EXPLAINED difference gets ignored, so
+      // the verdict distinguishes "unexplained" from "explained and benign".
+      // Soft-deleted rows are the benign class: the pager hides them too, and
+      // only resurfaces one while an unread post-deletion inbound exists.
+      ...(() => {
+        const benign = missedWhy.get('SOFT-DELETED (benign - listByType suppresses these)') ?? 0;
+        const unexplained = inTabNotPartition.length - benign;
+        if (unexplained === 0 && contactlessRows === 0 && benign === 0) {
+          return ['  VERDICT  SETS RECONCILE. A contact-side read loses nothing the tab shows today.'];
+        }
+        if (unexplained === 0 && contactlessRows === 0) {
+          return [
+            `  VERDICT  RECONCILE, WITH ONE REQUIREMENT. All ${benign} differences are`,
+            '           soft-deleted contacts, which the pager hides as well - so nothing',
+            '           is silently lost. BUT the pager RESURFACES a soft-deleted',
+            '           contact while an unread post-deletion inbound exists, and',
+            '           listByType excludes deleted rows by default. A contact-side',
+            '           read must handle resurfacing EXPLICITLY or it drops that',
+            '           feature. This is a design requirement, not a blocker.',
+          ];
+        }
+        return [
+          `  VERDICT  SETS DIVERGE - ${unexplained} row(s) UNEXPLAINED. Switching source`,
+          '           silently changes what the operator sees, and a missed triage row',
+          '           is invisible by construction. Explain every unexplained row above',
+          '           before the source changes.',
+        ];
+      })(),
       '',
     ].join('\n'),
   );

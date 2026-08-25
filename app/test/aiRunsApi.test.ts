@@ -62,19 +62,27 @@ function fullRun(options: FullRunOptions = {}): AiRunRecord {
 function makeWorld(options: {
   runs?: AiRunRecord[];
   expiredRunIds?: string[];
+  /** Non-live because the read was throttled, not because the row was reaped. */
+  unavailableRunIds?: string[];
   storedMessages?: Record<string, Partial<MessageItem>>;
   nextBefore?: string;
 } = {}) {
   const runs = options.runs ?? [fullRun()];
   const expired = new Set(options.expiredRunIds ?? []);
+  const unavailable = new Set(options.unavailableRunIds ?? []);
   const repo = {
     beginFinalization: vi.fn<AiRunsRepo['beginFinalization']>(),
     putRun: vi.fn<AiRunsRepo['putRun']>(),
     getRun: vi.fn<AiRunsRepo['getRun']>(async (runId) => runs.find((run) => run.runId === runId)),
     listByEntity: vi.fn<AiRunsRepo['listByEntity']>(async () => ({
       entries: runs.map((run) =>
-        expired.has(run.runId)
-          ? { runId: run.runId, sortKey: `${run.startedAt}#${run.runId}`, expired: true as const }
+        expired.has(run.runId) || unavailable.has(run.runId)
+          ? {
+              runId: run.runId,
+              sortKey: `${run.startedAt}#${run.runId}`,
+              expired: true as const,
+              ...(unavailable.has(run.runId) && { unavailable: true as const }),
+            }
           : { runId: run.runId, sortKey: `${run.startedAt}#${run.runId}`, expired: false as const, run },
       ),
       ...(options.nextBefore !== undefined && { nextBefore: options.nextBefore }),
@@ -343,6 +351,16 @@ describe('GET /api/ai-runs', () => {
     const { app } = makeWorld({ expiredRunIds: ['run-1'] });
     const res = await admin(app, '/api/ai-runs').expect(200);
     expect(res.body.runs).toEqual([expect.objectContaining({ runId: 'run-1', expired: true })]);
+    // A reaped row carries no flag at all - the dashboard reads it truthily.
+    expect(Object.hasOwn(res.body.runs[0], 'unavailable')).toBe(false);
+  });
+
+  it('carries the unavailable flag through, so a throttled row is not served as expired', async () => {
+    const { app } = makeWorld({ unavailableRunIds: ['run-1'] });
+    const res = await admin(app, '/api/ai-runs').expect(200);
+    expect(res.body.runs).toEqual([
+      { runId: 'run-1', sortKey: '2026-08-06T10:00:00.000Z#run-1', expired: true, unavailable: true },
+    ]);
   });
 });
 

@@ -51,7 +51,11 @@ export function AiRunList({
       {/* Explicit role: `list-style: none` makes WebKit drop the implicit list
           role, and this ul's aria-label (the e2e anchor) rides on that role. */}
       <ul className={styles.rows} role="list" aria-label="AI runs">
-        {rows.map((row) => row.expired ? <li key={row.runId} className={styles.expired}>Expired run {row.runId}</li> : <li key={row.runId}>
+        {/* A throttled read is not a reaped run, so it does not say "expired".
+            "Reload the page" means the BROWSER: deliberately NO per-row button
+            - a third button breaks the e2e one-button-per-row pin, and
+            useAiRuns.retry() resets to page 1, so an in-place retry would lie. */}
+        {rows.map((row) => row.expired ? <li key={row.runId} className={styles.expired}>{row.unavailable ? `Run ${row.runId} temporarily unavailable - reload the page to retry` : `Expired run ${row.runId}`}</li> : <li key={row.runId}>
           {/* No `aria-label`: it would OVERRIDE the row's contents, and the
               runId it carried is rendered nowhere a sighted operator can see.
               Named from content, the row reads as what the run actually did. */}

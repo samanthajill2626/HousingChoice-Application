@@ -81,9 +81,16 @@ interface FinalizationMarker {
   expires_at: number;
 }
 
+/**
+ * ONE non-live member with an OPTIONAL `unavailable` discriminant, not two
+ * members: the renderers narrow on `expired` and then read `unavailable`
+ * truthily, which only typechecks while the flag is present-optional on the
+ * single non-live shape. The hand-kept wire duplicate in
+ * dashboard/src/api/types.ts moves with this type.
+ */
 export type AiRunListEntry =
   | { runId: string; sortKey: string; expired: false; run: AiRunRecord }
-  | { runId: string; sortKey: string; expired: true };
+  | { runId: string; sortKey: string; expired: true; unavailable?: true };
 
 export interface ListByEntityOptions {
   limit?: number;
@@ -128,6 +135,7 @@ function isValidationFailure(err: unknown): boolean {
 }
 
 export const runItemId = (runId: string): string => `run#${runId}`;
+export const runIdOfItemId = (itemId: string): string => itemId.slice('run#'.length);
 export const inflightItemId = (runId: string): string => `inflight#${runId}`;
 export const runSortKey = (startedAt: string, runId: string): string => `${startedAt}#${runId}`;
 export const pointerItemId = (entityKey: string, startedAt: string, runId: string): string =>
@@ -153,9 +161,16 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
   const table = tableName('ai_runs', deps.env);
   const log = deps.logger ?? defaultLogger;
 
-  async function batchGetRuns(runIds: string[]): Promise<Map<string, AiRunRecord>> {
+  /**
+   * Reports the keys it could NOT read separately from the ones it did: a run
+   * left unprocessed after the full retry budget is unread, not reaped, and
+   * `listByEntity` must not render it as expired.
+   */
+  async function batchGetRuns(
+    runIds: string[],
+  ): Promise<{ found: Map<string, AiRunRecord>; unprocessedRunIds: Set<string> }> {
     const found = new Map<string, AiRunRecord>();
-    let unprocessed = 0;
+    const unprocessedRunIds = new Set<string>();
     // Chunk OUTSIDE, retry INSIDE - each chunk gets its own fresh key list and
     // its own full backoff budget (messagesRepo.getManyByTsMsgIds chunks the
     // same way). listByEntity only stays under the ceiling today because the
@@ -170,13 +185,18 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         for (const item of (res.Responses?.[table] ?? []) as AiRunRecord[]) found.set(item.runId, item);
         keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ itemId: string }>;
       }
-      unprocessed += keys.length;
+      // `keys` is chunk-local and rebound on the next iteration, so the
+      // leftovers have to be accumulated here or the earlier chunks' are lost.
+      for (const k of keys) unprocessedRunIds.add(runIdOfItemId(k.itemId));
     }
     // Warn ONCE per call rather than once per chunk.
-    if (unprocessed > 0) {
-      log.warn({ unprocessed }, 'ai run log: BatchGet left keys unprocessed after retries');
+    if (unprocessedRunIds.size > 0) {
+      log.warn(
+        { unprocessed: unprocessedRunIds.size },
+        'ai run log: BatchGet left keys unprocessed after retries',
+      );
     }
-    return found;
+    return { found, unprocessedRunIds };
   }
 
   return {
@@ -322,11 +342,14 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
       }));
       if (pointers.length === 0) return { entries: [] };
 
-      const byRunId = await batchGetRuns(pointers.map((p) => p.runId));
+      const { found: byRunId, unprocessedRunIds } = await batchGetRuns(pointers.map((p) => p.runId));
       const entries: AiRunListEntry[] = pointers.map((p) => {
         const run = byRunId.get(p.runId);
-        return run !== undefined
-          ? { runId: p.runId, sortKey: p.sortKey, expired: false, run }
+        if (run !== undefined) return { runId: p.runId, sortKey: p.sortKey, expired: false, run };
+        // Unprocessed-after-4-attempts is sustained pressure, NOT a TTL
+        // reap - the forensic surface must not call a throttled row expired.
+        return unprocessedRunIds.has(p.runId)
+          ? { runId: p.runId, sortKey: p.sortKey, expired: true, unavailable: true }
           : { runId: p.runId, sortKey: p.sortKey, expired: true };
       });
       const nextBefore =

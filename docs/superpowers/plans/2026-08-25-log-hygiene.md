@@ -391,7 +391,10 @@ describe('log sanitization - the credential class is structurally closed', () =>
     const { lines, stream } = capture();
     const log = createLogger({ destination: stream, level: 'warn' });
     log.warn(syntheticAxiosError(), 'vendor call failed');
-    expect(lines.join('')).not.toContain('U0tmYWtlOnNlY3JldGZha2U=');
+    const joined = lines.join('');
+    expect(joined).not.toContain('U0tmYWtlOnNlY3JldGZha2U=');
+    // Same discriminator as the keyed cases: absent, not censored.
+    expect(joined).not.toContain('[REDACTED]');
   });
 
   it('a primitive under each wired key passes through unchanged', () => {
@@ -524,7 +527,7 @@ Three correctness rules from review, all load-bearing:
 // invisible to this guard. Accepted: the serializer (Task 1) plus the sweep
 // baseline (Task 4) carry those; this is a ratchet against the common
 // literal form, not a proof.
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import ts from 'typescript';
@@ -638,8 +641,15 @@ function scanProgram({ program, checker }: GuardProgram): string[] {
 // paying - review round 2). The canary rides the real program; health
 // diagnostics and the allowlist scan simply filter it out.
 describe('logger call-site guard', () => {
-  const gp = buildProgram(true);
-  const findings = scanProgram(gp);
+  // beforeAll, NOT describe-body: describe bodies run at COLLECTION, where
+  // no test timeout applies and a buildProgram throw fails the whole file
+  // with no case to key on. The explicit timeout covers the full compile.
+  let gp: GuardProgram;
+  let findings: string[];
+  beforeAll(() => {
+    gp = buildProgram(true);
+    findings = scanProgram(gp);
+  }, 180_000);
 
   it('the real program is healthy: files resolved, no unresolved-module diagnostics', () => {
     const sourceCount = gp.program
@@ -679,11 +689,9 @@ empty-allowlist case reports findings, each is a REAL discovery - fix the
 call site in a SEPARATE commit staged WITH this test (rewire to a wired
 key; record in the Task 4 sweep table); never allowlist to get green. If
 the canary case fails, the guard is broken - fix the guard, never the
-canary. NOTE this test compiles app/src ONCE (module-scope program shared
-by the three cases); a full compile is still seconds - if it exceeds the
-default vitest timeout, raise the per-file timeout (vitest `testTimeout`
-in a describe-level config or per-it option) rather than shrinking the
-program. Then `npm run typecheck`.
+canary. NOTE this test compiles app/src ONCE, inside a beforeAll whose
+explicit 180s timeout covers the full compile (describe-body work gets no
+timeout and fails the file at collection). Then `npm run typecheck`.
 
 - [ ] **Step 3: Commit**
 
@@ -1039,6 +1047,16 @@ describe('span attribute masking hooks', () => {
       expect(attrs['url.path']).toBe('/a/+1...34');
     });
   });
+  it('an UPPERCASE token still activates stable mode (the parser lowercases)', () => {
+    withSemconv('HTTP', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['url.path']).toBe('/a/+1...34');
+      expect(attrs['http.target']).toBeUndefined();
+    });
+  });
   it('a token that merely CONTAINS http activates nothing stable', () => {
     withSemconv('http-anything,database', () => {
       const attrs = maskIncomingSpanAttributes({
@@ -1108,9 +1126,12 @@ import type { Attributes } from '@opentelemetry/api';
  * FABRICATE it onto the span.
  */
 function activeFamilies(): { old: boolean; stable: boolean } {
+  // Lowercased to match the instrumentation's own parser, which lowercases
+  // every entry - OTEL_SEMCONV_STABILITY_OPT_IN=HTTP puts IT in stable
+  // mode, so a case-sensitive match here would ship raw phones in url.*.
   const tokens = (process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] ?? '')
     .split(',')
-    .map((t) => t.trim());
+    .map((t) => t.trim().toLowerCase());
   if (tokens.includes('http/dup')) return { old: true, stable: true };
   if (tokens.includes('http')) return { old: false, stable: true };
   return { old: true, stable: false };
@@ -1748,11 +1769,27 @@ pages (no read capacity burned collecting nothing). DRAIN MODEL, stated:
 DynamoDB `Limit` bounds rows EVALUATED per page (RCU), not matches - a
 page of 200 mostly-tombstone rows can contribute zero journals - so the
 25-contacts-per-day rate of spec 9.1 is a CAP, and the real drain rate is
-min(cap, qualifying rows the cursor passes per run).
+min(cap, qualifying rows the cursor passes per run). QUANTIFIED (round-3):
+one run examines at most MAX_SCAN_PAGES * SCAN_PAGE_LIMIT = 4,000 rows, so
+a full cursor cycle takes ceil(tableRows/4000) daily runs - and "never
+permanent orphaning" holds only while the table grows slower than 4,000
+rows/day (comfortably true at this product's scale, but the production
+ai_extraction ItemCount is the spec's own UNVERIFIED item - the handback
+carries it as an operator datum, and if the table is ever 100k+ rows the
+caps need raising). Two accepted residuals, stated in the module comment:
+(a) the cursor is persisted BEFORE the recovery loop, so a mid-run crash
+advances past contacts this run never recovered - they remain ACTIVE rows
+and the wrap revisits them (same bounded delay); (b) a PERMANENTLY failing
+cadence claim (missing settings table, IAM regression) leaves the duty
+parked at one WARN per 30s poll with no ERROR - loud in the logs, not in
+the alarm; acceptable because a broken settings table alarms through every
+other consumer of it.
 
 - [ ] **Step 4: journalSweep.ts (TDD with fakes).** Failing tests in
 `app/test/journalSweep.test.ts` (plain object fakes for the four deps;
-fake pages are ROWS-SPARSE - a realistic page yields few qualifying rows):
+default the fake pages ROWS-SPARSE - a realistic page yields few
+qualifying rows - EXCEPT test 4, whose page is deliberately dense to fill
+the cap):
 1. cadence: claim -> false: nothing runs, outcome.ran false. force: true
    -> notBefore = now -> runs. claim THROWS -> WARN logged (not ERROR),
    outcome.ran false, promise resolves.

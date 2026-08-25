@@ -1,0 +1,20 @@
+{
+  "run": {
+    "startTime": "2026-08-25T17:27:48.163Z",
+    "durationSec": 1303,
+    "expected": 253,
+    "unexpected": 1,
+    "flaky": 0
+  },
+  "failures": [
+    {
+      "spec": "marked deviation - inspection FAILS at Awaiting inspection -> Lost (landlord_lost_inspection, bounce-back, relay stays open - close is a manual ask)",
+      "file": "scenarios/approval-and-move-in.spec.ts",
+      "line": 223,
+      "startTime": "2026-08-25T17:41:37.990Z",
+      "durationMs": 30331,
+      "error": "\u001b[31mTest timeout of 30000ms exceeded.\u001b[39m",
+      "stack": "\u001b[31mTest timeout of 30000ms exceeded.\u001b[39m"
+    }
+  ]
+}

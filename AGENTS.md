@@ -88,9 +88,28 @@ the work is done, and add or extend a spec for new behavior.
   E2E_CHILD_LOG_DIR=.artifacts/child-logs npm run e2e
   ```
 
-  Use it whenever you are chasing an intermittent failure, and read
+  Use it when you are chasing an intermittent failure whose evidence is
+  CONTENT (a missing row, an unexpected payload, a silent handler), and read
   `scripts/e2e-session.mjs`'s note on what it does not capture (the final
   instant under a tree-kill teardown, and the one-shot seed/build children).
+
+  **NOT for a timing-sensitive symptom - a hang, a stall, a budget that fires.**
+  Piping a child's stdout makes `isTTY` false and the stream block-buffered, so
+  the flag CHANGES the timings you would then be reasoning from; the docblock
+  in `scripts/e2e-session.mjs` says so directly and it overrides the general
+  recommendation above. Two agents hit this on 2026-08-25 chasing the same
+  stall: one instrumented run took **34.7m against a 17.9m baseline and
+  produced 4 failures instead of 1**, none of them the bug being hunted. For
+  those symptoms the decisive artifact is a TRACE, not a log - and note that
+  `retries: 0` with `trace: 'on-first-retry'` collects nothing, so a gate
+  failure carries no network data at all. See
+  [`placement-detail-bundle-fetch-stall`](docs/issues/placement-detail-bundle-fetch-stall.md).
+- **`reuseExistingServer` adopts an orphaned stack on a commit match alone.**
+  The preflight compares commits, not uptime or health, so a same-commit server
+  that a previous (or killed) run already drove for 20+ minutes is adopted
+  unchallenged. Killing a suite orphans its stack, so an interrupted hunt
+  silently contaminates the next run. After aborting a run, confirm no listener
+  survives on the lane's ports before starting another.
 - Run Playwright only through the e2e workspace (`npm run e2e`). A stray/root
   Playwright invocation can target the human's live lane.
 

@@ -1,0 +1,213 @@
+/**
+ * Measures how often the `byUnread` walk can resolve a contact WITHOUT a
+ * per-item GSI Query - the one number cluster C1's badge fix depends on.
+ *
+ * WHY THIS IS A SEPARATE SCRIPT, not a flag on `profile-inbox.ts`: that harness
+ * is deliberately hard-gated to `localhost:8000` + `hc-local-` tables, and the
+ * whole point of THIS measurement is that a seeded lane answers with the
+ * fixture coverage we are trying to distrust. Loosening that gate to reuse the
+ * harness would remove a guard that exists for good reasons. This script is
+ * read-only, human-run, and gated differently: it names its target out loud and
+ * refuses to run without `--confirm`.
+ *
+ * IT IS READ-ONLY. It issues Queries against the byUnread index and BatchGets
+ * against the contacts table. It writes nothing, anywhere.
+ *
+ * IT PRINTS NO PII. Phones, emails, contact ids and conversation ids never
+ * reach the output - only counts, percentages, and a verdict. That is
+ * deliberate: the output is meant to be pasteable into a design discussion.
+ *
+ * Usage:
+ *   DYNAMODB_ENDPOINT=... TABLE_PREFIX=... \
+ *     npx tsx app/scripts/measure-unread-contact-coverage.ts --confirm [--budget 5000]
+ *
+ * Omit DYNAMODB_ENDPOINT to use the AWS default resolution for the profile the
+ * shell is already authenticated as. Check `aws sts get-caller-identity` first;
+ * the default credential chain has pointed at the wrong account here before.
+ */
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import pino from 'pino';
+
+import { iterateUnreadConversations } from '../src/lib/unreadFeed.js';
+import { createContactsRepo } from '../src/repos/contactsRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationItem,
+} from '../src/repos/conversationsRepo.js';
+
+const argv = process.argv.slice(2);
+if (!argv.includes('--confirm')) {
+  console.error(
+    [
+      'Refusing to run without --confirm.',
+      '',
+      'This script reads REAL data if you point it at a real environment.',
+      'It writes nothing and prints no PII, but you should know which',
+      'environment you are measuring before the numbers mean anything.',
+      '',
+      `  endpoint:     ${process.env.DYNAMODB_ENDPOINT ?? '(AWS default resolution)'}`,
+      `  table prefix: ${process.env.TABLE_PREFIX ?? '(unset)'}`,
+      '',
+      'Re-run with --confirm once that is the target you meant.',
+    ].join('\n'),
+  );
+  process.exit(2);
+}
+
+const budgetArgIndex = argv.indexOf('--budget');
+const budget =
+  budgetArgIndex === -1 ? 5000 : Number.parseInt(argv[budgetArgIndex + 1] ?? '', 10);
+if (!Number.isInteger(budget) || budget < 1) {
+  console.error('--budget must be a positive integer');
+  process.exit(2);
+}
+
+const endpoint = process.env.DYNAMODB_ENDPOINT;
+const tablePrefix = process.env.TABLE_PREFIX;
+if (tablePrefix === undefined || tablePrefix === '') {
+  console.error('TABLE_PREFIX must be set explicitly - refusing to guess.');
+  process.exit(2);
+}
+
+const client = new DynamoDBClient({
+  region: process.env.AWS_REGION ?? 'us-east-1',
+  ...(endpoint === undefined ? {} : { endpoint }),
+});
+const doc = DynamoDBDocumentClient.from(client, {
+  marshallOptions: { removeUndefinedValues: true },
+});
+const logger = pino({ level: 'silent' });
+const env = { ...process.env, TABLE_PREFIX: tablePrefix };
+
+const conversations = createConversationsRepo({ doc, env, logger });
+const contacts = createContactsRepo({ doc, env, logger });
+
+/** Every bucket is mutually exclusive; they sum to `scanned`. */
+const tally = {
+  scanned: 0,
+  group: 0,
+  oneToOnePhone: 0,
+  oneToOneEmail: 0,
+  noParticipantsArray: 0,
+  noEntryForKey: 0,
+  ambiguousEntries: 0,
+  emptyContactId: 0,
+  hasContactId: 0,
+};
+
+const candidateIds: string[] = [];
+
+/**
+ * The selection rule the C1 spec's 4.1.b condition 1 prescribes, implemented
+ * here so the measurement answers the question the FIX will ask - not an
+ * easier one. Selecting by `participants[0]` would report better coverage than
+ * the fix can actually achieve on any row where the entry is not first.
+ */
+function selectEntry(conv: ConversationItem): { kind: string; contactId?: string } {
+  const entries = conv.participants;
+  if (!Array.isArray(entries) || entries.length === 0) return { kind: 'noParticipantsArray' };
+
+  const phone = conv.participant_phone;
+  if (typeof phone === 'string' && phone !== '') {
+    const hit = entries.find((p) => p.phone === phone);
+    if (hit === undefined) return { kind: 'noEntryForKey' };
+    return { kind: 'entry', contactId: hit.contactId };
+  }
+
+  // Email-only thread: the shape is `{contactId, phone: ''}` and there should be
+  // exactly one entry. More than one means we cannot pick, and the spec says
+  // fall back rather than guess - so it is counted as a miss, not as coverage.
+  if (entries.length > 1) return { kind: 'ambiguousEntries' };
+  return { kind: 'entry', contactId: entries[0]?.contactId };
+}
+
+const state = { scanExhausted: false, scanned: 0 };
+for await (const conv of iterateUnreadConversations({ conversations, logger }, { budget }, state)) {
+  tally.scanned += 1;
+
+  if (conv.type === 'relay_group' || conv.type === 'group_text') {
+    tally.group += 1;
+    continue;
+  }
+
+  const isEmail =
+    typeof conv.participant_email === 'string' &&
+    conv.participant_email !== '' &&
+    (conv.participant_phone === undefined || conv.participant_phone === '');
+  if (isEmail) tally.oneToOneEmail += 1;
+  else tally.oneToOnePhone += 1;
+
+  const selected = selectEntry(conv);
+  if (selected.kind === 'noParticipantsArray') tally.noParticipantsArray += 1;
+  else if (selected.kind === 'noEntryForKey') tally.noEntryForKey += 1;
+  else if (selected.kind === 'ambiguousEntries') tally.ambiguousEntries += 1;
+  else if (typeof selected.contactId !== 'string' || selected.contactId === '') {
+    tally.emptyContactId += 1;
+  } else {
+    tally.hasContactId += 1;
+    candidateIds.push(selected.contactId);
+  }
+}
+
+// A non-empty id is not the same as a USABLE one: the read-through only saves a
+// Query if the id actually resolves. Deliberately WITHOUT requireComplete - a
+// dangling id is exactly what we are trying to count, not an error to throw on.
+let resolved = 0;
+for (let i = 0; i < candidateIds.length; i += 100) {
+  const chunk = candidateIds.slice(i, i + 100);
+  const found = await contacts.getManyByIds(chunk);
+  resolved += chunk.filter((id) => found.has(id)).length;
+}
+const dangling = candidateIds.length - resolved;
+
+const oneToOne = tally.oneToOnePhone + tally.oneToOneEmail;
+const pct = (n: number): string =>
+  oneToOne === 0 ? 'n/a' : `${((n / oneToOne) * 100).toFixed(1)}%`;
+
+const coverage = oneToOne === 0 ? 0 : (resolved / oneToOne) * 100;
+const verdict =
+  oneToOne === 0
+    ? 'NO DATA - the walk returned no 1:1 unread rows; this number means nothing'
+    : coverage >= 95
+      ? 'HIGH - build the read-through; the fallback is a tail case'
+      : coverage <= 80
+        ? 'LOW - fix the capture paths and backfill FIRST (needs its own go)'
+        : 'MIXED - escalate with this number rather than picking';
+
+console.log(
+  [
+    '',
+    'byUnread contact-resolution coverage',
+    '===================================',
+    `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+    `  table prefix        ${tablePrefix}`,
+    `  walk budget         ${budget}${state.scanExhausted ? '' : '  <- BUDGET SPENT, not a full walk'}`,
+    '',
+    `  scanned             ${tally.scanned}`,
+    `  group rows          ${tally.group}  (not applicable - no contact to resolve)`,
+    `  1:1 rows            ${oneToOne}   (phone ${tally.oneToOnePhone}, email ${tally.oneToOneEmail})`,
+    '',
+    '  Of the 1:1 rows:',
+    `    resolvable        ${resolved}  ${pct(resolved)}   <- the coverage figure`,
+    `    dangling id       ${dangling}  ${pct(dangling)}`,
+    `    empty contactId   ${tally.emptyContactId}  ${pct(tally.emptyContactId)}`,
+    `    no entry for key  ${tally.noEntryForKey}  ${pct(tally.noEntryForKey)}`,
+    `    no participants   ${tally.noParticipantsArray}  ${pct(tally.noParticipantsArray)}`,
+    `    ambiguous entries ${tally.ambiguousEntries}  ${pct(tally.ambiguousEntries)}`,
+    '',
+    `  VERDICT  ${verdict}`,
+    '',
+    '  Thresholds are the C1 spec 4.1.a proposal (>=95 high, <=80 low), fixed',
+    '  in advance so the number cannot be rationalised after the fact.',
+    '',
+  ].join('\n'),
+);
+
+if (!state.scanExhausted) {
+  console.log(
+    '  NOTE: the budget was spent before the index ran out, so this samples\n' +
+      '  the most recently active unread rows rather than all of them. Re-run\n' +
+      '  with a larger --budget if the tail is likely to differ.\n',
+  );
+}

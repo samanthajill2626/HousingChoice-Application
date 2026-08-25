@@ -106,7 +106,7 @@ build needs.
 | --- | --- | --- | --- |
 | (a) group-detection stubs | **SOMETIMES** - a stub that later TEXTS gets a 1:1 thread and shows on the tab today | YES - they fill the partition | **Do NOT copy `excludeOrigin`** - see below. A threadless stub yields no `maxConv` and so no row anyway. prod 3, dev 3. |
 | (b) contact whose only thread is a relay group or closed | NO | Returned by the CONTACT query, then dropped | **Already handled by the seam**: `contactConversations` filters `status === 'open' && type !== 'relay_group'`. No new work. |
-| (c) `team_member` contacts | **YES** - `roleFromContact` returns `'unknown'` for `team_member` | **NO** - `listByType('unknown')` cannot return them under any option | **OPEN - human decision, section 7.** A silent behaviour change either way. |
+| (c) `team_member` contacts | **YES** - `roleFromContact` falls `team_member` through to `'unknown'` | **NO** - `listByType('unknown')` cannot return them | **RULED 2026-08-25: they do NOT belong in a triage queue.** The redesign is correct by construction and today's tab carries the bug. Measured zero in both environments. |
 | (d) soft-deleted under the resurfacing rule | YES, deliberately, while an unread post-deletion inbound exists | NO by default - and see the constraint below | Must be handled explicitly or the resurfacing feature is silently deleted. prod 4, dev 0. |
 | (e) contactless conversations | YES (phone, no contact) | NO - there is no contact to return | Measured ZERO in both environments. See the caveat below. |
 | **(f) `type=unknown` with a status other than `needs_review`** | **YES** | **NO, if the query narrows on status** | **Query `type=unknown` with NO status filter.** See below - this class is STRUCTURAL, not incidental. |
@@ -243,15 +243,31 @@ empty queue.
 - Five gates bare from the worktree: typecheck, test, smoke, e2e, `npx eslint`
   on the branch's own touched files.
 
-## 7. Open for the human
+## 7. Human rulings
 
-1. **Class (c), `team_member`.** Their threads sit on the Unknown tab today
-   because `roleFromContact` maps `team_member` to `'unknown'`. A contact-side
-   read cannot return them. Should a known team member appear in a triage queue
-   at all? Either answer is a deliberate behaviour change; inheriting the
-   current one by accident is the only wrong outcome. Measured at zero in both
-   environments today, so this is cheap to decide now and expensive to discover
-   later.
+**Class (c), `team_member` - RULED 2026-08-25: they do not belong in a triage
+queue.** Confirmed against the code before ruling: `team_member` is the
+INTERNAL-STAFF bucket - `lib/seed/lean.ts:158` states it directly ("excluded
+from audience fan-out, no 1:1 lifecycle"), and outside people who are neither
+tenants nor landlords - caseworkers, housing-authority staff - are `partner`, a
+separate type. There is a recorded incident of a housing-authority staffer
+mistyped as `team_member` which "quietly hid her from every outside-contact
+surface", which is the same exclusion working as intended.
+
+**So today's tab carries a latent bug and the redesign fixes it by
+construction.** `roleFromContact` (`inbox.ts:396-403`) returns `'unknown'` for
+any type that is not tenant, landlord or partner - so `team_member` falls
+through, `needsTriage` is true, and a colleague's 1:1 thread sits in the
+operator's triage queue. `listByType('unknown')` cannot return them, so the
+contact-side read is right and the current behaviour is wrong.
+
+Measured at ZERO in both environments, so there is nothing to clean up - but the
+mechanism is live, and if this design does not land the bug stays. Note it in
+the issue rather than letting it ride only on this document.
+
+**No open product questions remain.** The type-versus-status question draft 2
+escalated is retired by requirement 1, which narrows less rather than deciding
+it.
 
 ## 8. Out of scope
 

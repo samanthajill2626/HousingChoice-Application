@@ -232,6 +232,20 @@ because someone will otherwise re-propose them:
    not as unsound: it would add an attribute and an index to reproduce a
    partition the CONTACTS table already has.
 
+**A latent bug this work uncovered, recorded here so it does not ride only on a
+design doc.** `roleFromContact` (`inbox.ts:396-403`) returns `'unknown'` for any
+contact type that is not tenant, landlord or partner - so `team_member` falls
+through, `needsTriage` is true, and an INTERNAL STAFF member's 1:1 thread sits
+in the operator's triage queue. `team_member` is the internal-staff bucket
+(`lib/seed/lean.ts:158`: "excluded from audience fan-out, no 1:1 lifecycle");
+outside people who are neither tenants nor landlords are `partner`.
+
+The founder ruled 2026-08-25 that team members do not belong in a triage queue.
+Measured at ZERO rows in dev and prod, so there is nothing to clean up - but the
+mechanism is live. The contact-side redesign fixes it by construction, because
+`listByType('unknown')` cannot return a `team_member`. If that design does not
+land, this stays broken and wants its own one-line fix.
+
 **The current design reads the triage queue directly** - the contacts
 `byTypeStatus` partition, which the repo already documents as "the human triage
 queue". Measured at 7 rows in ONE Query in prod against 684 lookups across 24

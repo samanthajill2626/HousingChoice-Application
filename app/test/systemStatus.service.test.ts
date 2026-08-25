@@ -552,3 +552,75 @@ describe('systemStatus.getErrorDetail', () => {
     expect(await svc.getErrorDetail('A'.repeat(32))).toEqual({ available: false, reason: 'cloudwatch_error' });
   });
 });
+
+describe('systemStatus.getTrace', () => {
+  const DEPLOYED_CONFIG = deployedConfig();
+  const UUID = '11111111-2222-4333-8444-555555555555';
+
+  it('validates the id before calling AWS', async () => {
+    const queryTrace = vi.fn();
+    const svc = makeService({ config: DEPLOYED_CONFIG, cloudwatch: fakeSeam({ queryTrace }) });
+    expect(await svc.getTrace('correlationId', 'not-a-uuid', Date.now()))
+      .toEqual({ available: false, reason: 'invalid_id' });
+    expect(queryTrace).not.toHaveBeenCalled();
+  });
+
+  it('queries app and worker but NOT the system group', async () => {
+    const seen: string[][] = [];
+    const svc = makeService({
+      config: DEPLOYED_CONFIG,
+      cloudwatch: fakeSeam({
+        queryTrace: async (g: string[]) => { seen.push(g); return { lines: [], truncatedBefore: false, truncatedAfter: false }; },
+      }),
+    });
+    await svc.getTrace('correlationId', UUID, Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(seen[0]).toEqual([DEPLOYED_CONFIG.errorLogGroupName, DEPLOYED_CONFIG.workerLogGroupName]);
+  });
+
+  it('passes the kind, id and anchor through and returns both truncation flags', async () => {
+    const line = { timestamp: '2026-08-24T09:59:59.000Z', level: 30, message: 'ctx', source: 'app' as const };
+    const queryTrace = vi.fn(async () => ({ lines: [line], truncatedBefore: true, truncatedAfter: false }));
+    const svc = makeService({ config: DEPLOYED_CONFIG, cloudwatch: fakeSeam({ queryTrace }) });
+    const atMs = Date.parse('2026-08-24T10:00:00.000Z');
+
+    expect(await svc.getTrace('pollRunId', UUID, atMs)).toEqual({
+      available: true,
+      lines: [line],
+      truncatedBefore: true,
+      truncatedAfter: false,
+    });
+    expect(queryTrace).toHaveBeenCalledWith(
+      [DEPLOYED_CONFIG.errorLogGroupName, DEPLOYED_CONFIG.workerLogGroupName],
+      'pollRunId',
+      UUID,
+      atMs,
+    );
+  });
+
+  it('local env: unavailable_local BEFORE id validation, with no seam call', async () => {
+    const seam = fakeSeam();
+    // A malformed id proves the ORDER: the local short-circuit wins over invalid_id.
+    const res = await makeService({ config: localConfig(), cloudwatch: seam }).getTrace(
+      'requestId',
+      'not-a-uuid',
+      Date.now(),
+    );
+    expect(res).toEqual({ available: false, reason: 'unavailable_local' });
+    expect(seam.queryTrace).not.toHaveBeenCalled();
+  });
+
+  it('deployed + the seam throws -> cloudwatch_error (never an exception)', async () => {
+    const svc = makeService({
+      config: DEPLOYED_CONFIG,
+      cloudwatch: fakeSeam({
+        queryTrace: async () => {
+          throw new Error('ThrottlingException');
+        },
+      }),
+    });
+    expect(await svc.getTrace('requestId', UUID, Date.now())).toEqual({
+      available: false,
+      reason: 'cloudwatch_error',
+    });
+  });
+});

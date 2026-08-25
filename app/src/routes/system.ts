@@ -7,6 +7,7 @@
 //   GET /api/system/alarms            → 200 { available, alarms? | reason? }
 //   GET /api/system/errors?since=…    → 200 { available, events?  | reason? }
 //   GET /api/system/errors/detail?ref=...  -> 200 { available, record? | reason? }
+//   GET /api/system/trace?<idKind>=...&at=...  -> 200 { available, lines? | reason? }
 //
 // Alarms/errors degrade gracefully ({ available: false, reason } at HTTP 200)
 // when AWS is unreachable (local/hermetic) or a CloudWatch read throws — the
@@ -96,6 +97,27 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
       return;
     }
     res.json(await service.getErrorDetail(ref));
+  });
+
+  const TRACE_ID_KINDS = ['correlationId', 'requestId', 'pollRunId'] as const;
+
+  // GET /api/system/trace - the lines around one failure. Exactly one id kind
+  // plus a required `at` anchor; MISSING or ambiguous parameters are a 400
+  // (matching `since`), while a present-but-malformed id degrades at 200.
+  router.get('/trace', async (req, res) => {
+    const present = TRACE_ID_KINDS.filter((k) => typeof req.query[k] === 'string');
+    if (present.length !== 1) {
+      res.status(400).json({ error: 'exactly one of correlationId, requestId, pollRunId is required' });
+      return;
+    }
+    const rawAt = req.query['at'];
+    const atMs = typeof rawAt === 'string' ? Date.parse(rawAt) : Number.NaN;
+    if (Number.isNaN(atMs)) {
+      res.status(400).json({ error: 'at must be an ISO 8601 timestamp' });
+      return;
+    }
+    const kind = present[0]!;
+    res.json(await service.getTrace(kind, String(req.query[kind]), atMs));
   });
 
   return router;

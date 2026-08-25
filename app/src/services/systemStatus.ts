@@ -31,6 +31,8 @@ import {
   type CloudWatchClientSeam,
   type ErrorEventView,
   type LogRecordView,
+  type TraceIdKind,
+  type TraceLineView,
 } from '../adapters/cloudwatch.js';
 import { isPushConfigured, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -117,8 +119,26 @@ export type DetailResult =
   | { available: true; record: LogRecordView }
   | { available: false; reason: 'unavailable_local' | 'invalid_ref' | 'out_of_scope' | 'cloudwatch_error' };
 
+/**
+ * getTrace result. Degrades at HTTP 200 like the other reads, never a 500:
+ * `unavailable_local` on a local/hermetic stack, `invalid_id` for an id that is
+ * not UUID-shaped, `cloudwatch_error` when the read throws.
+ */
+export type TraceServiceResult =
+  | { available: true; lines: TraceLineView[]; truncatedBefore: boolean; truncatedAfter: boolean }
+  | { available: false; reason: 'unavailable_local' | 'invalid_id' | 'cloudwatch_error' };
+
 /** Base64-family pointer, bounded. Insights pointers observed at 220 chars. */
 const REF_PATTERN = /^[A-Za-z0-9+/=]{16,512}$/;
+
+/**
+ * A correlation id as this app mints them: every one of the four context ids is
+ * a `randomUUID()` (lib/context.ts) and the correlation middleware MINTS rather
+ * than honors an inbound header, so this can never reject a legitimate id. It
+ * runs BEFORE the id reaches the adapter, which interpolates it into an Insights
+ * query string - this is the boundary that keeps that interpolation safe.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface SystemStatusService {
   /** Go-live flags from runtime config — always works, no AWS call. */
@@ -139,6 +159,13 @@ export interface SystemStatusService {
    * no group, so this is what keeps the read inside this environment.
    */
   getErrorDetail(ref: string): Promise<DetailResult>;
+  /**
+   * The app+worker log lines around ONE failure, anchored on that row's own
+   * timestamp (`atMs`, epoch ms) and filtered on a single correlation id kind,
+   * or a degraded reason. The id is validated here, before it can reach the
+   * Insights query string.
+   */
+  getTrace(kind: TraceIdKind, id: string, atMs: number): Promise<TraceServiceResult>;
 }
 
 /** Options for {@link SystemStatusService.getErrors}. */
@@ -305,6 +332,28 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         log.error(
           { kind: classifyCloudWatchError(err), err: (err as Error).message },
           'system status: GetLogRecord failed',
+        );
+        return { available: false, reason: 'cloudwatch_error' };
+      }
+    },
+
+    async getTrace(kind, id, atMs) {
+      if (isLocalEnv(config)) return { available: false, reason: 'unavailable_local' };
+      if (!UUID_PATTERN.test(id)) return { available: false, reason: 'invalid_id' };
+      try {
+        // app + worker only. The system group's kernel lines carry no
+        // correlation id at all, so scanning it costs bytes for nothing.
+        const trace = await cloudwatch.queryTrace(
+          [config.errorLogGroupName, config.workerLogGroupName],
+          kind,
+          id,
+          atMs,
+        );
+        return { available: true, ...trace };
+      } catch (err) {
+        log.error(
+          { kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: trace query failed',
         );
         return { available: false, reason: 'cloudwatch_error' };
       }

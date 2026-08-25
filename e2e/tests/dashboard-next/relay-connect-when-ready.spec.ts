@@ -36,7 +36,8 @@ import { expectTodayReady } from '../../support/today.js';
 //
 // OBSERVABILITY: outbound legs are proven via the fake-twilio thread store
 // (listThreads - both directions + per-recipient delivery state incl. errorCode;
-// getOutboundTo - the D13 "nothing sent while connecting" absence proof). The warmed number is discovered via the admin GET /api/pool-numbers
+// getOutboundTo - the D13 "nothing sent while connecting" absence proof). The
+// warmed number is discovered via the admin GET /api/pool-numbers
 // inventory (state 'warming'); firing readiness is the fake's POST
 // /control/register-number (the T9 seam that drives warming -> active).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';

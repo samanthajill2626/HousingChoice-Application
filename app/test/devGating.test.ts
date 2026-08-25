@@ -78,6 +78,9 @@ describe('dev gating — router', () => {
       dev: true,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
+      // The preflight's launcher-exclusive discriminator: false here (no
+      // TWILIO_API_BASE_URL in this config), true on the hermetic stack.
+      twilioApiBaseUrlSet: false,
       emailDriver: config.emailDriver,
       emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,

@@ -18,7 +18,9 @@ deleted:
   replacement home `e2e/fixtures/fakeTwilio.ts` - same ergonomics as the old
   `getOutbox` (including the `createdAt >= since` filter), wire-level source.
 - Migrated: 9 spec files (relay x4, voice x2, contact-create-relay-group,
-  public-pages, flows/outbox -> flows/proof-of-send), the `voiceSetup` fixture,
+  public-pages, flows/outbox -> flows/proof-of-send, which proves send-lands
+  only - reset-clears is pinned by fake-twilio's own control.test.ts, and
+  /control/reset stays a once-per-suite preflight operation), the `voiceSetup` fixture,
   the perf self-QA snapshot (`reduceSelfQaSnapshot` now takes the thread-store
   URL; the `outbox` surface key and `outboxUnchanged` report field keep their
   names), and the e2e preflight (no `recordOutbox` expectation).

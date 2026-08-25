@@ -46,9 +46,9 @@ const INTRO_NEEDLE = 'Use this group text';
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
 // numbers (the "019" exchange, whose area segment tracks the buy hint - see
 // POOL_NUMBER_RE in e2e/scenarios/steps.ts) or the seeded rosters. A shared
-// incrementing counter keeps
-// every phone AND every inbound MessageSid unique across the run (unique numbers are
-// also what keeps the never-reset fake + the outbox free of cross-test contamination).
+// incrementing counter keeps every phone AND every inbound MessageSid unique
+// across the run (unique numbers are what keep the fake's thread store - reset
+// only once per suite, at preflight - free of cross-test contamination).
 let uid = 0;
 function uniquePhone(): string {
   uid += 1;

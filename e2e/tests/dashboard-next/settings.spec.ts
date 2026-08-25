@@ -158,8 +158,8 @@ test.describe('Settings — admin path', () => {
     await expect(page.getByRole('button', { name: 'Refresh alarms' })).toBeVisible();
 
     // --- Restore the welcome-text to a neutral copy that still interpolates
-    // {firstName} so later specs (e.g. proof-of-send.spec, which only checks the first
-    // name appears) stay green. The form can't UNSET welcomeText (empty = "leave
+    // {firstName} so later specs (e.g. proof-of-send.spec, which checks the
+    // "Reply STOP" line) stay green. The form can't UNSET welcomeText (empty = "leave
     // default", never PUT), so we overwrite with a benign default-like string. ---
     await page.getByRole('tab', { name: 'Templates' }).click();
     // Keep "Reply STOP" so the A2P/CTIA floor accepts it; keep "thanks for stopping

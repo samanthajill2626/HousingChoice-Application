@@ -191,7 +191,12 @@ test('Close group: final message sent to both, number kept, composer hard-disabl
   // Sending is available while open.
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
 
-  // Close (header action -> confirm dialog).
+  // Close (header action -> confirm dialog). Baseline the proof-of-send clock
+  // FIRST: the thread store is cleared once per suite (preflight), not per
+  // reseed, so an unscoped absence read here would span the whole run - any
+  // earlier spec sending CLOSED_COPY to these FIXED seeded numbers would fail
+  // this test for a reason unrelated to close.
+  const t0 = new Date().toISOString();
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   const closeDialog = page.getByRole('dialog', { name: 'Close group?' });
   await closeDialog.getByRole('button', { name: 'Close group' }).click();
@@ -212,7 +217,7 @@ test('Close group: final message sent to both, number kept, composer hard-disabl
   // vacuous "nothing arrived yet" check: by the time the Closed pill renders the
   // close request has completed server-side.
   for (const memberPhone of [DIANA_PHONE, GLORIA_PHONE]) {
-    const msgs = await getOutboundTo(request, { to: memberPhone });
+    const msgs = await getOutboundTo(request, { to: memberPhone, since: t0 });
     expect(
       msgs.some((m) => (m.body ?? '').includes(CLOSED_COPY)),
       `no close message should reach ${memberPhone}`,

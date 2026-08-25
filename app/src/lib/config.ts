@@ -524,7 +524,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const workerLogGroupName = `/hc/${appEnv}/worker`;
   const systemLogGroupName = `/hc/${appEnv}/system`;
 
-  // Dev-only endpoints (dev-login, outbox, reseed in later phases) are gated
+  // Dev-only endpoints (dev-login, reseed, the tick seams) are gated
   // behind this flag. It must NEVER be set in production; if it is, refuse to
   // start rather than expose a backdoor. Checked first, before other validation,
   // so the dangerous combination fails fast regardless of what else is missing.

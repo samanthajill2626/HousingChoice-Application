@@ -20,6 +20,12 @@ import { appUrl, dashboardUrl, fakeUrl } from './urls.js';
 const EXPECTED = {
   messagingDriver: 'twilio',
   smsSendingEnabled: true,
+  // The launcher-exclusive discriminator: only a stack whose Twilio REST is
+  // redirected at a fake host (TWILIO_API_BASE_URL - set by e2e-session.mjs
+  // and dev.mjs --mock, never by live dev) reports true. A hand-started LIVE
+  // dev stack matches messagingDriver/smsSendingEnabled/emailDriver exactly,
+  // so this is what actually rejects it.
+  twilioApiBaseUrlSet: true,
   // Email-channel v1 (A7): the hermetic stack runs the SES driver pointed at the
   // fake-SES host (scripts/e2e-session.mjs childEnv). A3 makes /__dev/ping echo it.
   emailDriver: 'ses',

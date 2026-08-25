@@ -53,7 +53,8 @@ describe.skipIf(!reachable)('import:apply', () => {
 
   // OUR OWN table prefix, as the other integration suites do. This suite drops
   // and recreates its tables, and vitest runs files in parallel — doing that to
-  // the shared `hc-local-` tables broke devOutbox.integration mid-run.
+  // the shared `hc-local-` tables once broke a neighbouring shared-tables suite
+  // (the since-deleted devOutbox.integration) mid-run.
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const table = (base: string): string => tableName(base, testEnv);
   const fixture = writeFixture();

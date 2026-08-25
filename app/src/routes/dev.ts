@@ -187,6 +187,12 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       dev: true,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
+      // TRUE only when Twilio REST is redirected at a fake host - the
+      // hermetic-stack discriminator the preflight keys on. A hand-started
+      // LIVE dev stack (real Twilio + real SES) matches every other flag
+      // here, so without this it would be reused silently. (Replaced the
+      // recordOutbox flag, remove-dev-outbox-proof-of-send 2026-08-24.)
+      twilioApiBaseUrlSet: Boolean(config.twilioApiBaseUrl),
       emailDriver: config.emailDriver,
       emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,

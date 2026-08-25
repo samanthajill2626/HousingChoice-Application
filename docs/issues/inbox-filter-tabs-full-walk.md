@@ -167,10 +167,17 @@ and `medium` -> `high`.** One Unknown-tab page render, replicating the pager
 exactly (`--audit-unknown-page` on
 `app/scripts/measure-unread-contact-coverage.ts`):
 
-| env | open conversations | conversations scanned | contact lookups PAID | matching rows | outcome |
-| --- | --- | --- | --- | --- | --- |
-| dev | 637 | 637 | 637 | 13 | partition EXHAUSTED before filling |
-| prod | 693 | 693 | 693 | 17 | partition EXHAUSTED before filling |
+| env | scanned | contact lookups PAID | matching rows (UPPER BOUND) | outcome |
+| --- | --- | --- | --- | --- |
+| dev | 637 | 636 | 12 | partition EXHAUSTED before filling |
+| prod | 693 | 684 | 8 | partition EXHAUSTED before filling |
+
+**RE-MEASURED 2026-08-25 after the instrument was corrected.** The first numbers
+published here (13 and 17 matching rows) came from a version that did not
+replicate the pager - it counted relay groups as matches, used the wrong
+resolver and chunk size, and counted per conversation rather than per contact.
+The COST figure survived that correction; the match counts did not, and they are
+an upper bound even now.
 
 **The partition is exhausted on EVERY render.** The unbounded walk is not a
 worst case reached by unlucky data - it is the steady state, and `useInbox`

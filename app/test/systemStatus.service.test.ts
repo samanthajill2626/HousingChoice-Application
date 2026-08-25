@@ -426,6 +426,28 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result.events[0]!.message).toBe('V8 heap out of memory');
   });
 
+  it('keeps two same-instant rows from different log groups apart', async () => {
+    const view = (ref: string, source: 'app' | 'worker') => ({
+      timestamp: '2026-08-24T10:00:00.000Z',
+      level: 50,
+      message: 'boom',
+      messageTruncated: false,
+      correlationId: null,
+      errorCode: null,
+      errMessageTruncated: false,
+      source,
+      ref,
+    });
+    const seam = fakeSeam({
+      queryInsights: async (_groups: string[], filterExpr: string) =>
+        filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [view('PTR-A', 'app'), view('PTR-B', 'worker')] : [],
+    });
+    const svc = makeService({ config: deployedConfig(), cloudwatch: seam });
+    const res = await svc.getErrors('1h');
+    expect(res.available).toBe(true);
+    expect(res.available && res.events).toHaveLength(2);
+  });
+
   it('local env: unavailable_local WITH NO queryInsights call (all queries skipped)', async () => {
     const seam = fakeSeam();
     const result = await makeService({ config: localConfig(), cloudwatch: seam }).getErrors();

@@ -244,7 +244,11 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         const seen = new Set<string>();
         const events = [...appErrors, ...relabeledV8, ...relabeledSystem]
           .filter((e) => {
-            const key = `${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
+            // `ref` (the Insights @ptr) is unique per log event AND stable
+            // across separate queries (measured 2026-08-24), so it is the real
+            // identity here. The remaining components are retained for the
+            // contract they used to carry; with a ref present they never decide.
+            const key = `${e.ref}|${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;

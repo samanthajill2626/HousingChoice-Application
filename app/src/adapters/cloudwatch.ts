@@ -1,17 +1,25 @@
 // CloudWatchClient seam — the ONLY place the CloudWatch + CloudWatch Logs SDKs
-// are imported (adapter rule, mirroring mediaStore). It exposes exactly the two
+// are imported (adapter rule, mirroring mediaStore). It exposes exactly the
 // narrow reads the System Status service needs (M1.4):
 //
 //   describeAlarms(prefix)                           → DescribeAlarms (AlarmNamePrefix)
 //   queryInsights(groups, filter, sinceMs, limit)    → Logs Insights (StartQuery → poll)
+//   getLogRecord(ref)                                -> GetLogRecord (one @ptr)
+//   queryTrace(groups, kind, id, atMs)               -> Logs Insights x2 (before + after)
 //
 // The seam is INJECTABLE into the service so tests pass a fake/throwing client
 // and never resolve AWS credentials or hit the network. The clients are
 // constructed with region: config.awsRegion (instance-role creds in AWS).
 //
-// PII (doc §9): the error projection is PII-SAFE — timestamp, level, the short
-// message (`msg`), and correlationId ONLY. Bodies, phone numbers, names,
-// emails, and any other log fields are NEVER projected out of a log event.
+// PII (doc section 9; HUMAN DECISION 2026-08-24): these reads are ADMIN-ONLY,
+// enforced SERVER-side (createSystemRouter puts requireRole('admin') on every
+// /api/system route), and they MAY carry contact PII - phone numbers, names,
+// message text - plus host operational data. That is deliberate: everyone who
+// can reach this panel already has access to the underlying log data, so the
+// projection is a DISPLAY control, not a storage control. CREDENTIALS are the
+// one exclusion: the detail path admits only the keys its ERR_ALLOWLIST names
+// (below), so a vendor SDK error nest cannot carry an auth header or a signed
+// URL out through it.
 import {
   CloudWatchClient,
   DescribeAlarmsCommand,
@@ -19,6 +27,7 @@ import {
 } from '@aws-sdk/client-cloudwatch';
 import {
   CloudWatchLogsClient,
+  GetLogRecordCommand,
   GetQueryResultsCommand,
   StartQueryCommand,
   StopQueryCommand,
@@ -34,8 +43,23 @@ const CW_CONNECTION_TIMEOUT_MS = 2_000;
 const CW_REQUEST_TIMEOUT_MS = 5_000;
 const CW_MAX_ATTEMPTS = 2;
 
-// Insights polling config: at most 20 polls × 400ms = 8s maximum wait.
-const INSIGHTS_MAX_POLLS = 20;
+// Insights polling config: at most 75 polls x 400ms = 30s maximum wait.
+//
+// WAS 20 polls / 8s, which was below the REAL latency of these queries and made
+// the errors panel degrade on dev permanently. Measured against the live dev
+// account on 2026-08-25, all within the panel's own 24h window:
+//
+//   pino level>=50 over app+worker    3.9s
+//   V8 OOM over app+worker            3.7s
+//   kernel OOM over /hc/dev/system   17.9s   <- 2x the old budget
+//
+// Insights latency is dominated by query STARTUP, not by data volume, so a
+// quiet environment is not a fast one - dev's system group holds the whole of
+// /var/log/messages (1.3 MB/24h against the app group's 147 KB) and is the slow
+// one. 30s leaves headroom over the worst measured case without letting a
+// blackholed connection tie up the handler indefinitely, which is what the
+// original bound existed to prevent.
+const INSIGHTS_MAX_POLLS = 75;
 const INSIGHTS_POLL_INTERVAL_MS = 400;
 
 /** A region-configured SDK client config with bounded socket/connect timeouts. */
@@ -75,23 +99,320 @@ export interface AlarmView {
   stateUpdatedAt: string;
 }
 
-/** One error log event, projected to the PII-SAFE fields ONLY. */
+/** Which configured log group an event came from. Never suffix-matched. */
+export type ErrorSource = 'app' | 'worker' | 'system' | 'unknown';
+
+/** Field cap for `message` and `errMessage`. Each carries its OWN flag. */
+export const FIELD_CAP = 300;
+
+/**
+ * One error log event, projected to the fields the dashboard renders.
+ *
+ * PII POSTURE (changed 2026-08-24): this projection is a DISPLAY control, not a
+ * storage control - every field here was already at rest in CloudWatch, and the
+ * panel that renders it is admin-only and server-enforced. Credentials are a
+ * separate concern, handled by the allowlist on the DETAIL path.
+ */
 export interface ErrorEventView {
   /** ISO 8601 of the log event. */
   timestamp: string;
-  /** pino numeric level (≥ 50 for error/fatal). */
+  /** pino numeric level (>= 50 for error/fatal). */
   level: number;
-  /** The log's short message (pino `msg`) — never a body/PII payload. */
+  /** The log's short message, capped at FIELD_CAP characters. */
   message: string;
+  /** True when `message` hit FIELD_CAP and was cut. */
+  messageTruncated: boolean;
   /** The correlation id, when the event carried one; null otherwise. */
   correlationId: string | null;
   /**
-   * The provider error code the event carried (pino `errorCode`), when present —
-   * e.g. a Twilio "30034". PII-SAFE (a numeric/short code, never a body). Absent
-   * (undefined) on events that carried no code.
+   * The provider error code the event carried (pino `errorCode`), when present -
+   * e.g. a Twilio "30034". Absent (undefined) on events that carried no code.
    */
   errorCode?: string | null;
+  /** The job whose failure produced the line (pino `jobName`). */
+  jobName?: string | null;
+  /** The structured event name (pino `event`), when the line carried one. */
+  event?: string | null;
+  /** The error type (`err.type`, falling back to `err.name`). */
+  errType?: string | null;
+  /** `err.message`, capped at FIELD_CAP - null when `message` already IS it. */
+  errMessage?: string | null;
+  /** True when `errMessage` hit FIELD_CAP and was cut. */
+  errMessageTruncated: boolean;
+  /** The HTTP request id, when the line carried one - a trace pivot key. */
+  requestId?: string | null;
+  /** The worker poll-run id, when the line carried one - a trace pivot key. */
+  pollRunId?: string | null;
+  /** Which configured log group produced the event. REQUIRED, never null. */
+  source: ErrorSource;
+  /** The raw Insights `@ptr` for this event. REQUIRED, never null. */
+  ref: string;
 }
+
+/**
+ * The ONLY `err.*` paths that leave this adapter.
+ *
+ * AN ALLOWLIST, NOT A DENYLIST, and the distinction is load-bearing. Write-time
+ * credential redaction (lib/logger.ts) is a BEST-EFFORT PATH LIST - it names
+ * three literal `err.config` paths and no wildcard, so `err.config.url`,
+ * `err.config.params`, `err.config.baseURL` and `err.config.auth` are NOT
+ * redacted at rest. A denylist here would inherit that failure mode and
+ * `err.cause.config.headers.Authorization` would walk straight through it.
+ *
+ * WHAT THIS CLOSES, EXACTLY. By construction it closes the whole `err.*`
+ * subtree (any depth, including nests nobody has met) PLUS an object-valued
+ * bare `err` - see isAllowedKey, which re-reads the value rather than trusting
+ * the key. What it does NOT close is every OTHER key: non-`err` fields pass
+ * through BY DESIGN, because app-authored fields are the point of the detail
+ * view. A vendor error logged under a non-`err` key (`log.error({ response })`,
+ * `log.error({ error: e })`) is therefore OUTSIDE this control and is owned by
+ * write-time redaction plus call-site discipline; a sweep of every
+ * log.error/warn/fatal in app/src on 2026-08-25 found zero live cases (the two
+ * `error:` hits are refusal-code STRINGS). Do not read the allowlist as a
+ * whole-record redaction boundary; it is the `err` boundary.
+ *
+ * `response.status` is kept deliberately: lib/errors.ts reads it as the vendor
+ * discriminator and `status` is one of the three fields in the repo's
+ * adjudicated ErrorSummary allowlist.
+ */
+export const ERR_ALLOWLIST: readonly string[] = [
+  'err.message', 'err.stack', 'err.type', 'err.name', 'err.code', 'err.status', 'err.response.status',
+];
+
+/** Cap for a non-JSON record's raw text; carries its OWN flag. */
+export const RAW_TEXT_CAP = 4000;
+/** Detail response bound in BYTES (Buffer.byteLength, not string length). */
+export const RESPONSE_BOUND_BYTES = 65536;
+
+/**
+ * AWS transport metadata - never returned to the client.
+ *
+ * `@log`, `@logStream` and `@ingestionTime` are DELIBERATELY not in here: they
+ * are the host metadata that tells an operator which group and stream the
+ * record came from, which is most of the value of the expanded row. `@log` is
+ * `<accountId>:<logGroupName>`, so the AWS account id is visible to whoever can
+ * read this panel - acceptable because the panel is admin-only and
+ * server-enforced, and stated here so it stays a decision rather than a leak.
+ */
+const DROPPED_PREFIXES = ['@aws.', '@entity.', '@data_'];
+const DROPPED_KEYS = new Set([
+  '@message', '@timestamp', '@logGroupId', '@logStreamId', 'backwardToken', 'forwardToken',
+]);
+
+/**
+ * Decide one record key/value pair. The VALUE matters for exactly one key:
+ * bare `err`. Six call sites log `err` as a plain string message, which is why
+ * it is admitted at all - but GetLogRecord only dot-flattens what it flattened,
+ * and an `err` handed back UNFLATTENED (a nesting-depth or field-count limit on
+ * discovery would do it) would carry the entire vendor object - `config.headers.
+ * Authorization` included - past the allowlist that exists to stop exactly that.
+ * So an `err` whose value parses to a JSON OBJECT is dropped; a scalar survives.
+ */
+function isAllowedKey(key: string, value: string): boolean {
+  if (key === 'err') return !isJsonObject(value);        // scalar err: the message itself
+  if (key.startsWith('err.')) return ERR_ALLOWLIST.includes(key);
+  if (DROPPED_KEYS.has(key)) return false;
+  if (DROPPED_PREFIXES.some((p) => key.startsWith(p))) return false;
+  return true;                                           // app-authored field
+}
+
+/** Does this string parse to a JSON object (or array)? Non-JSON is `false`. */
+function isJsonObject(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fields that carry the DIAGNOSIS. When a record does not fit, these are
+ * admitted first and whole; bulk payload is clipped and then dropped around
+ * them.
+ *
+ * This ordering is the point of the rewrite, not a nicety. Every earlier shape
+ * clipped uniformly, so on a pathological record `err.message` was cut to a
+ * single character while thousands of bytes of unread noise survived - the
+ * operator opened the row for exactly the field the trimmer destroyed.
+ */
+const PRIORITY_FIELDS = new Set([
+  'msg', 'err', 'err.message', 'err.type', 'err.name', 'err.code', 'err.status',
+  'err.response.status', 'event', 'jobName', 'jobId', 'hopCount', 'durationMs',
+  'level', 'time', 'correlationId', 'requestId', 'pollRunId',
+  '@log', '@logStream', '@ingestionTime',
+]);
+
+/** What `enforceBound` did, so the UI can say it rather than imply it. */
+interface BoundOutcome {
+  /** True when anything was clipped or dropped. */
+  truncated: boolean;
+  /** How many fields were dropped entirely - surfaced so the gap is visible. */
+  droppedFields: number;
+}
+
+/**
+ * Fit `fields` inside RESPONSE_BOUND_BYTES in ONE priority-ordered pass, and
+ * report what that cost.
+ *
+ * NEVER RE-SERIALISES THE WHOLE OBJECT. Each entry is priced once from its own
+ * key and value (`entryCost`), so the work is linear in the record's size. The
+ * shapes this replaces measured every candidate against a full
+ * `JSON.stringify(fields)`, which is quadratic whenever the record's weight is
+ * in its KEY NAMES: clipping values frees nothing, so nearly every key must be
+ * dropped, and each drop re-serialises what is left. MEASURED on the real
+ * predecessor, inside CloudWatch's own 256 KB event ceiling: 8,000 fields ->
+ * 3.9s, 12,000 -> 11.3s, 20,000 -> 35.8s of SYNCHRONOUS block. Node is
+ * single-threaded, so that stalls every request, webhook and job dispatch in
+ * the process while one admin waits on one "Show all". This shape returns in
+ * single-digit milliseconds on all of them.
+ *
+ * PRIORITY, not uniform clipping: PRIORITY_FIELDS first and unclipped, then
+ * `err.stack` (large but genuinely diagnostic), then everything else clipped to
+ * FIELD_CAP. Whatever no longer fits is dropped and COUNTED, so a truncated
+ * record says how much is missing instead of silently looking complete.
+ *
+ * MUTATES ITS ARGUMENT on purpose: there is exactly ONE caller (getLogRecord,
+ * which built the object and has not handed it out yet), so copying would buy
+ * nothing. `rawText` rides OUTSIDE this budget by design - it carries its own
+ * RAW_TEXT_CAP - so the true response ceiling is RESPONSE_BOUND_BYTES + 4000.
+ */
+function enforceBound(fields: Record<string, string>): BoundOutcome {
+  // Cost of one entry exactly as it will serialise: "key":"value" plus a comma.
+  const entryCost = (key: string, value: string): number =>
+    Buffer.byteLength(JSON.stringify(key), 'utf8') +
+    Buffer.byteLength(JSON.stringify(value), 'utf8') +
+    2;
+
+  const entries = Object.entries(fields);
+  let total = 2; // the enclosing "{}"
+  for (const [key, value] of entries) total += entryCost(key, value);
+  if (total <= RESPONSE_BOUND_BYTES) return { truncated: false, droppedFields: 0 };
+
+  const rank = (key: string): number =>
+    PRIORITY_FIELDS.has(key) ? 0 : key === 'err.stack' ? 1 : 2;
+  const ranked = entries
+    .map(([key, value]) => ({ key, value, rank: rank(key) }))
+    .sort((a, b) => a.rank - b.rank || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+  const kept: Record<string, string> = {};
+  let used = 2;
+  let dropped = 0;
+  for (const entry of ranked) {
+    let value = entry.rank === 2 && entry.value.length > FIELD_CAP
+      ? entry.value.slice(0, FIELD_CAP)
+      : entry.value;
+    let cost = entryCost(entry.key, value);
+    if (used + cost > RESPONSE_BOUND_BYTES) {
+      // Fit a shortened version rather than dropping outright. `room` is BYTES
+      // and `slice` counts CHARS, so a multibyte value can still overshoot -
+      // hence the re-check below rather than an assumption of 1 byte per char.
+      const room = RESPONSE_BOUND_BYTES - used - entryCost(entry.key, '');
+      value = room > 0 ? value.slice(0, room) : '';
+      cost = entryCost(entry.key, value);
+      if (value.length === 0 || used + cost > RESPONSE_BOUND_BYTES) {
+        dropped++;
+        continue;
+      }
+    }
+    kept[entry.key] = value;
+    used += cost;
+  }
+
+  for (const key of Object.keys(fields)) delete fields[key];
+  Object.assign(fields, kept);
+  return { truncated: true, droppedFields: dropped };
+}
+
+/**
+ * The complete log record behind ONE error row (the DETAIL path).
+ *
+ * ACCESSOR SHAPE: GetLogRecord hands back DOT-FLATTENED keys, so `err.message`
+ * is a literal key here - the opposite of the LIST path, which parses raw
+ * `@message` JSON where `err` is a NESTED object. Never conflate the two.
+ *
+ * `fields` is a STATED key set, not "everything the record had": the
+ * ERR_ALLOWLIST decides the `err.*` subtree, AWS transport metadata is dropped,
+ * and `@message` is never a key (returning it would hand back the very nest the
+ * allowlist just removed).
+ */
+export interface LogRecordView {
+  /** The surviving record keys, values coerced to strings. */
+  fields: Record<string, string>;
+  /** The raw line, present ONLY for a record whose `@message` is not JSON. */
+  rawText?: string;
+  /** True when `rawText` hit RAW_TEXT_CAP and was cut. */
+  rawTextTruncated?: boolean;
+  /** True when `fields` had to be trimmed to fit RESPONSE_BOUND_BYTES. */
+  responseTruncated: boolean;
+  /**
+   * How many fields were dropped entirely to fit the bound. Absent when none
+   * were. Surfaced so a truncated record states the size of its own gap rather
+   * than looking complete.
+   */
+  droppedFields?: number;
+  /** The record's normalised log group name - the service's scope check reads it. */
+  logGroup: string;
+}
+
+/** Which correlation id a trace pivots on. All three are minted as randomUUID(). */
+export type TraceIdKind = 'correlationId' | 'requestId' | 'pollRunId';
+
+/**
+ * One line of a correlation trace: an INTERLEAVED app+worker timeline around a
+ * failure, so most of its lines are ordinary INFO context rather than errors.
+ * That is why this is not an ErrorEventView - the list projection drops exactly
+ * the fields a context line carries.
+ *
+ * ACCESSOR SHAPE: like the LIST path and UNLIKE the detail path, this parses the
+ * raw `@message` JSON, where `err` is a NESTED object. Never conflate the two.
+ */
+export interface TraceLineView {
+  /** ISO 8601 of the log event. */
+  timestamp: string;
+  /** pino numeric level; 30 (info) when the line carried none. */
+  level: number;
+  /** The log's short message. */
+  message: string;
+  /** Which configured log group emitted the line. REQUIRED, never null. */
+  source: ErrorSource;
+  /**
+   * The raw Insights `@ptr` for this line. REQUIRED, never null - every listed
+   * line has one. It is what makes the view's anchor marking EXACT: a
+   * millisecond timestamp is not unique (an app line and a worker line under one
+   * requestId is the normal interleaved case this view exists to show), so
+   * comparing timestamps marks every line sharing the anchor's millisecond.
+   */
+  ref: string;
+  /** Request-line context (pino `method`/`path`/`statusCode`/`durationMs`). */
+  method?: string | null;
+  path?: string | null;
+  statusCode?: number | null;
+  durationMs?: number | null;
+  /** Job context (pino `jobName`/`jobId`/`hopCount`) on the worker side. */
+  jobName?: string | null;
+  jobId?: string | null;
+  hopCount?: number | null;
+}
+
+/** A merged trace: ascending lines plus a truncation flag for EACH side. */
+export interface TraceResult {
+  /** Ascending by timestamp, at most 2 x TRACE_SIDE_LIMIT lines. */
+  lines: TraceLineView[];
+  /** True when the BEFORE side filled its budget - earlier lines exist. */
+  truncatedBefore: boolean;
+  /** True when the AFTER side filled its budget - later lines exist. */
+  truncatedAfter: boolean;
+}
+
+/** Trace row budget PER SIDE of the anchor (50 max merged). */
+export const TRACE_SIDE_LIMIT = 25;
+/** correlationId reach-back: one job run, local. */
+const BRACKET_TIGHT_MS = 5 * 60_000;
+/** requestId / pollRunId reach-back - the cross-hop ids (see queryTrace). */
+const BRACKET_WIDE_MS = 30 * 60_000;
+/** Look-ahead, the same for every kind: nothing wanted is 30 min AFTER a failure. */
+const BRACKET_AHEAD_MS = 5 * 60_000;
 
 /** The narrow surface the systemStatus service depends on. */
 export interface CloudWatchClientSeam {
@@ -101,9 +422,26 @@ export interface CloudWatchClientSeam {
    * Logs Insights query across one or more log groups with an arbitrary filter
    * expression, since `sinceMs` (epoch ms). Returns up to `limit` events,
    * NEWEST-FIRST (Insights natively supports `sort @timestamp desc | limit N`).
-   * PII-safe: each result row projected through projectErrorEvent.
+   * Each result ROW is projected through projectErrorEvent - an admin-only
+   * display projection, not a redaction boundary (see ErrorEventView).
    */
   queryInsights(logGroupNames: string[], filterExpr: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
+  /**
+   * GetLogRecord for one Insights `@ptr` - the complete record behind a single
+   * error row, filtered through ERR_ALLOWLIST and bounded (see LogRecordView).
+   * The pointer is ACCOUNT-scoped and bound to no log group, so the CALLER must
+   * check `logGroup` against the configured groups before returning it.
+   */
+  getLogRecord(ref: string): Promise<LogRecordView>;
+  /**
+   * The lines around ONE failure: every log line carrying `id` for the chosen
+   * id kind, anchored on the failing row's own timestamp `atMs` (epoch ms) and
+   * merged ASCENDING. Two Insights queries with OPPOSITE sorts run in parallel
+   * over disjoint windows - see the implementation for why either half alone is
+   * wrong. `id` is interpolated into the query string, so the CALLER must have
+   * validated it (the service does, before this is ever reached).
+   */
+  queryTrace(groups: string[], kind: TraceIdKind, id: string, atMs: number): Promise<TraceResult>;
 }
 
 /** Map a CloudWatch StateValue to the three-value view enum. */
@@ -113,38 +451,174 @@ function mapAlarmState(state: StateValue | string | undefined): AlarmView['state
   return 'INSUFFICIENT_DATA';
 }
 
+/** `@log` is `<accountId>:<logGroupName>` - take everything after the last ':'. */
+export function normalizeLogGroup(atLog: string): string {
+  const at = atLog.lastIndexOf(':');
+  return at === -1 ? atLog : atLog.slice(at + 1);
+}
+
+function sourceOf(atLog: string | undefined, config: AppConfig): ErrorSource {
+  if (atLog === undefined) return 'unknown';
+  const name = normalizeLogGroup(atLog);
+  // Compare against the CONFIGURED names, not suffixes: /hc/prod/app must not
+  // read as 'app' when this process is dev.
+  if (name === config.errorLogGroupName) return 'app';
+  if (name === config.workerLogGroupName) return 'worker';
+  if (name === config.systemLogGroupName) return 'system';
+  return 'unknown';
+}
+
+function capped(value: string): { value: string; truncated: boolean } {
+  return value.length > FIELD_CAP
+    ? { value: value.slice(0, FIELD_CAP), truncated: true }
+    : { value, truncated: false };
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
 /**
- * Project a parsed pino log line to the PII-SAFE error view. Only `level`,
- * `msg`/`message`, and `correlationId` are read off the JSON — everything else
- * (bodies, phones, names, emails, arbitrary fields) is deliberately dropped.
- * A non-JSON / off-shape message degrades to a generic line rather than
- * leaking the raw text.
+ * Project one Insights result ROW to the view the dashboard renders.
+ *
+ * PII POSTURE (changed 2026-08-24): this is a DISPLAY control, not a storage
+ * control - every field here was already at rest in CloudWatch. The panel is
+ * admin-only and server-enforced. Credentials are handled separately, by the
+ * allowlist on the DETAIL path (getLogRecord below).
+ *
+ * ACCESSOR SHAPE: this path parses the raw `@message` JSON, where `err` is a
+ * NESTED object. `obj['err.message']` is undefined here; the dotted form
+ * belongs to the GetLogRecord path only.
  */
-function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorEventView {
-  const timestamp = new Date(eventTimestampMs).toISOString();
-  let level = 50;
-  let message = '(unparseable log line)';
-  let correlationId: string | null = null;
-  let errorCode: string | null = null;
-  try {
-    const parsed: unknown = JSON.parse(rawMessage);
-    if (typeof parsed === 'object' && parsed !== null) {
-      const obj = parsed as Record<string, unknown>;
-      if (typeof obj['level'] === 'number') level = obj['level'];
-      // pino's short message is `msg`; tolerate a `message` alias too.
-      const msg = obj['msg'] ?? obj['message'];
-      if (typeof msg === 'string' && msg.length > 0) message = msg;
-      const cid = obj['correlationId'];
-      if (typeof cid === 'string' && cid.length > 0) correlationId = cid;
-      // A provider error code (Twilio 30034 etc.) — PII-safe; string or number.
-      const ec = obj['errorCode'];
-      if (typeof ec === 'string' && ec.length > 0) errorCode = ec;
-      else if (typeof ec === 'number') errorCode = String(ec);
-    }
-  } catch {
-    // Non-JSON line — keep the generic message; never surface the raw text.
+export function projectErrorEvent(
+  row: { field?: string; value?: string }[],
+  config: AppConfig,
+): ErrorEventView {
+  let raw = '';
+  let tsValue: string | undefined;
+  let ptr = '';
+  let atLog: string | undefined;
+  for (const cell of row) {
+    if (cell.field === '@message') raw = cell.value ?? '';
+    else if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
+    else if (cell.field === '@ptr') ptr = cell.value ?? '';
+    else if (cell.field === '@log') atLog = cell.value ?? undefined;
   }
-  return { timestamp, level, message, correlationId, errorCode };
+
+  const base = {
+    timestamp: new Date(parseInsightsTimestamp(tsValue)).toISOString(),
+    correlationId: null as string | null,
+    errorCode: null as string | null,
+    source: sourceOf(atLog, config),
+    ref: ptr,
+  };
+
+  let parsed: Record<string, unknown>;
+  try {
+    const p: unknown = JSON.parse(raw);
+    if (typeof p !== 'object' || p === null) throw new Error('not an object');
+    parsed = p as Record<string, unknown>;
+  } catch {
+    // The LIST path deliberately does NOT surface raw text - that property is
+    // preserved and pinned by an existing assertion. Raw text is reachable
+    // through the detail path instead.
+    return {
+      ...base,
+      level: 50,
+      message: '(unparseable log line)',
+      messageTruncated: false,
+      errMessageTruncated: false,
+    };
+  }
+
+  const err =
+    typeof parsed['err'] === 'object' && parsed['err'] !== null
+      ? (parsed['err'] as Record<string, unknown>)
+      : undefined;
+  // A SCALAR err is the message itself - six call sites log `err: e.message`.
+  const errMessageRaw = err !== undefined ? str(err['message']) : str(parsed['err']);
+
+  const chosen =
+    str(parsed['msg']) ?? str(parsed['message']) ?? str(parsed['event']) ?? errMessageRaw ?? '(unparseable log line)';
+  const msgCap = capped(chosen);
+  // When `message` came FROM err.message they are the same string; leave
+  // errMessage null so the row does not render the same text twice.
+  const errCap = errMessageRaw !== null && errMessageRaw !== chosen ? capped(errMessageRaw) : null;
+
+  const ec = parsed['errorCode'];
+  return {
+    ...base,
+    level: typeof parsed['level'] === 'number' ? parsed['level'] : 50,
+    message: msgCap.value,
+    messageTruncated: msgCap.truncated,
+    correlationId: str(parsed['correlationId']),
+    errorCode: typeof ec === 'number' ? String(ec) : str(ec),
+    jobName: str(parsed['jobName']),
+    event: str(parsed['event']),
+    errType: err !== undefined ? (str(err['type']) ?? str(err['name'])) : null,
+    errMessage: errCap?.value ?? null,
+    errMessageTruncated: errCap?.truncated ?? false,
+    requestId: str(parsed['requestId']),
+    pollRunId: str(parsed['pollRunId']),
+  };
+}
+
+/**
+ * Project one Insights result ROW to a trace line.
+ *
+ * ACCESSOR SHAPE: like the LIST path and UNLIKE the detail path, this parses the
+ * raw `@message` JSON, so `err` is a NESTED object here.
+ *
+ * The level default is 30 (info), NOT the list path's 50: a trace is mostly
+ * context lines, and calling an unparseable one an error would misread the
+ * timeline. Fields are shared with projectErrorEvent (`sourceOf`, `str`,
+ * `parseInsightsTimestamp`) so the two paths cannot drift apart.
+ */
+function traceLine(row: { field?: string; value?: string }[], config: AppConfig): TraceLineView {
+  let raw = '';
+  let tsValue: string | undefined;
+  let atLog: string | undefined;
+  let ptr = '';
+  for (const cell of row) {
+    if (cell.field === '@message') raw = cell.value ?? '';
+    else if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
+    else if (cell.field === '@log') atLog = cell.value ?? undefined;
+    else if (cell.field === '@ptr') ptr = cell.value ?? '';
+  }
+  const timestamp = new Date(parseInsightsTimestamp(tsValue)).toISOString();
+  const source = sourceOf(atLog, config);
+  let parsed: Record<string, unknown>;
+  try {
+    const p: unknown = JSON.parse(raw);
+    if (typeof p !== 'object' || p === null) throw new Error('not an object');
+    parsed = p as Record<string, unknown>;
+  } catch {
+    return { timestamp, level: 30, message: '(unparseable log line)', source, ref: ptr };
+  }
+  const err =
+    typeof parsed['err'] === 'object' && parsed['err'] !== null
+      ? (parsed['err'] as Record<string, unknown>)
+      : undefined;
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  return {
+    timestamp,
+    level: typeof parsed['level'] === 'number' ? parsed['level'] : 30,
+    message:
+      str(parsed['msg']) ??
+      str(parsed['message']) ??
+      str(parsed['event']) ??
+      (err !== undefined ? str(err['message']) : str(parsed['err'])) ??
+      '(unparseable log line)',
+    source,
+    ref: ptr,
+    method: str(parsed['method']),
+    path: str(parsed['path']),
+    statusCode: num(parsed['statusCode']),
+    durationMs: num(parsed['durationMs']),
+    jobName: str(parsed['jobName']),
+    jobId: str(parsed['jobId']),
+    hopCount: num(parsed['hopCount']),
+  };
 }
 
 /**
@@ -210,6 +684,66 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
   const cw = deps.cloudwatch ?? new CloudWatchClient(boundedClientConfig(config.awsRegion));
   const logs = deps.logs ?? new CloudWatchLogsClient(boundedClientConfig(config.awsRegion));
 
+  /**
+   * StartQuery -> poll GetQueryResults -> RAW rows. Shared by every Insights
+   * read here, unchanged from the single-caller original: at most
+   * INSIGHTS_MAX_POLLS x INSIGHTS_POLL_INTERVAL_MS of waiting, then a
+   * best-effort StopQuery and a throw so the service degrades.
+   *
+   * The CALLER owns the query string and BOTH bounds, which are epoch SECONDS -
+   * the list and trace paths deliberately do not share a window convention
+   * (the trace splits on an inclusive second boundary; the list does not).
+   */
+  async function runInsights(
+    logGroupNames: string[],
+    queryString: string,
+    startTimeSec: number,
+    endTimeSec: number,
+    limit: number,
+  ): Promise<{ field?: string; value?: string }[][]> {
+    const startOut = await logs.send(
+      new StartQueryCommand({
+        logGroupNames,
+        startTime: startTimeSec,
+        endTime: endTimeSec,
+        queryString,
+        limit,
+      }),
+    );
+
+    const queryId = startOut.queryId;
+    if (!queryId) throw new Error('Insights StartQuery returned no queryId');
+
+    // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
+    for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {
+      if (poll > 0) {
+        await delay(INSIGHTS_POLL_INTERVAL_MS);
+      }
+      const result = await logs.send(new GetQueryResultsCommand({ queryId }));
+      const status = result.status;
+
+      if (status === 'Complete') {
+        // Each row is an array of { field, value } objects; the projections read
+        // @ptr and @log off it too, so WHOLE rows go back to the caller.
+        return (result.results ?? []).slice(0, limit);
+      }
+
+      if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {
+        throw new Error(`Insights query ${queryId} ended with status: ${status}`);
+      }
+
+      // 'Scheduled' | 'Running' - keep polling
+    }
+
+    // Budget exhausted - best-effort cleanup then degrade.
+    try {
+      await logs.send(new StopQueryCommand({ queryId }));
+    } catch {
+      // Ignore StopQuery errors - we're already in a degraded path.
+    }
+    throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
+  }
+
   return {
     async describeAlarms(prefix) {
       const out = await cw.send(new DescribeAlarmsCommand({ AlarmNamePrefix: prefix }));
@@ -224,60 +758,113 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
 
     async queryInsights(logGroupNames, filterExpr, sinceMs, limit) {
       // Build an Insights query string: filter + newest-first + limit.
-      const queryString = `fields @timestamp, @message | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
+      const queryString = `fields @timestamp, @message, @ptr, @log | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
 
       // CRITICAL: Insights StartQuery uses epoch SECONDS, not milliseconds.
-      const startOut = await logs.send(
-        new StartQueryCommand({
-          logGroupNames,
-          startTime: Math.floor(sinceMs / 1000),
-          endTime: Math.ceil(Date.now() / 1000),
-          queryString,
-          limit,
-        }),
+      const rows = await runInsights(
+        logGroupNames,
+        queryString,
+        Math.floor(sinceMs / 1000),
+        Math.ceil(Date.now() / 1000),
+        limit,
       );
+      return rows.map((row) => projectErrorEvent(row, config));
+    },
 
-      const queryId = startOut.queryId;
-      if (!queryId) throw new Error('Insights StartQuery returned no queryId');
+    async getLogRecord(ref) {
+      const out = await logs.send(new GetLogRecordCommand({ logRecordPointer: ref }));
+      const record = (out.logRecord ?? {}) as Record<string, string>;
+      // MEASURED (planner spike, 2026-08-24, real AWS account): GetLogRecord
+      // responses from BOTH /hc/dev/app and /hc/prod/system carried `@log`,
+      // valued `<accountId>:<logGroupName>`. The service's env-scope check reads
+      // the group this yields, so the whole boundary rests on that presence -
+      // and it fails CLOSED: were AWS ever to omit `@log`, normalizeLogGroup('')
+      // is '', no configured group matches, and every row degrades to
+      // `out_of_scope` rather than escaping the scope check.
+      const atLog = record['@log'] ?? '';
+      // PARSEABILITY, not field count, decides rawText. A JSON record whose err
+      // nests were ALL denied still has zero surviving err fields - returning
+      // its raw line would hand back exactly what the allowlist just removed.
+      const rawMessage = record['@message'] ?? '';
+      const isJson = isJsonObject(rawMessage);
 
-      // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
-      for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {
-        if (poll > 0) {
-          await delay(INSIGHTS_POLL_INTERVAL_MS);
-        }
-        const result = await logs.send(new GetQueryResultsCommand({ queryId }));
-        const status = result.status;
-
-        if (status === 'Complete') {
-          const rows = result.results ?? [];
-          return rows
-            .map((row) => {
-              // Each row is an array of { field, value } objects.
-              let message = '';
-              let tsValue: string | undefined;
-              for (const cell of row) {
-                if (cell.field === '@message') message = cell.value ?? '';
-                if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
-              }
-              return projectErrorEvent(message, parseInsightsTimestamp(tsValue));
-            })
-            .slice(0, limit);
-        }
-
-        if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {
-          throw new Error(`Insights query ${queryId} ended with status: ${status}`);
-        }
-
-        // 'Scheduled' | 'Running' — keep polling
+      const fields: Record<string, string> = {};
+      for (const [key, value] of Object.entries(record)) {
+        const text = String(value);
+        if (!isAllowedKey(key, text)) continue;
+        fields[key] = text;
       }
 
-      // Budget exhausted — best-effort cleanup then degrade.
-      try {
-        await logs.send(new StopQueryCommand({ queryId }));
-      } catch {
-        // Ignore StopQuery errors — we're already in a degraded path.
+      let rawText: string | undefined;
+      let rawTextTruncated = false;
+      if (!isJson && rawMessage.length > 0) {
+        rawTextTruncated = rawMessage.length > RAW_TEXT_CAP;
+        rawText = rawTextTruncated ? rawMessage.slice(0, RAW_TEXT_CAP) : rawMessage;
       }
-      throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
+
+      // Called BEFORE the literal, not inside it: `fields` is the same object
+      // reference either way, so trimming it as a property initialiser worked
+      // only by evaluation order and read as though the returned object held
+      // untrimmed values.
+      const bound = enforceBound(fields);
+      return {
+        fields,
+        ...(rawText !== undefined && { rawText, rawTextTruncated }),
+        responseTruncated: bound.truncated,
+        ...(bound.droppedFields > 0 && { droppedFields: bound.droppedFields }),
+        logGroup: normalizeLogGroup(atLog),
+      };
+    },
+
+    async queryTrace(groups, kind, id, atMs) {
+      // The cross-hop ids reach BACKWARDS by construction: a job's failure can
+      // be ~8 min after its first attempt (SQS 120s visibility x 5 receives)
+      // and ~20 min from its enqueue. A tight symmetric bracket reaches none of
+      // that, which is the case pollRunId propagation exists to serve.
+      const back = kind === 'correlationId' ? BRACKET_TIGHT_MS : BRACKET_WIDE_MS;
+      const startSec = Math.floor((atMs - back) / 1000);
+      const endSec = Math.ceil((atMs + BRACKET_AHEAD_MS) / 1000);
+      // SECOND-GRANULARITY SPLIT. `at` is milliseconds; StartQuery is seconds,
+      // so a split exactly at `at` is inexpressible.
+      //
+      // MEASURED, NOT ASSUMED (planner spike, 2026-08-24, real AWS account): an
+      // Insights query with startTime == endTime == 1787022602 RETURNED a real
+      // event whose epoch ms was 1787022602554 - i.e. `endTime: T` covers the
+      // WHOLE second T.000-T.999, not the instant T*1000. So BEFORE's
+      // endTime = floor(atMs / 1000) is inclusive AND gapless (the anchor's
+      // own mid-second line is inside it), and AFTER's startTime = floor + 1
+      // keeps the two windows DISJOINT - no row appears twice, so the merge
+      // needs no dedup rule. Do NOT use ceil for BEFORE: that overlaps by a
+      // second and returns the failure line itself from both queries.
+      //
+      // queryInsights' ceil'd endTime 60 lines up is NOT a contradiction: its
+      // window ends at "now", where rounding UP merely includes the current
+      // partial second. Both are correct under the same inclusive semantics.
+      const anchorSec = Math.floor(atMs / 1000);
+      // `@ptr` rides along so each line carries its own identity: the view marks
+      // the anchor by ref, which a millisecond timestamp cannot do uniquely.
+      const fields = 'fields @timestamp, @message, @log, @ptr';
+      // `id` is validated UUID-shaped by the service before it reaches here.
+      const filter = `filter ${kind} = "${id}"`;
+      // OPPOSITE SORTS, because Insights applies `limit` INSIDE the sort: one
+      // ascending query returns the EARLIEST 25 rows of the bracket and can
+      // drop the failure out of its own trace (and one descending query drops
+      // everything after it).
+      //
+      // Parallel: each Insights poll has a bounded ~8s budget, so sequential
+      // would double the worst-case wait on a user-initiated click.
+      const [beforeRows, afterRows] = await Promise.all([
+        runInsights(groups, `${fields} | ${filter} | sort @timestamp desc | limit ${TRACE_SIDE_LIMIT}`, startSec, anchorSec, TRACE_SIDE_LIMIT),
+        runInsights(groups, `${fields} | ${filter} | sort @timestamp asc | limit ${TRACE_SIDE_LIMIT}`, anchorSec + 1, endSec, TRACE_SIDE_LIMIT),
+      ]);
+      return {
+        lines: [
+          ...beforeRows.map((r) => traceLine(r, config)).reverse(),
+          ...afterRows.map((r) => traceLine(r, config)),
+        ],
+        truncatedBefore: beforeRows.length >= TRACE_SIDE_LIMIT,
+        truncatedAfter: afterRows.length >= TRACE_SIDE_LIMIT,
+      };
     },
   };
 }

@@ -131,8 +131,21 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
     }),
     getErrors: vi.fn<SystemStatusService['getErrors']>(async () => ({
       available: true,
-      events: [{ timestamp: '2026-06-29T00:00:00.000Z', level: 50, message: 'boom', correlationId: 'c1' }],
+      events: [
+        {
+          timestamp: '2026-06-29T00:00:00.000Z',
+          level: 50,
+          message: 'boom',
+          messageTruncated: false,
+          correlationId: 'c1',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-R1',
+        },
+      ],
     })),
+    getErrorDetail: async () => ({ available: false as const, reason: 'unavailable_local' as const }),
+    getTrace: async () => ({ available: false as const, reason: 'unavailable_local' as const }),
   };
 
   it('alarms returns { available:true, alarms } from the service', async () => {
@@ -156,7 +169,18 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       available: true,
-      events: [{ timestamp: '2026-06-29T00:00:00.000Z', level: 50, message: 'boom', correlationId: 'c1' }],
+      events: [
+        {
+          timestamp: '2026-06-29T00:00:00.000Z',
+          level: 50,
+          message: 'boom',
+          messageTruncated: false,
+          correlationId: 'c1',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-R1',
+        },
+      ],
     });
     expect(getErrors).toHaveBeenCalledWith('7d', { includeWarnings: false });
   });
@@ -178,5 +202,135 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE);
     expect(getErrors).toHaveBeenCalledWith('24h', { includeWarnings: false });
+  });
+});
+
+describe('GET /api/system/errors/detail', () => {
+  it('400s when ref is missing', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/system/errors/detail')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(400);
+  });
+
+  it('is admin-only', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/system/errors/detail?ref=AAAA')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(403);
+  });
+
+  it('degrades at 200 when a ref is present', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get(`/api/system/errors/detail?ref=${encodeURIComponent('A+B/C=')}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(false);
+  });
+
+  it('hands the DECODED pointer to the service (+ and / survive the query)', async () => {
+    const getErrorDetail = vi.fn<SystemStatusService['getErrorDetail']>(async () => ({
+      available: false,
+      reason: 'invalid_ref',
+    }));
+    const service: SystemStatusService = {
+      getFlags: () => ({
+        env: 'dev',
+        smsSendingEnabled: false,
+        relayLiveProvisioning: false,
+        pushConfigured: true,
+        messagingDriver: 'twilio',
+        aiExtractionEnabled: true,
+        aiExtractionDriver: 'console',
+        aiExtractionModel: 'claude-opus-4-8',
+        aiExtractionPromptFingerprint: '0123456789ab',
+      }),
+      getAlarms: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrors: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrorDetail,
+      getTrace: async () => ({ available: false, reason: 'unavailable_local' }),
+    };
+    const { app } = makeWebhookHarness({ systemStatusService: service });
+    const ref = 'CnAKMwo=+B/C';
+    await request(app)
+      .get(`/api/system/errors/detail?ref=${encodeURIComponent(ref)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(getErrorDetail).toHaveBeenCalledWith(ref);
+  });
+});
+
+describe('GET /api/system/trace', () => {
+  const auth = (r: request.Test) => r.set('x-origin-verify', SECRET).set('cookie', TEST_ADMIN_COOKIE);
+  const AT = '2026-08-24T10:00:00.000Z';
+  const UUID = '11111111-2222-4333-8444-555555555555';
+
+  it('400s with no id, with several ids, and with a bad at', async () => {
+    const { app } = makeWebhookHarness();
+    expect((await auth(request(app).get(`/api/system/trace?at=${AT}`))).status).toBe(400);
+    expect((await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&requestId=${UUID}&at=${AT}`))).status).toBe(400);
+    expect((await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&at=nonsense`))).status).toBe(400);
+  });
+
+  it('400s on a NON-ISO date Date.parse would otherwise accept, so the 400 message stays true', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&at=1 Jan 2020`));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('ISO 8601');
+  });
+
+  it('400s when at is missing entirely - the anchor is REQUIRED, never defaulted', async () => {
+    const { app } = makeWebhookHarness();
+    expect((await auth(request(app).get(`/api/system/trace?correlationId=${UUID}`))).status).toBe(400);
+  });
+
+  it('returns 200 for a well-formed request', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await auth(request(app).get(`/api/system/trace?correlationId=${UUID}&at=${AT}`));
+    expect(res.status).toBe(200);
+    // The hermetic harness is a local env, so it degrades at 200 (never a 500).
+    expect(res.body.available).toBe(false);
+  });
+
+  it('is admin-only', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get(`/api/system/trace?correlationId=${UUID}&at=${AT}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(403);
+  });
+
+  it('hands the chosen kind, the id and the PARSED anchor to the service', async () => {
+    const getTrace = vi.fn<SystemStatusService['getTrace']>(async () => ({
+      available: false,
+      reason: 'unavailable_local',
+    }));
+    const service: SystemStatusService = {
+      getFlags: () => ({
+        env: 'dev',
+        smsSendingEnabled: false,
+        relayLiveProvisioning: false,
+        pushConfigured: true,
+        messagingDriver: 'twilio',
+        aiExtractionEnabled: true,
+        aiExtractionDriver: 'console',
+        aiExtractionModel: 'claude-opus-4-8',
+        aiExtractionPromptFingerprint: '0123456789ab',
+      }),
+      getAlarms: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrors: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrorDetail: async () => ({ available: false, reason: 'unavailable_local' }),
+      getTrace,
+    };
+    const { app } = makeWebhookHarness({ systemStatusService: service });
+    await auth(request(app).get(`/api/system/trace?pollRunId=${UUID}&at=${AT}`));
+    expect(getTrace).toHaveBeenCalledWith('pollRunId', UUID, Date.parse(AT));
   });
 });

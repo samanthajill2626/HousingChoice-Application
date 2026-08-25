@@ -77,6 +77,39 @@ the work is done, and add or extend a spec for new behavior.
 - MCP artifacts belong in `.playwright-mcp/` (gitignored). Explicit screenshot
   filenames must be prefixed with `.playwright-mcp/`; unnamed artifacts already land
   there.
+- **A failing spec preserves BROWSER-side artifacts only.** Playwright's
+  webServer does not capture the launcher's stdout, so the app, worker, Vite and
+  fake-twilio logs are discarded - which is why three sightings of an empty
+  inbox could not be told apart from a healthy one until someone went looking
+  for a server-side log that was never written. Set `E2E_CHILD_LOG_DIR` to a
+  directory and each long-lived child also appends to `<dir>/<name>.log`:
+
+  ```
+  E2E_CHILD_LOG_DIR=.artifacts/child-logs npm run e2e
+  ```
+
+  Use it when you are chasing an intermittent failure whose evidence is
+  CONTENT (a missing row, an unexpected payload, a silent handler), and read
+  `scripts/e2e-session.mjs`'s note on what it does not capture (the final
+  instant under a tree-kill teardown, and the one-shot seed/build children).
+
+  **NOT for a timing-sensitive symptom - a hang, a stall, a budget that fires.**
+  Piping a child's stdout makes `isTTY` false and the stream block-buffered, so
+  the flag CHANGES the timings you would then be reasoning from; the docblock
+  in `scripts/e2e-session.mjs` says so directly and it overrides the general
+  recommendation above. Two agents hit this on 2026-08-25 chasing the same
+  stall: one instrumented run took **34.7m against a 17.9m baseline and
+  produced 4 failures instead of 1**, none of them the bug being hunted. For
+  those symptoms the decisive artifact is a TRACE, not a log - and note that
+  `retries: 0` with `trace: 'on-first-retry'` collects nothing, so a gate
+  failure carries no network data at all. See
+  [`placement-detail-bundle-fetch-stall`](docs/issues/placement-detail-bundle-fetch-stall.md).
+- **`reuseExistingServer` adopts an orphaned stack on a commit match alone.**
+  The preflight compares commits, not uptime or health, so a same-commit server
+  that a previous (or killed) run already drove for 20+ minutes is adopted
+  unchallenged. Killing a suite orphans its stack, so an interrupted hunt
+  silently contaminates the next run. After aborting a run, confirm no listener
+  survives on the lane's ports before starting another.
 - Run Playwright only through the e2e workspace (`npm run e2e`). A stray/root
   Playwright invocation can target the human's live lane.
 
@@ -152,6 +185,61 @@ commands from the feature worktree:
 2. `npm test`
 3. `npm run smoke`
 4. `npm run e2e`
+5. `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
+
+**Gate 5 is NO NEW LINT ERRORS IN THE FILES YOU TOUCHED - not a clean repo, and
+not a clean file.** Lint here is not yet clean: as of 2026-08-24 `npm run lint`
+reports 117 errors across 65 files, all pre-existing. A repo-wide gate would
+fail every branch on day one, and a whole-FILE gate would fail any one-line
+change to those 65 files on somebody else's debt. Neither makes anyone lint;
+both teach people to skip the gate. So the rule is the ratchet the ASCII rule
+already uses: on a pre-existing dirty file, only what you TOUCH must be clean.
+
+Read that command carefully; it has two traps, both of which produce a
+convincing but meaningless result.
+
+- A bare `git diff --name-only` lists UNSTAGED changes. At gate time your branch
+  is committed and clean, so it returns NOTHING and the gate passes having
+  checked zero files. `main...HEAD` is what lists the branch's own files.
+- **If that list comes back EMPTY (a docs-only branch), SKIP the gate.** Do not
+  run `npx eslint` with no path arguments: it lints the ENTIRE REPO and fails on
+  the 117 pre-existing errors below, which looks like your branch broke
+  something and is the fastest way to teach someone that gate 5 is noise.
+
+The extension filter is there so Markdown paths do not produce a wall of
+"File ignored because no matching configuration" warnings; they are harmless
+but they bury a real finding.
+
+The command above is bash. It works as written in PowerShell too (the
+subexpression splats to an argv array) but NOT in `cmd`. The empty-list trap
+bites identically in both shells - an empty array splats to zero arguments, and
+`npx eslint` goes repo-wide.
+
+How to read the result:
+
+- Clean, exit 0 - done.
+- Errors reported - attribute them by BASELINE COMPARISON: run the same command
+  on the same paths at the merge base and diff the two outputs. Anything present
+  now and absent there is YOURS and is BLOCKING. The rest are pre-existing:
+  leave them (fixing unrelated errors in a shared repo is its own change) and
+  NAME them in your handback so the next person does not re-diagnose them as
+  yours.
+
+**Attribute by baseline, not by line number.** Reading the reported lines
+against your diff is a shortcut that fails on the single most common shape:
+delete the last USE of an import and `no-unused-vars` fires on the IMPORT line,
+which your diff never touched. By line number that reads as pre-existing and
+ships - and an unused import often means the code that used it was deleted by
+mistake, so it is exactly the error worth catching.
+
+**Known hole: the config lints `.ts` and `.tsx` only.** There is no base JS
+block, so `npx eslint` on a `.mjs` / `.js` file exits 0 having checked NOTHING -
+no rules, no warning, no "file ignored" notice. Do not read a green gate on a
+script file as a lint pass. Tracked with the backlog below.
+
+The backlog is [`lint-backlog-repo-wide`](docs/issues/lint-backlog-repo-wide.md).
+When it reaches zero, promote this gate to a bare `npm run lint` and delete this
+paragraph.
 
 `npm run typecheck` is a separate required gate. Vitest and Playwright run through
 esbuild/tsx, which strip types without checking them. Never pipe a gate command; a

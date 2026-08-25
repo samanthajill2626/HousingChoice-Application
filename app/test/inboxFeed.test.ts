@@ -292,6 +292,77 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(page.rows[0]!.name).toBe('Dana Doe');
   });
 
+  it('READ ACCOUNTING: a zero-row page says WHICH zero it is - empty partition vs every row dropped', async () => {
+    // The whole point of the fields, and the reason they are worth their line
+    // width: `count: 0` alone cannot tell an empty inbox from an inbox whose
+    // rows were all consumed by an assembly guard. Three e2e sightings of a
+    // READY-AND-EMPTY All tab were undiagnosable for exactly that reason
+    // (docs/issues/call-inbox-unread-detached-node-flake.md) - the artifacts are
+    // browser-side, and nothing server-side recorded the difference.
+    //
+    // If this test ever goes green while the counters are computed AFTER the
+    // drops, it is worthless: rawScanned must be counted off the raw chunk.
+    const emptyInfo = vi.fn();
+    const emptyPartition = await aggregateInbox(
+      { filter: 'all', limit: 25 },
+      makeDeps({ contacts: [], conversations: [] }, undefined, {
+        info: emptyInfo,
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      } as never),
+    );
+    expect(emptyPartition.rows).toEqual([]);
+    const emptyLine = emptyInfo.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(emptyLine).toMatchObject({ count: 0, rawScanned: 0, rawQueries: 1 });
+    // Nothing was dropped, so the key is absent rather than an object of zeroes.
+    expect(emptyLine).not.toHaveProperty('drops');
+
+    // THE OTHER ZERO. A stale participant GSI names a thread the open partition
+    // is not currently offering, so `newestOf` picks it for every walked
+    // conversation and the identity guard suppresses them all - a page that
+    // scanned real rows and returned none. This is the exact shape
+    // mark-read-fanout-stale-gsi-skip describes on the read side.
+    const contact: ContactItem = {
+      contactId: 'c-stale',
+      type: 'tenant',
+      firstName: 'Stale',
+      lastName: 'Image',
+      phone: '+15550000001',
+      phones: [{ phone: '+15550000001', primary: true }],
+    };
+    const walked = [
+      conv({ conversationId: 'conv-a', participant_phone: '+15550000001', last_activity_at: '2026-06-10T10:00:00.000Z' }),
+      conv({ conversationId: 'conv-b', participant_phone: '+15550000001', last_activity_at: '2026-06-09T10:00:00.000Z' }),
+    ];
+    const droppedInfo = vi.fn();
+    const allDropped = await aggregateInbox(
+      { filter: 'all', limit: 25 },
+      makeDeps(
+        {
+          contacts: [contact],
+          conversations: walked,
+          // The GSI image the contact resolves through: a NEWER thread that the
+          // partition walk above never offers.
+          participantProjection: [
+            ...walked,
+            conv({ conversationId: 'conv-ghost', participant_phone: '+15550000001', last_activity_at: '2026-06-30T10:00:00.000Z' }),
+          ],
+        },
+        undefined,
+        { info: droppedInfo, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      ),
+    );
+    expect(allDropped.rows).toEqual([]);
+    const droppedLine = droppedInfo.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    // SAME count, DIFFERENT world - which is the entire value of the fields.
+    expect(droppedLine).toMatchObject({
+      count: 0,
+      rawScanned: 2,
+      drops: { notNewestConv: 2 },
+    });
+  });
+
   it('unknown number (no contact) → kind:"unknown", needsTriage:true, name=formatted number, role:"unknown"', async () => {
     const deps = makeDeps({
       contacts: [],

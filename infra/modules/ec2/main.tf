@@ -298,6 +298,24 @@ data "aws_iam_policy_document" "app" {
     actions   = ["logs:GetQueryResults", "logs:StopQuery"]
     resources = ["*"]
   }
+  # System Status "error detail" resolves one Insights @ptr with GetLogRecord.
+  # AWS's machine-readable service reference
+  # (https://servicereference.us-east-1.amazonaws.com/v1/logs/logs.json,
+  # retrieved 2026-08-24) lists GetLogRecord with a "log-group" resource, so it
+  # DOES support resource-level permissions and is scoped to this env's groups
+  # exactly like StartQuery above. The request carries only an opaque pointer;
+  # the pointer resolves server-side to its log group for IAM to match on.
+  # Env scoping is ALSO enforced in the app (services/systemStatus.ts rejects
+  # any record whose @log is not one of this env's three groups), so neither
+  # layer is the sole boundary.
+  statement {
+    sid     = "SystemStatusGetLogRecord"
+    actions = ["logs:GetLogRecord"]
+    resources = [
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*",
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "app" {

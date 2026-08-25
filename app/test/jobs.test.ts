@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
+  type OutboundQueueAdapter,
 } from '../src/adapters/scheduler.js';
+import { type JobEnvelope } from '../src/jobs/types.js';
 import {
   _resetForTests,
   configureJobsClock,
@@ -22,7 +24,7 @@ import {
   enqueueImmediate,
   JOBS_SQS_MAX_DELAY_SECONDS,
 } from '../src/jobs/jobs.js';
-import { createLogger } from '../src/lib/logger.js';
+import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
   getContext,
@@ -348,5 +350,87 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     vi.useRealTimers();
     await enqueue('demo.job', { x: 1 }, { runAt: new Date(NOW + 100_000) });
     expect(outbound.delayed[0]!.delaySeconds).toBe(100);
+  });
+});
+
+// This file has no top-level reset, so these tests carry their own: without it
+// defineJobHandler throws on re-registration and the logger/queue swaps leak.
+describe('jobs: the dispatcher log line names what failed', () => {
+  beforeEach(() => {
+    _resetForTests();
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('names the failing job in the job failed message', async () => {
+    const errors: { obj: Record<string, unknown>; msg: string }[] = [];
+    configureJobsLogger({
+      info: () => {},
+      warn: () => {},
+      error: (obj: Record<string, unknown>, msg: string) => {
+        errors.push({ obj, msg });
+      },
+    } as unknown as Logger);
+    defineJobHandler('test.explodes', async () => {
+      throw new Error('boom');
+    });
+    await expect(
+      dispatchJob({
+        v: 1,
+        jobId: 'j-1',
+        jobName: 'test.explodes',
+        payload: {},
+        correlationContext: {},
+        traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+        hopCount: 1,
+        enqueuedAt: '2026-08-24T10:00:00.000Z',
+      }),
+    ).rejects.toThrow('boom');
+    const failure = errors.find((l) => l.msg.startsWith('job failed'));
+    expect(failure?.msg).toBe('job failed: test.explodes');
+    expect(failure?.obj['jobName']).toBe('test.explodes');
+  });
+});
+
+describe('jobs: the envelope carries the poll tick that enqueued it', () => {
+  beforeEach(() => {
+    _resetForTests();
+    configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('propagates pollRunId into the envelope so a poll-enqueued job can be traced back', async () => {
+    const captured: JobEnvelope[] = [];
+    configureOutboundQueue({
+      enqueue: async (envelope: JobEnvelope) => {
+        captured.push(envelope);
+      },
+    } as unknown as OutboundQueueAdapter);
+    defineJobHandler('test.polled', async () => {});
+    await runWithContext({ pollRunId: 'poll-abc' }, async () => {
+      await enqueue('test.polled', { hello: 'world' });
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.correlationContext).toEqual({ pollRunId: 'poll-abc' });
+  });
+
+  it('does not invent a pollRunId when the context has none', async () => {
+    const captured: JobEnvelope[] = [];
+    configureOutboundQueue({
+      enqueue: async (envelope: JobEnvelope) => {
+        captured.push(envelope);
+      },
+    } as unknown as OutboundQueueAdapter);
+    defineJobHandler('test.requested', async () => {});
+    await runWithContext({ requestId: 'req-1' }, async () => {
+      await enqueue('test.requested', {});
+    });
+    expect(captured[0]!.correlationContext).toEqual({ requestId: 'req-1' });
+    expect(captured[0]!.correlationContext).not.toHaveProperty('pollRunId');
   });
 });

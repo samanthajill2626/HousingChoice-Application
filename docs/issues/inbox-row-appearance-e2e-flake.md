@@ -9,6 +9,49 @@ created: 2026-08-13
 refs: e2e/tests/dashboard-next/deleted-contact-resurfacing.spec.ts:95, e2e/tests/dashboard-next/inbox-markread.spec.ts:17
 ---
 
+**UPDATE 2026-08-24 - the C1 premise this was routed on is DISPROVEN, and this
+issue is deliberately NOT closed with its sibling.**
+
+[`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md)
+was resolved the same day, and the cause was not the read path at all: it was
+`useInbox` installing a page fetched for a filter the operator had already left
+(`feat/inbox-unread-read-path` @52ebafc8). "A whole open-partition read
+answered empty" never happened - the server served full pages throughout.
+
+**BOTH HALVES ARE NOW UNEXPLAINED.** An earlier version of this update called
+the `inbox-markread.spec.ts` half "plausibly the same defect". A re-review
+checked that against the harness rather than the spec text, and the stale-page
+mechanism CANNOT REACH IT. Three independent reasons:
+
+- `e2e/playwright.config.ts` sets `fullyParallel: false, workers: 1`, so there
+  is no cross-spec SSE traffic on the lane.
+- The SSE endpoint writes `: connected` and nothing else on connect - no
+  snapshot, no replay, no Last-Event-ID catch-up. The `conversation.updated` for
+  the spec's own inbound fires during `sendAsParty`, BEFORE `devLogin` opens an
+  EventSource, so it is gone.
+- `page.goto('/inbox')` remounts the app and opens a fresh EventSource anyway.
+
+The mechanism needs an event landing between the All-tab fetch and the Unread
+click. This spec produces none. `deleted-contact-resurfacing.spec.ts` was never
+explained by it either (a fresh mount, no timer to go stale).
+
+The only channel not ruled out is the WORKER emitting an unrelated
+`conversation.updated` - a scheduled send, a reminder - inside that window.
+Unverified, and recorded only so the next person does not have to re-derive it.
+
+**And the prediction that stood here has been deleted, not hedged**, because it
+inverted the inference: it said a recurrence on the markread half after
+`@52ebafc8` would mean the stale-page explanation was wrong. That explanation
+was never live for this spec, so a recurrence would say nothing at all about the
+fix - and a future reader would have drawn a false conclusion from real
+evidence. That is the exact failure this whole file is a monument to.
+
+Neither half has reproduced in 8+ full runs, including two heavily contended
+ones. Both stay open with NO candidate mechanism, which is a worse position than
+this issue was in yesterday, and an honest one.
+
+The original routing note is left below for the record.
+
 **ROUTED TO C1 (2026-08-24) - stays open as inbox read-path evidence, not as a
 spec flake.** "An inbound arrived and the row did not appear within 10s" is the
 same read path as `call-inbox-unread-detached-node-flake`'s adjudicated

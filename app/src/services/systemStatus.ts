@@ -1,9 +1,13 @@
 // systemStatusService — the read model behind the admin-only Settings → System
-// Status panel (M1.4, doc §6). Three reads, scoped to the env the app runs in:
+// Status panel (M1.4, doc section 6). FIVE reads, all scoped to this env:
 //
 //   getFlags()         go-live readiness from runtime config — NO AWS call
 //   getAlarms()        CloudWatch DescribeAlarms (prefix hc-<env>-), ALARM-first
 //   getErrors(window)  CloudWatch Logs Insights (newest-first, ≤25)
+//   getErrorDetail(ref)       CloudWatch GetLogRecord - the COMPLETE record
+//                             behind one row; the env scope check lives HERE
+//   getTrace(kind, id, atMs)  Logs Insights x2 - the lines around one failure,
+//                             merged ascending
 //
 // GRACEFUL LOCAL DEGRADATION: the alarms/errors reads short-circuit to
 // { available: false, reason: 'unavailable_local' } WITHOUT an SDK call when
@@ -18,8 +22,14 @@
 // flyers and send from, so an admin can see what the app is configured to use.
 // It is omitted when unconfigured and is never logged. A founder cell, a
 // tenant cell, or any other person's number still never appears here.
-// Errors are projected to message + correlationId (+
-// timestamp/level) by the adapter; this service logs counts/reasons only.
+// The three CloudWatch reads are a DIFFERENT posture (doc section 2, HUMAN
+// DECISION 2026-08-24): this panel is ADMIN-ONLY, enforced SERVER-side by
+// requireRole('admin') on every /api/system route, so getErrors,
+// getErrorDetail and getTrace MAY hand back contact PII - phone numbers,
+// names, message text - and host operational data. That is deliberate; the
+// projection is a display control, not a storage control. CREDENTIALS are the
+// exclusion: the detail path admits only the `err` keys the adapter's
+// ERR_ALLOWLIST names. This service itself still logs counts and reasons only.
 import {
   classifyCloudWatchError,
   createCloudWatchClient,
@@ -30,6 +40,9 @@ import {
   type AlarmView,
   type CloudWatchClientSeam,
   type ErrorEventView,
+  type LogRecordView,
+  type TraceIdKind,
+  type TraceLineView,
 } from '../adapters/cloudwatch.js';
 import { isPushConfigured, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -101,10 +114,47 @@ export type AlarmsResult =
   | { available: true; alarms: AlarmView[] }
   | { available: false; reason: string };
 
-/** getErrors result — degrades to { available: false, reason } (still HTTP 200). */
+/**
+ * getErrors result - degrades to { available: false, reason } (still HTTP 200).
+ *
+ * `partialSources` names the independent query sources that FAILED while others
+ * succeeded. Present only when the panel is showing an incomplete picture, so a
+ * short list is a positive statement that rows are missing - never silence.
+ */
 export type ErrorsResult =
-  | { available: true; events: ErrorEventView[] }
+  | { available: true; events: ErrorEventView[]; partialSources?: string[] }
   | { available: false; reason: string };
+
+/**
+ * getErrorDetail result. Degrades at HTTP 200 like the other reads, never a 500:
+ * `unavailable_local` on a local/hermetic stack, `invalid_ref` for a pointer that
+ * fails REF_PATTERN, `out_of_scope` when the record belongs to another
+ * environment's log group, `cloudwatch_error` when the read throws.
+ */
+export type DetailResult =
+  | { available: true; record: LogRecordView }
+  | { available: false; reason: 'unavailable_local' | 'invalid_ref' | 'out_of_scope' | 'cloudwatch_error' };
+
+/**
+ * getTrace result. Degrades at HTTP 200 like the other reads, never a 500:
+ * `unavailable_local` on a local/hermetic stack, `invalid_id` for an id that is
+ * not UUID-shaped, `cloudwatch_error` when the read throws.
+ */
+export type TraceServiceResult =
+  | { available: true; lines: TraceLineView[]; truncatedBefore: boolean; truncatedAfter: boolean }
+  | { available: false; reason: 'unavailable_local' | 'invalid_id' | 'cloudwatch_error' };
+
+/** Base64-family pointer, bounded. Insights pointers observed at 220 chars. */
+const REF_PATTERN = /^[A-Za-z0-9+/=]{16,512}$/;
+
+/**
+ * A correlation id as this app mints them: every one of the four context ids is
+ * a `randomUUID()` (lib/context.ts) and the correlation middleware MINTS rather
+ * than honors an inbound header, so this can never reject a legitimate id. It
+ * runs BEFORE the id reaches the adapter, which interpolates it into an Insights
+ * query string - this is the boundary that keeps that interpolation safe.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface SystemStatusService {
   /** Go-live flags from runtime config — always works, no AWS call. */
@@ -118,6 +168,20 @@ export interface SystemStatusService {
    * included regardless (they log at warn).
    */
   getErrors(window?: SystemErrorWindow, opts?: GetErrorsOptions): Promise<ErrorsResult>;
+  /**
+   * The complete log record behind ONE error row (`ref` is that row's Insights
+   * `@ptr`), or a degraded reason. The record is rejected unless it came from one
+   * of the three CONFIGURED log groups - a pointer is account-scoped and bound to
+   * no group, so this is what keeps the read inside this environment.
+   */
+  getErrorDetail(ref: string): Promise<DetailResult>;
+  /**
+   * The app+worker log lines around ONE failure, anchored on that row's own
+   * timestamp (`atMs`, epoch ms) and filtered on a single correlation id kind,
+   * or a degraded reason. The id is validated here, before it can reach the
+   * Insights query string.
+   */
+  getTrace(kind: TraceIdKind, id: string, atMs: number): Promise<TraceServiceResult>;
 }
 
 /** Options for {@link SystemStatusService.getErrors}. */
@@ -224,7 +288,15 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         //   appErrors      — pino level≥50 (or ≥40 with warnings) in app+worker
         //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
         //   systemOom      — kernel OOM-killer lines in the system log group
-        const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
+        //
+        // SETTLED, NOT ALL. These three are INDEPENDENT SOURCES, not parts of
+        // one answer, and `Promise.all` made the slowest of them the only one
+        // that mattered: on dev the kernel-OOM query over /hc/<env>/system took
+        // 17.9s against an 8s budget, so it rejected and discarded the pino
+        // errors query that had already succeeded in 3.9s - the panel went fully
+        // degraded while holding the exact rows it exists to show. A source that
+        // times out now costs its OWN rows and nothing else.
+        const settled = await Promise.allSettled([
           // BOTH process log groups: worker-side errors (extraction poll, tour
           // reminder + placement nudge polls, voice transcript jobs) were
           // invisible to this panel when only the app group was queried
@@ -233,6 +305,35 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);
+        const SOURCE_NAMES = ['errors', 'app-oom', 'system-oom'] as const;
+        const failedSources: string[] = [];
+        settled.forEach((outcome, i) => {
+          if (outcome.status === 'rejected') {
+            failedSources.push(SOURCE_NAMES[i]!);
+            log.warn(
+              {
+                source: SOURCE_NAMES[i],
+                kind: classifyCloudWatchError(outcome.reason),
+                err: (outcome.reason as Error).message,
+              },
+              'system status: one error source failed - the rest still render',
+            );
+          }
+        });
+        // EVERY source failing is the old all-or-nothing case and still degrades:
+        // an empty panel drawn from zero working queries would read as "no
+        // errors", which is the most dangerous thing this panel can say.
+        if (failedSources.length === settled.length) {
+          log.error({ window, failedSources }, 'system status: all error sources failed');
+          return { available: false, reason: 'cloudwatch_error' };
+        }
+        const rowsOf = (i: number): ErrorEventView[] =>
+          settled[i]!.status === 'fulfilled'
+            ? (settled[i] as PromiseFulfilledResult<ErrorEventView[]>).value
+            : [];
+        const appErrors = rowsOf(0);
+        const appWorkerV8Oom = rowsOf(1);
+        const systemOom = rowsOf(2);
         // Relabel OOM events with synthesized, PII-safe messages based on which
         // query found them — never from the raw log text (which projectErrorEvent
         // already collapses to "(unparseable log line)" for kernel/V8 OOM lines).
@@ -244,7 +345,11 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         const seen = new Set<string>();
         const events = [...appErrors, ...relabeledV8, ...relabeledSystem]
           .filter((e) => {
-            const key = `${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
+            // `ref` (the Insights @ptr) is unique per log event AND stable
+            // across separate queries (measured 2026-08-24), so it is the real
+            // identity here. The remaining components are retained for the
+            // contract they used to carry; with a ref present they never decide.
+            const key = `${e.ref}|${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
@@ -252,11 +357,60 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
           .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
           .slice(0, ERROR_EVENT_LIMIT);
         log.info({ window, errorCount: events.length }, 'system status: errors read');
-        return { available: true, events };
+        return {
+          available: true,
+          events,
+          ...(failedSources.length > 0 && { partialSources: failedSources }),
+        };
       } catch (err) {
         log.error(
           { window, kind: classifyCloudWatchError(err), err: (err as Error).message },
           'system status: Logs Insights query failed',
+        );
+        return { available: false, reason: 'cloudwatch_error' };
+      }
+    },
+
+    async getErrorDetail(ref) {
+      if (isLocalEnv(config)) return { available: false, reason: 'unavailable_local' };
+      if (!REF_PATTERN.test(ref)) return { available: false, reason: 'invalid_ref' };
+      try {
+        const record = await cloudwatch.getLogRecord(ref);
+        // A ref is an ACCOUNT-scoped pointer bound to nothing. This check makes
+        // the route's scope independent of which IAM branch the grant landed on
+        // - without it, a pointer from another environment resolves here.
+        const allowed = [config.errorLogGroupName, config.workerLogGroupName, config.systemLogGroupName];
+        if (!allowed.includes(record.logGroup)) {
+          log.warn({ logGroup: record.logGroup }, 'system status: detail record out of scope');
+          return { available: false, reason: 'out_of_scope' };
+        }
+        return { available: true, record };
+      } catch (err) {
+        log.error(
+          { kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: GetLogRecord failed',
+        );
+        return { available: false, reason: 'cloudwatch_error' };
+      }
+    },
+
+    async getTrace(kind, id, atMs) {
+      if (isLocalEnv(config)) return { available: false, reason: 'unavailable_local' };
+      if (!UUID_PATTERN.test(id)) return { available: false, reason: 'invalid_id' };
+      try {
+        // app + worker only. The system group's kernel lines carry no
+        // correlation id at all, so scanning it costs bytes for nothing.
+        const trace = await cloudwatch.queryTrace(
+          [config.errorLogGroupName, config.workerLogGroupName],
+          kind,
+          id,
+          atMs,
+        );
+        return { available: true, ...trace };
+      } catch (err) {
+        log.error(
+          { kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: trace query failed',
         );
         return { available: false, reason: 'cloudwatch_error' };
       }

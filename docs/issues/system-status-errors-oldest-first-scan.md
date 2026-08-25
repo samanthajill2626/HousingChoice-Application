@@ -32,8 +32,12 @@ regardless of window size.
 queries (`fields @timestamp, @message | filter <expr> | sort @timestamp desc | limit
 N`) — pino errors on the app group, V8 heap-OOM across app+worker, kernel OOM on the
 system group — via a new bounded `queryInsights` seam method (`StartQuery`, poll
-`GetQueryResults`, best-effort `StopQuery` on timeout; epoch **seconds**; PII-safe
-projection via the unchanged `projectErrorEvent`; source-synthesized OOM labels).
+`GetQueryResults`, best-effort `StopQuery` on timeout; epoch **seconds**; the
+then-PII-safe projection via the unchanged `projectErrorEvent`;
+source-synthesized OOM labels). NOTE (2026-08-24): the PII-safe half of that is
+retired - `error-surface-detail` widened `projectErrorEvent` for this admin-only,
+server-enforced panel by deliberate human decision, so a row may now carry
+contact PII; credentials stay out via the detail path's `err` allowlist.
 The oldest-first `scanFiltered` / `filterErrorEvents` / `filterEventsByPattern` and
 their `FilterLogEvents` OOM patterns were removed. Insights needs IAM the role lacked
 (`logs:StartQuery` scoped to `/hc/<env>/*`; `logs:GetQueryResults` + `logs:StopQuery`

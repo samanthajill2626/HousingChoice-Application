@@ -117,7 +117,7 @@ export function installProcessErrorHandlers(
   };
 
   process.on('uncaughtException', (err) => {
-    withFallback(() => log.fatal({ err }, 'uncaughtException — exiting'));
+    withFallback(() => log.fatal({ err }, 'uncaughtException - exiting'));
     // Flush pino's buffer before exiting; fall back to a hard exit if the
     // flush callback never fires.
     const forceExit = setTimeout(() => process.exit(1), 2000);
@@ -133,36 +133,69 @@ export function installProcessErrorHandlers(
 }
 
 /**
+ * A STABLE, low-cardinality route label for a log message.
+ *
+ * DELIBERATELY NOT `req.path`: three routes mount a raw E.164 as a path segment
+ * (routes/contacts.ts `/:contactId/phones/:phone`, routes/relayGroups.ts
+ * `/conversations/:conversationId/members/:phone`), so a concrete path would put
+ * a tenant's phone number into `msg` - a field operators are taught to grep and
+ * that must stay groupable. `path` remains a structured FIELD on the line.
+ *
+ * `req.route.path` alone is MOUNT-RELATIVE, so it is prefixed with `req.baseUrl`.
+ * `req.route` is unset for middleware, body-parser and URIError failures, which
+ * take the literal `(unrouted)` token.
+ *
+ * INVARIANT THE baseUrl HALF RESTS ON: every router in app/src mounts on a
+ * LITERAL prefix (swept 2026-08-25: zero parameterised mounts). Express sets
+ * `baseUrl` to the matched prefix with ACTUAL VALUES SUBSTITUTED, so a router
+ * mounted at, say, `/:contactId/phones` would put the concrete id straight back
+ * into `msg` - the very outcome the paragraph above refuses. Keep mounts
+ * literal, or template `req.baseUrl` here before a parameterised one lands.
+ */
+function routeLabel(req: { baseUrl?: string; route?: { path?: string } }): string {
+  const path = req.route?.path;
+  if (typeof path !== 'string' || path.length === 0) return '(unrouted)';
+  return `${req.baseUrl ?? ''}${path}`;
+}
+
+/**
  * Express error-handling middleware (mounted LAST). Logs the error with full
- * stack — the pino mixin attaches the request's correlation context — and
+ * stack - the pino mixin attaches the request's correlation context - and
  * responds 500 JSON. If headers were already sent, delegates to Express's
  * default handler.
+ *
+ * Each of the three branches names the METHOD and the ROUTE TEMPLATE in its
+ * message, and the three messages are DISTINCT, so a reader of the error panel
+ * can tell which request failed and which branch produced the line.
  */
 export function createExpressErrorHandler(log: Logger = defaultLogger): ErrorRequestHandler {
   return (err, req, res, next) => {
     if (res.headersSent) {
       log.error(
+        // Merge reconcile (log-hygiene x error-surface): main's branch-distinct
+        // msg with the ROUTE TEMPLATE (routeLabel never carries a raw path) +
+        // this branch's masked raw-path field.
         { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
-        'unhandled error while handling request',
+        `unhandled error after response started: ${req.method} ${routeLabel(req)}`,
       );
       next(err);
       return;
     }
     // A malformed %-escape in the URL path/params makes Express's route matcher
     // throw URIError (decodeURIComponent) BEFORE any handler runs. That is a
-    // client error (a bad request), NOT a server fault — respond 400 and WARN
+    // client error (a bad request), NOT a server fault - respond 400 and WARN
     // (not ERROR), so it never trips the hc-<env>-error-logs alarm.
     if (err instanceof URIError) {
       log.warn(
         { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
-        'malformed URI in request — rejected as 400',
+        `malformed URI in request - rejected as 400: ${req.method} ${routeLabel(req)}`,
       );
       res.status(400).json({ error: 'bad request' });
       return;
     }
     log.error(
       { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
-      'unhandled error while handling request',
+      `unhandled error while handling request: ${req.method} ${routeLabel(req)}`,
     );
     res.status(500).json({ error: 'internal server error' });
   };

@@ -350,7 +350,7 @@ describe('checked-in background policy', () => {
 
   it('is source-fingerprinted from every timer and SSE reader and excludes the sending poll', () => {
     expect(BACKGROUND_REFRESH_GETS.map((row) => row.sourceFingerprint)).toEqual([
-      'dashboard/src/routes/settings/useSystemStatus.ts:124-132',
+      'dashboard/src/routes/settings/useSystemStatus.ts:133-141',
       'dashboard/src/routes/tours/RemindersPanel.tsx:188-208',
       'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
       'dashboard/src/app/UnreadContext.tsx:48,168-292',

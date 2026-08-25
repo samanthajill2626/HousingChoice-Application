@@ -692,15 +692,16 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       // request URL and query params - which now include the property ZIP
       // (InPostalCode). Pino's default err serializer copies those verbatim, so
       // that object must NEVER escape this call: the ZIP would land in
-      // CloudWatch through 'job failed'. Rebuild a plain Error carrying the
-      // message plus, at most, a code/status - and deliberately NO `cause` and
-      // no reference to the original, so nothing downstream can walk back to
-      // the params. (Only the SEARCH is sanitized here. The purchase path's
-      // pre-existing LOG exposure is now closed structurally instead: the pino
-      // serializer in lib/logSerializers.ts allowlists `instanceof Error`
-      // values, so config/request/response cannot ride any wired log key. What
-      // remains of the class - phones and other identifiers travelling in URL
-      // PATHS - is tracked in docs/issues/phone-in-url-paths-structural.md.)
+      // CloudWatch through 'job failed: <jobName>'. Rebuild a plain Error
+      // carrying the message plus, at most, a code/status - and deliberately NO
+      // `cause` and no reference to the original, so nothing downstream can
+      // walk back to the params. (Only the SEARCH is sanitized here. The
+      // purchase path's pre-existing LOG exposure is now closed structurally
+      // instead: the pino serializer in lib/logSerializers.ts allowlists
+      // `instanceof Error` values, so config/request/response cannot ride any
+      // wired log key. What remains of the class - phones and other identifiers
+      // travelling in URL PATHS - is tracked in
+      // docs/issues/phone-in-url-paths-structural.md.)
       const original = err as { message?: unknown; code?: unknown; status?: unknown };
       const detail = typeof original.message === 'string' ? original.message : String(err);
       const sanitized: Error & { code?: string | number; status?: number } = new Error(

@@ -334,18 +334,33 @@ export interface SystemAlarm {
   stateUpdatedAt: string;
 }
 
-/** GET /api/system/errors → one error event (PII-safe projection ONLY). */
+/** Mirrors the backend ErrorSource union - all four values. */
+export type SystemErrorSource = 'app' | 'worker' | 'system' | 'unknown';
+
+/**
+ * GET /api/system/errors -> one error event. The panel is ADMIN-ONLY, enforced
+ * SERVER-side, and a row MAY carry contact PII or host data by the deliberate
+ * 2026-08-24 decision: this projection is a DISPLAY control, not a redaction
+ * boundary. Credentials are excluded by the detail path's `err` allowlist.
+ */
 export interface SystemErrorEvent {
-  /** ISO 8601 of the log event. */
   timestamp: string;
-  /** pino numeric level (≥ 50 = error/fatal). */
   level: number;
-  /** The log's short message — never a body/PII payload. */
   message: string;
-  /** The correlation id, or null when the event carried none. */
+  messageTruncated: boolean;
   correlationId: string | null;
-  /** The provider error code (e.g. Twilio "30034"), when the event carried one. */
   errorCode?: string | null;
+  jobName?: string | null;
+  event?: string | null;
+  errType?: string | null;
+  errMessage?: string | null;
+  errMessageTruncated: boolean;
+  requestId?: string | null;
+  pollRunId?: string | null;
+  /** REQUIRED: every row has one. An optional field would add a fifth state. */
+  source: SystemErrorSource;
+  /** REQUIRED: the opaque log-event pointer. Row key and detail handle. */
+  ref: string;
 }
 
 /** GET /api/system/alarms response — degrades to { available: false, reason }. */
@@ -360,7 +375,51 @@ export interface SystemErrorsResult {
   available: boolean;
   events?: SystemErrorEvent[];
   reason?: string;
+  /**
+   * Independent query sources that FAILED while others succeeded. Present only
+   * when the list is incomplete, so the panel can say rows are missing instead
+   * of showing a short list that looks whole.
+   */
+  partialSources?: string[];
 }
+
+/** GET /api/system/errors/detail - the complete log record behind one row. */
+export interface SystemLogRecord {
+  fields: Record<string, string>;
+  rawText?: string;
+  rawTextTruncated?: boolean;
+  responseTruncated: boolean;
+  /** How many fields the server dropped to fit its byte bound; absent when none. */
+  droppedFields?: number;
+  logGroup: string;
+}
+
+/** GET /api/system/trace - one line of the merged, ascending trace timeline. */
+export interface SystemTraceLine {
+  timestamp: string;
+  level: number;
+  message: string;
+  source: SystemErrorSource;
+  /** REQUIRED: the log-event pointer. The anchor is marked by THIS, not by
+   *  timestamp - two lines can share a millisecond and only one is the anchor. */
+  ref: string;
+  method?: string | null;
+  path?: string | null;
+  statusCode?: number | null;
+  durationMs?: number | null;
+  jobName?: string | null;
+  jobId?: string | null;
+  hopCount?: number | null;
+}
+
+/** DISCRIMINATED on `available` so the component narrows. */
+export type SystemErrorDetailResult =
+  | { available: true; record: SystemLogRecord }
+  | { available: false; reason: string };
+
+export type SystemTraceResult =
+  | { available: true; lines: SystemTraceLine[]; truncatedBefore: boolean; truncatedAfter: boolean }
+  | { available: false; reason: string };
 
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at

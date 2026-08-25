@@ -1,13 +1,27 @@
-// RecentErrors — recent error events (doc §6). A labeled window selector (1h /
-// 24h / 7d, default 24h) + a manual ↻ button drive a CloudWatch Logs read; each
-// event renders its timestamp, level, short message, and correlationId — the
-// PII-SAFE projection ONLY (never bodies/numbers/names/emails). On the local/
-// hermetic stack (no AWS) the server returns { available: false } → the degraded
-// notice "Available in deployed environments." An empty result is a friendly
-// "no recent errors" state.
+// RecentErrors - recent error events (doc section 6). A labeled window selector
+// (1h / 24h / 7d, default 24h) plus a manual Refresh button drive a CloudWatch
+// Logs read. Each row renders its timestamp, level, source (app / worker / host
+// / unknown), the job or event name, the error type and code, the short message
+// and the failing error's own message, and correlationId - with any truncation
+// marked in TEXT. Two per-row controls go deeper: "Show all" expands the
+// COMPLETE log record behind that row (GetLogRecord, via /errors/detail), and
+// "Trace" pivots to the surrounding lines sharing the row's requestId,
+// pollRunId or correlationId (via /trace).
+//
+// PII (HUMAN DECISION 2026-08-24): this panel is ADMIN-ONLY, enforced
+// SERVER-side, and what it renders MAY include contact PII - phone numbers,
+// names, message text - and host operational data. That is deliberate: everyone
+// who can reach it already has access to the underlying logs. CREDENTIALS are
+// the exclusion, dropped server-side by the detail route's `err` allowlist.
+//
+// On the local/hermetic stack (no AWS) the server returns { available: false }
+// and the panel shows the degraded notice "Available in deployed
+// environments." - with NO rows, so neither row control exists there. An empty
+// result is a friendly "no recent errors" state.
 //
 // A11y: a real heading, a <label>ed <select> for the window, an accessibly-named
-// refresh button, role="alert" only on a true load error.
+// refresh button, aria-expanded on the detail toggle, role="alert" only on a
+// true load error.
 import { useState } from 'react';
 import { useErrorDetail, useSystemErrors, type ErrorWindow } from './useSystemStatus.js';
 import { ErrorTrace } from './ErrorTrace.js';

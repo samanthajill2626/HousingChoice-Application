@@ -2094,9 +2094,13 @@ export function getSystemAlarms(signal?: AbortSignal): Promise<SystemAlarmsResul
 }
 
 /**
- * GET /api/system/errors?since=&warnings= — recent error events (PII-safe) or
+ * GET /api/system/errors?since=&warnings= - recent error events or
  * { available:false, reason }. `includeWarnings` opts into the level≥40 firehose;
  * Twilio delivery failures show either way.
+ *
+ * ADMIN-ONLY, enforced SERVER-side; a row MAY carry contact PII or host data by
+ * the deliberate 2026-08-24 decision. Credentials are excluded by the detail
+ * path's `err` allowlist.
  */
 export function getSystemErrors(
   since: '1h' | '24h' | '7d',

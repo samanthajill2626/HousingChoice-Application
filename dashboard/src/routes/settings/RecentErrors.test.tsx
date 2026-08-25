@@ -1,8 +1,11 @@
 // RecentErrors tests — recent error events (doc §6). A labeled window selector
-// (1h/24h/7d, default 24h) drives the query; available:true renders the PII-SAFE
-// projection ONLY (timestamp + level + message + correlationId); an empty list is
-// a friendly empty state; available:false renders the degraded notice. Mocks
-// getSystemErrors.
+// (1h/24h/7d, default 24h) drives the query; available:true renders the widened
+// row (timestamp, level, source, job/event, error type + code, message,
+// errMessage, correlationId) plus its "Show all" record expander and "Trace"
+// pivot; an empty list is a friendly empty state; available:false renders the
+// degraded notice. The panel is admin-only and a row MAY carry PII (deliberate,
+// 2026-08-24), so nothing here asserts a redaction. Mocks getSystemErrors,
+// getSystemErrorDetail and getSystemTrace.
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,7 +82,7 @@ describe('RecentErrors — window selector', () => {
   });
 });
 
-describe('RecentErrors — available:true rendering (PII-safe)', () => {
+describe('RecentErrors - available:true rendering', () => {
   it('renders timestamp + level + message + correlationId ONLY', async () => {
     getSystemErrors.mockResolvedValue(
       available([

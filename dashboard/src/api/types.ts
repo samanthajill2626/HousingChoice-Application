@@ -334,7 +334,12 @@ export interface SystemAlarm {
 /** Mirrors the backend ErrorSource union - all four values. */
 export type SystemErrorSource = 'app' | 'worker' | 'system' | 'unknown';
 
-/** GET /api/system/errors → one error event (PII-safe projection ONLY). */
+/**
+ * GET /api/system/errors -> one error event. The panel is ADMIN-ONLY, enforced
+ * SERVER-side, and a row MAY carry contact PII or host data by the deliberate
+ * 2026-08-24 decision: this projection is a DISPLAY control, not a redaction
+ * boundary. Credentials are excluded by the detail path's `err` allowlist.
+ */
 export interface SystemErrorEvent {
   timestamp: string;
   level: number;

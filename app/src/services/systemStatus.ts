@@ -1,9 +1,13 @@
 // systemStatusService — the read model behind the admin-only Settings → System
-// Status panel (M1.4, doc §6). Three reads, scoped to the env the app runs in:
+// Status panel (M1.4, doc section 6). FIVE reads, all scoped to this env:
 //
 //   getFlags()         go-live readiness from runtime config — NO AWS call
 //   getAlarms()        CloudWatch DescribeAlarms (prefix hc-<env>-), ALARM-first
 //   getErrors(window)  CloudWatch Logs Insights (newest-first, ≤25)
+//   getErrorDetail(ref)       CloudWatch GetLogRecord - the COMPLETE record
+//                             behind one row; the env scope check lives HERE
+//   getTrace(kind, id, atMs)  Logs Insights x2 - the lines around one failure,
+//                             merged ascending
 //
 // GRACEFUL LOCAL DEGRADATION: the alarms/errors reads short-circuit to
 // { available: false, reason: 'unavailable_local' } WITHOUT an SDK call when
@@ -18,8 +22,14 @@
 // flyers and send from, so an admin can see what the app is configured to use.
 // It is omitted when unconfigured and is never logged. A founder cell, a
 // tenant cell, or any other person's number still never appears here.
-// Errors are projected to message + correlationId (+
-// timestamp/level) by the adapter; this service logs counts/reasons only.
+// The three CloudWatch reads are a DIFFERENT posture (doc section 2, HUMAN
+// DECISION 2026-08-24): this panel is ADMIN-ONLY, enforced SERVER-side by
+// requireRole('admin') on every /api/system route, so getErrors,
+// getErrorDetail and getTrace MAY hand back contact PII - phone numbers,
+// names, message text - and host operational data. That is deliberate; the
+// projection is a display control, not a storage control. CREDENTIALS are the
+// exclusion: the detail path admits only the `err` keys the adapter's
+// ERR_ALLOWLIST names. This service itself still logs counts and reasons only.
 import {
   classifyCloudWatchError,
   createCloudWatchClient,

@@ -1,17 +1,25 @@
 // CloudWatchClient seam — the ONLY place the CloudWatch + CloudWatch Logs SDKs
-// are imported (adapter rule, mirroring mediaStore). It exposes exactly the two
+// are imported (adapter rule, mirroring mediaStore). It exposes exactly the
 // narrow reads the System Status service needs (M1.4):
 //
 //   describeAlarms(prefix)                           → DescribeAlarms (AlarmNamePrefix)
 //   queryInsights(groups, filter, sinceMs, limit)    → Logs Insights (StartQuery → poll)
+//   getLogRecord(ref)                                -> GetLogRecord (one @ptr)
+//   queryTrace(groups, kind, id, atMs)               -> Logs Insights x2 (before + after)
 //
 // The seam is INJECTABLE into the service so tests pass a fake/throwing client
 // and never resolve AWS credentials or hit the network. The clients are
 // constructed with region: config.awsRegion (instance-role creds in AWS).
 //
-// PII (doc §9): the error projection is PII-SAFE — timestamp, level, the short
-// message (`msg`), and correlationId ONLY. Bodies, phone numbers, names,
-// emails, and any other log fields are NEVER projected out of a log event.
+// PII (doc section 9; HUMAN DECISION 2026-08-24): these reads are ADMIN-ONLY,
+// enforced SERVER-side (createSystemRouter puts requireRole('admin') on every
+// /api/system route), and they MAY carry contact PII - phone numbers, names,
+// message text - plus host operational data. That is deliberate: everyone who
+// can reach this panel already has access to the underlying log data, so the
+// projection is a DISPLAY control, not a storage control. CREDENTIALS are the
+// one exclusion: the detail path admits only the keys its ERR_ALLOWLIST names
+// (below), so a vendor SDK error nest cannot carry an auth header or a signed
+// URL out through it.
 import {
   CloudWatchClient,
   DescribeAlarmsCommand,

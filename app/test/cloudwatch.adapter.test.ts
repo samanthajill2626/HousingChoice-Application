@@ -1,12 +1,24 @@
 // M1.4 System Status adapter (adapters/cloudwatch.ts) — the ONLY place the
-// CloudWatch + CloudWatch Logs SDKs are imported. Exercises both narrow reads
+// CloudWatch + CloudWatch Logs SDKs are imported. Exercises every narrow read
 // against INJECTED fake SDK clients (no AWS, no creds, no network):
 //
 //   describeAlarms(prefix)   DescribeAlarms → AlarmView mapping (state/name/ISO,
 //                            AlarmNamePrefix passed straight through)
-//   queryInsights(...)       StartQuery → poll GetQueryResults → PII-SAFE projection
-//                            (timestamp, level, message, correlationId ONLY),
-//                            newest-first (Insights yields newest-first natively)
+//   queryInsights(...)       StartQuery -> poll GetQueryResults -> the WIDENED
+//                            list projection (timestamp, level, source, ref,
+//                            job/event, err type + message, request/poll ids,
+//                            correlationId), newest-first (Insights yields
+//                            newest-first natively). The LIST path still never
+//                            surfaces RAW log text: an unparseable line
+//                            degrades to '(unparseable log line)'.
+//   getLogRecord(ref)        GetLogRecord -> the COMPLETE record behind ONE row,
+//                            `err` keys filtered by ERR_ALLOWLIST (credentials
+//                            out) and the response byte-bounded. This path DOES
+//                            hand back raw text for a non-JSON line, and MAY
+//                            carry contact PII - deliberate, admin-only, per the
+//                            2026-08-24 decision.
+//   queryTrace(...)          two opposite-sorted Insights queries in parallel ->
+//                            the lines around one failure, merged ascending.
 //
 // The fakes implement `.send(command)` and inspect the command's `input` — so we
 // assert the exact SDK request the adapter builds, and feed back canned SDK

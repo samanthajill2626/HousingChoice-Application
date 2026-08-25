@@ -17,7 +17,13 @@
 // and carry no CONTACT's phone number; the ONE phone number they do carry is
 // deliberate - our OWN business number (BUSINESS_PHONE_NUMBER), which is
 // printed on public flyers, omitted when unconfigured, and never logged here.
-// The errors projection is message + correlationId (+ timestamp/level) only.
+// What these routes RETURN is a separate question (doc section 2, HUMAN
+// DECISION 2026-08-24): every route here is ADMIN-ONLY, enforced SERVER-side,
+// and the /errors, /errors/detail and /trace responses MAY carry contact PII -
+// phone numbers, names, message text - plus host operational data. That is
+// deliberate, because an admin already has access to the underlying logs.
+// CREDENTIALS are the one exclusion, enforced by the detail path's `err`
+// allowlist in the adapter.
 import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -62,8 +68,9 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
     res.json({ available: false, reason: result.reason });
   });
 
-  // GET /api/system/errors?since=1h|24h|7d — recent error events (PII-safe) or a
-  // degraded notice. Default 24h; an explicitly-invalid `since` is a 400.
+  // GET /api/system/errors?since=1h|24h|7d - recent error events (admin-only;
+  // a row may carry PII) or a degraded notice. Default 24h; an
+  // explicitly-invalid `since` is a 400.
   router.get('/errors', async (req, res) => {
     const rawSince = req.query['since'];
     let window: '1h' | '24h' | '7d' = '24h';

@@ -697,11 +697,11 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       // request URL and query params - which now include the property ZIP
       // (InPostalCode). Pino's default err serializer copies those verbatim, so
       // that object must NEVER escape this call: the ZIP would land in
-      // CloudWatch through 'job failed'. Rebuild a plain Error carrying the
-      // message plus, at most, a code/status - and deliberately NO `cause` and
-      // no reference to the original, so nothing downstream can walk back to
-      // the params. (Only the SEARCH is sanitized here; the purchase path's
-      // pre-existing exposure stays tracked in
+      // CloudWatch through 'job failed: <jobName>'. Rebuild a plain Error
+      // carrying the message plus, at most, a code/status - and deliberately no
+      // `cause` and no reference to the original, so nothing downstream can
+      // walk back to the params. (Only the SEARCH is sanitized here; the
+      // purchase path's pre-existing exposure stays tracked in
       // docs/issues/telemetry-phone-in-url-pii.md.)
       const original = err as { message?: unknown; code?: unknown; status?: unknown };
       const detail = typeof original.message === 'string' ? original.message : String(err);

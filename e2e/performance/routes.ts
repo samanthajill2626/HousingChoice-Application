@@ -687,7 +687,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/templates': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62' },
     '/settings/notifications': { base: 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100' },
     '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176' },
-    '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:77-132' },
+    '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:86-141' },
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
     '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
     '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1229-1240; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
@@ -769,7 +769,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     unmatched_email_probe: 'dashboard/src/routes/email/UnmatchedRow.tsx:98-116; dashboard/src/routes/email/useUnmatchedEmail.ts:181-195',
   } as const),
   background: Object.freeze({
-    systemAlarms: 'dashboard/src/routes/settings/useSystemStatus.ts:124-132',
+    systemAlarms: 'dashboard/src/routes/settings/useSystemStatus.ts:133-141',
     tourReminders: 'dashboard/src/routes/tours/RemindersPanel.tsx:188-208',
     placementNudges: 'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
     unreadShell: 'dashboard/src/app/UnreadContext.tsx:48,168-292',

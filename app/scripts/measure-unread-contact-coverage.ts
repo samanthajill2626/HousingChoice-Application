@@ -31,6 +31,7 @@ import pino from 'pino';
 
 import { iterateUnreadConversations } from '../src/lib/unreadFeed.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
+import { GROUP_DETECTION_ORIGIN } from '../src/services/groupMembers.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -577,8 +578,122 @@ async function auditDenorm(): Promise<void> {
   );
 }
 
+/**
+ * `--audit-triage-partition` mode. Prices the read the Unknown-tab redesign
+ * proposes, which nothing in this branch measured before it was proposed.
+ *
+ * The design leaned on the repo's own comment - "(type=unknown,
+ * status=needs_review) IS the human triage queue" - and treated it as the
+ * operational reality. The one existing consumer says otherwise. `today.ts`
+ * reads this exact partition and needed a bounded TEN-PAGE sequential fill
+ * loop, an origin exclusion, a hard result cap, a status re-check and a
+ * truncation WARN to survive it, because the partition is "thick with excluded
+ * rows" ahead of the real unknowns - and its failure mode was a short block
+ * reading as "nothing needs triage".
+ *
+ * So the question is not "how many untriaged contacts are there" but "how much
+ * of this partition must be walked to find them, and what is in the way".
+ *
+ * Read-only. Counts only, no PII. `Limit` is applied at the index BEFORE the
+ * origin FilterExpression, which is exactly why a page can come back short -
+ * this measures that directly rather than assuming it away.
+ */
+async function auditTriagePartition(): Promise<void> {
+  const PAGE = 100;
+  const MAX_PAGES = 10; // today.ts's TRIAGE_MAX_PAGES - the precedent's budget.
+  let queries = 0;
+  let rawRows = 0;
+  let statusMismatch = 0;
+  let deletedSeen = 0;
+  let cursor: Record<string, unknown> | undefined;
+  let exhausted = false;
+
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const read = await contacts.listByType('unknown', {
+      status: 'needs_review',
+      limit: PAGE,
+      ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
+    });
+    queries += 1;
+    rawRows += read.items.length;
+    for (const c of read.items) {
+      if ((c as { deleted_at?: unknown }).deleted_at !== undefined) deletedSeen += 1;
+      if (c.status !== 'needs_review') statusMismatch += 1;
+    }
+    cursor = read.lastEvaluatedKey;
+    if (cursor === undefined) {
+      exhausted = true;
+      break;
+    }
+  }
+
+  // The same read the precedent actually issues - with the origin exclusion -
+  // so the two numbers can be compared. The gap between them IS the pollution.
+  let filteredRows = 0;
+  let filteredQueries = 0;
+  let fcursor: Record<string, unknown> | undefined;
+  let filteredExhausted = false;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const read = await contacts.listByType('unknown', {
+      status: 'needs_review',
+      limit: PAGE,
+      excludeOrigin: GROUP_DETECTION_ORIGIN,
+      ...(fcursor === undefined ? {} : { exclusiveStartKey: fcursor }),
+    });
+    filteredQueries += 1;
+    filteredRows += read.items.length;
+    fcursor = read.lastEvaluatedKey;
+    if (fcursor === undefined) {
+      filteredExhausted = true;
+      break;
+    }
+    if (filteredRows >= PAGE) break;
+  }
+
+  console.log(
+    [
+      '',
+      'Contacts triage partition - what the redesign proposes to read',
+      '=============================================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      `  page size ${PAGE}, page budget ${MAX_PAGES} (today.ts's own)`,
+      '',
+      '  UNFILTERED (type=unknown, status=needs_review):',
+      `    Queries issued     ${queries}`,
+      `    rows returned      ${rawRows}`,
+      `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,
+      `    soft-deleted seen  ${deletedSeen}`,
+      `    status mismatch    ${statusMismatch}  (should be 0 - the range key is the status)`,
+      '',
+      '  WITH the group-detection origin exclusion (what today.ts actually issues):',
+      `    Queries issued     ${filteredQueries}`,
+      `    rows returned      ${filteredRows}`,
+      `    ${filteredExhausted ? 'partition EXHAUSTED within budget' : 'NOT exhausted - the fill loop would still be walking'}`,
+      '',
+      `  POLLUTION            ${rawRows - filteredRows} of ${rawRows} rows are excluded-origin stubs`,
+      '',
+      rawRows === 0
+        ? '  VERDICT  EMPTY partition. The redesign has nothing to read here yet - which is itself the answer, and not a good one.'
+        : filteredExhausted && filteredQueries <= 2
+          ? '  VERDICT  CHEAP. The partition is small and clean enough to read directly. The redesign cost claim survives.'
+          : '  VERDICT  NOT CHEAP. This partition needs the same fill loop, exclusion and truncation warning today.ts already carries. Any design that calls it "one Query per page" is wrong.',
+      '',
+      '  Limit is applied at the INDEX before the origin FilterExpression, so a',
+      '  page can come back short with rows still behind it. That is the mechanism',
+      '  behind the precedent silently rendering "nothing needs triage".',
+      '',
+    ].join('\n'),
+  );
+}
+
 if (argv.includes('--audit-index')) {
   await auditIndex();
+  process.exit(0);
+}
+
+if (argv.includes('--audit-triage-partition')) {
+  await auditTriagePartition();
   process.exit(0);
 }
 

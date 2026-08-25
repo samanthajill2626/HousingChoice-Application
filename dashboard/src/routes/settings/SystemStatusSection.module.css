@@ -328,6 +328,44 @@
   cursor: pointer;
 }
 
+/* --- ErrorTrace ---------------------------------------------------------- */
+/* The merged correlation timeline for one error row: an ordered list, one entry
+ * per log line, oldest first. The anchor - the failure the operator clicked -
+ * carries the TEXT "this failure" as well as this accent, because status is
+ * never conveyed by colour alone here. */
+.traceList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.traceLine,
+.traceAnchor {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+
+.traceLine {
+  background: var(--c-surface-2);
+}
+
+.traceAnchor {
+  background: var(--c-evt-amber-bg);
+  border-left-color: var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+
 /* Visually-hidden polite status line — announces alarm-state changes to AT on
  * each successful (auto-)refresh without showing visually or stealing focus. */
 .srOnly {

@@ -56,14 +56,23 @@ export function ErrorTrace({ kind, id, at, anchorRef }: ErrorTraceProps): React.
         <p className={styles.truncated}>Earlier lines were cut off (limit reached).</p>
       ) : null}
       <ol className={styles.traceList}>
-        {result.lines.map((l: SystemTraceLine) => (
-          <li key={l.ref} className={l.ref === anchorRef ? styles.traceAnchor : styles.traceLine}>
-            <span className={styles.errorWhen}>{l.timestamp}</span>
-            <span className={styles.errorChip}>{l.source}</span>
-            <span>{l.message}</span>
-            {l.ref === anchorRef ? <span className={styles.errorChip}>this failure</span> : null}
-          </li>
-        ))}
+        {result.lines.map((l: SystemTraceLine, i: number) => {
+          // ref (the log-event pointer) is the anchor identity, but a row with no
+          // @ptr cell carries '' - so an unguarded compare would mark EVERY line
+          // "this failure" whenever the anchor's own ref is also '', and a bare
+          // ref key would collapse the whole list onto one key. The index keeps
+          // the key unique by construction; the emptiness guard keeps the marker
+          // honest. Same asymmetry the sibling row list guards in RecentErrors.
+          const isAnchor = l.ref !== '' && l.ref === anchorRef;
+          return (
+            <li key={`${l.ref}|${i}`} className={isAnchor ? styles.traceAnchor : styles.traceLine}>
+              <span className={styles.errorWhen}>{l.timestamp}</span>
+              <span className={styles.errorChip}>{l.source}</span>
+              <span>{l.message}</span>
+              {isAnchor ? <span className={styles.errorChip}>this failure</span> : null}
+            </li>
+          );
+        })}
       </ol>
       {result.truncatedAfter ? (
         <p className={styles.truncated}>Later lines were cut off (limit reached).</p>

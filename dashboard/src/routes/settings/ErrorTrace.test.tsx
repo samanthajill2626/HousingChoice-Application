@@ -111,9 +111,33 @@ describe('ErrorTrace', () => {
     expect(items[1]!).not.toHaveTextContent('this failure');
   });
 
+  it('an ABSENT @ptr marks nothing, and every line still gets its own key', async () => {
+    // Degenerate shape: a row with no @ptr cell carries ref '' (traceLine
+    // defaults it), and so can the anchor. An unguarded compare would then call
+    // EVERY line "this failure" - a stronger lie than marking two - and a bare
+    // ref key would collapse the whole list onto one key.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockTrace({
+      available: true,
+      lines: [
+        line('2026-08-24T09:59:59.000Z', 'before', 'app', ''),
+        line(AT, 'the failure', 'worker', ''),
+        line('2026-08-24T10:00:01.000Z', 'after', 'app', ''),
+      ],
+      truncatedBefore: false,
+      truncatedAfter: false,
+    });
+    render(<ErrorTrace kind="requestId" id="r-1" at={AT} anchorRef="" />);
+    expect(await screen.findAllByRole('listitem')).toHaveLength(3);
+    expect(screen.queryAllByText('this failure')).toHaveLength(0);
+    const logged = consoleError.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).not.toMatch(/same key|duplicate/i);
+  });
+
   it('aborts the in-flight query when the trace is hidden before it lands', async () => {
-    // Hiding the trace unmounts this component. The pair of Insights queries
-    // behind it must not outlive the view nobody is waiting on any more.
+    // Hiding the trace unmounts this component, which cancels the browser fetch
+    // so a response nobody will read never lands (the server's two Insights
+    // queries are NOT cancelled by it - nothing plumbs the signal that far).
     getSystemTrace.mockImplementation(() => new Promise(() => {}));
     const { unmount } = render(<ErrorTrace kind="requestId" id="r-1" at={AT} anchorRef={ANCHOR_REF} />);
     await waitFor(() => expect(getSystemTrace).toHaveBeenCalled());

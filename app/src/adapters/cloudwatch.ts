@@ -215,12 +215,24 @@ function isJsonObject(value: string): boolean {
  * Trim `fields` until the serialized response is within the byte bound, and
  * report whether anything was trimmed or dropped.
  *
- * CONVERGES rather than trimming once: a single longest-first pass at 512 chars
- * fits one huge stack, but ~128 surviving fields of 512 bytes each still exceed
- * 64 KiB, which used to return `true` over a payload the bound had not actually
- * bounded (measured: 200 fields x 2000 chars -> 104,291 bytes). So the cap
- * halves and the pass repeats, and if even a one-char cap is not enough (the KEY
- * NAMES alone can overflow) the longest remaining fields are DROPPED.
+ * CONVERGES rather than trimming once: a single pass at 512 chars fits one huge
+ * stack, but ~128 surviving fields of 512 bytes each still exceed 64 KiB, which
+ * used to return `true` over a payload the bound had not actually bounded
+ * (measured: 200 fields x 2000 chars -> 104,291 bytes). So the cap halves and
+ * the pass repeats, and if even a one-char cap is not enough (the KEY NAMES
+ * alone can overflow) the longest-named remaining fields are DROPPED.
+ *
+ * MEASURE ONCE PER PASS, never once per key. `size()` re-serialises the WHOLE
+ * object, so a per-key check costs up to 11N serialisations and is quadratic on
+ * a record whose weight is in its KEY NAMES - where no value exceeds the cap, so
+ * the pass trims nothing and every measurement is waste. MEASURED here on 3000
+ * such fields: 31,231 serialisations and a 16.3s SYNCHRONOUS block of the
+ * single-process server, against 1,240 and 0.5s for the shape below - for a
+ * BYTE-IDENTICAL result. Clipping the whole pass first is order-independent
+ * (each field is clipped to `cap` on its own), which is why longest-first
+ * ordering is no longer needed here; the only cost is that a pass may trim a
+ * little more than the minimum, and `responseTruncated` already says so. The
+ * drop loop measures per DELETION - bounded by actual removals, not key count.
  *
  * MUTATES ITS ARGUMENT on purpose: there is exactly ONE caller (getLogRecord,
  * which built the object and has not handed it out yet), so copying would buy
@@ -230,20 +242,19 @@ function isJsonObject(value: string): boolean {
 function enforceBound(fields: Record<string, string>): boolean {
   const size = (): number => Buffer.byteLength(JSON.stringify(fields), 'utf8');
   if (size() <= RESPONSE_BOUND_BYTES) return false;
-  // Longest-first, so one huge stack is trimmed before many small fields.
-  const longestFirst = (): string[] =>
-    Object.keys(fields).sort((a, b) => fields[b]!.length - fields[a]!.length);
   for (let cap = 512; cap >= 1; cap = Math.floor(cap / 2)) {
-    for (const key of longestFirst()) {
-      if (size() <= RESPONSE_BOUND_BYTES) return true;
+    for (const key of Object.keys(fields)) {
       if (fields[key]!.length > cap) fields[key] = fields[key]!.slice(0, cap);
     }
+    if (size() <= RESPONSE_BOUND_BYTES) return true;
   }
   // Every value is now at most one character and it STILL does not fit, so the
-  // key names are the weight. Drop the longest-named fields until it does.
+  // key names are the weight. Drop the longest-named fields until it does. We
+  // only get here having just measured OVER the bound, so delete first, then
+  // re-measure: emptying the object serialises to "{}" and always fits.
   for (const key of Object.keys(fields).sort((a, b) => b.length - a.length)) {
-    if (size() <= RESPONSE_BOUND_BYTES) return true;
     delete fields[key];
+    if (size() <= RESPONSE_BOUND_BYTES) return true;
   }
   return true;
 }

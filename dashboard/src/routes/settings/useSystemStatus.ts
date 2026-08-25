@@ -326,8 +326,10 @@ export function useErrorTrace(): {
     setResult(null);
     setStatus('ready');
   }, []);
-  // Mount-scoped: hiding a trace unmounts ErrorTrace, and its two Insights
-  // queries should not outlive the view nobody is waiting on any more.
+  // Mount-scoped: hiding a trace unmounts ErrorTrace, so the browser stops
+  // waiting on a response nobody will read. CLIENT-SIDE CANCELLATION ONLY - the
+  // route plumbs no abort signal, so the two Insights queries behind it still
+  // run (and still bill) to completion on the server.
   useEffect(() => () => abortRef.current?.abort(), []);
   return { status, result, load, reset };
 }

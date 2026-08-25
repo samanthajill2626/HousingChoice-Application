@@ -493,7 +493,7 @@ describe('cloudwatch adapter - getLogRecord', () => {
     expect(out.responseTruncated).toBe(false);
   });
 
-  it('trims the longest field first when the response exceeds the byte bound', async () => {
+  it('trims an oversized field to the cap and leaves the small ones whole', async () => {
     const out = await seamFor({
       '@log': `9:${CONFIG.errorLogGroupName}`,
       'err.stack': 'S'.repeat(RESPONSE_BOUND_BYTES + 10),
@@ -514,6 +514,21 @@ describe('cloudwatch adapter - getLogRecord', () => {
     const out = await seamFor(many).getLogRecord('PTR');
     expect(out.responseTruncated).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('DROPS fields when the weight is in the KEY NAMES, not the values', async () => {
+    // The last-resort branch, which the halving passes alone cannot reach: no
+    // value here exceeds even a one-char cap by much, so every pass trims a few
+    // bytes and the record still does not fit - 3000 keys x 40 chars is ~162 KB
+    // of NAMES against a 65,536 bound. Only dropping whole fields closes it.
+    const wide: Record<string, string> = { '@log': `9:${CONFIG.errorLogGroupName}` };
+    for (let i = 0; i < 3000; i++) wide[`f${String(i).padStart(4, '0')}_${'k'.repeat(34)}`] = 'v'.repeat(8);
+    const inputCount = Object.keys(wide).length;
+    const out = await seamFor(wide).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+    // Fields actually LEFT, not merely got shorter - that is the drop loop.
+    expect(Object.keys(out.fields).length).toBeLessThan(inputCount);
   });
 
   it('DROPS a bare err whose value is a JSON object - the whole nest would ride out on one key', async () => {

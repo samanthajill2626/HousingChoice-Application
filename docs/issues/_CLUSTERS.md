@@ -57,24 +57,53 @@ generated artifact.
 > `findByPhones` was never buildable. The collector needs a design decision
 > (denormalize `contactId` onto the conversation item) rather than a sweep.
 
-Both highs are the same walk: the badge resolves one contact per index item
-SCANNED, and the mark-read fan-outs trust a lagging `byParticipantPhone` image.
+> **Re-adjudicated 2026-08-25 against main `@88ac7b36`** - twelve independent
+> read-only agents, one per issue, each briefed without the planner's priors.
+> Result: **6 still-valid, 6 remedy-wrong, 0 already-fixed.** Nothing self-healed;
+> every defect still reproduces. What decayed is the REMEDIES - half the
+> "Suggested fix" sections were wrong, no-ops, or aimed at a path that does not
+> behave the way the issue says. Reports:
+> `W:\tmp\handbacks\c1-readjudication-2026-08-25\`.
+>
+> Two claims below were DISPROVEN and are corrected in this section:
+> the badge and the page-fill loop are DIFFERENT endpoints (`countUnreadRows`
+> makes exactly ONE collect, and its `maxRows` already equals the internal page
+> size), so the fill loop was never "contributor 2" of the badge and sequencing
+> it first would have measured no badge improvement; and the badge's blocking
+> premise - that no `contactId` exists on the conversation item - is false.
+> `participants[].contactId` is written by `contactCapture` before the row is
+> ever indexed, `today.ts` already reads it off this same walk, and
+> `contacts.getManyByIds` shipped 2026-08-21.
+
+The two highs are NOT the same walk. The badge is a read amplification on the
+`byUnread` walk - one contact resolved per index item SCANNED, unbounded to
+2000. The mark-read fan-out is a WRITE path that trusts a lagging
+`byParticipantPhone` image. They share a cluster because they share the unread
+state, not a code path.
+
+**Re-sliced 2026-08-25.** The four issues marked `[gen]` below are not four
+independent riders. They are one tangle in the collect generator's exit and
+flag semantics in `app/src/lib/unreadFeed.ts` - `capped`, `scanExhausted`,
+`truncated`, and the missing `consumedAll`. Three agents independently proposed
+edits to the same few lines, and two found a neighbour's remedy was a no-op or
+unreachable precisely because of that coupling. Build them as ONE slice with a
+single coherent flag contract.
 
 | sev | issue | why it rides along |
 |---|---|---|
-| high | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | anchor - the badge's two amplifications, spec gate on the schema call |
-| high | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - wants `resetUnreadIfUnread` conditional write |
-| med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | contributor 2 of the badge high - **cheapest, biggest win, sequence FIRST** |
-| med | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | same budget/walk-stop logic |
-| med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | the flag the truncation path emits |
+| high | [unread-badge-request-round-trip-cost](./unread-badge-request-round-trip-cost.md) | anchor - one serial `findByPhone` per index item scanned; fix is the `contactId` read-through |
+| med | [mark-read-fanout-stale-gsi-skip](./mark-read-fanout-stale-gsi-skip.md) | anchor - conditional write; `high -> med`, the skip is not permanent (five later events re-drive it) |
+| med | [unread-fill-loop-query-amplification](./unread-fill-loop-query-amplification.md) | `[gen]` - page path only, NOT the badge; both filed remedies disproven |
+| low | [unread-budget-truncation-has-no-forward-path](./unread-budget-truncation-has-no-forward-path.md) | `[gen]` - `med -> low`; the exits are already mutually exclusive |
+| med | [inbox-truncated-flag-two-meanings](./inbox-truncated-flag-two-meanings.md) | `[gen]` - four producers, one boolean, exactly one consumer mis-served |
 | ~~med~~ | ~~[unread-index-integration-coverage-requires-local-dynamo](./unread-index-integration-coverage-requires-local-dynamo.md)~~ | **RESOLVED 2026-08-21** by the `globalSetup` throw - this row was stale when C1 was scoped. C1 is TWELVE open issues, not thirteen |
-| low | [unread-load-more-empty-on-exact-multiple](./unread-load-more-empty-on-exact-multiple.md) | same paging arithmetic |
-| low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | same constants |
-| low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8) |
-| low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing |
-| low | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | same hydrate-every-conversation shape |
-| low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice |
-| low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | same inbox row assembly |
+| low | [unread-load-more-empty-on-exact-multiple](./unread-load-more-empty-on-exact-multiple.md) | `[gen]` - filed remedy is a literal no-op; needs 3 coordinated edits |
+| low | [seen-set-max-equals-max-inbox-limit](./seen-set-max-equals-max-inbox-limit.md) | filed symptom is INVERTED and never reproduced; retitled to the real invariant |
+| low | [unread-deleted-contact-probed-twice-per-page](./unread-deleted-contact-probed-twice-per-page.md) | extra probes in the collector (also C8); carrier must be keyed by `conversationId` |
+| low | [inbox-parselimit-empty-one-row](./inbox-parselimit-empty-one-row.md) | same route's limit parsing; the `aiRuns` line it says to copy has since changed |
+| medium | [inbox-filter-tabs-full-walk](./inbox-filter-tabs-full-walk.md) | `low -> medium` - the last unbounded read on the route; rides the badge's `contactId` fix |
+| low | [inbox-group-truncation-notice-not-reset](./inbox-group-truncation-notice-not-reset.md) | dashboard side of the truncation notice; All/Groups tabs only |
+| low | [inbox-imported-call-outcome-normalization](./inbox-imported-call-outcome-normalization.md) | THREE renderers, not two; one crosses a package boundary, group threads bypass `deriveLatest` |
 
 **Spin-off, DONE** - `feat/contacts-batchget` shipped and merged (`65179d73`,
 2026-08-21); the branch and its worktree are retired.

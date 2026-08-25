@@ -692,8 +692,147 @@ if (argv.includes('--audit-index')) {
   process.exit(0);
 }
 
+/**
+ * `--audit-tab-vs-partition` mode. The ROW-SET DIFF both round-2 reviewers
+ * demanded before the Unknown tab may change its source.
+ *
+ * The tab today keys on contact TYPE alone (`roleFromContact(contact) ===
+ * 'unknown'`). The proposed contact-side read keys on TYPE AND STATUS
+ * (`type=unknown, status=needs_review`). Those are different sets, and the
+ * first real measurement did not reconcile: prod showed a tab upper bound of 8
+ * against a partition of 7 unfiltered / 4 filtered.
+ *
+ * A count comparison cannot settle it - only comparing the actual IDENTITIES
+ * can, because the two sets can differ in BOTH directions at once and still
+ * produce plausible totals. This walks both and diffs them by class.
+ *
+ * Read-only. Counts only, no PII: contact ids are compared in memory and never
+ * printed. Statuses ARE printed, because a status is a schema value rather than
+ * anything about a person, and knowing WHICH status a missed row carries is the
+ * whole point.
+ */
+async function auditTabVsPartition(pageLimit: number): Promise<void> {
+  // 1. Walk the open partition exactly as the pager does, collecting the
+  //    contact ids the tab would show. No page limit here - we want the whole
+  //    set, not the first page, because a row missing from page 3 is still
+  //    missing.
+  const tabContactIds = new Set<string>();
+  const tabStatuses = new Map<string, number>();
+  let contactlessRows = 0;
+  let chunkStartKey: Record<string, unknown> | undefined;
+  const chunkSize = Math.min(100, Math.max(pageLimit, 25));
+  do {
+    const chunk = await conversations.listByLastActivity({
+      status: 'open',
+      limit: chunkSize,
+      ...(chunkStartKey === undefined ? {} : { exclusiveStartKey: chunkStartKey }),
+    });
+    for (const conv of chunk.items) {
+      if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
+      const phone = conv.participant_phone;
+      const email = conv.participant_email;
+      let contact;
+      if (typeof phone === 'string' && phone !== '') contact = await contacts.findByPhone(phone);
+      if (contact === undefined && typeof email === 'string' && email !== '') {
+        contact = await contacts.findByEmail(email);
+      }
+      if (contact === undefined) {
+        if (typeof phone === 'string' && phone !== '') contactlessRows += 1;
+        continue;
+      }
+      const t = contact.type;
+      if (t === 'tenant' || t === 'landlord' || t === 'partner') continue;
+      const id = String(contact.contactId);
+      if (!tabContactIds.has(id)) {
+        tabContactIds.add(id);
+        const st = String(contact.status ?? '(none)');
+        tabStatuses.set(st, (tabStatuses.get(st) ?? 0) + 1);
+      }
+    }
+    chunkStartKey = chunk.lastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (chunkStartKey !== undefined);
+
+  // 2. The partition the redesign proposes, both with and without the origin
+  //    exclusion the existing consumer applies.
+  const collect = async (excludeOrigin: boolean): Promise<Set<string>> => {
+    const out = new Set<string>();
+    let cursor: Record<string, unknown> | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const read = await contacts.listByType('unknown', {
+        status: 'needs_review',
+        limit: 100,
+        ...(excludeOrigin ? { excludeOrigin: GROUP_DETECTION_ORIGIN } : {}),
+        ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
+      });
+      for (const c of read.items) out.add(String(c.contactId));
+      cursor = read.lastEvaluatedKey;
+      if (cursor === undefined) break;
+    }
+    return out;
+  };
+  const partitionAll = await collect(false);
+  const partitionFiltered = await collect(true);
+
+  // 3. Diff by class.
+  const inTabNotPartition: string[] = [];
+  const inTabOnlyExcluded: string[] = [];
+  for (const id of tabContactIds) {
+    if (partitionFiltered.has(id)) continue;
+    if (partitionAll.has(id)) inTabOnlyExcluded.push(id);
+    else inTabNotPartition.push(id);
+  }
+  const inPartitionNotTab = [...partitionFiltered].filter((id) => !tabContactIds.has(id));
+
+  // What statuses do the MISSED rows carry? This is the number that decides
+  // whether narrowing to needs_review is a silent regression.
+  const missedStatuses = new Map<string, number>();
+  if (inTabNotPartition.length > 0) {
+    const found = await contacts.getManyByIds(inTabNotPartition.slice(0, 100));
+    for (const id of inTabNotPartition.slice(0, 100)) {
+      const st = String(found.get(id)?.status ?? '(not found)');
+      missedStatuses.set(st, (missedStatuses.get(st) ?? 0) + 1);
+    }
+  }
+  const fmt = (m: Map<string, number>): string[] =>
+    [...m.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `      ${k.padEnd(20)}${v}`);
+
+  console.log(
+    [
+      '',
+      'Unknown tab vs triage partition - ROW-SET DIFF',
+      '==============================================',
+      `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
+      `  table prefix        ${tablePrefix}`,
+      '',
+      `  tab would show (by contact)   ${tabContactIds.size}`,
+      '    their statuses:',
+      ...fmt(tabStatuses),
+      `  contactless rows (no contact) ${contactlessRows}  <- invisible to ANY contact-side read`,
+      '',
+      `  partition, unfiltered         ${partitionAll.size}`,
+      `  partition, origin-excluded    ${partitionFiltered.size}`,
+      '',
+      '  THE DIFF:',
+      `    in tab, NOT in partition    ${inTabNotPartition.length}  <- would be SILENTLY LOST`,
+      ...(missedStatuses.size > 0 ? ['      by status:', ...fmt(missedStatuses)] : []),
+      `    in tab, excluded by origin  ${inTabOnlyExcluded.length}  <- lost only if the exclusion is copied`,
+      `    in partition, NOT in tab    ${inPartitionNotTab.length}  <- would be NEWLY SHOWN (no open thread?)`,
+      '',
+      inTabNotPartition.length === 0 && contactlessRows === 0
+        ? '  VERDICT  SETS RECONCILE. A contact-side read loses nothing the tab shows today.'
+        : '  VERDICT  SETS DIVERGE. Switching source silently changes what the operator sees. Every row above must be explained before the source changes - a missed triage row is invisible by construction.',
+      '',
+    ].join('\n'),
+  );
+}
+
 if (argv.includes('--audit-triage-partition')) {
   await auditTriagePartition();
+  process.exit(0);
+}
+
+if (argv.includes('--audit-tab-vs-partition')) {
+  await auditTabVsPartition(30);
   process.exit(0);
 }
 

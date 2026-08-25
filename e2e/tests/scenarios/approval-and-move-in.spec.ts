@@ -224,6 +224,7 @@ test('marked deviation - inspection FAILS at Awaiting inspection -> Lost (landlo
   page,
   request,
 }) => {
+  test.slow(); // a deviation branch is barely shorter than the :161 walk - see the note there.
   const flow = new Scenario(page, request);
   const { tenant, unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Failed',
@@ -259,6 +260,7 @@ test('marked deviation — landlord REJECTS the determined rent at Awaiting rent
   page,
   request,
 }) => {
+  test.slow(); // a deviation branch is barely shorter than the :161 walk - see the note there.
   const flow = new Scenario(page, request);
   const { tenant, unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Reject',
@@ -296,6 +298,7 @@ test('marked deviation - a party BACKS OUT mid-window (Awaiting HAP contract) ->
   page,
   request,
 }) => {
+  test.slow(); // a deviation branch is barely shorter than the :161 walk - see the note there.
   const flow = new Scenario(page, request);
   const { unit } = await reachAwaitingAuthorityApproval(flow, { tenant: 'Backout', owner: 'Mid' });
 
@@ -319,6 +322,7 @@ test('LIF non-eligible branch — advances through Complete paperwork with the L
   page,
   request,
 }) => {
+  test.slow(); // a deviation branch is barely shorter than the :161 walk - see the note there.
   const flow = new Scenario(page, request);
   const { unit } = await reachAwaitingAuthorityApproval(flow, { tenant: 'NoLif', owner: 'Plain' });
   // Tenant lifEligible left UNSET → the LIF checklist row is absent and the

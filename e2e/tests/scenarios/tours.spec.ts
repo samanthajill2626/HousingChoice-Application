@@ -94,6 +94,7 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   page,
   request,
 }) => {
+  test.slow(); // the full landlord-led arc: interest -> group -> booked -> reminders -> toured -> exit.
   const flow = new Scenario(page, request);
   const { tenant, owner, ownerId, unit } = await searchingTenantOwnerUnit(flow, {
     tenant: 'Tourist',

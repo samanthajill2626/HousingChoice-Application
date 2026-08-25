@@ -19,6 +19,7 @@ import {
 } from '@aws-sdk/client-cloudwatch';
 import {
   CloudWatchLogsClient,
+  GetLogRecordCommand,
   GetQueryResultsCommand,
   StartQueryCommand,
   StopQueryCommand,
@@ -125,6 +126,81 @@ export interface ErrorEventView {
   ref: string;
 }
 
+/**
+ * The ONLY `err.*` paths that leave this adapter.
+ *
+ * AN ALLOWLIST, NOT A DENYLIST, and the distinction is load-bearing. Write-time
+ * credential redaction (lib/logger.ts) is a BEST-EFFORT PATH LIST - it names
+ * three literal `err.config` paths and no wildcard, so `err.config.url`,
+ * `err.config.params`, `err.config.baseURL` and `err.config.auth` are NOT
+ * redacted at rest. A denylist here would inherit that failure mode and
+ * `err.cause.config.headers.Authorization` would walk straight through it.
+ * An allowlist closes the class by construction, including nests nobody has met.
+ *
+ * `response.status` is kept deliberately: lib/errors.ts reads it as the vendor
+ * discriminator and `status` is one of the three fields in the repo's
+ * adjudicated ErrorSummary allowlist.
+ */
+export const ERR_ALLOWLIST: readonly string[] = [
+  'err.message', 'err.stack', 'err.type', 'err.name', 'err.code', 'err.status', 'err.response.status',
+];
+
+/** Cap for a non-JSON record's raw text; carries its OWN flag. */
+export const RAW_TEXT_CAP = 4000;
+/** Detail response bound in BYTES (Buffer.byteLength, not string length). */
+export const RESPONSE_BOUND_BYTES = 65536;
+
+/** AWS transport metadata - never returned to the client. */
+const DROPPED_PREFIXES = ['@aws.', '@entity.', '@data_'];
+const DROPPED_KEYS = new Set([
+  '@message', '@timestamp', '@logGroupId', '@logStreamId', 'backwardToken', 'forwardToken',
+]);
+
+function isAllowedKey(key: string): boolean {
+  if (key === 'err') return true;                        // scalar err: the message itself
+  if (key.startsWith('err.')) return ERR_ALLOWLIST.includes(key);
+  if (DROPPED_KEYS.has(key)) return false;
+  if (DROPPED_PREFIXES.some((p) => key.startsWith(p))) return false;
+  return true;                                           // app-authored field
+}
+
+/** Trim `fields` until the serialized response is within the byte bound. */
+function enforceBound(fields: Record<string, string>): boolean {
+  if (Buffer.byteLength(JSON.stringify(fields), 'utf8') <= RESPONSE_BOUND_BYTES) return false;
+  // Longest-first, so one huge stack is trimmed before many small fields.
+  const keys = Object.keys(fields).sort((a, b) => fields[b]!.length - fields[a]!.length);
+  for (const key of keys) {
+    if (Buffer.byteLength(JSON.stringify(fields), 'utf8') <= RESPONSE_BOUND_BYTES) break;
+    fields[key] = fields[key]!.slice(0, 512);
+  }
+  return true;
+}
+
+/**
+ * The complete log record behind ONE error row (the DETAIL path).
+ *
+ * ACCESSOR SHAPE: GetLogRecord hands back DOT-FLATTENED keys, so `err.message`
+ * is a literal key here - the opposite of the LIST path, which parses raw
+ * `@message` JSON where `err` is a NESTED object. Never conflate the two.
+ *
+ * `fields` is a STATED key set, not "everything the record had": the
+ * ERR_ALLOWLIST decides the `err.*` subtree, AWS transport metadata is dropped,
+ * and `@message` is never a key (returning it would hand back the very nest the
+ * allowlist just removed).
+ */
+export interface LogRecordView {
+  /** The surviving record keys, values coerced to strings. */
+  fields: Record<string, string>;
+  /** The raw line, present ONLY for a record whose `@message` is not JSON. */
+  rawText?: string;
+  /** True when `rawText` hit RAW_TEXT_CAP and was cut. */
+  rawTextTruncated?: boolean;
+  /** True when `fields` had to be trimmed to fit RESPONSE_BOUND_BYTES. */
+  responseTruncated: boolean;
+  /** The record's normalised log group name - the service's scope check reads it. */
+  logGroup: string;
+}
+
 /** The narrow surface the systemStatus service depends on. */
 export interface CloudWatchClientSeam {
   /** DescribeAlarms filtered by AlarmNamePrefix → mapped alarm views. */
@@ -137,6 +213,13 @@ export interface CloudWatchClientSeam {
    * display projection, not a redaction boundary (see ErrorEventView).
    */
   queryInsights(logGroupNames: string[], filterExpr: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
+  /**
+   * GetLogRecord for one Insights `@ptr` - the complete record behind a single
+   * error row, filtered through ERR_ALLOWLIST and bounded (see LogRecordView).
+   * The pointer is ACCOUNT-scoped and bound to no log group, so the CALLER must
+   * check `logGroup` against the configured groups before returning it.
+   */
+  getLogRecord(ref: string): Promise<LogRecordView>;
 }
 
 /** Map a CloudWatch StateValue to the three-value view enum. */
@@ -380,6 +463,43 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
         // Ignore StopQuery errors — we're already in a degraded path.
       }
       throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
+    },
+
+    async getLogRecord(ref) {
+      const out = await logs.send(new GetLogRecordCommand({ logRecordPointer: ref }));
+      const record = (out.logRecord ?? {}) as Record<string, string>;
+      const atLog = record['@log'] ?? '';
+      // PARSEABILITY, not field count, decides rawText. A JSON record whose err
+      // nests were ALL denied still has zero surviving err fields - returning
+      // its raw line would hand back exactly what the allowlist just removed.
+      const rawMessage = record['@message'] ?? '';
+      let isJson = false;
+      try {
+        const p: unknown = JSON.parse(rawMessage);
+        isJson = typeof p === 'object' && p !== null;
+      } catch {
+        isJson = false;
+      }
+
+      const fields: Record<string, string> = {};
+      for (const [key, value] of Object.entries(record)) {
+        if (!isAllowedKey(key)) continue;
+        fields[key] = String(value);
+      }
+
+      let rawText: string | undefined;
+      let rawTextTruncated = false;
+      if (!isJson && rawMessage.length > 0) {
+        rawTextTruncated = rawMessage.length > RAW_TEXT_CAP;
+        rawText = rawTextTruncated ? rawMessage.slice(0, RAW_TEXT_CAP) : rawMessage;
+      }
+
+      return {
+        fields,
+        ...(rawText !== undefined && { rawText, rawTextTruncated }),
+        responseTruncated: enforceBound(fields),
+        logGroup: normalizeLogGroup(atLog),
+      };
     },
   };
 }

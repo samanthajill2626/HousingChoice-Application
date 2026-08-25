@@ -42,10 +42,19 @@ function fakeSeam(
 ): CloudWatchClientSeam & {
   describeAlarms: ReturnType<typeof vi.fn>;
   queryInsights: ReturnType<typeof vi.fn>;
+  getLogRecord: ReturnType<typeof vi.fn>;
 } {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
     queryInsights: vi.fn(impl.queryInsights ?? (async () => [])),
+    getLogRecord: vi.fn(
+      impl.getLogRecord ??
+        (async () => ({
+          fields: {},
+          responseTruncated: false,
+          logGroup: deployedConfig().errorLogGroupName,
+        })),
+    ),
   };
 }
 

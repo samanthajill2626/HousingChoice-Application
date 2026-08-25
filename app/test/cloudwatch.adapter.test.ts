@@ -13,6 +13,7 @@
 // output to assert the projection.
 import { DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
 import {
+  GetLogRecordCommand,
   GetQueryResultsCommand,
   StartQueryCommand,
   StopQueryCommand,
@@ -25,6 +26,8 @@ import {
   PINO_ERROR_INSIGHTS_FILTER,
   PINO_WARN_INSIGHTS_FILTER,
   projectErrorEvent,
+  RAW_TEXT_CAP,
+  RESPONSE_BOUND_BYTES,
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
@@ -369,5 +372,133 @@ describe('projectErrorEvent - widened projection', () => {
     expect(ev.ref).toBe('PTR1');
     expect(ev.requestId).toBe('r-1');
     expect(ev.pollRunId).toBe('p-1');
+  });
+});
+
+describe('cloudwatch adapter - getLogRecord', () => {
+  const seamFor = (logRecord: Record<string, string>) =>
+    createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: fakeCw({ logRecord }) as never,
+    });
+
+  it('keeps the allowlisted err fields including response.status', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'boom',
+      'err.type': 'RestException',
+      'err.response.status': '404',
+      msg: 'job failed: relay.warm',
+    }).getLogRecord('PTR');
+    expect(out.fields['err.message']).toBe('boom');
+    expect(out.fields['err.response.status']).toBe('404');
+    expect(out.fields['msg']).toBe('job failed: relay.warm');
+  });
+
+  it('drops every other err nest AT ANY DEPTH, including err.cause', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.message': 'boom',
+      'err.config.params': 'To=%2B14045551234',
+      'err.config.url': 'https://api.twilio.com/x',
+      'err.cause.config.headers.Authorization': 'Basic c2lkOnNlY3JldA==',
+    }).getLogRecord('PTR');
+    expect(out.fields['err.config.params']).toBeUndefined();
+    expect(out.fields['err.config.url']).toBeUndefined();
+    expect(out.fields['err.cause.config.headers.Authorization']).toBeUndefined();
+  });
+
+  it('KEEPS a scalar string err - six call sites log err as a message', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      err: 'Insights query failed',
+      msg: 'system status: Logs Insights query failed',
+    }).getLogRecord('PTR');
+    expect(out.fields['err']).toBe('Insights query failed');
+  });
+
+  it('never returns @message or AWS transport metadata for a PARSED record', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@message': '{"msg":"x","err":{"config":{"url":"secret"}}}',
+      '@logGroupId': 'g',
+      backwardToken: 'b/1',
+      forwardToken: 'f/1',
+      msg: 'x',
+    }).getLogRecord('PTR');
+    expect(out.fields['@message']).toBeUndefined();
+    expect(out.fields['@logGroupId']).toBeUndefined();
+    expect(out.fields['backwardToken']).toBeUndefined();
+    expect(out.rawText).toBeUndefined();
+  });
+
+  it('does NOT hand back the raw line when a JSON record had all its err nests denied', async () => {
+    // The record parses and has app fields, but EVERY err.* key was dropped.
+    // Gating rawText on "no app fields" instead of "not parseable" would return
+    // @message here - which still contains the nest the allowlist just removed.
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@message': '{"err":{"config":{"url":"https://api.twilio.com/secret"}}}',
+      'err.config.url': 'https://api.twilio.com/secret',
+    }).getLogRecord('PTR');
+    expect(out.rawText).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain('secret');
+  });
+
+  it('returns capped rawText for a NON-JSON record', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.systemLogGroupName}`,
+      '@message': 'Out of memory: Killed process 123 (node)',
+      '@timestamp': '1787000000000',
+    }).getLogRecord('PTR');
+    expect(out.rawText).toContain('Out of memory');
+    expect(out.rawTextTruncated).toBe(false);
+  });
+
+  it('passes the ref through as the SDK logRecordPointer', async () => {
+    const logs = fakeCw({ logRecord: { '@log': `9:${CONFIG.errorLogGroupName}`, msg: 'x' } });
+    await createCloudWatchClient({
+      config: CONFIG,
+      cloudwatch: fakeCw({}) as never,
+      logs: logs as never,
+    }).getLogRecord('PTR-abc');
+    const sent = logs.send.mock.calls[0]![0] as GetLogRecordCommand;
+    expect(sent).toBeInstanceOf(GetLogRecordCommand);
+    expect(sent.input.logRecordPointer).toBe('PTR-abc');
+  });
+
+  it('normalises @log to the bare group name and passes @logStream through', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      '@logStream': 'app/2026-08-24',
+      '@ingestionTime': '1787000000000',
+      msg: 'x',
+    }).getLogRecord('PTR');
+    expect(out.logGroup).toBe(CONFIG.errorLogGroupName);
+    expect(out.fields['@logStream']).toBe('app/2026-08-24');
+    expect(out.fields['@ingestionTime']).toBe('1787000000000');
+    expect(out.responseTruncated).toBe(false);
+  });
+
+  it('trims the longest field first when the response exceeds the byte bound', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.stack': 'S'.repeat(RESPONSE_BOUND_BYTES + 10),
+      msg: 'small',
+    }).getLogRecord('PTR');
+    expect(out.responseTruncated).toBe(true);
+    expect(out.fields['msg']).toBe('small');
+    expect(out.fields['err.stack']!.length).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(JSON.stringify(out.fields), 'utf8')).toBeLessThanOrEqual(RESPONSE_BOUND_BYTES);
+  });
+
+  it('caps rawText at RAW_TEXT_CAP and flags it', async () => {
+    const out = await seamFor({
+      '@log': `9:${CONFIG.systemLogGroupName}`,
+      '@message': 'x'.repeat(RAW_TEXT_CAP + 50),
+    }).getLogRecord('PTR');
+    expect(out.rawText).toHaveLength(RAW_TEXT_CAP);
+    expect(out.rawTextTruncated).toBe(true);
   });
 });

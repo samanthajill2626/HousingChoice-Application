@@ -1,6 +1,15 @@
 # Inbox unread read path (cluster C1) - design
 
-Status: DRAFT, spec gate not yet taken.
+Status: **SPLIT.** Section 2 (the diagnosis and its fix) SHIPPED on
+`feat/inbox-unread-read-path`. Sections 3 through 7 - the two highs and the
+riders - are DRAFT and have not passed the human's spec gate; they are a
+separate branch's work.
+
+The split was the human's call once the diagnosis landed: the `useInbox` fix is
+self-contained and verified (250/250 on the spec that reproduced at 1-in-38),
+and holding it behind a twelve-issue build would both delay an
+operator-visible fix and produce a diff too large to review well.
+
 Branch: `feat/inbox-unread-read-path`, cut from `main` @5355b7ae.
 Cluster: [`docs/issues/_CLUSTERS.md`](../../issues/_CLUSTERS.md) section C1.
 

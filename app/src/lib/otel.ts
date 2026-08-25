@@ -63,6 +63,24 @@ function activeFamilies(): { old: boolean; stable: boolean } {
   return { old: true, stable: false };
 }
 
+/**
+ * The instrumentation's own getAbsoluteUrl REDACTS the values of these query
+ * parameters (its DEFAULT_REDACTED_QUERY_PARAMS) before writing url
+ * attributes. Hook attributes are assigned LAST, so an unredacted
+ * reconstruction here would silently OVERWRITE that control (adversarial
+ * review, phase 6) - re-apply the same list to everything we rebuild.
+ */
+const SIGNED_QUERY_PARAM_RE = /([?&](?:sig|Signature|AWSAccessKeyId|X-Goog-Signature)=)[^&#]*/g;
+
+function redactSignedQueryParams(text: string): string {
+  return text.replace(SIGNED_QUERY_PARAM_RE, '$1REDACTED');
+}
+
+/** Mask phones AND re-apply the library's signed-query redaction. */
+function maskUrlText(text: string): string {
+  return redactSignedQueryParams(maskPhonesInText(text));
+}
+
 /** startIncomingSpanHook: masked overrides for the SERVER span's URL attributes. */
 export function maskIncomingSpanAttributes(request: unknown): Attributes {
   try {
@@ -73,7 +91,7 @@ export function maskIncomingSpanAttributes(request: unknown): Attributes {
     };
     if (typeof req?.url !== 'string' || req.url.length === 0) return {};
     const families = activeFamilies();
-    const masked = maskPhonesInText(req.url);
+    const masked = maskUrlText(req.url);
     const host = typeof req.headers?.host === 'string' ? req.headers.host : 'localhost';
     const scheme = req.socket?.encrypted === true ? 'https' : 'http';
     const out: Record<string, string> = {};
@@ -100,10 +118,16 @@ export function maskIncomingSpanAttributes(request: unknown): Attributes {
 /** startOutgoingSpanHook: masked overrides for the CLIENT span's URL attributes. */
 export function maskOutgoingSpanAttributes(request: unknown): Attributes {
   try {
-    const req = request as { host?: unknown; hostname?: unknown; path?: unknown; protocol?: unknown };
+    const req = request as {
+      host?: unknown;
+      hostname?: unknown;
+      path?: unknown;
+      protocol?: unknown;
+      port?: unknown;
+    };
     if (typeof req?.path !== 'string' || req.path.length === 0) return {};
     const families = activeFamilies();
-    const path = maskPhonesInText(req.path);
+    const path = maskUrlText(req.path);
     const host =
       typeof req.hostname === 'string' && req.hostname.length > 0
         ? req.hostname
@@ -111,7 +135,12 @@ export function maskOutgoingSpanAttributes(request: unknown): Attributes {
           ? req.host
           : 'unknown';
     const protocol = typeof req.protocol === 'string' ? req.protocol : 'https:';
-    const full = `${protocol}//${host}${path}`;
+    // Preserve a non-default port the way the library's getAbsoluteUrl does -
+    // the reconstruction was silently dropping it from every client span.
+    const rawPort = typeof req.port === 'number' || typeof req.port === 'string' ? String(req.port) : '';
+    const defaultPort = protocol === 'https:' ? '443' : protocol === 'http:' ? '80' : '';
+    const portSuffix = rawPort.length > 0 && rawPort !== defaultPort && !host.includes(':') ? `:${rawPort}` : '';
+    const full = `${protocol}//${host}${portSuffix}${path}`;
     const out: Record<string, string> = {};
     if (families.old) {
       out['http.url'] = full;

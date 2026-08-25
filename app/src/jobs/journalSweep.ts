@@ -189,7 +189,22 @@ export async function runJournalSweep(
       cursor = page.nextCursor;
       if (cursor === undefined) { exhausted = true; break; }
     }
-    await settings.putJournalSweepCursor(exhausted ? undefined : cursor);
+    try {
+      await settings.putJournalSweepCursor(exhausted ? undefined : cursor);
+    } catch (err) {
+      // Best-effort (adversarial review, phase 6): this bare await used to sit
+      // ahead of the recovery loop with no local catch, so ONE throttled
+      // single-item settings write jumped to the run-level catch - zero
+      // contacts recovered, the already-claimed period burned, and the
+      // self-heal there then CLEARED the cursor, discarding this run's scan
+      // progress too. A failed persist costs only cursor advance: tomorrow's
+      // run re-reads the same page (bounded - the same trade the wrap makes),
+      // and the contacts THIS run enumerated still get recovered below.
+      log.warn(
+        { err },
+        'journal sweep: persisting the scan cursor failed (best-effort) - the next run re-reads this page',
+      );
+    }
 
     let calls = 0;
     let budgetExhausted = false;

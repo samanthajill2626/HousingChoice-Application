@@ -106,6 +106,17 @@ that strips `config`/`request`/`response`" - shipped on this same branch as
 paths no longer leak their params through a raw axios error either. See
 [twilio-sdk-error-logs-leak-credentials](./twilio-sdk-error-logs-leak-credentials.md).
 
+Precision on what the mask buys (phase-6 adversarial review): PORTABILITY, not
+de-identification. On the always-phone-bearing routes the sibling path segment
+is the contact/conversation id, so anyone with log access plus contacts-table
+read access recovers the full number in one lookup - the mask stops a raw,
+greppable E.164 sitting at rest in CloudWatch, which is the stated goal, and
+nothing more. Also accepted residual (spec 1.2, operator-approved): a VENDOR
+ERROR MESSAGE that names a phone (e.g. Twilio 21211's "The 'To' number +1...")
+still reaches logs verbatim through `err.message` - the serializer closes the
+credential class structurally, not the phone-in-prose class, consistent with
+the lifted 2026-08-15 gate this file records.
+
 RE-FILED, not fixed: the "Structural (better, more work)" half of the suggested
 fix. Phones still travel in URL PATHS, and masking is a sink-side defense -
 anything that reads a raw path before our sinks (the CDN/load-balancer access-log

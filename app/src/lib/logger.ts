@@ -210,10 +210,14 @@ export function createLogger(opts: CreateLoggerOptions = {}): Logger {
         // casings are listed because pino's redact is CASE-SENSITIVE and axios
         // writes the capitalized header name.
         //
-        // This is defense in depth, not the fix: a call site that can receive a
-        // vendor error must log `summarizeError(err)` (lib/errors.ts) rather
-        // than the error object. Redaction only covers the paths it is told
-        // about, and the next SDK will invent a new one.
+        // This is defense in depth, not the fix. THE FIX IS THE SERIALIZER
+        // (lib/logSerializers.ts, wired below): `{ err }` is now safe at every
+        // call site, and the house rule is err/error/cause/reason as the ONLY
+        // error-carrying keys - the static guard (logCallSiteGuard.test.ts)
+        // enforces it. `summarizeError(err)` remains the OPTIONAL terse form
+        // for outcome lines that want no stack and no vendor message text.
+        // These paths stay as belt-and-suspenders for a serializer regression;
+        // redaction alone covers only the paths it is told about.
         'err.config.headers.Authorization',
         'err.config.headers.authorization',
         'err.config.data',

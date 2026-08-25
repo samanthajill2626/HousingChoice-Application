@@ -207,6 +207,44 @@ describe('span attribute masking hooks', () => {
     expect(maskIncomingSpanAttributes({} as never)).toEqual({});
     expect(maskOutgoingSpanAttributes(undefined as never)).toEqual({});
   });
+
+  it('re-applies the library signed-query redaction the overwrite would otherwise disable', () => {
+    // getAbsoluteUrl REDACTS sig/Signature/AWSAccessKeyId/X-Goog-Signature
+    // values before writing url attributes; hook attributes are assigned LAST,
+    // so an unredacted reconstruction would WIN over the redacted one
+    // (adversarial review, phase 6). The values here are clearly-fake.
+    const attrs = maskOutgoingSpanAttributes({
+      hostname: 'storage.example.com',
+      path: '/obj?X-Goog-Signature=fakesig123&sig=fakesig456&keep=1&AWSAccessKeyId=AKIAFAKE&Signature=fakesig789',
+      protocol: 'https:',
+    } as never) as Record<string, string>;
+    expect(attrs['http.url']).toBe(
+      'https://storage.example.com/obj?X-Goog-Signature=REDACTED&sig=REDACTED&keep=1&AWSAccessKeyId=REDACTED&Signature=REDACTED',
+    );
+    expect(attrs['http.target']).not.toContain('fakesig');
+    const incoming = maskIncomingSpanAttributes({
+      url: '/cb?Signature=fakesig123&phone=%2B14045551234',
+      headers: { host: 'h' },
+    } as never) as Record<string, string>;
+    expect(incoming['http.target']).toBe('/cb?Signature=REDACTED&phone=%2B1...34');
+  });
+
+  it('preserves a non-default outgoing port the way getAbsoluteUrl does', () => {
+    const attrs = maskOutgoingSpanAttributes({
+      hostname: 'localhost',
+      port: 4566,
+      path: '/x',
+      protocol: 'http:',
+    } as never) as Record<string, string>;
+    expect(attrs['http.url']).toBe('http://localhost:4566/x');
+    const defaultPort = maskOutgoingSpanAttributes({
+      hostname: 'api.twilio.com',
+      port: '443',
+      path: '/x',
+      protocol: 'https:',
+    } as never) as Record<string, string>;
+    expect(defaultPort['http.url']).toBe('https://api.twilio.com/x');
+  });
 });
 
 describe('startOtel: disabled mode', () => {

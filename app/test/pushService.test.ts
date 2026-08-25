@@ -1199,4 +1199,133 @@ describe('pushService.sendToAll', () => {
     expect(resultA).toEqual(zeroed);
     expect(resultB).toEqual(zeroed);
   });
+
+  it('a slow FAILED first scan cannot un-publish its successor: the join slot is identity-guarded', async () => {
+    // Two attempts can be live at once - the 30s floor is shorter than a Scan
+    // under throttle-and-retry - and an UNGUARDED cleanup let the FIRST
+    // attempt's finally null out the SECOND attempt's published join slot. A
+    // floored caller then found nothing to join, read the still-empty cache,
+    // and dropped its broadcast at debug: the exact cold-start window the join
+    // exists to close, re-opened (adversarial review, phase 6).
+    const config = loadConfig(VAPID_ENV);
+    let clock = 0;
+    let failScan1: () => void = () => {};
+    const scan1 = new Promise<never>((_resolve, reject) => {
+      failScan1 = () => reject(new Error('ProvisionedThroughputExceededException'));
+    });
+    let releaseScan2: () => void = () => {};
+    const scan2 = new Promise<void>((resolve) => {
+      releaseScan2 = resolve;
+    });
+    const userItems = [
+      {
+        userId: 'usr_a',
+        email: 'usr_a@example.com',
+        role: 'admin',
+        status: 'active',
+        created_at: '2026-08-16T00:00:00.000Z',
+        push_subscriptions: [
+          {
+            endpoint: ep('a1'),
+            keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+            created_at: '2026-08-16T00:00:00.000Z',
+          },
+        ],
+      },
+    ];
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        if (listAllCalls === 1) {
+          await scan1;
+          return [];
+        }
+        await scan2;
+        return userItems;
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => clock,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // t=0: A starts attempt 1 (slow, will fail).
+    const a = service.sendToAll(note);
+    // t=31s: past the floor, C legitimately starts attempt 2 and publishes it.
+    clock = 31_000;
+    const c = service.sendToAll(note);
+    // Attempt 1 now fails; A settles and its cleanup runs. With the identity
+    // guard, attempt 2's published slot survives that cleanup.
+    failScan1();
+    const resultA = await a;
+    await Promise.resolve(); // let attempt 1's finally run
+    // t=45s: D is floored (14s into C's window) and must JOIN attempt 2.
+    clock = 45_000;
+    const d = service.sendToAll(note);
+    releaseScan2();
+    const [resultC, resultD] = await Promise.all([c, d]);
+
+    expect(listAllCalls).toBe(2);
+    expect(resultA).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(resultC).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    // THE PIN: D joined the live attempt and fanned out - an un-published slot
+    // would have dropped it to the zeroed result invisibly.
+    expect(resultD).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(sentTo).toEqual([ep('a1'), ep('a1')]);
+    expect(capture.atLevel(50)).toHaveLength(1); // attempt 1's window-opening ERROR only
+  });
+
+  it('a null throw from the adapter is counted, never escaped (per-device never-rejects invariant)', async () => {
+    // `err` in a catch is unknown; an unguarded property read for
+    // pushStatusCode turned a `throw null` into the catch's OWN TypeError,
+    // which escaped sendToDevices against its documented contract
+    // (adversarial review, phase 6). web-push itself only rejects with
+    // WebPushError - this pins the invariant against injected adapters.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById() {
+        return {
+          userId: 'usr_a',
+          email: 'usr_a@example.com',
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              endpoint: ep('a1'),
+              keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+              created_at: '2026-08-16T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as UsersRepo;
+    const adapter = {
+      async sendToSubscription() {
+        throw null;
+      },
+    } as never;
+    const capture = createLogCapture();
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+
+    const result = await service.sendToUser('usr_a', { kind: 'test', payload: { title: 'x' } });
+
+    expect(result).toMatchObject({ configured: true, attempted: 1, sent: 0, failed: 1 });
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect('pushStatusCode' in warns[0]!).toBe(false);
+  });
 });

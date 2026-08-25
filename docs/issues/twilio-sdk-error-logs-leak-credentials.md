@@ -152,3 +152,14 @@ Residuals, named rather than implied:
 - The `summarizeVendorError(err)` helper item 2 proposed was not written. The
   serializer supersedes it: correctness no longer depends on any call site
   choosing the right helper.
+- WHAT "CLOSED" MEANS, precisely (phase-6 adversarial review): the CREDENTIAL
+  class is closed structurally - config/request/response and every future
+  enumerable an SDK invents cannot serialize through a wired key. The
+  serializer deliberately KEEPS `message` and `stack` (operator-approved spec
+  residual, 1.2): vendor error prose can and does name phone numbers (Twilio
+  21211 echoes the To number), so `{ err }` lines on send paths still carry
+  phone PII in `err.message` - accepted under the lifted 2026-08-15 telemetry
+  PII gate, and the reason `summarizeError` (which drops message) remains the
+  right choice for terse outcome lines. A future stricter posture would mask
+  E.164s inside the serializer's message/stack fields; nothing structural
+  prevents that.

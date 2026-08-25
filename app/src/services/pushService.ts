@@ -256,8 +256,17 @@ export function createPushService(deps: PushServiceDeps): PushService {
         // correlated (the logger mixin stamps the correlationId) and move
         // on; one dead device must not fail the whole notification.
         failed += 1;
+        // Optional-chained through the cast: a `throw null` from an injected
+        // adapter must not turn this catch into its own TypeError - the
+        // docblock above promises this helper never rejects per device.
+        const pushStatusCode = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
         log.warn(
-          { userId, kind, err, pushStatusCode: (err as { statusCode?: number }).statusCode },
+          {
+            userId,
+            kind,
+            err,
+            ...(typeof pushStatusCode === 'number' && { pushStatusCode }),
+          },
           'push: send to one device failed (transient) — kept subscription',
         );
       }
@@ -320,15 +329,28 @@ export function createPushService(deps: PushServiceDeps): PushService {
           lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
         if (!floored) {
           lastRefreshAttemptAt = now();
-          // PUBLISH the attempt before awaiting it, so a floored caller has
-          // something to join. The joinable copy neutralizes BOTH settlements -
-          // it is not the error handler, the try/catch below is - so joining it
-          // can never reject into someone else's call.
-          const attempt = users.listAll();
-          refreshInFlight = attempt.then(() => undefined, () => undefined).finally(() => {
-            refreshInFlight = undefined;
-          });
           try {
+            // The listAll CALL sits inside the try: the production repo cannot
+            // throw synchronously (async fn), but this function's contract is
+            // that a lookup failure NEVER escapes to the fire-and-forget
+            // caller, and an injected/decorated repo must not be able to
+            // reopen that structurally (adversarial review, phase 6).
+            //
+            // PUBLISH the attempt before awaiting it, so a floored caller has
+            // something to join. The joinable copy neutralizes BOTH
+            // settlements - it is not the error handler, this try/catch is -
+            // so joining it can never reject into someone else's call. The
+            // cleanup is IDENTITY-GUARDED: two attempts can be live at once
+            // (the 30s floor is shorter than a slow Scan under throttle), and
+            // an unguarded finally let the FIRST attempt's cleanup un-publish
+            // its successor - a floored caller then found nothing to join and
+            // dropped the broadcast, the exact window this join closes.
+            const attempt = users.listAll();
+            const published = attempt.then(() => undefined, () => undefined);
+            refreshInFlight = published;
+            void published.finally(() => {
+              if (refreshInFlight === published) refreshInFlight = undefined;
+            });
             usersCache = { items: await attempt, fetchedAt: now() };
           } catch (err) {
             // A lookup failure must never break the caller (the send is

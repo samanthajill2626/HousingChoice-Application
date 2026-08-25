@@ -608,4 +608,40 @@ describe('journal sweep: a failed run', () => {
     expect(h.log.warn).not.toHaveBeenCalled();
     expect(outcome.ran).toBe(true);
   });
+
+  it('a failed cursor persist is best-effort: the run still recovers, WARN not ERROR', async () => {
+    // This bare await used to sit ahead of the recovery loop inside the
+    // run-level try, so ONE throttled single-item settings write burned the
+    // already-claimed period with ZERO contacts recovered - and the run-level
+    // self-heal then cleared the cursor, discarding the scan progress too
+    // (adversarial review, phase 6). A failed persist now costs only cursor
+    // advance: tomorrow re-reads the same page; today's contacts recover.
+    let recoverCallsForContact = 0;
+    const h = harness({
+      recover: async () => {
+        recoverCallsForContact += 1;
+        return recoverCallsForContact === 1
+          ? { recovered: 1, stateChanged: true }
+          : { recovered: 0, stateChanged: false };
+      },
+    });
+    h.deps.settingsRepo = {
+      ...(h.deps.settingsRepo as NonNullable<JournalSweepDeps['settingsRepo']>),
+      async putJournalSweepCursor() {
+        throw new Error('ProvisionedThroughputExceededException');
+      },
+    };
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(outcome.ran).toBe(true);
+    expect(outcome.recovered).toBe(1); // the enumerated contact still recovered
+    expect(h.recoverCalls.length).toBeGreaterThan(0);
+    expect(h.emit).toHaveBeenCalledWith('suggestion.updated', { contactId: 'contact-1' });
+    const warnMsgs = h.log.warn.mock.calls.map((c) => String(c[1]));
+    expect(warnMsgs.some((m) => m.includes('persisting the scan cursor failed'))).toBe(true);
+    // No run-level ERROR: this is a deferral, not a burned day.
+    const errorMsgs = h.log.error.mock.calls.map((c) => String(c[1]));
+    expect(errorMsgs.some((m) => m.includes('run failed'))).toBe(false);
+  });
 });

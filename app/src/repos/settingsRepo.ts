@@ -468,13 +468,15 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       try {
         JSON.parse(cursor);
       } catch {
-        // Say so ONCE, at WARN: the self-heal is silent otherwise, so the run
+        // Say so ONCE, at WARN: the degrade is silent otherwise, so the run
         // that follows looks exactly like a healthy wrap and an operator has no
         // way to tell a restarted cycle from a completed one. The VALUE is
         // deliberately not logged - it is garbage of unknown provenance, and
         // this cursor is an ExclusiveStartKey over rows that carry a PII
-        // snapshot.
-        log.warn({}, 'settings: stored journal-sweep cursor is unparseable - cleared, the next run rescans from the start');
+        // snapshot. NOTE this getter issues NO write - the stored garbage is
+        // IGNORED here and overwritten by the run's own cursor persist; the
+        // message must not claim a clear that never happened.
+        log.warn({}, 'settings: stored journal-sweep cursor is unparseable - ignored, this run rescans from the start');
         return undefined;
       }
       return cursor;

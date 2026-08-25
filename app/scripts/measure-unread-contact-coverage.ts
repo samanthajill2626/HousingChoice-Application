@@ -324,38 +324,75 @@ async function auditWalk(): Promise<void> {
  * contact resolution, same break condition. Counts only, no PII.
  */
 async function auditUnknownPage(pageLimit: number): Promise<void> {
+  // The pager's own chunk size: min(FETCH_BATCH=100, max(limit, DEFAULT=25)).
+  // At PAGE_LIMIT 30 that is 30, NOT 100 - the first version used 100 and
+  // under-reported the partition Query count by roughly 3x.
+  const chunkSize = Math.min(100, Math.max(pageLimit, 25));
+
   let scanned = 0;
-  let lookups = 0;
+  let contactLookups = 0;
+  let messageReads = 0;
+  let skippedGroup = 0;
   let matched = 0;
+  let matchedContactless = 0;
+  let queries = 0;
   let chunkStartKey: Record<string, unknown> | undefined;
   let filled = false;
   let exhausted = false;
+  const seenContacts = new Set<string>();
 
   outer: for (;;) {
     const chunk = await conversations.listByLastActivity({
       status: 'open',
-      limit: 100,
+      limit: chunkSize,
       ...(chunkStartKey === undefined ? {} : { exclusiveStartKey: chunkStartKey }),
     });
+    queries += 1;
     for (const conv of chunk.items) {
       scanned += 1;
-      // roleFromContact returns 'unknown' for a MISSING contact as well as for
-      // a contact typed 'unknown', and needsTriage is `role === 'unknown'`.
-      let contact;
-      const entry = conv.participants?.find(
-        (pt) => pt.phone === conv.participant_phone && pt.contactId !== '',
-      );
-      if (entry?.contactId !== undefined && entry.contactId !== '') {
-        const found = await contacts.getManyByIds([entry.contactId]);
-        lookups += 1;
-        contact = found.get(entry.contactId);
-      } else if (typeof conv.participant_phone === 'string' && conv.participant_phone !== '') {
-        contact = await contacts.findByPhone(conv.participant_phone);
-        lookups += 1;
+
+      // The pager drops these BEFORE any lookup (`groupKind`). The first version
+      // did not, so open relay groups both PAID a lookup and COUNTED as matches -
+      // which is what made prod read as 17 matching rows instead of ~8.
+      if (conv.type === 'relay_group' || conv.type === 'group_text') {
+        skippedGroup += 1;
+        continue;
       }
-      const type = contact?.type;
-      const needsTriage = type !== 'tenant' && type !== 'landlord' && type !== 'partner';
-      if (needsTriage) matched += 1;
+
+      // The pager's resolver verbatim: findByPhone THEN findByEmail. NOT the
+      // participants entry - the first version used that, which is a different
+      // resolver with different misses.
+      const phone = conv.participant_phone;
+      const email = conv.participant_email;
+      let contact;
+      if (typeof phone === 'string' && phone !== '') {
+        contact = await contacts.findByPhone(phone);
+        contactLookups += 1;
+      }
+      if (contact === undefined && typeof email === 'string' && email !== '') {
+        contact = await contacts.findByEmail(email);
+        contactLookups += 1;
+      }
+
+      if (contact === undefined) {
+        // No contact and no phone -> dropped. With a phone -> an untriaged
+        // unknown row that ALSO pays a message read for its preview, which the
+        // first version never counted.
+        if (typeof phone !== 'string' || phone === '') continue;
+        messageReads += 1;
+        matched += 1;
+        matchedContactless += 1;
+      } else {
+        const t = contact.type;
+        if (t === 'tenant' || t === 'landlord' || t === 'partner') continue;
+        // The pager emits ONE row per contact (newest conversation wins), so a
+        // contact with several open threads is one row, not several.
+        const key = String(contact.contactId);
+        if (seenContacts.has(key)) continue;
+        seenContacts.add(key);
+        matched += 1;
+      }
+
       if (matched === pageLimit) {
         filled = true;
         break outer;
@@ -375,20 +412,25 @@ async function auditUnknownPage(pageLimit: number): Promise<void> {
       '====================================',
       `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
       `  table prefix        ${tablePrefix}`,
-      `  page limit          ${pageLimit}   (the dashboard's own PAGE_LIMIT)`,
+      `  page limit          ${pageLimit}   chunk size ${chunkSize} (the pager's own)`,
       '',
+      `  partition Queries      ${queries}`,
       `  conversations scanned  ${scanned}`,
-      `  contact lookups paid   ${lookups}   <- THE COST, per page render`,
-      `  matching rows found    ${matched}`,
+      `  group rows skipped     ${skippedGroup}  (dropped before any lookup, as the pager does)`,
+      `  contact lookups paid   ${contactLookups}   <- THE COST, per page render`,
+      `  message reads paid     ${messageReads}  (contactless rows fetch a preview)`,
+      `  matching rows found    ${matched}  (contactless: ${matchedContactless}) - UPPER BOUND, see note`,
       `  outcome                ${filled ? 'page FILLED' : exhausted ? 'partition EXHAUSTED before filling' : 'stopped'}`,
       '',
-      filled && lookups <= pageLimit * 3
-        ? '  VERDICT  CHEAP. The page fills quickly, so the "full walk" is an\n' +
-          '           upper bound this data does not reach. Do not scope the\n' +
-          '           unbounded-walk fix off a number nobody is paying.'
-        : '  VERDICT  REAL. The walk goes deep before it can answer, so the\n' +
-          '           unbounded read is being paid on every debounced SSE event\n' +
-          '           while an operator sits on this tab.',
+      filled
+        ? '  VERDICT  CHEAP. The page fills before the partition runs out.'
+        : '  VERDICT  REAL. The partition is exhausted on every render, so the unbounded read is paid on every debounced SSE event while an operator sits on this tab.',
+      '',
+      '  MATCH COUNT IS AN UPPER BOUND. Cost is replicated faithfully; the match',
+      '  count is not, because the pager has further drop arms this does not',
+      '  implement (soft-deleted-contact resurfacing, and the newest-conversation',
+      '  rule beyond the per-contact dedup above). Treat it as "no more than",',
+      '  and never quote it as the size of the triage queue.',
       '',
       '  NOTE the inversion: this is EXPENSIVE when few rows match (a cleared',
       '  tab) and CHEAP when many do (a backlog). Re-measure after any triage',

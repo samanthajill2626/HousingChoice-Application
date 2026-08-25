@@ -64,8 +64,26 @@ describe('RecentErrors — available:true rendering (PII-safe)', () => {
   it('renders timestamp + level + message + correlationId ONLY', async () => {
     getSystemErrors.mockResolvedValue(
       available([
-        { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal boom', correlationId: 'corr-9' },
-        { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'just an error', correlationId: null },
+        {
+          timestamp: '2026-06-29T03:00:00.000Z',
+          level: 60,
+          message: 'fatal boom',
+          messageTruncated: false,
+          correlationId: 'corr-9',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-A',
+        },
+        {
+          timestamp: '2026-06-29T02:00:00.000Z',
+          level: 50,
+          message: 'just an error',
+          messageTruncated: false,
+          correlationId: null,
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-B',
+        },
       ]),
     );
     render(<RecentErrors />);
@@ -88,8 +106,12 @@ describe('RecentErrors — available:true rendering (PII-safe)', () => {
           timestamp: '2026-07-21T20:04:31.000Z',
           level: 40,
           message: 'twilio relay-recipient delivery failed (undelivered/failed)',
+          messageTruncated: false,
           correlationId: 'c-30034',
           errorCode: '30034',
+          errMessageTruncated: false,
+          source: 'app',
+          ref: 'PTR-C',
         },
       ]),
     );

@@ -139,6 +139,20 @@ export function createPushService(deps: PushServiceDeps): PushService {
    */
   const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
   let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
+  /**
+   * Floor between listAll ATTEMPTS after a failure (log-hygiene spec 6.1):
+   * one ERROR/WARN + one Scan attempt per ~30s window PER INSTANCE (about
+   * six instances exist per process), instead of one per inbound message.
+   * Stamped on every attempt; a successful refresh naturally resets the
+   * cadence because the TTL then governs.
+   *
+   * READ THE CATCH ARMS BELOW WITH THIS IN MIND: they still leave `fetchedAt`
+   * untouched on failure, so the refresh IS retried and the age keeps counting
+   * toward the stale bound - but the retry now waits out this floor rather than
+   * riding the very next send.
+   */
+  const REFRESH_RETRY_FLOOR_MS = 30_000;
+  let lastRefreshAttemptAt: number | undefined;
 
   /**
    * The shared per-device loop: allowlist prune, send, Gone prune, transient
@@ -291,44 +305,64 @@ export function createPushService(deps: PushServiceDeps): PushService {
       }
 
       if (usersCache === undefined || now() - usersCache.fetchedAt >= USERS_CACHE_TTL_MS) {
-        try {
-          usersCache = { items: await users.listAll(), fetchedAt: now() };
-        } catch (err) {
-          // A lookup failure must never break the caller (the send is
-          // fire-and-forget off a webhook/ingest path): it is logged, never
-          // thrown, exactly as the voice founder lookup does.
-          if (usersCache === undefined) {
-            // No list has ever been fetched, so there is nobody to send to:
-            // log ERROR and drop the broadcast (spec 3.1).
-            log.error(
-              { err, kind: notification.kind },
-              'push: listing users failed - broadcast not sent',
-            );
-            return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
-          }
-          const staleMs = now() - usersCache.fetchedAt;
-          if (staleMs >= STALE_SERVE_MAX_MS) {
-            // The cached list is past the bound, so it is no longer a
-            // trustworthy recipient set: give up exactly as 3.1 says - ERROR
-            // (a permanently broken Scan MUST reach the error-log alarm, per
-            // this repo's 436c0388 precedent), zeroed result, never a throw.
-            log.error(
+        const floored =
+          lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
+        if (!floored) {
+          lastRefreshAttemptAt = now();
+          try {
+            usersCache = { items: await users.listAll(), fetchedAt: now() };
+          } catch (err) {
+            // A lookup failure must never break the caller (the send is
+            // fire-and-forget off a webhook/ingest path): it is logged, never
+            // thrown, exactly as the voice founder lookup does.
+            if (usersCache === undefined) {
+              // No list has ever been fetched, so there is nobody to send to:
+              // log ERROR and drop the broadcast (spec 3.1).
+              log.error(
+                { err, kind: notification.kind },
+                'push: listing users failed - broadcast not sent',
+              );
+              return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+            }
+            const staleMs = now() - usersCache.fetchedAt;
+            if (staleMs >= STALE_SERVE_MAX_MS) {
+              // The cached list is past the bound, so it is no longer a
+              // trustworthy recipient set: give up exactly as 3.1 says - ERROR
+              // (a permanently broken Scan MUST reach the error-log alarm, per
+              // this repo's 436c0388 precedent), zeroed result, never a throw.
+              log.error(
+                { err, kind: notification.kind, staleMs },
+                'push: listing users failed and the cached list is too stale to serve - broadcast not sent',
+              );
+              return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+            }
+            // A cached list exists and is still INSIDE the bound, so fan out to
+            // it instead of dropping the notification. Deliberate, spec-amended
+            // deviation from 3.1's original literal wording (see 3.1 / D10 /
+            // section 5): D1 ("everyone with a subscription is notified") plus
+            // the late-better-than-never posture make a slightly stale fan-out
+            // strictly better than a silent drop on a transient Dynamo blip.
+            // `fetchedAt` is left UNCHANGED, so the very next send retries the
+            // refresh AND the age keeps counting toward the bound above.
+            log.warn(
               { err, kind: notification.kind, staleMs },
-              'push: listing users failed and the cached list is too stale to serve - broadcast not sent',
+              'push: refreshing the user list failed - fanning out to the cached list (stale)',
+            );
+          }
+        } else {
+          // Inside the floor after a failed attempt: the window-opening line
+          // already told the operator. Serve the cache when it is inside the
+          // stale bound; otherwise drop quietly (debug, not warn/error).
+          if (usersCache === undefined || now() - usersCache.fetchedAt >= STALE_SERVE_MAX_MS) {
+            log.debug(
+              { kind: notification.kind },
+              'push: refresh floored and no servable cache - broadcast dropped',
             );
             return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
           }
-          // A cached list exists and is still INSIDE the bound, so fan out to
-          // it instead of dropping the notification. Deliberate, spec-amended
-          // deviation from 3.1's original literal wording (see 3.1 / D10 /
-          // section 5): D1 ("everyone with a subscription is notified") plus
-          // the late-better-than-never posture make a slightly stale fan-out
-          // strictly better than a silent drop on a transient Dynamo blip.
-          // `fetchedAt` is left UNCHANGED, so the very next send retries the
-          // refresh AND the age keeps counting toward the bound above.
-          log.warn(
-            { err, kind: notification.kind, staleMs },
-            'push: refreshing the user list failed - fanning out to the cached list (stale)',
+          log.debug(
+            { kind: notification.kind },
+            'push: refresh floored - fanning out to the cached list',
           );
         }
       }

@@ -682,8 +682,11 @@ describe('pushService.sendToAll', () => {
       capture.atLevel(40).some((l) => /refreshing the user list failed/.test(String(l['msg']))),
     ).toBe(true);
 
-    // fetchedAt was left untouched, so the very next send retries the scan.
+    // fetchedAt was left untouched, so the scan IS retried - but the 30s
+    // attempt floor (log-hygiene 6.1) governs when: a send at t=60_000 would be
+    // floored, so the retry lands on the first send past 60_000 + 30_000.
     world.setFailListAll(false);
+    t = 91_000;
     await service.sendToAll(note);
     expect(world.calls.listAll).toBe(3);
   });
@@ -720,9 +723,12 @@ describe('pushService.sendToAll', () => {
     expect(sentTo).toEqual([ep('a1')]);
     expect(capture.atLevel(50)).toHaveLength(0);
 
-    // AT the bound: the list is given up on.
+    // PAST the bound - and past the 30s attempt floor (log-hygiene 6.1), so the
+    // retry actually runs and its catch can reach the give-up arm. At t=300_000
+    // the previous attempt is 1ms old, so the floor would skip the Scan
+    // entirely and the ERROR below would never fire.
     sentTo.length = 0;
-    t = 300_000;
+    t = 330_000;
     const past = await service.sendToAll(note);
     expect(past).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
     expect(sentTo).toEqual([]);
@@ -939,5 +945,143 @@ describe('pushService.sendToAll', () => {
     await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
 
     expect(seenOptions).toEqual([undefined, undefined]);
+  });
+
+  // Log-hygiene spec 6.1: the refresh ATTEMPT floor. Before it, a down Scan
+  // produced one ERROR/WARN and one Scan attempt per INBOUND MESSAGE; now it is
+  // one per ~30s window per instance. These cases assert BEHAVIOUR - listAll
+  // call counts, returned tallies, and the ABSENCE of repeat warn/error lines -
+  // never the new debug lines, which this capture (info level) cannot see.
+
+  it('floors the refresh RETRY: a send inside the 30s window does not re-attempt listAll', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    t = 60_000;
+    world.setFailListAll(true);
+    await service.sendToAll(note);
+
+    // The FAILED attempt itself still opens the window with its stale-serve
+    // WARN - the floor silences the sends that follow, not the first alarm.
+    expect(world.calls.listAll).toBe(2);
+    const warnsAfterTheFailure = capture.atLevel(40).length;
+    expect(warnsAfterTheFailure).toBeGreaterThan(0);
+
+    // 10s later the TTL is still lapsed, but the floor is not: no second Scan,
+    // no second alarm line, and the cached list is still served.
+    sentTo.length = 0;
+    t = 70_000;
+    const floored = await service.sendToAll(note);
+
+    expect(world.calls.listAll).toBe(2);
+    expect(floored).toEqual({
+      configured: true,
+      users: 1,
+      attempted: 1,
+      sent: 1,
+      pruned: 0,
+      failed: 0,
+    });
+    expect(sentTo).toEqual([ep('a1')]);
+    expect(capture.atLevel(40)).toHaveLength(warnsAfterTheFailure);
+    expect(capture.atLevel(50)).toHaveLength(0);
+  });
+
+  it('re-attempts listAll once the 30s floor has elapsed', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    t = 60_000;
+    world.setFailListAll(true);
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+
+    // Inside the floor: skipped.
+    t = 70_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+
+    // 31s after the failed ATTEMPT (not after the last send): retried.
+    world.setFailListAll(false);
+    t = 91_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(3);
+  });
+
+  it('floors the repeat ERROR too when no list has ever been fetched', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    world.setFailListAll(true);
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    const first = await service.sendToAll(note);
+    expect(first).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(world.calls.listAll).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+
+    // The zeroed drop is UNCHANGED - what the floor removes is the second Scan
+    // and the second ERROR (the line that used to fire per inbound message).
+    t = 10_000;
+    const second = await service.sendToAll(note);
+    expect(second).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(world.calls.listAll).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+  });
+
+  it('never delays a refresh that follows a SUCCESSFUL one', async () => {
+    // Non-regression guard: the floor is stamped on every attempt, successes
+    // included, but the 60s cache TTL is longer than the 30s floor - so by the
+    // time a post-success refresh is due, the stamp is always older than the
+    // floor and the Scan runs immediately.
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(1);
+
+    t = 60_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
   });
 });

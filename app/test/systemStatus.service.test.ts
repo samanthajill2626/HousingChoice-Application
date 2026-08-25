@@ -247,6 +247,60 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
   });
 
+  it('one SLOW source does not discard the others - the errors still render, flagged as partial', async () => {
+    // The live dev failure this exists to prevent: the kernel-OOM query over
+    // /hc/<env>/system took 17.9s against the poll budget while the pino errors
+    // query had already succeeded in 3.9s. Under Promise.all the timeout threw
+    // away the successful result and the whole panel degraded - showing the
+    // not-deployed notice on a deployed environment that had errors to show.
+    const pinoEvent = {
+      timestamp: '2026-08-25T10:00:00.000Z',
+      level: 50,
+      message: 'job failed: relay.warmNumber',
+      messageTruncated: false,
+      correlationId: 'c1',
+      errMessageTruncated: false,
+      source: 'app' as const,
+      ref: 'PTR-1',
+    };
+    const seam = fakeSeam({
+      queryInsights: async (_groups: string[], filterExpr: string) => {
+        if (filterExpr === OOM_SYSTEM_INSIGHTS_FILTER) {
+          throw new Error('Insights query abc did not complete within 75 polls');
+        }
+        return filterExpr === PINO_ERROR_INSIGHTS_FILTER ? [pinoEvent] : [];
+      },
+    });
+
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.message).toBe('job failed: relay.warmNumber');
+    // The gap is STATED, never silent: a short list that looks whole is the
+    // worst thing this panel can render.
+    expect(result.partialSources).toEqual(['system-oom']);
+  });
+
+  it('degrades only when EVERY source fails - an empty panel from zero working queries would read as "no errors"', async () => {
+    const seam = fakeSeam({
+      queryInsights: async () => {
+        throw new Error('Insights query abc did not complete within 75 polls');
+      },
+    });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+    expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
+  });
+
+  it('omits partialSources entirely when every source succeeds', async () => {
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.partialSources).toBeUndefined();
+  });
+
   it('the pino-error query reads BOTH the app and worker log groups (worker-side errors - extraction, reminder pollers - must reach the panel)', async () => {
     const config = deployedConfig();
     const seam = fakeSeam({ queryInsights: async () => [] });

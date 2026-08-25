@@ -372,6 +372,12 @@ export interface SystemErrorsResult {
   available: boolean;
   events?: SystemErrorEvent[];
   reason?: string;
+  /**
+   * Independent query sources that FAILED while others succeeded. Present only
+   * when the list is incomplete, so the panel can say rows are missing instead
+   * of showing a short list that looks whole.
+   */
+  partialSources?: string[];
 }
 
 /** GET /api/system/errors/detail - the complete log record behind one row. */

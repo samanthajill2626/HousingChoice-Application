@@ -25,6 +25,7 @@
 import { useState } from 'react';
 import { useErrorDetail, useSystemErrors, type ErrorWindow } from './useSystemStatus.js';
 import { ErrorTrace } from './ErrorTrace.js';
+import { degradedNotice } from './degradedNotice.js';
 import { Button, Spinner } from '../../ui/index.js';
 import type { SystemErrorEvent } from '../../api/index.js';
 import styles from './SystemStatusSection.module.css';
@@ -103,13 +104,7 @@ function ErrorDetail({ state }: { state: ReturnType<typeof useErrorDetail> }): R
   if (status === 'error') return <p role="alert">Couldn&apos;t load details for this row.</p>;
   if (result === null) return null;
   if (!result.available) {
-    return (
-      <p className={styles.degraded}>
-        {result.reason === 'unavailable_local'
-          ? 'Available in deployed environments.'
-          : 'Could not load the full record.'}
-      </p>
-    );
+    return <p className={styles.degraded}>{degradedNotice(result.reason)}</p>;
   }
 
   const record = result.record;
@@ -223,6 +218,11 @@ export function RecentErrors(): React.JSX.Element {
 
   const available = result?.available === true;
   const events = result?.events ?? [];
+  // Named sources that failed while others succeeded. The list on screen is
+  // then INCOMPLETE, and a short list that looks whole is the worst thing this
+  // panel can show - so it says so, both when there are rows and when there
+  // are none.
+  const partialSources = result?.partialSources ?? [];
 
   return (
     <div className={styles.block} aria-labelledby="system-errors-heading">
@@ -279,10 +279,21 @@ export function RecentErrors(): React.JSX.Element {
           </Button>
         </div>
       ) : !available ? (
-        <p className={styles.degraded}>Available in deployed environments.</p>
+        <p className={styles.degraded}>{degradedNotice(result?.reason)}</p>
       ) : events.length === 0 ? (
-        <p className={styles.empty}>No recent errors in this window.</p>
+        <p className={styles.empty}>
+          No recent errors in this window.
+          {partialSources.length > 0
+            ? ` (${partialSources.join(', ')} could not be read, so this may be incomplete.)`
+            : ''}
+        </p>
       ) : (
+        <>
+          {partialSources.length > 0 ? (
+            <p className={styles.truncated}>
+              {`Some sources could not be read (${partialSources.join(', ')}), so rows may be missing.`}
+            </p>
+          ) : null}
         <ul className={styles.errorList}>
           {events.map((ev) => (
             // ref (the log-event pointer) stays the LEADING identity: it is
@@ -295,6 +306,7 @@ export function RecentErrors(): React.JSX.Element {
             <ErrorRow key={`${ev.ref}|${ev.timestamp}|${ev.message}`} event={ev} />
           ))}
         </ul>
+        </>
       )}
     </div>
   );

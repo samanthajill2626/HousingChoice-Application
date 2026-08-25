@@ -13,6 +13,7 @@
 // blank panel is the failure mode this view exists to avoid.
 import { useEffect } from 'react';
 import { useErrorTrace } from './useSystemStatus.js';
+import { degradedNotice } from './degradedNotice.js';
 import { Spinner } from '../../ui/index.js';
 import type { SystemTraceLine } from '../../api/index.js';
 import styles from './SystemStatusSection.module.css';
@@ -47,7 +48,7 @@ export function ErrorTrace({ kind, id, at, anchorRef }: ErrorTraceProps): React.
   if (result === null) return <p className={styles.empty}>No trace loaded.</p>;
   // DEGRADED and EMPTY must read differently. An empty trace that looks like a
   // blank panel is the failure mode this view exists to avoid.
-  if (!result.available) return <p className={styles.degraded}>Available in deployed environments.</p>;
+  if (!result.available) return <p className={styles.degraded}>{degradedNotice(result.reason)}</p>;
   if (result.lines.length === 0) return <p className={styles.empty}>No lines found around this event.</p>;
 
   return (

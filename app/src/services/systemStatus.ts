@@ -114,9 +114,15 @@ export type AlarmsResult =
   | { available: true; alarms: AlarmView[] }
   | { available: false; reason: string };
 
-/** getErrors result — degrades to { available: false, reason } (still HTTP 200). */
+/**
+ * getErrors result - degrades to { available: false, reason } (still HTTP 200).
+ *
+ * `partialSources` names the independent query sources that FAILED while others
+ * succeeded. Present only when the panel is showing an incomplete picture, so a
+ * short list is a positive statement that rows are missing - never silence.
+ */
 export type ErrorsResult =
-  | { available: true; events: ErrorEventView[] }
+  | { available: true; events: ErrorEventView[]; partialSources?: string[] }
   | { available: false; reason: string };
 
 /**
@@ -282,7 +288,15 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         //   appErrors      — pino level≥50 (or ≥40 with warnings) in app+worker
         //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
         //   systemOom      — kernel OOM-killer lines in the system log group
-        const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
+        //
+        // SETTLED, NOT ALL. These three are INDEPENDENT SOURCES, not parts of
+        // one answer, and `Promise.all` made the slowest of them the only one
+        // that mattered: on dev the kernel-OOM query over /hc/<env>/system took
+        // 17.9s against an 8s budget, so it rejected and discarded the pino
+        // errors query that had already succeeded in 3.9s - the panel went fully
+        // degraded while holding the exact rows it exists to show. A source that
+        // times out now costs its OWN rows and nothing else.
+        const settled = await Promise.allSettled([
           // BOTH process log groups: worker-side errors (extraction poll, tour
           // reminder + placement nudge polls, voice transcript jobs) were
           // invisible to this panel when only the app group was queried
@@ -291,6 +305,35 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);
+        const SOURCE_NAMES = ['errors', 'app-oom', 'system-oom'] as const;
+        const failedSources: string[] = [];
+        settled.forEach((outcome, i) => {
+          if (outcome.status === 'rejected') {
+            failedSources.push(SOURCE_NAMES[i]!);
+            log.warn(
+              {
+                source: SOURCE_NAMES[i],
+                kind: classifyCloudWatchError(outcome.reason),
+                err: (outcome.reason as Error).message,
+              },
+              'system status: one error source failed - the rest still render',
+            );
+          }
+        });
+        // EVERY source failing is the old all-or-nothing case and still degrades:
+        // an empty panel drawn from zero working queries would read as "no
+        // errors", which is the most dangerous thing this panel can say.
+        if (failedSources.length === settled.length) {
+          log.error({ window, failedSources }, 'system status: all error sources failed');
+          return { available: false, reason: 'cloudwatch_error' };
+        }
+        const rowsOf = (i: number): ErrorEventView[] =>
+          settled[i]!.status === 'fulfilled'
+            ? (settled[i] as PromiseFulfilledResult<ErrorEventView[]>).value
+            : [];
+        const appErrors = rowsOf(0);
+        const appWorkerV8Oom = rowsOf(1);
+        const systemOom = rowsOf(2);
         // Relabel OOM events with synthesized, PII-safe messages based on which
         // query found them — never from the raw log text (which projectErrorEvent
         // already collapses to "(unparseable log line)" for kernel/V8 OOM lines).
@@ -314,7 +357,11 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
           .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
           .slice(0, ERROR_EVENT_LIMIT);
         log.info({ window, errorCount: events.length }, 'system status: errors read');
-        return { available: true, events };
+        return {
+          available: true,
+          events,
+          ...(failedSources.length > 0 && { partialSources: failedSources }),
+        };
       } catch (err) {
         log.error(
           { window, kind: classifyCloudWatchError(err), err: (err as Error).message },

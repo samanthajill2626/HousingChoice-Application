@@ -43,8 +43,23 @@ const CW_CONNECTION_TIMEOUT_MS = 2_000;
 const CW_REQUEST_TIMEOUT_MS = 5_000;
 const CW_MAX_ATTEMPTS = 2;
 
-// Insights polling config: at most 20 polls × 400ms = 8s maximum wait.
-const INSIGHTS_MAX_POLLS = 20;
+// Insights polling config: at most 75 polls x 400ms = 30s maximum wait.
+//
+// WAS 20 polls / 8s, which was below the REAL latency of these queries and made
+// the errors panel degrade on dev permanently. Measured against the live dev
+// account on 2026-08-25, all within the panel's own 24h window:
+//
+//   pino level>=50 over app+worker    3.9s
+//   V8 OOM over app+worker            3.7s
+//   kernel OOM over /hc/dev/system   17.9s   <- 2x the old budget
+//
+// Insights latency is dominated by query STARTUP, not by data volume, so a
+// quiet environment is not a fast one - dev's system group holds the whole of
+// /var/log/messages (1.3 MB/24h against the app group's 147 KB) and is the slow
+// one. 30s leaves headroom over the worst measured case without letting a
+// blackholed connection tie up the handler indefinitely, which is what the
+// original bound existed to prevent.
+const INSIGHTS_MAX_POLLS = 75;
 const INSIGHTS_POLL_INTERVAL_MS = 400;
 
 /** A region-configured SDK client config with bounded socket/connect timeouts. */

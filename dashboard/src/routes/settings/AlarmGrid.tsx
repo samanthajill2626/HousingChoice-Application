@@ -9,6 +9,7 @@
 // TEXT in the badge (colour is supplementary), role="alert" only on a true
 // load error.
 import { useSystemAlarms } from './useSystemStatus.js';
+import { degradedNotice } from './degradedNotice.js';
 import { Button, Spinner } from '../../ui/index.js';
 import type { SystemAlarmState } from '../../api/index.js';
 import styles from './SystemStatusSection.module.css';
@@ -80,7 +81,7 @@ export function AlarmGrid(): React.JSX.Element {
           </Button>
         </div>
       ) : !available ? (
-        <p className={styles.degraded}>Available in deployed environments.</p>
+        <p className={styles.degraded}>{degradedNotice(result?.reason)}</p>
       ) : alarms.length === 0 ? (
         <p className={styles.empty}>No alarms configured for this environment.</p>
       ) : (

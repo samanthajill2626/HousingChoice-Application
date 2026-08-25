@@ -357,10 +357,12 @@ describe('RecentErrors - the expanded record', () => {
     expect(await screen.findByText('Available in deployed environments.')).toBeInTheDocument();
   });
 
-  it('reads DIFFERENTLY for any other degraded reason', async () => {
+  it('NAMES the reason rather than reading as a generic failure', async () => {
     getSystemErrorDetail.mockResolvedValue({ available: false, reason: 'out_of_scope' });
     await expand();
-    expect(await screen.findByText('Could not load the full record.')).toBeInTheDocument();
+    // Was a generic "Could not load the full record." - which told an operator
+    // nothing about WHY. Each degraded reason now has its own sentence.
+    expect(await screen.findByText(/different environment/)).toBeInTheDocument();
     expect(screen.queryByText('Available in deployed environments.')).toBeNull();
   });
 

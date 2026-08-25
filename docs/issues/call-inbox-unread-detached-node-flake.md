@@ -3,11 +3,68 @@ id: call-inbox-unread-detached-node-flake
 title: call-inbox-unread.spec.ts clicks a Mark-unread button that the inbox row swaps out from under it
 type: bug
 severity: low
-status: open
+status: resolved
 area: e2e
 created: 2026-08-23
-refs: e2e/tests/dashboard-next/call-inbox-unread.spec.ts:155
+resolved: 2026-08-24
+refs: e2e/tests/dashboard-next/call-inbox-unread.spec.ts:155, dashboard/src/routes/inbox/useInbox.ts
 ---
+
+**Resolution (2026-08-24, `feat/inbox-unread-read-path` @52ebafc8). NOT the
+read path, and not a spec bug: `useInbox` installed a page it fetched for a
+filter the operator had already left.**
+
+Reproduced deliberately - iteration 38 of a 150-repeat soak of this one test on
+a QUIET machine, roughly 3 minutes - and diagnosed with server-side read
+accounting added for the purpose (`360c5a6d`). The app served a FULL page on
+every `filter=all` request in the failing iteration while the browser rendered
+"No conversations yet":
+
+```
+-28553ms  ASSEMBLED all     count=4 rawScanned=2   <- All tab fetch; row visible
+-28395ms  ASSEMBLED unread  count=0                <- lands INTO the All tab
+   ...    28 seconds of silence, then the click times out
+```
+
+The request that emptied the list came from the BROWSER (Chrome user-agent),
+not the test's API helper, and it was `?filter=unread`. `scheduleRefetch`
+closes over the `fetchFirstPage` of whichever filter was active when the SSE
+event arrived; nothing cancelled it on a filter change (the clearing effect had
+EMPTY deps, so it ran only on unmount), and `fetchFirstPage` committed whatever
+it fetched with no filter-identity check. Mark-read on Unread fires
+`conversation.updated`, the operator switches to All inside the 300ms debounce,
+the stale reconcile lands, and because mark-read has just emptied the unread
+feed it installs ZERO rows. One bad page sticks until the next event arrives.
+
+Operator-visible, not a test artifact: mark a row read on Unread and switch to
+All within 300ms and the tab goes blank.
+
+**All three sightings are ONE defect.** Sighting 1's detached-node retry and
+sightings 2 and 3's ready-and-empty snapshot are the same event seen at
+different moments - the node detaches BECAUSE the list is replaced by an empty
+one. The reproduction exhibits both signatures simultaneously, which is what
+settles it. So the `thread-hooks-refetch-whole-page-per-event` churn attributed
+to sighting 1 below was NOT its mechanism either.
+
+**Why it is always this spec:** it is the only one that marks a row read on the
+Unread tab and switches to All immediately afterwards. The defect fires on
+every iteration - passing runs show the same stale `unread` fetch replacing the
+All list - but it only FAILS when mark-read has just emptied that feed, so the
+stale page has no rows.
+
+Verified by re-soaking the same spec after the fix: **250/250 passed, 15.2m,
+zero failures**, against a pre-fix rate of 1 in 38.
+
+Two claims below are left standing but are now known WRONG, deliberately not
+edited out, because the reasoning that produced them is instructive: "a whole
+open-partition read (byLastActivity, status='open') answered EMPTY" and
+"infrastructure is ELIMINATED - this is app read-path behaviour". Both were
+sound inferences from browser-side artifacts alone. Neither survived a
+server-side log. The lesson is the one the fix's own commit records: this
+repo's e2e runs discarded the app log entirely (Playwright's webServer does not
+capture the launcher's stdout), so three sightings produced no evidence capable
+of distinguishing a client bug from a server one. `E2E_CHILD_LOG_DIR` now exists
+so the next one does.
 
 **Sighting 3 (2026-08-24, soak R3, lane B) - AND IT ELIMINATES THE CONTAINER
 EXPLANATION.** Same test, same signature verbatim: the All tab in its

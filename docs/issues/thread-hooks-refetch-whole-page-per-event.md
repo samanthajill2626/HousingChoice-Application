@@ -9,6 +9,16 @@ created: 2026-08-13
 refs: dashboard/src/routes/conversation/useRelayThread.ts:196, dashboard/src/routes/conversation/useRelayThread.ts:238, dashboard/src/routes/conversation/useGroupThread.ts:128, dashboard/src/routes/conversation/useGroupThread.ts:188, dashboard/src/routes/contact/useContactTimeline.ts:141, dashboard/src/routes/contact/useContactTimeline.ts:318, dashboard/src/routes/placements/usePlacements.ts:244
 ---
 
+**CORRECTION 2026-08-24: this was NOT the mechanism behind
+[`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md)
+sighting 1.** That issue attributed its "element was detached, retrying"
+signature to this churn. The reproduction on 2026-08-24 showed the node
+detaches because the list is replaced by an EMPTY one - a stale-filter page
+installed by `useInbox` - not because every event replaces every row. This
+issue keeps its own merits (a list should not re-render wholesale to deliver
+one changed row) but it is no longer evidence for anything in C1, and it should
+not be sequenced as if a flake depended on it.
+
 **Problem.** Every conversation-shaped hook answers an SSE event by re-fetching
 the whole page it already has, then replacing its state wholesale. One new
 inbound text costs a full re-read of up to 50 messages the client is already

@@ -9,6 +9,37 @@ created: 2026-08-13
 refs: e2e/tests/dashboard-next/deleted-contact-resurfacing.spec.ts:95, e2e/tests/dashboard-next/inbox-markread.spec.ts:17
 ---
 
+**UPDATE 2026-08-24 - the C1 premise this was routed on is DISPROVEN, and this
+issue is deliberately NOT closed with its sibling.**
+
+[`call-inbox-unread-detached-node-flake`](./call-inbox-unread-detached-node-flake.md)
+was resolved the same day, and the cause was not the read path at all: it was
+`useInbox` installing a page fetched for a filter the operator had already left
+(`feat/inbox-unread-read-path` @52ebafc8). "A whole open-partition read
+answered empty" never happened - the server served full pages throughout.
+
+The two halves of THIS issue now sit differently, and neither is verifiable
+today:
+
+- `inbox-markread.spec.ts` is PLAUSIBLY the same defect. It clicks Unread, then
+  All, with inbound traffic in flight. A stale ALL page installed while the
+  Unread tab is showing gets narrowed CLIENT-SIDE to unread rows only
+  (`useInbox` applies `filter === 'unread' ? patched.filter(r => r.unreadCount > 0)`),
+  so a page fetched before the inbound landed renders as no row at all - which
+  is exactly this issue's symptom, and it sticks until the next event.
+- `deleted-contact-resurfacing.spec.ts` is NOT explained by it. That spec
+  reaches the inbox by `page.goto`, a fresh mount, where no timer survives to
+  go stale.
+
+It has not reproduced in 8+ full runs, including two heavily contended ones, so
+neither half can be confirmed or refuted by re-running today. Closing it on the
+resemblance would be guessing. It stays open with the mechanism named, and a
+recurrence AFTER @52ebafc8 is now a much sharper datum than it was: if it is
+the markread half, it should be gone; if it recurs there anyway, the stale-page
+explanation is wrong and something else is live.
+
+The original routing note is left below for the record.
+
 **ROUTED TO C1 (2026-08-24) - stays open as inbox read-path evidence, not as a
 spec flake.** "An inbound arrived and the row did not appear within 10s" is the
 same read path as `call-inbox-unread-detached-node-flake`'s adjudicated

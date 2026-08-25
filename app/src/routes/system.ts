@@ -6,6 +6,7 @@
 //   GET /api/system/flags             → 200 { ...flags }            (config only, no AWS)
 //   GET /api/system/alarms            → 200 { available, alarms? | reason? }
 //   GET /api/system/errors?since=…    → 200 { available, events?  | reason? }
+//   GET /api/system/errors/detail?ref=...  -> 200 { available, record? | reason? }
 //
 // Alarms/errors degrade gracefully ({ available: false, reason } at HTTP 200)
 // when AWS is unreachable (local/hermetic) or a CloudWatch read throws — the
@@ -83,6 +84,18 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
     }
     log.info({ window, reason: result.reason }, 'system status: errors degraded');
     res.json({ available: false, reason: result.reason });
+  });
+
+  // GET /api/system/errors/detail?ref=... - the complete log record behind one
+  // row. A MISSING ref is a 400 (matching the `since` precedent); a PRESENT but
+  // malformed one takes the degraded 200, like every other failure here.
+  router.get('/errors/detail', async (req, res) => {
+    const ref = req.query['ref'];
+    if (typeof ref !== 'string' || ref.length === 0) {
+      res.status(400).json({ error: 'ref is required' });
+      return;
+    }
+    res.json(await service.getErrorDetail(ref));
   });
 
   return router;

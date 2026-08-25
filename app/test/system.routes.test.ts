@@ -144,6 +144,7 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
         },
       ],
     })),
+    getErrorDetail: async () => ({ available: false as const, reason: 'unavailable_local' as const }),
   };
 
   it('alarms returns { available:true, alarms } from the service', async () => {
@@ -200,5 +201,65 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE);
     expect(getErrors).toHaveBeenCalledWith('24h', { includeWarnings: false });
+  });
+});
+
+describe('GET /api/system/errors/detail', () => {
+  it('400s when ref is missing', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/system/errors/detail')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(400);
+  });
+
+  it('is admin-only', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/system/errors/detail?ref=AAAA')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(403);
+  });
+
+  it('degrades at 200 when a ref is present', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get(`/api/system/errors/detail?ref=${encodeURIComponent('A+B/C=')}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(false);
+  });
+
+  it('hands the DECODED pointer to the service (+ and / survive the query)', async () => {
+    const getErrorDetail = vi.fn<SystemStatusService['getErrorDetail']>(async () => ({
+      available: false,
+      reason: 'invalid_ref',
+    }));
+    const service: SystemStatusService = {
+      getFlags: () => ({
+        env: 'dev',
+        smsSendingEnabled: false,
+        relayLiveProvisioning: false,
+        pushConfigured: true,
+        messagingDriver: 'twilio',
+        aiExtractionEnabled: true,
+        aiExtractionDriver: 'console',
+        aiExtractionModel: 'claude-opus-4-8',
+        aiExtractionPromptFingerprint: '0123456789ab',
+      }),
+      getAlarms: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrors: async () => ({ available: false, reason: 'unavailable_local' }),
+      getErrorDetail,
+    };
+    const { app } = makeWebhookHarness({ systemStatusService: service });
+    const ref = 'CnAKMwo=+B/C';
+    await request(app)
+      .get(`/api/system/errors/detail?ref=${encodeURIComponent(ref)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(getErrorDetail).toHaveBeenCalledWith(ref);
   });
 });

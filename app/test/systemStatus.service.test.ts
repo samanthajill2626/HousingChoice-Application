@@ -483,3 +483,68 @@ describe('isSystemErrorWindow', () => {
     }
   });
 });
+
+describe('systemStatus.getErrorDetail', () => {
+  it('rejects a record from a foreign log group', async () => {
+    const svc = makeService({
+      config: deployedConfig(),
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => ({ fields: { msg: 'x' }, responseTruncated: false, logGroup: '/hc/prod/app' }),
+      }),
+    });
+    expect(await svc.getErrorDetail('A'.repeat(32))).toEqual({ available: false, reason: 'out_of_scope' });
+  });
+
+  it('returns the record for an in-scope log group', async () => {
+    const config = deployedConfig();
+    const svc = makeService({
+      config,
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => ({ fields: { msg: 'x' }, responseTruncated: false, logGroup: config.errorLogGroupName }),
+      }),
+    });
+    const res = await svc.getErrorDetail('A'.repeat(32));
+    expect(res.available).toBe(true);
+    expect(res.available && res.record.fields['msg']).toBe('x');
+  });
+
+  it('accepts the worker and system groups too', async () => {
+    const config = deployedConfig();
+    for (const logGroup of [config.workerLogGroupName, config.systemLogGroupName]) {
+      const svc = makeService({
+        config,
+        cloudwatch: fakeSeam({
+          getLogRecord: async () => ({ fields: {}, responseTruncated: false, logGroup }),
+        }),
+      });
+      expect((await svc.getErrorDetail('A'.repeat(32))).available, logGroup).toBe(true);
+    }
+  });
+
+  it('degrades a malformed ref without calling AWS', async () => {
+    const getLogRecord = vi.fn();
+    const svc = makeService({ config: deployedConfig(), cloudwatch: fakeSeam({ getLogRecord }) });
+    expect(await svc.getErrorDetail('!!!')).toEqual({ available: false, reason: 'invalid_ref' });
+    expect(getLogRecord).not.toHaveBeenCalled();
+  });
+
+  it('local env: unavailable_local BEFORE ref validation, with no seam call', async () => {
+    const seam = fakeSeam();
+    // A malformed ref proves the ORDER: the local short-circuit wins over invalid_ref.
+    const res = await makeService({ config: localConfig(), cloudwatch: seam }).getErrorDetail('!!!');
+    expect(res).toEqual({ available: false, reason: 'unavailable_local' });
+    expect(seam.getLogRecord).not.toHaveBeenCalled();
+  });
+
+  it('deployed + the seam throws -> cloudwatch_error (never an exception)', async () => {
+    const svc = makeService({
+      config: deployedConfig(),
+      cloudwatch: fakeSeam({
+        getLogRecord: async () => {
+          throw new Error('ThrottlingException');
+        },
+      }),
+    });
+    expect(await svc.getErrorDetail('A'.repeat(32))).toEqual({ available: false, reason: 'cloudwatch_error' });
+  });
+});

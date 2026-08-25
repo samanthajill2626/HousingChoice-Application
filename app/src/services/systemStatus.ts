@@ -30,6 +30,7 @@ import {
   type AlarmView,
   type CloudWatchClientSeam,
   type ErrorEventView,
+  type LogRecordView,
 } from '../adapters/cloudwatch.js';
 import { isPushConfigured, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -106,6 +107,19 @@ export type ErrorsResult =
   | { available: true; events: ErrorEventView[] }
   | { available: false; reason: string };
 
+/**
+ * getErrorDetail result. Degrades at HTTP 200 like the other reads, never a 500:
+ * `unavailable_local` on a local/hermetic stack, `invalid_ref` for a pointer that
+ * fails REF_PATTERN, `out_of_scope` when the record belongs to another
+ * environment's log group, `cloudwatch_error` when the read throws.
+ */
+export type DetailResult =
+  | { available: true; record: LogRecordView }
+  | { available: false; reason: 'unavailable_local' | 'invalid_ref' | 'out_of_scope' | 'cloudwatch_error' };
+
+/** Base64-family pointer, bounded. Insights pointers observed at 220 chars. */
+const REF_PATTERN = /^[A-Za-z0-9+/=]{16,512}$/;
+
 export interface SystemStatusService {
   /** Go-live flags from runtime config — always works, no AWS call. */
   getFlags(): SystemFlags;
@@ -118,6 +132,13 @@ export interface SystemStatusService {
    * included regardless (they log at warn).
    */
   getErrors(window?: SystemErrorWindow, opts?: GetErrorsOptions): Promise<ErrorsResult>;
+  /**
+   * The complete log record behind ONE error row (`ref` is that row's Insights
+   * `@ptr`), or a degraded reason. The record is rejected unless it came from one
+   * of the three CONFIGURED log groups - a pointer is account-scoped and bound to
+   * no group, so this is what keeps the read inside this environment.
+   */
+  getErrorDetail(ref: string): Promise<DetailResult>;
 }
 
 /** Options for {@link SystemStatusService.getErrors}. */
@@ -261,6 +282,29 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         log.error(
           { window, kind: classifyCloudWatchError(err), err: (err as Error).message },
           'system status: Logs Insights query failed',
+        );
+        return { available: false, reason: 'cloudwatch_error' };
+      }
+    },
+
+    async getErrorDetail(ref) {
+      if (isLocalEnv(config)) return { available: false, reason: 'unavailable_local' };
+      if (!REF_PATTERN.test(ref)) return { available: false, reason: 'invalid_ref' };
+      try {
+        const record = await cloudwatch.getLogRecord(ref);
+        // A ref is an ACCOUNT-scoped pointer bound to nothing. This check makes
+        // the route's scope independent of which IAM branch the grant landed on
+        // - without it, a pointer from another environment resolves here.
+        const allowed = [config.errorLogGroupName, config.workerLogGroupName, config.systemLogGroupName];
+        if (!allowed.includes(record.logGroup)) {
+          log.warn({ logGroup: record.logGroup }, 'system status: detail record out of scope');
+          return { available: false, reason: 'out_of_scope' };
+        }
+        return { available: true, record };
+      } catch (err) {
+        log.error(
+          { kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: GetLogRecord failed',
         );
         return { available: false, reason: 'cloudwatch_error' };
       }

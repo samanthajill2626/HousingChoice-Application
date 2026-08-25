@@ -1,7 +1,7 @@
 # Log hygiene: vendor errors, PII, and alarm noise (cluster C3)
 
-Date: 2026-08-24 (v3 after adversarial doc review rounds 1-2)
-Status: DRAFT - awaiting round-3 review + human review gate
+Date: 2026-08-24 (v4 after adversarial doc review rounds 1-3)
+Status: DRAFT - awaiting round-4 (terminal-cap) review + human review gate
 Branch: feat/log-hygiene (worktree W:\tmp\log-hygiene, cut from main @6e707348)
 Review artifacts: .superpowers/design-review/ (spec-r1-a.md, spec-r1-b.md,
 spec-r2.md, adjudications.md)
@@ -73,16 +73,24 @@ Value handling, in order:
    metric-filter line - auth.ts:172, groupCrossCheck.ts x4, api.ts:1326,
    more; spec-r1-b B1). Seven sites also log `err: <string>` and keep
    their shape.
-2. NON-ERROR-LIKE OBJECTS PASS THROUGH UNCHANGED (no string `message`),
-   mirroring pino's own `isErrorLike` bail. Load-bearing: `{ err:
-   summarizeError(x) }` at 11 sites (groupRail/groupSend/
-   groupIdentityFingerprint/groupReceipts/twilio.ts) logs a plain
-   `{ name, code?, status? }` object whose only identifying field is
-   `name` - it must keep reaching the line verbatim (spec-r2 B1). The
-   dangerous class (axios/vendor errors) is always error-like, so nothing
-   protected escapes through this branch.
-3. ERROR-LIKE VALUES (instanceof Error, or any object with a string
-   `message`) get the ALLOWLIST, copying nothing else:
+2. NON-Error VALUES PASS THROUGH UNCHANGED. Load-bearing for TWO
+   deliberate conventions: `{ err: summarizeError(x) }` at 11 sites
+   (groupRail/groupSend/groupIdentityFingerprint/groupReceipts/
+   twilio.ts) logs a plain `{ name, code?, status? }` object whose only
+   identifying field is `name` (spec-r2 B1), and `err: { name: ... }`
+   name-only objects at 7 sites (api.ts:1435, relayGroups.ts:378,:387,
+   rosterProvision.ts:366,:376,:667,:678) - a FOURTH posture the sweep
+   table records as KEPT (spec-r3 M3). The allowlist trigger is
+   `instanceof Error` ONLY, not a structural message-check: every member
+   of the dangerous class extends Error (AxiosError, RestException, AWS
+   ServiceException - spec-r3 M2), the process has one realm, and a
+   structural test would silently gut domain objects that happen to
+   carry a string `message` (the RunError shape). Backstop asymmetry,
+   stated (spec-r3 M4): the literal `err.*` redact paths still censor a
+   credential-carrying plain object under `err`; under
+   `error`/`cause`/`reason` there is no backstop - accepted, since the
+   pass-through branch only receives our own deliberate summary shapes.
+3. `instanceof Error` VALUES get the ALLOWLIST, copying nothing else:
    - `type`: constructor name (pino's existing field name), falling back
      to `name` then 'Error'.
    - `message`, `stack`: the error's OWN message and stack (not the
@@ -96,8 +104,13 @@ Value handling, in order:
    - `moreInfo`: string when present (Twilio docs URL).
    - `$metadata`: projected `{ httpStatusCode, requestId, attempts,
      totalRetryDelay }` (AWS SDK v3 diagnostics, machine-generated).
-   - `cause`: recursed with the same rules, fixed depth 3.
-   - `aggregateErrors`: same treatment, capped at 5 entries.
+   - `cause`: recursed to fixed depth 3, WITH ONE RULE CHANGE inside the
+     recursion (spec-r3 M1): a nested non-Error value is DROPPED, never
+     passed through - the pass-through exists to protect deliberate
+     top-level summary objects, and nothing deliberate nests under
+     `cause`. (Real chains stay intact: axios sets `cause` to the
+     underlying Node error, which is an Error.)
+   - `aggregateErrors`: same treatment as `cause`, capped at 5 entries.
 4. The serializer never throws; internal failure degrades to
    `{ type: 'UnserializableError' }`.
 
@@ -196,21 +209,33 @@ lint rule cannot gate):
    source-scanning tests - `app/test/tourCopyCallSites.test.ts`,
    `app/test/dynamoKeyLedger.test.ts`): using the `typescript` package
    (a ROOT devDependency, resolved via workspace hoisting) with a
-   TYPE-AWARE program over `app/src`: for every call expression
+   program over `app/src` built from the repo's real tsconfig (NodeNext
+   module resolution): for every call expression
    `<obj>.(trace|debug|info|warn|error|fatal)(...)` whose first argument
    is an object literal, FAIL when a property at any depth is assigned a
-   value whose TYPE is assignable to Error (or structurally carries
-   string `message` + `stack`) under a property path that is not a
-   top-level wired key. Type-awareness, not an /err/i name regex - the
-   regex form false-positives on the repo's domain uses of
-   `err.code`/`errorMessage(err)`/`draft.error.kind`
-   (spec-r2 H3a), and the exception allowlist genuinely starts EMPTY.
-   KNOWN LIMITS, stated in the test header per the
-   tourCopyCallSites precedent: a payload hoisted into a const and
-   passed as an identifier, a spread of a helper's return, and an error
-   stringified into `msg` are invisible to this guard - accepted; the
-   serializer plus the audit baseline carry those, and the guard is a
-   ratchet against the common literal form, not a proof.
+   value that is (a) an identifier DECLARED BY A CATCH CLAUSE (an AST
+   fact), or (b) of a type assignable to Error, under a property path
+   that is not a top-level wired key. The catch-clause test is the
+   load-bearing half (spec-r3 B2): under `strict: true` every bare
+   `catch (e)` binding is `unknown` - 464 sites, zero annotations - so a
+   purely type-based check is VACUOUS (flags nothing, forever), and a
+   name-regex check false-positives on domain uses of
+   `err.code`/`errorMessage(err)` (spec-r2 H3a). Catch-origin
+   identifiers are exactly "an error", regardless of their static type;
+   `summarizeError(err)`/`errFields(err)` call results are neither
+   catch bindings nor Error-typed, so the domain conventions stay
+   unflagged and the exception allowlist genuinely starts EMPTY.
+   POSITIVE CONTROL, required (spec-r3 H3): the test compiles a
+   known-bad fixture (an in-test source string logging
+   `{ ctx: { err } }` from a catch clause) through the same program
+   configuration and asserts the guard FLAGS it - so a misconfigured
+   ts.Program fails loud instead of passing empty.
+   KNOWN LIMITS, stated in the test header per the tourCopyCallSites
+   precedent: a payload hoisted into a const and passed as an
+   identifier, a spread of a helper's return, a catch variable laundered
+   through a local, and an error stringified into `msg` are invisible -
+   accepted; the serializer plus the audit baseline carry those, and the
+   guard is a ratchet against the common literal form, not a proof.
 
 EXISTING TESTS THAT CHANGE (round-1 A-B3):
 `app/test/errorSummary.test.ts:107-117` and `:119-141` assert
@@ -371,10 +396,18 @@ exists; `pre_ring` goes to the inbound-line HOLDER, `missed_call` /
 audience.
 
 Design: the voice pushes adopt the MESSAGE PUSHES' existing naming chain
-verbatim (twilio.ts:2284-2290, mirrored :1042-1048):
+(twilio.ts:2284-2290, mirrored :1042-1048) - including its EMPTY-STRING
+guard on rung 2 (spec-r3 H2: `??` alone would select a stored empty
+string) - plus a TERMINAL rung the message chain does not need
+(spec-r3 H1: its terminal `From` is webhook-guaranteed, while here the
+phone is `conversation?.participant_phone` and can be undefined; today's
+code always yields a non-empty label and this must too):
 
-    contactDisplayName(contact) ?? conversation.participant_display_name
-      ?? formatPhoneForDisplay(phone) ?? phone
+    contactDisplayName(contact)
+      ?? (nonEmptyString(conversation?.participant_display_name))
+      ?? formatPhoneForDisplay(phone)
+      ?? phone
+      ?? UNKNOWN_CALLER_LABEL
 
 - `contactDisplayName` is the EXISTING push-copy helper
   (`app/src/lib/contactName.ts:65`) - imported, never duplicated (its
@@ -490,40 +523,56 @@ time-driven. Three consequences stated for the approval, not buried:
   operator resolved can REAPPEAR on a live dashboard (with the SSE emit,
   in real time, possibly at 3am). Rare, bounded, and the machinery's own
   behavior - but user-visible.
-- FIRST RUN drains the whole backlog: on deploy there is no cadence
-  record, so the first worker tick claims and sweeps everything older
-  than 24h, subject to the caps below - the backlog commits over the
-  first ceil(backlog/25) days.
+- The backlog drains at the caps' rate: every daily run enumerates ALL
+  qualifying journals the same way (there is no first-run special case),
+  so a backlog of N contacts commits over ceil(N/25) days, 25 contacts
+  per day.
 
-### 9.2 Enumeration - the byDueAt idiom, not a recurring Scan
+### 9.2 Enumeration - a bounded daily Scan, deliberately NOT an index
 
-(Adopted from spec-r2 H1, which refuted the v2 Scan's justification:
-`ai_extraction`'s sparse `byDueAt` GSI is a GENERIC due-index -
-`_duePartition` is writer-chosen; the extraction poller queries partition
-value 'due' - and the repo's stay-out-of-the-indexes note names only the
-two SUGGESTION GSIs.)
+DECISION HISTORY, kept because it reversed twice: v2 proposed this Scan;
+round 2 (spec-r2 H1) refuted its "no alternative" justification with the
+sparse byDueAt idiom and v3 adopted that; a round-3 deep verification of
+the byDueAt lifecycle then refuted the ADOPTION on stronger grounds, and
+v4 returns to the Scan with the honesty fixes. Why the index loses:
 
-- `claim()` additionally writes `_duePartition: 'resolve'` and
-  `dueAt: leaseExpiresAt`; `takeover()` updates `dueAt` to the new
-  leaseExpiresAt; `complete()` REMOVEs both attributes; `release()`
-  deletes the row. Phase-advance updates leave them untouched. The
-  extraction poller (partition 'due') never sees these rows.
-- Enumeration is a bounded, paginated QUERY on byDueAt: partition
-  'resolve', `dueAt <= now` (lease expired), FilterExpression
-  `claimedAt <= now - 24h` (the age anchor; `claimedAt` is written once
-  at claim, never refreshed by takeover, ISO string - compare via
-  Date.parse, never lexicographically, since it is stored un-normalized).
-  Cost is proportional to the ACTIVE-journal working set, not the table.
-- LEGACY BACKFILL, once: rows claimed before this change lack the index
-  attributes and are exactly the backlog the issue is about. The sweep's
-  FIRST run (per environment - detected by the absence of the cadence
-  record) performs a one-time paginated Scan
-  (`begins_with(itemId, 'resolve#') AND #state = :active` - `state` is
-  reserved, alias it) with a hard max-pages bound, recovering what it
-  finds AND relying on recovery itself to retire the rows (complete
-  scrubs, release deletes); subsequent runs use the Query only. A fresh
-  e2e lane's "first run" Scan is trivially empty (no seed writes
-  resolve# rows).
+- PII INVERSION: every `ai_extraction` GSI projects ALL (hardcoded in
+  the terraform module; tables.ts:60 states it). Indexing `resolve#`
+  rows would copy each active journal's FULL PII snapshot and replay
+  plan into the index - and the issue being closed records, as its
+  accepted-residual SAFETY property, that "no API, GSI or pending list
+  can return" these rows. A PII-hygiene mission must not be the change
+  that puts journal PII into a GSI.
+- LIFECYCLE FRAGILITY, found by verification: legacy rows never enter a
+  sparse index without a backfill writer; `takeover()` would need both
+  key attributes; `complete()` is a whole-item Put (not a REMOVE edit);
+  the backfill's gating signal (cadence-record absence) is destroyed by
+  claim-first ordering, by `force`, and by devReset - four independent
+  ways to orphan PII permanently.
+- Write amplification on every claim/takeover/complete, for a
+  once-a-day consumer.
+
+The Scan, with its costs stated: one paginated Scan per day,
+`FilterExpression: begins_with(#id, :p) AND #state = :active AND
+#claimedAt <= :cutoff` (`state` is reserved - alias it; `:cutoff` is
+`new Date(nowMs - 24h).toISOString()`). The filter applies AFTER the
+page read, so `Limit` bounds RCU per page, not matches per page; pages
+are capped at `MAX_SCAN_PAGES = 20` with `Limit: 200` (up to 4000 rows
+examined per run - far above any realistic journal count). Cost is
+proportional to TABLE size (dism#/due#/sugg# rows included), not the
+working set - accepted at daily cadence; this is the system's first
+recurring production Scan and says so here. Every run sees every row,
+so nothing is ever orphaned: caps defer work to tomorrow, never strand
+it. `dynamodb:Scan` is already granted (verified round 1).
+
+INVARIANT, asserted rather than hedged (round-3 verification):
+`claimedAt` is ALWAYS `new Date().toISOString()` in production - its
+only writers go through the service's `now()` default, and the
+injectable `deps.now` is wired only from test seams. The string compare
+above is therefore chronologically correct. The sweep treats an
+unparseable `claimedAt` as qualifying (fail-toward-scrub). Note the
+attribute name also appears on extraction `due#` rows - harmless, the
+`begins_with` filter excludes them.
 
 ### 9.3 The duty
 
@@ -534,23 +583,36 @@ two SUGGESTION GSIs.)
   `force` bypass and gains `POST /__dev/journal-sweep/tick`
   (triple-gated like its siblings) - without it the duty is untestable
   from e2e (worker logs never reach the app logtail, A16).
-- CLAIM-FIRST HONESTY (spec-r2 H5): the cadence stamp lands BEFORE the
-  work and has no release path, so a mid-run failure burns the day.
-  Accepted for a daily hygiene duty ON CONDITION the failure is loud:
-  the sweep wraps its body and logs ERROR (alarm-feeding) on any thrown
-  failure, stating the next natural retry is tomorrow (or a force tick).
+- CLAIM-FIRST HONESTY (spec-r2 H5, upheld round 3 - the conditional
+  write IS the cross-process dedup, and concurrent sweeps that commit
+  domain decisions would be worse than a burned day): the cadence stamp
+  lands BEFORE the work and has no release path, so a mid-run failure
+  burns the day. Accepted ON CONDITION the failure is loud, and "loud"
+  covers MORE than throws (spec-r3 H4): the sweep logs alarm-feeding
+  ERROR when (a) its body throws, OR (b) the run ends with work known to
+  remain - a cap was hit, the page bound was hit, or the post-loop truth
+  check found persistent actives - naming the counts and that the next
+  natural retry is tomorrow (or a force tick). NAMED EDIT: reading the
+  cadence state needs a read method for period records (the existing
+  getGroupTimestamp is typed to the liveness union only) - or the duty
+  simply relies on the claim's conditional failure, which needs no read.
 - Caps, named: `MAX_CONTACTS_PER_RUN = 25`,
-  `JOURNAL_SWEEP_MIN_AGE_MS = 24h`, backfill `MAX_SCAN_PAGES = 20`.
+  `MAX_RECOVERY_CALLS_PER_RUN = 100` (the bound that actually governs
+  write volume - spec-r3 M5), `JOURNAL_SWEEP_MIN_AGE_MS = 24h`,
+  `MAX_SCAN_PAGES = 20`, `SCAN_PAGE_LIMIT = 200`.
+- Contact selection: the Scan returns JOURNAL ROWS; contactIds are
+  DEDUPLICATED across the run before dispatch (one contact owns up to 12
+  journals; without dedup the 25-contact cap is a ~2-contact cap -
+  round-3 verification).
 - Per contact: call `recoverAbandoned(contactId, { maxAttempts: 12 })` -
   recoverAbandoned gains an OPTIONAL maxAttempts (default 2, preserving
   read-path behavior; 12 = the closed DECISION_TARGETS key set) so a
   poison pair of persistently-failing journals cannot starve the other
-  ten (spec-r2 H6: the internal budget counts attempts and is consumed
-  by failures). Loop while `recovered > 0` and caps allow; OR
-  `stateChanged` across ALL calls (the terminating call always reports
-  false - spec-r2 M7) and emit `suggestion.updated` for the contact when
-  the OR is true (real registered event; the event bridge forwards to
-  app SSE in all deployed/lane environments).
+  ten (spec-r2 H6). Loop while `recovered > 0` and the run caps allow;
+  OR `stateChanged` across ALL calls (the terminating call always
+  reports false - spec-r2 M7) and emit `suggestion.updated` for the
+  contact when the OR is true (real registered event; the event bridge
+  forwards to app SSE in all deployed/lane environments).
 - POST-LOOP TRUTH CHECK (spec-r2 B3 - the v2 WARN fired on every
   contact): after the loop, re-read the contact's journals via the
   existing `listJournals(contactId)` (one consistent BatchGet over the
@@ -572,9 +634,10 @@ semantics (9.1), and the constants.
   the email path's bounded errFields convention.
 - No changes to the C1 agent's files (verified-safe exclusion,
   section 0).
-- No TTL on `ai_extraction`; no new tables or indexes (the byDueAt
-  attributes ride an EXISTING index); no recurring Scan (one bounded
-  legacy backfill only).
+- No TTL on `ai_extraction`; no new tables or indexes, and NO journal
+  attributes written into any existing index (the projection-ALL PII
+  inversion - section 9.2). The daily bounded Scan is the accepted cost
+  of that line.
 - No Conversations-rail `syssid#` restoration (section 5 boundary).
 - No changes to what the SERVER logs about push payloads (section 7
   changes what the push carries, not what is logged).
@@ -590,12 +653,16 @@ errorSummary.test.ts rewrite, maskPhonesInText, each masked sink,
 exported per-direction otel hooks, relayAnnouncements persist:false
 marker (success, marker-failure WARN, epoch-seconds TTL value),
 putSystemSidMarker TTL for both callers, pushService floor +
-pushStatusCode + err-object conversion, voice identity chain (all four
-rungs; the five enumerated founderTriage/missed-call updates; NEW
-voicemail push body pin), aiRunsRepo split + route serialization +
-optional-discriminant shape, journal sweep (fake repo/service: query vs
-backfill paths, age gate, caps, maxAttempts pass-through, post-loop
-truth check, OR'd SSE emit, cadence claim + force, loud-failure ERROR).
+pushStatusCode + err-object conversion, voice identity chain (all five
+rungs including the empty-string guard and the terminal fallback; the
+enumerated founderTriage updates; NEW voicemail push body pin),
+aiRunsRepo split + route serialization + optional-discriminant shape
+(house `!== undefined` spread form), journal sweep (fake repo/service:
+scan paging + filter, contact dedup, age gate + unparseable-claimedAt
+fail-toward-scrub, all five caps, maxAttempts pass-through, post-loop
+truth check, OR'd SSE emit, cadence claim + force, loud-failure ERROR
+including the work-remaining non-throw case). The static guard's
+positive-control canary is part of its own test.
 Dashboard: AiRunList unavailable-row component test. E2E: no NEW spec
 required (no new interactive control; rationale per section); the build
 may cheaply extend an existing logtail-based assertion where one already
@@ -616,3 +683,6 @@ Gates, bare, from the worktree: `npm run typecheck`, `npm test`,
 - Comment edits shipped with their code: tables.ts:213-223 TTL-family
   enumeration (+ syssid# exception), phone.ts server-only masking note,
   `e2e/performance/routes.ts:691,:745` citation refresh.
+- One line added to the open
+  `docs/issues/consolidate-contact-display-name-helpers.md`: the voice
+  pushes become a second push-copy consumer of `contactDisplayName`.

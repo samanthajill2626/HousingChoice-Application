@@ -5,6 +5,11 @@
 //   useSystemAlarms()  GET /api/system/alarms (auto-refresh 60s WHILE VISIBLE + manual ↻)
 //   useSystemErrors()  GET /api/system/errors?since= (window selector + manual ↻)
 //
+// Plus two ON-DEMAND reads, driven by one error row rather than by the panel:
+//
+//   useErrorDetail()   GET /api/system/errors/detail?ref= (the row expander)
+//   useErrorTrace()    GET /api/system/trace              (the correlation pivot)
+//
 // Each uses an AbortController + a cancelled/abort guard (the Phase-A pattern in
 // useTeam): an unmount or a superseding fetch never sets state. Alarms/errors
 // resolve to { available: false, reason } on the local stack (no AWS) — the
@@ -12,11 +17,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getSystemAlarms,
+  getSystemErrorDetail,
   getSystemErrors,
   getSystemFlags,
+  getSystemTrace,
   type SystemAlarmsResult,
+  type SystemErrorDetailResult,
   type SystemErrorsResult,
   type SystemFlags,
+  type SystemTraceResult,
 } from '../../api/index.js';
 
 export type FetchStatus = 'loading' | 'ready' | 'error';
@@ -231,4 +240,81 @@ export function useSystemErrors(): SystemErrorsState {
     setIncludeWarnings,
     refresh,
   };
+}
+
+// --- Row detail + correlation trace (on demand) -----------------------------
+// Neither of these loads with the panel: a row's full log record and the trace
+// around it are each fetched only when the operator asks for that row. Both
+// carry an `abortRef` like the reads above, so a second row supersedes the
+// first in flight instead of racing it into state. `status` starts 'ready'
+// with `result` null - FetchStatus has no 'idle', so a never-loaded hook is
+// 'ready' with nothing in it, and the caller must handle that pair.
+
+export function useErrorDetail(): {
+  status: FetchStatus;
+  result: SystemErrorDetailResult | null;
+  load: (ref: string) => void;
+  reset: () => void;
+} {
+  const [status, setStatus] = useState<FetchStatus>('ready');
+  const [result, setResult] = useState<SystemErrorDetailResult | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const load = useCallback((ref: string) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setStatus('loading');
+    void getSystemErrorDetail(ref, controller.signal)
+      .then((next) => {
+        if (controller.signal.aborted) return;
+        setResult(next);
+        setStatus('ready');
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        setStatus('error');
+      });
+  }, []);
+  const reset = useCallback(() => {
+    abortRef.current?.abort();
+    setResult(null);
+    setStatus('ready');
+  }, []);
+  return { status, result, load, reset };
+}
+
+export function useErrorTrace(): {
+  status: FetchStatus;
+  result: SystemTraceResult | null;
+  load: (kind: 'correlationId' | 'requestId' | 'pollRunId', id: string, at: string) => void;
+  reset: () => void;
+} {
+  const [status, setStatus] = useState<FetchStatus>('ready');
+  const [result, setResult] = useState<SystemTraceResult | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const load = useCallback(
+    (kind: 'correlationId' | 'requestId' | 'pollRunId', id: string, at: string) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setStatus('loading');
+      void getSystemTrace(kind, id, at, controller.signal)
+        .then((next) => {
+          if (controller.signal.aborted) return;
+          setResult(next);
+          setStatus('ready');
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+          setStatus('error');
+        });
+    },
+    [],
+  );
+  const reset = useCallback(() => {
+    abortRef.current?.abort();
+    setResult(null);
+    setStatus('ready');
+  }, []);
+  return { status, result, load, reset };
 }

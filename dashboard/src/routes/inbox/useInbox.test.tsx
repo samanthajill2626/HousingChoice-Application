@@ -591,6 +591,67 @@ describe('useInbox - the unread feed truncation flag', () => {
     expect(screen.getByTestId('count')).toHaveTextContent('0');
   });
 
+  // THE STALE-FILTER RECONCILE. Diagnosed 2026-08-24 from a reproduced e2e
+  // failure with server-side read accounting: the app served a FULL page on
+  // every filter=all request while the browser rendered "No conversations yet",
+  // and the request that emptied the list was a `filter=unread` fetch the
+  // BROWSER issued 158ms after the All tab's own fetch had already landed.
+  //
+  // The debounce timer is scheduled inside `scheduleRefetch`, which closes over
+  // the `fetchFirstPage` of the filter that was active when the SSE event
+  // arrived. Nothing cancels it on a filter change - the clearing effect has
+  // EMPTY deps, so it only runs on unmount - and `fetchFirstPage` commits
+  // whatever it fetched with no filter-identity guard. `loadMore` was hardened
+  // against precisely this class ("a page fetched for the previous filter must
+  // never append to the new filter's list"); the first-page path never was.
+  //
+  // Operator-visible, and not only in tests: mark a row read on Unread and
+  // switch to All inside 300ms and the All tab goes blank until the next event
+  // happens to arrive. Closes call-inbox-unread-detached-node-flake and
+  // inbox-row-appearance-e2e-flake, which are the same defect seen from the
+  // click side and the row-appearance side.
+  it('DROPS a debounced reconcile scheduled under the previous filter', async () => {
+    const allRows = [
+      mkRow({ contactId: 'c1' }),
+      mkRow({ contactId: 'c2', lastActivityAt: '2026-06-17T09:00:00.000Z' }),
+      mkRow({ contactId: 'c3', lastActivityAt: '2026-06-17T08:00:00.000Z' }),
+    ];
+    // The unread feed still holds the row when the Unread tab loads, and is
+    // EMPTY by the time the stale refetch lands - which is exactly what
+    // marking that row read does, and why this only bites right after one.
+    let unreadRows: InboxRow[] = [mkRow({ contactId: 'c1' })];
+    getInbox.mockImplementation((opts: { filter: InboxFilter }) =>
+      Promise.resolve(pageOf(opts.filter === 'unread' ? unreadRows : allRows)),
+    );
+
+    const { rerender } = render(<Probe filter="unread" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
+
+    unreadRows = [];
+    // The mark-read's conversation.updated: schedules a reconcile bound to the
+    // UNREAD closure...
+    act(() => {
+      sse.onConversationUpdated?.({ conversationId: 'conv-1' } as never);
+    });
+    // ...and the operator switches tabs inside the 300ms debounce window.
+    rerender(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('3'));
+
+    // Outlast the debounce. The stale timer either never fires or its page is
+    // refused; either way the All tab keeps the page it actually asked for.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+
+    expect(screen.getByTestId('status')).toHaveTextContent('ready');
+    expect(screen.getByTestId('count')).toHaveTextContent('3');
+    // And no request was spent on a filter the operator has left.
+    const filtersAfterSwitch = getInbox.mock.calls
+      .map((c) => (c[0] as { filter: InboxFilter }).filter)
+      .slice(1);
+    expect(filtersAfterSwitch).not.toContain('unread');
+  });
+
   // The OTHER reset A10 names. Kept on the SAME filter (a reconcile refetch that
   // 404s), because a filter change would reset the flag through the filter effect
   // and this branch would go untested.

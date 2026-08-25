@@ -157,6 +157,30 @@ export function useInbox(filter: InboxFilter): InboxState {
   // holds, which the next Load more 400s on. The filter axis already had this
   // guard; this is the same guard on the other axis that can move `base`.
   const firstPageGenRef = useRef(0);
+  // THE FILTER THIS HOOK IS CURRENTLY SHOWING, readable from a callback that was
+  // built for a DIFFERENT one. `scheduleRefetch` closes over the
+  // `fetchFirstPage` of whichever filter was active when the SSE event arrived,
+  // so a reconcile can land for a tab the operator has already left - and
+  // `fetchFirstPage` installs its page wholesale. Comparing the closure's
+  // `filter` against this ref is what refuses it.
+  //
+  // A GENERATION COUNTER CANNOT DO THIS JOB, which is why `filterGenRef` is not
+  // reused here: the stale callback would read the counter at CALL time, by
+  // which point the filter effect has already bumped it, so the stale page
+  // would compare EQUAL and commit. The identity of the filter is the only
+  // thing the closure carries that the ref can be checked against.
+  const activeFilterRef = useRef(filter);
+  // The pending debounced reconcile, declared up here (rather than beside
+  // `scheduleRefetch` below) so the filter-change effect can cancel it. Its
+  // clearing effect has empty deps and therefore only ever ran on UNMOUNT,
+  // which is what let a reconcile outlive the filter that scheduled it.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const clearPendingRefetch = useCallback(() => {
+    if (debounceRef.current !== undefined) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = undefined;
+    }
+  }, []);
 
   const fetchFirstPage = useCallback(async () => {
     abortRef.current?.abort();
@@ -166,6 +190,19 @@ export function useInbox(filter: InboxFilter): InboxState {
     try {
       const pageData = await getInbox({ filter, limit: PAGE_LIMIT }, controller.signal);
       if (controller.signal.aborted || gen !== genRef.current) return;
+      // A page for a filter we have LEFT is refused, never installed.
+      //
+      // HONEST STATUS: no test can currently fail by deleting this line, and
+      // that is stated rather than hidden. Two other mechanisms already cover
+      // every path that reaches here - the filter effect's cleanup ABORTS any
+      // in-flight first-page fetch, and the effect CLEARS a pending reconcile
+      // before it can fire - so today this is the third lock on a door with two
+      // working ones. It is kept for the same reason `loadMore` checks
+      // `filterStale()` at its commit point despite also aborting: it makes the
+      // refusal local to the moment state is installed, so a future scheduler
+      // (a focus-retry, a polling fallback) cannot reintroduce this class
+      // silently. Delete it only together with that argument.
+      if (filter !== activeFilterRef.current) return;
       firstPageGenRef.current += 1;
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
@@ -176,6 +213,9 @@ export function useInbox(filter: InboxFilter): InboxState {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
       }
+      // Same refusal on both failure branches: a 404 or a 500 answering a filter
+      // we have left must not move THIS filter's state either.
+      if (filter !== activeFilterRef.current) return;
       if (err instanceof ApiError && err.status === 404) {
         // C8 backend slice isn't live yet → honest pending state (not an error).
         firstPageGenRef.current += 1;
@@ -202,6 +242,12 @@ export function useInbox(filter: InboxFilter): InboxState {
     // append to the list we are about to build (C2).
     filterGenRef.current += 1;
     loadMoreAbortRef.current?.abort();
+    // The new filter is the one we are showing from here on, and any reconcile
+    // still pending for the OLD one is cancelled rather than left to fire into
+    // this list. Both lines must precede `fetchFirstPage()` below: the fetch
+    // it starts checks `activeFilterRef` when it lands.
+    activeFilterRef.current = filter;
+    clearPendingRefetch();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     setBase([]);
@@ -216,7 +262,7 @@ export function useInbox(filter: InboxFilter): InboxState {
     setPending(new Map());
     void fetchFirstPage();
     return () => abortRef.current?.abort();
-  }, [fetchFirstPage]);
+  }, [fetchFirstPage, filter, clearPendingRefetch]);
 
   const retry = useCallback(() => {
     setStatus('loading');
@@ -267,21 +313,18 @@ export function useInbox(filter: InboxFilter): InboxState {
   }, [filter, cursor, loadingMore]);
 
   // --- SSE: debounced reconcile-refetch of the current filter's first page ---
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // `debounceRef` / `clearPendingRefetch` are declared with the other refs above,
+  // because the filter-change effect has to be able to cancel a pending
+  // reconcile before it fires into a list it was never scheduled for.
   const scheduleRefetch = useCallback(() => {
-    if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+    clearPendingRefetch();
     debounceRef.current = setTimeout(() => {
       debounceRef.current = undefined;
       void fetchFirstPage();
     }, REFETCH_DEBOUNCE_MS);
-  }, [fetchFirstPage]);
+  }, [fetchFirstPage, clearPendingRefetch]);
 
-  useEffect(
-    () => () => {
-      if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
-    },
-    [],
-  );
+  useEffect(() => clearPendingRefetch, [clearPendingRefetch]);
 
   useEventStream({ onConversationUpdated: scheduleRefetch });
 

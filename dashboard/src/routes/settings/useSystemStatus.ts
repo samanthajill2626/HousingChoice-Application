@@ -244,11 +244,18 @@ export function useSystemErrors(): SystemErrorsState {
 
 // --- Row detail + correlation trace (on demand) -----------------------------
 // Neither of these loads with the panel: a row's full log record and the trace
-// around it are each fetched only when the operator asks for that row. Both
-// carry an `abortRef` like the reads above, so a second row supersedes the
-// first in flight instead of racing it into state. `status` starts 'ready'
-// with `result` null - FetchStatus has no 'idle', so a never-loaded hook is
-// 'ready' with nothing in it, and the caller must handle that pair.
+// around it are each fetched only when the operator asks for that row.
+//
+// SCOPE OF THE abortRef: PER HOOK INSTANCE, and each ROW creates its own (
+// RecentErrors calls useErrorDetail() inside ErrorRow, and mounts an ErrorTrace
+// per traced row). So a new load supersedes the previous load OF THAT INSTANCE
+// - it does NOT reach across rows, and opening row B cannot cancel row A's
+// request. Each instance also aborts on unmount, which is the case that
+// actually bites here: closing a trace or a detail before its response lands.
+//
+// `status` starts 'ready' with `result` null - FetchStatus has no 'idle', so a
+// never-loaded hook is 'ready' with nothing in it, and the caller must handle
+// that pair.
 
 export function useErrorDetail(): {
   status: FetchStatus;
@@ -280,6 +287,9 @@ export function useErrorDetail(): {
     setResult(null);
     setStatus('ready');
   }, []);
+  // Mount-scoped, like the three panel hooks above: a row collapsed before its
+  // record lands must not leave the fetch running.
+  useEffect(() => () => abortRef.current?.abort(), []);
   return { status, result, load, reset };
 }
 
@@ -316,5 +326,8 @@ export function useErrorTrace(): {
     setResult(null);
     setStatus('ready');
   }, []);
+  // Mount-scoped: hiding a trace unmounts ErrorTrace, and its two Insights
+  // queries should not outlive the view nobody is waiting on any more.
+  useEffect(() => () => abortRef.current?.abort(), []);
   return { status, result, load, reset };
 }

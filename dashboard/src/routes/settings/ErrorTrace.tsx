@@ -4,9 +4,10 @@
 // from two bracketing queries and renders it as an ordered list: when, which log
 // group the line came from, and the line's message.
 //
-// The anchor - the very failure the operator clicked - is marked by the TEXT
-// "this failure" as well as by styling, because this panel never conveys status
-// by colour alone. The per-side truncation notices are rendered HERE; they have
+// The anchor - the very failure the operator clicked - is found by REF (the
+// log-event pointer, exact) and marked by the TEXT "this failure" as well as by
+// styling, because this panel never conveys status by colour alone. The
+// timestamp only bounds the query. The per-side truncation notices are HERE; they have
 // no other surface. DEGRADED (no AWS on this stack) and EMPTY (queried fine,
 // nothing correlated) must read differently: an empty trace that looks like a
 // blank panel is the failure mode this view exists to avoid.
@@ -19,11 +20,18 @@ import styles from './SystemStatusSection.module.css';
 interface ErrorTraceProps {
   kind: 'correlationId' | 'requestId' | 'pollRunId';
   id: string;
-  /** The anchor row's timestamp - bounds the query AND marks the anchor line. */
+  /** The anchor row's timestamp - bounds the QUERY (it no longer marks the line). */
   at: string;
+  /**
+   * The anchor row's `ref` - which line IS the failure. Compared exactly,
+   * because a millisecond timestamp is not unique: an app line and a worker
+   * line under one requestId is the normal interleaved case this view exists to
+   * show, and marking both "this failure" would be a lie about which one is.
+   */
+  anchorRef: string;
 }
 
-export function ErrorTrace({ kind, id, at }: ErrorTraceProps): React.JSX.Element {
+export function ErrorTrace({ kind, id, at, anchorRef }: ErrorTraceProps): React.JSX.Element {
   const { status, result, load } = useErrorTrace();
   useEffect(() => {
     load(kind, id, at);
@@ -48,15 +56,12 @@ export function ErrorTrace({ kind, id, at }: ErrorTraceProps): React.JSX.Element
         <p className={styles.truncated}>Earlier lines were cut off (limit reached).</p>
       ) : null}
       <ol className={styles.traceList}>
-        {result.lines.map((l: SystemTraceLine, i: number) => (
-          <li
-            key={`${l.timestamp}-${i}`}
-            className={l.timestamp === at ? styles.traceAnchor : styles.traceLine}
-          >
+        {result.lines.map((l: SystemTraceLine) => (
+          <li key={l.ref} className={l.ref === anchorRef ? styles.traceAnchor : styles.traceLine}>
             <span className={styles.errorWhen}>{l.timestamp}</span>
             <span className={styles.errorChip}>{l.source}</span>
             <span>{l.message}</span>
-            {l.timestamp === at ? <span className={styles.errorChip}>this failure</span> : null}
+            {l.ref === anchorRef ? <span className={styles.errorChip}>this failure</span> : null}
           </li>
         ))}
       </ol>

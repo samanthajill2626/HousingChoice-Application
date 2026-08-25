@@ -207,7 +207,7 @@ function ErrorRow({ event }: { event: SystemErrorEvent }): React.JSX.Element {
       </div>
       {open ? <ErrorDetail state={detail} /> : null}
       {tracing && pivot !== null ? (
-        <ErrorTrace kind={pivot.kind} id={pivot.id} at={event.timestamp} />
+        <ErrorTrace kind={pivot.kind} id={pivot.id} at={event.timestamp} anchorRef={event.ref} />
       ) : null}
     </li>
   );
@@ -281,9 +281,14 @@ export function RecentErrors(): React.JSX.Element {
       ) : (
         <ul className={styles.errorList}>
           {events.map((ev) => (
-            // ref (the log-event pointer) is unique per event and stable across
-            // queries, so expander state and fetched detail survive a refresh.
-            <ErrorRow key={ev.ref} event={ev} />
+            // ref (the log-event pointer) stays the LEADING identity: it is
+            // unique per event and stable across queries, so expander state and
+            // fetched detail survive a refresh. timestamp+message only
+            // disambiguate two known same-ref cases - one event matched by BOTH
+            // the pino and OOM queries (the OOM relabel rewrites message, so
+            // both copies survive the service merge), and the degenerate case of
+            // an absent @ptr, which would otherwise collapse every row onto ''.
+            <ErrorRow key={`${ev.ref}|${ev.timestamp}|${ev.message}`} event={ev} />
           ))}
         </ul>
       )}

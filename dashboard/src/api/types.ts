@@ -389,6 +389,9 @@ export interface SystemTraceLine {
   level: number;
   message: string;
   source: SystemErrorSource;
+  /** REQUIRED: the log-event pointer. The anchor is marked by THIS, not by
+   *  timestamp - two lines can share a millisecond and only one is the anchor. */
+  ref: string;
   method?: string | null;
   path?: string | null;
   statusCode?: number | null;

@@ -6,7 +6,7 @@
 // degraded notice. The panel is admin-only and a row MAY carry PII (deliberate,
 // 2026-08-24), so nothing here asserts a redaction. Mocks getSystemErrors,
 // getSystemErrorDetail and getSystemTrace.
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -26,6 +26,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { RecentErrors } from './RecentErrors.js';
+import { useErrorDetail } from './useSystemStatus.js';
 
 const available = (events: SystemErrorsResult['events']): SystemErrorsResult => ({ available: true, events });
 
@@ -256,6 +257,36 @@ describe('RecentErrors - the widened row', () => {
     await waitFor(() => expect(getSystemErrorDetail).toHaveBeenCalledWith('PTR-2', expect.anything()));
     expect(toggles[0]!).toHaveAttribute('aria-expanded', 'false');
     expect(toggles[1]!).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps two rows APART when they share a ref and a timestamp but not a message', async () => {
+    // The OOM double-match: ONE log event matched by both the pino and the V8
+    // OOM query survives the service merge twice - same ref, different message
+    // after the relabel. Keying on ref alone gave React duplicate keys and let
+    // it bind one row's expander state to the other.
+    const user = userEvent.setup();
+    renderRows([
+      { ...base, ref: 'PTR-DUP', message: 'caught: JavaScript heap out of memory' },
+      { ...base, ref: 'PTR-DUP', message: 'V8 heap out of memory' },
+    ]);
+    const toggles = await screen.findAllByRole('button', { name: /show all/i });
+    expect(toggles).toHaveLength(2);
+    await user.click(toggles[1]!);
+    expect(toggles[0]!).toHaveAttribute('aria-expanded', 'false');
+    expect(toggles[1]!).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('aborts an in-flight detail read when the row unmounts', async () => {
+    // renderHook, because the hook instance is PER ROW: a row leaving the list
+    // (a refresh that no longer returns it) must not leave its fetch running.
+    getSystemErrorDetail.mockImplementation(() => new Promise(() => {}));
+    const { result, unmount } = renderHook(() => useErrorDetail());
+    act(() => result.current.load('PTR-1'));
+    await waitFor(() => expect(getSystemErrorDetail).toHaveBeenCalled());
+    const signal = getSystemErrorDetail.mock.calls[0]![1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    unmount();
+    expect(signal.aborted).toBe(true);
   });
 
   it('toggles the expander with aria-expanded, and loads the record on OPEN only', async () => {

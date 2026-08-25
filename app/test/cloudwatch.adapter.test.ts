@@ -561,10 +561,11 @@ describe('cloudwatch adapter - queryTrace', () => {
     });
     return { seam, starts, order };
   }
-  const row = (iso: string) => [
+  const row = (iso: string, ptr = 'TPTR-1') => [
     { field: '@timestamp', value: iso },
     { field: '@message', value: JSON.stringify({ level: 30, msg: 'x' }) },
     { field: '@log', value: `9:${CONFIG.errorLogGroupName}` },
+    { field: '@ptr', value: ptr },
   ];
 
   it('uses a -5min bracket for correlationId and -30min for the cross-hop ids', async () => {
@@ -613,7 +614,8 @@ describe('cloudwatch adapter - queryTrace', () => {
     expect(starts).toHaveLength(2);
     for (const start of starts) {
       expect(start.input.logGroupNames).toEqual([CONFIG.errorLogGroupName, CONFIG.workerLogGroupName]);
-      expect(start.input.queryString).toContain('fields @timestamp, @message, @log');
+      // @ptr on BOTH sides: the view marks its anchor by ref, not by timestamp.
+      expect(start.input.queryString).toContain('fields @timestamp, @message, @log, @ptr');
       expect(start.input.queryString).toContain('filter requestId = "r-1"');
       expect(start.input.queryString).toContain('limit 25');
       expect(start.input.limit).toBe(25);
@@ -648,6 +650,7 @@ describe('cloudwatch adapter - queryTrace', () => {
         }),
       },
       { field: '@log', value: `9:${CONFIG.workerLogGroupName}` },
+      { field: '@ptr', value: 'TPTR-9' },
     ];
     const { seam } = traceSeam([line], []);
     const out = await seam.queryTrace(
@@ -669,6 +672,7 @@ describe('cloudwatch adapter - queryTrace', () => {
         jobName: 'send_message',
         jobId: 'j-1',
         hopCount: 2,
+        ref: 'TPTR-9',
       },
     ]);
   });
@@ -678,6 +682,7 @@ describe('cloudwatch adapter - queryTrace', () => {
       { field: '@timestamp', value: '2026-08-24 09:59:59.000' },
       { field: '@message', value: 'FATAL ERROR: Reached heap limit' },
       { field: '@log', value: `9:${CONFIG.systemLogGroupName}` },
+      { field: '@ptr', value: 'TPTR-OOM' },
     ];
     const { seam } = traceSeam([line], []);
     const out = await seam.queryTrace(
@@ -692,7 +697,19 @@ describe('cloudwatch adapter - queryTrace', () => {
         level: 30,
         message: '(unparseable log line)',
         source: 'system',
+        // Even the degraded branch carries its ref - the anchor can BE the
+        // unparseable OOM line, and it still has to be markable.
+        ref: 'TPTR-OOM',
       },
     ]);
+  });
+
+  it('carries the per-line ref through the merge, so the view can mark its anchor exactly', async () => {
+    const { seam } = traceSeam(
+      [row('2026-08-24 09:59:59.000', 'TPTR-BEFORE')],
+      [row('2026-08-24 10:00:01.000', 'TPTR-AFTER')],
+    );
+    const out = await seam.queryTrace([CONFIG.errorLogGroupName], 'requestId', 'r-1', Date.parse('2026-08-24T10:00:00.000Z'));
+    expect(out.lines.map((l) => l.ref)).toEqual(['TPTR-BEFORE', 'TPTR-AFTER']);
   });
 });

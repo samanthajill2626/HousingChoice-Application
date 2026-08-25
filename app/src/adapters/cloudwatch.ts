@@ -294,6 +294,14 @@ export interface TraceLineView {
   message: string;
   /** Which configured log group emitted the line. REQUIRED, never null. */
   source: ErrorSource;
+  /**
+   * The raw Insights `@ptr` for this line. REQUIRED, never null - every listed
+   * line has one. It is what makes the view's anchor marking EXACT: a
+   * millisecond timestamp is not unique (an app line and a worker line under one
+   * requestId is the normal interleaved case this view exists to show), so
+   * comparing timestamps marks every line sharing the anchor's millisecond.
+   */
+  ref: string;
   /** Request-line context (pino `method`/`path`/`statusCode`/`durationMs`). */
   method?: string | null;
   path?: string | null;
@@ -488,10 +496,12 @@ function traceLine(row: { field?: string; value?: string }[], config: AppConfig)
   let raw = '';
   let tsValue: string | undefined;
   let atLog: string | undefined;
+  let ptr = '';
   for (const cell of row) {
     if (cell.field === '@message') raw = cell.value ?? '';
     else if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
     else if (cell.field === '@log') atLog = cell.value ?? undefined;
+    else if (cell.field === '@ptr') ptr = cell.value ?? '';
   }
   const timestamp = new Date(parseInsightsTimestamp(tsValue)).toISOString();
   const source = sourceOf(atLog, config);
@@ -501,7 +511,7 @@ function traceLine(row: { field?: string; value?: string }[], config: AppConfig)
     if (typeof p !== 'object' || p === null) throw new Error('not an object');
     parsed = p as Record<string, unknown>;
   } catch {
-    return { timestamp, level: 30, message: '(unparseable log line)', source };
+    return { timestamp, level: 30, message: '(unparseable log line)', source, ref: ptr };
   }
   const err =
     typeof parsed['err'] === 'object' && parsed['err'] !== null
@@ -518,6 +528,7 @@ function traceLine(row: { field?: string; value?: string }[], config: AppConfig)
       (err !== undefined ? str(err['message']) : str(parsed['err'])) ??
       '(unparseable log line)',
     source,
+    ref: ptr,
     method: str(parsed['method']),
     path: str(parsed['path']),
     statusCode: num(parsed['statusCode']),
@@ -742,7 +753,9 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       // window ends at "now", where rounding UP merely includes the current
       // partial second. Both are correct under the same inclusive semantics.
       const anchorSec = Math.floor(atMs / 1000);
-      const fields = 'fields @timestamp, @message, @log';
+      // `@ptr` rides along so each line carries its own identity: the view marks
+      // the anchor by ref, which a millisecond timestamp cannot do uniquely.
+      const fields = 'fields @timestamp, @message, @log, @ptr';
       // `id` is validated UUID-shaped by the service before it reaches here.
       const filter = `filter ${kind} = "${id}"`;
       // OPPOSITE SORTS, because Insights applies `limit` INSIDE the sort: one

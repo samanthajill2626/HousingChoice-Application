@@ -604,7 +604,7 @@ describe('systemStatus.getTrace', () => {
   });
 
   it('passes the kind, id and anchor through and returns both truncation flags', async () => {
-    const line = { timestamp: '2026-08-24T09:59:59.000Z', level: 30, message: 'ctx', source: 'app' as const };
+    const line = { timestamp: '2026-08-24T09:59:59.000Z', level: 30, message: 'ctx', source: 'app' as const, ref: 'TPTR-1' };
     const queryTrace = vi.fn(async () => ({ lines: [line], truncatedBefore: true, truncatedAfter: false }));
     const svc = makeService({ config: DEPLOYED_CONFIG, cloudwatch: fakeSeam({ queryTrace }) });
     const atMs = Date.parse('2026-08-24T10:00:00.000Z');

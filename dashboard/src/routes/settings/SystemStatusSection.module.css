@@ -317,6 +317,107 @@
   font-family: var(--font-mono, monospace);
 }
 
+/* The row's classifying facts (source, job/event name, error type) as compact
+ * neutral chips. Deliberately quieter than the level pill and the error-code
+ * chip: these are context, not status. */
+.errorChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* "(truncated)" and the "... was cut off" notices. The server capped a field and
+ * this is the ONLY surface that says so, so it reads as WORDS - never as a bare
+ * ellipsis an operator could mistake for the real text. */
+.truncated {
+  margin: 0;
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  font-style: italic;
+}
+
+/* The row's controls: the detail expander and the correlation-trace pivot. */
+.errorActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* The vendor/exception text under the row's message, rendered only when the
+ * fallback ladder did not already source `message` from it. Secondary to the
+ * message, never hidden: it is the line that says what actually went wrong. */
+.errorDetail {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+
+/* The expanded record under a row: the full log event, one key/value per line. */
+.detailBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface-2);
+}
+
+.detailFields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.detailField {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.detailKey {
+  flex: 0 0 auto;
+  min-width: 140px;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono, monospace);
+}
+
+.detailValue {
+  margin: 0;
+  flex: 1 1 auto;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+
+/* The stack and the raw record are BOUNDED and scroll internally - a 60-frame
+ * stack must never push the rest of the panel off the screen. */
+.detailStack,
+.detailRaw {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* The "Include warnings" checkbox + label in the errors controls row. */
 .warnToggle {
   display: inline-flex;

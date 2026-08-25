@@ -9,6 +9,7 @@
 // every poll-loop TICK in a pollRunId context, so neither is ever an orphan.
 import { destination as pinoDestination, pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { getContext } from './context.js';
+import { LOG_SERIALIZER_KEYS, serializeLoggedError } from './logSerializers.js';
 
 export type { Logger } from 'pino';
 
@@ -177,6 +178,18 @@ export function clearDevLogTail(): number {
 export function createLogger(opts: CreateLoggerOptions = {}): Logger {
   const options: LoggerOptions = {
     level: opts.level ?? process.env.LOG_LEVEL ?? 'info',
+    // THE SAFE ERROR SERIALIZER (log-hygiene spec section 1): the four
+    // error-carrying keys emit an allowlist for `instanceof Error` values and
+    // pass everything else through untouched. The redact list below stays as
+    // belt-and-suspenders; the serializer is the fix.
+    //
+    // The entry tuples are TYPED EXPLICITLY rather than left to the untyped
+    // Object.fromEntries overload, so the map is checked against pino's
+    // serializer signature; LOG_SERIALIZER_KEYS stays the one source of the
+    // key list.
+    serializers: Object.fromEntries(
+      LOG_SERIALIZER_KEYS.map((key): [string, (value: unknown) => unknown] => [key, serializeLoggedError]),
+    ),
     // Defense-in-depth: even if a credential header sneaks into a log call,
     // redact it. The request logger additionally only logs a safe allowlist.
     redact: {

@@ -107,6 +107,7 @@ describe('POST /__dev/journal-sweep/tick', () => {
       recovered: 0,
       deferred: false,
       persistentContacts: 0,
+      failedContacts: 0,
     });
     expect(runs).toEqual({ pages: 1, recoveries: 1 });
   });

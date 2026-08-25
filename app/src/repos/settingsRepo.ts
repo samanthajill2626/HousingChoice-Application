@@ -458,7 +458,19 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       // reads as "no cursor", i.e. a full rescan, never as a corrupt
       // ExclusiveStartKey the Scan would reject on every run.
       const cursor = (Item as { cursor?: unknown } | undefined)?.cursor;
-      return typeof cursor === 'string' && cursor.length > 0 ? cursor : undefined;
+      if (typeof cursor !== 'string' || cursor.length === 0) return undefined;
+      // The type check alone did NOT keep that promise: the stored value is a
+      // JSON-encoded ExclusiveStartKey that the Scan caller parses
+      // (suggestionResolutionRepo.listActiveResolutionRows), so any non-empty
+      // string passed this guard and then threw inside the Scan on page 1 of
+      // every run, forever. Parse-check it here so an unparseable value really
+      // does degrade to "no cursor" - a full rescan - as stated above.
+      try {
+        JSON.parse(cursor);
+      } catch {
+        return undefined;
+      }
+      return cursor;
     },
   };
 }

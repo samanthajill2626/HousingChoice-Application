@@ -417,13 +417,24 @@ describe('journal sweep: the recovery-call budget', () => {
 });
 
 // --- 8. The post-loop truth check ----------------------------------------
+//
+// The shape every journal in these cases wears is the POST-TAKEOVER one,
+// because that is the only shape the truth check ever sees. recoverAbandoned's
+// takeover unconditionally rewrites leaseExpiresAt to now + DEFAULT_LEASE_MS
+// (30s) on success, so a journal the run just attempted ALWAYS re-reads with a
+// live lease - `claimedAt`, which takeover never touches, is the only staleness
+// signal left. A truth check that re-used the enumeration's lease-and-age gate
+// could therefore never fire for the case it names, which is exactly what these
+// cases exist to prevent regressing.
+const TAKEN_OVER_LEASE = new Date(NOW_MS + 30_000).toISOString();
+
 describe('journal sweep: the post-loop truth check', () => {
-  it('ERRORs with counts when a journal is STILL active, expired and past the gate', async () => {
+  it('ERRORs with counts when a journal is STILL active past the gate, even with the takeover lease live', async () => {
     const h = harness({
       pages: [{ rows: [row({ contactId: 'stuck' })] }],
       journals: async () => [
-        { state: 'active', leaseExpiresAt: hoursAgo(25), claimedAt: hoursAgo(25) },
-        { state: 'active', leaseExpiresAt: hoursAgo(30), claimedAt: hoursAgo(30) },
+        { state: 'active', leaseExpiresAt: TAKEN_OVER_LEASE, claimedAt: hoursAgo(25) },
+        { state: 'active', leaseExpiresAt: TAKEN_OVER_LEASE, claimedAt: hoursAgo(30) },
       ],
     });
 
@@ -435,12 +446,28 @@ describe('journal sweep: the post-loop truth check', () => {
     expect(String(h.log.error.mock.calls[0]![1])).toContain('still active after recovery');
   });
 
-  it('stays quiet for completed journals and for one whose lease is live again', async () => {
+  it('an UNPARSEABLE claimedAt counts as remaining - the same fail-toward-scrub rule as the gate', async () => {
+    const h = harness({
+      pages: [{ rows: [row({ contactId: 'garbage-claim' })] }],
+      journals: async () => [
+        { state: 'active', leaseExpiresAt: TAKEN_OVER_LEASE, claimedAt: 'garbage' },
+      ],
+    });
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(outcome.persistentContacts).toBe(1);
+    expect(h.log.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet for completed journals and for one claimed only an hour ago', async () => {
     const h = harness({
       pages: [{ rows: [row({ contactId: 'healthy' })] }],
       journals: async () => [
         { state: 'completed' },
-        { state: 'active', leaseExpiresAt: hoursAgo(-1), claimedAt: hoursAgo(48) },
+        // A live journal a human claimed an hour ago: inside the gate, so the
+        // sweep says nothing about it however its lease reads.
+        { state: 'active', leaseExpiresAt: TAKEN_OVER_LEASE, claimedAt: hoursAgo(1) },
         { state: 'active', leaseExpiresAt: hoursAgo(25), claimedAt: hoursAgo(1) },
       ],
     });
@@ -468,7 +495,49 @@ describe('journal sweep: the post-loop truth check', () => {
   });
 });
 
-// --- 9. A failed body -----------------------------------------------------
+// --- 9. Per-contact isolation --------------------------------------------
+describe('journal sweep: one contact failing never abandons its siblings', () => {
+  it('skips only the thrower, WARNs once, and closes the run with ONE counted ERROR', async () => {
+    const h = harness({
+      pages: [
+        {
+          rows: [
+            row({ contactId: 'first' }),
+            row({ contactId: 'second' }),
+            row({ contactId: 'third' }),
+          ],
+        },
+      ],
+      recover: async (contactId) => {
+        // recoverAbandoned reads the contact's 12 journals with a consistent
+        // BatchGet that sits in its for-of HEADER, outside its per-journal
+        // try, so a throttled read propagates out of the call exactly here.
+        if (contactId === 'second') throw new Error('batchget throttled');
+        return { recovered: 0, stateChanged: false };
+      },
+    });
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(h.recoverCalls.map((c) => c.contactId)).toEqual(['first', 'second', 'third']);
+    // The contacts either side of the thrower still reached their truth check:
+    // before the per-contact try, everything after 'second' was abandoned for a
+    // whole cursor cycle because the cursor had already advanced past them.
+    expect(h.journalCalls).toEqual(['first', 'third']);
+    expect(outcome.contactsVisited).toBe(3);
+    expect(outcome.failedContacts).toBe(1);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(h.log.warn.mock.calls[0]![0]).toMatchObject({ contactId: 'second' });
+    expect(String(h.log.warn.mock.calls[0]![1])).toContain('recovery threw for this contact');
+    // ONE end-of-run ERROR carrying the count - the loud claimed-then-failed
+    // contract survives, and this is NOT the run-level 'run failed' line.
+    expect(h.log.error).toHaveBeenCalledTimes(1);
+    expect(h.log.error.mock.calls[0]![0]).toMatchObject({ failedContacts: 1, contactsVisited: 3 });
+    expect(String(h.log.error.mock.calls[0]![1])).toContain('retried on the next run');
+  });
+});
+
+// --- 10. A failed body ----------------------------------------------------
 describe('journal sweep: a failed run', () => {
   it('ERRORs and RESOLVES - the poll loop must never see a rejection', async () => {
     const h = harness({
@@ -484,5 +553,27 @@ describe('journal sweep: a failed run', () => {
     expect(h.log.error).toHaveBeenCalledTimes(1);
     expect(String(h.log.error.mock.calls[0]![1])).toContain('next natural retry is tomorrow');
     expect(h.log.warn).not.toHaveBeenCalled();
+  });
+
+  it('CLEARS the stored cursor, so a poisoned one cannot wedge the duty forever', async () => {
+    // The enumeration never reaches the persist below the page loop, so
+    // without this a cursor the Scan rejects stays stored and EVERY future run
+    // dies on page 1 behind a daily ERROR that no waiting clears.
+    const h = harness({
+      storedCursor: '{"itemId":"resolve#gone#pets"}',
+      listRows: async () => {
+        throw new Error('ValidationException: the provided starting key is invalid');
+      },
+    });
+
+    const outcome = await runJournalSweep(NOW, h.deps);
+
+    expect(h.cursorPuts).toEqual([undefined]);
+    // Still exactly one ERROR: clearing is best-effort housekeeping, not a
+    // second alarm, and it must not replace the run-failed line.
+    expect(h.log.error).toHaveBeenCalledTimes(1);
+    expect(String(h.log.error.mock.calls[0]![1])).toContain('next natural retry is tomorrow');
+    expect(h.log.warn).not.toHaveBeenCalled();
+    expect(outcome.ran).toBe(true);
   });
 });

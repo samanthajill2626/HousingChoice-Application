@@ -729,6 +729,19 @@ describe('settingsRepo - the journal-sweep Scan cursor', () => {
     expect(await repo.getJournalSweepCursor()).toBeUndefined();
   });
 
+  it('a stored value that is not JSON reads as NO CURSOR - a full rescan, never a poisoned Scan', async () => {
+    // The Scan caller does the JSON.parse (listActiveResolutionRows feeds the
+    // string straight to ExclusiveStartKey), so a type-and-length check alone
+    // let an unparseable value through to throw on page 1 of EVERY run: the
+    // enumeration never reached the persist that would have replaced it, so
+    // the duty stayed dead behind a daily ERROR that no waiting could clear.
+    const { doc } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    await repo.putJournalSweepCursor('not-json-at-all');
+
+    expect(await repo.getJournalSweepCursor()).toBeUndefined();
+  });
+
   it('clearing an absent cursor is a no-op, not a throw (the common exhausted case)', async () => {
     const { doc } = statefulSettingsDoc();
     const repo = createSettingsRepo({ doc });

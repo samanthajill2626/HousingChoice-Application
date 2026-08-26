@@ -102,5 +102,25 @@ queue. The re-check is TWO numbers, both from
    the partition as a whole looks large. A narrowed run reports it as zero
    unconditionally and is not evidence of anything.
 
+Both now come from the `partition statuses` breakdown that audit prints. **That
+breakdown did not exist when this issue was first filed** - the audit printed
+only totals, and the tab-vs-partition audit breaks down the TAB's rows rather
+than the partition's - so the reopen check named a number nobody could produce.
+Corrected 2026-08-26 in the same script (print-only, no measured value changed).
+
+**Baseline, measured 2026-08-26 on deployed data** (before the breakdown landed,
+so the `active` counts below are derived arithmetically rather than read off):
+
+| | dev | prod |
+| --- | --- | --- |
+| partition, unfiltered | 16 | 8 |
+| partition, origin-excluded | 13 | 5 |
+| Queries issued | 1 | 1 |
+| partition exhausted in budget | yes | yes |
+| `(unknown, active)` | **0 or 1** - 12 of the 13 live non-stub rows are confirmed `needs_review`; the 13th is the "in partition, not on tab" row and its status was not printed | **0** - confirmed: 9 tab rows minus 4 soft-deleted = 5 live, all `needs_review`, and origin-excluded partition = 5 |
+
+Both are ~200x from the cap, which is why this stays LATENT. Re-run the audit
+after the breakdown lands to replace dev's derived range with a read number.
+
 Full context, including the coverage-class decisions this queue implements:
 [`inbox-filter-tabs-full-walk`](inbox-filter-tabs-full-walk.md).

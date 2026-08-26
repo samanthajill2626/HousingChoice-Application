@@ -622,6 +622,13 @@ async function auditTriagePartition(): Promise<void> {
   let rawRows = 0;
   let statusMismatch = 0;
   let deletedSeen = 0;
+  // The PARTITION's own status composition. Added 2026-08-26 because the issue
+  // `unknown-queue-cap-starves-needs-review` names the `(unknown, active)` count
+  // as half its reopen trigger, and NOTHING printed it: the tab-vs-partition
+  // audit breaks down the TAB's rows, not the partition's, and `statusMismatch`
+  // is inert under --no-status-narrow. A reopen check nobody can run is not a
+  // check. Print-only; no measured value changes.
+  const partitionStatuses = new Map<string, number>();
   let cursor: Record<string, unknown> | undefined;
   let exhausted = false;
 
@@ -636,6 +643,8 @@ async function auditTriagePartition(): Promise<void> {
     for (const c of read.items) {
       if ((c as { deleted_at?: unknown }).deleted_at !== undefined) deletedSeen += 1;
       if (narrow && c.status !== 'needs_review') statusMismatch += 1;
+      const st = typeof c.status === 'string' && c.status !== '' ? c.status : '(none)';
+      partitionStatuses.set(st, (partitionStatuses.get(st) ?? 0) + 1);
     }
     cursor = read.lastEvaluatedKey;
     if (cursor === undefined) {
@@ -683,6 +692,14 @@ async function auditTriagePartition(): Promise<void> {
       `    rows returned      ${rawRows}`,
       `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,
       `    soft-deleted seen  ${deletedSeen}`,
+      // THE REOPEN NUMBERS for `unknown-queue-cap-starves-needs-review`: the
+      // Query ascends the range key `status` and 'active' < 'needs_review', so
+      // the `active` block is read FIRST and a cap fills from it. Read the
+      // `active` count against UNKNOWN_QUEUE_MAX_ROWS (200), not the total.
+      '    partition statuses (the cap fills from the TOP of this list):',
+      ...[...partitionStatuses.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        .map(([k, v]) => `      ${k.padEnd(20)}${v}`),
       // PRINTED ONLY WHEN IT CAN MEAN SOMETHING (2026-08-25, round-2 ruling
       // C1). `statusMismatch` is incremented under `if (narrow && ...)` above,
       // so under `--no-status-narrow` it is structurally inert - and printing

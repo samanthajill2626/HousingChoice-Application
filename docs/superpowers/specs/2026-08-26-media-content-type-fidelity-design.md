@@ -1,10 +1,10 @@
 # Inbound media content-type fidelity - design
 
 Date: 2026-08-26
-Status: DRAFT (spec review round 4 - the cap)
+Status: REVIEWED - awaiting the human spec gate
 Branch: `feat/media-content-type-fidelity` (cut from `main` @3c2962a4)
-Design review: spec R1 + R2 adjudicated at
-`.superpowers/design-review/adjudications.md`
+Design review: spec R1-R4 (terminal), 52 findings adjudicated at
+`.superpowers/design-review/adjudications.md`. R4 verdict: buildable.
 
 ## 1. Problem
 
@@ -223,8 +223,9 @@ why the record must not be trusted here - and applies the section 5 table:
 
 ### 6.3 Filename construction
 
-THE EXTENSION IS ALWAYS DRAWN FROM OUR OWN MAP. It is never copied from stored
-data as a string. The stored `filename` originates in a MIME part the sender
+THE EXTENSION IS ALWAYS CHOSEN FROM ONE OF OUR OWN CLOSED SETS, never copied
+from stored data as a string. There are two such sets and they are not the same
+size - see immediately below. The stored `filename` originates in a MIME part the sender
 controls (`services/inboundEmail.ts` persists it verbatim), so honoring its
 extension freely would let a sender choose what the operator's OS does with the
 downloaded file - turning today's inert `attachment-0` into `invoice.exe`. The
@@ -236,10 +237,17 @@ other:
 
 - The EMISSION map, type -> one extension, used by `resolveMediaTier`. One
   value per type, our choice: `image/jpeg -> .jpg`.
-- The ACCEPTED-EXTENSION SET, used only by rule 2 below. It is the emission
-  map's values PLUS the ordinary spelling variants of the same formats -
-  `.jpeg`, `.tif`, `.heif`, `.3gp`, `.mpeg`, `.vcf` and so on. It is a closed,
-  hand-written set and it contains no active extension, ever.
+- The ACCEPTED-EXTENSION SET, used only by rule 2 below. It is a closed,
+  hand-written, EXHAUSTIVELY ENUMERATED set - it gates what reaches an
+  operator's filesystem, so "and so on" is not an acceptable specification of
+  it. Exactly these, and nothing else:
+
+  ```
+  .jpg .jpeg .png .gif .webp .bmp .tif .tiff .heic .heif
+  .mp4 .m4v .mov .3gp .3g2 .webm
+  .mp3 .m4a .aac .oga .ogg .amr .wav
+  .pdf .txt .csv .vcf .docx .xlsx
+  ```
 
   Deriving this set from the emission map's values is a defect, not a
   shortcut: the map emits `.jpg`, so a derived set would reject `photo.jpeg`
@@ -291,8 +299,21 @@ truncate the extension itself - a 100-character name ending `.xlsx` would ship
 as `.xls`, silently changing the file type the OS sees. The emitted name is
 therefore at most 100 + the longest extension.
 
-Emit an ASCII-only `filename="..."`, and when the original stem contained
-non-ASCII ALSO emit `filename*=UTF-8''<percent-encoded>` per RFC 5987.
+NON-ASCII, stated concretely because there is NO RFC 5987 implementation in
+this repo to copy and inbound email supplies such names verbatim
+(`services/inboundEmail.ts:683-686`):
+
+- The `filename="..."` parameter is ASCII-only. Build it from the sanitized
+  stem by replacing EVERY non-ASCII codepoint with `_` (replace, never drop -
+  dropping can empty an entirely non-ASCII stem and yield `filename=".xlsx"`).
+- If the ASCII stem is empty or all underscores after that, use the synthesized
+  stem instead, so the ASCII parameter is always a usable name.
+- When the sanitized stem contained ANY non-ASCII, ALSO emit
+  `filename*=UTF-8''<pct>` where `<pct>` is the UTF-8 bytes of the FULL
+  sanitized stem plus extension, percent-encoded with `encodeURIComponent` and
+  then additionally escaping the characters it leaves bare that RFC 5987
+  reserves (`!`, `'`, `(`, `)`, `*`). Clients that understand `filename*`
+  prefer it; the rest fall back to the ASCII form above.
 
 Note the deliberate off-by-one correction: the header is 0-based today
 (`attachment-0`) while the UI labels the same attachment "Attachment 1". The
@@ -313,11 +334,26 @@ REGRESSION this change would introduce, in both the thread and the
 "Media from comms" grid.
 
 Both must branch on the inline-renderable set instead. The dashboard cannot
-import from `app/`, so the four raster types are mirrored in
+import from `app/`, so it mirrors what it needs in
 `dashboard/src/routes/contact/media.ts` with a comment naming
 `app/src/lib/mediaTypes.ts` as the source of truth, matching how the dashboard
 already mirrors other server constants. Both components consume the shared
-helper; neither keeps its own predicate.
+helpers; neither keeps its own predicate.
+
+WHAT THE DASHBOARD MIRRORS - all three, not just the first. The label rules
+below are tier-based, and a builder given only the raster set would have to
+invent the rest:
+
+1. the four raster types, for the inline-vs-file-link branch;
+2. the DECLARABLE type set, to tell a declarable attachment from an opaque one;
+3. a KIND-WORD map, canonical type -> "Video" / "Audio" / "Image" /
+   "Document" / "Contact card".
+
+A media-type PREFIX test is NOT an acceptable substitute for (2) and (3): it
+collides on `application/octet-stream` against the OOXML `application/...`
+types, and on `text/vcard` against `text/plain`. Getting it wrong labels the
+opaque case "Document - Attachment 2" and breaks the two assertions section 9
+lists as stable.
 
 LABEL RULES, exhaustively. A stored filename still wins over the fallback in
 every case; these govern the FALLBACK only:
@@ -524,6 +560,9 @@ the allowlist it enforces:
   previous draft.
 - presigned-POST email attachments (`routes/emailMedia.ts`, `isEmailAttachmentType`).
 - presigned-POST unit photos (`routes/units.ts:516,686`, `isImageMediaType`).
+- unit-photo transcode RENDITION (`routes/units.ts:766`) - a separate
+  `mediaStore.put` the two citations above do not reach, writing the same
+  string-literal `'image/jpeg'` as the MMS transcoder.
 - call recordings (`routes/webhooks/voice.ts:1995`) - hardcoded `audio/mpeg`.
 - the seeder (`lib/seed/media.ts:121-128`) - literal types, dev fixtures only.
 - NEW: the backfill, which passes every recovered type through
@@ -532,6 +571,11 @@ the allowlist it enforces:
 Each is a closed allowlist of non-active types, or a hardcoded constant. The
 invariant holds because every gate holds, not because one function guards them
 all.
+
+This list was independently re-derived from every `mediaStore.put` and
+`createPresignedPost` call site at round 4 and is exhaustive as of
+`main` @3c2962a4. It took four rounds to get right; a tenth writer added later
+is a new gate to check, not a free addition.
 
 ### 7.2 Read side
 
@@ -577,8 +621,13 @@ READERS:
 1. `routes/api.ts` media serve (the fix)
 2. `dashboard` `AttachmentGallery` - image-vs-file branch (6.4, MUST change)
 3. `dashboard` `MediaGallery` - the identical branch (6.4, MUST change)
-4. `jobs/relayFanOut.ts:494-509` - presigns `a.s3Key` and hands the URL to
-   Twilio, which reads the S3 object's Content-Type. WATCH ITEM: after this
+4. THE THREE PRESIGN-TO-TWILIO CALL SITES, which share one shape:
+   `jobs/relayFanOut.ts:494-509`, `jobs/retrySend.ts:158-164` and
+   `routes/api.ts:1589-1594`. Each presigns a stored `s3Key` and hands the URL
+   to Twilio, which reads the S3 object's Content-Type. The latter two are safe
+   by a constraint that is not visible at the call site: `resolveAttachmentKeys`
+   (`routes/api.ts:527-531`) already bounded their keys to jpeg/png/gif. Only
+   the relay one sources media from the inbound mirror. WATCH ITEM: after this
    change a forwarded video is presented to Twilio as `video/mp4` instead of
    `application/octet-stream`. Both are outside `TWILIO_DELIVERABLE_MMS_TYPES`,
    so the expectation is that the leg fails before and after - but

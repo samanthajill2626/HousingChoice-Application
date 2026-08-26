@@ -369,6 +369,26 @@ not. Signals if the assumption breaks: the UNCONDITIONAL `sweepScanned` field on
 the `inbox feed assembled` log line (every request, not just past a tripwire),
 and the shared 500-item scan tripwire (`UNREAD_WALK_WARN`).
 
+**Why the sweep is paid even when no soft-deleted unknown exists, and what the
+real objection to skipping it is.** Both environments measured ZERO soft-deleted
+unknown contacts, so the obvious optimisation is a cheap pre-check that skips the
+sweep when that population is empty. It was considered and NOT taken - but not
+for the reason first recorded here, which was wrong and is corrected so nobody
+inherits it. The wrong reason was that a pre-check violates approved requirement
+3: it does not. Requirement 3 says the sweep carries NO SECOND BOUND (`maxRows`
+is pinned to the budget so no candidate cap can crowd class-(d) rows out), and a
+check that decides whether to RUN the sweep adds no bound to it.
+
+The real objection is that the pre-check cannot cheaply answer "zero".
+`listByType('unknown', { deleted: true })` is itself a filter-after-limit read
+over the very partition this design argues accumulates soft-deleted residue
+FOREVER, so a bounded probe can return "none found" while truncated - and
+skipping the sweep on that answer would reintroduce exactly the
+"missing for two different reasons" ambiguity the whole branch exists to remove.
+An unbounded probe is the forever-growing walk requirement 3 replaced. So the
+optimisation is sound only with a source that can answer "zero" authoritatively
+and cheaply; reopen it if one appears.
+
 **The capped-sweep residual, forced JOINTLY by approved requirements 2 and 5 and
 not fixable here.** A sweep that stops early can leave the tab rendering the
 ordinary "No unknown numbers" empty state over a knowingly incomplete answer.

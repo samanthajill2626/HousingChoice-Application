@@ -1536,9 +1536,33 @@ export async function aggregateInbox(
   // RETURNED", which is off by the whole cap. Hydration runs inside the loop
   // over queue.contacts below, while the window `slice(0, limit)` happens
   // AFTER the sort - so a cap-full queue hydrates up to 200 rows serially to
-  // render 30.) That ordering is REQUIRED and is not a defect to restructure
-  // away: the sort key is the hydrated activity, so the window cannot be
-  // applied before the rows exist. The
+  // render 30.)
+  //
+  // ONLY THE THREAD RESOLUTION HAS TO PRECEDE THE SORT (corrected again
+  // 2026-08-25, round-2 finding N1). This block used to add "that ordering is
+  // REQUIRED ... the sort key is the hydrated activity, so the window cannot
+  // be applied before the rows exist", which is FALSE and told the next reader
+  // a real saving did not exist. The sort key is `row.lastActivityAt`, which
+  // buildContactRow copies verbatim from `maxConv.last_activity_at` - a
+  // CONVERSATION field, produced by resolveOpenThreads. `latestMessageOf`
+  // (channel/direction/preview) and `placementLabel` are PRESENTATION ONLY and
+  // are not sort inputs, so on this deleted=false path they could move AFTER
+  // `slice(0, limit)`.
+  //
+  // KNOWINGLY DEFERRED, not impossible: at the cap that is up to 200 message
+  // reads and up to 200 placement reads to render 30 rows - roughly 340
+  // discarded serial round trips. Taking it is a PERFORMANCE change with its
+  // own test surface (nothing on this branch pins the hydration count), and
+  // this branch's fix waves are chartered not to move behaviour. Recorded as a
+  // deferral in docs/issues/inbox-filter-tabs-full-walk.md.
+  //
+  // THE SWEEP PATH IS GENUINELY DIFFERENT and must not be "optimised" the same
+  // way: there `latestMessageOf` is a VISIBILITY predicate (buildContactRow's
+  // resurfacing test reads the newest message to decide whether the row exists
+  // at all), so it has to run before the row is known to exist - and that path
+  // is not cap-bound.
+  //
+  // The
   // coverage decisions - what each class of row does under the new source -
   // are section 3 of docs/superpowers/specs/
   // 2026-08-25-inbox-unknown-tab-walk-design.md; the parity suite
@@ -1627,6 +1651,25 @@ export async function aggregateInbox(
         dropped('unknownQueueRetyped');
         continue;
       }
+      // ONE ROW PER CONTACT (round-2 finding N5). The sweep loop below has
+      // carried this same check all along - its own comment calls it "a belt" -
+      // and this loop only ADDED to `emitted` without ever consulting it, which
+      // reads as an oversight rather than a decision.
+      //
+      // NARROW, and stated honestly rather than dressed up: a Query resuming
+      // from an ExclusiveStartKey cannot re-serve an item unless that item's
+      // INDEX KEY MOVED, and `status` IS this index's range key - so a contact
+      // flipped 'active' -> 'needs_review' between two pages of the SAME walk
+      // moves FORWARD past the cursor and is collected twice. That needs a
+      // multi-page walk (>UNKNOWN_QUEUE_PAGE_SIZE unknown contacts) AND a write
+      // landing between two sequential Queries; it is not a state anyone hits
+      // this week. The mirror flip ('needs_review' -> 'active') moves the row
+      // BACKWARD and silently skips it, which no guard here can see.
+      //
+      // Cheap insurance against a user-visible symptom: the dashboard keys the
+      // wire row by contactId (useInbox `rowKey` -> `c:<contactId>`), so a
+      // duplicate ships a doubled row under a duplicate React key.
+      if (emitted.has(contact.contactId)) continue;
       const open = await resolveOpenThreads(contact);
       if (open === undefined) continue; // threw - counted and WARNed above
       const maxConv = newestOf(open);
@@ -1793,9 +1836,11 @@ export async function aggregateInbox(
     // unknown contact `active` and it stays type='unknown' and stays in this
     // queue forever. Worse, per the ordering note above, `active` sorts FIRST,
     // so a status-only triage PROMOTES that row to the front of the collector's
-    // read and crowds out rows nobody has reviewed. Only a type change (to
-    // tenant/landlord/partner) actually drains a row, and until it happens the
-    // rows past `limit` have no affordance that reaches them. No cursor - an
+    // read and crowds out rows nobody has reviewed. Only a TYPE change - to any
+    // other ContactType, team_member included - or a SOFT-DELETE actually
+    // drains a row (completed 2026-08-25, round 2: this said "a type change (to
+    // tenant/landlord/partner)", which omits both). Until one of those happens
+    // the rows past `limit` have no affordance that reaches them. No cursor - an
     // offset page over a mutating in-memory sort
     // re-serves and skips rows, and the design settled on cap-plus-WARN
     // (requirement 2). The affordance gap is recorded in

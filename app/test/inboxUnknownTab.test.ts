@@ -222,9 +222,12 @@ describe('filter=unknown - the contact-side read', () => {
     expect('truncated' in page).toBe(false);
     expect('groupsTruncated' in page).toBe(false);
     // The collector's WARN is the truncation signal, and its copy carries the
-    // index-order caveat.
+    // ordering caveat. The matched phrase moved with the round-2 N2 rewrite:
+    // the copy no longer claims WHICH rows were hidden (false on an
+    // all-`active` partition), only the status-ascending mechanism that is true
+    // in every composition.
     expect(
-      warn.mock.calls.some((c) => String(c[1]).includes('untriaged contacts still behind it')),
+      warn.mock.calls.some((c) => String(c[1]).includes('needs_review rows are cut FIRST')),
     ).toBe(true);
   });
 
@@ -496,5 +499,44 @@ describe('filter=unknown - the contact-side read', () => {
     expect(page.rows).toEqual([]);
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
     expect(assembled?.drops).toMatchObject({ unknownQueueRetyped: 1 });
+  });
+
+  it('a DUPLICATED queue item ships ONE row: the partition loop consults `emitted`, like its sibling sweep loop', async () => {
+    // REGRESSION TEST for round-2 finding N5. Before the guard landed, the
+    // partition loop ADDED to `emitted` and never read it, while the sweep loop
+    // three statements later did - so this fixture produced two identical
+    // `kind: 'contact'` rows on the wire, which the dashboard keys identically
+    // (useInbox `rowKey` -> `c:<contactId>`): a duplicate React key and a
+    // doubled row.
+    //
+    // WHY A DUPLICATE IS REACHABLE AT ALL, stated narrowly. A Query resuming
+    // from an ExclusiveStartKey cannot re-serve an item unless the item's index
+    // key MOVED - and `status` IS byTypeStatus's range key, so a contact
+    // flipped 'active' -> 'needs_review' between two pages of the SAME walk
+    // moves forward past the cursor and is collected twice. That needs a
+    // multi-page walk (>100 unknown contacts) and a write landing between two
+    // sequential Queries. `listByTypeOverride` is how the shape is driven here,
+    // because the DynamoDB-faithful fake pages a static array and will never
+    // race itself.
+    const dup: ContactItem = {
+      contactId: 'c-dup',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15550002800',
+    } as ContactItem;
+    const seed: Seed = {
+      contacts: [dup],
+      conversations: [
+        conv({
+          conversationId: 'cv-dup',
+          participant_phone: '+15550002800',
+          last_activity_at: '2026-06-12T11:00:00.000Z',
+        }),
+      ],
+      listByTypeOverride: () => ({ items: [dup, dup] }),
+    };
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-dup']);
+    expect(new Set(page.rows.map((r) => r.contactId)).size).toBe(page.rows.length);
   });
 });

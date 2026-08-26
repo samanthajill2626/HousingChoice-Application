@@ -22,10 +22,26 @@
 //   KEPT - the truncation WARN: a walk that ends with rows still behind it
 //   must never end silently (the precedent's "loud problem turned silent").
 //
-//   NOT COPIED - `status: 'needs_review'`: a contact CREATED as unknown
-//   defaults to status 'active' (routes/contacts.ts:881-884), so
-//   (unknown, active) is the DEFAULT, not an edge case - class f. The type
-//   alone is the queue.
+//   NOT COPIED - `status: 'needs_review'`: live (unknown, active) contacts are
+//   reachable, and narrowing on needs_review would drop them off the tab
+//   entirely - class f. The type alone is the queue.
+//
+//   WHAT ACTUALLY MANUFACTURES THAT POPULATION (corrected 2026-08-25, round-2
+//   finding N3): the STATUS-ONLY triage PATCH documented in the next block. It
+//   is the only UI-REACHABLE manufacturer, and it is what this justification
+//   should have pointed at all along. It used to cite POST /api/contacts
+//   defaulting an `unknown` create to status 'active'
+//   (routes/contacts.ts:881-884) and call that "the DEFAULT". The default is
+//   real but it is API-ONLY: KindPicker
+//   (dashboard/src/routes/contact/KindPicker.tsx) is the single control both
+//   the create dialog and the edit form use, and it offers no `unknown`
+//   segment - so no operator can create a contact into this partition, nor
+//   re-type one back into it. Every production writer that mints an `unknown`
+//   sets 'needs_review' (contactCapture.ts, groupMembers.ts, groupConvert.ts,
+//   both seeds, and the importer's deriveStatus), which is why both deployed
+//   environments measure ZERO (unknown, active) today. The class-f DECISION is
+//   unchanged and is NOT reopened: the narrowing costs nothing to omit and the
+//   PATCH below can fill this block one row at a time.
 //
 //   AND THE TYPE ALONE IS ALSO HOW A ROW LEAVES IT. This block used to say
 //   "triage retypes the contact out of the partition"; that is FALSE
@@ -36,7 +52,10 @@
 //   ['needs_review','active'] - and the dashboard's edit form reaches it. An
 //   operator can therefore mark an unknown contact `active` while it stays
 //   type='unknown': it leaves Today's triage block (which DOES narrow on
-//   needs_review) but it NEVER leaves this queue. Only a RE-TYPE drains a row.
+//   needs_review) but it NEVER leaves this queue. Only a RE-TYPE - to ANY other
+//   ContactType, team_member included - or a SOFT-DELETE drains a row
+//   (completed 2026-08-25, round 2: "a type change to tenant/landlord/partner"
+//   omitted both).
 //
 //   That compounds with the range-key ordering documented on
 //   UnknownQueueResult.contacts: a status-only triage moves the row from the
@@ -206,15 +225,35 @@ export async function collectUnknownTriageQueue(
   const contacts = collected.slice(0, opts.maxRows);
   const truncated = !exhaustedAll || contacts.length < collected.length;
   if (truncated) {
-    // The precedent's WARN (today.ts:884-889): counts only, no PII. The copy
-    // names the ordering caveat because the operator-facing list LOOKS
-    // newest-first while the hidden rows were chosen by the index's range key,
-    // `status` - ascending, so 'active' before 'needs_review' (see the
-    // UnknownQueueResult.contacts doc). The copy says WHICH rows are starved
-    // rather than "index order", which reads as harmless.
+    // The precedent's WARN (today.ts:884-889): counts only, no PII.
+    //
+    // THE COPY STATES THE MECHANISM, NEVER THE OUTCOME (corrected 2026-08-25,
+    // round-2 finding N2). It briefly read "so the hidden rows are the ones
+    // nobody has reviewed yet", which is an unconditional claim about WHICH
+    // rows were hidden and is FALSE whenever the cut lands inside the `active`
+    // block - on an all-`active` partition every hidden row is one somebody DID
+    // review. This is the single artifact an on-call reader gets, and a
+    // specific false claim reads as freshly verified. What is true in EVERY
+    // composition is the ordering: the cut is status-ascending, 'active' <
+    // 'needs_review', so `active` rows are KEPT and `needs_review` rows are the
+    // first to be CUT (see the UnknownQueueResult.contacts doc).
+    //
+    // The composition itself goes in the FIELDS rather than the sentence, so
+    // the reader SEES which block the cut landed in instead of being told:
+    // keptNeedsReview 0 with collectedNeedsReview 0 is an all-`active`
+    // partition, and keptNeedsReview 0 with collectedNeedsReview > 0 is the
+    // starvation shape.
+    const needsReview = (rows: readonly ContactItem[]): number =>
+      rows.reduce((n, c) => (c.status === 'needs_review' ? n + 1 : n), 0);
     log.warn(
-      { pages: pagesWalked, kept: contacts.length, collected: collected.length },
-      'inbox: the unknown-queue walk ended with untriaged contacts still behind it - the cut is in status order (active before needs_review), so the hidden rows are the ones nobody has reviewed yet',
+      {
+        pages: pagesWalked,
+        kept: contacts.length,
+        collected: collected.length,
+        keptNeedsReview: needsReview(contacts),
+        collectedNeedsReview: needsReview(collected),
+      },
+      'inbox: the unknown-queue walk ended with rows still behind it - the cut is status-ascending, so active rows are kept and needs_review rows are cut FIRST; the needsReview counts say which block the cut landed in',
     );
   }
   return { contacts, pagesWalked, truncated };

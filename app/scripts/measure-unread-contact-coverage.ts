@@ -323,6 +323,16 @@ async function auditWalk(): Promise<void> {
  *
  * This replicates the pager: same partition, same order, same per-conversation
  * contact resolution, same break condition. Counts only, no PII.
+ *
+ * HISTORICAL AS OF `feat/inbox-unread-cluster` (2026-08-25, round-2 ruling C1).
+ * The app no longer performs this read: `filter=unknown` was moved onto the
+ * (type='unknown') contacts byTypeStatus partition, so nothing in production
+ * walks `byLastActivity` resolving a contact per open conversation any more.
+ * This mode is RETAINED UNCHANGED, deliberately, so the before/after comparison
+ * still runs against the same instrument that produced the published figures -
+ * do not "modernise" it to match the new read, and do not read its output as
+ * the current cost of the Unknown tab. Use `--audit-triage-partition`
+ * (with `--no-status-narrow`) for what the tab reads today.
  */
 async function auditUnknownPage(pageLimit: number): Promise<void> {
   // The pager's own chunk size: min(FETCH_BATCH=100, max(limit, DEFAULT=25)).
@@ -673,7 +683,16 @@ async function auditTriagePartition(): Promise<void> {
       `    rows returned      ${rawRows}`,
       `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,
       `    soft-deleted seen  ${deletedSeen}`,
-      `    status mismatch    ${statusMismatch}  (should be 0 - the range key is the status)`,
+      // PRINTED ONLY WHEN IT CAN MEAN SOMETHING (2026-08-25, round-2 ruling
+      // C1). `statusMismatch` is incremented under `if (narrow && ...)` above,
+      // so under `--no-status-narrow` it is structurally inert - and printing
+      // an inert `0` next to the words "should be 0" reads as a PASSED CHECK,
+      // inside the output of the very run the HIGH-1 record depends on. No
+      // measured value changes; the line simply does not claim a check that
+      // was never made.
+      ...(narrow
+        ? [`    status mismatch    ${statusMismatch}  (should be 0 - the range key is the status)`]
+        : []),
       '',
       '  WITH the group-detection origin exclusion (what today.ts actually issues):',
       `    Queries issued     ${filteredQueries}`,

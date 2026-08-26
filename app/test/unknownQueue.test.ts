@@ -104,7 +104,16 @@ describe('collectUnknownTriageQueue', () => {
     expect(result.truncated).toBe(true);
     expect(result.pagesWalked).toBe(3);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]![0]).toMatchObject({ pages: 3, kept: 0 });
+    // The composition fields (round-2 finding N2) are present even when the
+    // answer is "no needs_review row got anywhere near this cut": every page
+    // read was soft-deleted residue, so nothing was collected at all.
+    expect(warn.mock.calls[0]![0]).toMatchObject({
+      pages: 3,
+      kept: 0,
+      collected: 0,
+      keptNeedsReview: 0,
+      collectedNeedsReview: 0,
+    });
   });
 
   it('hard-caps the RESULT, not just the read: the loop breaks on >=, so the last page can overshoot', async () => {
@@ -163,7 +172,7 @@ describe('collectUnknownTriageQueue', () => {
       unk(3, { status: 'active' }), // reviewed but never re-typed (MED-3)
       unk(4, { status: 'active' }),
     ];
-    const { deps } = makeDeps(seed);
+    const { deps, warn } = makeDeps(seed);
     const result = await collectUnknownTriageQueue(deps, { pageSize: 10, maxPages: 10, maxRows: 2 });
     // The cap is 2 and the partition holds 2 of each status. Both survivors are
     // `active`; NEITHER needs_review row is reachable, however recent its
@@ -174,6 +183,20 @@ describe('collectUnknownTriageQueue', () => {
     expect(result.contacts.map((c) => c.status)).toEqual(['active', 'active']);
     expect(result.contacts.some((c) => c.status === 'needs_review')).toBe(false);
     expect(result.truncated).toBe(true);
+    // AND THE WARN SHOWS IT rather than asserting it (round-2 finding N2). The
+    // copy states only the mechanism - true in every composition - so the
+    // starvation itself has to be READABLE off the fields: two needs_review
+    // rows were collected and none of them survived the cut.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toMatchObject({
+      kept: 2,
+      collected: 4,
+      keptNeedsReview: 0,
+      collectedNeedsReview: 2,
+    });
+    // The sentence must NOT claim what was hidden: on an all-active partition
+    // that claim is false, which is why it was removed.
+    expect(String(warn.mock.calls[0]![1])).not.toContain('nobody has reviewed');
   });
 
   it('production constants are named and sane', () => {

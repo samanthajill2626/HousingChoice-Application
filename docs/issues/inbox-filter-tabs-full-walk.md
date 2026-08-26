@@ -6,7 +6,7 @@ severity: high
 status: open
 area: app
 created: 2026-08-03
-updated: 2026-08-25
+updated: 2026-08-26
 refs: app/src/routes/inbox.ts, app/src/lib/tables.ts, app/src/routes/contacts.ts, dashboard/src/routes/inbox/useInbox.ts
 ---
 
@@ -392,7 +392,7 @@ read was residue. On that result the branch assembles ZERO rows and - by the
 same approved requirement 5 - must NOT set the wire `truncated`, so the
 dashboard renders the ordinary "No unknown numbers" empty state over a triage
 queue that has rows in it. The only signals are the collector's own WARN ("the
-unknown-queue walk ended with untriaged contacts still behind it") and the
+unknown-queue walk ended with rows still behind it") and the
 `queueTruncated` field on the `inbox feed assembled` line - a DIFFERENT WARN and
 a DIFFERENT field from the sweep's, so a reader who only knows about the sweep
 residual will not think to look. It is the likelier of the two because this
@@ -429,18 +429,31 @@ Failure shapes to watch for:
   row is read, and the tab renders the empty state (the collector-truncation
   residual above) with only a server WARN behind it.
 
-**Live impact today: none.** Measured 2026-08-25: 16 unknown contacts in dev, 7
+**Live impact today: none.** Measured 2026-08-25 with
+`--audit-triage-partition --no-status-narrow` on
+`app/scripts/measure-unread-contact-coverage.ts`: 16 unknown contacts in dev, 7
 in prod, with ZERO `(unknown, active)` in either - two orders of magnitude from
 the cap. This is a latent-behaviour and design-record item.
+
+**The flag is not a footnote, it is what makes the zero mean anything** (added
+2026-08-26, round-2 finding N6). `--audit-triage-partition` WITHOUT
+`--no-status-narrow` queries `status: 'needs_review'`, so it reports zero
+`active` rows in every possible world, including one full of them. The
+`(unknown, active)` count is the single figure that makes this reopen point
+LATENT rather than LIVE, and it is the one figure a narrowed run structurally
+cannot produce - which is why this file records the flag alongside the number.
+Same discipline this file already states above: "every figure published before
+this flag existed priced the narrowed shape".
 
 **THE MITIGATION, and why it was NOT taken on this branch.** Pass
 `ScanIndexForward: false` on the `listByType` Query (or add it as an option and
 have the unknown queue opt in), which would reverse the partition and put
 `needs_review` first. It was not done here because `listByType` is a **shared
-read** - `today.ts`'s triage block, `GET /api/contacts?type=`, and the importer
-all use it - so changing its direction, even behind an option, is a repo-wide
-change with its own review, and the spec that governs this branch is
-human-gated. It is the human's call. Two alternatives if the option is
+read** - `today.ts`'s triage block, `GET /api/contacts?type=`, the importer, and
+**`app/src/services/audienceResolution.ts`** all use it - so changing its
+direction, even behind an option, is a repo-wide change with its own review, and
+the spec that governs this branch is human-gated. It is the human's call. Two
+alternatives if the option is
 unattractive: query the two statuses explicitly and interleave
 (`needs_review` first, two bounded Queries), or make the cut status-aware rather
 than positional.
@@ -450,9 +463,55 @@ The fact is PINNED so it cannot be quietly rediscovered or contradicted:
 collector over a mixed-status partition and asserts the `needs_review` rows are
 the ones cut, and `app/test/helpers/contactsPartitionFake.ts` rule 6 models the
 range-key sort that makes it expressible at all (its absence is why no test
-could catch this before). **Reopen here** if a deployment's unknown partition
-approaches either bound, or the moment anyone wants `(unknown, active)` rows to
-stop crowding the queue.
+could catch this before).
+
+**Reopen here** if a deployment's unknown partition approaches either bound, or
+the moment anyone wants `(unknown, active)` rows to stop crowding the queue. The
+re-check is TWO numbers, not one (added 2026-08-26, round-2 finding N6), both
+from `--audit-triage-partition --no-status-narrow`:
+
+1. the unknown partition SIZE, against `UNKNOWN_QUEUE_MAX_ROWS` (200) and the
+   page budget (10 x 100); and
+2. the **`(unknown, active)` count**, which is half the trigger on its own - it
+   is the block that fills the cap first, so it can starve the queue long before
+   the partition as a whole looks large. A narrowed run reports it as zero
+   unconditionally and is not evidence of anything.
+
+**THE SAME UNSTATED SORT LIVES IN THE BROADCAST AUDIENCE WALK**, filed
+separately as
+[`broadcast-audience-truncation-drops-searching-tenants`](broadcast-audience-truncation-drops-searching-tenants.md)
+(2026-08-26, round-2 finding N4). `app/src/services/audienceResolution.ts`
+bound-walks the same `byTypeStatus` index for `type='tenant'`, where ascending
+`TENANT_STATUSES` starts at `inactive` and ends at `searching` - so a truncated
+audience keeps inactive tenants and drops `searching` ones first. Latent today
+(10,000 bound vs ~641 tenants). It is named here because it is the SECOND caller
+that has to be considered if the `ScanIndexForward: false` mitigation above is
+taken, and because the flip helps the two callers in opposite senses.
+
+**DEFERRED, not dropped (2026-08-26, round-2 finding N1): the unknown tab
+hydrates up to the CAP to render one WINDOW.** `buildContactRow` runs inside the
+loop over `queue.contacts` (`app/src/routes/inbox.ts`, the `filter === 'unknown'`
+branch), while the window `slice(0, limit)` happens AFTER the sort - so a
+cap-full queue pays hydration for up to `UNKNOWN_QUEUE_MAX_ROWS` (200) rows to
+render the dashboard's 30.
+
+Only PART of that hydration has to precede the sort, and the code briefly
+claimed otherwise ("the sort key is the hydrated activity, so the window cannot
+be applied before the rows exist" - false, and now corrected in place). The sort
+key is `row.lastActivityAt`, copied verbatim from `maxConv.last_activity_at`, a
+CONVERSATION field produced by the thread resolution. `latestMessageOf`
+(channel / direction / preview) and `placementLabel` are PRESENTATION ONLY and
+are not sort inputs, so on the `deleted=false` path they could move after the
+`slice`. Measured shape at the cap: up to 200 message reads and up to 200
+placement reads where 30 of each would do - roughly 340 discarded serial round
+trips per request.
+
+NOT TAKEN on this branch, knowingly: it is a PERFORMANCE change with its own
+test surface (nothing currently pins the hydration count for this branch), and
+the branch's fix waves were chartered not to move behaviour. Whoever takes it
+must leave the SWEEP path alone - there `latestMessageOf` is a VISIBILITY
+predicate deciding whether a resurfaced row exists at all, so it cannot move
+after the window, and that path is not cap-bound.
 
 **DEFERRED, not dropped (human ruling 2026-08-25): spec section 5's
 open-partition safety net.** A raw-scan budget plus cursor plus `truncated`

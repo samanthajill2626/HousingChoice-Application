@@ -17,11 +17,24 @@
 //      trip than items-remaining modelling suggests, and call-count pins built
 //      on the weaker model are one Query short of production.
 //   6. The partition is SORTED BY THE RANGE KEY, ascending: `status` first,
-//      then the table key `contactId` as the tie-break (DynamoDB orders items
-//      sharing a GSI range-key value by their table key). A Query returns the
+//      then the table key `contactId` as the tie-break. A Query returns the
 //      partition in range-key order unless it sets `ScanIndexForward: false`,
 //      and contactsRepo.listByType sets NO such key (contactsRepo.ts:1009-1020)
-//      - so ASCENDING is what production does.
+//      - so ASCENDING on `status` is what production does, and that half
+//      carries rules 1-5's confidence.
+//
+//      THE TIE-BREAK IS OBSERVED, NOT CONTRACTED (weakened 2026-08-25, round-2
+//      finding V1 - this parenthetical used to assert flatly that "DynamoDB
+//      orders items sharing a GSI range-key value by their table key"). AWS
+//      documents that results are ordered by the sort-key VALUE and that a
+//      GSI's index key need not be unique; it does not specify the order among
+//      items that SHARE one. Ordering by `contactId` is what the storage layout
+//      produces and what DynamoDB Local does - stable, and stable is all any
+//      pin here needs. today.ts:844-853 words the same fact correctly one file
+//      over ("intra-partition order is stable and the same 100 rows come back
+//      every time", deliberately not "ascending by contactId"). Four pins lean
+//      on this tie-break; NOTHING in production may. Do not build an ordering
+//      guarantee or a cursor scheme on a fake's assertion.
 //
 //      WHY THIS RULE EXISTS (added by the 2026-08-25 fix wave, adversarial
 //      finding HIGH-1): returning items in SEED-ARRAY order made the

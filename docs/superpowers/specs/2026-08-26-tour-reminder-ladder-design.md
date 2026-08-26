@@ -44,12 +44,28 @@ founder who does not yet have a settled model of when the system speaks for her"
   effect is what the Reminders panel displays and what a human force-send
   composes. Do not empty that set here, and do not "helpfully" flip it as part
   of getting a test green.
-- **Phase B - a later branch.** Flip the ladder to automatic once the founder's
-  outstanding answers are in and the copy has been confirmed correct in the
-  panel. That is one line, but it takes on real scope: in-flight rows armed
-  under the OLD timing begin firing automatically (section 9.3), and the blast
-  radius is live texts to tenants and landlords. It gets its own branch, its own
-  review, and its own deploy.
+- **Phase B - a later branch.** Two things, together, because neither matters
+  until the other happens. (1) Flip the ladder to automatic once the founder's
+  outstanding answers are in and the copy is confirmed correct in the panel -
+  one line, but it takes on real scope: in-flight rows armed under the OLD
+  timing begin firing automatically (section 9.3), and the blast radius is live
+  texts. (2) STOP ARMING `confirmation` (section 9.5). Its own branch, own
+  review, own deploy.
+
+RULED (Cameron, 2026-08-26): `confirmation` STAYS ARMED through Phase A. The
+founder asked for no confirmation text, and while the pause holds she gets none -
+nothing auto-sends, and force-send is a deliberate act she simply does not take
+on that rung. Un-arming it buys nothing observable now and costs a great deal:
+`confirmation` is the ONLY rung whose dueAt is `now`, which makes it the test
+suites' universal "fire a reminder immediately" vehicle - roughly forty
+structural sites in `tourReminders.test.ts` and fourteen across three e2e specs.
+Nothing else can replace it, because a rung already due at ARM time writes no row
+at all (`jobs/tourReminders.ts:266`), so the obvious substitute cannot exist.
+
+So Phase A leaves `REMINDER_KINDS` alone entirely. The rung keeps its current
+copy; it is simply never sent. Phase B removes it at the same moment the pause
+lifts - which is the moment it would otherwise start firing - and owns the
+harness surgery then, when the suites have to change anyway.
 
 Sequencing this way is what makes the copy reviewable before the POLL can reach
 anyone.
@@ -81,6 +97,22 @@ The Aug 24 file also carries a voice-prompt section with PRE-2026-08-18 wording.
 That section is stale - the founder states she edited only tours and relay.
 Voice prompts are OUT OF SCOPE and must not be touched.
 
+GOVERNING REGISTRY ITEM: `docs/issues/founder-message-template-updates-owed.md`
+is the tracked home for this whole thread and MUST be updated by this change -
+its tour-ladder items close here; its relay items stay open.
+
+One of its entries needs an explicit ruling rather than a silent reversal. It
+records the `no_show_checkin` name token as an open PRODUCT question, because the
+rung was deliberately kept token-free under spec D2 ("when you are not certain
+someone no-showed, vaguer wording is kinder"). Section 5 of this document
+reverses D2.
+
+RULED (Sam via Cameron, 2026-08-26): D2 IS REVERSED. The founder asked for
+"Hi {tenant first name}! Do you need to reschedule?" with the name, and that is
+approved. Recording it here as a dated decision so the reversal is traceable to
+a person rather than appearing as drift, and so D2's original reasoning is not
+re-argued later without knowing it was considered and overruled.
+
 ## 4. Scope
 
 IN: tour reminder copy, tokens, timing, skip rules, entry restructure, and
@@ -109,20 +141,37 @@ Placeholders are the FINAL token names (section 6).
 | 1h before, landlord-led | `tour.en_route_landlord_led` | `Hey {tenantFirstName}, {propertyContactFirstName} will be headed that way shortly. Can you please text here when you're on the way?` |
 | No-show check-in | `tour.no_show_checkin` | `Hi {tenantFirstName}! Do you need to reschedule?` |
 
-`tour.confirmation` / `tour.confirmation_no_address` are TURNED OFF: no
-confirmation text in any flow. Section 9.1 explains why the entries stay.
+`tour.confirmation` / `tour.confirmation_no_address` are NOT in this table and
+are NOT retimed, re-worded or un-armed in Phase A (section 2). They keep their
+current copy and keep arming. The founder gets no confirmation text because
+nothing auto-sends, not because the rung was removed.
+
+They DO still need the new token declarations from section 6, because the
+exhaustive compose matrix in 9.1 covers every kind and would otherwise fail on
+them - and because a human CAN force-send one, in which case it must not throw.
 
 SEGMENT BUDGET IS A HARD EXISTING GATE, NOT A MEASUREMENT. `tourCopy.test.ts:115`
 already asserts `analyzeSms(body).segments === 1` for every rung composed with a
 REAL seeded address, alongside an ASCII check. An earlier revision framed this as
 "measure and report at gate time"; that was wrong.
 
-`tour.morning_of` is the longest and highest-volume rung, and with a first name,
-a formatted time and a street line the measured margin is roughly NINETEEN
-CHARACTERS. So this is a design constraint on the founder's wording: if the copy
-grows, that gate goes red and the answer is to shorten the copy or take the
-decision to two segments deliberately, NOT to relax the assertion. Anyone
-editing this copy later needs to know the gate exists.
+`tour.morning_of` is the longest and highest-volume rung, and the measured margin
+is roughly NINETEEN CHARACTERS. So this is a design constraint on the founder's
+wording: if the copy grows, that gate goes red and the answer is to shorten the
+copy or take the two-segment decision deliberately, NOT to relax the assertion.
+
+READ THE GATE BEFORE TRUSTING THE MARGIN. As written
+(`tourCopy.test.ts:109-118`) it composes with NO `names`, so it measures the
+FALLBACK body - the one greeting "there". A real send substitutes a real first
+name, and every character beyond four eats that margin: "Hey Alejandra," is nine
+characters longer than "Hey there,". The gate as it stands would pass while a
+real recipient's message crossed into a second segment.
+
+So the gate must be EXTENDED to compose with a representative name, and the spec
+must state what "representative" means: assume a first name of up to TWELVE
+characters, which covers the overwhelming majority of real names, and pin that
+assumption in the test's comment so the next person editing copy knows what the
+margin was computed against.
 
 ## 6. Token contract
 
@@ -160,10 +209,17 @@ unitContacts(unit).find((c) => c.primaryContact === true)?.contactId
 
 as in `lib/rosterResolution.ts:274` and `services/rosterProvision.ts:233`.
 
-KEEP THE `nonEmpty()` GUARD - an earlier revision of this snippet dropped it. A
+KEEP THE EMPTY-STRING GUARD - an earlier revision of this snippet dropped it. A
 legacy unit can carry `landlordId: ''`, and a bare `??` passes an empty string
 straight through as a contactId, which then reads as a missing contact rather
-than as "no property contact", producing the wrong branch in 6.3.
+than as "no property contact", producing the wrong branch in 6.3b.
+
+`nonEmpty` in `rosterResolution.ts:151` is MODULE-PRIVATE and is not exported, so
+it cannot simply be imported - a second correction the round-3 pass caught. Write
+the guard inline in the new module rather than exporting `nonEmpty` for one
+caller; a one-line `typeof x === 'string' && x.length > 0` check needs no shared
+helper, and widening another module's surface for it is the kind of drive-by 6.2
+already refuses.
 
 Do NOT read the `unit.primary_contact` scalar (`unitsRepo.ts:253`). Nothing else
 in the codebase resolves from it, and it is nullable. Writing a second resolver
@@ -195,8 +251,11 @@ consolidating the older copies is tracked in
 terms "do not re-point them here as a drive-by". Adding a tour consumer there is
 exactly that drive-by.
 
-So: put the first-name helper next to its consumer, in the new tour-contacts
-module (section 6.1), NOT in `contactName.ts`. That does add one more local
+So: put the first-name helper next to its consumer, in the NEW module section
+6.1's resolver lives in (`app/src/lib/tourContacts.ts` - this document's only
+new module; 6.1's heading says "reuse, do not reimplement" about the PRIMARY-
+CONTACT RULE, not about where the module sits), NOT in `contactName.ts`. That
+does add one more local
 implementation to the six the tracking issue already counts - accepted
 deliberately, because honouring the guard and letting the filed consolidation do
 its job later is better than widening a module whose own docblock forbids it.
@@ -212,6 +271,35 @@ Absence (no such contact, or no name on it):
   SELF-GUIDED entry instead. Do not invent a filler noun - "your contact will be
   headed that way shortly" reads badly and asserts what we cannot back.
 
+### 6.3a Where names are resolved - the GROUP path is the hard one
+
+CORRECTED after round 3. An earlier revision split this on the wrong axis: poll
+versus force-send. The axis that actually matters is 1:1 VERSUS GROUP.
+
+`resolveReminderTarget` (`jobs/tourReminders.ts:641`) returns
+`{ route: 'group' }` for a `landlord_led` or `pm_team` tour with a usable group
+BEFORE it reaches "resolve the tenant contact" at `:646`. So the group path
+performs ZERO contact reads today - and it is precisely the path carrying the
+landlord-led copy, which is the only copy needing BOTH names. Nothing to ride
+along on; all of it is new work.
+
+RULED (Cameron, 2026-08-26): that plumbing is IN SCOPE for this phase.
+
+RESOLVE IN THE SHARED SEAM, NOT IN THE ROUTER. `composeBodyForRow`
+(`jobs/tourReminders.ts:547`) is called by BOTH routes and already reads the unit
+for the address. Resolve the two names there, so 1:1 and group get identical
+copy by construction rather than by two implementations agreeing. Consequences:
+
+- Its deps are `Pick<RunDueTourRemindersDeps,'unitsRepo'>` today and must widen
+  to include `contactsRepo`.
+- On the 1:1 route `resolveReminderTarget` has ALREADY fetched the tenant contact
+  into `target.contact`. Pass it in and reuse it; do not read the tenant twice.
+- On the GROUP route nothing has been read, so both reads happen here.
+- The three preview surfaces call the same function and therefore inherit the
+  same resolution - which is what keeps a preview honest against the send.
+
+### 6.3b Absence versus read FAILURE
+
 Read FAILURE (the contacts read threw) is not absence and must not silently
 degrade into a wrong-but-valid message:
 
@@ -226,15 +314,23 @@ TWO SEND PATHS, NOT ONE. The poll is one; `forceSendReminder` is the other, and
 in Phase A it is the ONLY one that reaches anybody (section 2). "Leave unclaimed"
 is the poll's vocabulary and does not translate: a human pressing Send now needs
 an answer, so force-send returns a REFUSAL the route can render, not silence.
-That refusal needs a representable outcome on `ForceSendResult` and a reason
-token - neither exists today, and inventing one at build time is how this ends up
-as a thrown error in a click handler.
+It needs a REASON TOKEN, not a new outcome - a fourth `ForceSendResult` outcome
+would break the route's existing ternary at `routes/tourReminders.ts:394`, and
+the reason has to reach the string-keyed `SEND_NOW_ERROR_COPY` map or it degrades
+to a blank error. That map is SHARED with the nudge route; adding a key there
+must not change nudge behaviour.
 
-WATCH: `resolveReminderTarget` (`jobs/tourReminders.ts:646`) does a BARE
-`contactsRepo.getById` with no try/catch, so a throwing read ALREADY escapes and
-already leaves the rung unclaimed. Any test written against today's behaviour is
-green before the feature exists. The new code must be what produces the outcome,
-and the test must fail without it.
+TWO WATCH ITEMS, both of which make a naive test green before the feature exists:
+
+- `resolveReminderTarget:646` does a BARE `contactsRepo.getById` with no
+  try/catch, so a throwing read ALREADY escapes and already leaves the rung
+  unclaimed. A test asserting that passes today.
+- TENANT ABSENCE IS UNREACHABLE ON THE 1:1 PATH: `:653` returns
+  `contact_missing` before compose is ever called. Do NOT write a spec or a test
+  that requires an absent tenant to SEND on that route - satisfying it would mean
+  deleting the `contact_missing` claim-skip, which is not intended. The reachable
+  absence fixture is a contact that EXISTS but carries no name; and on the GROUP
+  route, where no contact is fetched at all, absence is reachable directly.
 
 ### 6.4 DO NOT declare `{where}` on `tour.morning_of_no_address`
 
@@ -384,10 +480,16 @@ degrades silently to a reason-less "Skipped", which reads as a bug in the ladder
 rather than a missing label. Change both, and let the label test be what catches
 a future divergence.
 
-WHAT `dueAt` IS PERSISTED on a `booked_too_late` row must be stated, because the
-panel SORTS by it and picks "Next" from it: store the rung's RAW computed dueAt,
-unclamped, the same value the rule compared against. A skipped row is display-
-only, so this is about ordering the trace sensibly, not about scheduling.
+WHAT `dueAt` IS PERSISTED on a `booked_too_late` row: store the CLAMPED dueAt,
+exactly as the `past_event` and `quiet_hours_superseded` branches already do.
+
+An earlier revision said "raw, unclamped" and justified it by the panel's "Next"
+selection. That justification was HALF FALSE - `next` is computed from PENDING
+rows only (`routes/tourReminders.ts:508`), so a skipped row never supplies it -
+and the instruction contradicted the rule that these rows are shaped like the
+existing skip branches. Consistency with the neighbouring branches wins; the
+RAW value is what the skip RULE compares against (section 8), not what the ROW
+stores.
 
 ## 9. Entry restructure
 
@@ -482,11 +584,32 @@ shows old timings with new copy - a rung labelled "Day before" sitting at 3pm.
 Accept this and say so; a re-arm backfill would be more destructive. This matters
 much more under option (B) in section 2, where those rows fire automatically.
 
-### 9.4 `confirmation` also sits in `MANUAL_ONLY_REMINDER_KINDS`
+### 9.4 `confirmation` - NOTHING CHANGES IN PHASE A
 
-with a long rationale (`:149`) arguing its inclusion is "a deliberate decision,
-not a side effect". Once nothing arms it, that entry is dead state and the
-comment is false. Say what happens to both.
+Superseded by Cameron's 2026-08-26 ruling in section 2. `confirmation` keeps
+arming, keeps its current copy, and keeps its `MANUAL_ONLY_REMINDER_KINDS` entry
+- whose 6-line rationale at `:149` therefore stays TRUE rather than becoming dead
+state. `REMINDER_KINDS` is not edited in this phase.
+
+The only Phase A change touching these entries is the token declarations from
+section 6, which they need for the 9.1 matrix and for a force-send not to throw.
+
+### 9.5 What Phase B owes here
+
+When Phase B lifts the pause it must, in the same change, stop arming
+`confirmation` - remove it from `REMINDER_KINDS` only, the `no_show_checkin`
+pattern, leaving the kind valid in the union, `computeDueAt`, `LADDER_ORDER` and
+the catalog so in-flight rows still compose (9.1). At that point its
+`MANUAL_ONLY_REMINDER_KINDS` entry DOES become dead state and its comment DOES
+become false; correct both then.
+
+Phase B also inherits the harness problem Phase A deliberately avoids:
+`confirmation` is the suites' only immediate-send vehicle (~40 sites in
+`tourReminders.test.ts`, ~14 across `scheduled-visibility.spec.ts`,
+`tour-roster.spec.ts` and `tours.spec.ts`), and no armed rung can replace it
+because a rung already due at arm time writes no row (`:266`). Phase B needs a
+different mechanism - most likely a dev seam that arms a row with an arbitrary
+dueAt - and should budget for that rather than discovering it.
 
 ## 10. Implementation notes
 
@@ -520,18 +643,35 @@ request. Resolve contacts once per request and batch; do not read per rung.
 
 ## 11. Behavioural consequences to state, not discover
 
-- A short-notice booking can now produce a ladder where EVERY rung is skipped:
-  `day_before` past, `morning_of` by rule 2, and `en_route` clamped past the tour
-  for an evening booking. Previously the confirmation went out immediately and
-  the tenant had something. The founder will meet this in the first week.
+- A short-notice booking can now produce a ladder where every AUTOMATED rung is
+  skipped: `day_before` past, `morning_of` by rule 2, and `en_route` clamped past
+  the tour for an evening booking. `confirmation` still arms in Phase A
+  (section 2), so the trace is not empty - but nothing is SENT, because the
+  ladder is paused. The founder will meet this in her first week.
+- RESCHEDULE AND REVIVAL STAMP THE NEW SKIP TOO. `armTourReminders` is called
+  from `routes/tours.ts:349` (book) AND `:1168-1182` (PATCH: any `scheduledAt`
+  change, and any status move back into `scheduled` from `canceled`/`no_show`).
+  `now` is the ARM instant, so back-dating a tour, or reviving a cancelled one
+  onto its stored time, evaluates both skip rules against the REVIVAL moment -
+  and can stamp a visible "booked too late" chip on a tour nobody booked late.
+  That is a mutation surface no earlier revision enumerated. Accepted as
+  correct-by-mechanism (the rung genuinely cannot usefully fire), but the CHIP
+  WORDING must not accuse: it says when the reminder was armed too late, not
+  that the operator was slow. Worth a test on the revival path.
 - The operator-facing label `morning_of: 'Morning of'`
   (`dashboard/src/api/types.ts:1242`, mirrored `e2e/scenarios/steps.ts:205`) is
   now wrong - for a 7pm tour that rung fires at 3pm. DECIDED: RELABEL it to
-  `4 hours before` (touches the dashboard map, the e2e mirror, and
-  `RemindersPanel.test.tsx`). The persisted KIND keeps its name for the
-  migration reason in section 9; the LABEL has no such constraint, and leaving a
-  staff-facing lie in place because the key underneath it is stuck would be
-  choosing the worst of both.
+  `4 hours before`. The persisted KIND keeps its name for the migration reason in
+  section 9; the LABEL has no such constraint, and leaving a staff-facing lie in
+  place because the key underneath is stuck would be the worst of both.
+
+  KNOCK-ON the relabel decision did not account for: that label is INTERPOLATED
+  into aria-labels (`RemindersPanel.tsx:347`, `:358`), producing "Send 4 hours
+  before reminder now", and one of those is a PINNED accessible-name contract at
+  `e2e/support/selectors.md:72`. The label map alone is not the whole edit: fix
+  the surrounding sentence so it still reads as English, and move the pinned
+  contract with it. If no phrasing reads well, prefer changing the SENTENCE
+  ("Send the 4-hours-before reminder now") over reverting to a label that lies.
 
 ## 12. Open items with the founder (do not block)
 
@@ -617,23 +757,31 @@ Specs that drive ticks off `times.dayBefore` and must be reworked, not
 re-baselined: `quiet-hours.spec.ts:293,318`,
 `scheduled-visibility.spec.ts:163,228`, `tours.spec.ts:134`.
 
-### 13.2 `confirmation` is load-bearing in the harness
+### 13.2 What the e2e side DOES and does NOT owe in Phase A
 
-Turning the rung off is not a copy change to the tests. `confirmation` is the
-e2e suite's only "fire a reminder NOW" vehicle - it is the sole rung whose dueAt
-is `now`, so every spec needing an immediate send uses it, roughly fourteen sites
-across `scheduled-visibility.spec.ts` (six, as its anchor), `tour-roster.spec.ts`
-and `tours.spec.ts`. Those specs need a different immediate-send vehicle, not a
-new expected string. Also affected and easily missed: `tour-comms-pane.spec.ts`
-and `tourReminderContext`, which the required `tourType` and the threaded names
-both reach.
+DOES NOT: any `confirmation` rework. Section 2 keeps that rung armed, so its ~14
+e2e sites and ~40 unit sites are untouched here. That whole problem moves to
+Phase B (9.5), which is also where the replacement mechanism has to be designed
+- no armed rung can substitute, because a rung already due at arm time writes no
+row (`:266`).
 
-Two further e2e notes. `tourReminderBody()` (`steps.ts:173`) composes expected
-bodies through the app's own composer, so once names are required the expectation
-couples to the SEEDED tenant's first name. And the new skip rules change how many
-rows a short-horizon booking arms, so any spec asserting a rung count for a
-near-term tour can flip; `tourScheduleFullLadder()` (14:00, two days out)
-survives the retiming cleanly (19:30 D-1 < 10:00 D < 13:00 D < 14:00 start).
+DOES, and each is easy to miss:
+
+- `tour-comms-pane.spec.ts:230` and `tourReminderContext` - both reached by the
+  required `tourType` and the threaded names, not by any copy change.
+- `tour-no-show-checkin.spec.ts:63-75` - a FOURTH affected spec no earlier
+  revision named. Its first half goes vacuous once the copy carries a name, and
+  its comment becomes false. Re-derive it; do not just re-baseline the string.
+- `tourReminderBody()` (`steps.ts:173`) composes through the app's own composer,
+  so once names are required every exact-equality expectation couples to the
+  SEEDED tenant's first name. Thread that through the context rather than
+  hard-coding a name per spec.
+- The new skip rules change how many rows a short-horizon booking arms, so any
+  spec asserting a rung COUNT for a near-term tour can flip - and note the
+  direction: `booked_too_late` writes a VISIBLE row where the old past-dueAt
+  branch wrote none, so those ladders get LONGER, not shorter.
+  `tourScheduleFullLadder()` (14:00, two days out) survives cleanly
+  (19:30 D-1 < 10:00 D < 13:00 D < 14:00 start).
 
 ## 14. Gates
 

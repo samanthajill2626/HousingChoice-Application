@@ -5,22 +5,23 @@
 **Goal:** Replace the Unknown inbox tab's full open-partition walk (~684 contact
 lookups across 24 Queries for at most 8 rows in prod) with a bounded read of the
 `type=unknown` contact partition, plus a byUnread sweep for deleted-contact
-resurfacing, so cost is proportional to rows RETURNED - and give the remaining
-open-partition pager (filter=all) a raw-scan budget so no unbounded read
-survives on the route.
+resurfacing, so cost is proportional to the unread set and the rows RETURNED
+instead of to an open partition that never shrinks.
 
 **Architecture:** A new `filter === 'unknown'` branch in `aggregateInbox`
 (`app/src/routes/inbox.ts`) returns before the open-partition pager, exactly as
 the `groups` and `unread` branches already do. It reads the whole capped
 `(type='unknown')` byTypeStatus partition through a new module-level collector
-(`app/src/lib/unknownQueue.ts` - fill loop, result cap, truncation WARN), does a
-live type re-check per contact, resolves each contact's open non-relay threads
-by calling `conversationsForContact` DIRECTLY (so "query threw" and "filtered to
-nothing" are different code paths), builds rows with the existing
-`buildContactRow` closure, folds in soft-deleted resurfacing candidates from one
-`collectUnreadRows` sweep, sorts in memory, and returns a single page
-(`nextCursor: null`, never the `truncated` wire flag). A final task adds the
-budget + cursor + truncated contract to the `filter=all` pager (spec section 5).
+(`app/src/lib/unknownQueue.ts` - fill loop, result cap, truncation WARN, and a
+type list DERIVED from the exhaustive per-ContactType decision map so the map is
+load-bearing, not decorative), does a live type re-check per contact, resolves
+each contact's open non-relay threads by calling `conversationsForContact`
+DIRECTLY (so "query threw" and "filtered to nothing" are different code paths),
+builds rows with the existing `buildContactRow` closure, folds in soft-deleted
+resurfacing candidates from one `collectUnreadRows` sweep (budget-bounded, with
+BOTH of the collector's early-stop flags - `capped` masks `truncated` - detected
+and reported), sorts in memory, and returns a single page (`nextCursor: null`,
+never the `truncated` wire flag).
 
 **Tech Stack:** TypeScript (Node 24, ESM `.js` import specifiers), Express 5,
 DynamoDB (byTypeStatus GSI + byUnread sparse GSI), Vitest, Playwright e2e.
@@ -50,9 +51,34 @@ DynamoDB (byTypeStatus GSI + byUnread sparse GSI), Vitest, Playwright e2e.
   `e2e/performance/routes.test.ts:327`). Do not edit `inboxFilters.ts`.
 - The wire endpoint stays `GET /api/inbox?filter=unknown&limit=...` - the perf
   harness pins exact query-key tuples; do not add or rename query params.
-- Do not modify `app/test/helpers/twilioWebhookHarness.ts` - its `listByType`
-  fake (line 1684) already exists and route tests depend on its current
-  semantics.
+- Do not modify `app/test/helpers/twilioWebhookHarness.ts`. Its `listByType`
+  fake (line 1684) applies the soft-delete filter BEFORE `Limit` (unfaithful on
+  that axis) and returns `lastEvaluatedKey` on "rows remain" rather than "Limit
+  reached" (unfaithful on that axis too) - but it backs the `today.ts` triage
+  suite, whose fill-loop pins are calibrated against those semantics, and
+  re-ordering it moves pins in a suite this branch has no business touching.
+  ACCEPTED CONSEQUENCE, stated so nobody rediscovers it: `inboxApi.test.ts`
+  exercises the new branch through this unfaithful fake, so the route-level
+  tests cannot produce the short-page-with-LEK shape; Task 4 covers the
+  collector against the faithful helper and Task 6 covers the real index.
+
+## Out of scope (deliberately deferred)
+
+- **Spec section 5's open-partition safety net** (a raw-scan budget + cursor +
+  `truncated` contract for the `filter=all` pager) is DEFERRED by human ruling
+  2026-08-25 - deferred, not dropped. Both plan reviewers showed that building
+  it now ships section 5's own named gate unsolved: the spec says the banner
+  problem "must be solved first", and a budget-stopped ZERO-ROW `filter=all`
+  page carrying `truncated` hits the dashboard's non-filter-gated failure gate
+  (`serverEndedEarlyEmpty = serverRowCount === 0 && truncated`, `Inbox.tsx:42`,
+  banner at `:183`) and renders "We couldn't load your inbox." on an org where
+  nothing failed. Whoever picks it up must solve that banner gate FIRST, and
+  should know two traps found in review: the empty-page invariant nulls the
+  cursor, so "Load more" cannot be the affordance in exactly that state; and
+  replacing the pager loop's tail leaves the `moreChunks` binding at
+  `inbox.ts:1481` unused (its only reader is the tail at `:1522`), which is a
+  gate-5 `no-unused-vars` error unless the binding is deleted too. Task 9
+  records the deferral in the issue registry.
 
 ## Load-bearing facts about the current code (verified 2026-08-25)
 
@@ -93,9 +119,13 @@ The executor of any task can rely on these; each was read from the worktree:
   Pick<MessagesRepo,'listByConversation'>, logger? }` and
   `{ maxRows, budget, startAfter?, excludeContactIds?, wastedProbesBefore? }`,
   returning `CollectResult` with `candidates` (a DELETED contact appears only
-  after its resurfacing probe passes), `truncated`, `remainingBudget`,
-  `deletedProbes`, `wastedProbes`, `skippedDeletedThreads`. `BADGE_COUNT_CAP`
-  is 100, `UNREAD_WALK_LIMIT` is 2000.
+  after its resurfacing probe passes), `truncated`, `capped`, `remainingBudget`,
+  `deletedProbes`, `wastedProbes`, `skippedDeletedThreads`.
+  `UNREAD_WALK_LIMIT` is 2000. CRITICAL FLAG SEMANTICS (`unreadFeed.ts:695-709`):
+  `truncated = !capped && !state.scanExhausted` - so `capped` (the `maxRows`
+  stop, set at `:674-677` counting ALL candidate kinds) MASKS `truncated`. Any
+  caller that treats `truncated` alone as "the answer is a floor" is blind to
+  the cap stop; both flags are floor signals.
 - `InboxPage.truncated` (`inbox.ts:147-152`) is documented as set on the
   `filter=unread` branch ONLY. The dashboard failure banner is gated by
   `serverEndedEarlyEmpty = inbox.serverRowCount === 0 && inbox.truncated`
@@ -129,9 +159,21 @@ The executor of any task can rely on these; each was read from the worktree:
   `performanceSeed.integration.test.ts:414` (`unknown.rows.length > 0`) is
   expected to SURVIVE the flip. Task 6 verifies by running it; if it goes red,
   that is a real coverage regression to diagnose, not a test to relax.
-- `useInbox` passes `pageData.truncated` through for every filter
-  (`useInbox.ts:242,348`), so Task 9's `filter=all` truncation needs no
-  dashboard change.
+- Test-fake LEK rule, pinned by the sibling helper this repo already ships
+  (`app/test/helpers/unreadIndexFake.ts:104-116` and `:180-187`): DynamoDB
+  returns `LastEvaluatedKey` whenever the page REACHED the Limit - "Limit
+  reached", NOT "rows remain" - so a walk over exactly n * limit rows costs one
+  MORE round trip than items-remaining modelling suggests, and call-count pins
+  calibrated against the weaker model are one Query short of production. The
+  webhook harness's `listByType` (`twilioWebhookHarness.ts:1707`) carries the
+  items-remaining defect; the Task 1 helper must NOT copy it.
+- `byTypeStatus` is `hash: type, range: status` (`app/src/lib/tables.ts:90-93`)
+  and `ContactItem.status` is OPTIONAL - a GSI does not index an item missing a
+  key attribute, so a status-less `type='unknown'` contact is invisible to
+  `listByType` entirely. Every current write path sets a status
+  (`contactCapture.ts:79-81`, `groupMembers.ts:111-112`, `groupConvert.ts:339-340`,
+  `routes/contacts.ts:881-884`, `lib/import/apply.ts:884-899`), so this is a
+  fake-fidelity rule, not a shipping defect.
 
 ---
 
@@ -159,19 +201,28 @@ short-page-with-LEK shape the fill loop exists for.
 // app/test/helpers/contactsPartitionFake.ts
 //
 // Models contactsRepo.listByType the way DynamoDB executes it:
-//   1. The partition is (type, optional status) - both are KEY conditions,
+//   1. The GSI is SPARSE: byTypeStatus is (hash: type, range: status), and an
+//      item missing a key attribute is not indexed - a status-less contact is
+//      invisible here no matter its type (lib/tables.ts:90-93).
+//   2. The partition is (type, optional status) - both are KEY conditions,
 //      applied before paging.
-//   2. `Limit` slices the page NEXT, from exclusiveStartKey.
-//   3. The FilterExpressions - the soft-delete scope and `excludeOrigin` -
+//   3. `Limit` slices the page NEXT, from exclusiveStartKey.
+//   4. The FilterExpressions - the soft-delete scope and `excludeOrigin` -
 //      apply to the PAGE, so a filtered-out row still spends its page slot and
 //      a short (even EMPTY) page can carry a lastEvaluatedKey.
+//   5. `lastEvaluatedKey` is returned whenever the page REACHED the Limit -
+//      "Limit reached", NOT "rows remain". That is the service's rule (see
+//      helpers/unreadIndexFake.ts:104-116, which documents and guards this
+//      exact trap): a walk over exactly n * limit rows costs one MORE round
+//      trip than items-remaining modelling suggests, and call-count pins built
+//      on the weaker model are one Query short of production.
 // A fake that filters before slicing can never exercise the fill loop the
 // unknown-queue read carries (docs/superpowers/specs/
 // 2026-08-25-inbox-unknown-tab-walk-design.md, section 3 class d), and a fake
 // that ignores `status`/`excludeOrigin` makes the "no narrowing" mutation
 // probes vacuous. The webhook harness's own fake keeps its historical
-// deleted-before-limit shape for the suites that depend on it; new tests use
-// this one.
+// deleted-before-limit, items-remaining shape for the suites calibrated
+// against it (the today.ts triage pins); new tests use this one.
 import {
   isDeleted,
   type ContactItem,
@@ -187,6 +238,8 @@ export function listByTypeFromContacts(
   const partition = contacts
     // Pointer items carry no real type/status -> invisible to this GSI.
     .filter((c) => c.phone_ref !== true && c.email_ref !== true)
+    // SPARSE index: no range-key attribute, no index entry (rule 1).
+    .filter((c) => c.status !== undefined)
     .filter((c) => c.type === type)
     .filter((c) => (opts.status === undefined ? true : c.status === opts.status));
   const start =
@@ -199,10 +252,13 @@ export function listByTypeFromContacts(
     .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)))
     .filter((c) => opts.excludeOrigin === undefined || c.origin !== opts.excludeOrigin);
   const last = page[page.length - 1];
-  const more = start + page.length < partition.length;
+  // LIMIT REACHED, not "rows remain" (rule 5): the service stops at the Limit
+  // and hands back the position; the caller must ask again to learn the
+  // stream ended.
+  const limitReached = page.length === limit;
   return {
     items: filtered,
-    ...(more && last !== undefined && { lastEvaluatedKey: { contactId: last.contactId } }),
+    ...(limitReached && last !== undefined && { lastEvaluatedKey: { contactId: last.contactId } }),
   };
 }
 ```
@@ -277,6 +333,29 @@ describe('listByTypeFromContacts', () => {
     ];
     expect(listByTypeFromContacts(seed, 'unknown', {}).items.map((x) => x.contactId)).toEqual(['unk']);
   });
+
+  it('LEK means "Limit reached", not "rows remain": an exact-multiple partition costs one extra empty page', () => {
+    // The service's rule (unreadIndexFake.ts:104-116): a page that reached the
+    // Limit hands back a key even when it was also the end - the caller pays
+    // one more Query to learn the stream ended. An items-remaining fake makes
+    // every call-count pin one Query short of production.
+    const seed = [c({ contactId: 'a' }), c({ contactId: 'b' })];
+    const page1 = listByTypeFromContacts(seed, 'unknown', { limit: 2 });
+    expect(page1.items.map((x) => x.contactId)).toEqual(['a', 'b']);
+    expect(page1.lastEvaluatedKey).toEqual({ contactId: 'b' });
+    const page2 = listByTypeFromContacts(seed, 'unknown', {
+      limit: 2,
+      exclusiveStartKey: page1.lastEvaluatedKey!,
+    });
+    expect(page2.items).toEqual([]);
+    expect(page2.lastEvaluatedKey).toBeUndefined();
+  });
+
+  it('the GSI is sparse: a status-less contact is not indexed at all', () => {
+    const statusless: ContactItem = { contactId: 'no-status', type: 'unknown' };
+    const seed = [statusless, c({ contactId: 'indexed' })];
+    expect(listByTypeFromContacts(seed, 'unknown', {}).items.map((x) => x.contactId)).toEqual(['indexed']);
+  });
 });
 ```
 
@@ -285,7 +364,7 @@ describe('listByTypeFromContacts', () => {
   meaningful red state for a new pure helper plus its pins)
 
 Run: `cd W:\tmp\inbox-unread-cluster\app; npx vitest run test/contactsPartitionFake.test.ts`
-Expected: 5 passed.
+Expected: 7 passed.
 
 - [ ] **Step 4: Commit**
 
@@ -372,12 +451,15 @@ In the `contactsRepo` fake (~line 190-210), add after `getById`:
       },
 ```
 
-- [ ] **Step 3: fix the two whole-object call assertions**
+- [ ] **Step 3: fix EVERY whole-object call assertion - find them by grep, not by this list**
 
-`expect(calls).toEqual({...})` at ~lines 727-733 and ~759-765 and ~800-807 are
-EXHAUSTIVE literals - they now need the two new zero fields. Add
-`listByType: 0, listByLastActivity: <n>` to each, where `<n>` is what the run
-in Step 5 reports (the unread-filter tests never touch the pager, so expect 0
+Run `rg -n "expect\(calls\).toEqual" app/test/inboxFeed.test.ts` and update
+every hit. As of this writing there are FOUR - ~lines 647-653, 727-733,
+759-765, 800-807 (the first one's own comment says why it is whole-object: "so
+a future read cannot slip in unnoticed") - but the grep is the authority; a
+line list in a plan goes stale. Each literal now needs the two new zero fields:
+add `listByType: 0, listByLastActivity: <n>`, where `<n>` is what the run in
+Step 5 reports (the unread-filter tests never touch the pager, so expect 0
 there; the `filter: 'unknown'` test at ~736 walks the pager once today, so
 expect 1 there). Do not guess: run, read, pin.
 
@@ -658,6 +740,8 @@ git commit -m "test(inbox): parity baseline for the unknown tab, class by class,
   - `UNKNOWN_QUEUE_PAGE_SIZE = 100`, `UNKNOWN_QUEUE_MAX_PAGES = 10`,
     `UNKNOWN_QUEUE_MAX_ROWS = 200`
   - `UNKNOWN_TAB_TYPE_DECISIONS: Record<ContactType, 'queried' | 'excluded'>`
+    and the DERIVED `UNKNOWN_QUEUE_TYPES: readonly ContactType[]` (what the
+    collector queries and the sweep admits - the map is load-bearing through it)
   - `collectUnknownTriageQueue(deps: { contacts: Pick<ContactsRepo,
     'listByType'>; logger?: Logger }, opts: { pageSize: number; maxPages:
     number; maxRows: number }): Promise<UnknownQueueResult>` where
@@ -677,6 +761,7 @@ import {
   UNKNOWN_QUEUE_MAX_PAGES,
   UNKNOWN_QUEUE_MAX_ROWS,
   UNKNOWN_QUEUE_PAGE_SIZE,
+  UNKNOWN_QUEUE_TYPES,
   UNKNOWN_TAB_TYPE_DECISIONS,
 } from '../src/lib/unknownQueue.js';
 import type { ContactItem, ContactType, ListContactsOpts } from '../src/repos/contactsRepo.js';
@@ -693,12 +778,12 @@ function unk(n: number, over: Partial<ContactItem> = {}): ContactItem {
 }
 
 function makeDeps(seed: ContactItem[]) {
-  const calls: ListContactsOpts[] = [];
+  const calls: Array<{ type: ContactType } & ListContactsOpts> = [];
   const warn = vi.fn();
   const deps = {
     contacts: {
       async listByType(type: ContactType, opts: ListContactsOpts = {}) {
-        calls.push(opts);
+        calls.push({ type, ...opts });
         return listByTypeFromContacts(seed, type, opts);
       },
     },
@@ -721,9 +806,14 @@ describe('collectUnknownTriageQueue', () => {
     expect(result.contacts.map((c) => c.contactId)).toEqual(['c-unk-001', 'c-unk-002', 'c-unk-003']);
     expect(result).toMatchObject({ pagesWalked: 1, truncated: false });
     expect(calls).toHaveLength(1);
+    // THE MAP DRIVES THE READ: the queried partitions are exactly
+    // UNKNOWN_QUEUE_TYPES, which is derived from UNKNOWN_TAB_TYPE_DECISIONS -
+    // flipping a type to 'queried' in the map changes this pin, which is what
+    // makes the exhaustiveness guard load-bearing rather than decorative.
+    expect(calls.map((c) => c.type)).toEqual([...UNKNOWN_QUEUE_TYPES]);
     // THE PROBES. The fake honors these options, so re-adding either narrow
     // (spec section 3, classes a and f) empties the row set above AND flips
-    // these two pins.
+    // these pins.
     expect(calls[0]!.status).toBeUndefined();
     expect(calls[0]!.excludeOrigin).toBeUndefined();
     expect(calls[0]!.deleted).toBeUndefined();
@@ -747,7 +837,12 @@ describe('collectUnknownTriageQueue', () => {
     const result = await collectUnknownTriageQueue(deps, { pageSize: 2, maxPages: 5, maxRows: 10 });
     expect(result.contacts.map((c) => c.contactId)).toEqual(['c-unk-005', 'c-unk-006']);
     expect(result.truncated).toBe(false);
-    expect(result.pagesWalked).toBe(3);
+    // FOUR pages, not three: page 3 returns the last two live rows AT the
+    // Limit, so the service hands back a key and page 4 is the empty read that
+    // proves the stream ended (the LEK rule, unreadIndexFake.ts:104-116). An
+    // items-remaining fake would report 3 here and calibrate the suite one
+    // round trip short of production.
+    expect(result.pagesWalked).toBe(4);
   });
 
   it('the page budget bounds a partition made entirely of residue - truncated + the WARN', async () => {
@@ -771,13 +866,27 @@ describe('collectUnknownTriageQueue', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('a partition read that drains exactly at the cap is NOT truncated (no false WARN)', async () => {
+  it('a partition that drains BELOW the page size is not truncated (no false WARN)', async () => {
+    const seed = Array.from({ length: 4 }, (_, i) => unk(i + 1));
+    const { deps, warn } = makeDeps(seed);
+    const result = await collectUnknownTriageQueue(deps, { pageSize: 5, maxPages: 10, maxRows: 4 });
+    expect(result.contacts).toHaveLength(4);
+    expect(result.truncated).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('an EXACT page-multiple partition that fills the cap is CONSERVATIVELY truncated - the LEK in hand makes "nothing behind it" unknowable', async () => {
+    // Page 1 returns all 4 rows AT the Limit, so the service hands back a key;
+    // the cap is also full, so the collector stops without paying the extra
+    // Query that would prove emptiness. It reports a floor that happens to be
+    // exact - the accepted trade (UnknownQueueResult.truncated doc). A fake
+    // returning no LEK here would pin the OPPOSITE of production behaviour.
     const seed = Array.from({ length: 4 }, (_, i) => unk(i + 1));
     const { deps, warn } = makeDeps(seed);
     const result = await collectUnknownTriageQueue(deps, { pageSize: 4, maxPages: 10, maxRows: 4 });
     expect(result.contacts).toHaveLength(4);
-    expect(result.truncated).toBe(false);
-    expect(warn).not.toHaveBeenCalled();
+    expect(result.truncated).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('production constants are named and sane', () => {
@@ -786,14 +895,18 @@ describe('collectUnknownTriageQueue', () => {
     expect(UNKNOWN_QUEUE_MAX_ROWS).toBe(200);
   });
 
-  it('class g: every ContactType has a recorded tab decision, and only unknown is queried', () => {
+  it('class g: every ContactType has a recorded tab decision, only unknown is queried, and the derived type list agrees', () => {
     // The compile-time `satisfies Record<ContactType, ...>` on the map is the
-    // real guard: adding a ContactType member without deciding its tab fate is
-    // a typecheck failure, not a quietly narrowed queue.
+    // decision guard: adding a ContactType member without deciding its tab
+    // fate is a typecheck failure. UNKNOWN_QUEUE_TYPES is the ENFORCEMENT: it
+    // is derived from the map and is what the collector queries (pinned by the
+    // calls assertion in the first test) and what the resurfacing sweep
+    // admits, so the decision and the behaviour cannot drift apart.
     const queried = (Object.entries(UNKNOWN_TAB_TYPE_DECISIONS) as [ContactType, string][])
       .filter(([, decision]) => decision === 'queried')
       .map(([type]) => type);
     expect(queried).toEqual(['unknown']);
+    expect([...UNKNOWN_QUEUE_TYPES]).toEqual(queried);
   });
 });
 ```
@@ -871,6 +984,11 @@ export const UNKNOWN_QUEUE_MAX_ROWS = 200;
  * entry here is a TYPECHECK failure, so a new type can never silently be
  * "on the tab but absent from the query".
  *
+ * AND IT IS LOAD-BEARING, not a decoration: `UNKNOWN_QUEUE_TYPES` below is
+ * DERIVED from it and is what the collector queries and what the resurfacing
+ * sweep admits - so a type mapped 'queried' here IS queried, and a decorative
+ * drift between the map and the behaviour cannot exist.
+ *
  * team_member is 'excluded' BY RULING (2026-08-25, spec section 7): it is the
  * internal-staff bucket and does not belong in an outside-contact triage
  * queue. The old tab showed them (the fall-through); that was the bug.
@@ -883,49 +1001,89 @@ export const UNKNOWN_TAB_TYPE_DECISIONS = {
   unknown: 'queried',
 } as const satisfies Record<ContactType, 'queried' | 'excluded'>;
 
+/** The partitions the triage queue reads - derived, never hand-listed. */
+export const UNKNOWN_QUEUE_TYPES: readonly ContactType[] = (
+  Object.entries(UNKNOWN_TAB_TYPE_DECISIONS) as [ContactType, 'queried' | 'excluded'][]
+)
+  .filter(([, decision]) => decision === 'queried')
+  .map(([type]) => type);
+
 export interface UnknownQueueResult {
-  /** At most `maxRows` live (non-deleted) unknown contacts, partition order -
-   *  this index has NO activity dimension; the caller sorts after hydration. */
+  /**
+   * At most `maxRows` live (non-deleted) queue contacts, in PARTITION order -
+   * this index has NO activity dimension (its range key is `status`), so when
+   * the cap or the page budget cuts this list, the cut is ARBITRARY with
+   * respect to recency: the newest untriaged contact can be among the hidden
+   * rows. The caller's newest-first sort orders only what survived the cut.
+   */
   contacts: ContactItem[];
   pagesWalked: number;
-  /** Rows may remain behind this result: the page budget ran out with a
-   *  lastEvaluatedKey still in hand, or the result cap cut the collection.
-   *  Already WARNed here; the caller decides nothing else. */
+  /**
+   * Rows may remain behind this result: the page budget ran out with a
+   * lastEvaluatedKey still in hand, or the result cap cut the collection.
+   * CONSERVATIVE at exact page multiples: the service returns a LEK whenever
+   * the Limit was reached, so a partition of exactly n * pageSize rows ends
+   * with a key in hand and "nothing behind it" is unknowable without paying
+   * another Query - a spurious floor claim is accepted over that cost.
+   * Already WARNed here; the caller decides nothing else.
+   */
   truncated: boolean;
 }
 
+/**
+ * LOUD BY CONTRACT: this collector does not catch. inbox.ts's norm is
+ * best-effort hydration, but a failed triage-partition Query must NOT degrade
+ * to an empty queue - "no unknown contacts" and "the query broke" would be
+ * indistinguishable, and the failure mode is the entire triage queue silently
+ * vanishing behind a healthy-looking empty state. Same posture, same reason as
+ * the inbox group source (inbox.ts readGroupSource); the route's 500 is the
+ * honest answer.
+ */
 export async function collectUnknownTriageQueue(
   deps: { contacts: Pick<ContactsRepo, 'listByType'>; logger?: Logger },
   opts: { pageSize: number; maxPages: number; maxRows: number },
 ): Promise<UnknownQueueResult> {
   const log = deps.logger ?? defaultLogger;
   const collected: ContactItem[] = [];
-  let exclusiveStartKey: Record<string, unknown> | undefined;
   let pagesWalked = 0;
-  let exhausted = false;
-  for (let page = 0; page < opts.maxPages; page += 1) {
-    pagesWalked = page + 1;
-    const read = await deps.contacts.listByType('unknown', {
-      limit: opts.pageSize,
-      ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
-    });
-    collected.push(...read.items);
-    exclusiveStartKey = read.lastEvaluatedKey;
-    if (exclusiveStartKey === undefined) {
-      exhausted = true;
+  let exhaustedAll = true;
+  const types = [...UNKNOWN_QUEUE_TYPES];
+  for (let t = 0; t < types.length; t += 1) {
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    let exhausted = false;
+    // `maxPages` bounds each PARTITION's walk (one partition exists today).
+    for (let page = 0; page < opts.maxPages; page += 1) {
+      pagesWalked += 1;
+      const read = await deps.contacts.listByType(types[t]!, {
+        limit: opts.pageSize,
+        ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      });
+      collected.push(...read.items);
+      exclusiveStartKey = read.lastEvaluatedKey;
+      if (exclusiveStartKey === undefined) {
+        exhausted = true;
+        break;
+      }
+      // Break on rows KEPT, never rows read: a filtered (deleted) row spends a
+      // page slot but must not spend the queue's budget-to-show.
+      if (collected.length >= opts.maxRows) break;
+    }
+    if (!exhausted) exhaustedAll = false;
+    if (collected.length >= opts.maxRows) {
+      // Cap hit with partitions still unvisited -> rows remain by definition.
+      if (t < types.length - 1) exhaustedAll = false;
       break;
     }
-    // Break on rows KEPT, never rows read: a filtered (deleted) row spends a
-    // page slot but must not spend the queue's budget-to-show.
-    if (collected.length >= opts.maxRows) break;
   }
   const contacts = collected.slice(0, opts.maxRows);
-  const truncated = !exhausted || contacts.length < collected.length;
+  const truncated = !exhaustedAll || contacts.length < collected.length;
   if (truncated) {
-    // The precedent's WARN (today.ts:884-889): counts only, no PII.
+    // The precedent's WARN (today.ts:884-889): counts only, no PII. The copy
+    // names the ordering caveat because the operator-facing list LOOKS
+    // newest-first while the hidden rows were chosen by index order.
     log.warn(
       { pages: pagesWalked, kept: contacts.length, collected: collected.length },
-      'inbox: the unknown-queue walk ended with untriaged contacts still behind it - the triage queue shown is a floor',
+      'inbox: the unknown-queue walk ended with untriaged contacts still behind it - the cut is in index order, so the newest untriaged contact may be among the hidden rows',
     );
   }
   return { contacts, pagesWalked, truncated };
@@ -935,7 +1093,7 @@ export async function collectUnknownTriageQueue(
 - [ ] **Step 4: Run, see it pass**
 
 Run: `cd W:\tmp\inbox-unread-cluster\app; npx vitest run test/unknownQueue.test.ts`
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Typecheck** (the `satisfies` map and the Pick-typed deps are
   exactly what gate 1 checks and vitest's esbuild does not)
@@ -970,17 +1128,18 @@ fake gained `listByType` in Task 2. Run it anyway.
 
 **Interfaces:**
 - Consumes: `collectUnknownTriageQueue`, `UNKNOWN_QUEUE_PAGE_SIZE`,
-  `UNKNOWN_QUEUE_MAX_PAGES`, `UNKNOWN_QUEUE_MAX_ROWS` from
-  `app/src/lib/unknownQueue.js` (Task 4); existing in-file closures
+  `UNKNOWN_QUEUE_MAX_PAGES`, `UNKNOWN_QUEUE_MAX_ROWS`, `UNKNOWN_QUEUE_TYPES`
+  from `app/src/lib/unknownQueue.js` (Task 4); existing in-file closures
   `buildContactRow`, `newestOf`, `unreadOf`, `dropped`, `drops`,
   `roleFromContact`; existing imports `conversationsForContact`,
-  `collectUnreadRows`, `BADGE_COUNT_CAP`, `UNREAD_WALK_LIMIT`,
-  `warnDeletedProbes`, `isDeleted`.
+  `collectUnreadRows`, `UNREAD_WALK_LIMIT`, `warnDeletedProbes`, `isDeleted`.
 - Produces: the new wire behavior (single page, `nextCursor: null`, no
-  `truncated` key, cursor -> 400) and three test seams on `InboxRouterDeps`:
+  `truncated` key, cursor -> 400) and four test seams on `InboxRouterDeps`:
   `unknownQueuePageSize?: number`, `unknownQueueMaxPages?: number`,
-  `unknownQueueMaxRows?: number`. Task 6 and the e2e task rely on the wire
-  behavior; Task 9 leaves this branch untouched.
+  `unknownQueueMaxRows?: number`, `unknownSweepBudget?: number` (the sweep's
+  own seam, so unread-branch tests that shrink `unreadWalkLimit` can never
+  silently reshape the Unknown tab). Task 6 and the e2e task rely on the wire
+  behavior.
 
 - [ ] **Step 1: Write the failing behavior tests**
 
@@ -1025,6 +1184,7 @@ interface Calls {
   queryUnreadPage: number;
   findByPhone: number;
   findByParticipantPhone: number;
+  listByConversation: number;
 }
 
 function emptyCalls(): Calls {
@@ -1036,6 +1196,7 @@ function emptyCalls(): Calls {
     queryUnreadPage: 0,
     findByPhone: 0,
     findByParticipantPhone: 0,
+    listByConversation: 0,
   };
 }
 
@@ -1056,7 +1217,10 @@ function makeDeps(
   seed: Seed,
   calls: Calls = emptyCalls(),
   logger?: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> },
-  seams?: Pick<InboxRouterDeps, 'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize' | 'unreadWalkLimit'>,
+  seams?: Pick<
+    InboxRouterDeps,
+    'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize' | 'unknownSweepBudget'
+  >,
 ): InboxRouterDeps {
   const log = logger ?? { info: vi.fn(), warn: vi.fn() };
   return {
@@ -1116,6 +1280,7 @@ function makeDeps(
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
       async listByConversation(conversationId: string) {
+        calls.listByConversation += 1;
         const latest = seed.latestMessage?.[conversationId];
         return latest ? [latest as MessageItem] : [];
       },
@@ -1163,7 +1328,16 @@ describe('filter=unknown - the contact-side read', () => {
     expect(calls.listGroupTexts).toBe(0);
   });
 
-  it('returns a single page: nextCursor null and NO truncated key, even when the queue was cut', async () => {
+  it('a cap-cut queue: single page, no truncated key, WARNed - and the cut is INDEX order, so the newest rows can be the hidden ones', async () => {
+    // Partition order here is contactId order (c-u0..c-u3) while activity
+    // order is the REVERSE (c-u3 newest). The collector cap keeps the first
+    // maxRows in PARTITION order - the byTypeStatus range key is `status`,
+    // which has no recency dimension - so the two NEWEST contacts are exactly
+    // the hidden ones, and the rendered list is "newest-first of what
+    // survived", NOT "the newest of the queue". This is the documented,
+    // deliberate limitation of cap-plus-WARN (spec requirement 2); the WARN
+    // copy names it, and this pin is what keeps anyone from quietly claiming
+    // otherwise.
     const contacts = Array.from({ length: 4 }, (_, i) => ({
       contactId: `c-u${i}`,
       type: 'unknown' as const,
@@ -1174,7 +1348,7 @@ describe('filter=unknown - the contact-side read', () => {
       conv({
         conversationId: `cv-u${i}`,
         participant_phone: c.phone!,
-        last_activity_at: `2026-06-12T0${i}:00:00.000Z`,
+        last_activity_at: `2026-06-12T0${i}:00:00.000Z`, // c-u3 is the newest
       }),
     );
     const warn = vi.fn();
@@ -1182,15 +1356,19 @@ describe('filter=unknown - the contact-side read', () => {
       { filter: 'unknown', limit: 30 },
       makeDeps({ contacts, conversations }, emptyCalls(), { info: vi.fn(), warn }, { unknownQueueMaxRows: 2 }),
     );
-    expect(page.rows).toHaveLength(2);
+    // Kept: c-u0 and c-u1 (partition order), then sorted newest-first.
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-u1', 'c-u0']);
     expect(page.nextCursor).toBeNull();
     // The wire flag belongs to the unread branch (InboxPage.truncated) - and
     // an empty page carrying it renders the dashboard FAILURE banner on a tab
     // whose normal state is an empty queue (requirement 5).
     expect('truncated' in page).toBe(false);
     expect('groupsTruncated' in page).toBe(false);
-    // The collector's WARN is the truncation signal.
-    expect(warn.mock.calls.some((c) => String(c[1]).includes('triage queue shown is a floor'))).toBe(true);
+    // The collector's WARN is the truncation signal, and its copy carries the
+    // index-order caveat.
+    expect(
+      warn.mock.calls.some((c) => String(c[1]).includes('untriaged contacts still behind it')),
+    ).toBe(true);
   });
 
   it('windows the sorted result to the request limit and WARNs about the rows it could not show', async () => {
@@ -1297,6 +1475,112 @@ describe('filter=unknown - the contact-side read', () => {
     expect(page.rows[0]).toMatchObject({ contactId: 'c-res', deleted: true, needsTriage: true });
   });
 
+  it('a CAPPED sweep is a floor and says so - capped MASKS truncated in CollectResult, so the branch must read both flags', async () => {
+    // The sweep pins maxRows to its budget (requirement 3: no second bound),
+    // so shrinking the seam makes the CAP the stop: two visible unread
+    // candidates fill maxRows before the third index item - the deleted
+    // unknown - is ever scanned. collectUnreadRows then returns capped: true
+    // and truncated: FALSE (truncated = !capped && !scanExhausted,
+    // unreadFeed.ts) - a branch that reads only `truncated` is silent here,
+    // and the class-(d) row vanishes with no trace. That silence is the
+    // round-2 blocking finding; this probe goes red if the `|| capped` is
+    // ever dropped.
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-t1', type: 'tenant', phone: '+15550002800' },
+        { contactId: 'c-t2', type: 'tenant', phone: '+15550002801' },
+        { contactId: 'c-del', type: 'unknown', status: 'needs_review', phone: '+15550002802', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-t1', type: 'tenant_1to1', participant_phone: '+15550002800', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-t2', type: 'tenant_1to1', participant_phone: '+15550002801', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-del', participant_phone: '+15550002802', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+      ],
+      latestMessage: {
+        'cv-del': { type: 'sms', direction: 'inbound', body: 'hello?', created_at: '2026-06-12T10:00:00.000Z' },
+      },
+    };
+    const info = vi.fn();
+    const warn = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, emptyCalls(), { info, warn }, { unknownSweepBudget: 2 }),
+    );
+    // The deleted unknown sits past the cap: it does NOT resurface this page.
+    expect(page.rows).toEqual([]);
+    // ...but that is REPORTED, never silent: the floor WARN fires and names
+    // the cap as the stop.
+    const floorWarn = warn.mock.calls.find((c) =>
+      String(c[1]).includes('resurfacing sweep stopped early'),
+    );
+    expect(floorWarn?.[0]).toMatchObject({ capped: true });
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.resurfaceCapped).toBe(true);
+  });
+
+  it('a failed triage-partition Query is LOUD: the branch propagates (route 500), never an empty queue impersonating health', async () => {
+    // The module norm is best-effort, but "no unknown contacts" and "the
+    // query broke" must not be indistinguishable - the failure mode is the
+    // whole triage queue silently vanishing behind a healthy empty state.
+    // Same posture, same reason as the group source (inbox.ts
+    // readGroupSource).
+    const seed: Seed = {
+      contacts: [],
+      conversations: [],
+      listByTypeOverride: () => {
+        throw new Error('byTypeStatus unavailable');
+      },
+    };
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed)),
+    ).rejects.toThrow('byTypeStatus unavailable');
+  });
+
+  it('THE READ THAT SHIPS: one partition Query plus a byUnread sweep whose contact reads scale with the VISIBLE UNREAD set', async () => {
+    // The starved pin above zeroes the unread index to isolate the queue
+    // read; this one prices the whole configuration production runs - the
+    // spec-accepted O(all unread) sweep included (requirement 3) - so the
+    // branch's cost claim is on the record, not assumed. Fixture: one live
+    // queue row (no unread), two unread tenant threads, one deleted unknown
+    // with a fresh post-deletion inbound.
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002900' },
+        { contactId: 'c-t1', type: 'tenant', phone: '+15550002901' },
+        { contactId: 'c-t2', type: 'tenant', phone: '+15550002902' },
+        { contactId: 'c-del', type: 'unknown', status: 'needs_review', phone: '+15550002903', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-q', participant_phone: '+15550002900', last_activity_at: '2026-06-12T13:00:00.000Z' }),
+        conv({ conversationId: 'cv-t1', type: 'tenant_1to1', participant_phone: '+15550002901', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-t2', type: 'tenant_1to1', participant_phone: '+15550002902', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 2 }),
+        conv({ conversationId: 'cv-del', participant_phone: '+15550002903', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+      ],
+      latestMessage: {
+        'cv-del': { type: 'sms', direction: 'inbound', body: 'still there?', created_at: '2026-06-12T10:00:00.000Z' },
+      },
+    };
+    const calls = emptyCalls();
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, calls));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk', 'c-del']);
+    // The queue read: one partition Query, no open-partition walk.
+    expect(calls.listByType).toBe(1);
+    expect(calls.listByLastActivity).toBe(0);
+    // The sweep: one index page (3 visible items), then ONE contact
+    // resolution PER VISIBLE UNREAD ITEM - cv-t1, cv-t2, cv-del - which is
+    // the O(all unread) term the design accepts and this pin makes visible.
+    expect(calls.queryUnreadPage).toBe(1);
+    expect(calls.findByPhone).toBe(3);
+    // Thread resolution: the queue row and the resurfaced row (one distinct
+    // phone each).
+    expect(calls.findByParticipantPhone).toBe(2);
+    // Message reads: the collector's resurfacing probe on cv-del, plus one
+    // latest-message hydration per rendered row (cv-q, cv-del).
+    expect(calls.listByConversation).toBe(3);
+    // If any of these counts move, find WHICH read moved and why before
+    // repinning - each number above names its buyer.
+  });
+
   it('sorts partition rows and resurfaced rows together, newest displayed activity first', async () => {
     const seed: Seed = {
       contacts: [
@@ -1347,8 +1631,9 @@ If it fails on a fixture TypeError instead, fix the fixture first.
 - [ ] **Step 3: inbox.ts - imports and deps seams**
 
 Add to the imports (the `unreadFeed.js` import block already carries
-`BADGE_COUNT_CAP`, `collectUnreadRows`, `UNREAD_WALK_LIMIT`,
-`warnDeletedProbes` - verify, they are all imported at `inbox.ts:86-96`):
+`collectUnreadRows`, `UNREAD_WALK_LIMIT` and `warnDeletedProbes` - verify, they
+are all imported at `inbox.ts:86-96`; the branch does NOT use
+`BADGE_COUNT_CAP`, deliberately - see the sweep comment in Step 5):
 
 ```ts
 import {
@@ -1356,6 +1641,7 @@ import {
   UNKNOWN_QUEUE_MAX_PAGES,
   UNKNOWN_QUEUE_MAX_ROWS,
   UNKNOWN_QUEUE_PAGE_SIZE,
+  UNKNOWN_QUEUE_TYPES,
 } from '../lib/unknownQueue.js';
 ```
 
@@ -1371,6 +1657,13 @@ In `InboxRouterDeps` (after `unreadWalkLimit`):
   unknownQueuePageSize?: number;
   unknownQueueMaxPages?: number;
   unknownQueueMaxRows?: number;
+  /**
+   * TEST SEAM for the unknown tab's resurfacing sweep (production:
+   * UNREAD_WALK_LIMIT). Deliberately NOT `unreadWalkLimit`: that seam belongs
+   * to the unread branch, and a route test shrinking it to reach the unread
+   * `truncated` posture must never silently reshape the Unknown tab's sweep.
+   */
+  unknownSweepBudget?: number;
 ```
 
 - [ ] **Step 4: inbox.ts - the cursor decode gate**
@@ -1410,6 +1703,13 @@ BEFORE `const rows: InboxRow[] = [];`:
       throw new InboxBadRequestError('cursor does not match this filter');
     }
 
+    // LOUD BY CONTRACT, like the group source (readGroupSource above): the
+    // module norm is best-effort hydration, but a failed triage-partition
+    // Query is NOT swallowed - "no unknown contacts" and "the query broke"
+    // must not be indistinguishable, because the failure mode is the entire
+    // triage queue silently vanishing behind a healthy-looking empty state.
+    // collectUnknownTriageQueue does not catch; the throw propagates to the
+    // route's 500.
     const queue = await collectUnknownTriageQueue(
       { contacts, logger: log },
       {
@@ -1489,15 +1789,17 @@ BEFORE `const rows: InboxRow[] = [];`:
     // a TRI-STATE with no "both", so soft-deleted unknowns cannot come from
     // the partition read above - but a resurfacing row is UNREAD BY
     // DEFINITION, so the sparse byUnread index already carries it. ONE collect
-    // on the unread branch's own budget and bounds - no second invented bound
-    // (design requirement 3). Its per-request probe tripwire fires here like
-    // it does on the badge path.
+    // on the shared unread-request budget, and NO second bound (design
+    // requirement 3): `maxRows` is pinned to the budget itself - a walk of N
+    // raw items can emit at most N candidates - so the budget is the ONE stop
+    // that matters, and no third caller's cap (the badge's BADGE_COUNT_CAP
+    // counts ALL candidate kinds) can silently crowd deleted unknowns out of
+    // the sweep. Its per-request probe tripwire fires here like it does on the
+    // badge path.
+    const sweepBudget = deps.unknownSweepBudget ?? UNREAD_WALK_LIMIT;
     const collected = await collectUnreadRows(
       { conversations, contacts, messages, logger: log },
-      {
-        maxRows: BADGE_COUNT_CAP,
-        budget: deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT,
-      },
+      { maxRows: sweepBudget, budget: sweepBudget },
     );
     warnDeletedProbes(log, {
       probes: collected.deletedProbes,
@@ -1506,10 +1808,14 @@ BEFORE `const rows: InboxRow[] = [];`:
     });
     for (const candidate of collected.candidates) {
       if (candidate.kind !== 'contact') continue;
-      // TYPE, not roleFromContact: a deleted team_member's fresh inbound must
-      // not re-enter the triage queue through this side door - the
-      // fall-through renders team_member as 'unknown' (class c ruling).
-      if (candidate.contact.type !== 'unknown') continue;
+      // TYPE MEMBERSHIP against the derived queue-type list, never
+      // roleFromContact: a deleted team_member's fresh inbound must not
+      // re-enter the triage queue through this side door - the fall-through
+      // renders team_member as 'unknown' (class c ruling) - and a future type
+      // mapped 'queried' in UNKNOWN_TAB_TYPE_DECISIONS is admitted here the
+      // moment it is admitted to the partition read, with no second list to
+      // update.
+      if (!UNKNOWN_QUEUE_TYPES.includes(candidate.contact.type)) continue;
       // Live unknowns already came from the partition read; only soft-deleted
       // ones need this source. (The partition read excludes deleted rows, so
       // the two sources are disjoint - the emitted-set check is a belt.)
@@ -1518,7 +1824,13 @@ BEFORE `const rows: InboxRow[] = [];`:
       const open = await resolveOpenThreads(candidate.contact);
       if (open === undefined) continue;
       const maxConv = newestOf(open);
-      if (maxConv === undefined) continue;
+      // Counted, unlike a bare continue: this branch's log line exists to make
+      // zero-row pages diagnosable, and a resurfacing candidate lost to a
+      // closed-or-relay-only thread set is a drop like any other.
+      if (maxConv === undefined) {
+        dropped('resurfaceNoOpenThread');
+        continue;
+      }
       const unreadSum = open.reduce((sum, c) => sum + unreadOf(c), 0);
       // Read since the index offered it: the resurfacing window has closed.
       if (unreadSum === 0) {
@@ -1533,28 +1845,44 @@ BEFORE `const rows: InboxRow[] = [];`:
       emitted.add(candidate.contact.contactId);
       unknownRows.push(row);
     }
-    if (collected.truncated) {
-      // The sweep's answer is a floor - same posture as the collector's own
-      // WARN, and NEVER the wire `truncated` flag (see the return below).
+    if (collected.truncated || collected.capped) {
+      // BOTH flags are floor signals, and `capped` MASKS `truncated` in
+      // CollectResult (truncated = !capped && !scanExhausted, unreadFeed.ts) -
+      // reading `truncated` alone made a capped sweep silently drop class-(d)
+      // rows past the cap, the round-2 blocking finding. The WARN names which
+      // stop it was. NEVER the wire `truncated` flag (see the return below).
       log.warn(
-        { scanned: (deps.unreadWalkLimit ?? UNREAD_WALK_LIMIT) - collected.remainingBudget },
+        {
+          scanned: sweepBudget - collected.remainingBudget,
+          ...(collected.capped && { capped: true }),
+          ...(collected.truncated && { truncated: true }),
+        },
         'inbox: the unknown-tab resurfacing sweep stopped early - the deleted-row set is a floor',
       );
     }
 
-    // Requirement 2: the whole capped queue, sorted in memory, newest first -
+    // Requirement 2: the whole KEPT queue, sorted in memory, newest first -
     // the byTypeStatus index has no activity dimension, so index-order paging
-    // would yield globally out-of-order pages.
+    // would yield globally out-of-order pages. TWO different cuts can hide
+    // rows, and they are NOT the same claim: this WINDOW cut (below) really is
+    // newest-first, so what it hides is the older tail and triage drains
+    // toward it; the COLLECTOR's cap/page-budget cut (already WARNed inside
+    // collectUnknownTriageQueue) is in INDEX order, so past
+    // UNKNOWN_QUEUE_MAX_ROWS untriaged contacts the hidden rows are arbitrary
+    // with respect to recency and the newest inbound can be among them. The
+    // sort orders what SURVIVED; it cannot repair what the collector never
+    // read.
     unknownRows.sort((a, b) =>
       a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
     );
     // The response window is the wire limit (route-clamped, dashboard sends
     // 30). Rows past it are NOT silently gone: the WARN below names the count,
-    // and triage itself drains the queue newest-first, so the remainder
-    // becomes reachable as rows are retyped away. No cursor - an offset page
-    // over a mutating in-memory sort re-serves and skips rows, and the design
-    // settled on cap-plus-WARN (requirement 2). The affordance gap is recorded
-    // in docs/issues/inbox-filter-tabs-full-walk.md.
+    // and - for THIS cut only, see above - triage drains the queue
+    // newest-first, so the remainder becomes reachable as rows are retyped
+    // away. No cursor - an offset page over a mutating in-memory sort
+    // re-serves and skips rows, and the design settled on cap-plus-WARN
+    // (requirement 2). The affordance gap is recorded in
+    // docs/issues/inbox-filter-tabs-full-walk.md.
     const windowed = unknownRows.slice(0, limit);
     if (windowed.length < unknownRows.length) {
       log.warn(
@@ -1572,6 +1900,7 @@ BEFORE `const rows: InboxRow[] = [];`:
         ...(queue.truncated && { queueTruncated: true }),
         ...(threadReadFailures > 0 && { threadReadFailures }),
         ...(collected.truncated && { resurfaceTruncated: true }),
+        ...(collected.capped && { resurfaceCapped: true }),
         ...(Object.keys(drops).length > 0 && { drops }),
       },
       'inbox feed assembled',
@@ -1585,12 +1914,40 @@ BEFORE `const rows: InboxRow[] = [];`:
   }
 ```
 
-- [ ] **Step 6: inbox.ts - the read-accounting comment**
+- [ ] **Step 6: inbox.ts - retire every comment and arm the flip invalidates**
 
-The block comment at ~599-623 says the accounting fields cover "filters `all`
-and `unknown`". Update that sentence to name `all` only, and add one line: the
-unknown branch returns through its own log line
-(queueContacts/queuePages/threadReadFailures + the shared `drops`).
+This file's comments are its design record; a flip that leaves them stale is
+how the next reader re-derives a wrong model. Four sites, all in the same
+commit as the flip:
+
+1. The read-accounting block at ~599-623 says the fields cover "filters `all`
+   and `unknown`". Name `all` only, and add one line: the unknown branch
+   returns through its own log line (queueContacts / queuePages /
+   threadReadFailures / resurfaceTruncated / resurfaceCapped + the shared
+   `drops`).
+2. `passesFilter`'s `case 'unknown': return row.needsTriage;` (~710-711)
+   becomes unreachable exactly as the `'unread'` arm above it did. Give it the
+   SAME kind of keep-comment the unread arm carries (~703-709): unreachable
+   since the 2026-08-25 contact-side read (the unknown branch returns before
+   any caller of this runs) but NOT removable - the switch is exhaustive over
+   InboxFilter with no `default:`, and re-adding a `default:` is exactly how a
+   new filter ships as a silent no-op.
+3. `rowForConversation`: its header (~836-838) says "THE OPEN-PARTITION PATH
+   ONLY (filters `all` and `unknown`)" - change to `filter=all` only, noting
+   `unknown` moved to the contact-side branch on 2026-08-25. Mark its two
+   unknown-filter arms as DEAD ARMS kept deliberately, mirroring the unread
+   dead-arm comments already in the function: the `filter === 'unknown' &&
+   role !== 'unknown'` guard at ~901 (which also retires the
+   `unknownFilterRole` drop counter - say so, so a log reader does not grep
+   for a counter that can no longer fire) and the `filter === 'unread'`-style
+   wording around them.
+4. The relay-merge drop comment at ~1571-1576 ("On filter=unknown this arm
+   rejects EVERY relay row...") describes a state the flip makes impossible -
+   the unknown branch returns before the relay merge runs. Rewrite it to say
+   the arm now guards FUTURE filters that reach the merge, and that
+   `filteredRelay` can no longer fire under `unknown`. Same for the group
+   source gate at ~1599-1601 (`filter !== 'unknown'`): the gate is now
+   belt-and-braces behind the branch's early return - keep it, but say that.
 
 - [ ] **Step 7: Run the new suite, see it pass**
 
@@ -1928,7 +2285,7 @@ git commit -m "test(dashboard): pin the Unknown tab's empty-state-vs-banner gate
   starts empty. A missed inbound call mints a `(unknown, needs_review)` contact
   AND a 1:1 thread (the missed-call auto-text), which is exactly the queue's
   row shape.
-- Produces: the user-facing proof, executed by gate 4 (`npm run e2e`) in Task 11.
+- Produces: the user-facing proof, executed by gate 4 (`npm run e2e`) in Task 10.
   DO NOT run the e2e suite or start a lane in this task - write the spec only.
 
 - [ ] **Step 1: Append the test**
@@ -1989,301 +2346,11 @@ git commit -m "test(e2e): Unknown tab shows the captured caller and an honest em
 
 ---
 
-### Task 9: The safety net - budget the filter=all open-partition pager (spec section 5)
-
-**Files:**
-- Modify: `app/src/routes/inbox.ts` (the `InboxPage.truncated` doc comment at
-  ~147-152; `InboxRouterDeps`; a constant near `FETCH_BATCH` ~205; the pager
-  loop at ~1474-1528; the final return at ~1655)
-- Create: `app/test/inboxOpenBudget.test.ts`
-
-**Interfaces:**
-- Consumes: the pager's existing `rawScanned` counter and `encodeCursor`;
-  `useInbox` already forwards `pageData.truncated` for every filter
-  (`useInbox.ts:242,348`), and the dashboard's `serverEndedEarlyEmpty` gate
-  plus Load-more give an honest surface with NO client change.
-- Produces: `OPEN_WALK_LIMIT = 2000` (exported), `InboxRouterDeps.openWalkLimit?:
-  number` (test seam), and `truncated: true` + a minted cursor on a
-  budget-stopped `filter=all` page. This is a DELIBERATE extension of the
-  `InboxPage.truncated` contract - same meaning ("the feed ended for a
-  non-natural reason"), one new producer - never a repurpose; the doc comment
-  is updated in the same commit and the unknown/groups exclusions stay.
-
-- [ ] **Step 1: Write the failing tests**
-
-```ts
-// app/test/inboxOpenBudget.test.ts
-// Spec section 5: the open-partition pager (now serving filter=all only) gets
-// the budget + cursor + truncated contract the unread branch already has. An
-// unbounded read should not exist even while it is cheap.
-import { describe, expect, it } from 'vitest';
-import { aggregateInbox, type InboxRouterDeps } from '../src/routes/inbox.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
-
-interface Seed {
-  contacts: ContactItem[];
-  conversations: ConversationItem[];
-  /** The participant GSIs' image when it must differ from the base table. */
-  participantProjection?: ConversationItem[];
-}
-
-function conv(
-  over: Partial<ConversationItem> & { conversationId: string; participant_phone: string; last_activity_at: string },
-): ConversationItem {
-  return { status: 'open', type: 'tenant_1to1', ai_mode: 'auto', created_at: over.last_activity_at, ...over };
-}
-
-function makeDeps(seed: Seed, openWalkLimit?: number): InboxRouterDeps {
-  const ordered = [...seed.conversations]
-    .filter((c) => c.status === 'open')
-    .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
-  const participantView = seed.participantProjection ?? seed.conversations;
-  return {
-    ...(openWalkLimit !== undefined && { openWalkLimit }),
-    conversationsRepo: {
-      async getById(id: string) {
-        return seed.conversations.find((c) => c.conversationId === id);
-      },
-      async queryUnreadPage() {
-        return { items: [] };
-      },
-      async listByLastActivity({ limit, exclusiveStartKey }: { status: string; limit?: number; exclusiveStartKey?: Record<string, unknown> }) {
-        const start = typeof exclusiveStartKey?.['idx'] === 'number' ? (exclusiveStartKey['idx'] as number) + 1 : 0;
-        const take = limit ?? 50;
-        const window = ordered.slice(start, start + take);
-        const hasMore = start + window.length < ordered.length;
-        return {
-          items: window,
-          ...(hasMore && { lastEvaluatedKey: { idx: start + window.length - 1 } as Record<string, unknown> }),
-        };
-      },
-      async findByParticipantPhone(phone: string) {
-        return participantView.filter((c) => c.participant_phone === phone);
-      },
-      async findByParticipantEmail(email: string) {
-        return participantView.filter((c) => c.participant_email === email);
-      },
-      async listRelayGroups() {
-        return { items: [], truncated: false };
-      },
-      async listGroupTexts() {
-        return { items: [], truncated: false };
-      },
-    } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
-    contactsRepo: {
-      async findByPhone(phone: string) {
-        return seed.contacts.find((c) => c.phone === phone);
-      },
-      async findByEmail() {
-        return undefined;
-      },
-      async getById(contactId: string) {
-        return seed.contacts.find((c) => c.contactId === contactId);
-      },
-      async listByType() {
-        return { items: [] };
-      },
-    } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
-    messagesRepo: {
-      async listByConversation() {
-        return [];
-      },
-    } as unknown as NonNullable<InboxRouterDeps['messagesRepo']>,
-    placementsRepo: {
-      async getById() {
-        return undefined;
-      },
-    } as unknown as NonNullable<InboxRouterDeps['placementsRepo']>,
-  };
-}
-
-/** 30 open conversations all owned by ONE contact: 1 row, 29 drops - a page
- *  that cannot fill, which is the only world where the budget matters. */
-function oneContactManyThreads(): Seed {
-  const phone = '+15550003000';
-  const conversations = Array.from({ length: 30 }, (_, i) =>
-    conv({
-      conversationId: `cv-${String(i).padStart(2, '0')}`,
-      participant_phone: phone,
-      last_activity_at: `2026-06-12T${String(23 - (i % 24)).padStart(2, '0')}:${String(59 - i).padStart(2, '0')}:00.000Z`,
-    }),
-  );
-  return {
-    contacts: [{ contactId: 'c-one', type: 'tenant', phone }],
-    conversations,
-  };
-}
-
-describe('filter=all open-partition budget (spec section 5)', () => {
-  it('the budget stops the walk at a chunk boundary: truncated + a cursor that RESUMES', async () => {
-    // limit 5 -> chunkSize max(5, DEFAULT_INBOX_LIMIT 25) = 25: chunk one
-    // scans 25 raw rows >= budget 25 with more behind -> stop, mint, flag.
-    const page1 = await aggregateInbox({ filter: 'all', limit: 5 }, makeDeps(oneContactManyThreads(), 25));
-    expect(page1.rows).toHaveLength(1);
-    expect(page1.truncated).toBe(true);
-    expect(page1.nextCursor).not.toBeNull();
-
-    const page2 = await aggregateInbox(
-      { filter: 'all', limit: 5, cursor: page1.nextCursor! },
-      makeDeps(oneContactManyThreads(), 25),
-    );
-    // The remaining 5 raw rows are all older threads of the already-shown
-    // contact: no rows, natural end, no flag.
-    expect(page2.rows).toEqual([]);
-    expect(page2.nextCursor).toBeNull();
-    expect('truncated' in page2).toBe(false);
-  });
-
-  it('zero rows + budget spent: the flag stands and the cursor is nulled (empty-page invariant)', async () => {
-    // The ghost-projection trick from inboxFeed.test.ts:334-363: the contact
-    // resolves through a participant image containing a NEWER thread the
-    // partition walk never offers, so every walked conversation drops as
-    // notNewestConv and the page is empty while supply remains.
-    const seed = oneContactManyThreads();
-    seed.participantProjection = [
-      ...seed.conversations,
-      conv({ conversationId: 'cv-ghost', participant_phone: '+15550003000', last_activity_at: '2026-06-30T00:00:00.000Z' }),
-    ];
-    const page = await aggregateInbox({ filter: 'all', limit: 5 }, makeDeps(seed, 25));
-    expect(page.rows).toEqual([]);
-    expect(page.truncated).toBe(true);
-    // rows empty -> null cursor: the dashboard's Load-more hangs off rows, and
-    // an empty truncated page must keep its error-state posture instead.
-    expect(page.nextCursor).toBeNull();
-  });
-
-  it('without the seam the default budget never trips on a small world', async () => {
-    const page = await aggregateInbox({ filter: 'all', limit: 5 }, makeDeps(oneContactManyThreads()));
-    expect(page.rows).toHaveLength(1);
-    expect('truncated' in page).toBe(false);
-    expect(page.nextCursor).toBeNull();
-  });
-});
-```
-
-- [ ] **Step 2: Run, see it fail**
-
-Run: `cd W:\tmp\inbox-unread-cluster\app; npx vitest run test/inboxOpenBudget.test.ts`
-Expected: FAIL - `page1.truncated` undefined, `page1.nextCursor` null (the
-walk ran to exhaustion).
-
-- [ ] **Step 3: Implement**
-
-In `inbox.ts`:
-
-(a) Constant, next to `FETCH_BATCH` (~line 205):
-
-```ts
-/**
- * Raw open-partition conversations ONE filter=all request may scan (spec
- * section 5 of the 2026-08-25 unknown-tab design - the safety net). The same
- * shape as UNREAD_WALK_LIMIT: a request budget, not a per-chunk allowance.
- * Checked at CHUNK boundaries, so the real ceiling is this plus one chunk.
- */
-export const OPEN_WALK_LIMIT = 2000;
-```
-
-(b) Deps seam, after the unknown-queue seams:
-
-```ts
-  /** TEST SEAM mirroring unreadWalkLimit, for the filter=all pager's budget. */
-  openWalkLimit?: number;
-```
-
-(c) The pager loop (~1474-1528). Before the loop:
-
-```ts
-  const openBudget = deps.openWalkLimit ?? OPEN_WALK_LIMIT;
-  let openTruncated = false;
-```
-
-Replace the loop's tail (currently `if (!moreChunks) { nextCursor = null;
-break; } chunkStartKey = chunk.lastEvaluatedKey;`) with:
-
-```ts
-    const lek = chunk.lastEvaluatedKey;
-    if (lek === undefined) {
-      // Walked the whole stream without filling the page -> no more rows.
-      nextCursor = null;
-      break;
-    }
-    if (rawScanned >= openBudget) {
-      // THE SAFETY NET (design section 5): stop at the CHUNK boundary - the
-      // chunk's LEK is already the exact resume key, so no mid-chunk boundary
-      // recovery is needed - mint the cursor (the position is paid for; see
-      // the unread branch's budget exit for the precedent), and name the end
-      // non-natural.
-      nextCursor = encodeCursor(lek);
-      openTruncated = true;
-      break;
-    }
-    chunkStartKey = lek;
-```
-
-(`moreChunks` at ~1481 remains for the mid-chunk page-fill boundary logic; only
-the loop tail changes.)
-
-(d) After BOTH merge blocks (relay ~1530-1587 and groups ~1589-1631), before
-the final `log.info`:
-
-```ts
-  // Empty-page invariant, shared with the unread branch (spec 4.5 step 2): an
-  // empty rows array implies a null cursor - the dashboard's Load-more hangs
-  // off rows, and an empty truncated page must keep its error-state posture
-  // rather than offer a Load more the client has nothing to hang off.
-  if (rows.length === 0) nextCursor = null;
-```
-
-(e) The final log line gains `...(openTruncated && { truncated: true }),` and
-the return becomes:
-
-```ts
-  return {
-    rows,
-    nextCursor,
-    ...(groupsTruncated && { groupsTruncated: true }),
-    ...(openTruncated && { truncated: true as const }),
-  };
-```
-
-(f) Update the `InboxPage.truncated` doc comment (~147-152) - a DELIBERATE
-contract extension, not a repurpose:
-
-```ts
-  /** TRUE when a feed ended for a NON-NATURAL reason - the request's scan
-   *  budget expired before the page filled, or (unread only) the SEEN_SET_MAX
-   *  depth cap ended paging. Producers: the `filter=unread` branch (spec 4.5
-   *  step 3) and, since the 2026-08-25 safety net, the `filter=all`
-   *  open-partition pager's own budget. NEVER set on `unknown` (its normal
-   *  state is an empty, cleared queue, and the dashboard renders
-   *  empty-plus-truncated as the failure banner - design requirement 5) or on
-   *  `groups` (`groupsTruncated` is its signal). Absent means the feed ended
-   *  because it ran out of rows, which is the ordinary case. */
-```
-
-- [ ] **Step 4: Run the new suite AND the neighbors the pager change could disturb**
-
-Run: `cd W:\tmp\inbox-unread-cluster\app; npx vitest run test/inboxOpenBudget.test.ts test/inboxFeed.test.ts test/inboxApi.test.ts test/inboxGroups.test.ts test/inboxUnknownTab.test.ts test/inboxUnknownParity.test.ts`
-Expected: all pass (the default budget of 2000 is far above every fixture, so
-only the seam-driven tests see the new exits).
-
-- [ ] **Step 5: Typecheck, then commit**
-
-Run: `cd W:\tmp\inbox-unread-cluster; npm run typecheck`
-Expected: exit 0.
-
-```
-git add app/src/routes/inbox.ts app/test/inboxOpenBudget.test.ts
-git commit -m "feat(inbox): budget the filter=all open-partition walk (spec section 5 safety net)"
-```
-
----
-
-### Task 10: Docs - close the issue's unknown item, record the ruling and the remainder
+### Task 9: Docs - close the issue's unknown item, record the ruling, the remainder, and the deferral
 
 **Files:**
 - Modify: `docs/issues/inbox-filter-tabs-full-walk.md`
+- Modify: `e2e/README.md` (the Unknown-surface description around lines 185-195)
 
 **Interfaces:**
 - Consumes: the issue's existing structure (its line 153 currently reads
@@ -2292,7 +2359,7 @@ git commit -m "feat(inbox): budget the filter=all open-partition walk (spec sect
   INDEX (nothing to commit from that).
 
 - [ ] **Step 1: Edit the issue** (ASCII only; edit tool, never a PowerShell
-  rewrite). Three additions:
+  rewrite). Four additions:
 
 1. Replace the "UNKNOWN: STILL OPEN" status line with a dated resolution:
    `filter=unknown` now reads the `(type='unknown')` byTypeStatus partition
@@ -2300,38 +2367,61 @@ git commit -m "feat(inbox): budget the filter=all open-partition walk (spec sect
    `docs/superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md`):
    bounded fill loop (`UNKNOWN_QUEUE_MAX_PAGES` x `UNKNOWN_QUEUE_PAGE_SIZE`),
    hard result cap (`UNKNOWN_QUEUE_MAX_ROWS`), truncation WARN, deleted-contact
-   resurfacing via one byUnread sweep, and NO status narrowing or excludeOrigin
-   (spec section 3, classes f and a). The `filter=all` pager gained the
-   `OPEN_WALK_LIMIT` budget + cursor + `truncated` contract (spec section 5),
-   so no unbounded read remains on the route.
+   resurfacing via one byUnread sweep (budget-bounded; BOTH collector stop
+   flags - `capped` and `truncated` - are floor signals), and NO status
+   narrowing or excludeOrigin (spec section 3, classes f and a).
 2. Record the class (c) ruling so it does not ride only on the spec: a
    `team_member` contact no longer appears on the Unknown tab (`roleFromContact`
    falls internal staff through to 'unknown', which put colleagues in the
    operator's triage queue; RULED 2026-08-25 that they do not belong there; the
    contact-side read excludes them by construction and
-   `UNKNOWN_TAB_TYPE_DECISIONS` in `app/src/lib/unknownQueue.ts` pins the
-   decision per ContactType).
-3. Name the deliberate remainder: rows past the request `limit` (dashboard: 30)
-   are WARNed (`inbox: the unknown tab could not show every triage row`) and
-   become reachable as triage drains the queue newest-first, but the tab has no
-   Load-more affordance for them; contactless conversations (class e, measured
-   zero) surface on the All tab only. Reopen here if either trade goes wrong.
+   `UNKNOWN_TAB_TYPE_DECISIONS` in `app/src/lib/unknownQueue.ts` - which
+   DERIVES the queried-type list, so the decision is enforced, not decorative).
+3. Name the deliberate remainder, precisely: rows past the request `limit`
+   (dashboard: 30) are WARNed and become reachable as triage drains the queue
+   newest-first - that claim holds for the WINDOW cut only; the collector's
+   `UNKNOWN_QUEUE_MAX_ROWS` cap cuts in INDEX order with no recency guarantee,
+   so past ~200 untriaged contacts the newest inbound can be among the hidden
+   rows (WARNed, with the index-order caveat in the copy). No Load-more
+   affordance exists for either cut. Contactless conversations (class e,
+   measured zero) surface on the All tab only. Reopen here if any of these
+   trades goes wrong.
+4. Record the DEFERRAL (human ruling 2026-08-25): spec section 5's
+   open-partition safety net - a raw-scan budget + cursor + `truncated`
+   contract for the `filter=all` pager - is deferred, NOT built on this
+   branch. Its own named gate is unsolved: an empty budget-stopped
+   `filter=all` page carrying `truncated` renders the dashboard's
+   non-filter-gated failure banner (`Inbox.tsx:42` / `:183`) on an org where
+   nothing failed, and the spec says that must be solved FIRST. Note the two
+   review-found traps for whoever picks it up: the empty-page invariant nulls
+   the cursor, so Load-more cannot be the affordance in that state; and
+   replacing the pager loop's tail orphans the `moreChunks` binding at
+   `inbox.ts:1481` (a gate-5 no-unused-vars error unless deleted with it).
 
-- [ ] **Step 2: Regenerate the index**
+- [ ] **Step 2: Update e2e/README.md**
+
+Lines ~185-195 describe the profiled Unknown surface. The profiled request
+shape (`GET /api/inbox?filter=unknown&limit=30`, no cursor) is UNCHANGED, but
+if the surrounding text describes the Unknown tab as paging the open partition
+or carrying a cursor, correct it: the Unknown feed is now a single
+contact-partition page that mints no cursor and answers 400 to any cursor.
+Read the section before editing; touch only sentences the flip made false.
+
+- [ ] **Step 3: Regenerate the index**
 
 Run: `cd W:\tmp\inbox-unread-cluster; npm run issues`
 Expected: exit 0 (INDEX.md is gitignored).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```
-git add docs/issues/inbox-filter-tabs-full-walk.md
-git commit -m "docs(issues): unknown-tab walk resolved by the contact-side read; team_member ruling recorded"
+git add docs/issues/inbox-filter-tabs-full-walk.md e2e/README.md
+git commit -m "docs(issues): unknown-tab walk resolved by the contact-side read; section-5 safety net deferred with its gate named"
 ```
 
 ---
 
-### Task 11: Completion gates
+### Task 10: Completion gates
 
 **Files:** none (verification only; fix-forward anything red, in the task where
 it belongs).
@@ -2392,32 +2482,54 @@ Run (PowerShell, from the worktree):
 
 - [ ] **Step 7: Hand back**
 
-Report: gates run with exit codes, the coverage-class pin changes (e and c) as
-deliberate spec decisions with their parity-test locations, the
-`InboxPage.truncated` contract extension (Task 9), and the perf-seed suite's
-unchanged pass (Task 6 Step 5). Do not merge to `main`; that is the human's
-call.
+Report: gates run with exit codes; the coverage-class pin changes (e and c) as
+deliberate spec decisions with their parity-test locations; the section-5
+deferral (human ruling, recorded in the issue with its unsolved gate named);
+the sweep's cost model as pinned by the read-that-ships test (one partition
+Query plus an O(visible-unread) contact-resolution sweep - the spec-accepted
+trade from requirement 3); and the perf-seed suite's unchanged pass (Task 6
+Step 5).
+
+OFFER, do not run: the end-to-end price on DEPLOYED data can be re-measured
+with the corrected instrument the spec's numbers came from -
+`npx tsx app/scripts/measure-unread-contact-coverage.ts --confirm
+--audit-tab-vs-partition --no-status-narrow` (the script exists and accepts
+those flags). It reads deployed environments, so it is HUMAN-INVOKED: put the
+command in the handback for Cameron to run (or run it only on his explicit
+per-run go), and note that the branch's cost claim rests on the unit pins
+until that measurement is taken.
+
+Do not merge to `main`; that is the human's call.
 
 ---
 
-## Self-review notes (already applied)
+## Self-review notes (updated after round-2 review)
 
 - Spec coverage: requirement 1 -> Tasks 4+5 (no narrowing, live type check,
-  named page size/cap); requirement 2 -> Task 5 (in-memory sort, window, WARN);
-  requirement 3 -> Task 5 sweep (byUnread, badge-path bounds, no second bound);
-  requirement 4 -> Task 5 `resolveOpenThreads` + its discrimination test;
-  requirement 5 -> Task 5 (no `truncated` on unknown) + Task 7 pins; section 5
-  -> Task 9; section 6 testing demands -> Tasks 3 (parity), 5 (starved fixture,
-  read counts not wall-clock, class pins, loud-failure pin), mutation probes
-  throughout; section 7 ruling -> `UNKNOWN_TAB_TYPE_DECISIONS`, the sweep's
-  type check, Task 10's issue note.
+  named page size/cap); requirement 2 -> Task 5 (in-memory sort, window, WARN -
+  with the collector-cap ordering caveat stated where the sort runs);
+  requirement 3 -> Task 5 sweep (shared budget, maxRows pinned to the budget so
+  no third caller's bound is inherited, `capped || truncated` both read as
+  floor signals); requirement 4 -> Task 5 `resolveOpenThreads` + its
+  discrimination test, and the partition read's LOUD posture stated explicitly
+  (the one read whose failure must not impersonate an empty queue); requirement
+  5 -> Task 5 (no `truncated` on unknown) + Task 7 pins; section 5 -> DEFERRED
+  by human ruling 2026-08-25 (see "Out of scope", recorded in the issue by Task
+  9); section 6 testing demands -> Tasks 3 (parity), 5 (starved fixture PLUS
+  the read-that-ships cost pin, read counts not wall-clock, class pins,
+  loud-failure pin), mutation probes throughout; section 7 ruling ->
+  `UNKNOWN_TAB_TYPE_DECISIONS` driving `UNKNOWN_QUEUE_TYPES` (load-bearing, not
+  decorative), the sweep's membership check, Task 9's issue note.
 - Deliberately NOT copied from the precedent, with reasons in code comments:
   `excludeOrigin` (class a - single-source reader) and the status re-check
   (replaced by the live type check). Both carry probes that go red if re-added,
-  because the fakes honor the options.
+  because the fakes honor the options - and the fakes follow the service's LEK
+  rule ("Limit reached", unreadIndexFake.ts:104-116), so call-count pins are
+  calibrated to production round trips.
 - Names used consistently across tasks: `collectUnknownTriageQueue`,
   `UNKNOWN_QUEUE_PAGE_SIZE/MAX_PAGES/MAX_ROWS`, `UNKNOWN_TAB_TYPE_DECISIONS`,
-  `listByTypeFromContacts`, drop reasons `unknownQueueRetyped` /
-  `unknownThreadReadFailed` / `unknownNoOpenThread` / `deletedNoUnread` /
-  `resurfaceHidden`, seams `unknownQueuePageSize/MaxPages/MaxRows`,
-  `openWalkLimit`, constant `OPEN_WALK_LIMIT`.
+  `UNKNOWN_QUEUE_TYPES`, `listByTypeFromContacts`, drop reasons
+  `unknownQueueRetyped` / `unknownThreadReadFailed` / `unknownNoOpenThread` /
+  `deletedNoUnread` / `resurfaceHidden` / `resurfaceNoOpenThread`, log fields
+  `resurfaceTruncated` / `resurfaceCapped`, seams
+  `unknownQueuePageSize/MaxPages/MaxRows` and `unknownSweepBudget`.

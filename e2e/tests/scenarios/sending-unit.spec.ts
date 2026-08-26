@@ -26,6 +26,9 @@
 //     tenant stays `searching` (touring never changes tenant status).
 import { test } from '@playwright/test';
 import { Scenario, freshTenant, type Tenant, type Unit } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // Opt-in end-of-test pause for eyeballing the live dashboard (gated on E2E_PAUSE so
 // CI/normal runs are unaffected). Same two modes as tenant-onboarding.spec.ts:

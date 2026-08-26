@@ -6,6 +6,9 @@
 // the end of each path. Coordinator role is "Team", never the founder's name.
 import { test } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // Opt-in: pause at the END of each test so you can look around the live dashboard
 // (the page is parked on the tenant's contact page — eyeball the Details panel for

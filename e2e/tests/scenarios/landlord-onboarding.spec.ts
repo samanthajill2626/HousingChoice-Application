@@ -22,6 +22,9 @@
 //     API seam; the handoff to Matching is "the unit appears in ?status=available".
 import { test } from '@playwright/test';
 import { Scenario, freshLandlord, type Landlord, type Unit } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // Opt-in end-of-test pause for eyeballing the live dashboard (gated on E2E_PAUSE so
 // CI/normal runs are unaffected). Same two modes as the sibling specs:

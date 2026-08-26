@@ -234,7 +234,16 @@ to 08:00, which is `>= scheduledAt`, so both are born SKIPPED as `past_event`
 rung supersedes the earlier. This is accepted (Cameron, 2026-08-26) and is
 already communicated to the founder.
 
-### 7.3 The exemption hook - TWO sites, not one line
+### 7.3 The exemption hook - CUT FROM PHASE A (amended 2026-08-26)
+
+AMENDED after plan review: this hook is NOT built in Phase A. It needs injection
+points on two deps interfaces that do not exist, and its second site - the
+fire-time backstop - is UNREACHABLE in production while the manual-only filter
+(`:470`) short-circuits ahead of it. Building an untestable, unreachable hook to
+make a later one-line change easier is not worth the surface area. Phase B adds
+it where it can actually be exercised.
+
+The design below stands for whoever builds it then.
 
 Add `QUIET_HOURS_EXEMPT_KINDS: ReadonlySet<ReminderKind>`, EMPTY in this change,
 mirroring `MANUAL_ONLY_NUDGE_KINDS`. It must be consulted in BOTH:

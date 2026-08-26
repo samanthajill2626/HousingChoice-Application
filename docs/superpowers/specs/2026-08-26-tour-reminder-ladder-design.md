@@ -160,18 +160,31 @@ is roughly NINETEEN CHARACTERS. So this is a design constraint on the founder's
 wording: if the copy grows, that gate goes red and the answer is to shorten the
 copy or take the two-segment decision deliberately, NOT to relax the assertion.
 
-READ THE GATE BEFORE TRUSTING THE MARGIN. As written
+READ THE GATE BEFORE TRUSTING ANY MARGIN. As written
 (`tourCopy.test.ts:109-118`) it composes with NO `names`, so it measures the
 FALLBACK body - the one greeting "there". A real send substitutes a real first
-name, and every character beyond four eats that margin: "Hey Alejandra," is nine
-characters longer than "Hey there,". The gate as it stands would pass while a
-real recipient's message crossed into a second segment.
+name, and every character beyond five eats into the budget ("Alejandra" is nine
+characters against "there"'s five, so four more, not nine - an earlier revision
+of this paragraph got that arithmetic wrong and then quoted a margin computed
+from the wrong body).
 
-So the gate must be EXTENDED to compose with a representative name, and the spec
-must state what "representative" means: assume a first name of up to TWELVE
-characters, which covers the overwhelming majority of real names, and pin that
-assumption in the test's comment so the next person editing copy knows what the
-margin was computed against.
+STATE IT AS A BUDGET, NOT A MARGIN. The body has TWO variable inputs, and pinning
+one while leaving the other free is how this silently regresses:
+
+    len(firstName) + len(where) <= ~59 characters
+
+for `tour.morning_of` to stay inside one GSM-7 segment. Compute the exact
+constant during the build from the final copy and pin it in the test's comment -
+a margin quoted against the fallback body is meaningless once a name is
+substituted.
+
+The gate must be EXTENDED to compose with representative values for BOTH inputs,
+not just a name. `350 Boulevard SE, Atlanta, GA 30312` (the seeded address the
+gate already uses) is 35 characters, which leaves roughly 24 for a first name at
+that address - comfortable. A LONGER address is the tighter constraint, and it is
+the input nobody controls: legacy plain-string addresses carry the full postal
+tail (section 6 note on `formatStreet`), so the worst realistic case is a long
+legacy address plus a long name. Pin that case, not the comfortable one.
 
 ## 6. Token contract
 
@@ -285,18 +298,39 @@ along on; all of it is new work.
 
 RULED (Cameron, 2026-08-26): that plumbing is IN SCOPE for this phase.
 
-RESOLVE IN THE SHARED SEAM, NOT IN THE ROUTER. `composeBodyForRow`
-(`jobs/tourReminders.ts:547`) is called by BOTH routes and already reads the unit
-for the address. Resolve the two names there, so 1:1 and group get identical
-copy by construction rather than by two implementations agreeing. Consequences:
+THERE IS NO SHARED SEAM. A round-3 revision of this section claimed
+`composeBodyForRow` was one and told the builder to resolve there. That was WRONG
+on two counts, and it contradicted section 10 of this same document:
 
-- Its deps are `Pick<RunDueTourRemindersDeps,'unitsRepo'>` today and must widen
-  to include `contactsRepo`.
-- On the 1:1 route `resolveReminderTarget` has ALREADY fetched the tenant contact
-  into `target.contact`. Pass it in and reuse it; do not read the tenant twice.
-- On the GROUP route nothing has been read, so both reads happen here.
-- The three preview surfaces call the same function and therefore inherit the
-  same resolution - which is what keeps a preview honest against the send.
+- `composeBodyForRow` (`jobs/tourReminders.ts:532`) is MODULE-PRIVATE. Its only
+  callers are inside the job (`:846`, `:1006`, `:1224`). No preview can reach it.
+- All three previews call `composeTourReminderBody` DIRECTLY and do so
+  SYNCHRONOUSLY - `relayGroups.ts:256` is a `((): string => {...})()` IIFE inside
+  a `.map()`. An async resolve cannot be dropped behind their compose call.
+
+`composeTourReminderBody` stays PURE and SYNCHRONOUS: it receives already-resolved
+names. Resolution happens in EACH CALLER, before composition:
+
+- SEND, 1:1 and group both: inside `composeBodyForRow`, which is already `async`
+  and already reads the unit for the address. Widen its deps - they are
+  `Pick<RunDueTourRemindersDeps,'unitsRepo'>` today with no `contactsRepo`. On
+  the 1:1 route `resolveReminderTarget` has ALREADY fetched the tenant into
+  `target.contact`; pass it through rather than reading twice. On the GROUP route
+  nothing has been read, so both reads happen here - that is the new work
+  ruling (a) put in scope.
+- PREVIEWS, all three: HOIST the resolve ABOVE the synchronous composition.
+  Resolve once per request, keyed by `unitId` (the property contact varies per
+  TOUR, so a single per-request value would stamp one name onto every row), then
+  pass the resolved names into the existing sync call.
+
+THE REAL HAZARD IS THE DUPLICATION, and the codebase already names it:
+`relayGroups.ts:253` carries "DUPLICATED SHAPE (3 copies, keep in sync)" with
+twins in `routes/tourReminders.ts` (`bodyFor`) and `routes/contactTimeline.ts`
+(`tourReminderBodyOrEmpty`). Three hand-mirrored compose blocks now each need
+identical name resolution and identical fallbacks. Any one of them drifting makes
+a PREVIEW disagree with the SEND, which is the exact failure
+`tourCopyCallSites.test.ts` exists to prevent and which no test currently covers
+at the body level. Extend that guard, or accept that three copies will drift.
 
 ### 6.3b Absence versus read FAILURE
 
@@ -452,6 +486,15 @@ PRECEDENCE, which must be explicit because three rules can now claim the same
 rung: for `day_before` and `morning_of` the order is (1) the new booked-too-late
 rule, (2) past-dueAt, (3) past-event, (4) supersession / `staleDayBefore`. A rung
 retired by rule 1 is NOT re-examined by the later rules.
+
+ONE MIS-ATTRIBUTION THIS ORDERING CREATES, accepted knowingly: a rung whose RAW
+time is inside its booked-too-late window AND whose CLAMPED time would have
+landed at/past the tour now reports `booked_too_late`, when the more truthful
+cause is the clamp. Both are true of the same rung and rule 1 wins by order.
+Accepted because the founder-facing answer is the same either way - the reminder
+could not usefully fire - and because a combined reason would be worse to read
+than either. Do not "fix" it by reordering; that reopens the vanishing-row
+problem this precedence exists to solve.
 
 CONSEQUENCE the tests must pin: for `day_before` this makes the past-dueAt branch
 effectively unreachable, because any booking late enough to put 19:30-the-night-
@@ -611,6 +654,30 @@ because a rung already due at arm time writes no row (`:266`). Phase B needs a
 different mechanism - most likely a dev seam that arms a row with an arbitrary
 dueAt - and should budget for that rather than discovering it.
 
+### 9.6 THE UNPAUSE BACKLOG - Phase B's real hazard
+
+A manual-only rung is left PENDING, not claim-skipped, so that "Send now" still
+works. That means every rung armed while the pause holds is still sitting there,
+due, waiting. `confirmation` is armed with `dueAt = now`, so it is past-due the
+instant it is written: EVERY tour booked during Phase A leaves a pending,
+already-due `confirmation` row behind it.
+
+The moment Phase B empties `MANUAL_ONLY_REMINDER_KINDS`, the next poll tick sees
+all of them at once and sends the lot.
+
+TWO THINGS TO BE HONEST ABOUT. First, this is NOT created by ruling (b) - the
+ladder has been paused since 2026-08-20 and all four armed rungs have been
+accumulating pending rows since. Phase B was always going to face it. Ruling (b)
+adds `confirmation` to the pile and keeps the pile growing. Second, it is not
+only a volume problem: those rows carry OLD dueAts (section 9.3), so what fires
+is a burst of reminders for tours that are long past.
+
+So Phase B owes a ONE-TIME RETIREMENT SWEEP of stale pending rows BEFORE it
+lifts the pause - retire anything whose dueAt is meaningfully past, as
+`past_event` - and must prove it on real dev data, not only in a test. Lifting
+the pause without that sweep texts a backlog of tenants about tours that already
+happened. Write it into the Phase B branch as its first task, not its last.
+
 ## 10. Implementation notes
 
 `composeTourReminderBody` (`app/src/messages/tourCopy.ts`) is the composer for
@@ -705,8 +772,19 @@ that would otherwise disagree with the new rule:
   carrying a `computeDueAt('day_before') parity` comment this change falsifies,
   and `:930` is the `pm_team` generator from 9.0.
 - `app/src/lib/seed/live.ts` describes a "Full 5-rung ladder".
+- `app/src/lib/seed/cast.ts:768-795` is a FIFTH reminder-row writer, hardcoding
+  the old `08:00Z` ladder times. Found only at round 4, after three passes that
+  each believed the enumeration complete.
 - `e2e/support/selectors.md:72` pins the Send-now accessible-name contract,
   which lists "Morning of".
+
+NO SEED WRITES `sentBody`. The read paths render a stored `sentBody` only when
+one exists (`routes/tourReminders.ts:236`) and otherwise RECOMPOSE from the live
+catalog - so every seeded "already sent" reminder row will silently re-render in
+the NEW copy, including rows representing historical sends in the demo world.
+That is not wrong exactly, but it means the demo shows tours from months ago
+quoting wording that did not exist then, and it is worth a deliberate decision
+rather than a discovery.
 
 New coverage this change owes:
 

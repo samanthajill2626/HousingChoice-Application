@@ -424,6 +424,13 @@ residual.
 **NAMED REOPEN POINT: the cap starves `needs_review`** (found 2026-08-25 by
 adversarial review, HIGH-1; recorded here rather than fixed, by ruling).
 
+> **TRACKED SEPARATELY, and that file is the authority:**
+> [`unknown-queue-cap-starves-needs-review`](unknown-queue-cap-starves-needs-review.md)
+> (filed 2026-08-26). It carries the frontmatter, the severity and the reopen
+> triggers, so it shows up in triage; this section stays because the decision
+> only makes sense beside the coverage-class record it belongs to. If the two
+> ever disagree, the standalone issue wins.
+
 `byTypeStatus` is `(hash: type, range: status)` and `contactsRepo.listByType`
 sets **no `ScanIndexForward`**, so the Query returns the partition ASCENDING by
 `status`. Within `type='unknown'` the only legal statuses are `needs_review` and

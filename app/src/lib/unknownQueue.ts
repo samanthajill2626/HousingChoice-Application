@@ -127,6 +127,12 @@ export interface UnknownQueueResult {
   /**
    * At most `maxRows` live (non-deleted) queue contacts, in PARTITION order.
    *
+   * TODO(unknown-queue-cap-starves-needs-review): tracked in the issue registry
+   * (with the mitigation options and the two-number reopen check); the sibling
+   * occurrence on the broadcast audience walk is
+   * TODO(broadcast-audience-truncation-drops-searching-tenants), and the two
+   * have to be considered together because they want OPPOSITE sort directions.
+   *
    * PARTITION ORDER IS `status` ASCENDING, and that is worse than arbitrary
    * (corrected 2026-08-25, adversarial HIGH-1 - this doc previously called the
    * cut "ARBITRARY with respect to recency", which is what would stop a reader

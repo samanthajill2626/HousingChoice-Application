@@ -32,8 +32,8 @@ on every send, not a rotating sample.
 
 **Why this is worse than the same defect on a triage tab.** The sibling
 occurrence of this sort assumption is
-[`inbox-filter-tabs-full-walk`](inbox-filter-tabs-full-walk.md)'s NAMED REOPEN
-POINT, where a truncated unknown queue starves `needs_review`. There the cost is
+[`unknown-queue-cap-starves-needs-review`](unknown-queue-cap-starves-needs-review.md),
+where a truncated unknown queue starves `needs_review`. There the cost is
 a delayed triage: the rows are still in the database, still reachable, and the
 operator sees a WARN-backed short list on a tab they will reload. Here the cost
 is an outbound SEND that silently did not reach the people it was for. There is

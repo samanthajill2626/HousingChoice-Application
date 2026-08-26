@@ -28,6 +28,7 @@ import {
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
+import { listByTypeFromContacts } from './helpers/contactsPartitionFake.js';
 import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface Seed {
@@ -66,6 +67,8 @@ interface InboxCallCounts {
   findByParticipantPhone: number;
   listByConversation: number;
   getPlacementById: number;
+  listByType: number;
+  listByLastActivity: number;
 }
 
 function emptyCallCounts(): InboxCallCounts {
@@ -75,6 +78,8 @@ function emptyCallCounts(): InboxCallCounts {
     findByParticipantPhone: 0,
     listByConversation: 0,
     getPlacementById: 0,
+    listByType: 0,
+    listByLastActivity: 0,
   };
 }
 
@@ -136,6 +141,7 @@ function makeDeps(
         limit?: number;
         exclusiveStartKey?: Record<string, unknown>;
       }) {
+        if (calls !== undefined) calls.listByLastActivity += 1;
         const start =
           typeof exclusiveStartKey?.['idx'] === 'number'
             ? (exclusiveStartKey['idx'] as number) + 1
@@ -206,6 +212,14 @@ function makeDeps(
       },
       async getById(contactId: string) {
         return seed.contacts.find((c) => c.contactId === contactId);
+      },
+      // Inert until the unknown tab's contact-side read lands (2026-08-25
+      // design): aggregateInbox does not call this yet. Real DynamoDB
+      // semantics via the shared helper so the later mutation probes
+      // (status narrowing, excludeOrigin) can actually go red.
+      async listByType(type: string, opts = {}) {
+        if (calls !== undefined) calls.listByType += 1;
+        return listByTypeFromContacts(seed.contacts, type, opts);
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
@@ -650,6 +664,8 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 
@@ -730,6 +746,8 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 
@@ -762,6 +780,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      // The unknown filter walks the open-partition pager once today. The
+      // contact-side read replaces that walk; this pin is what will show it.
+      listByLastActivity: 1,
     });
   });
 
@@ -804,6 +826,8 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       // Still NO downstream hydration: the drop happens before any of it.
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 

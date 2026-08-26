@@ -283,9 +283,63 @@ Copy is spec section 5, verbatim. Token declarations:
 Legal only because these entries are `editable: true` (`catalog.test.ts:43`
 runs its no-dead-tokens check on non-editable entries only). Do not flip that flag.
 
-- [ ] **Step 1: Write the failing tests.** Include, verbatim from the previous
-      plan revision, the day_before/morning_of/en_route/pm_team/degrade/there/
-      no_show cases, PLUS these two:
+- [ ] **Step 1: Write the failing tests.** Everything you need is below - there
+      is no other document to copy from. DELETE the existing old-copy
+      expectations in `tourCopy.test.ts` as you go; leaving them means Step 7
+      cannot pass.
+
+```ts
+import { MESSAGE_CATALOG } from '../src/messages/catalog.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
+import { TOUR_TYPES } from '../src/lib/toursModel.js';
+import type { ReminderKind } from '../src/repos/tourRemindersRepo.js';
+
+const base = { scheduledAt: '2026-07-23T19:00:00.000Z', timezone: 'America/New_York' } as const;
+const NAMES = {
+  tenantFirstName: 'Alice', tenantName: 'Alice Rivera',
+  propertyContactFirstName: 'Dana', propertyContactName: 'Dana Ortiz',
+};
+
+it('day_before greets by first name and uses the BARE time', () => {
+  const body = composeTourReminderBody({ ...base, kind: 'day_before', tourType: 'self_guided', names: NAMES });
+  expect(body).toBe('Hey Alice, confirming your tour tomorrow at 3:00 PM. Does that still work for you?');
+  expect(body).not.toContain('Jul 23');
+});
+
+it('morning_of carries the address; its twin drops that sentence', () => {
+  expect(composeTourReminderBody({ ...base, kind: 'morning_of', tourType: 'self_guided', names: NAMES, address: '412 Oak St' }))
+    .toBe('Hey Alice, looking forward to having you tour at 3:00 PM today. Does that still work for you? Address is 412 Oak St.');
+  expect(composeTourReminderBody({ ...base, kind: 'morning_of', tourType: 'self_guided', names: NAMES }))
+    .toBe('Hey Alice, looking forward to having you tour at 3:00 PM today. Does that still work for you?');
+});
+
+it('en_route forks on TOUR TYPE, and pm_team takes the landlord-led wording', () => {
+  expect(composeTourReminderBody({ ...base, kind: 'en_route', tourType: 'self_guided', names: NAMES }))
+    .toBe("Hey Alice, can you please text me when you're on the way?");
+  const landlordLed = "Hey Alice, Dana will be headed that way shortly. Can you please text here when you're on the way?";
+  expect(composeTourReminderBody({ ...base, kind: 'en_route', tourType: 'landlord_led', names: NAMES })).toBe(landlordLed);
+  expect(composeTourReminderBody({ ...base, kind: 'en_route', tourType: 'pm_team', names: NAMES })).toBe(landlordLed);
+});
+
+it('no property-contact name DEGRADES landlord-led AND pm_team to the self-guided wording', () => {
+  for (const tourType of ['landlord_led', 'pm_team'] as const) {
+    expect(composeTourReminderBody({ ...base, kind: 'en_route', tourType, names: { tenantFirstName: 'Alice' } }))
+      .toBe("Hey Alice, can you please text me when you're on the way?");
+  }
+});
+
+it('no tenant first name greets with "there"', () => {
+  expect(composeTourReminderBody({ ...base, kind: 'day_before', tourType: 'self_guided', names: {} }))
+    .toBe('Hey there, confirming your tour tomorrow at 3:00 PM. Does that still work for you?');
+});
+
+it('no_show_checkin greets by name and no longer throws on the token', () => {
+  expect(composeTourReminderBody({ ...base, kind: 'no_show_checkin', tourType: 'self_guided', names: NAMES }))
+    .toBe('Hi Alice! Do you need to reschedule?');
+});
+```
+
+PLUS these two:
 
 ```ts
 it('the no-address twins do NOT declare where - the leak guard', () => {
@@ -455,14 +509,20 @@ it('the 19:30 anchor holds on a DST-transition day', () => {
       `morning_of` becomes `scheduledAt - 4h`. Comment both with the founder
       decision date and note `morning_of` keeps its name deliberately.
 - [ ] **Step 5: Run and watch them pass.**
-- [ ] **Step 6: Update `app/test/seedLive.test.ts`'s DELIBERATE twin** of
-      `computeDueAt` (the function starts at `:53`) in lockstep, AND its local
-      `REMINDER_KINDS` copy at `:84` and the rung-count assertion at `:219` -
-      Task 9 removes `confirmation` from arming, so re-derive rather than guess.
-      This file is `describe.skipIf(!reachable)`, so run it with Docker up or the
-      drift guard silently passes.
-- [ ] **Step 7: Run `cd app && npx vitest run test/seedLive.test.ts`** and confirm
-      it did NOT skip.
+- [ ] **Step 6: Update ONLY the `computeDueAt` twin** in
+      `app/test/seedLive.test.ts` (the function starts at `:53`), in lockstep
+      with Step 4. Do NOT touch that file's local `REMINDER_KINDS` copy at `:84`
+      or its rung-count assertion at `:219` in this task - those depend on
+      `confirmation` no longer arming, which does not happen until Task 9. An
+      earlier revision of this plan changed them here and then asked you to prove
+      the file green, which was impossible.
+- [ ] **Step 7: Run `cd app && npx vitest run test/seedLive.test.ts` with Docker
+      UP** and confirm it did NOT skip (`describe.skipIf(!reachable)` passes
+      silently without it, and this file IS the drift guard).
+      EXPECTED STATE: the dueAt assertions pass; the rung-count assertion at
+      `:219` still passes because `confirmation` is still armed. If it fails
+      here, your `computeDueAt` change is wrong - do not "fix" it by editing
+      `:219`.
 - [ ] **Step 8: Commit.**
 
 ---
@@ -531,43 +591,54 @@ Task 3 produces `failed`; this task is where it is CONSUMED. Without it the flag
 is dead code and every gate is still green - spec 6.3 and section 13 both owe
 this behavior.
 
-Note `composeBodyForRow` already reads the unit for the address and its deps are
-`Pick<RunDueTourRemindersDeps,'unitsRepo'>` with NO `contactsRepo`. Widen the
-deps, and resolve the unit ONCE - do not read it twice.
+**READ THIS BEFORE WRITING A TEST - the obvious test is already green.**
+`resolveReminderTarget` (`jobs/tourReminders.ts:646`) calls
+`contactsRepo.getById` with NO try/catch, so a throwing read ALREADY escapes and
+ALREADY leaves the rung unclaimed. A test asserting "read throws -> nothing sent,
+row unclaimed" passes on today's code, before you write a line. An earlier
+revision of this plan shipped exactly that test. Your red state must come from
+behaviour that does NOT exist yet.
 
-- [ ] **Step 1: Write the failing tests**
+What does not exist yet, and is therefore what you test:
 
-```ts
-it('SEND path: a contacts read failure leaves the rung UNCLAIMED, sends nothing', async () => {
-  // Mirrors the roster_unavailable idiom: the poll retries, it does not send
-  // fallback copy under a name we could not read.
-  const rig = tourRig({ contactsRepo: { getById: async () => { throw new Error('boom'); } } });
-  await runDueTourReminders(NOW, { ...rig.deps, manualOnlyKinds: new Set() });
-  expect(rig.world.sent).toHaveLength(0);
-  const row = await rig.repo.getById(rig.rowId);
-  expect(row.sentAt).toBeUndefined();
-  expect(row.skippedAt).toBeUndefined(); // unclaimed, NOT retired
-});
+1. The POLL distinguishing failure from ABSENCE. Today an absent contact is
+   `contact_missing` (a claim-skip) and a THROW is an escape. After this task an
+   absent contact still sends, greeting "there"; only a THROW leaves it
+   unclaimed. The absence-still-sends case is the one that is red today.
+2. `forceSendReminder` returning a REPRESENTABLE REFUSAL. This is the path that
+   matters most: in Phase A it is the ONLY way a message reaches anyone. "Leave
+   unclaimed" is poll vocabulary and does not translate to a human pressing Send
+   now - they need an answer. Add a refusal outcome to `ForceSendResult` and a
+   reason token, and have the route render it. Neither exists today.
+3. READ paths degrading rather than 500-ing. Each preview catches ONLY
+   `UncomposableReminderError`, so an escaping repo error takes out the whole
+   bucket.
 
-it('SEND path: genuine ABSENCE still sends, greeting with "there"', async () => {
-  const rig = tourRig({ contactsRepo: { getById: async () => undefined } });
-  await runDueTourReminders(NOW, { ...rig.deps, manualOnlyKinds: new Set() });
-  expect(rig.world.sent[0]!.body).toContain('Hey there,');
-});
+- [ ] **Step 1: Write the failing tests** - one per numbered item above, plus a
+      force-send test asserting the refusal reaches the route as a rendered
+      outcome rather than a thrown error. Before writing each one, RUN IT AGAINST
+      UNMODIFIED CODE and confirm it is red. A test that is green before you
+      start is not a test; delete it and find the behaviour that is actually new.
+- [ ] **Step 2: Run and confirm every one is red for the RIGHT reason** (the new
+      behaviour is missing), not because a fixture is malformed.
+- [ ] **Step 3: Implement.** Widen `composeBodyForRow`'s deps - they are
+      `Pick<RunDueTourRemindersDeps,'unitsRepo'>` today with no `contactsRepo`.
+      Resolve the unit ONCE; it already reads it for the address. And note
+      `resolveReminderTarget` has ALREADY fetched the tenant contact into
+      `target.contact` - reuse it rather than reading the tenant twice.
+- [ ] **Step 4: Resolve the property contact PER TOUR, not per request.**
 
-it('READ path: a contacts read failure degrades and does NOT 500 the bucket', async () => {
-  const res = await request(app).get(`/api/tours/${tourId}/reminders`)...;
-  expect(res.status).toBe(200);
-});
-```
+      An earlier revision said "resolve contacts once per request" for the
+      contact timeline's Upcoming bucket. THAT IS THE WRONG KEY and would have
+      shipped a real bug: the bucket walks MULTIPLE tours, each with its OWN
+      unit and therefore its own property contact. Caching one per request
+      stamps one person's name onto every tour's preview.
 
-- [ ] **Step 2: Run and watch them fail.**
-- [ ] **Step 3: Implement.** Send paths: on `failed`, return without claiming.
-      Read paths: degrade to the absence fallbacks and never throw - each catches
-      only `UncomposableReminderError`, so an escaping repo error 500s the bucket.
-- [ ] **Step 4: Batch the timeline bucket.** `contactTimeline`'s Upcoming bucket
-      walks MULTIPLE tours; resolve contacts once per request, not per rung
-      (spec section 10). Assert the read count in a test.
+      Correct shape: memoize by `unitId` (and by `contactId` for the contact
+      reads) across the request, so N tours on the same unit cost one read and N
+      tours on different units stay correct. Assert BOTH in a test: the read
+      count collapses for repeats, AND two tours on different units render
+      different names.
 - [ ] **Step 5: Run and watch them pass.**
 - [ ] **Step 6: Commit.**
 
@@ -586,14 +657,41 @@ The kind stays in the union, `computeDueAt`, `LADDER_ORDER` and the catalog. Its
 `MANUAL_ONLY_REMINDER_KINDS` entry becomes dead state whose 6-line rationale is
 now false: leave the entry (harmless) and correct the comment.
 
-- [ ] **Step 1: Write the failing tests** - arming creates no `confirmation` row;
-      and (in `tourCopy.test.ts`) a pending `confirmation` row still composes,
-      because a removed catalog entry would throw a bare `TypeError` no
-      containment block catches.
-- [ ] **Step 2: Run and watch them fail.**
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and watch them pass.**
-- [ ] **Step 5: Commit.**
+**THIS IS THE WIDEST-BLAST-RADIUS TASK IN THE PLAN. Read before starting.**
+`confirmation` is the ONLY rung whose dueAt is `now`, which makes it the test
+suites' universal "fire a reminder immediately" vehicle. Turning it off is not a
+string change:
+
+- ~40 structural sites in `app/test/tourReminders.test.ts` key on it.
+- ~14 e2e sites across `scheduled-visibility.spec.ts` (six, as its anchor),
+  `tour-roster.spec.ts` and `tours.spec.ts:130-132`.
+
+Those specs need a DIFFERENT immediate-send vehicle, not a new expected string.
+Decide that vehicle ONCE here and apply it consistently - the natural candidate
+is an `en_route` rung on a tour booked so the rung is already due, driven by the
+dueAt read back from the API (Task 11 Step 2's method). Do not solve it five
+different ways in five specs.
+
+- [ ] **Step 1: Enumerate every site** before changing anything:
+      `grep -rn "confirmation" app/test/tourReminders.test.ts e2e/tests/ | wc -l`
+      and read them. If the count is far from the numbers above, STOP and report -
+      the plan's model of this task is wrong and pressing on will produce a sweep
+      that hides the difference.
+- [ ] **Step 2: Write the failing tests** - arming creates no `confirmation` row;
+      and (in `tourCopy.test.ts`, which owns `base`/`NAMES`) a pending
+      `confirmation` row still composes, because a removed catalog entry throws a
+      bare `TypeError` no containment block catches.
+- [ ] **Step 3: Run and watch them fail.**
+- [ ] **Step 4: Implement** the `REMINDER_KINDS` removal and correct the
+      `MANUAL_ONLY_REMINDER_KINDS` comment.
+- [ ] **Step 5: Re-point the app-side immediate-send sites** to the chosen
+      vehicle. `seedLive.test.ts`'s local `REMINDER_KINDS` copy at `:84` and its
+      rung-count assertion at `:219` belong to THIS task (Task 6 deliberately
+      left them alone).
+- [ ] **Step 6: Run `cd app && npx vitest run` and get it green.** The e2e side
+      is Task 11's - the suite is expected to be RED between here and Task 11
+      Step 6, and Task 11 owns closing it.
+- [ ] **Step 7: Commit.**
 
 ---
 
@@ -645,10 +743,28 @@ The change INVERTS: `morning_of` becomes a pure `-4h` offset and CAN be mirrored
       `morningOf: sched - 4h`. Keep `enRoute` and `noShowCheckin`. Update the
       docblock to explain the inversion and why, in the same voice as the
       existing one.
-- [ ] **Step 2: Rework the five specs that tick off `times.dayBefore`.** Each
-      needs either the org-local 19:30 instant computed a different way, or to
-      drive that rung by a different means. Do NOT invent a host-local
-      approximation - that is the wrong answer the docblock warns about.
+- [ ] **Step 2: Rework the five specs that tick off `times.dayBefore`** -
+      `quiet-hours.spec.ts:293,318`, `scheduled-visibility.spec.ts:163,228`,
+      `tours.spec.ts:134`.
+
+      THE METHOD, because "compute it a different way" is not an instruction:
+      READ THE ARMED `dueAt` BACK from the reminders API for the tour under test
+      and drive `justAfter()` from that value. The server already computed the
+      org-local instant; the harness does not need to reproduce the arithmetic,
+      and a value read back is correct by construction at any wall clock. Do NOT
+      invent a host-local approximation of 19:30 - that is the "wrong answer
+      waiting to be used" the `TourTimes` docblock at `:234` warns about, and it
+      is why `morningOf` was removed in the first place.
+
+      HARDEST CASE, do not treat it as arithmetic: `quiet-hours.spec.ts:21`
+      declares an explicit TIMING CONTRACT - "deterministic at ANY wall clock" -
+      and the suite is deliberately time-of-day independent after a documented
+      flake class. A fixed 19:30 org-local rung is exactly the dependency that
+      contract excludes. Your rework must PRESERVE that property: a solution
+      that passes only between certain hours is a regression against a contract
+      someone already paid for. If reading the dueAt back cannot preserve it for
+      a given assertion, change WHICH RUNG that assertion drives rather than
+      weakening the contract.
 - [ ] **Step 3: Update the markers.** Each fragment must appear in EVERY variant
       of its rung - address forks AND tour-type forks - or absence assertions
       pass vacuously:
@@ -708,13 +824,39 @@ npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx')
 If that list is EMPTY, SKIP the gate - a bare `npx eslint` lints the whole repo
 and fails on ~117 pre-existing errors.
 
-- [ ] **Step 8: Measure the segment count** for `tour.morning_of` with a real
-      address, using `analyzeSms`. It is the highest-volume rung; a silent second
-      segment doubles its cost. Report the number.
-- [ ] **Step 9: Write the handback** naming: the segment measurement; that the
-      ladder is STILL PAUSED and nothing sends automatically; and that a green
+- [ ] **Step 8: Update the non-test surfaces that STATE the ladder.** Each is a
+      reader that otherwise disagrees with the new rule, and none is covered by
+      any earlier task:
+      - `documentation/tours-sequence-writeup.md:110-119` states the ladder
+        verbatim.
+      - `app/src/lib/seed/matrix.ts:958` - a THIRD hardcoded `scheduledAt - 24h`
+        carrying a `computeDueAt('day_before') parity` comment this change
+        falsifies. (`:930`, the `pm_team` generator, needs no change but explains
+        why Task 4's `pm_team` case matters.)
+      - `app/src/lib/seed/live.ts` describes a "Full 5-rung ladder".
+      - `e2e/support/selectors.md:72` pins the Send-now accessible-name contract,
+        which lists "Morning of" and must follow the Task 10 relabel.
+- [ ] **Step 9: Confirm the segment gate is GREEN, do not "measure and report".**
+      `tourCopy.test.ts:115` already asserts `analyzeSms(body).segments === 1`
+      for every rung with a real seeded address. The new `tour.morning_of` copy
+      has roughly NINETEEN characters of margin. If that gate is red, the answer
+      is to shorten the copy or take a deliberate decision to allow two segments
+      - NEVER to relax the assertion. Report the measured margin either way.
+- [ ] **Step 10: File the deferrals in the issue registry.** Two things are
+      deliberately NOT built here and would otherwise be lost with this branch:
+      the quiet-hours exemption hook (spec 7.3, cut from Phase A) and the
+      zero-primary property-contact leg having no e2e path (spec 13). File each
+      as a `docs/issues/<slug>.md` from `_TEMPLATE.md`, and put a
+      `TODO(<slug>)` marker on the new first-name helper for the
+      `consolidate-contact-display-name-helpers` issue it deliberately adds to.
+      Re-run `npm run issues`.
+- [ ] **Step 11: Write the handback** naming: the measured segment margin; that
+      the ladder is STILL PAUSED so nothing sends automatically; that a green
       e2e proves the machinery ONLY, because the dev tick injects an empty
-      manual-only set that production does not have.
+      manual-only set production does not have; and - said plainly, because it is
+      the part that reaches people - that FORCE-SEND is live and every word of
+      this copy plus its fallbacks goes to real tenants the moment the founder
+      presses Send now.
 
 ---
 

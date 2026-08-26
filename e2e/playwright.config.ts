@@ -101,11 +101,38 @@ const htmlReportDir = fileURLToPath(new URL('.artifacts/html-report', import.met
 // (a generous per-action budget); a genuine hang still eventually fails. 0 = off.
 const slowMo = Number(process.env.E2E_SLOWMO ?? 0);
 
+// Per-test cap for everything OUTSIDE tests/scenarios (those carry 90s via
+// useScenarioBudget). Sized from the 2026-08-25 pressure runs, which held the
+// suite at 1.93-1.96x its 17.9m idle baseline: across 199 non-scenario tests
+// p50 was 5.3s, p95 14.0s, and the slowest real test 20.2s. 30s left the p95 at
+// 47% of cap - fine at 2x, but only ~1.5x from the edge, and the suite already
+// meets 2x routinely on a shared box.
+//
+// 60s puts p95 at 23% and the worst real test at 34%, which holds through 3x
+// with room, while still surfacing a genuine hang inside a minute. The two
+// tests above 30s here (thread-history-paging, event-bridge) already carry
+// their own explicit setTimeout and are unaffected.
+const DEFAULT_TEST_TIMEOUT_MS = 60_000;
+
 export default defineConfig({
   testDir: './tests',
   outputDir: '.artifacts/test-results',
-  // Default 30s; when slow-motion is on, give each delayed action headroom.
-  timeout: slowMo > 0 ? 30_000 + slowMo * 150 : 30_000,
+  // When slow-motion is on, give each delayed action headroom on top.
+  timeout: slowMo > 0 ? DEFAULT_TEST_TIMEOUT_MS + slowMo * 150 : DEFAULT_TEST_TIMEOUT_MS,
+  // THE 5s DEFAULT WAS THE SINGLE HIGHEST-LEVERAGE NUMBER IN THE SUITE, AND IT
+  // WAS INVISIBLE - Playwright's implicit expect timeout, written down nowhere.
+  // Every spec's devLogin rides expectTodayReady (support/today.ts), which uses
+  // it, so a marginal cold-SPA-load budget fires RANDOMLY across the whole suite
+  // under load and lands on whichever spec drew the short straw. It did exactly
+  // that on 2026-08-25 at 1.93x load, failing inside a2p-compliance before that
+  // test's substance ran - a spec with nothing wrong with it.
+  //
+  // 15s is both the inferred-safe number (failing at 5s under 1.93x load implies
+  // >2.6s idle, so 2.5x headroom needs >6.5s) and the value 177 explicit budgets
+  // in this suite already use. Assertions stay bounded by the per-test cap above,
+  // so this changes WHICH assertion is blamed and how fast, not the ceiling.
+  // See docs/issues/concurrent-capacity-budget-tail.md.
+  expect: { timeout: 15_000 },
   // Fail fast (with an actionable message) if the stack under test is stale or
   // misconfigured — e.g. a hand-started session reused via reuseExistingServer
   // with the wrong driver or sending flags. See support/preflight.ts.

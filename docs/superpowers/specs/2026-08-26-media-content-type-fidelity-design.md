@@ -1,10 +1,10 @@
 # Inbound media content-type fidelity - design
 
 Date: 2026-08-26
-Status: DRAFT (spec review round 2)
+Status: DRAFT (spec review round 3)
 Branch: `feat/media-content-type-fidelity` (cut from `main` @3c2962a4)
-Design review: spec R1 adjudicated at
-`.superpowers/design-review/adjudications.md` (21 accepted, 2 rejected)
+Design review: spec R1 + R2 adjudicated at
+`.superpowers/design-review/adjudications.md`
 
 ## 1. Problem
 
@@ -26,7 +26,7 @@ inbound paths. Relay is simply where it was noticed.
 
 ## 2. Root cause
 
-Two defects, stacked. Both are reachable by construction, neither is timing
+Three defects, stacked. All are reachable by construction; none is timing
 dependent.
 
 ### 2.1 The stored Content-Type is destroyed at mirror time
@@ -58,10 +58,18 @@ res.setHeader('Content-Disposition', `attachment; filename="attachment-${idx}"`)
 No extension - which is what actually breaks opening the saved file, because
 Windows and macOS dispatch on extension, not on the MIME type the server sent.
 
-The outbound email send path already solved this problem one channel over -
-`services/sendEmailMessage.ts:225-235` maps content type to extension and
-synthesizes `attachment-1.pdf`, with `.bin` as the fallback. The inbound serve
-route never got the equivalent.
+### 2.3 The serve route ignores the filename it already has
+
+`attachments[idx].filename` is in scope on the line above and IS populated for
+email attachments, but the header never reads it. So an inbound email
+attachment displays in the timeline as `budget.xlsx`
+(`Timeline.tsx:614-617`) and downloads as `attachment-0`. Section 6.3's stem
+ladder exists to fix this, safely.
+
+The outbound email send path already solved the naming problem one channel
+over - `services/sendEmailMessage.ts:225-235` maps content type to extension
+and synthesizes `attachment-1.pdf`, with `.bin` as the fallback. The inbound
+serve route never got the equivalent.
 
 ## 3. Decisions (locked by the human, 2026-08-26)
 
@@ -88,19 +96,22 @@ forwarding fix would need it.
 ## 4. Non-goals
 
 - No inline rendering of anything beyond today's five types.
-- No change to the outbound MMS upload allowlist, the outbound send path, unit
-  photos, or call recordings.
+- No change to the outbound MMS upload allowlist, the outbound SEND path, unit
+  photos, or call recordings. (Outbound email ATTACHMENT SERVING does change -
+  see 8.6. That is the same serve route, not the send path.)
 - No relay forwarding fix (D3).
 - No consolidation of `EMAIL_EXTENSIONS` (`services/sendEmailMessage.ts:225-235`)
-  into the new shared map. It is outbound-only and serves a different
-  allowlist; merging them would put a regression risk into a channel nobody has
-  reported a problem with. The duplication is noted in the new map's comment.
+  into the new shared map. Neither map feeds a security decision - the outbound
+  one names a MIME part we are sending, the new one names a download we are
+  offering, and both draw only from closed allowlists - so their divergence is
+  cosmetic and does not justify touching a channel nobody reported a problem
+  with. The duplication is noted in the new map's comment.
 - No promotion of legacy `media_s3_keys` rows to `media_attachments` (see 8.5).
 - No transcoding of any kind.
 
 ## 5. Type tiers
 
-Three tiers, one source of truth, in `lib/mediaTypes.ts`.
+Three tiers, resolved in ONE place in `lib/mediaTypes.ts`.
 
 | Tier | Set | Response Content-Type | Disposition | Filename |
 |---|---|---|---|---|
@@ -121,22 +132,41 @@ DELIBERATELY EXCLUDED, permanently: `text/html`, `application/xhtml+xml`,
 `image/svg+xml`, `text/xml`, `application/xml`, `application/javascript`, and
 anything unrecognised. These fall to the opaque tier and are named `.bin`.
 
-### 5.1 Matching is on the media-type ESSENCE, and the canonical member is what gets served
+### 5.1 ONE resolver, essence matching, canonical output
 
-A stored type can legitimately carry parameters - `text/plain; charset=utf-8`,
-`video/3gpp; codecs=...` are ordinary wire forms. Today's exact-string set
-lookup would send both to the opaque tier and silently defeat the feature for
-the very types it adds.
+Add exactly one function and route every tier decision through it:
 
-So: match on the ESSENCE (everything before the first `;`, trimmed,
-lowercased). Then SERVE THE CANONICAL SET MEMBER, not the raw stored string -
-which also guarantees the tier decision, the response header and the extension
-lookup can never disagree with each other.
+```
+resolveMediaTier(raw: string | undefined):
+  { tier: 'inline' | 'declarable' | 'opaque', canonical: string, ext: string }
+```
 
-This does not weaken the inline gate. Essence matching is exactly what makes
-`text/html; charset=utf-8` fail the inline test, the same as the exact-match
-form does today; the parameterized string never reaches a response header
-either way.
+It takes the media-type ESSENCE (everything before the first `;`, trimmed,
+lowercased), matches it against the two sets in order, and returns the
+CANONICAL SET MEMBER plus its extension - never the caller's raw string. The
+serve route (6.2) and `normalizeStoredMediaType` (5.2) both call it and nothing
+re-implements the decision, so the tier, the response header and the extension
+can never disagree.
+
+Essence matching is required because parameters are ordinary wire forms:
+`text/plain; charset=utf-8` and `video/3gpp; codecs=...` would fall to the
+opaque tier under today's exact-string lookup and silently defeat the feature
+for the types it adds.
+
+SECURITY, STATED IN THE DIRECTION THAT ACTUALLY CHANGES: this NEWLY ADMITS the
+parameterized forms of ALLOWLISTED types. `image/png; charset=x` reaches the
+inline tier now, where today it falls to octet-stream. That is safe, and the
+reason is the canonical output rather than the matching: the response header is
+our own constant `image/png`, so a parameterized string never reaches a header
+and cannot smuggle anything. Non-allowlisted types are unaffected in either
+direction - `text/html; charset=utf-8` has essence `text/html` and still fails
+both sets.
+
+This DOES change a property asserted in a resolved security issue:
+`docs/issues/media-serve-stored-xss.md:30-32` records that "`...; charset=...`
+parameter forms cannot bypass it", describing exact-string matching as part of
+the fix. That issue must be amended in this change with the reasoning above,
+not left to contradict the code.
 
 ### 5.2 THE TRAP: widen `normalizeStoredMediaType`, NOT `isInlineMediaType`
 
@@ -146,10 +176,13 @@ declarable tier would silently permit staff to upload video and documents as
 outbound MMS attachments - media Twilio cannot carry (error 12300) - with no
 other code change and no test naming it.
 
-`normalizeStoredMediaType` becomes: keep the canonical member when the essence
-is inline OR declarable; otherwise `application/octet-stream`.
-`isInlineMediaType` is NOT touched. A test must pin that the outbound upload
-gate still refuses `video/mp4`.
+So: `isInlineMediaType` keeps BOTH its current set AND its current exact-string
+semantics, and keeps its existing callers. It is not the serve route's gate any
+more - the serve route goes through `resolveMediaTier`.
+`normalizeStoredMediaType` is re-expressed on the resolver: return the
+canonical member when the tier is inline or declarable, else
+`application/octet-stream`. A test must pin that the outbound upload gate still
+refuses `video/mp4`.
 
 ## 6. Design
 
@@ -169,35 +202,45 @@ HMAC-validated webhook's `MediaContentType{i}`, unchanged.
 
 ### 6.2 Read side - the serve route
 
-`routes/api.ts` `GET /messages/:providerSid/media/:idx` implements the section
-5 table:
+`routes/api.ts` `GET /messages/:providerSid/media/:idx` calls
+`resolveMediaTier(object.contentType)` - the S3 object's own type, see 7.4 for
+why the record must not be trusted here - and applies the section 5 table:
 
-1. `stored = object.contentType` (the S3 object's own type - unchanged source,
-   see 7.4 for why the record must not be trusted here).
-2. Inline tier: serve the canonical member,
-   `Content-Disposition: inline; filename=...`.
-3. Declarable tier: serve the canonical member,
-   `Content-Disposition: attachment; filename=...`.
-4. Opaque tier: `application/octet-stream`, `attachment`, `.bin`.
-5. `X-Content-Type-Options: nosniff` and
+1. Inline: `Content-Type: <canonical>`, `Content-Disposition: inline; filename=...`.
+2. Declarable: `Content-Type: <canonical>`, `Content-Disposition: attachment; filename=...`.
+3. Opaque: `Content-Type: application/octet-stream`, `attachment`, `.bin`.
+4. `X-Content-Type-Options: nosniff` and
    `Content-Security-Policy: default-src 'none'; sandbox` stay on EVERY
    response exactly as today.
 
 ### 6.3 Filename construction
 
-THE EXTENSION IS ALWAYS OURS. It is looked up from the resolved tier's
-canonical type and is never taken from stored data. This is not a detail: the
-stored `filename` originates in a MIME part the sender controls
-(`services/inboundEmail.ts` persists it verbatim), so honoring its extension
-would let a sender choose what the operator's OS does with the downloaded file
-- turning today's inert `attachment-0` into `invoice.exe`. The whole point of
-the feature is a filename the OS acts on, which is exactly why the sender must
-not choose it.
+THE EXTENSION IS ALWAYS DRAWN FROM OUR OWN MAP. It is never copied from stored
+data as a string. The stored `filename` originates in a MIME part the sender
+controls (`services/inboundEmail.ts` persists it verbatim), so honoring its
+extension freely would let a sender choose what the operator's OS does with the
+downloaded file - turning today's inert `attachment-0` into `invoice.exe`. The
+whole point of the feature is a filename the OS acts on, which is exactly why
+the sender must not choose it.
 
-The stem is resolved in this order:
+EXTENSION, in order:
 
-1. The stored `attachments[idx].filename`, reduced to its BASE NAME with any
-   existing extension DISCARDED, then sanitized (below).
+1. The extension for the resolved tier's canonical type, when the tier is
+   inline or declarable.
+2. OPAQUE TIER ONLY: if the stored filename ends in an extension that is a
+   VALUE IN OUR OWN EXTENSION MAP, use that. This is a lookup against our
+   closed set, not a passthrough - `.xlsx` is accepted because we already emit
+   it, `.exe` can never be. It exists for one real population: historical
+   inbound EMAIL attachments, whose stored type is permanently unrecoverable
+   (8.5) but whose real filename we still hold. Without this rule the timeline
+   shows `budget.xlsx` while the download is `budget.bin`, which is a worse
+   outcome than the bug being fixed.
+3. Otherwise `.bin`.
+
+STEM, in order:
+
+1. The stored `attachments[idx].filename`, reduced to its base name with any
+   existing extension removed, then sanitized.
 2. If that stem is empty after sanitizing, or matches `^attachment-\d+$`, treat
    it as absent. `lib/emailMime.ts:100-106` synthesizes exactly
    `attachment-<i>` for a nameless MIME part, so without this rule the stored
@@ -205,16 +248,21 @@ The stem is resolved in this order:
    this feature exists to remove.
 3. Otherwise the synthesized stem `attachment-<idx + 1>`.
 
-The final name is `<stem><ext>`. Note the deliberate off-by-one correction: the
-header is 0-based today (`attachment-0`) while the UI labels the same
-attachment "Attachment 1". The synthesized stem is 1-based to match the UI and
-the existing outbound email convention.
+The final name is `<stem><ext>`, joined with exactly one `.` which the
+extension carries (map values include the dot; the stem never ends in one).
+A stored name that is ALL extension and no stem (a dotfile such as `.env`) has
+an empty stem and falls to rule 3.
 
-Stem sanitization (header-injection guard): strip CR, LF and NUL; strip `"`
-and `\`; strip path separators; reject `..`; collapse whitespace; cap at 100
-characters. Emit an ASCII-only `filename="..."`, and when the original stem
-contained non-ASCII ALSO emit `filename*=UTF-8''<percent-encoded>` per
-RFC 5987.
+Stem sanitization, in this order: strip CR, LF and NUL; strip `"` and `\`;
+strip path separators; reject `..`; collapse whitespace; THEN apply the
+100-character cap. The cap runs last so it can never re-expose a sequence an
+earlier rule removed. Emit an ASCII-only `filename="..."`, and when the
+original stem contained non-ASCII ALSO emit `filename*=UTF-8''<percent-encoded>`
+per RFC 5987.
+
+Note the deliberate off-by-one correction: the header is 0-based today
+(`attachment-0`) while the UI labels the same attachment "Attachment 1". The
+synthesized stem is 1-based to match the UI and the outbound email convention.
 
 ### 6.4 Dashboard readers
 
@@ -237,11 +285,15 @@ import from `app/`, so the four raster types are mirrored in
 already mirrors other server constants. Both components consume the shared
 helper; neither keeps its own predicate.
 
-Label change, FILE-LINK FALLBACK ONLY: `attachmentLabel`
-(`Timeline.tsx:614-617`) keeps preferring a stored filename, and its positional
-fallback gains the file kind ("Video - Attachment 1" rather than a bare
-"Attachment 1"). The image `alt` text is NOT given a kind prefix - it is
-already known to be an image. Section 9 names the two assertions this moves.
+LABEL RULES, exhaustively, because the current fallback has three cases and the
+change must not disturb two of them:
+
+- image `alt`: UNCHANGED. No kind prefix - it is already known to be an image.
+- PDF file link: UNCHANGED. Keeps "PDF attachment N", which already names its
+  kind.
+- every other file link: the positional fallback gains the kind, so
+  "Attachment 1" becomes "Video - Attachment 1". A stored filename still wins
+  over the fallback in all cases.
 
 ### 6.5 Media pointer rows - the second persisted copy
 
@@ -258,9 +310,17 @@ and the thread will disagree about the same bytes.
 ### 6.6 Backfill
 
 `app/scripts/backfill-media-content-types.ts`, npm script
-`backfill:media-content-types`, modeled on `backfill-media-pointers.ts`
-(scan + `--dry-run` + physical table via `lib/config.tableName`, ops-run
-against a deliberately chosen environment).
+`backfill:media-content-types`.
+
+PRECEDENT, SPLIT DELIBERATELY. Take the SCAN-AND-REPORT shape from
+`backfill-media-pointers.ts` (paged scan, `--dry-run`, physical table via
+`lib/config.tableName`). Do NOT take its credential posture: it has no AWS
+write, no vendor API and no account guard. The guard this script needs is
+`assertHousingChoiceAccount` / `hcCredentials` from `scripts/lib/hcAws.mjs`, as
+used by `app/scripts/import-apply.ts:30-34` - the repo's own precedent for an
+ops script that writes to a real account. The default AWS credential chain
+resolves to the WRONG account in this environment, so the guard is mandatory,
+not defensive.
 
 SELECTION. A DynamoDB `FilterExpression` cannot express "some element of this
 list has this value", so the scan filters coarsely (message rows carrying
@@ -278,16 +338,24 @@ are inbound, carry `media_attachments`, and are octet-stream, but have no
 Twilio media behind them. Without the clause they inflate the dry-run histogram
 the ops go/no-go decision reads. They are counted in their own bucket instead.
 
-PER ATTACHMENT:
+PER ATTACHMENT (steps 1-4), then PER MESSAGE (step 5):
 
-1. Derive the provider media index BY PARSING THE S3 KEY, never from the
-   attachment's array position. `media_attachments` is a compacted
-   successes-only list (`routes/webhooks/twilio.ts:496-497`) that
-   `jobs/mediaMirror.ts:150-160` later APPENDS to, so after any partial mirror
-   `media_attachments[0]` can be provider index 1. The true index is carried in
-   the key itself - `inboundMediaKey` (`services/mediaMirror.ts:67-69`) is
+1. Derive the media index BY PARSING THE S3 KEY, never from the attachment's
+   array position. `media_attachments` is a compacted successes-only list
+   (`routes/webhooks/twilio.ts:496-497`) that `jobs/mediaMirror.ts:150-160`
+   later APPENDS to, so after any partial mirror `media_attachments[0]` can
+   carry index 1. The index is in the key: `inboundMediaKey`
+   (`services/mediaMirror.ts:67-69`) is
    `media/<conversationId>/<messageSid>/<index>`. A key that does not match
    that pattern is skipped and counted, never guessed at.
+
+   PRECISE INVARIANT, because the loose version misdirects the tests: that
+   index is the position in the ROW'S STORED `mediaUrls` ARRAY, not Twilio's
+   own `MediaUrl{i}` numbering. `parseInboundMediaUrls`
+   (`routes/webhooks/twilio.ts:440-448`) SKIPS absent or empty entries, so the
+   two can differ. It is the correct index to use precisely because both the
+   s3Key and the stored `mediaUrls` derive from that same compacted list.
+
 2. Read `mediaUrls[<that index>]` and extract the MediaSid. Inbound MediaUrls
    are stable `api.twilio.com/.../Messages/<MM...>/Media/<ME...>` resource
    URLs, not expiring presigns. Missing or out-of-range -> skip + count.
@@ -295,29 +363,47 @@ PER ATTACHMENT:
    bytes. A 404 (media aged out or deleted) -> skip + count.
 4. Pass the recovered type through `normalizeStoredMediaType`. If it is still
    `application/octet-stream`, skip: the backfill can never write a type the
-   runtime would refuse.
-5. WRITE ORDER, LOAD-BEARING: S3 object -> `putMediaPointers` -> the message
-   row.
+   runtime would refuse. Then `mediaStore.setContentType` on THAT attachment's
+   object.
+5. ONCE PER MESSAGE, after every attachment on it has been through 1-4:
+   `putMediaPointers` with the corrected array, then `annotateMessage` with it.
 
 THE PREDICATE-CLEARING WRITE GOES LAST. The re-scan predicate is the message
 row still saying octet-stream, so the row must be the final write: every step
-before it is idempotent and a partial failure is repaired by simply re-running.
-The naive order (row, then pointers) is specifically wrong here because
-`annotateMessage` writes pointers best-effort inside a try/catch that logs and
-swallows (`repos/messagesRepo.ts:2538-2550`) - so a pointer failure after the
-row write would clear the predicate and leave the thread and the gallery
-permanently disagreeing. Writing pointers first makes `annotateMessage`'s own
-pointer write a harmless idempotent repeat.
+before it is idempotent and a partial failure is repaired by re-running. The
+naive order (row, then pointers) is specifically wrong because `annotateMessage`
+writes pointers best-effort inside a try/catch that logs and swallows
+(`repos/messagesRepo.ts:2538-2550`), so a pointer failure after the row write
+would clear the predicate and leave the thread and the gallery permanently
+disagreeing. Writing pointers first makes `annotateMessage`'s own pointer write
+a harmless idempotent repeat.
+
+Step 5 is per-message because `annotateMessage` takes the whole attachments
+array; batching it per-attachment would rewrite the row once per attachment and
+clear the predicate before the later attachments on that row were repaired.
+
+`--dry-run` IS NOT READ-ONLY, and must not be described as if it were. It
+performs no WRITES, but it makes one Twilio API READ per candidate attachment
+against the live account in order to build the histogram. It therefore needs
+the same pacing as the apply run: a bounded concurrency (small, single digit)
+and a retry with backoff on 429, and its report must state the number of vendor
+calls it made.
+
+IDEMPOTENCY, stated exactly: a second run is a no-op for every attachment it
+repaired. It is NOT a no-op for rows carrying a permanently unrepairable
+attachment - the predicate is row-granular, so those rows are re-selected and
+re-queried against Twilio every run. That is the cost of not writing a
+"tried and failed" marker, it is bounded by the skip counts in the report, and
+it is accepted deliberately rather than overlooked.
 
 REPORTING (counts and type histogram only, never keys, bodies or numbers):
 rows scanned, attachments eligible, recovered by type, skipped-unparseable-key,
 skipped-no-url, skipped-twilio-404, skipped-still-opaque, skipped-email-row,
-skipped-legacy-row, written.
+skipped-legacy-row, written, vendor calls made.
 
 Concurrency: the backfill targets old rows while `media.mirror` only ever
 touches recent ones, so a race is not expected; the backfill nonetheless writes
-through the existing repo methods so pointer rows stay consistent with whatever
-else wrote them.
+through the existing repo methods so pointer rows stay consistent.
 
 ### 6.7 Adapter additions
 
@@ -332,10 +418,10 @@ Both belong in `app/src/adapters` per the vendor-SDK rule.
   the new `ContentType`. This is the documented same-key copy case. Objects are
   capped at 25 MB upstream, well under the 5 GB single-part copy limit.
 
-Widening either interface breaks the full object literals in the test helpers
-that implement them - `app/test/helpers/twilioWebhookHarness.ts` implements
-`MediaStore` exhaustively. Named here so the builder treats it as a task rather
-than discovering it as a type error.
+SIZING NOTE: widening these interfaces breaks every exhaustive object literal
+that implements them - FOUR for `MessagingAdapter` and one for `MediaStore`
+across the test helpers and fakes. The builder must expect a spread of
+mechanical type errors, not a single one.
 
 ### 6.8 fake-twilio and e2e
 
@@ -343,14 +429,15 @@ than discovering it as a type error.
 png/gif/webp/jpg/pdf and returns octet-stream otherwise, so today the harness
 CANNOT produce a declarable-tier inbound MMS. Nor can the seeds: the only
 seeded MESSAGE attachment is `image/jpeg` (`lib/seed/cast.ts:1210`), and the
-seeded `audio/mpeg` object (`lib/seed/media.ts:122`) is a CALL RECORDING served
-by a different route that hardcodes its type.
+seeded `audio/mpeg` object (`lib/seed/media.ts:122`) is a CALL RECORDING
+reachable only through `recording_s3_key` (`lib/seed/cast.ts:1075`) and a
+different route.
 
 So a new canned non-image asset is required, and it is more than a suffix
 branch: the canned-asset registry, its pinning test and the static serving path
-for the asset all live in `fake-twilio/web/` and must be updated together. The
-builder must locate all of them before adding the asset rather than assuming
-`signer.ts` is the whole change.
+all live in `fake-twilio/web/` and must be updated together. The builder must
+locate all of them before adding the asset rather than assuming `signer.ts` is
+the whole change.
 
 ## 7. Security analysis
 
@@ -361,27 +448,31 @@ The guarantee that must survive D2:
 
 ### 7.1 Write side - every gate, not one gate
 
-There is no single choke point, and the round-1 draft was wrong to claim one.
-Every writer of an S3 object Content-Type, with the allowlist it enforces:
+There is no single choke point. Every writer of an S3 object Content-Type, with
+the allowlist it enforces:
 
 - `normalizeStoredMediaType` - inbound MMS mirror, deferred mirror job, inbound
-  email attachments. Widened by this change; closed allowlist.
+  email attachments. Widened by this change; closed allowlist via the resolver.
 - presigned-POST MMS uploads (`routes/mmsMedia.ts:78`, `isInlineMediaType`).
+- MMS transcode output (`routes/mmsMedia.ts:143`) - writes the transcoder's own
+  produced type, which `planMmsMedia` constrains to deliverable renditions.
 - presigned-POST email attachments (`routes/emailMedia.ts`, `isEmailAttachmentType`).
 - presigned-POST unit photos (`routes/units.ts:516,686`, `isImageMediaType`).
-- the seeder (`lib/seed/media.ts:121-128`) - writes literal types with no gate
-  at all, but writes only hardcoded dev fixtures.
+- call recordings (`routes/webhooks/voice.ts:1995`) - hardcoded `audio/mpeg`.
+- the seeder (`lib/seed/media.ts:121-128`) - literal types, dev fixtures only.
 - NEW: the backfill, which passes every recovered type through
   `normalizeStoredMediaType` and so cannot write a type the runtime would not.
 
-Each is a closed allowlist of non-active types. The invariant holds because
-every gate holds, not because one function guards them all.
+Each is a closed allowlist of non-active types, or a hardcoded constant. The
+invariant holds because every gate holds, not because one function guards them
+all.
 
 ### 7.2 Read side
 
-The inline branch still gates on `INLINE_MEDIA_TYPES`, unchanged. The
-declarable branch always sets `Content-Disposition: attachment`, which forces a
-download rather than a render even if a type ever reached it wrongly.
+The inline tier is still gated on `INLINE_MEDIA_TYPES`, now via
+`resolveMediaTier`; the set is unchanged and the matching change is analysed in
+5.1. The declarable tier always sets `Content-Disposition: attachment`, which
+forces a download rather than a render even if a type ever reached it wrongly.
 
 ### 7.3 Headers
 
@@ -410,20 +501,10 @@ through the same allowlist the runtime uses.
 
 ## 8. Mutation surfaces and readers of the corrected state
 
-WRITERS of an attachment content-type:
-
-1. `services/mediaMirror.ts` (inline mirror, both webhook and job callers)
-2. `jobs/mediaMirror.ts` (deferred rungs; appends via `annotateMessage`)
-3. `services/inboundEmail.ts:677` (inbound email attachments)
-4. `routes/webhooks/twilio.ts` `mirrorInboundMedia` (persists via `annotateMessage`)
-5. `repos/messagesRepo.ts` `append` / `annotateMessage` / `putMediaPointers`
-   (pointer rows)
-6. `lib/seed/media.ts:121-128` and `lib/seed/cast.ts:1210` (dev/e2e fixtures,
-   written with literal types)
-7. the three presigned-POST upload paths (7.1) - unchanged by this work
-8. NEW: `scripts/backfill-media-content-types.ts` (S3 + pointers + row)
-9. `services/sendMessage.ts` / `jobs/retrySend.ts` (OUTBOUND attachments -
-   unchanged; listed so a reviewer can confirm they are untouched)
+WRITERS of an attachment content-type: the eight listed in 7.1, plus
+`repos/messagesRepo.ts` `append` / `annotateMessage` / `putMediaPointers` for
+the pointer-row copy, plus `services/sendMessage.ts` / `jobs/retrySend.ts` for
+OUTBOUND attachments (unchanged; listed so a reviewer can confirm it).
 
 READERS:
 
@@ -449,35 +530,58 @@ READERS:
   are counted during the scan and excluded from the repair set. Tracked by
   `docs/issues/remove-media-s3-keys-legacy.md`.
 - EXISTING INBOUND EMAIL attachments: there is no Twilio media behind them and
-  the MIME source is long gone, so their stored type is UNRECOVERABLE by any
-  means. 6.1 fixes new ones; old ones keep `.bin` permanently. Counted
-  separately in the report so this is visible rather than inferred.
+  the MIME source is long gone, so their stored TYPE is UNRECOVERABLE by any
+  means. 6.1 fixes new ones. Old ones keep the opaque tier - but they do keep
+  their real filename, and 6.3's extension rule 2 is what lets `budget.xlsx`
+  still download as `budget.xlsx` rather than `budget.bin`.
+
+### 8.6 A serving change this spec does NOT scope away: outbound email attachments
+
+Outbound email attachments are stored by the presign/confirm path with types
+from `EMAIL_ATTACHMENT_TYPES` - `text/plain`, `text/csv`, docx, xlsx - and
+their S3 objects ALREADY carry those types. They are served by the SAME route.
+So they move from the opaque tier to the declarable tier the moment 6.2 lands,
+with no backfill and no other change.
+
+That is the intended behavior and an improvement, but it is a behavior change
+outside the reported bug, so it is named here rather than discovered later, and
+section 9 covers it with a test. It does not contradict non-goal 4, which
+excludes the SEND path; nothing about sending changes.
 
 ## 9. Testing
 
 Unit (app):
 
-- `mediaTypes`: the new set; `normalizeStoredMediaType` keeps declarable types
-  and still collapses `text/html`, `image/svg+xml`, XHTML, XML, unknown and
-  absent; ESSENCE matching accepts `text/plain; charset=utf-8` and still
-  refuses `text/html; charset=utf-8`; the canonical member is what comes back;
-  extension map total over both allowlists; active types map to `.bin`.
-- REGRESSION GUARD: `isInlineMediaType('video/mp4')` is false and the outbound
-  upload gate still refuses it (5.2).
+- `resolveMediaTier`: each tier; ESSENCE matching accepts
+  `text/plain; charset=utf-8` and `image/png; charset=x` and still refuses
+  `text/html; charset=utf-8`; the canonical member and its extension come back
+  together; unknown and absent are opaque.
+- `normalizeStoredMediaType` keeps declarable types and still collapses
+  `text/html`, `image/svg+xml`, XHTML, XML, unknown and absent.
+- REGRESSION GUARD: `isInlineMediaType('video/mp4')` is false, and
+  `isInlineMediaType('image/png; charset=x')` is STILL FALSE (it keeps exact
+  matching), and the outbound upload gate still refuses `video/mp4` (5.2).
 - Serve route: one test per tier asserting Content-Type, disposition and
-  filename TOGETHER; a stored filename contributes its stem but NEVER its
-  extension (`invoice.exe` on an opaque attachment downloads as `invoice.bin`);
-  a stored `attachment-0` is treated as absent and yields `attachment-1.<ext>`;
-  a filename carrying CRLF and quotes cannot inject a header; a non-ASCII stem
-  produces `filename*`; `nosniff` and CSP present on all three tiers.
-- Mirror: a `video/mp4` target stores `video/mp4`; a `text/html` target still
-  stores octet-stream.
+  filename TOGETHER; a stored filename contributes its stem but never its
+  extension when the tier is inline or declarable (`invoice.exe` typed
+  `video/mp4` downloads as `invoice.mp4`); an OPAQUE attachment named
+  `budget.xlsx` keeps `.xlsx` (6.3 rule 2) while one named `invoice.exe`
+  becomes `invoice.bin`; a stored `attachment-0` is treated as absent; a
+  dotfile stem falls through; a filename carrying CRLF and quotes cannot inject
+  a header; a non-ASCII stem produces `filename*`; `nosniff` and CSP present on
+  all three tiers.
+- OUTBOUND EMAIL ATTACHMENT (8.6): an `xlsx` attachment on an outbound email
+  message is served `application/vnd...sheet` + `attachment` + `.xlsx`.
+- Mirror: a `video/mp4` target stores `video/mp4`; `text/html` still stores
+  octet-stream.
 - Inbound email: a `.docx` attachment now stores its real type.
 - Backfill: the index comes from the s3Key, PROVEN with a compacted
-  attachments array whose position 0 is provider index 1; write order proven by
-  failing the row write and re-running to a correct result; idempotent second
-  run is a no-op; unparseable key, Twilio 404, missing `mediaUrls`, email rows,
-  legacy rows and a recovered active type all skip and count.
+  attachments array whose position 0 carries index 1; the per-message step 5
+  runs once for a two-attachment message; write order proven by failing the row
+  write and re-running to a correct result; a re-run over a repaired row is a
+  no-op while a row with an unrepairable attachment is re-queried; unparseable
+  key, Twilio 404, missing `mediaUrls`, email rows, legacy rows and a recovered
+  active type all skip and count.
 
 Dashboard: `image/heic` renders as a file link in BOTH `AttachmentGallery` and
 `MediaGallery`; `image/jpeg` still renders inline in both; email attachment
@@ -494,9 +598,11 @@ change as a broken guard):
   `content-disposition` is UNDEFINED on the inline path. The inline tier now
   sends `inline; filename=...` (6.2, rationale in 7.3), so these change from
   "absent" to "starts with inline".
-- The two attachment-label assertions moved by 6.4's file-link kind prefix:
-  `dashboard/src/routes/contact/Timeline.test.tsx:552` and
-  `Timeline.email.test.tsx:88,107`.
+- `dashboard/src/routes/contact/Timeline.test.tsx:555` is the PDF file-link
+  label. 6.4 keeps "PDF attachment N" deliberately, so this assertion must NOT
+  change - it is listed to stop a builder "fixing" it. `:552` is the image
+  `alt`, likewise unchanged by 6.4's exemption.
+- `Timeline.email.test.tsx:88,107` cover filename-labelled links, unchanged.
 
 ## 10. Ops
 
@@ -514,24 +620,30 @@ through before prod is started.
 Operator requirements, stated because the script runs under the OPERATOR's own
 credentials and not the EC2 instance role: Twilio API credentials for the
 target account, and `s3:GetObject` + `s3:PutObject` on that environment's media
-bucket (`CopyObject` needs BOTH). The account-ID guard the sibling ops scripts
-use is required - the default AWS credential chain resolves to the wrong
-account in this repo's environment.
+bucket (`CopyObject` needs BOTH). The `assertHousingChoiceAccount` guard from
+`scripts/lib/hcAws.mjs` is mandatory - the default AWS credential chain
+resolves to the wrong account in this environment.
+
+Note that `--dry-run` reads the live Twilio account once per candidate
+attachment (6.6). It is safe, but it is not free and it is not offline.
 
 ## 11. Risks
 
 - Twilio media retention: an old enough message may have no media left. The
-  backfill counts these and moves on; those attachments keep `.bin`. The
-  dry-run histogram tells us the real number before anything is written.
+  backfill counts these and moves on; those attachments keep the opaque tier.
+  The dry-run histogram tells us the real number before anything is written.
 - The recovered type is what the sending handset/carrier declared, so a
   mislabeled file stays mislabeled. Out of scope to detect; magic-byte sniffing
   was considered and rejected as unnecessary for this fix.
-- The media bucket has versioning ENABLED and no lifecycle rule at all
-  (`infra/modules/s3_media/main.tf:12-17`), so every in-place `CopyObject`
-  retains the wrongly-typed version indefinitely. Two consequences, one bad and
-  one good: storage grows by a full copy per repaired object, and the operation
-  is REVERSIBLE - the pre-backfill state remains addressable as a noncurrent
-  version, which is worth knowing for a change that mutates production objects.
+- REVERSIBILITY IS PARTIAL, and only for one of the three writes. The media
+  bucket has versioning ENABLED with no lifecycle rule at all
+  (`infra/modules/s3_media/main.tf:12-17`), so each `CopyObject` retains the
+  pre-backfill object as an addressable noncurrent version - recoverable, at
+  the cost of a full extra copy per repaired object, forever. The pointer-row
+  and message-row writes are DESTRUCTIVE OVERWRITES in DynamoDB with no version
+  history; nothing restores their prior `contentType` except re-deriving it.
+  Since the prior value was `application/octet-stream` by selection, that is a
+  cheap re-derivation, but it is not a rollback.
 - `CopyObject` changes ETag and LastModified. Nothing in the app keys off
   either.
 
@@ -540,12 +652,11 @@ account in this repo's environment.
 - FILED: `docs/issues/relay-forwards-undeliverable-media.md` (D3) - relay
   fan-out forwards media Twilio cannot carry, failing the whole leg including
   its body text.
+- AMEND IN THIS CHANGE: `docs/issues/media-serve-stored-xss.md:30-32` asserts
+  exact-string parameter behavior that 5.1 supersedes.
 - `routes/unitMediaServe.ts:65` has the same extensionless
   `filename="unit-media"` shape. Unit photos are image-only so the download
   branch is a rarely reached fallback; noted, not fixed here.
-- The extension map is now a third copy alongside `EMAIL_EXTENSIONS` and the
-  dashboard's mirrored raster set. Deliberate (non-goal 4); the new map's
-  comment points at the others.
 - INCIDENTAL: `routes/api.ts:23` imports `normalizeStoredMediaType` and never
   uses it - a pre-existing unused import. The implementer necessarily edits
   that import line, so the dead symbol is dropped in passing.

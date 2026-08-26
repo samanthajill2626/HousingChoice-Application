@@ -14,11 +14,25 @@ import { test } from '@playwright/test';
  * placement page" that was only ever a scenario running long.
  * See docs/issues/placement-detail-bundle-fetch-stall.md.
  *
- * WHY 90s. Measured, not guessed. Under a 1.6x machine load (28.9m and 29.6m
- * suites against a 17.9m idle baseline) the slowest scenario test ran 38.1s and
- * the pack sat at 23-38s. 90s leaves every one of them 2.4x headroom or better,
- * while staying short enough that a genuine hang still surfaces in well under
- * two minutes.
+ * WHY 100s. Measured, not guessed, across five pressure runs at 1.34x-1.96x a
+ * 17.9m idle baseline. The pack sits at 20-45s; the high-water mark is
+ * approval-and-move-in:164 (the nine-stage no-skip walk) at 62.6s under 1.90x.
+ *
+ * TODO(concurrent-capacity-budget-tail): 100s is NOT a comfortable multiple of
+ * that worst observation - it is ~1.6x, chosen deliberately over a roomier 150s
+ * because a budget long enough to never fire is also long enough to hide a real
+ * hang. THE COROLLARY IS A STANDING OBLIGATION: if any scenario test ever fails
+ * at ~100s, do NOT simply raise this number. That failure means either the
+ * sizing is genuinely too tight (in which case size it from the run's numbers,
+ * not by doubling) or - more likely, given the history below - something is
+ * actually hanging and the budget is the messenger. Four separate
+ * investigations already chased a "hung placement page" that was only a
+ * scenario running out of clock; the mirror-image mistake is to keep widening
+ * the budget until a real hang stops being visible. Read the failing test's
+ * duration against this constant BEFORE touching it.
+ *
+ * Also note :164 is not linear with load - it ran 34.4s at 1.96x and 62.6s at
+ * 1.90x - so treat any single observation as a sample, not a measurement.
  *
  * WHY A DIRECTORY BUDGET RATHER THAN PER-TEST `test.slow()`. That is what this
  * replaced, and it failed by attrition: the annotation landed wherever someone
@@ -32,7 +46,7 @@ import { test } from '@playwright/test';
  * by design, and a blanket raise only lengthens how long a real hang takes to
  * surface everywhere else. Keep the sizing where the long work actually is.
  */
-export const SCENARIO_TIMEOUT_MS = 90_000;
+export const SCENARIO_TIMEOUT_MS = 100_000;
 
 /**
  * Apply {@link SCENARIO_TIMEOUT_MS} to every test in the calling spec file.

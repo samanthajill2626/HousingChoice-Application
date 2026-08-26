@@ -397,7 +397,20 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
           const t = threads.find((x) => x.partyNumber === consented.phone);
           return t?.messages.some((m) => m.direction === 'outbound' && (m.body ?? '').includes(body)) ?? false;
         },
-        { timeout: 15_000 },
+        // 30s, not 15s: this observes a JOB, not a render. The send is deferred
+        // into the in-process queue (JOBS_QUEUE_URL is unset locally, so every
+        // handler runs on the app's own loop) before the leg reaches the fake
+        // thread store, and that latency is decided by the machine. 15s fired
+        // twice on this exact assertion under heavy suite load - 2026-08-25 at
+        // 1.96x and 2026-08-26 at 1.87x - each time with the test itself having
+        // used only ~20s of its 60s cap, i.e. an inner budget expiring while
+        // the test was nowhere near its ceiling. Matches the sizing already
+        // applied to manual-extraction-trigger's suggestion wait.
+        //
+        // NOT the same shape as relay-late-text-1to1-badge-not-visible, which
+        // fails at 1.1x-1.34x and is therefore a delivery bug rather than a
+        // budget - do not "fix" that one this way.
+        { timeout: 30_000 },
       )
       .toBe(true);
     const noConsentGotIt = (await listThreads(request))

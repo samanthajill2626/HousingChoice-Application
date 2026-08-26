@@ -665,10 +665,12 @@ EXHAUSTIVE matrix test - every `ReminderKind` x {address, no address} x every
 `TourType` composes without throwing. That test also closes the filed issue; say
 so in the handback.
 
-KEEP the two `confirmation` entries even though nothing arms them: a pending
-`confirmation` row may exist at cutover, and a missing entry is the failure above.
-Remove `confirmation` from `REMINDER_KINDS` only - the `no_show_checkin` pattern
-(`:197`).
+KEEP the two `confirmation` entries. In Phase A the rung ALSO KEEPS ARMING
+(section 2's ruling, restated in 9.4), so `REMINDER_KINDS` is NOT edited here.
+An earlier draft of this paragraph ordered that removal inline; it is Phase B's
+work and now lives only in 9.5. The entries stay either way: a pending
+`confirmation` row may exist at cutover, and a missing entry is the failure
+above.
 
 ### 9.2 `no_show_checkin` is NOT unchanged - it has two throw sites
 
@@ -879,7 +881,8 @@ New coverage this change owes:
 - The EXHAUSTIVE compose matrix from 9.1.
 - `tour.morning_of` composed with NO address ends cleanly - no trailing
   `Address is`, no literal `{where}`, no double space (6.4).
-- A pending `confirmation` row still composes after the rung stops arming.
+- A pending `confirmation` row still composes - in Phase A, where the rung is
+  still arming, and unchanged once Phase B stops it.
 - The new skip reason's operator label.
 
 e2e: `REMINDER_BODY_MARKERS` and the `timesFor` ladder mirror both need updating

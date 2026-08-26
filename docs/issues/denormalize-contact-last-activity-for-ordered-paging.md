@@ -67,6 +67,25 @@ HIDES one. That is a materially safer failure mode than the sparse-index one,
 so a best-effort bump that occasionally fails is tolerable in a way a missing
 attribute is not.
 
+**WHAT THIS DOES NOT BUY: paging correctness** (round-2 review C1, 2026-08-26 -
+recorded here because
+[`unknown-queue-status-flip-duplicates-across-pages`](unknown-queue-status-flip-duplicates-across-pages.md)
+named this work as its standing remedy on the premise that it "removes the
+mechanism entirely", which is false). A cursor into an ordering keyed on a
+mutable attribute is unstable no matter WHICH mutable attribute it is, and this
+change swaps an operator-written range key for a more frequently written one:
+`status` moves on a triage click, `last_activity_at` moves on every message.
+Under newest-first paging the DUPLICATE disappears (a bump only moves a row
+toward the head, past the cursor) but the invisible SKIP survives and gets more
+frequent - a row older than the cursor that receives a message jumps ahead of it
+and is served on no page. Closing that still needs a seen-set or a snapshot
+predicate, i.e. the same unbounded cursor that was rejected there.
+
+So the value proposition is ORDERING, not correctness. That is a defensible
+thing to buy - "a row that just got a new message is at the top, not missed" is
+the ordinary semantics of an activity feed - but whoever specs this must not
+plan on it closing that issue.
+
 **Open questions for whoever specs this:**
 
 - Do GROUP messages count as activity for a member contact, or only 1:1? The

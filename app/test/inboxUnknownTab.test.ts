@@ -68,12 +68,17 @@ function conv(
 function makeDeps(
   seed: Seed,
   calls: Calls = emptyCalls(),
-  logger?: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> },
+  logger?: {
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    /** Optional, because only the page-head thread-failure pins read it. */
+    error?: ReturnType<typeof vi.fn>;
+  },
   seams?: Pick<InboxRouterDeps, 'unknownQueueScanBudget' | 'unknownQueuePageSize'>,
 ): InboxRouterDeps {
   const log = logger ?? { info: vi.fn(), warn: vi.fn() };
   return {
-    logger: { ...log, error: vi.fn(), debug: vi.fn() } as never,
+    logger: { error: vi.fn(), debug: vi.fn(), ...log } as never,
     ...seams,
     conversationsRepo: {
       async getById(id: string) {
@@ -519,6 +524,87 @@ describe('filter=unknown - the contact-side read', () => {
     }
     expect([...seen].sort()).toEqual(['c-t1', 'c-t2', 'c-t3', 'c-t4']);
     expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('a thread read that fails AT THE PAGE HEAD is STEPPED OVER, not retried forever', async () => {
+    // F1 (fix wave 2, round-2 review N1). The stop-at-the-failed-row trade above
+    // is bounded ONLY when the request has already made progress. When the
+    // failure lands on the FIRST row this request consumes and NOTHING has been
+    // kept, `retryFrom` is still the position the client sent, so the answer is
+    // an empty page carrying the cursor it arrived with - every subsequent Load
+    // more repeats it, verbatim, forever. That is byte-identical to the shape
+    // readUnknownQueue THROWS to outlaw one file over ("a Load more that never
+    // advances and never ends", unknownQueue.ts's budget guard).
+    //
+    // So the retry is capped at ONE: the previous request already re-read this
+    // row, and the row is now DROPPED (an ERROR, not the deferral WARN) so the
+    // walk can move. Neither pin above can see this - one failure clears, the
+    // other has a kept row ahead of it.
+    const broken = queueContact('c-h1-broken', 'needs_review', 90, '2026-06-12T01:00:00.000Z');
+    const rest = [
+      queueContact('c-h2', 'needs_review', 91, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-h3', 'needs_review', 92, '2026-06-12T03:00:00.000Z'),
+    ];
+    const seed: Seed = {
+      contacts: [broken, ...rest].map((s) => s.contact),
+      conversations: [broken, ...rest].map((s) => s.conversation),
+      threadLookupErrorPhone: broken.contact.phone!,
+    };
+    const info = vi.fn();
+    const warn = vi.fn();
+    const error = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, emptyCalls(), { info, warn, error }),
+    );
+    // THE ROWS BEHIND THE BAD ROW SHIP. Before F1 this page was `[]`.
+    expect(page.rows.map((r) => r.contactId).sort()).toEqual(['c-h2', 'c-h3']);
+    // ...and the walk ENDS, rather than handing back the cursor it was given.
+    expect(page.nextCursor).toBeNull();
+    // THE LOG ESCALATES: a dropped row is an ERROR, and it is NOT the deferral
+    // WARN, because nothing is being deferred any more.
+    const errLine = error.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'));
+    expect(errLine?.[0]).toMatchObject({ contactId: 'c-h1-broken' });
+    expect(warn.mock.calls.filter((c) => String(c[1]).includes('thread read FAILED'))).toEqual([]);
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1 });
+  });
+
+  it('a page-head failure AFTER A BLOCK ROLL-OVER does not strand the whole later block', async () => {
+    // F1, the second unbounded shape. Page 1 fills inside `needs_review`, so
+    // page 2 resumes at a position whose first CONSUMED row is the first row of
+    // the `active` block. Before F1 that page came back empty with the cursor it
+    // was sent and every remaining `active` row was unreachable from the UI.
+    const seeds = [
+      queueContact('c-r1', 'needs_review', 95, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-r2', 'needs_review', 96, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-r3-broken', 'active', 97, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-r4', 'active', 98, '2026-06-12T04:00:00.000Z'),
+    ];
+    const seed: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+      threadLookupErrorPhone: seeds[2]!.contact.phone!,
+    };
+    const first = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(seed));
+    expect(first.rows.map((r) => r.contactId).sort()).toEqual(['c-r1', 'c-r2']);
+    expect(first.nextCursor).not.toBeNull();
+
+    // THE WHOLE WALK TERMINATES AND REACHES THE LIVE ROW BEHIND THE BAD ONE.
+    // The guard is the assertion: a cursor that never advances spins to it.
+    const seen = first.rows.map((r) => r.contactId!);
+    let cursor: string | null = first.nextCursor;
+    let pages = 0;
+    for (; pages < 8 && cursor !== null; pages += 1) {
+      const next: Awaited<ReturnType<typeof aggregateInbox>> = await aggregateInbox(
+        { filter: 'unknown', limit: 2, cursor },
+        makeDeps(seed),
+      );
+      seen.push(...next.rows.map((r) => r.contactId!));
+      cursor = next.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(seen.sort()).toEqual(['c-r1', 'c-r2', 'c-r4']);
   });
 
   it('class b: a contact whose only threads are closed or relay_group yields no row', async () => {

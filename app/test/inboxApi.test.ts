@@ -267,7 +267,14 @@ describe('GET /api/inbox (C8)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('400 on filter=unknown with any cursor (the unknown feed mints none)', async () => {
+  // RENAMED 2026-08-26 (fix wave 2, F6). The old name was "400 on
+  // filter=unknown with any cursor (the unknown feed mints none)", and BOTH
+  // claims died when the feed became paged: minting cursors is now that feed's
+  // whole purpose, and a valid `{q,b,k}` cursor returns 200 (the real-index
+  // paged walk in test/inbox.integration.test.ts). The assertion itself was
+  // always about a FOREIGN cursor - `{idx:0}` is the `all` feed's shape - so
+  // the test was passing under a name that told a grepper the opposite.
+  it('400 on filter=unknown with a FOREIGN cursor - a cursor minted by another feed is never Queried here', async () => {
     const { app } = makeWebhookHarness();
     const foreign = Buffer.from(JSON.stringify({ idx: 0 }), 'utf8').toString('base64url');
     const res = await auth(request(app).get(`/api/inbox?filter=unknown&cursor=${foreign}`));

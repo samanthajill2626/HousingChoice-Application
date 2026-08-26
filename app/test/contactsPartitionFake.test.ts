@@ -143,6 +143,18 @@ describe('listByTypeFromContacts', () => {
     ).toThrow(/status and contactId/);
   });
 
+  it('an exclusiveStartKey naming a DIFFERENT type THROWS - the hash key is not advisory', () => {
+    // N3 (round-2). A positional resume would seek by (status, contactId) and
+    // answer with rows for a key whose `type` names another partition; the
+    // service answers ValidationException. Measured round 1, case F.
+    const seed = [c({ contactId: 'a' }), c({ contactId: 'b' })];
+    expect(() =>
+      listByTypeFromContacts(seed, 'unknown', {
+        exclusiveStartKey: { type: 'tenant', status: 'needs_review', contactId: 'a' },
+      }),
+    ).toThrow(/does not name the queried partition/);
+  });
+
   it('the GSI is sparse: a status-less contact is not indexed at all', () => {
     const statusless: ContactItem = { contactId: 'no-status', type: 'unknown' };
     const seed = [statusless, c({ contactId: 'indexed' })];

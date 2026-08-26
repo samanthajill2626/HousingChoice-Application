@@ -1619,13 +1619,30 @@ export async function aggregateInbox(
     // counts a row no page in this session can show; `truncated` is the one
     // honest name for "we may disagree with the badge".
     if (unresolvedDrops > 0) truncated = true;
-    // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor -
-    // the dashboard's empty-state and Load-more gating both key on rows.length.
+    // INVARIANT (spec 4.5 step 2): an empty rows array implies a null cursor.
     // This is LOAD-BEARING for the budget branch above (which mints a cursor
     // unconditionally); for every other exit it is the defensive belt that
-    // keeps the invariant true if the loop ever grows another one. An empty
-    // truncated page keeps its error-state posture rather than offering a Load
-    // more the client has nothing to hang off.
+    // keeps the invariant true if the loop ever grows another one.
+    //
+    // ITS ORIGINAL REASON IS DEAD - READ THIS BEFORE DELETING THE LINE (fix
+    // wave 2, F3; round-2 blast-radius N3). It used to say the client "has
+    // nothing to hang a Load more off", because the dashboard nested Load more
+    // inside `rows.length > 0`. That limitation was REMOVED on 2026-08-26
+    // (dashboard Inbox.tsx now gates Load more on `hasMore` alone), so the
+    // stated justification no longer holds anywhere.
+    //
+    // WHAT IS TRUE NOW is a different thing this line was not written to guard:
+    // it is the ONLY reason the dashboard's early-end failure banner and a live
+    // Load more cannot appear together. That banner needs `serverRowCount === 0
+    // && truncated`; this line guarantees a zero-row unread page carries no
+    // cursor, so `hasMore` is false wherever the banner is true. Remove it on
+    // the strength of the obsolete reason and that unreviewed pairing ships the
+    // same day - along with the dead end the budget branch above argues against
+    // at length ("the only forward affordance left was Retry").
+    //
+    // KEPT UNCHANGED BY RULING, not by inertia: `unread` is a different filter
+    // from `unknown` with a different empty-page posture (error-state, not
+    // continue-here), and flipping it is a product decision nobody has taken.
     if (unreadRows.length === 0) unreadCursor = null;
 
     log.info(
@@ -1712,7 +1729,16 @@ export async function aggregateInbox(
      * walk still ended `nextCursor: null`. The row appeared on NO page while
      * this WARN called it "withheld from this page"; it was withheld from
      * everything, recoverable only by restarting the tab from page one.
+     *
+     * THE LOG LINE IS THE CALLER'S, not this helper's (fix wave 2, F1). Whether
+     * a failure is a DEFERRAL (the page stops and the next request re-reads the
+     * row) or a DROP (the row already had its retry and the walk steps over it)
+     * is decided one level up, and the level has to match the decision: WARN for
+     * the deferral, ERROR for the drop. This helper owns the counter and the
+     * discrimination; `lastThreadReadErr` carries the cause to whichever line
+     * the caller writes.
      */
+    let lastThreadReadErr: unknown;
     const resolveOpenThreads = async (
       contact: ContactItem,
     ): Promise<ConversationItem[] | undefined> => {
@@ -1722,10 +1748,7 @@ export async function aggregateInbox(
       } catch (err) {
         threadReadFailures += 1;
         dropped('unknownThreadReadFailed');
-        log.warn(
-          { err, contactId: contact.contactId },
-          'inbox: unknown-queue thread read FAILED - the page STOPS here and resumes AT this row',
-        );
+        lastThreadReadErr = err;
         return undefined;
       }
     };
@@ -1772,6 +1795,18 @@ export async function aggregateInbox(
      * real cursor.
      */
     let retryFrom: UnknownQueuePosition = resume ?? { block: 0 };
+    /**
+     * Has `retryFrom` MOVED past the position this request resumed from?
+     *
+     * THIS IS THE BOUND ON THE RETRY (fix wave 2, F1). `boundary = retryFrom`
+     * is only progress when this is true; while it is false the boundary IS the
+     * cursor the client sent, so answering with it asks the client to repeat
+     * the identical request - the never-advancing Load more `readUnknownQueue`
+     * throws to outlaw for the same reason (unknownQueue.ts, the `budget < 1`
+     * guard). Every assignment to `retryFrom` sets it, so it is exactly "some
+     * row was consumed".
+     */
+    let retryFromMoved = false;
     /** A thread read threw: the page ends here and this request stops. */
     let threadReadStopped = false;
     let remainingBudget = queueBudget;
@@ -1827,6 +1862,7 @@ export async function aggregateInbox(
         if (roleFromContact(contact) !== 'unknown') {
           dropped('unknownQueueRetyped');
           retryFrom = after;
+          retryFromMoved = true;
           continue;
         }
         // ONE ROW PER CONTACT, WITHIN THIS REQUEST (round-2 finding N5). It
@@ -1867,6 +1903,7 @@ export async function aggregateInbox(
         // docs/issues/unknown-queue-status-flip-duplicates-across-pages.md.
         if (emitted.has(contact.contactId)) {
           retryFrom = after;
+          retryFromMoved = true;
           continue;
         }
         const open = await resolveOpenThreads(contact);
@@ -1876,13 +1913,45 @@ export async function aggregateInbox(
           // request attempts it again; `after` would step over it, which is
           // what silently dropped it from the whole walk before.
           //
-          // THE TRADE, stated plainly: a PERMANENTLY failing row becomes a
-          // short page whose Load more does not advance - the walk visibly
-          // stalls at that row instead of quietly omitting it and reporting the
-          // queue as fully drained. VISIBLE-STUCK BEATS SILENT-LOSS, and it is
-          // the same posture the scan-budget exit already takes. The WARN and
-          // the `unknownThreadReadFailed` counter name the row, so a stall is
+          // ...BUT EXACTLY ONCE (fix wave 2, F1 - round-2 review N1). The
+          // original ruling called the consequence "a short page", which is the
+          // one case that does NOT happen at a PAGE HEAD. If the failure lands
+          // on the first row this request CONSUMES and nothing has been kept,
+          // `retryFrom` is still the position the client sent - so the answer is
+          // an empty page carrying the cursor it arrived with, and every Load
+          // more repeats it verbatim. Measured: a failure on row 1 of page 1
+          // renders the tab EMPTY forever; a failure on the first row after a
+          // block roll-over strands the entire later block.
+          //
+          // That shape is the one `readUnknownQueue` THROWS to outlaw a file
+          // over ("a Load more that never advances and never ends"), so the
+          // retry is capped at one. The previous request already re-read this
+          // row; step OVER it, and say so at ERROR rather than WARN, because
+          // the row is now being DROPPED and not deferred.
+          //
+          // (`keptContacts.length === 0` is implied by `!retryFromMoved` - a
+          // kept row either advances `retryFrom` or fills the page and breaks -
+          // and is stated anyway so the predicate reads as the rule it is.)
+          if (!retryFromMoved && keptContacts.length === 0) {
+            log.error(
+              { err: lastThreadReadErr, contactId: contact.contactId },
+              'inbox: unknown-queue thread read FAILED at the PAGE HEAD - the row is DROPPED and the walk steps over it',
+            );
+            retryFrom = after;
+            retryFromMoved = true;
+            continue;
+          }
+          // THE TRADE, stated plainly: a PERMANENTLY failing row costs one
+          // short page whose Load more re-reads it - the walk visibly pauses at
+          // that row instead of quietly omitting it and reporting the queue as
+          // fully drained. VISIBLE-STUCK BEATS SILENT-LOSS, and it is the same
+          // posture the scan-budget exit already takes. The WARN and the
+          // `unknownThreadReadFailed` counter name the row, so the pause is
           // diagnosable from the log line the very first time it happens.
+          log.warn(
+            { err: lastThreadReadErr, contactId: contact.contactId },
+            'inbox: unknown-queue thread read FAILED - the page STOPS here and resumes AT this row',
+          );
           boundary = retryFrom;
           threadReadStopped = true;
           break;
@@ -1894,6 +1963,7 @@ export async function aggregateInbox(
         if (maxConv === undefined) {
           dropped('unknownNoOpenThread');
           retryFrom = after;
+          retryFromMoved = true;
           continue;
         }
         emitted.add(contact.contactId);
@@ -1922,6 +1992,7 @@ export async function aggregateInbox(
           break;
         }
         retryFrom = after;
+        retryFromMoved = true;
       }
       if (threadReadStopped) break;
       if (filled) break;
@@ -1933,6 +2004,18 @@ export async function aggregateInbox(
       boundary = read.next;
       if (read.next === undefined) break;
       position = read.next;
+      // AND `retryFrom` MOVES WITH IT (fix wave 2, F7 - round-2 blast-radius
+      // N5). Reaching here means every row this read returned was consumed, so
+      // the reader's own resume point is a retry boundary too - by the same
+      // argument as `boundary` above: whatever sits between the last consumed
+      // row and `read.next` is residue the FilterExpression ate, which was never
+      // emitted and therefore cannot be duplicated by re-reading or lost by
+      // skipping. It matters most on a ZERO-ROW read (a whole fetch eaten by
+      // the soft-delete filter, the documented normal case for this partition):
+      // without this, a later thread-read failure resumed from the request's
+      // START and re-paid the entire residue walk on every Load more.
+      retryFrom = read.next;
+      retryFromMoved = true;
       if (read.budgetSpent || remainingBudget === 0) {
         // THE SCAN BUDGET RAN OUT - a SHORT PAGE, not a truncated one. The
         // rows found so far ship WITH the cursor we stopped at, so nothing is

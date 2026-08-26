@@ -96,8 +96,26 @@ one.
 2. **Denormalize `last_activity_at` onto the contact and page an
    activity-ordered GSI**
    ([`denormalize-contact-last-activity-for-ordered-paging`](denormalize-contact-last-activity-for-ordered-paging.md)).
-   The range key stops being an operator-written field, which removes the
-   mechanism entirely. This is the standing plan for this reader.
+   This is the standing plan for this reader, and it **does NOT remove the
+   mechanism** - an earlier version of this paragraph claimed it did, which is
+   corrected here (round-2 review C1, 2026-08-26). The mechanism is not "the
+   range key is operator-written", it is "the cursor is a position in an
+   ordering keyed on a MUTABLE attribute", and `last_activity_at` is mutated by
+   every inbound and outbound message on the contact's thread - for a queue of
+   unknown numbers, an unknown caller texting in again is the most common event
+   the system sees, and it needs no operator at all. What it buys and what it
+   costs:
+   - The DUPLICATE direction genuinely disappears: under newest-first paging an
+     activity bump only ever moves a row TOWARD the head, i.e. to positions the
+     cursor has already passed.
+   - The SKIP direction gets MORE frequent, not less. A row older than the
+     cursor that receives a message jumps ahead of the cursor and is served on
+     no page - the invisible half this issue argues is the worse one, now
+     triggered by any message rather than by a rare un-triage click.
+   - It still owes the same seen-set cost. Stable paging over a mutable sort key
+     needs a seen-set or a snapshot predicate either way, which is the unbounded
+     cursor rejected below.
+   So it buys ORDERING, not correctness. Judge it on that.
 3. **Accept it and keep it documented** (today's posture). The in-code comment
    at the `emitted` guard in `app/src/routes/inbox.ts` states both directions,
    both reachability conditions and the visible/invisible asymmetry, and points
@@ -108,3 +126,8 @@ one.
 being hypothetical. The count comes from
 `app/scripts/measure-unread-contact-coverage.ts --audit-triage-partition
 --no-status-narrow`.
+
+**This issue is NOT closed by option 2.** The defect follows whichever MUTABLE
+attribute is the paged ordering's range key - `status` today,
+`last_activity_at` after the denormalization - so read the corrected option 2
+above before marking it resolved on the strength of that work landing.

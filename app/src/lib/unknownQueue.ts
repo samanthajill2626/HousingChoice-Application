@@ -85,8 +85,26 @@ import type { ContactItem, ContactsRepo, ContactType } from '../repos/contactsRe
 export const UNKNOWN_QUEUE_PAGE_SIZE = 100;
 
 /**
- * Raw index rows ONE request may examine before it stops and hands back the
- * position it stopped at.
+ * Roughly how many raw index rows ONE request may examine before it stops and
+ * hands back the position it stopped at.
+ *
+ * ROUGHLY, AND IN BOTH DIRECTIONS - the accounting is deliberately loose and
+ * this number is not a hard ceiling (round-1 review A6, adjudicated as accepted
+ * 2026-08-26; the docblock used to state it as an exact bound):
+ *
+ *   * OVER-SPEND, up to `budget + pageSize - 1`. The budget check runs BEFORE
+ *     the Query, so a read sitting at `budget - 1` still issues one more page
+ *     and charges up to `pageSize` for it - 1099 against a stated 1000 at
+ *     today's constants.
+ *   * UNDER-CHARGE, up to `blocks.length * (pageSize - 1)` = 198. A page with
+ *     no LastEvaluatedKey ended its block, so it is charged `items.length` -
+ *     the count AFTER the soft-delete FilterExpression - and the rows the
+ *     filter ate are examined for free. One such page exists per block.
+ *
+ * Neither affects TERMINATION, which is what the budget exists for: the charge
+ * per page that has more behind it is exactly `pageSize` against a strictly
+ * decreasing budget. They are accepted rather than fixed because tightening
+ * them buys nothing at two orders of magnitude below the number.
  *
  * THIS IS A SCAN BUDGET, NOT A RESULT CAP, and the distinction is the whole
  * rework. Deciding whether a queue contact is KEPT costs a thread resolution

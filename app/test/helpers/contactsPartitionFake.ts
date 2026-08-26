@@ -147,6 +147,23 @@ export function listByTypeFromContacts(
   const startStatus = typeof startKey?.['status'] === 'string' ? startKey['status'] : undefined;
   let start = 0;
   if (startContactId !== undefined && startStatus !== undefined) {
+    // AND THE KEY MUST NAME THIS PARTITION (2026-08-26, round-2 review N3).
+    // `type` is the GSI's HASH key, so a key carrying a different one is a
+    // ValidationException at the service ("does not match the range key
+    // predicate", measured against DynamoDB Local) while a positional resume
+    // here would happily seek by (status, contactId) and answer with rows. No
+    // route can produce it today - decodeUnknownCursor enforces
+    // `key.type === block.type` - so this is the same residual-kindness class
+    // as the positionless fallback removed below, and it is removed for the
+    // same reason: this helper is the authority on partition semantics, and an
+    // authority that is kinder than the service teaches the wrong lesson.
+    if (startKey?.['type'] !== type) {
+      throw new Error(
+        `contactsPartitionFake: exclusiveStartKey type ${JSON.stringify(startKey?.['type'])} ` +
+          `does not name the queried partition '${type}' - the GSI hash key is \`type\`, and the ` +
+          'service rejects a mismatch rather than resuming positionally',
+      );
+    }
     start = partition.findIndex((c) => {
       const s = String(c.status);
       if (s !== startStatus) return s > startStatus;

@@ -133,12 +133,52 @@ describe('Inbox', () => {
   // couldn't load your inbox.", an error banner with no server statement behind
   // it. The gate is `serverRowCount` - a server claim judged against a server
   // quantity - so the two states stay exact complements.
+  //
+  // `hasMore: true` IS PART OF THE FIXTURE (fix wave 2, F2). It was left at
+  // `baseState`'s default `false`, and that alone is why this pin stayed green
+  // while fix wave 1 gated the empty COPY on `hasMore` - the state it is named
+  // for carries a cursor (a page that FILLED mints one), so the pin could not
+  // see the regression it exists to catch. A pin that cannot fail is worse than
+  // no pin.
   it('a truncated page whose rows were all marked read is caught up, NOT an error', () => {
-    state = baseState({ status: 'ready', rows: [], truncated: true, serverRowCount: 3 });
+    state = baseState({
+      status: 'ready',
+      rows: [],
+      truncated: true,
+      serverRowCount: 3,
+      hasMore: true,
+    });
     renderInbox('/inbox?filter=unread');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
     expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
+  });
+
+  // F2, THE ORDINARY END OF A TRIAGE SESSION - and the state both round-2
+  // reviewers found independently. The server filled a page of 30 unread and
+  // minted a cursor because it FILLED, not because it stopped early. The
+  // operator marks all 30 read, which is what the tab is for, and `useInbox`
+  // narrows them out of `rows`. Gated on `hasMore` alone the empty copy became
+  // "This search stopped early to stay fast" - false on both halves, and a
+  // successful session ended by telling the operator the app had degraded.
+  //
+  // THE GATE IS A SERVER QUANTITY, `serverRowCount === 0 && hasMore`, which is
+  // the same doctrine the truncation notice and the failure banner above
+  // already carry: a claim about the SERVER page is never judged against
+  // `rows`. The Load more STAYS - there really are more unread behind it.
+  it('says all caught up - NOT "stopped early" - after the operator clears a full unread page', () => {
+    state = baseState({
+      status: 'ready',
+      rows: [],
+      truncated: false,
+      serverRowCount: 30,
+      hasMore: true,
+    });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
+    expect(screen.queryByText('Nothing on this page yet')).toBeNull();
+    expect(screen.queryByText(/stopped early/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument();
   });
 
   it('renders rows and a Load more button when there is another page', () => {

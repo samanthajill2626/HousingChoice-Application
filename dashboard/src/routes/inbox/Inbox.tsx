@@ -26,11 +26,28 @@ export function Inbox(): React.JSX.Element {
   const [params, setParams] = useSearchParams();
   const filter = filterFromParam(params.get('filter'));
   const inbox = useInbox(filter);
-  // THE EMPTY COPY DEPENDS ON WHETHER THERE IS MORE TO FETCH, not on the filter
-  // alone. A page that came back empty WITH a cursor has not proved the list is
+  // THE EMPTY COPY DEPENDS ON WHETHER THE SERVER PAGE CAME BACK EMPTY WITH MORE
+  // BEHIND IT, not on the filter alone. Such a page has not proved the list is
   // empty - it stopped early - so it gets the "nothing on this page yet" copy
   // that sits sensibly next to the live Load more below. See emptyMoreCopy.
-  const empty = inbox.hasMore ? emptyMoreCopy() : emptyCopy(filter);
+  //
+  // BOTH HALVES ARE SERVER STATEMENTS, and the first one is load-bearing (fix
+  // wave 2, F2 - found independently by both round-2 reviewers). Gated on
+  // `hasMore` ALONE this said "This search stopped early to stay fast" at the
+  // end of an ORDINARY unread triage session: the server filled a page of 30
+  // and minted a cursor BECAUSE it filled, the operator marked all 30 read, and
+  // `useInbox` narrows read rows out of `rows` (that narrowing is the whole
+  // point of the tab). The list went empty for a CLIENT reason and selected a
+  // SERVER-flavoured sentence that was false on both halves. `serverRowCount`
+  // is the same server quantity the truncation notice and the failure banner
+  // below are gated on, for the same reason - see those two comments.
+  //
+  // The client-emptied-with-more-behind state therefore keeps `emptyCopy`
+  // ("You're all caught up") ALONGSIDE a live Load more. That pairing is
+  // deliberate and reviewed: the button is an improvement (there really are
+  // more unread behind it), and inventing a third string for the state is a
+  // copy decision nobody has taken.
+  const empty = inbox.serverRowCount === 0 && inbox.hasMore ? emptyMoreCopy() : emptyCopy(filter);
   // A26: the count comes from the hook's server-page tally, NOT from a filter
   // over `inbox.rows`. `rows` is the DISPLAYED list - already narrowed by the
   // Unread filter and already patched by the optimistic mark-read - so counting
@@ -235,9 +252,18 @@ export function Inbox(): React.JSX.Element {
           green.
 
           It can now render ALONGSIDE the empty state (see `empty` above, which
-          switches its copy for exactly that pairing) and, on `filter=unread`,
-          alongside the early-end failure banner - a cursor and a truncation are
-          independent server statements, and offering the continuation does not
+          switches its copy for exactly that pairing).
+
+          IT CANNOT RENDER ALONGSIDE THE EARLY-END FAILURE BANNER, and the
+          earlier claim here that it could was wrong (fix wave 2, round-2
+          blast-radius N3). That banner needs `serverRowCount === 0 &&
+          truncated`, and the server nulls the unread cursor on a zero-row page
+          (app/src/routes/inbox.ts, the unread branch's empty-page invariant), so
+          `hasMore` is false wherever the banner is true. The pairing is
+          server-unreachable TODAY, by one line - not by anything on this
+          client - and that line now says so. If it ever changes, this element
+          and that banner render together; a cursor and a truncation are
+          independent server statements, and offering the continuation would not
           make the banner less true. */}
       {inbox.status === 'ready' && inbox.hasMore ? (
         <button

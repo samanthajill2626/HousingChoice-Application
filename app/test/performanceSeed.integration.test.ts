@@ -451,5 +451,19 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
       Key: { conversationId: leanNativeConversationId },
     }));
     expect(leanConversation.Item).toBeUndefined();
-  }, 300_000);
+    // 600s, raised from 300s on 2026-08-26. This is the heaviest test in the
+    // repo: it seeds and re-seeds a full performance dataset, and it takes
+    // 112.2s on an IDLE box (measured, `npm test` gate run the same day; the
+    // whole file is 193.3s across 12 tests). 300s was only 2.7x that clean
+    // figure, and it timed out at 300020ms while four e2e stacks and a CPU load
+    // generator shared the machine - so the DynamoDB Local container, whose
+    // throughput this test is entirely bound by, was the contended resource.
+    //
+    // 600s is ~5.3x the clean duration, which is deliberately generous BECAUSE
+    // the bound here is a SHARED container rather than this process: its cost
+    // rises with every concurrent lane and every accumulated database, neither
+    // of which this test controls. The sibling at :376 runs 65.6s clean and
+    // keeps its 300s (4.6x) - it has not failed, and there is no reason to
+    // widen a budget that is holding.
+  }, 600_000);
 });

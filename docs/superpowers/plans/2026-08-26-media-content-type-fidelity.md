@@ -25,8 +25,15 @@ spec governs. Design review: R1-R4, 52 findings, adjudications preserved at
 ## Global Constraints
 
 - ASCII-only in every new or touched line: source, comments, test names, log
-  strings, docs. The two dashboard components already contain non-ASCII emoji
-  glyphs; do not add more and do not "fix" the existing ones.
+  strings, docs. `Timeline.tsx` already does this correctly - its paperclip and
+  page glyphs are `String.fromCodePoint(0x1f4ce)` escapes (`:604-608`), so
+  follow that pattern for any glyph you add. `MediaGallery.tsx:56` has LITERAL
+  emoji; leave them exactly as they are (pre-existing, and only added lines must
+  be ASCII) and do not add more.
+- The TEST files in this plan need non-ASCII VALUES on purpose (fixtures that
+  prove the non-ASCII filename path). BUILD them with `String.fromCharCode`,
+  as the tasks below do and as `Timeline.tsx:604-608` already does for its
+  glyphs - never paste an accented character into a source file.
 - Never use `git add -A`. Stage explicit paths only. Read bare `git status`
   before every commit and check `.git/MERGE_HEAD`.
 - Every commit gets `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
@@ -128,6 +135,23 @@ describe('resolveMediaTier', () => {
     expect(resolveMediaTier('application/x-made-up').tier).toBe('opaque');
     expect(resolveMediaTier(undefined).tier).toBe('opaque');
     expect(resolveMediaTier('').tier).toBe('opaque');
+  });
+});
+
+describe('the emission map covers every allowlisted type', () => {
+  it('never falls through to .bin for a type we claim to serve truthfully', () => {
+    // GUARDRAIL: resolveMediaTier ends in `?? '.bin'`, so a type added to
+    // either allowlist without an extension would be served truthfully AND
+    // named .bin - silently, and only noticed by an operator.
+    for (const type of [...INLINE_MEDIA_TYPES, ...DECLARABLE_MEDIA_TYPES]) {
+      expect(resolveMediaTier(type).ext).not.toBe('.bin');
+    }
+  });
+
+  it('emits only extensions the accepted set also recognises', () => {
+    for (const type of [...INLINE_MEDIA_TYPES, ...DECLARABLE_MEDIA_TYPES]) {
+      expect(isAcceptedExtension(resolveMediaTier(type).ext)).toBe(true);
+    }
   });
 });
 
@@ -362,50 +386,61 @@ Expected: PASS.
 behavior of both. Neither is covered by Step 1's tests, which only exercise the
 helper directly. Add one test per caller.
 
-To `app/test/mediaMirror.test.ts`, using the file's existing `mirrorMediaSet`
-harness:
+To `app/test/mediaMirror.test.ts`, using the file's OWN existing helpers -
+`flakyAdapter(failures, err)` returns `{ calls, urls, adapter }` and
+`storeSpy()` returns `{ puts, mediaStore }`, where `puts` is an array of
+`{ key, contentType }` (`app/test/mediaMirror.test.ts:23-50`). Copy the call
+shape from the first test in the `mirrorMediaSet` describe block:
 
 ```ts
 it('stores a declarable sender type truthfully', async () => {
   // The reported bug: a relay member's video was stored as octet-stream and
   // its real type lost forever the moment the object landed in S3.
-  const out = await mirrorMediaSet(deps, {
-    conversationId: 'c1',
-    messageSid: 'MM1',
-    targets: [{ index: 0, url: 'https://api.twilio.com/x', contentType: 'video/mp4' }],
-    delaysMs: [],
-  });
+  const f = flakyAdapter(0, () => new Error('never'));
+  const s = storeSpy();
+  const out = await mirrorMediaSet(
+    { adapter: f.adapter, mediaStore: s.mediaStore, logger: silent, sleep: async () => {} },
+    {
+      conversationId: 'conv-1',
+      messageSid: 'MM9',
+      targets: [{ index: 0, url: 'https://api.twilio.com/m/0', contentType: 'video/mp4' }],
+      delaysMs: INLINE_MIRROR_DELAYS_MS,
+    },
+  );
   expect(out.attachments[0]?.attachment.contentType).toBe('video/mp4');
-  expect(putSpy).toHaveBeenCalledWith('media/c1/MM1/0', expect.anything(), 'video/mp4');
+  expect(s.puts).toEqual([{ key: 'media/conv-1/MM9/0', contentType: 'video/mp4' }]);
 });
 
 it('still collapses a script-capable sender type at rest', async () => {
-  const out = await mirrorMediaSet(deps, {
-    conversationId: 'c1',
-    messageSid: 'MM2',
-    targets: [{ index: 0, url: 'https://api.twilio.com/x', contentType: 'text/html' }],
-    delaysMs: [],
-  });
-  expect(out.attachments[0]?.attachment.contentType).toBe('application/octet-stream');
-});
-```
-
-To `app/test/inboundEmail.test.ts`, using its existing inbound-email harness:
-
-```ts
-it('stores an inbound docx attachment with its real type', async () => {
-  // Same defect, different channel: an inbound .docx collapsed to
-  // octet-stream exactly like an MMS video did.
-  const stored = await ingestWithAttachment({
-    filename: 'lease.docx',
-    contentType:
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  });
-  expect(stored.media_attachments?.[0]?.contentType).toBe(
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  const f = flakyAdapter(0, () => new Error('never'));
+  const s = storeSpy();
+  const out = await mirrorMediaSet(
+    { adapter: f.adapter, mediaStore: s.mediaStore, logger: silent, sleep: async () => {} },
+    {
+      conversationId: 'conv-1',
+      messageSid: 'MM10',
+      targets: [{ index: 0, url: 'https://api.twilio.com/m/0', contentType: 'text/html' }],
+      delaysMs: INLINE_MIRROR_DELAYS_MS,
+    },
   );
+  expect(out.attachments[0]?.attachment.contentType).toBe('application/octet-stream');
+  expect(s.puts[0]?.contentType).toBe('application/octet-stream');
 });
 ```
+
+To `app/test/inboundEmail.test.ts`: this file's harness is larger and its shape
+is NOT restated here because it is easy to get wrong from memory. Before
+writing, read an existing test in that file that asserts on a stored
+attachment and copy its setup and its assertion path verbatim - the persisted
+attachments are reached through the harness's recorded append, not through a
+re-read of the row. Then assert that an inbound `.docx` part is stored as
+`application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+rather than `application/octet-stream`, and that an inbound `.html` part is
+still stored as `application/octet-stream`.
+
+If no existing test in that file asserts on a stored attachment's contentType,
+say so in the handback and cover this caller with the mirror tests above plus
+the Task 3 route tests instead of inventing a harness.
 
 Run: `cd app && npx vitest run test/mediaTypes.test.ts test/mediaMirror.test.ts test/inboundEmail.test.ts test/mmsMedia.test.ts`
 Expected: PASS. If an EXISTING mirror or inbound-email assertion says a
@@ -433,8 +468,11 @@ Message: `feat(media): add the declarable tier and one resolveMediaTier`
 **Interfaces:**
 - Consumes: `ResolvedMediaType`, `isAcceptedExtension` (Task 1).
 - Produces:
-  - `buildMediaFilename(storedFilename: string | undefined, index: number, resolved: ResolvedMediaType): string`
-  - `contentDispositionHeader(kind: 'inline' | 'attachment', filename: string): string`
+  - `interface MediaFilename { ascii: string; utf8?: string | undefined }`
+  - `buildMediaFilenameParts(storedFilename: string | undefined, index: number, resolved: ResolvedMediaType): MediaFilename`
+  - `buildMediaFilename(...same args...): string` - convenience returning
+    `.ascii`, used by the tests and by any caller that does not need the pair
+  - `contentDispositionHeader(kind: 'inline' | 'attachment', name: MediaFilename): string`
 
 `index` is the ZERO-BASED attachment index from the URL; the function emits a
 one-based name.
@@ -447,6 +485,13 @@ Create `app/test/mediaFilename.test.ts`:
 import { describe, expect, it } from 'vitest';
 import { buildMediaFilename, contentDispositionHeader } from '../src/lib/mediaFilename.js';
 import { resolveMediaTier } from '../src/lib/mediaTypes.js';
+
+// Non-ASCII fixtures are BUILT, never written as literals: the repo's
+// ASCII-only rule covers test files, and a unicode escape in a markdown plan
+// does not survive copy-paste reliably. String.fromCharCode is unambiguous at
+// every layer - the same reason Timeline.tsx:604-608 builds its glyphs.
+const E_ACUTE = String.fromCharCode(0xe9);
+const NON_ASCII_STEM = `bud${E_ACUTE}get`;
 
 const MP4 = resolveMediaTier('video/mp4');
 const XLSX = resolveMediaTier(
@@ -490,7 +535,7 @@ describe('buildMediaFilename - the extension is always ours', () => {
   });
 });
 
-describe('buildMediaFilename - splitting and sanitizing', () => {
+describe('buildMediaFilename - sanitizing happens BEFORE splitting', () => {
   it('splits at the LAST dot and keeps interior dots in the stem', () => {
     expect(buildMediaFilename('data.tar.csv', 0, OPAQUE)).toBe('data.tar.csv');
     expect(buildMediaFilename('data.tar.csv', 0, MP4)).toBe('data.tar.mp4');
@@ -505,9 +550,20 @@ describe('buildMediaFilename - splitting and sanitizing', () => {
     expect(buildMediaFilename('report...', 0, MP4)).toBe('report.mp4');
   });
 
-  it('strips path separators, traversal and control characters', () => {
+  it('removes path separators and traversal BEFORE looking for the extension', () => {
+    // ORDER IS LOAD-BEARING. Splitting first would find the dot at index 4 of
+    // `../../etc/passwd` and hand `./etc/passwd` to the extension logic.
     expect(buildMediaFilename('../../etc/passwd', 0, MP4)).toBe('etcpasswd.mp4');
+    expect(buildMediaFilename('C:\\Users\\x\\secret.txt', 0, MP4)).toBe('CUsersxsecret.mp4');
+  });
+
+  it('turns control characters into a space rather than deleting them', () => {
+    // Deleting would silently join two words: `a\r\nb` must not become `ab`.
     expect(buildMediaFilename('a\r\nb', 0, MP4)).toBe('a b.mp4');
+    expect(buildMediaFilename('a\tb', 0, MP4)).toBe('a b.mp4');
+  });
+
+  it('removes quotes and backslashes entirely', () => {
     expect(buildMediaFilename('he said "hi"', 0, MP4)).toBe('he said hi.mp4');
   });
 
@@ -520,30 +576,77 @@ describe('buildMediaFilename - splitting and sanitizing', () => {
     expect(out.endsWith('.xlsx')).toBe(true);
   });
 
+  it('re-strips a trailing dot EXPOSED BY the cap', () => {
+    // The stem is 110 chars with a dot at position 99, so the cap turns an
+    // INTERIOR dot into a trailing one. Stripping only before the cap emits
+    // `aaa...a..mp4`.
+    const name = `${'a'.repeat(99)}.${'c'.repeat(10)}.txt`;
+    expect(buildMediaFilename(name, 0, MP4)).toBe(`${'a'.repeat(99)}.mp4`);
+  });
+
   it('replaces non-ASCII rather than dropping it', () => {
     // Dropping empties a wholly non-ASCII stem and yields filename=".xlsx".
-    expect(buildMediaFilename('bud\u00e9get', 0, XLSX)).toBe('bud_get.xlsx');
-    expect(buildMediaFilename('\u4f60\u597d', 0, XLSX)).toBe('attachment-1.xlsx');
+    expect(buildMediaFilename(NON_ASCII_STEM, 0, XLSX)).toBe('bud_get.xlsx');
+  });
+
+  it('falls through when nothing usable survives sanitizing', () => {
+    // An all-placeholder stem is not a name. Without this rule a wholly
+    // non-ASCII filename downloads as `__.xlsx`.
+    const allNonAscii = String.fromCharCode(0x4f60, 0x597d);
+    expect(buildMediaFilename(allNonAscii, 0, XLSX)).toBe('attachment-1.xlsx');
+    expect(buildMediaFilename('///', 0, MP4)).toBe('attachment-1.mp4');
+    expect(buildMediaFilename('   ', 0, MP4)).toBe('attachment-1.mp4');
+  });
+});
+
+describe('buildMediaFilename - the RFC 5987 companion', () => {
+  it('reports no utf8 form when the stem was already ASCII', () => {
+    expect(buildMediaFilenameParts('budget.xlsx', 0, XLSX)).toEqual({
+      ascii: 'budget.xlsx',
+      utf8: undefined,
+    });
+  });
+
+  it('reports both forms when the stem carried non-ASCII', () => {
+    expect(buildMediaFilenameParts(NON_ASCII_STEM, 0, XLSX)).toEqual({
+      ascii: 'bud_get.xlsx',
+      utf8: `${NON_ASCII_STEM}.xlsx`,
+    });
   });
 });
 
 describe('contentDispositionHeader', () => {
   it('emits a plain ASCII filename parameter', () => {
-    expect(contentDispositionHeader('attachment', 'budget.xlsx')).toBe(
+    expect(contentDispositionHeader('attachment', { ascii: 'budget.xlsx' })).toBe(
       'attachment; filename="budget.xlsx"',
     );
   });
 
   it('supports the inline kind', () => {
-    expect(contentDispositionHeader('inline', 'photo.jpg')).toBe(
+    expect(contentDispositionHeader('inline', { ascii: 'photo.jpg' })).toBe(
       'inline; filename="photo.jpg"',
     );
+  });
+
+  it('adds filename* only when a utf8 form differs', () => {
+    expect(
+      contentDispositionHeader('attachment', {
+        ascii: 'bud_get.xlsx',
+        utf8: `${NON_ASCII_STEM}.xlsx`,
+      }),
+    ).toBe("attachment; filename=\"bud_get.xlsx\"; filename*=UTF-8''bud%C3%A9get.xlsx");
+  });
+
+  it('percent-encodes the RFC 5987 characters encodeURIComponent leaves bare', () => {
+    expect(
+      contentDispositionHeader('attachment', { ascii: 'a_b.txt', utf8: "a'(b)*!.txt" }),
+    ).toContain("filename*=UTF-8''a%27%28b%29%2A%21.txt");
   });
 
   it('cannot be injected into via a quote or CRLF', () => {
     // buildMediaFilename has already removed these; this is defence in depth
     // at the point the header string is actually assembled.
-    const header = contentDispositionHeader('attachment', 'a"b\r\nX-Evil: 1');
+    const header = contentDispositionHeader('attachment', { ascii: 'a"b\r\nX-Evil: 1' });
     expect(header).not.toContain('\r');
     expect(header).not.toContain('\n');
     expect(header.match(/"/g)).toHaveLength(2);
@@ -551,13 +654,11 @@ describe('contentDispositionHeader', () => {
 });
 ```
 
-NOTE ON `filename*`: the spec allows an RFC 5987 parameter alongside the ASCII
-one. This plan deliberately does NOT implement it. `buildMediaFilename`
-transliterates non-ASCII to `_`, which is a complete and safe answer on its
-own, and there is no RFC 5987 implementation in the repo to copy - so adding
-one is new surface with its own encoding-bug risk for a cosmetic gain on a
-population (non-ASCII inbound email attachment names) that has never been
-reported. Flag this to the reviewer as a deliberate spec deviation.
+RFC 5987 IS IMPLEMENTED HERE, reversing an earlier draft of this plan that
+dropped it. Spec 6.3 mandates it and spec 9 tests it, and the ASCII
+transliteration alone leaves a non-ASCII name as `attachment-1.xlsx` for the
+operator - correct and safe, but a real loss of information for a name we
+actually hold. It is about eight lines over `encodeURIComponent`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -590,36 +691,65 @@ const MAX_STEM = 100;
 /** emailMime.ts synthesizes this for a nameless MIME part; it is not a name. */
 const SYNTHESIZED = /^attachment-\d+$/;
 
-/**
- * Split a stored filename at the LAST dot: everything before is the stem,
- * the dot and everything after is the extension. Interior dots stay in the
- * stem (`data.tar.csv` -> `data.tar` + `.csv`). A name whose only dot is
- * leading (`.env`) is all extension and has an EMPTY stem.
- */
-function splitName(name: string): { stem: string; ext: string } {
-  const dot = name.lastIndexOf('.');
-  if (dot <= 0) return { stem: name, ext: '' };
-  return { stem: name.slice(0, dot), ext: name.slice(dot) };
+/** An ASCII name for `filename=`, plus the original for `filename*` when they
+ *  differ. */
+export interface MediaFilename {
+  ascii: string;
+  utf8?: string | undefined;
 }
 
 /**
- * Order matters. Every verb REMOVES the matched characters - none of them
- * rejects the whole name. The cap runs LAST so it can never re-expose a
- * sequence an earlier rule removed.
+ * SANITIZE FIRST, THEN SPLIT. The order is load-bearing and is the single
+ * easiest thing to get wrong here: splitting first finds the dot at index 4 of
+ * `../../etc/passwd` and hands `./etc/passwd` to the extension logic. Removing
+ * the separators and traversal first leaves `etcpasswd`, which has no
+ * extension at all - the correct reading.
+ *
+ * Every rule REMOVES or REPLACES matched characters; none rejects the whole
+ * name. Control characters become a SPACE rather than vanishing, so `a\r\nb`
+ * is `a b` and not the silently-joined `ab`.
  */
-function sanitizeStem(raw: string): string {
+function sanitizeName(raw: string): string {
   let s = raw;
-  s = s.replace(/[\r\n\0"\\]/g, '');
-  s = s.replace(/[/\\]/g, '');
+  s = s.replace(/[\r\n\t\0]/g, ' ');
+  s = s.replace(/["\\]/g, '');
+  s = s.replace(/\//g, '');
+  // Windows-reserved characters. A name we hand to an operator's browser has
+  // to be a legal filename on their machine, and `:` in particular survives
+  // every other rule here.
+  s = s.replace(/[<>:|?*]/g, '');
   s = s.replace(/\.\./g, '');
-  // Replace, never drop: dropping empties a wholly non-ASCII stem, and an
-  // empty ASCII stem would emit filename=".xlsx".
-  s = s.replace(/[^\x20-\x7e]/g, '_');
   s = s.replace(/\s+/g, ' ').trim();
-  // Makes "the stem never ends in a dot" TRUE rather than assumed - without
-  // it `report.` yields `report..bin`.
-  s = s.replace(/\.+$/, '');
-  return s.slice(0, MAX_STEM);
+  return s;
+}
+
+/**
+ * Split a SANITIZED name at the LAST dot: everything before is the stem, the
+ * dot and everything after is the extension. Interior dots stay in the stem
+ * (`data.tar.csv` -> `data.tar` + `.csv`). A name whose only dot is LEADING
+ * (`.env`) is all extension and has an EMPTY stem - which is why the `dot > 0`
+ * test is strict.
+ */
+function splitName(name: string): { stem: string; ext: string } {
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return { stem: name, ext: '' };
+  if (dot === 0) return { stem: '', ext: name };
+  return { stem: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+/** True when nothing a human would recognise as a name survived sanitizing:
+ *  empty, only separators/underscores/spaces, or emailMime's placeholder. */
+function isUnusableStem(stem: string): boolean {
+  return stem.length === 0 || /^[_\s]+$/.test(stem) || SYNTHESIZED.test(stem);
+}
+
+/** RFC 5987 ext-value. encodeURIComponent leaves five characters bare that the
+ *  grammar reserves, so they are escaped explicitly. */
+function rfc5987(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*!]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 }
 
 /**
@@ -627,35 +757,70 @@ function sanitizeStem(raw: string): string {
  * message, given its resolved type. The emitted name is one-based to match the
  * "Attachment N" the dashboard shows for the same attachment.
  */
+export function buildMediaFilenameParts(
+  storedFilename: string | undefined,
+  index: number,
+  resolved: ResolvedMediaType,
+): MediaFilename {
+  const cleaned = typeof storedFilename === 'string' ? sanitizeName(storedFilename) : '';
+  const stored = cleaned.length > 0 ? splitName(cleaned) : undefined;
+
+  // Trailing dots are stripped BEFORE the cap and AGAIN after it: the cap can
+  // turn an interior dot into a trailing one, which would emit `name..mp4`.
+  let stem = (stored?.stem ?? '').replace(/\.+$/, '').slice(0, MAX_STEM).replace(/\.+$/, '');
+
+  // Replace, never drop: dropping empties a wholly non-ASCII stem, and an
+  // empty ASCII stem would emit filename=".xlsx".
+  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_');
+  const hadNonAscii = asciiStem !== stem;
+
+  if (isUnusableStem(asciiStem)) {
+    stem = `attachment-${index + 1}`;
+    return { ascii: `${stem}${extFor(resolved, stored)}`, utf8: undefined };
+  }
+
+  const ext = extFor(resolved, stored);
+  return {
+    ascii: `${asciiStem}${ext}`,
+    ...(hadNonAscii && { utf8: `${stem}${ext}` }),
+  };
+}
+
+/**
+ * Inline and declarable: the type is known, so the extension is ours.
+ * Opaque: the type is unrecoverable, so a stored extension we RECOGNISE is
+ * better information than `.bin` - a membership test against our closed set,
+ * never a passthrough.
+ */
+function extFor(
+  resolved: ResolvedMediaType,
+  stored: { stem: string; ext: string } | undefined,
+): string {
+  if (resolved.tier === 'opaque' && stored !== undefined && isAcceptedExtension(stored.ext)) {
+    return stored.ext.toLowerCase();
+  }
+  return resolved.ext;
+}
+
+/** The ASCII name alone - what most callers and every test want. */
 export function buildMediaFilename(
   storedFilename: string | undefined,
   index: number,
   resolved: ResolvedMediaType,
 ): string {
-  const stored = typeof storedFilename === 'string' ? splitName(storedFilename) : undefined;
-  const rawStem = stored ? sanitizeStem(stored.stem) : '';
-  const usable = rawStem.length > 0 && !SYNTHESIZED.test(rawStem);
-  const stem = usable ? rawStem : `attachment-${index + 1}`;
-
-  // Inline and declarable: the type is known, so the extension is ours.
-  // Opaque: the type is unrecoverable, so a stored extension we RECOGNISE is
-  // better information than `.bin` - a membership test against our closed set,
-  // never a passthrough.
-  let ext = resolved.ext;
-  if (resolved.tier === 'opaque' && stored !== undefined && isAcceptedExtension(stored.ext)) {
-    ext = stored.ext.toLowerCase();
-  }
-  return `${stem}${ext}`;
+  return buildMediaFilenameParts(storedFilename, index, resolved).ascii;
 }
 
 /** Assemble the header value. Defence in depth: strips anything a future
- *  caller might pass that buildMediaFilename would already have removed. */
+ *  caller might pass that the builder would already have removed. */
 export function contentDispositionHeader(
   kind: 'inline' | 'attachment',
-  filename: string,
+  name: MediaFilename,
 ): string {
-  const safe = filename.replace(/[\r\n\0"\\]/g, '');
-  return `${kind}; filename="${safe}"`;
+  const safe = name.ascii.replace(/[\r\n\0"\\]/g, '');
+  const base = `${kind}; filename="${safe}"`;
+  if (name.utf8 === undefined || name.utf8 === name.ascii) return base;
+  return `${base}; filename*=UTF-8''${rfc5987(name.utf8)}`;
 }
 ```
 
@@ -682,84 +847,139 @@ Message: `feat(media): pure download-filename builder with an owned extension`
 **Files:**
 - Modify: `app/src/routes/api.ts:2283-2298` (the media-serve header block) and
   its import at `:23`
-- Test: `app/test/mmsMedia.test.ts`, `app/test/apiRoutes.test.ts`
+- Test: `app/test/apiRoutes.test.ts` (ALL new cases go here), and update three
+  existing assertions in `app/test/mmsMedia.test.ts` + `app/test/apiRoutes.test.ts`
 
 **Interfaces:**
-- Consumes: `resolveMediaTier` (Task 1), `buildMediaFilename` +
+- Consumes: `resolveMediaTier` (Task 1), `buildMediaFilenameParts` +
   `contentDispositionHeader` (Task 2).
 - Produces: no new exports.
 
+WHY apiRoutes.test.ts AND NOT mmsMedia.test.ts: `makeMediaApp`
+(`app/test/apiRoutes.test.ts:600-632`) injects BOTH the message record and the
+store's returned `contentType` directly, so a test can state the stored type
+and a stored filename independently. `mmsMedia.test.ts` drives the webhook,
+which NORMALIZES the type on the way in - so a "we still refuse text/html at
+READ time" test written there would pass without ever exercising the read-side
+gate, because the write side already collapsed it. That would be a test that
+proves nothing while looking like it proves the security property.
+
 - [ ] **Step 1: Write the failing tests**
 
-Add to `app/test/mmsMedia.test.ts`, following the file's existing harness
-setup for a mirrored attachment (reuse whatever helper the neighbouring tests
-use to seed a message + a stored object; do not invent a new one):
+Add to the `GET /api/messages/:providerSid/media/:idx` describe block in
+`app/test/apiRoutes.test.ts`. `makeMediaApp` already takes the message record,
+so a stored filename is expressed through `media_attachments`:
 
 ```ts
-it('serves a declarable type truthfully, as a download, with a real extension', async () => {
-  // The reported bug: a relay member's video downloaded as an untyped,
-  // extensionless blob the OS could not open.
-  const res = await getMedia({ storedContentType: 'video/mp4' });
-  expect(res.status).toBe(200);
-  expect(res.headers['content-type']).toBe('video/mp4');
-  expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.mp4"');
-  expect(res.headers['x-content-type-options']).toBe('nosniff');
-  expect(res.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
-});
+  function mediaMessage(attachment: Record<string, unknown>) {
+    return {
+      conversationId: 'c1',
+      tsMsgId: '2026-08-01T00:00:00.000Z#MM1',
+      provider_sid: 'MM1',
+      media_attachments: [{ s3Key: 'media/c1/MM1/0', ...attachment }],
+    };
+  }
 
-it('still forces an unknown type to an opaque download', async () => {
-  const res = await getMedia({ storedContentType: 'application/x-made-up' });
-  expect(res.headers['content-type']).toBe('application/octet-stream');
-  expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.bin"');
-});
-
-it('still refuses to render a script-capable stored type', async () => {
-  // The stored-XSS guard. A legacy object written before the write-side
-  // normalizer existed can still carry text/html at rest.
-  const res = await getMedia({ storedContentType: 'text/html' });
-  expect(res.headers['content-type']).toBe('application/octet-stream');
-  expect(res.headers['content-disposition']).toMatch(/^attachment/);
-});
-
-it('names an inline attachment without forcing a download', async () => {
-  const res = await getMedia({ storedContentType: 'image/png' });
-  expect(res.headers['content-type']).toBe('image/png');
-  expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.png"');
-});
-
-it('prefers a stored filename stem but never its extension', async () => {
-  const res = await getMedia({ storedContentType: 'video/mp4', filename: 'invoice.exe' });
-  expect(res.headers['content-disposition']).toBe('attachment; filename="invoice.mp4"');
-});
-
-it('keeps a recognised stored extension when the type is unrecoverable', async () => {
-  // Historical inbound email: octet-stream at rest, real name still present.
-  const res = await getMedia({
-    storedContentType: 'application/octet-stream',
-    filename: 'budget.xlsx',
+  it('serves a declarable type truthfully, as a download, with a real extension', async () => {
+    // The reported bug: a relay member's video downloaded as an untyped,
+    // extensionless blob the OS could not open.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4' }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('video/mp4');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.mp4"');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
   });
-  expect(res.headers['content-disposition']).toBe('attachment; filename="budget.xlsx"');
-});
 
-it('serves an OUTBOUND email attachment on the declarable tier', async () => {
-  // Not the reported bug, but the same route: outbound email attachments are
-  // already stored as their real type, so they change tier the moment this
-  // lands. Spec section 8.6.
-  const res = await getMedia({
-    storedContentType:
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    filename: 'Q3.xlsx',
+  it('still forces an unknown stored type to an opaque download', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/x-made-up' }),
+      object: { contentType: 'application/x-made-up' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toBe('attachment; filename="attachment-1.bin"');
   });
-  expect(res.headers['content-type']).toBe(
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  );
-  expect(res.headers['content-disposition']).toBe('attachment; filename="Q3.xlsx"');
-});
+
+  it('refuses to render a script-capable type stored on the OBJECT', async () => {
+    // The stored-XSS guard, exercised where it actually lives. An object
+    // mirrored before the write-side normalizer existed can still carry
+    // text/html at rest, which is the population this gate is for - so the
+    // OBJECT's type is text/html here even though no write path would produce
+    // it today.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/octet-stream' }),
+      object: { contentType: 'text/html' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('application/octet-stream');
+    expect(res.headers['content-disposition']).toMatch(/^attachment/);
+  });
+
+  it('names an inline attachment without forcing a download', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'image/png' }),
+      object: { contentType: 'image/png' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe('image/png');
+    expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.png"');
+  });
+
+  it('takes a stored filename stem but never its extension', async () => {
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4', filename: 'invoice.exe' }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="invoice.mp4"');
+  });
+
+  it('keeps a recognised stored extension when the type is unrecoverable', async () => {
+    // Historical inbound email: octet-stream at rest, real name still present.
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'application/octet-stream', filename: 'budget.xlsx' }),
+      object: { contentType: 'application/octet-stream' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="budget.xlsx"');
+  });
+
+  it('serves an OUTBOUND email attachment on the declarable tier', async () => {
+    // Not the reported bug, but the same route: outbound email attachments are
+    // already stored as their real type, so they change tier the moment this
+    // lands with no backfill at all. Spec section 8.6.
+    const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: xlsx, filename: 'Q3.xlsx' }),
+      object: { contentType: xlsx },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-type']).toBe(xlsx);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="Q3.xlsx"');
+  });
+
+  it('emits filename* for a non-ASCII stored name', async () => {
+    // Built, not written as a literal - the ASCII-only source rule.
+    const stored = `bud${String.fromCharCode(0xe9)}get.mov`;
+    const { app } = makeMediaApp({
+      message: mediaMessage({ contentType: 'video/mp4', filename: stored }),
+      object: { contentType: 'video/mp4' },
+    });
+    const res = await get(app, 'MM1', 0);
+    expect(res.headers['content-disposition']).toBe(
+      "attachment; filename=\"bud_get.mp4\"; filename*=UTF-8''bud%C3%A9get.mp4",
+    );
+  });
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cd app && npx vitest run test/mmsMedia.test.ts`
+Run: `cd app && npx vitest run test/apiRoutes.test.ts`
 Expected: FAIL - the declarable case returns `application/octet-stream`.
 
 - [ ] **Step 3: Implement**
@@ -770,7 +990,7 @@ pre-existing unused import; you are editing this line anyway):
 
 ```ts
 import { isTwilioDeliverableType, resolveMediaTier } from '../lib/mediaTypes.js';
-import { buildMediaFilename, contentDispositionHeader } from '../lib/mediaFilename.js';
+import { buildMediaFilenameParts, contentDispositionHeader } from '../lib/mediaFilename.js';
 ```
 
 `isInlineMediaType` also leaves this import if nothing else in the file uses it
@@ -792,7 +1012,7 @@ REPLACE the header block at `:2283-2298`:
     // at rest, and that population is why this gate exists at all.
     // Belt-and-braces regardless of tier: nosniff + a restrictive CSP.
     const resolved = resolveMediaTier(object.contentType);
-    const filename = buildMediaFilename(attachments[idx]?.filename, idx, resolved);
+    const filename = buildMediaFilenameParts(attachments[idx]?.filename, idx, resolved);
     res.setHeader('Content-Type', resolved.canonical);
     res.setHeader(
       'Content-Disposition',
@@ -807,8 +1027,8 @@ Update the `log.info` a few lines below to log `tier: resolved.tier` instead of
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cd app && npx vitest run test/mmsMedia.test.ts`
-Expected: PASS except the three pre-existing assertions in Step 5.
+Run: `cd app && npx vitest run test/apiRoutes.test.ts`
+Expected: PASS except the pre-existing assertions in Step 5.
 
 - [ ] **Step 5: Update the three assertions the inline tier deliberately moves**
 
@@ -844,12 +1064,18 @@ Message: `fix(media): serve inbound media with its true type and a real filename
 - Modify: `dashboard/src/routes/contact/MediaGallery.tsx:36`
 - Test: `dashboard/src/routes/contact/Timeline.test.tsx`,
   `dashboard/src/routes/contact/media.test.ts`
+- Create: `dashboard/src/routes/contact/MediaGallery.test.tsx` if no test file
+  for that component exists (check first)
 
 **Interfaces:**
 - Consumes: nothing from Tasks 1-3 (the dashboard cannot import from `app/`).
 - Produces, all from `media.ts`:
   - `isInlineRenderable(contentType: string): boolean`
   - `mediaKindWord(contentType: string): string | undefined`
+  - `isDeclarableMediaType(contentType: string): boolean` - the third mirrored
+    item spec 6.4 requires. It is NOT redundant with `mediaKindWord`: a caller
+    asking "is this a known typed attachment" should not have to infer it from
+    a label lookup returning a truthy string.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1004,6 +1230,13 @@ export function isInlineRenderable(contentType: string): boolean {
 export function mediaKindWord(contentType: string): string | undefined {
   return KIND_WORDS.get(essenceOf(contentType));
 }
+
+/** True when the server will serve this type truthfully (declarable tier).
+ *  Every declarable type has a kind word, so this shares the map - but callers
+ *  asking a yes/no question get a yes/no answer rather than a label. */
+export function isDeclarableMediaType(contentType: string): boolean {
+  return KIND_WORDS.has(essenceOf(contentType));
+}
 ```
 
 - [ ] **Step 4: Implement the two components**
@@ -1049,6 +1282,25 @@ The `<img>` call site passes `att.contentType` too but its `isPdf` stays
 to be an image, and `mediaKindWord` returns undefined for the four raster
 types anyway.
 
+- [ ] **Step 4b: Cover MediaGallery as a COMPONENT, not only through media.ts**
+
+Spec 9 requires the HEIC/JPEG behavior proven in BOTH galleries. Task 4's
+helper tests prove the predicate; they do not prove `MediaGallery` calls it.
+Add (creating the file if there is none), following whatever render helper the
+neighbouring `dashboard/src/routes/contact/*.test.tsx` files use:
+
+```tsx
+it('renders a HEIC gallery item as a file tile, not an img', () => {
+  render(<MediaGallery media={[{ key: 'a:0', src: '/x', contentType: 'image/heic', at: T }]} />);
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+it('still renders a jpeg gallery item as an img', () => {
+  render(<MediaGallery media={[{ key: 'a:0', src: '/x', contentType: 'image/jpeg', at: T }]} />);
+  expect(screen.getByRole('img')).toBeInTheDocument();
+});
+```
+
 - [ ] **Step 5: Run the dashboard suite**
 
 Run: `cd dashboard && npx vitest run src/routes/contact/`
@@ -1061,7 +1313,7 @@ rule has been applied too widely - fix the rule, not the assertion.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dashboard/src/routes/contact/media.ts dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/MediaGallery.tsx dashboard/src/routes/contact/media.test.ts dashboard/src/routes/contact/Timeline.test.tsx
+git add dashboard/src/routes/contact/media.ts dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/MediaGallery.tsx dashboard/src/routes/contact/media.test.ts dashboard/src/routes/contact/Timeline.test.tsx dashboard/src/routes/contact/MediaGallery.test.tsx
 git commit
 ```
 
@@ -1085,30 +1337,70 @@ Message: `fix(dashboard): branch both galleries on renderable types, not image/*
 
 - [ ] **Step 1: Write the failing tests**
 
-For `MediaStore` (add to `app/test/mediaStore.test.ts`, using the file's
-existing MinIO/localstack harness):
+THERE IS NO MinIO ROUND-TRIP HARNESS. `app/test/mediaStore.test.ts` is
+hermetic - it asserts factory gating and command SHAPES against a fake `send`
+(see its header comment: "The real S3/MinIO streaming path is exercised in the
+e2e harness"). Do not invent a live-bucket harness here; assert the command,
+which is the part that can be wrong.
+
+Add to `app/test/mediaStore.test.ts`, matching the file's existing fake-`send`
+style:
 
 ```ts
-it('rewrites an object Content-Type in place and preserves the bytes', async () => {
-  await store.put('media/c1/MM1/0', Readable.from(Buffer.from('hello')), 'application/octet-stream');
+it('setContentType issues a same-key CopyObject that REPLACES the metadata', async () => {
+  const sent: unknown[] = [];
+  const store = new S3MediaStore({
+    client: { async send(cmd: unknown) { sent.push(cmd); return {}; } } as unknown as S3Client,
+    bucket: 'b',
+  });
   await store.setContentType('media/c1/MM1/0', 'video/mp4');
-  const head = await store.head('media/c1/MM1/0');
-  expect(head?.contentType).toBe('video/mp4');
-  const bytes = await store.getBytes('media/c1/MM1/0');
-  expect(bytes?.toString()).toBe('hello');
-});
-
-it('is idempotent', async () => {
-  await store.put('media/c1/MM1/1', Readable.from(Buffer.from('x')), 'application/octet-stream');
-  await store.setContentType('media/c1/MM1/1', 'video/mp4');
-  await store.setContentType('media/c1/MM1/1', 'video/mp4');
-  expect((await store.head('media/c1/MM1/1'))?.contentType).toBe('video/mp4');
+  const input = (sent[0] as { input: Record<string, unknown> }).input;
+  expect(input).toMatchObject({
+    Bucket: 'b',
+    Key: 'media/c1/MM1/0',
+    CopySource: 'b/media/c1/MM1/0',
+    ContentType: 'video/mp4',
+    // Without REPLACE, S3 COPIES the old Content-Type and the call is a no-op
+    // that looks like a success - the single most likely way to ship this
+    // broken.
+    MetadataDirective: 'REPLACE',
+  });
 });
 ```
 
-For the messaging adapter, assert the console driver returns `undefined` and
-the Twilio driver maps a 404 to `undefined` rather than throwing, following
-whatever mocking style that test file already uses for `getMediaStream`.
+Construct `S3MediaStore` the way the file's other tests do - read them first;
+the constructor signature above is illustrative, not verified.
+
+For the messaging adapter, add tests in whichever file already exercises
+`TwilioMessagingDriver` with an injected `client` (find it with
+`grep -rln "TwilioMessagingDriver" app/test`), covering three cases:
+
+```ts
+it('reads the content type off a callable messages resource', async () => {
+  const fetch = vi.fn().mockResolvedValue({ contentType: 'video/mp4' });
+  const messages = Object.assign(
+    (_sid: string) => ({ media: (_m: string) => ({ fetch }) }),
+    { create: vi.fn() },
+  );
+  const driver = makeDriver({ client: { messages } });
+  expect(await driver.getMediaContentType('MM1', 'ME1')).toBe('video/mp4');
+});
+
+it('returns undefined when Twilio no longer has the media', async () => {
+  const fetch = vi.fn().mockRejectedValue(Object.assign(new Error('gone'), { status: 404 }));
+  // ...same callable shape...
+  expect(await driver.getMediaContentType('MM1', 'ME1')).toBeUndefined();
+});
+
+it('returns undefined against a message-only fake rather than throwing', async () => {
+  // Every existing fake supplies a plain object with only `create`. This path
+  // must degrade, not crash, or one new method breaks six unrelated suites.
+  const driver = makeDriver({ client: { messages: { create: vi.fn() } } });
+  expect(await driver.getMediaContentType('MM1', 'ME1')).toBeUndefined();
+});
+```
+
+And that the console driver returns `undefined`.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1141,6 +1433,11 @@ And in the S3 implementation, alongside the existing `put`:
         new CopyObjectCommand({
           Bucket: bucket,
           Key: key,
+          // CopySource is a URL PATH, so a key containing characters that are
+          // special in a path would need encoding. Every key this method is
+          // called with is machine-minted (media/<uuid>/<SID>/<int>), so plain
+          // interpolation is correct today - encode if that ever stops being
+          // true.
           CopySource: `${bucket}/${key}`,
           ContentType: contentType,
           MetadataDirective: 'REPLACE',
@@ -1168,17 +1465,46 @@ beside `getMediaStream`:
   getMediaContentType(messageSid: string, mediaSid: string): Promise<string | undefined>;
 ```
 
-Twilio driver:
+Twilio driver. THE SEAM IS NOT CALLABLE, so `this.client.messages(sid)` does
+NOT compile: `TwilioClientLike.messages` is declared as a plain object with
+only `create` (`app/src/adapters/messaging.ts:390-399`), because every injected
+fake supplies an object literal. The real SDK's `messages` IS callable - the
+interface just models less than the real object.
+
+Do NOT widen `messages` to a call signature: that breaks every message-only
+fake in the repo for one new method. Assert the narrow callable view at the ONE
+call site that needs it, and discriminate at runtime, which also makes the
+degradation testable:
 
 ```ts
+/**
+ * The callable shape the REAL Twilio SDK exposes for per-message
+ * sub-resources. TwilioClientLike models only what our fakes implement
+ * (`messages.create`), so this narrower view is asserted here rather than
+ * widening the seam - the same reason `calls` is optional on that interface.
+ */
+interface MessageMediaResource {
+  messages(messageSid: string): {
+    media(mediaSid: string): { fetch(): Promise<{ contentType?: string | null }> };
+  };
+}
+
   async getMediaContentType(messageSid: string, mediaSid: string): Promise<string | undefined> {
+    // A message-only fake has a plain object here, not a function. Degrade
+    // rather than crash: one new method must not break unrelated suites.
+    if (typeof (this.client as { messages?: unknown }).messages !== 'function') return undefined;
+    const client = this.client as unknown as MessageMediaResource;
     try {
-      const media = await this.client.messages(messageSid).media(mediaSid).fetch();
+      const media = await client.messages(messageSid).media(mediaSid).fetch();
       return typeof media.contentType === 'string' ? media.contentType : undefined;
     } catch (err) {
-      // 20404 / HTTP 404: the media is gone (retention, deletion). Not an
-      // error for the backfill - it counts it and moves on.
-      if ((err as { status?: number }).status === 404) return undefined;
+      // The media is gone (retention, deletion). Not an error for the
+      // backfill - it counts it and moves on. Twilio surfaces this as HTTP 404
+      // with code 20404; check BOTH, because the repo has already been bitten
+      // by assuming one shape (see the note at
+      // app/src/services/groupConversations.ts:708-716).
+      const e = err as { status?: number; code?: number };
+      if (e.status === 404 || e.code === 20404) return undefined;
       throw err;
     }
   }
@@ -1211,7 +1537,9 @@ Run `npm run typecheck` again until clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/src/adapters/messaging.ts app/src/adapters/mediaStore.ts app/test/
+# Explicit paths only - never `git add app/test/` or any other directory.
+# List each file typecheck made you touch.
+git add app/src/adapters/messaging.ts app/src/adapters/mediaStore.ts app/test/mediaStore.test.ts <each-touched-test-file>
 git commit
 ```
 
@@ -1224,9 +1552,10 @@ Message: `feat(adapters): media content-type read + in-place S3 type rewrite`
 **Files:**
 - Create: `app/scripts/backfill-media-content-types.ts`
 - Create: `app/test/backfillMediaContentTypes.test.ts`
-- Modify: `package.json` (root scripts block - add
-  `"backfill:media-content-types": "tsx app/scripts/backfill-media-content-types.ts"`,
-  matching how `backfill:media-pointers` is declared)
+
+NO npm SCRIPT. There is no `backfill:*` script in any package.json - the
+RUNBOOK invokes every backfill as `npx tsx app/scripts/<name>.ts --dry-run`
+(see `RUNBOOK.md:257,260`). Follow that; do not add one for this script alone.
 
 **Interfaces:**
 - Consumes: `resolveMediaTier` / `normalizeStoredMediaType` (Task 1),
@@ -1247,8 +1576,13 @@ Start with these shared fixtures and harness so no test below is elided:
 import { describe, expect, it, vi } from 'vitest';
 import { backfillMediaContentTypes } from '../scripts/backfill-media-content-types.js';
 
-const URL0 = 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME_ZERO';
-const URL1 = 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME_ONE';
+// REAL-SHAPED SIDs: `ME` + 32 hex. An underscore-and-letters placeholder like
+// `ME_ZERO` cannot match the parser's own regex and would redden most of this
+// file while looking like a logic bug.
+const ME0 = 'ME00000000000000000000000000000000';
+const ME1 = 'ME11111111111111111111111111111111';
+const URL0 = `https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/${ME0}`;
+const URL1 = `https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/${ME1}`;
 
 /** An inbound MMS row with `n` octet-stream attachments, keys index 0..n-1. */
 function inboundRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1321,7 +1655,18 @@ describe('backfillMediaContentTypes', () => {
       ],
     });
     const { getMediaContentType } = await run({ rows: [row] });
-    expect(getMediaContentType).toHaveBeenCalledWith('MM1', 'ME_ONE');
+    expect(getMediaContentType).toHaveBeenCalledWith('MM1', ME1);
+  });
+
+  it('skips an attachment already carrying a real type', async () => {
+    // The per-attachment predicate. Without it a re-run re-queries Twilio for
+    // every attachment on a partially repaired row.
+    const row = inboundRow({
+      media_attachments: [{ s3Key: 'media/c1/MM1/0', contentType: 'video/mp4' }],
+    });
+    const { result, getMediaContentType } = await run({ rows: [row] });
+    expect(result.eligible).toBe(0);
+    expect(getMediaContentType).not.toHaveBeenCalled();
   });
 
   it('writes S3, then pointers, then the row - the predicate-clearing write LAST', async () => {
@@ -1425,16 +1770,39 @@ Create `app/scripts/backfill-media-content-types.ts`. Structure, in order:
 
 1. Module docblock: what it repairs, why the write order is what it is, that
    `--dry-run` still READS Twilio, and that it is human-run per the RUNBOOK.
-2. `export interface BackfillResult` with every counter the spec's reporting
-   list names: `rowsScanned`, `eligible`, `recovered: Record<string, number>`,
-   `skippedUnparseableKey`, `skippedNoUrl`, `skippedTwilio404`,
-   `skippedStillOpaque`, `skippedEmailRow`, `skippedLegacyRow`, `written`,
-   `vendorCalls`.
+2. `export interface BackfillResult` with every counter, EACH WITH ITS
+   SEMANTICS IN A COMMENT because an operator reads these to decide whether to
+   apply:
+   - `rowsScanned` - message rows returned by the scan, before any filtering
+   - `eligible` - ATTACHMENTS that passed the full candidate predicate
+   - `recovered: Record<string, number>` - canonical type -> count, the
+     histogram
+   - `written` - attachments whose repair COMMITTED, which means their
+     message's row write succeeded. An attachment whose S3 copy landed but
+     whose row write then failed is NOT counted: it is still octet-stream in
+     the row, so the next run re-selects it.
+   - `skippedUnparseableKey`, `skippedNoUrl`, `skippedTwilio404`,
+     `skippedThrottled`, `skippedStillOpaque`, `skippedEmailRow`,
+     `skippedLegacyRow`
+   - `vendorCalls` - Twilio reads performed, INCLUDING on a dry run
+
+   `skippedThrottled` is separate from `skippedTwilio404` on purpose:
+   throttling is transient and means "run it again", retention loss is
+   permanent and means "these are gone". Folding them together corrupts the
+   one number the go/no-go decision turns on.
 3. `parseMediaIndexFromKey(s3Key: string): number | undefined` - matches
    `^media/[^/]+/[^/]+/(\d+)$` and returns the group as a number. Anything else
    is undefined; NEVER guess.
+
+   NOTE ON WHAT THAT INDEX IS: it is the position in the ROW'S STORED
+   `mediaUrls` array, not Twilio's own `MediaUrl{i}` numbering.
+   `parseInboundMediaUrls` (`app/src/routes/webhooks/twilio.ts:440-448`) skips
+   absent/empty entries, so the two can differ - and it is the correct index to
+   use precisely because the s3Key and the stored `mediaUrls` derive from the
+   same compacted list.
 4. `parseMediaSid(url: string): string | undefined` - matches
-   `/Media/(ME[0-9a-f]+)` case-insensitively.
+   `/\/Media\/(ME[0-9a-fA-F]{32})/`. A real Twilio SID is `ME` + 32 hex; a
+   looser pattern silently accepts junk.
 5. The paged `ScanCommand` loop, filtering
    `attribute_exists(media_attachments) OR attribute_exists(media_s3_keys)`
    exactly as `backfill-media-pointers.ts` does, then applying the
@@ -1443,28 +1811,71 @@ Create `app/scripts/backfill-media-content-types.ts`. Structure, in order:
 6. Per row: skip + count legacy rows (`media_s3_keys` with no
    `media_attachments`), non-inbound rows, and rows with no `mediaUrls`
    (inbound EMAIL - count as `skippedEmailRow`).
-7. Per attachment: parse the index, parse the MediaSid, call
-   `getMediaContentType` (increment `vendorCalls`), normalize, skip if still
-   opaque, else `setContentType` and stage the corrected attachment.
+7. Per attachment, skipping any whose stored `contentType` is NOT
+   `application/octet-stream` (a partially repaired row must not re-query
+   Twilio for the attachments already fixed): parse the index, parse the
+   MediaSid, call `getMediaContentType` (increment `vendorCalls`), normalize,
+   skip if still opaque, else - ONLY WHEN NOT `dryRun` - `setContentType` on
+   that attachment's object, and stage the corrected attachment either way so
+   the histogram is complete on a dry run.
+
+   `setContentType` MUST be inside the `dryRun` guard. It is the one call in
+   this script that mutates the production bucket, and a dry run that mutates
+   anything makes the whole "dry run first" ops sequence a lie.
 8. Per row, ONLY if at least one attachment changed and not `dryRun`:
    `putMediaPointers(conversationId, tsMsgId, merged)` and THEN
-   `annotateMessage(conversationId, tsMsgId, { mediaAttachments: merged })`.
-9. Bounded concurrency of 4 over attachments within a page, with a retry on a
-   Twilio 429 (sleep 1s, 2s, 4s, then give up and count the attachment as
-   `skippedTwilio404`). Keep it simple: a small `for` loop with a counter is
-   fine - do not add a dependency.
+   `annotateMessage(conversationId, tsMsgId, { mediaAttachments: merged })`,
+   inside a try/catch. On failure log the error, do NOT increment `written`
+   for that row's attachments, and CONTINUE to the next row - one bad row must
+   not abort a long ops run, and the row still says octet-stream so a re-run
+   repairs it.
+
+   `merged` IS THE SAME ARRAY IN THE SAME ORDER as the row's existing
+   `media_attachments`, with only the `contentType` of repaired entries
+   changed. Positional identity is load-bearing twice over: pointer sort keys
+   are built from the array position (`mediaPointerSk`), and the dashboard
+   addresses bytes as `/media/:idx` where `idx` IS that position. Build it with
+   `attachments.map(...)` - never filter, never reorder, never append.
+9. Bounded concurrency of 4 over the attachments of one page, with a retry on
+   a Twilio 429 (sleep 1s, 2s, 4s, then give up and count the attachment as
+   `skippedThrottled`). Implement it as a simple index-cursor worker pool - four
+   async workers pulling from a shared array cursor. Do not add a dependency
+   and do not use an unbounded `Promise.all` over the whole page.
 10. CLI wrapper copying `backfill-media-pointers.ts`'s `invokedDirectly` shape,
-    PLUS the account guard, which that script does not have:
+    PLUS the account guard - which that script does NOT have, so it is not the
+    precedent for this part. `app/scripts/import-apply.ts:30-34,240-254` is:
 
 ```ts
-import { assertHousingChoiceAccount, hcCredentials, HC_PROFILE, HC_REGION } from '../../scripts/lib/hcAws.mjs';
-// ...
+import {
+  assertHousingChoiceAccount,
+  hcCredentials,
+  HC_PROFILE,
+  HC_REGION,
+} from '../../scripts/lib/hcAws.mjs';
+
 const identity = await assertHousingChoiceAccount();
 logger.info({ profile: HC_PROFILE, account: identity.Account }, 'account guard OK');
 ```
 
-The default AWS credential chain resolves to the WRONG account in this
-environment - the guard is mandatory, not defensive.
+THE GUARD MUST BIND TO THE CLIENTS THE SCRIPT ACTUALLY WRITES THROUGH. Calling
+`assertHousingChoiceAccount()` and then building the doc client and media store
+from `getDocumentClient()` / `createMediaStore()` proves an account the writes
+never touch - the guard passes on the `housingchoice` profile while the writes
+go wherever the DEFAULT chain points, which in this environment is a different
+account. That is worse than no guard, because it reads as protection.
+
+So construct all three explicitly and pass them in:
+
+```ts
+const credentials = hcCredentials();
+const doc = DynamoDBDocumentClient.from(new DynamoDBClient({ region: HC_REGION, credentials }));
+const mediaStore = createMediaStore({ /* same region + credentials */ });
+```
+
+Read `import-apply.ts:240-254` for exactly how it threads `hcCredentials()`
+into its client, and follow it. If `createMediaStore` cannot accept explicit
+credentials, that is a finding to report in the handback, NOT something to work
+around by falling back to the default chain.
 
 Write the counters into one `logger.info` at the end. Log IDs and counts only:
 never a filename, a media URL or a phone number.
@@ -1477,7 +1888,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/scripts/backfill-media-content-types.ts app/test/backfillMediaContentTypes.test.ts package.json
+git add app/scripts/backfill-media-content-types.ts app/test/backfillMediaContentTypes.test.ts
 git commit
 ```
 
@@ -1488,7 +1899,11 @@ Message: `feat(scripts): backfill inbound media content types from Twilio`
 ### Task 7: fake-twilio fixture and the e2e
 
 **Files:**
-- Create: a canned `.vcf` asset under `fake-twilio/web/` (see Step 1)
+- Create: `fake-twilio/web/public/canned/contact-card.vcf` - the SAME directory
+  as the existing `kitchen.png`, `room.png` and `lease-doc.pdf`. It must be
+  under `public/`: an asset under `src/assets` below Vite's inlining threshold
+  is emitted as a `data:` URI rather than a fetchable URL, and a few-hundred-byte
+  vCard is far below it.
 - Modify: `fake-twilio/src/engine/signer.ts:27` (`inferMediaContentType`)
 - Modify: the canned-asset registry and its pinning test under `fake-twilio/web/`
 - Create: `e2e/tests/dashboard-next/inbound-media-type.spec.ts`
@@ -1532,23 +1947,36 @@ the final return:
 ```
 
 Register the asset in the canned registry with a label, and update the pinning
-test's expected list.
+test's expected list. That test also carries an extension-to-type map; add
+`.vcf` there too or the registry and the signer will disagree, which is exactly
+the kind of split the pinning test exists to catch.
 
 - [ ] **Step 3: Write the e2e spec**
 
 Create `e2e/tests/dashboard-next/inbound-media-type.spec.ts`. Use the
 accessibility-first selectors in `e2e/support/selectors.md` and follow the
 existing `outbound-mms.spec.ts` for how a spec drives the fake into sending an
-inbound MMS. Assert BOTH halves:
+inbound MMS.
+
+TARGET A 1:1 THREAD, NOT A RELAY GROUP. The spec's own example was a relay
+thread, but the mirror is shared by both paths (spec section 1), and a relay
+thread also drives the fan-out, which is the KNOWN-BROKEN forwarding path filed
+as `docs/issues/relay-forwards-undeliverable-media.md`. A 1:1 thread proves the
+same thing without entangling this spec with a failure it does not own.
+
+Assert BOTH halves. `mediaHref` comes off the rendered link, so the test
+follows the same URL a human would click:
 
 ```ts
 // 1. the dashboard renders it as a file link with its kind, not an <img>
-await expect(
-  timeline.getByRole('link', { name: /Contact card - Attachment 1/i }),
-).toBeVisible();
+const link = timeline.getByRole('link', { name: /Contact card - Attachment 1/i });
+await expect(link).toBeVisible();
 
-// 2. the served response is typed and named
-const res = await page.request.get(mediaHref);
+// 2. the served response is typed and named. Same session cookie - the media
+//    route is authed, so an unauthenticated request would 401.
+const mediaHref = await link.getAttribute('href');
+const res = await page.request.get(mediaHref!);
+expect(res.status()).toBe(200);
 expect(res.headers()['content-type']).toBe('text/vcard');
 expect(res.headers()['content-disposition']).toMatch(/^attachment; filename=".*\.vcf"$/);
 ```
@@ -1599,21 +2027,43 @@ Add a section for `backfill:media-content-types` covering, in this order:
 
 - [ ] **Step 2: Amend the stored-XSS issue**
 
-`docs/issues/media-serve-stored-xss.md:30-32` records that
-`...; charset=...` parameter forms cannot bypass the allowlist, describing
-exact-string matching as part of the resolved fix. That is no longer how it
-works. Add a dated amendment - do not rewrite the history:
+That issue's Resolution section makes THREE claims this change alters, not one.
+Read the whole section before writing, and cover all of them:
+
+1. `:30-32` - `...; charset=...` parameter forms cannot bypass the allowlist
+   (exact-string matching). Now essence matching.
+2. "everything else is forced to `application/octet-stream` +
+   `Content-Disposition: attachment`" - no longer true; the declarable tier is
+   served truthfully, still as an attachment.
+3. it names `isInlineMediaType(object.contentType)` as the read-side gate - the
+   route now calls `resolveMediaTier`.
+
+Add ONE dated amendment covering all three - do not rewrite the history:
 
 ```markdown
-**Amendment (2026-08-26, media content-type fidelity).** The allowlist now
-matches on the media-type ESSENCE rather than the exact string, so the
-parameterized forms of ALLOWLISTED types are admitted (`image/png; charset=x`
-reaches the inline tier). The guarantee is unchanged and now rests on the
-CANONICAL OUTPUT instead of the matching: `resolveMediaTier` returns the
-allowlist's own constant, so a caller-supplied parameterized string never
-reaches a response header. Non-allowlisted types are unaffected -
-`text/html; charset=x` has essence `text/html` and still fails the gate. See
-docs/superpowers/specs/2026-08-26-media-content-type-fidelity-design.md 5.1.
+**Amendment (2026-08-26, media content-type fidelity).** Three details of the
+resolution above changed; the GUARANTEE did not.
+
+- The read-side gate is now `resolveMediaTier` (`app/src/lib/mediaTypes.ts`),
+  not `isInlineMediaType`, which keeps its own set and exact-match semantics
+  for the outbound upload endpoint.
+- Matching is on the media-type ESSENCE rather than the exact string, so the
+  parameterized forms of ALLOWLISTED types are now admitted
+  (`image/png; charset=x` reaches the inline tier). Safety rests on the
+  CANONICAL OUTPUT instead of the matching: the resolver returns the
+  allowlist's own constant, so a caller-supplied parameterized string never
+  reaches a response header. Non-allowlisted types are unaffected -
+  `text/html; charset=x` has essence `text/html` and still fails the gate.
+- "Everything else is forced to octet-stream" is now two tiers: a DECLARABLE
+  set of non-script-capable types (video, audio, HEIC, vCard, the OOXML
+  documents) is served with its true Content-Type but ALWAYS as
+  `Content-Disposition: attachment`, so it is downloaded and never rendered
+  same-origin. Everything else, including every script-capable type and
+  anything unrecognised, still gets octet-stream + attachment exactly as
+  before.
+
+See docs/superpowers/specs/2026-08-26-media-content-type-fidelity-design.md
+sections 5.1 and 7.
 ```
 
 - [ ] **Step 3: Commit**

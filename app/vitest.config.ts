@@ -32,7 +32,16 @@ export default defineConfig({
     // suite is bound by DynamoDB Local I/O, not CPU. It was only ever costing
     // the coordinator its core. Raising this number is not a speed win; it is a
     // way to reintroduce the false red.
-    poolOptions: { threads: { maxThreads: 4 } },
+    // MUST be top-level `maxWorkers`, NOT poolOptions.threads.maxThreads. A
+    // first attempt used the latter and was INERT: vitest 3's default pool is
+    // `forks` (defaults.B7q_naMc.js), and each pool reads only its own key -
+    //   forks:   poolOptions.maxForks  ?? config.maxWorkers ?? threadsCount
+    //   threads: poolOptions.maxThreads ?? config.maxWorkers ?? threadsCount
+    // - so a threads key configures a pool that is not running, silently. The
+    // A/B below was measured with the CLI's --maxWorkers, which resolves to
+    // this option and works for either pool; shipping the poolOptions form
+    // changed the mechanism without re-testing it, and the failure recurred.
+    maxWorkers: 4,
     // Timeouts under cross-worktree load are contention, never hangs — keep a
     // generous budget (belt-and-braces alongside the per-key isolation; this
     // mirrors the feat/tours-sequence mitigation and must survive the merge).

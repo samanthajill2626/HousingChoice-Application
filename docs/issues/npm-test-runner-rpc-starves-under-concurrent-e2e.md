@@ -80,16 +80,42 @@ per-file `failed`. It narrows the search but does not name the answer: the flag
 persists until a file passes again, so it also lists stale entries (a 2026-08-25
 read of it turned up two deleted scratch files alongside the real failure).
 
-**Fix: `poolOptions: { threads: { maxThreads: 4 } }`** in `app/vitest.config.ts`.
+**Fix: top-level `maxWorkers: 4`** in `app/vitest.config.ts`.
 
-Sized by A/B, all four runs 336 files / 5977 tests, same commit:
+**IT MUST BE `maxWorkers`, NOT `poolOptions.threads.maxThreads`.** The first
+attempt shipped the latter and was INERT - the failure recurred unchanged.
+Vitest 3's default pool is `forks` (`defaults.B7q_naMc.js`), and each pool reads
+only its own key:
+
+```
+forks:   poolOptions.maxForks   ?? config.maxWorkers ?? threadsCount
+threads: poolOptions.maxThreads ?? config.maxWorkers ?? threadsCount
+```
+
+So a `threads` key configures a pool that is not running, and vitest says
+nothing about it. **This is the trap worth remembering: pool options fail
+SILENTLY when they name the wrong pool.** Top-level `maxWorkers` is read by
+both, so it also survives a future pool change.
+
+The A/B below was measured with the CLI's `--maxWorkers`, which resolves to the
+top-level option. Shipping the `poolOptions` form changed the mechanism without
+re-testing it - the measurement was sound and the implementation did not match
+it.
+
+Sized by A/B, all runs 336 files / 5977 tests, same commit:
 
 | condition | maxThreads | duration | RPC errors | exit |
 |---|---|---|---|---|
 | quiet box | 16 (default) | 249.8s | 0 | 0 |
 | quiet box | **4** | **253.1s** | 0 | 0 |
 | under load | 16 (default) | 347.8s | **1** | **1** |
-| under load | **4** | 361.7s | **0** | **0** |
+| under load | **4** (CLI flag) | 361.7s | **0** | **0** |
+| **under LIVE e2e load** | **4 (config only)** | **720.5s** | **0** | **0** |
+
+The last row is the one that proves the SHIPPED form: no CLI flag, config alone,
+while two full e2e suites and a 6-worker load generator ran on the same box at
+94% CPU. That is roughly twice the contention of the run that originally failed
+(720.5s against 347.8s), and it came back clean.
 
 Capping costs **1.3% on an idle box** and removes the failure entirely. The
 parallelism above 4 was buying close to nothing even when idle, because this

@@ -320,13 +320,17 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
     expect(ids).not.toContain(contactBId);
   });
 
-  it('filter=unknown returns only needsTriage rows', async () => {
+  it('filter=unknown no longer lists the contactless number - it stays on the All tab (class e, design 2026-08-25)', async () => {
     const resp = await get('/api/inbox?filter=unknown');
     expect(resp.status).toBe(200);
     const { rows } = await resp.json() as { rows: Array<Record<string, unknown>> };
-    expect(rows.every((r) => r['needsTriage'] === true)).toBe(true);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!['phone']).toBe(PHONE_UNK);
+    // No unknown CONTACTS exist in this world yet - the queue is empty, and an
+    // empty queue is a normal page, not an error shape.
+    expect(rows).toEqual([]);
+
+    const all = await get('/api/inbox');
+    const allRows = (await all.json() as { rows: Array<Record<string, unknown>> }).rows;
+    expect(allRows.some((r) => r['kind'] === 'unknown' && r['phone'] === PHONE_UNK)).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
@@ -427,5 +431,36 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
   it('POST /read returns 404 when no conversation exists for the phone', async () => {
     const resp = await post('/api/inbox/read', { phone: '+15569999999' });
     expect(resp.status).toBe(404);
+  });
+
+  // LAST ON PURPOSE: this test adds a contact + conversation to the shared
+  // world, and the split-proof paging test above pins exact page counts over
+  // the original topology.
+  it('filter=unknown lists a type=unknown CONTACT with an open thread, against the real byTypeStatus index', async () => {
+    const PHONE_UNK2 = '+15561001099';
+    await contacts.createIfAbsent({
+      contactId: 'it-contact-unk',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: PHONE_UNK2,
+    });
+    await seedConv({ phone: PHONE_UNK2, lastActivityAt: '2026-06-17T09:00:00.000Z', type: 'unknown_1to1', unread: 1 });
+
+    const resp = await get('/api/inbox?filter=unknown');
+    expect(resp.status).toBe(200);
+    const { rows, nextCursor } = await resp.json() as {
+      rows: Array<Record<string, unknown>>;
+      nextCursor: string | null;
+      truncated?: boolean;
+    };
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'contact',
+      contactId: 'it-contact-unk',
+      role: 'unknown',
+      needsTriage: true,
+      phone: PHONE_UNK2,
+    });
+    expect(nextCursor).toBeNull();
   });
 });

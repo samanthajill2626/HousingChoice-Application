@@ -67,6 +67,23 @@ copy; it is simply never sent. Phase B removes it at the same moment the pause
 lifts - which is the moment it would otherwise start firing - and owns the
 harness surgery then, when the suites have to change anyway.
 
+TWO CONSEQUENCES OF THIS RULING, both accepted, both stated so nobody discovers
+them in the panel:
+
+- The founder still SEES a `confirmation` rung on every tour, on a ladder she
+  asked to have no confirmation on, and its "Send now" button
+  (`RemindersPanel.tsx:347`) is LIVE. Nothing prevents her sending one by hand.
+  Accepted: she asked for the rung not to FIRE, and it does not; suppressing a
+  per-rung button is dashboard work this phase does not otherwise touch, and a
+  disabled button with no explanation is its own confusion. If it turns out to
+  bother her in the panel, that is a small follow-up, not a reason to take on the
+  harness problem in 9.5 early.
+- Its copy is the 2026-08-18 wording, which IS in her voice (it was rewritten in
+  the previous pass), but it is now the only rung this change does not touch. So
+  the panel shows one rung phrased to an older brief beside four phrased to the
+  current one. Accepted for the same reason: rewriting copy for a rung she asked
+  to delete is work with a negative expected value.
+
 Sequencing this way is what makes the copy reviewable before the POLL can reach
 anyone.
 

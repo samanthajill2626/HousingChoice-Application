@@ -395,6 +395,39 @@ describe('the Unknown tab empty state (contact-side read, 2026-08-25)', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  // M1 / blast-radius finding 2, THE DEAD END. The server deliberately returns
+  // an EMPTY page WITH a cursor when its per-request scan budget expires
+  // (app/src/routes/inbox.ts, the unknown branch's budget exit; pinned app-side
+  // by test/inboxUnknownTab.test.ts "the SCAN BUDGET returns a SHORT page WITH
+  // a cursor"). Load more used to be nested inside `rows.length > 0`, so that
+  // state rendered the empty copy with NO affordance and every row behind the
+  // budget was unreachable from the UI - the exact defect the rework was
+  // chartered to remove, reintroduced one layer up. There was no dashboard pin,
+  // so it shipped green.
+  it('renders Load more on an EMPTY page that still carries a cursor - a budget-stopped page is not a dead end', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: true });
+    renderInbox('/inbox?filter=unknown');
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  // ...and the COPY changes with it. "No unknown numbers" over a live Load more
+  // is a contradiction an operator reads as a broken app; the honest sentence is
+  // that this page found nothing YET and there is more to read.
+  it('says the page found nothing YET - not that the queue is empty - while a cursor stands', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: true });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.queryByText('No unknown numbers')).toBeNull();
+    expect(screen.getByText('Nothing on this page yet')).toBeInTheDocument();
+  });
+
+  it('keeps the real empty copy - and no Load more - once the walk has actually ended', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: false });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.getByText('No unknown numbers')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /load more/i })).toBeNull();
+  });
+
   it('an empty page the server calls truncated DOES banner - which is why the unknown branch must never set the flag (requirement 5)', () => {
     // This pins the DEPENDENCY, not a wish: serverEndedEarlyEmpty is not
     // filter-gated (Inbox.tsx:42), so the server-side rule "no truncated on

@@ -281,17 +281,64 @@ describe('filter=unknown - the contact-side read', () => {
     await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: unreadCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
     const groupCursor = Buffer.from(JSON.stringify({ t: 'g', k: {} }), 'utf8').toString('base64url');
     await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: groupCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
-    // Tampered payloads inside our OWN namespace: an out-of-range block index,
-    // and an ExclusiveStartKey with an empty key attribute (which DynamoDB
-    // answers with a ValidationException nothing on this path maps - i.e. the
-    // one tamper that would turn a 400-by-design into a 500).
-    const badBlock = Buffer.from(JSON.stringify({ q: 1, b: 99 }), 'utf8').toString('base64url');
-    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: badBlock }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
-    const emptyKey = Buffer.from(
-      JSON.stringify({ q: 1, b: 0, k: { type: 'unknown', status: 'needs_review', contactId: '' } }),
+    // TAMPERED PAYLOADS INSIDE OUR OWN NAMESPACE. Every one of these reaches
+    // DynamoDB and returns 500 if the decoder does not refuse it: the route
+    // maps only InboxBadRequestError to 400 and rethrows everything else, so a
+    // ValidationException is a 500 on an endpoint whose decoder exists to
+    // guarantee 400s.
+    const tampered: Array<[string, unknown]> = [
+      // An out-of-range block index (would index UNKNOWN_QUEUE_BLOCKS to
+      // undefined and crash the reader).
+      ['block index out of range', { q: 1, b: 99 }],
+      // An empty key attribute: DynamoDB permits an empty String for a non-key
+      // attribute ONLY, so this is a ValidationException.
+      [
+        'empty key attribute',
+        { q: 1, b: 0, k: { type: 'unknown', status: 'needs_review', contactId: '' } },
+      ],
+      // THE FIVE SHAPES MEASURED AGAINST DYNAMODB LOCAL (rework review A2/B3),
+      // none of which the pre-2026-08-26 decoder caught. The first three answer
+      // "The provided starting key is invalid"...
+      ['junk key names', { q: 1, b: 0, k: { foo: 'bar' } }],
+      ['index keys missing', { q: 1, b: 0, k: { contactId: 'c2' } }],
+      [
+        'an EXTRA attribute alongside valid keys',
+        {
+          q: 1,
+          b: 0,
+          k: { type: 'unknown', status: 'needs_review', contactId: 'c2', extra: 'x' },
+        },
+      ],
+      // ...and these two "does not match the range key predicate": the block
+      // picks the Query's KeyConditionExpression while `k` is its
+      // ExclusiveStartKey, and nothing used to check that the pair named the
+      // same partition. Block 0 is needs_review.
+      [
+        'k.status contradicting the block',
+        { q: 1, b: 0, k: { type: 'unknown', status: 'active', contactId: 'a1' } },
+      ],
+      [
+        'a wrong type',
+        { q: 1, b: 0, k: { type: 'tenant', status: 'needs_review', contactId: 'a1' } },
+      ],
+    ];
+    for (const [, payload] of tampered) {
+      const cursor = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+      await expect(
+        aggregateInbox({ filter: 'unknown', limit: 25, cursor }, deps),
+      ).rejects.toBeInstanceOf(InboxBadRequestError);
+    }
+    // AND THE HONEST CURSOR STILL ROUND-TRIPS - a validator that refuses
+    // everything passes the assertions above and breaks paging. The other
+    // direction is covered by "a page that fills mints a cursor that resumes
+    // EXACTLY after the last row it served".
+    const honest = Buffer.from(
+      JSON.stringify({ q: 1, b: 1, k: { type: 'unknown', status: 'active', contactId: 'c-x' } }),
       'utf8',
     ).toString('base64url');
-    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: emptyKey }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25, cursor: honest }, deps),
+    ).resolves.toMatchObject({ rows: [] });
     // THE OTHER DIRECTION: an unknown cursor replayed under `all` would hand
     // the 'open' partition Query a byTypeStatus key.
     const ourCursor = Buffer.from(JSON.stringify({ q: 1, b: 0 }), 'utf8').toString('base64url');
@@ -375,12 +422,24 @@ describe('filter=unknown - the contact-side read', () => {
     // repinning - each number above names its buyer.
   });
 
-  it('requirement 4: a THROWN thread read withholds ONE row loudly - it neither 500s the tab nor impersonates an empty thread set', async () => {
+  it('requirement 4: a THROWN thread read STOPS the page AT that row - it neither 500s the tab nor steps over the row', async () => {
+    // REWRITTEN 2026-08-26 (rework review A3/M3) for a BEHAVIOUR CHANGE. The
+    // old build `continue`d past a failed row, kept filling the page from LATER
+    // rows and then minted the boundary from one of THEM - so the cursor
+    // stepped over a row that was never served and the walk still ended
+    // `nextCursor: null`. The row appeared on NO page; the WARN called it
+    // "withheld from this page" and it was withheld from everything.
+    //
+    // Now the failure ENDS the page and the boundary is set AT the failed row,
+    // so the next request re-attempts it. The ids sort ascending in the
+    // partition (rule 6), so `c-q1-ok` is consumed and kept BEFORE the failure
+    // - which is what makes "the rows already kept still ship" a real claim
+    // here rather than a vacuous one.
     const seed: Seed = {
       contacts: [
-        { contactId: 'c-ok', type: 'unknown', status: 'needs_review', phone: '+15550002300' },
-        { contactId: 'c-broken', type: 'unknown', status: 'needs_review', phone: '+15550002301' },
-        { contactId: 'c-empty', type: 'unknown', status: 'needs_review', phone: '+15550002302' }, // no threads at all
+        { contactId: 'c-q1-ok', type: 'unknown', status: 'needs_review', phone: '+15550002300' },
+        { contactId: 'c-q2-broken', type: 'unknown', status: 'needs_review', phone: '+15550002301' },
+        { contactId: 'c-q3-empty', type: 'unknown', status: 'needs_review', phone: '+15550002302' }, // no threads at all
       ],
       conversations: [
         conv({ conversationId: 'cv-ok', participant_phone: '+15550002300', last_activity_at: '2026-06-12T10:00:00.000Z' }),
@@ -391,18 +450,75 @@ describe('filter=unknown - the contact-side read', () => {
     const info = vi.fn();
     const warn = vi.fn();
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, emptyCalls(), { info, warn }));
-    // The page SERVES (no throw), minus exactly the broken row.
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-ok']);
+    // The page SERVES (no throw) the rows it had already kept...
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-q1-ok']);
+    // ...and it is a SHORT page WITH a cursor, not the end of the queue. A null
+    // cursor here is the silent-loss shape this fix removed.
+    expect(page.nextCursor).not.toBeNull();
     // The failure is its OWN code path: the specific WARN with the contactId...
     const failLine = warn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'));
-    expect(failLine?.[0]).toMatchObject({ contactId: 'c-broken' });
+    expect(failLine?.[0]).toMatchObject({ contactId: 'c-q2-broken' });
     // ...and its OWN drop reason, distinct from the empty-thread-set drop. A
     // build that routes this through the best-effort contactConversations seam
     // (which returns [] for both) collapses these two counters into one and
     // goes red here.
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
-    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1, unknownNoOpenThread: 1 });
+    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1 });
     expect(assembled?.threadReadFailures).toBe(1);
+    // c-q3-empty is BEHIND the failed row and was never consumed, so its
+    // no-open-thread drop has not happened yet. That is the point: the page
+    // stopped rather than reading past the failure.
+    expect(assembled?.drops).not.toHaveProperty('unknownNoOpenThread');
+  });
+
+  it('a TRANSIENT thread-read failure costs a SHORT PAGE, not a lost row: the retry serves it', async () => {
+    // A3/M3. The participant GSI throws for ONE contact on request 1 only (a
+    // throttle, a timeout) and is healthy afterwards. Before the fix that row
+    // appeared on zero pages of a walk that ended `nextCursor: null` - a
+    // complete-looking queue with a row silently missing. The trade taken
+    // instead: a PERMANENTLY failing row becomes a short page whose Load more
+    // does not advance - visible-stuck rather than silent-loss.
+    const seeds = [
+      queueContact('c-t1', 'needs_review', 80, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-t2', 'needs_review', 81, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-t3', 'needs_review', 82, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-t4', 'needs_review', 83, '2026-06-12T04:00:00.000Z'),
+    ];
+    const healthy: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const brokenPhone = seeds[1]!.contact.phone!;
+    const flaky: Seed = { ...healthy, threadLookupErrorPhone: brokenPhone };
+
+    // Request 1 consumes c-t1 (kept), then c-t2 THROWS and the page stops.
+    const first = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(flaky));
+    expect(first.rows.map((r) => r.contactId)).toEqual(['c-t1']);
+    expect(first.nextCursor).not.toBeNull();
+
+    // THE BOUNDARY DOES NOT STEP OVER THE FAILED ROW. Replaying the cursor
+    // against a HEALTHY world with room for exactly one row returns c-t2 -
+    // i.e. the resume point is AT the failed row, not past it.
+    const retry = await aggregateInbox(
+      { filter: 'unknown', limit: 1, cursor: first.nextCursor! },
+      makeDeps(healthy),
+    );
+    expect(retry.rows.map((r) => r.contactId)).toEqual(['c-t2']);
+
+    // AND THE WHOLE WALK IS EXACT: one transient failure costs a short page and
+    // nothing else - no row is lost and none is served twice.
+    const seen = ['c-t1'];
+    let cursor: string | null = first.nextCursor;
+    for (let guard = 0; guard < 10 && cursor !== null; guard += 1) {
+      const page: Awaited<ReturnType<typeof aggregateInbox>> = await aggregateInbox(
+        { filter: 'unknown', limit: 2, cursor },
+        makeDeps(healthy),
+      );
+      seen.push(...page.rows.map((r) => r.contactId!));
+      cursor = page.nextCursor;
+    }
+    expect([...seen].sort()).toEqual(['c-t1', 'c-t2', 'c-t3', 'c-t4']);
+    expect(new Set(seen).size).toBe(seen.length);
   });
 
   it('class b: a contact whose only threads are closed or relay_group yields no row', async () => {
@@ -575,19 +691,27 @@ describe('filter=unknown - the contact-side read', () => {
     expect(assembled?.drops).toMatchObject({ unknownQueueRetyped: 1 });
   });
 
-  it('a DUPLICATED queue item ships ONE row: the block loop consults `emitted`', async () => {
+  it('a WITHIN-REQUEST duplicate ships ONE row: the block loop consults `emitted` (it does NOT cover the cross-page shape)', async () => {
     // REGRESSION TEST for round-2 finding N5. Without the guard this fixture
     // produced two identical `kind: 'contact'` rows on the wire, which the
     // dashboard keys identically (useInbox `rowKey` -> `c:<contactId>`): a
     // duplicate React key and a doubled row.
     //
-    // WHY A DUPLICATE IS REACHABLE AT ALL, stated narrowly. A Query resuming
-    // from an ExclusiveStartKey cannot re-serve an item unless the item's index
-    // key MOVED - and `status` IS byTypeStatus's range key, so a contact
-    // flipped 'active' -> 'needs_review' between two reads moves forward past
-    // the cursor and is read twice. `listByTypeOverride` is how the shape is
-    // driven here, because the DynamoDB-faithful fake pages a static array and
-    // will never race itself.
+    // WHAT THIS ACTUALLY PINS, corrected 2026-08-26 (rework review A7). One
+    // Query answering `[dup, dup]` - the WITHIN-request shape, which is exactly
+    // what `emitted` (a per-REQUEST Set) covers. This comment used to describe
+    // the CROSS-PAGE duplicate instead, a status flip moving a row past the
+    // cursor between two HTTP requests, and then test something else: that
+    // shape has no guard here and this test CANNOT fail for it. Read the
+    // fixture, not the name.
+    //
+    // The cross-page shape is real, reachable, and deliberately unfixed -
+    // docs/issues/unknown-queue-status-flip-duplicates-across-pages.md. A test
+    // for it would have to assert the DEFECT, so there is none.
+    //
+    // `listByTypeOverride` is how the within-request shape is driven, because
+    // the DynamoDB-faithful fake pages a static array and will never race
+    // itself.
     const dup: ContactItem = {
       contactId: 'c-dup',
       type: 'unknown',

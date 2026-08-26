@@ -23,30 +23,50 @@
 //      - so ASCENDING on `status` is what production does, and that half
 //      carries rules 1-5's confidence.
 //
-//      THE TIE-BREAK IS OBSERVED, NOT CONTRACTED (weakened 2026-08-25, round-2
-//      finding V1 - this parenthetical used to assert flatly that "DynamoDB
-//      orders items sharing a GSI range-key value by their table key"). AWS
-//      documents that results are ordered by the sort-key VALUE and that a
-//      GSI's index key need not be unique; it does not specify the order among
-//      items that SHARE one. Ordering by `contactId` is what the storage layout
-//      produces and what DynamoDB Local does - stable, and stable is all any
-//      pin here needs. today.ts:844-853 words the same fact correctly one file
-//      over ("intra-partition order is stable and the same 100 rows come back
-//      every time", deliberately not "ascending by contactId"). Four pins lean
-//      on this tie-break; NOTHING in production may. Do not build an ordering
-//      guarantee or a cursor scheme on a fake's assertion.
+//      THE TIE-BREAK IS THIS FAKE'S OWN CONVENTION AND CONTRADICTS THE REAL
+//      SERVICE (corrected 2026-08-26, rework review A5; weakened once before,
+//      on 2026-08-25, from an even flatter claim - twice wrong, so read this
+//      before restating it a third time). AWS documents that results are
+//      ordered by the sort-key VALUE and that a GSI's index key need not be
+//      unique; it does not specify the order among items that SHARE one, and
+//      DynamoDB Local demonstrably does NOT use `contactId`. MEASURED: four
+//      items with identical (type='unknown', status='needs_review') and ids
+//      c1..c4, queried through a real byTypeStatus-shaped GSI, came back
+//      `c2, c4, c1, c3` - the index's internal (hashed table key) order.
+//      Resuming from c2 returned `c4, c1, c3`, so the real order IS stable and
+//      ESK resume IS consistent with it; only the SHAPE of the order is
+//      invented here.
+//
+//      `contactId` ascending is chosen because a test needs ONE deterministic,
+//      READABLE order to write exact page-composition pins against - not
+//      because production produces it. today.ts:844-853 words the real fact
+//      correctly one file over ("intra-partition order is stable and the same
+//      100 rows come back every time", deliberately not "ascending by
+//      contactId"). Several pins lean on this convention; NOTHING in production
+//      may. Do not build an ordering guarantee, a cursor scheme, or a
+//      "first N rows" argument on it - and note that the real-index walk in
+//      test/inbox.integration.test.ts sorts before comparing precisely because
+//      it cannot lean on this.
 //
 //      WHY THIS RULE EXISTS (added by the 2026-08-25 fix wave, adversarial
-//      finding HIGH-1): returning items in SEED-ARRAY order made the
-//      partition's most consequential property INEXPRESSIBLE. Within
-//      `type='unknown'` the only legal statuses are 'needs_review' and 'active'
-//      (NON_TENANT_STATUSES, lib/statusModel.ts:194) and 'active' <
-//      'needs_review' lexicographically, so EVERY 'active' unknown is returned
-//      before ANY 'needs_review' one - which means the unknown queue's page
-//      budget and result cap cut STATUS-FIRST and starve the status that means
-//      "nobody has looked at this yet". No test in the suite could state that
-//      until this fake modelled the sort. Pinned by
-//      test/unknownQueue.test.ts ("the cap starves needs_review...").
+//      finding HIGH-1; rationale corrected 2026-08-26, rework review B4).
+//      Returning items in SEED-ARRAY order made the partition's most
+//      consequential property INEXPRESSIBLE. Within `type='unknown'` the only
+//      legal statuses are 'needs_review' and 'active' (NON_TENANT_STATUSES,
+//      lib/statusModel.ts:194) and 'active' < 'needs_review' lexicographically,
+//      so an UN-NARROWED Query returns EVERY 'active' unknown before ANY
+//      'needs_review' one. That is what made the deleted result cap and page
+//      budget cut STATUS-FIRST and starve the status meaning "nobody has looked
+//      at this yet" - and no test in the suite could state it until this fake
+//      modelled the sort.
+//
+//      THOSE BOUNDS ARE GONE (2026-08-26: the reader now issues one Query per
+//      status BLOCK and pages with the index's own cursor), and so is the pin
+//      this paragraph used to cite - test/unknownQueue.test.ts's "the cap
+//      starves needs_review". What the sort model buys NOW is that BLOCK ORDER
+//      is expressible at all: the replacement pin, "the UNTRIAGED block is
+//      exhausted BEFORE the reviewed block is read", is a statement about
+//      range-key order and is vacuous against a seed-order fake.
 //
 // KEY SHAPE (rule 5's other half): the real repo hands back DynamoDB's raw
 // `LastEvaluatedKey` from a GSI Query (contactsRepo.ts:1021-1025), which
@@ -54,8 +74,8 @@
 // not `{ contactId }` alone. This fake mints that full shape so the one helper
 // positioned as the authority on partition semantics does not pin a key
 // production never emits. RESUMING reads `status` + `contactId` and seeks to
-// that POSITION in the sort order (see the resume block below); a hand-built
-// key carrying `contactId` alone still resolves by identity.
+// that POSITION in the sort order (see the resume block below); a key that
+// cannot express a position - one carrying `contactId` alone - THROWS.
 //
 // FAKE-ONLY CAVEAT on rule 5: `limit ?? 50` SYNTHESIZES a Limit for a caller
 // that passes none, so an un-limited call over a partition of exactly 50+ rows
@@ -109,10 +129,18 @@ export function listByTypeFromContacts(
   // returns -1 there and, +1, silently RESTARTS the partition, which would
   // model the paging bug (duplicate rows on page 2) as correct behaviour.
   //
-  // Compares the (status, contactId) tuple, matching the sort in rule 6. A key
-  // carrying no `status` falls back to identity: the fake has minted the full
-  // three-attribute key since it was written, but a hand-built key is allowed
-  // to carry contactId alone (see KEY SHAPE above).
+  // Compares the (status, contactId) tuple, matching the sort in rule 6.
+  //
+  // A KEY CARRYING NO `status` THROWS (2026-08-26, rework review B5). It used
+  // to fall back to `findIndex(identity) + 1` "because a hand-built key is
+  // allowed to carry contactId alone" - which is the EXACT silent-restart bug
+  // the positional path above was written to remove (`-1 + 1` is 0, i.e. page
+  // one again, which models duplicate rows on page 2 as correct behaviour).
+  // The fallback was also DEAD: every consumer of this helper passes either no
+  // key or a `lastEvaluatedKey` this fake minted, and the fake has minted the
+  // full three-attribute key since it was written. Returning `start = 0`
+  // instead of throwing would be the same silent restart by another route, so a
+  // key that cannot express a position is a LOUD test failure.
   const startKey = opts.exclusiveStartKey;
   const startContactId =
     typeof startKey?.['contactId'] === 'string' ? startKey['contactId'] : undefined;
@@ -125,8 +153,11 @@ export function listByTypeFromContacts(
       return c.contactId > startContactId;
     });
     if (start === -1) start = partition.length;
-  } else if (startContactId !== undefined) {
-    start = partition.findIndex((c) => c.contactId === startContactId) + 1;
+  } else if (startKey !== undefined) {
+    throw new Error(
+      'contactsPartitionFake: exclusiveStartKey must carry BOTH status and contactId ' +
+        '(the real GSI key shape - see KEY SHAPE); a positionless key would silently restart the partition',
+    );
   }
   const limit = opts.limit ?? 50;
   const page = partition.slice(start, start + limit);

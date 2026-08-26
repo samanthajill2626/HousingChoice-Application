@@ -8,7 +8,7 @@ import { useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { InboxFilter } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
-import { INBOX_FILTERS, emptyCopy } from './inboxFilters.js';
+import { INBOX_FILTERS, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
 import { InboxRow } from './InboxRow.js';
 import { rowKey, useInbox } from './useInbox.js';
 import styles from './Inbox.module.css';
@@ -26,7 +26,11 @@ export function Inbox(): React.JSX.Element {
   const [params, setParams] = useSearchParams();
   const filter = filterFromParam(params.get('filter'));
   const inbox = useInbox(filter);
-  const empty = emptyCopy(filter);
+  // THE EMPTY COPY DEPENDS ON WHETHER THERE IS MORE TO FETCH, not on the filter
+  // alone. A page that came back empty WITH a cursor has not proved the list is
+  // empty - it stopped early - so it gets the "nothing on this page yet" copy
+  // that sits sensibly next to the live Load more below. See emptyMoreCopy.
+  const empty = inbox.hasMore ? emptyMoreCopy() : emptyCopy(filter);
   // A26: the count comes from the hook's server-page tally, NOT from a filter
   // over `inbox.rows`. `rows` is the DISPLAYED list - already narrowed by the
   // Unread filter and already patched by the optimistic mark-read - so counting
@@ -204,29 +208,46 @@ export function Inbox(): React.JSX.Element {
       ) : null}
 
       {inbox.status === 'ready' && inbox.rows.length > 0 ? (
-        <>
-          <ul className={styles.rows} aria-label="Conversations">
-            {inbox.rows.map((row) => (
-              <InboxRow
-                key={rowKey(row)}
-                row={row}
-                onOpen={inbox.markRead}
-                onMarkRead={inbox.markRead}
-                onMarkUnread={inbox.markUnread}
-              />
-            ))}
-          </ul>
-          {inbox.hasMore ? (
-            <button
-              type="button"
-              className={styles.loadMore}
-              onClick={() => inbox.loadMore()}
-              disabled={inbox.loadingMore}
-            >
-              {inbox.loadingMore ? 'Loading…' : 'Load more'}
-            </button>
-          ) : null}
-        </>
+        <ul className={styles.rows} aria-label="Conversations">
+          {inbox.rows.map((row) => (
+            <InboxRow
+              key={rowKey(row)}
+              row={row}
+              onOpen={inbox.markRead}
+              onMarkRead={inbox.markRead}
+              onMarkUnread={inbox.markUnread}
+            />
+          ))}
+        </ul>
+      ) : null}
+
+      {/* LOAD MORE IS GATED ON `hasMore` ALONE, NOT ON THE PAGE HAVING ROWS
+          (M1, rework blast-radius finding 2). It used to be nested inside the
+          `rows.length > 0` block above, which made the server's deliberate
+          empty-page-with-a-cursor a DEAD END: `filter=unknown` returns
+          `{ rows: [], nextCursor }` when its per-request scan budget expires on
+          a wall of soft-deleted residue or threadless stubs (and now also when
+          a thread read fails mid-page), and the operator got the empty state
+          with nothing to click. Every row behind that position was unreachable
+          from the UI - which is the exact defect the paged rework was chartered
+          to remove, reintroduced one layer up. The app-side pin assumed this
+          affordance existed; nothing on the client proved it, so it shipped
+          green.
+
+          It can now render ALONGSIDE the empty state (see `empty` above, which
+          switches its copy for exactly that pairing) and, on `filter=unread`,
+          alongside the early-end failure banner - a cursor and a truncation are
+          independent server statements, and offering the continuation does not
+          make the banner less true. */}
+      {inbox.status === 'ready' && inbox.hasMore ? (
+        <button
+          type="button"
+          className={styles.loadMore}
+          onClick={() => inbox.loadMore()}
+          disabled={inbox.loadingMore}
+        >
+          {inbox.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
       ) : null}
     </div>
   );

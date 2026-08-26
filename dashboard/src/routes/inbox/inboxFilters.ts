@@ -18,6 +18,27 @@ export const INBOX_FILTERS: InboxFilterTab[] = [
   { filter: 'groups', label: 'Groups' },
 ];
 
+/**
+ * The empty state for a page that returned NO rows but DID hand back a cursor.
+ *
+ * NOT a per-filter string, because it is not about the filter: it says what the
+ * SERVER said, which is "this request stopped before it found anything, and
+ * there is more behind it". `filter=unknown` produces it deliberately - its
+ * per-request SCAN BUDGET can expire on a wall of soft-deleted residue or
+ * threadless stubs and return `{ rows: [], nextCursor }` (app/src/routes/inbox.ts,
+ * the unknown branch's budget exit; and now also its thread-read-failure exit).
+ *
+ * The filter's own copy would be a LIE in that state - "No unknown numbers"
+ * over a live Load more reads as a broken app, and the operator's correct move
+ * (click it) is the one the sentence talks them out of.
+ */
+export function emptyMoreCopy(): { title: string; body: string } {
+  return {
+    title: 'Nothing on this page yet',
+    body: 'This search stopped early to stay fast. Load more to keep looking.',
+  };
+}
+
 /** The honest empty-state copy per filter (spec §States & mobile). */
 export function emptyCopy(filter: InboxFilter): { title: string; body: string } {
   switch (filter) {

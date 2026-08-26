@@ -220,6 +220,36 @@ describe('readUnknownQueue', () => {
     ]);
   });
 
+  it('refuses a degenerate `want` or `budget` LOUDLY, because both spin forever instead of failing', async () => {
+    // A4, both measured. `want < 1` is a TIGHT INFINITE SPIN WITH ZERO QUERIES:
+    // the loop breaks immediately, hands back the UNCHANGED start position with
+    // budgetSpent false, and inbox.ts's fill-or-exhaust loop re-enters with the
+    // same position forever - a pure microtask spin no downstream runaway guard
+    // can trip. `budget < 1` marks budgetSpent before any Query, so every
+    // request answers with an empty page and the SAME cursor the client sent: a
+    // Load more that never advances and never ends.
+    //
+    // Neither is reachable over the wire (`parseLimit` clamps to 1..100), but
+    // `aggregateInbox` is exported and app/scripts/profile-inbox.ts passes a
+    // case-supplied limit, and the budget is a `deps` seam.
+    //
+    // THROWING, not clamping or returning an empty page: an empty page here is
+    // indistinguishable from "the triage queue is empty", which is the one
+    // confusion this reader's LOUD-BY-CONTRACT posture exists to prevent.
+    const { deps, calls } = makeDeps([unk(1)]);
+    await expect(readUnknownQueue(deps, { want: 0, budget: 1000, pageSize: 10 })).rejects.toThrow(
+      /want must be a positive integer/,
+    );
+    await expect(readUnknownQueue(deps, { want: -1, budget: 1000, pageSize: 10 })).rejects.toThrow(
+      /want must be a positive integer/,
+    );
+    await expect(readUnknownQueue(deps, { want: 10, budget: 0, pageSize: 10 })).rejects.toThrow(
+      /budget must be a positive integer/,
+    );
+    // It refuses BEFORE issuing a Query, so a bad caller costs nothing.
+    expect(calls).toHaveLength(0);
+  });
+
   it('production constants are named and sane', () => {
     expect(UNKNOWN_QUEUE_PAGE_SIZE).toBe(100);
     expect(UNKNOWN_QUEUE_SCAN_BUDGET).toBe(1000);

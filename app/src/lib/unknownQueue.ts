@@ -268,6 +268,31 @@ export interface UnknownQueueRead {
  * that is the number the residue-walking cost has to be measured in. A page
  * WITHOUT a key ended the block, so its exact examined count no longer matters
  * for termination and the returned count is charged instead.
+ *
+ * THE TWO SEAM GUARDS BELOW ARE WHAT MAKE THAT TERMINATION ARGUMENT TRUE, and
+ * the caller's own (inbox.ts's fill-or-exhaust loop) states itself as if
+ * `want >= 1` and `budget >= 1` were already guaranteed. They were not
+ * (rework review A4, measured):
+ *
+ *   * `want < 1` is a TIGHT INFINITE SPIN WITH ZERO QUERIES. The loop breaks
+ *     immediately on `rows.length >= want`, returns the UNCHANGED start
+ *     position with `budgetSpent: false`, and the caller re-enters with the
+ *     same position forever. It is a pure microtask spin - no Query, no timer,
+ *     nothing downstream that could trip a runaway guard. `parseLimit` clamps
+ *     to 1..100 so the HTTP route cannot reach it, but `aggregateInbox` is
+ *     exported and app/scripts/profile-inbox.ts passes a case-supplied `limit`.
+ *   * `budget < 1` marks `budgetSpent` before issuing any Query, so every
+ *     request answers with an empty page and the SAME cursor the client sent -
+ *     a Load more that never advances and never ends. Only reachable through
+ *     the `unknownQueueScanBudget` dep seam (`0 ?? DEFAULT` is 0: nullish, not
+ *     falsy).
+ *
+ * THEY THROW RATHER THAN CLAMPING OR RETURNING AN EMPTY PAGE, which is the same
+ * LOUD-BY-CONTRACT posture as the un-caught Query above and for the same
+ * reason: a no-op page is indistinguishable from "the triage queue is empty",
+ * and this reader's whole contract is that those two must never look alike. A
+ * caller asking for zero rows is a programming error, and it should read like
+ * one.
  */
 export async function readUnknownQueue(
   deps: { contacts: Pick<ContactsRepo, 'listByType'> },
@@ -280,6 +305,14 @@ export async function readUnknownQueue(
     pageSize: number;
   },
 ): Promise<UnknownQueueRead> {
+  if (!Number.isInteger(opts.want) || opts.want < 1) {
+    throw new Error(`readUnknownQueue: want must be a positive integer, got ${String(opts.want)}`);
+  }
+  if (!Number.isInteger(opts.budget) || opts.budget < 1) {
+    throw new Error(
+      `readUnknownQueue: budget must be a positive integer, got ${String(opts.budget)}`,
+    );
+  }
   const blocks = UNKNOWN_QUEUE_BLOCKS;
   let block = opts.start?.block ?? 0;
   let key = opts.start?.key;

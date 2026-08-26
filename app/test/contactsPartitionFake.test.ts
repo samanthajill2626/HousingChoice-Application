@@ -92,13 +92,22 @@ describe('listByTypeFromContacts', () => {
     expect(page2.lastEvaluatedKey).toBeUndefined();
   });
 
-  it('rule 6 - the partition comes back sorted by the RANGE KEY: status ascending, then contactId, NOT seed order', () => {
-    // The Query sets no ScanIndexForward (contactsRepo.ts:1009-1020), so it is
-    // ascending on `status`. Within type='unknown' the legal statuses are
-    // 'needs_review' and 'active', and 'active' < 'needs_review' - so every
-    // active row precedes every needs_review one. The seed below is in the
-    // OPPOSITE order on purpose: a fake returning seed order passes nothing
-    // here.
+  it('rule 6 - status ascending is REAL service behaviour; the contactId tie-break is this FAKE\'S OWN convention', () => {
+    // THE STATUS HALF IS PRODUCTION. The Query sets no ScanIndexForward
+    // (contactsRepo.ts:1009-1020), so it is ascending on `status`. Within
+    // type='unknown' the legal statuses are 'needs_review' and 'active', and
+    // 'active' < 'needs_review' - so every active row precedes every
+    // needs_review one. The seed below is in the OPPOSITE order on purpose: a
+    // fake returning seed order passes nothing here.
+    //
+    // THE contactId HALF IS NOT. Positions 2 and 4 below assert a tie-break the
+    // real service does not produce: four same-status items c1..c4 through a
+    // real byTypeStatus-shaped GSI on DynamoDB Local came back `c2, c4, c1, c3`
+    // (measured 2026-08-26, rework review A5). This test pins the fake's
+    // DETERMINISM - chosen so page-composition pins are stable and readable -
+    // and says so, rather than asserting a fiction as service behaviour. The
+    // real order is stable too, which is the property production may rely on;
+    // its SHAPE is not.
     const seed = [
       c({ contactId: 'z-review', status: 'needs_review' }),
       c({ contactId: 'a-review', status: 'needs_review' }),
@@ -112,12 +121,26 @@ describe('listByTypeFromContacts', () => {
       'z-review',
     ]);
     // And the sort is what the PAGE cuts: a Limit smaller than the partition
-    // keeps the active block and leaves needs_review behind. This is the
-    // starvation HIGH-1 named; unknownQueue.test.ts pins it end to end.
+    // keeps the active block and leaves needs_review behind - the starvation
+    // HIGH-1 named, which is why an UN-NARROWED bounded read was the defect.
+    // The reader no longer takes one (it Queries per status block), so this is
+    // the property of the INDEX, not a live failure.
     expect(listByTypeFromContacts(seed, 'unknown', { limit: 2 }).items.map((x) => x.contactId)).toEqual([
       'a-active',
       'z-active',
     ]);
+  });
+
+  it('a POSITIONLESS exclusiveStartKey THROWS - it must never silently restart the partition', () => {
+    // B5. The `contactId`-only fallback that used to live here was
+    // `findIndex(identity) + 1`, which is 0 on a miss - page one again, i.e.
+    // the duplicate-rows-on-page-2 bug modelled as correct behaviour. It was
+    // unreachable by any consumer (they all pass a key this fake minted), and a
+    // silent `start = 0` would be the same bug by another route.
+    const seed = [c({ contactId: 'a' }), c({ contactId: 'b' })];
+    expect(() =>
+      listByTypeFromContacts(seed, 'unknown', { exclusiveStartKey: { contactId: 'a' } }),
+    ).toThrow(/status and contactId/);
   });
 
   it('the GSI is sparse: a status-less contact is not indexed at all', () => {

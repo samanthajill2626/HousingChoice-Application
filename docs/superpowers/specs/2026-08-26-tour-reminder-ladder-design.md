@@ -73,11 +73,20 @@ them in the panel:
 - The founder still SEES a `confirmation` rung on every tour, on a ladder she
   asked to have no confirmation on, and its "Send now" button
   (`RemindersPanel.tsx:347`) is LIVE. Nothing prevents her sending one by hand.
-  Accepted: she asked for the rung not to FIRE, and it does not; suppressing a
-  per-rung button is dashboard work this phase does not otherwise touch, and a
-  disabled button with no explanation is its own confusion. If it turns out to
-  bother her in the panel, that is a small follow-up, not a reason to take on the
-  harness problem in 9.5 early.
+  Accepted, but NOT for the reason an earlier revision gave. That revision said
+  suppressing the button was "dashboard work this phase does not otherwise
+  touch", which is FALSE - sections 8.2 and 11 already edit
+  `RemindersPanel.tsx:347` and `dashboard/src/api/types.ts`, so the file is open
+  either way and the edit would be cheap.
+
+  The real reason is that the action is HARMLESS. A force-sent confirmation is a
+  correct message to a tenant who does have a booked tour; the founder asked not
+  to send them AUTOMATICALLY, not that the text is wrong. Special-casing one kind
+  inside a shared per-rung control - and then owing the operator an explanation
+  for why exactly one button is dead - buys nothing against an action that does
+  no harm if taken. If she finds it confusing in the panel that is a small
+  follow-up, and it is a UI question rather than a reason to pull 9.5's harness
+  work forward.
 - Its copy is the 2026-08-18 wording, which IS in her voice (it was rewritten in
   the previous pass), but it is now the only rung this change does not touch. So
   the panel shows one rung phrased to an older brief beside four phrased to the
@@ -172,10 +181,12 @@ already asserts `analyzeSms(body).segments === 1` for every rung composed with a
 REAL seeded address, alongside an ASCII check. An earlier revision framed this as
 "measure and report at gate time"; that was wrong.
 
-`tour.morning_of` is the longest and highest-volume rung, and the measured margin
-is roughly NINETEEN CHARACTERS. So this is a design constraint on the founder's
-wording: if the copy grows, that gate goes red and the answer is to shorten the
-copy or take the two-segment decision deliberately, NOT to relax the assertion.
+`tour.morning_of` is the longest and highest-volume rung. This is therefore a
+design constraint on the founder's wording: if the copy grows, that gate goes red
+and the answer is to shorten the copy or take the two-segment decision
+deliberately, NOT to relax the assertion. (An earlier revision quoted a
+"nineteen character margin" here and then, four lines below, explained why any
+such margin is meaningless. The budget below supersedes it.)
 
 READ THE GATE BEFORE TRUSTING ANY MARGIN. As written
 (`tourCopy.test.ts:109-118`) it composes with NO `names`, so it measures the
@@ -336,9 +347,20 @@ names. Resolution happens in EACH CALLER, before composition:
   nothing has been read, so both reads happen here - that is the new work
   ruling (a) put in scope.
 - PREVIEWS, all three: HOIST the resolve ABOVE the synchronous composition.
-  Resolve once per request, keyed by `unitId` (the property contact varies per
-  TOUR, so a single per-request value would stamp one name onto every row), then
-  pass the resolved names into the existing sync call.
+  Resolve once per request, keyed by `unitId` for the PROPERTY contact (it varies
+  per tour, so a single per-request value would stamp one name onto every row).
+  The TENANT is different: the only multi-tour surface is the contact timeline,
+  which queries `listByTenant(contactId)` (`contactTimeline.ts:874`), so the
+  tenant is CONSTANT for that request - resolve it once, not per tour.
+
+  DO NOT REUSE THE EXISTING `unitOnce` MEMO AS-IS. `contactTimeline.ts:860-871`
+  already swallows a failed unit read into `undefined`, which is exactly the
+  absence/failure collapse 6.3b forbids. Threaded through the new resolution
+  that would make a FAILED read compose the SELF-GUIDED entry for a landlord-led
+  tour - a preview silently disagreeing with what the send would produce, which
+  is the one outcome the composer's single-source rule exists to prevent. The
+  memo must carry the failure distinctly, or the preview must degrade on a
+  failed read the way 6.3b says (absence fallbacks, never a different ENTRY).
 
 THE REAL HAZARD IS THE DUPLICATION, and the codebase already names it:
 `relayGroups.ts:253` carries "DUPLICATED SHAPE (3 copies, keep in sync)" with
@@ -689,11 +711,25 @@ adds `confirmation` to the pile and keeps the pile growing. Second, it is not
 only a volume problem: those rows carry OLD dueAts (section 9.3), so what fires
 is a burst of reminders for tours that are long past.
 
-So Phase B owes a ONE-TIME RETIREMENT SWEEP of stale pending rows BEFORE it
-lifts the pause - retire anything whose dueAt is meaningfully past, as
-`past_event` - and must prove it on real dev data, not only in a test. Lifting
-the pause without that sweep texts a backlog of tenants about tours that already
-happened. Write it into the Phase B branch as its first task, not its last.
+So Phase B owes a ONE-TIME RETIREMENT SWEEP of stale pending rows BEFORE it lifts
+the pause, and must prove it on real dev data, not only in a test. Lifting the
+pause without that sweep texts a backlog of tenants about tours that already
+happened. Write it into the Phase B branch as its FIRST task, not its last.
+
+TWO THINGS THE SWEEP MUST GET RIGHT, both of which an earlier draft of this
+section got wrong:
+
+- THE CRITERION IS THE TOUR, NOT THE dueAt. "Anything past-due" is the wrong
+  test: a `confirmation` row for a tour NEXT WEEK is past-due from birth
+  (`dueAt = now` at arm time) while its tour has not happened. Retire rows whose
+  TOUR is already past; leave rows for future tours to the un-arming in 9.5,
+  which is what actually decides their fate.
+- DO NOT STAMP THEM `past_event`. Section 8.2 calls that reuse a lie for exactly
+  this shape of row, and it is false on the merits for any stale rung whose
+  `dueAt < scheduledAt` - the rung was not retired because it landed after the
+  tour, it was retired because nobody was sending anything. Phase B owes a
+  reason token of its own; deciding it is part of that work, not something to
+  borrow here.
 
 ## 10. Implementation notes
 

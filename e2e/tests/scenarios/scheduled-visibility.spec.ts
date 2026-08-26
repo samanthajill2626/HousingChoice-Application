@@ -33,6 +33,9 @@ import {
   type Unit,
 } from '../../scenarios/steps.js';
 import { postInboundSms } from '../../fixtures/fakeTwilio.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // The receipt-check nudge body (app/src/jobs/placementNudges.ts) — a distinctive
 // substring pinned so a reword breaks the test loudly (mirrors post-tour-app.spec).
@@ -230,7 +233,6 @@ test('(e) tenant nudge: a placement at Awaiting receipt shows an Upcoming nudge 
   page,
   request,
 }) => {
-  test.slow(); // convert → walk to a nudged stage → tick.
   const flow = new Scenario(page, request);
   const { tenant, tenantId } = await bookedSelfGuidedTour(flow, 'Applicant');
 

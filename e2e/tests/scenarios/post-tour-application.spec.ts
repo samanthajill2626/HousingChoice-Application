@@ -37,6 +37,9 @@ import {
 // the PURE catalog module (no repo/AWS deps). Full bodies still satisfy the
 // `…Containing` outbox assertions below.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 const RECEIPT_NUDGE = MESSAGE_CATALOG['nudge.receipt_check'].default;
 const COMPLETION_NUDGE = MESSAGE_CATALOG['nudge.completion_check'].default;
@@ -105,7 +108,6 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   page,
   request,
 }) => {
-  test.slow(); // the packed no-skip walk — every stage, three ticks, board reads.
   const flow = new Scenario(page, request);
   const { tenant, owner, unit } = await reachConvertedPlacement(flow, { tenant: 'Mover', owner: 'Keys' });
 
@@ -271,7 +273,6 @@ test('placement-deadline-model — voucher + rta_window coexist (soonest-wins on
   page,
   request,
 }) => {
-  test.slow(); // full tour reach + a nine-stage walk + several board reads.
   const flow = new Scenario(page, request);
   await reachConvertedPlacement(flow, { tenant: 'Voucher', owner: 'Clock' });
 

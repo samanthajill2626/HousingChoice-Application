@@ -37,6 +37,9 @@ import {
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // Opt-in end-of-test pause for eyeballing the live dashboard (gated on E2E_PAUSE so
 // CI/normal runs are unaffected). Same two modes as the sibling specs:
@@ -94,7 +97,6 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   page,
   request,
 }) => {
-  test.slow(); // the full landlord-led arc: interest -> group -> booked -> reminders -> toured -> exit.
   const flow = new Scenario(page, request);
   const { tenant, owner, ownerId, unit } = await searchingTenantOwnerUnit(flow, {
     tenant: 'Tourist',
@@ -353,7 +355,6 @@ test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -
   page,
   request,
 }) => {
-  test.slow(); // a full page-driven walk with a relay fan-out + a conversion.
   const flow = new Scenario(page, request);
   const { tenant, owner, unit } = await searchingTenantOwnerUnit(flow, {
     tenant: 'Arc',

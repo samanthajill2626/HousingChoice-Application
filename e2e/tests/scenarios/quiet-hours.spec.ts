@@ -52,6 +52,9 @@ import {
   type TourTimes,
 } from '../../scenarios/steps.js';
 import { expectTodayReady } from '../../support/today.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -277,7 +280,6 @@ test('(2) Defer + release: a due rung WAITS inside the window, then sends once i
   page,
   request,
 }) => {
-  test.slow(); // full booking flow + two reminder ticks
   const flow = new Scenario(page, request);
 
   // Arm the ladder with quiet hours OFF -> un-clamped (legacy-shaped) dueAts.
@@ -324,7 +326,6 @@ test('(3) Send now: a human send goes out immediately, even inside the quiet win
   page,
   request,
 }) => {
-  test.slow(); // full booking flow + a settings round-trip before the click
   const flow = new Scenario(page, request);
 
   await putQuietHours(request, QUIET_OFF);

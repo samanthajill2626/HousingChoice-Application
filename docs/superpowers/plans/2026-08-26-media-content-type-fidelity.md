@@ -210,10 +210,12 @@ describe('isInlineMediaType is NOT widened (outbound upload gate)', () => {
 });
 ```
 
-Add FOUR symbols to the file's existing import from `../src/lib/mediaTypes.js`:
-`resolveMediaTier`, `isAcceptedExtension`, `DECLARABLE_MEDIA_TYPES` and
-`INLINE_MEDIA_TYPES` - the last two are iterated by the emission-map guardrail
-block above, which is easy to miss when scanning only the first two describes.
+Add THREE symbols to the file's existing import from
+`../src/lib/mediaTypes.js`: `resolveMediaTier`, `isAcceptedExtension` and
+`DECLARABLE_MEDIA_TYPES`. (`INLINE_MEDIA_TYPES` is already imported at
+`app/test/mediaTypes.test.ts:4-8`.) `DECLARABLE_MEDIA_TYPES` is easy to miss
+because it is used only by the emission-map guardrail block, not by the two
+obvious describes.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1104,11 +1106,17 @@ hundred lines into the same describe block in `apiRoutes.test.ts`, so the line
 numbers recorded during planning are already stale:
 
 ```
-grep -rn "content-disposition'\]).toBeUndefined" app/test
+grep -n "content-disposition'\]).toBeUndefined" app/test/mmsMedia.test.ts app/test/apiRoutes.test.ts
 ```
 
-That returns one hit in `app/test/mmsMedia.test.ts` and two in
-`app/test/apiRoutes.test.ts`. The inline tier now sends `inline; filename=...`,
+THOSE TWO FILES ONLY - do not run it across `app/test`. A repo-wide grep also
+hits `app/test/unitMediaServe.test.ts`, which covers a DIFFERENT serve route
+that this change does not touch and that spec section 12 explicitly defers.
+Changing that assertion would make a green suite hide a route whose behaviour
+never moved.
+
+The scoped grep returns one hit in `mmsMedia.test.ts` and two in
+`apiRoutes.test.ts`. The inline tier now sends `inline; filename=...`,
 which does not change rendering (`inline` is the default when no disposition is
 sent) and exists so an operator saving an image gets a real name. Change each
 from absent to:
@@ -1154,7 +1162,10 @@ Message: `fix(media): serve inbound media with its true type and a real filename
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `dashboard/src/routes/contact/media.test.ts`:
+Add to `dashboard/src/routes/contact/media.test.ts`. Its import at `:2`
+currently names only `messageMediaSrc`, `messageSid` and `toCommsMediaItem`, so
+ADD all three new helpers to it - `isInlineRenderable`, `mediaKindWord` and
+`isDeclarableMediaType`:
 
 ```ts
 describe('isInlineRenderable', () => {
@@ -1409,15 +1420,28 @@ Message: `fix(dashboard): branch both galleries on renderable types, not image/*
 
 **Files:**
 - Modify: `app/src/adapters/messaging.ts` (interface + Twilio driver + console driver)
-- Modify: `app/src/adapters/mediaStore.ts` (interface + implementation)
-- Test: `app/test/mediaStore.test.ts`, and whichever messaging-adapter test file
-  the repo already has (find it with `ls app/test | grep -i messaging`)
+- Modify: `app/src/adapters/mediaStore.ts` (interface + implementation + the
+  factory's deps)
+- Create: `app/test/mediaStore.setContentType.test.ts`
+- Test: `app/test/messaging.test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
   - `MessagingAdapter.getMediaContentType(messageSid: string, mediaSid: string): Promise<string | undefined>`
   - `MediaStore.setContentType(key: string, contentType: string): Promise<void>`
+  - an optional `credentials` field on `CreateMediaStoreDeps`
+    (`app/src/adapters/mediaStore.ts:281-285`), forwarded to the `S3Client` the
+    factory constructs.
+
+THAT THIRD ITEM IS OWNED HERE even though Task 6 is what needs it. The backfill
+runs under an operator's own credentials behind an account guard, and reaching
+for the store's `client` seam from a script would put an
+`@aws-sdk/client-s3` import in `app/scripts`, which the adapter rule forbids.
+`hcCredentials()` already returns an `AwsCredentialIdentityProvider`, so the
+field's type is that and the change is a passthrough, not a new concept. A
+task-by-task builder commits Task 5 before ever reading Task 6, so if it is not
+stated here it is simply missed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1664,7 +1688,7 @@ Run `npm run typecheck` again until clean.
 ```bash
 # Explicit paths only - never `git add app/test/` or any other directory.
 # List each file typecheck made you touch.
-git add app/src/adapters/messaging.ts app/src/adapters/mediaStore.ts app/test/mediaStore.test.ts <each-touched-test-file>
+git add app/src/adapters/messaging.ts app/src/adapters/mediaStore.ts app/test/mediaStore.setContentType.test.ts app/test/messaging.test.ts <each-file-typecheck-made-you-touch>
 git commit
 ```
 
@@ -1735,6 +1759,9 @@ async function run(opts: {
   rows: Record<string, unknown>[];
   /** What Twilio answers. `null` means "Twilio no longer has it" (404). */
   contentType?: string | null;
+  /** Reject with a 429 this many times before answering normally.
+   *  `Infinity` = throttled forever. */
+  throttleTimes?: number;
   dryRun?: boolean;
   annotateFails?: boolean;
 }) {
@@ -1749,9 +1776,14 @@ async function run(opts: {
     calls.push(`annotate:${conversationId}`);
     if (opts.annotateFails) throw new Error('boom');
   });
-  const getMediaContentType = vi
-    .fn()
-    .mockResolvedValue(opts.contentType === null ? undefined : (opts.contentType ?? 'video/mp4'));
+  let throttlesLeft = opts.throttleTimes ?? 0;
+  const getMediaContentType = vi.fn(async () => {
+    if (throttlesLeft > 0) {
+      throttlesLeft -= 1;
+      throw Object.assign(new Error('too many requests'), { status: 429 });
+    }
+    return opts.contentType === null ? undefined : (opts.contentType ?? 'video/mp4');
+  });
   const doc = { send: vi.fn().mockResolvedValue({ Items: opts.rows }) };
 
   const result = await backfillMediaContentTypes({
@@ -1759,6 +1791,8 @@ async function run(opts: {
     adapter: { getMediaContentType } as never,
     mediaStore: { setContentType } as never,
     messagesRepo: { putMediaPointers, annotateMessage } as never,
+    // Injected so a throttle test does not actually wait seven seconds.
+    sleep: async () => {},
     ...(opts.dryRun === true && { dryRun: true }),
   });
   return { result, calls, setContentType, putMediaPointers, annotateMessage, getMediaContentType };
@@ -1840,6 +1874,22 @@ describe('backfillMediaContentTypes', () => {
       media_attachments: [{ s3Key: 'media/c1/MM1/5', contentType: 'application/octet-stream' }],
     });
     expect((await run({ rows: [row] })).result.skippedNoUrl).toBe(1);
+  });
+
+  it('retries through a transient 429 and still repairs', async () => {
+    const { result, setContentType } = await run({ rows: [inboundRow()], throttleTimes: 2 });
+    expect(result.written).toBe(1);
+    expect(result.skippedThrottled).toBe(0);
+    expect(setContentType).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a persistent 429 as THROTTLED, never as retention loss', async () => {
+    // Conflating the two corrupts the histogram the ops go/no-go reads:
+    // throttling means "run it again", retention loss means "these are gone".
+    const { result } = await run({ rows: [inboundRow()], throttleTimes: Infinity });
+    expect(result.skippedThrottled).toBe(1);
+    expect(result.skippedTwilio404).toBe(0);
+    expect(result.written).toBe(0);
   });
 
   it('skips an attachment whose media Twilio no longer has', async () => {
@@ -1969,16 +2019,28 @@ Create `app/scripts/backfill-media-content-types.ts`. Structure, in order:
    HOW A 429 IS DETECTED, because a counter with no detection is decoration:
    the adapter returns `undefined` ONLY for a 404 and RETHROWS everything else
    (Task 5), so the backfill wraps its `getMediaContentType` call in a
-   try/catch and inspects the thrown error:
-   `const s = (err as {status?: number; code?: number}); if (s.status === 429 || s.code === 20429)`.
+   try/catch and inspects the thrown error. COMPARE THE CODE
+   STRING-TOLERANTLY - Twilio delivers `code` as a number OR a string
+   depending on the path, which is the entire reason
+   `app/src/adapters/groupConversations.ts:322-329` exists:
+
+```ts
+const e = err as { status?: number; code?: number | string };
+const code = e.code === undefined ? undefined : Number(e.code);
+const throttled = e.status === 429 || code === 20429;
+```
+
+   A strict `e.code === 20429` lets the string form fall through to the
+   "propagate everything else" rule below, which would ABORT an ops run on a
+   transient rate limit - the opposite of the intent.
+
    Sleep 1s, 2s, 4s; if the fourth attempt still throttles, count the
    attachment as `skippedThrottled` and continue. Any other thrown error
    propagates - an auth failure must stop the run, not be silently counted.
 
-   TEST IT: a fake whose `getMediaContentType` throws `{status: 429}` twice
-   then resolves must produce one repair and zero skips; one that always
-   throttles must produce `skippedThrottled: 1` and no write. Inject the sleep
-   so the test does not actually wait 7 seconds.
+   (`20429` itself is UNVERIFIED against this repo - only 20404, 50353 and
+   12300 appear anywhere in it. The `status === 429` half is the load-bearing
+   check; the code comparison is belt-and-braces.)
 
 9b. MISCONFIGURATION GUARD, and it is not optional. `getMediaContentType`
    returns `undefined` for BOTH "Twilio no longer has this media" and "this
@@ -1988,11 +2050,29 @@ Create `app/scripts/backfill-media-content-types.ts`. Structure, in order:
    out", write nothing, and EXIT GREEN - the worst possible outcome, because it
    looks like a completed repair.
 
-   So: if `vendorCalls > 0` and the `recovered` histogram is empty, log an
-   ERROR and exit non-zero with a message saying that every single lookup came
-   back empty, that this is far more likely a driver or credential
-   misconfiguration than genuine total retention loss, and that nothing was
-   written. Applies on a dry run too - that is when it should be caught.
+   GUARD BEFORE THE SCAN, NOT AFTER IT, and check the CAUSE rather than a
+   symptom. In the CLI wrapper - NOT inside `backfillMediaContentTypes` -
+   assert that the process is configured to talk to real Twilio at all
+   (`config.twilioApiKeySid` / `twilioApiKeySecret` / `twilioAccountSid`
+   present, which is exactly what makes the adapter factory choose the Twilio
+   driver over the console one). If they are absent, log ERROR and exit
+   non-zero before a single row is scanned.
+
+   That is a direct check on the cause with NO false positives. An
+   after-the-fact "recovered is empty" test is the wrong predicate and must not
+   be used: section 6.6 accepts a permanent steady state where unrepairable
+   attachments are re-queried every run, so a fully repaired environment
+   legitimately produces zero recoveries forever, and a single aged-out
+   attachment would trip it too.
+
+   IT LIVES IN THE CLI WRAPPER because `backfillMediaContentTypes` is a pure,
+   injected function that the tests drive with stub adapters - several of which
+   deliberately recover nothing (the Twilio-404 case, the still-opaque case).
+   A guard that exits from inside the function would redden its own tests.
+
+   The final report may still WARN when nothing was recovered. A warning is
+   informational; an exit code is a claim, and this one cannot be made
+   honestly from that data.
 10. CLI wrapper copying `backfill-media-pointers.ts`'s `invokedDirectly` shape,
     PLUS the account guard - which that script does NOT have, so it is not the
     precedent for this part. `app/scripts/import-apply.ts:30-34,240-254` is:

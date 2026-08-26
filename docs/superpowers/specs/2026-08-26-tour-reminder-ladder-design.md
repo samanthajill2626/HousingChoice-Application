@@ -161,8 +161,7 @@ Placeholders are the FINAL token names (section 6).
 | Rung | Entry id | Copy |
 | --- | --- | --- |
 | Day before | `tour.day_before` | `Hey {tenantFirstName}, confirming your tour tomorrow at {time}. Does that still work for you?` |
-| 4h before | `tour.morning_of` | `Hey {tenantFirstName}, looking forward to having you tour at {time} today. Does that still work for you? Address is {where}.` |
-| 4h before, no address | `tour.morning_of_no_address` | `Hey {tenantFirstName}, looking forward to having you tour at {time} today. Does that still work for you?` |
+| 4h before | `tour.morning_of` | `Hey {tenantFirstName}, looking forward to having you tour at {time} today. Does that still work for you? {addressLine}` |
 | 1h before, self-guided | `tour.en_route_self_guided` | `Hey {tenantFirstName}, can you please text me when you're on the way?` |
 | 1h before, landlord-led | `tour.en_route_landlord_led` | `Hey {tenantFirstName}, {propertyContactFirstName} will be headed that way shortly. Can you please text here when you're on the way?` |
 | No-show check-in | `tour.no_show_checkin` | `Hi {tenantFirstName}! Do you need to reschedule?` |
@@ -176,43 +175,27 @@ They DO still need the new token declarations from section 6, because the
 exhaustive compose matrix in 9.1 covers every kind and would otherwise fail on
 them - and because a human CAN force-send one, in which case it must not throw.
 
-SEGMENT BUDGET IS A HARD EXISTING GATE, NOT A MEASUREMENT. `tourCopy.test.ts:115`
-already asserts `analyzeSms(body).segments === 1` for every rung composed with a
-REAL seeded address, alongside an ASCII check. An earlier revision framed this as
-"measure and report at gate time"; that was wrong.
+SEGMENT LENGTH IS NOT A REQUIREMENT. RULED (Cameron, 2026-08-26): there is no
+business rule that a tour reminder fit in one SMS segment, so this change does
+not treat one as a design constraint on the founder's wording.
 
-`tour.morning_of` is the longest and highest-volume rung. This is therefore a
-design constraint on the founder's wording: if the copy grows, that gate goes red
-and the answer is to shorten the copy or take the two-segment decision
-deliberately, NOT to relax the assertion. (An earlier revision quoted a
-"nineteen character margin" here and then, four lines below, explained why any
-such margin is meaningless. The budget below supersedes it.)
+`tourCopy.test.ts:109-118` currently asserts `analyzeSms(body).segments === 1`
+alongside an ASCII check. DELETE THE SEGMENT ASSERTION. It encodes a requirement
+nobody agreed to, and an earlier revision of this document promoted it into a
+constraint on Sam's copy - inventing a rule from an implementation detail. It
+would also have been measuring the wrong thing: it composes with NO `names`, so
+it pins the "there" fallback body rather than anything a real recipient receives.
 
-READ THE GATE BEFORE TRUSTING ANY MARGIN. As written
-(`tourCopy.test.ts:109-118`) it composes with NO `names`, so it measures the
-FALLBACK body - the one greeting "there". A real send substitutes a real first
-name, and every character beyond five eats into the budget ("Alejandra" is nine
-characters against "there"'s five, so four more, not nine - an earlier revision
-of this paragraph got that arithmetic wrong and then quoted a margin computed
-from the wrong body).
+KEEP THE ASCII ASSERTION. That one is real and is not about length. A single
+non-ASCII character - a smart quote pasted from a Word document, exactly how this
+copy arrives - flips the whole message from GSM-7 to UCS-2 and HALVES capacity
+from 160 characters to 70. That is a silent cost and truncation risk with a
+cause nobody would look for, and the repo already guards it deliberately
+(`messageCatalogAscii.test.ts`, and the ASCII rule in AGENTS.md).
 
-STATE IT AS A BUDGET, NOT A MARGIN. The body has TWO variable inputs, and pinning
-one while leaving the other free is how this silently regresses:
-
-    len(firstName) + len(where) <= ~59 characters
-
-for `tour.morning_of` to stay inside one GSM-7 segment. Compute the exact
-constant during the build from the final copy and pin it in the test's comment -
-a margin quoted against the fallback body is meaningless once a name is
-substituted.
-
-The gate must be EXTENDED to compose with representative values for BOTH inputs,
-not just a name. `350 Boulevard SE, Atlanta, GA 30312` (the seeded address the
-gate already uses) is 35 characters, which leaves roughly 24 for a first name at
-that address - comfortable. A LONGER address is the tighter constraint, and it is
-the input nobody controls: legacy plain-string addresses carry the full postal
-tail (section 6 note on `formatStreet`), so the worst realistic case is a long
-legacy address plus a long name. Pin that case, not the comfortable one.
+So: the copy is whatever length the founder's wording needs. If a message runs to
+two segments, that is a cost observation for the handback, not a gate failure and
+not a reason to shorten her sentences.
 
 ## 6. Token contract
 
@@ -405,12 +388,57 @@ TWO WATCH ITEMS, both of which make a naive test green before the feature exists
   absence fixture is a contact that EXISTS but carries no name; and on the GROUP
   route, where no contact is fetched at all, absence is reachable directly.
 
-### 6.4 DO NOT declare `{where}` on `tour.morning_of_no_address`
+### 6.4 `{addressLine}` - why the `_no_address` twins are gone entirely
 
-The twin exists so a unit with no address cannot leak a broken address clause.
-`interpolate()` inspects DECLARED tokens only, so an undeclared `{where}` emits
-literally rather than resolving - and `catalog.test.ts:35` fails the build on a
-token used but not declared. Declare every token on that entry EXCEPT `where`.
+RULED (Cameron, 2026-08-26): the `_no_address` variants are dropped EVERYWHERE
+for the rungs this change touches, not selectively. Dropping some while `{where}`
+still exists in a template only defers the problem - the first unit without an
+address brings the twin straight back.
+
+`day_before` and `en_route` need nothing: their copy has no address at all.
+`morning_of` is the only rung that names one, and Sam's wording puts it in its
+own trailing sentence, which is what makes the twin removable.
+
+THE ADDRESS CLAUSE MOVES FROM THE CATALOG INTO THE COMPOSER. Declare
+`{addressLine}` and compute it:
+
+- street present: `Address is 1420 Maple St Apt 3B.`
+- street absent: the empty string
+
+then TRIM the composed body, because an empty clause leaves a trailing space.
+`{where}` stays declared on the entry (a future edit may want the bare address
+mid-sentence), but the shipped copy uses `{addressLine}`.
+
+WHAT THIS BUYS: one entry per rung, no fork on address, and a unit with no
+address degrades to a sentence that simply ends - never `Address is .` and never
+a literal `{where}`. WHAT IT COSTS: the sentence's wording now lives in code
+rather than in the catalog string, so an operator editing this copy later cannot
+reword "Address is" without a code change. Accepted - these templates are not
+operator-editable in this phase (section 4), and the alternative was a second
+entry that has to be kept in sync by hand.
+
+`tour.confirmation` / `tour.confirmation_no_address` KEEP their pair. That rung
+is out of scope entirely in Phase A (section 2) and its copy uses `{where}`
+MID-sentence, where the same trick does not apply. Phase B disposes of both
+entries when it removes the rung.
+
+### 6.5 The leak the twins used to guard, and what guards it now
+
+Recorded because the OLD protection is being deliberately removed and its
+reasoning must not be lost with it.
+
+The twin existed so a unit with no address could not leak a broken address
+clause: `{where}` was left UNDECLARED on the no-address entry, and since
+`interpolate()` inspects declared tokens only, a stray `{where}` there would emit
+literally - loudly, and `catalog.test.ts:35` fails the build on a token used but
+not declared, so it could never ship.
+
+That guard is gone. What replaces it is that the address-absent case now has a
+DEFINED rendering (`{addressLine}` resolves to the empty string) rather than an
+undefined one, so there is no broken state to guard against. The test that used
+to assert the twin does not declare `where` is replaced by one asserting that
+`tour.morning_of` composed with NO address produces a clean sentence - no
+trailing `Address is`, no literal `{where}`, no double space.
 
 ## 7. Timing
 
@@ -580,9 +608,9 @@ resulting id map must be TOTAL:
 
 | kind | fork | ids |
 | --- | --- | --- |
-| `confirmation` | address | `tour.confirmation` / `tour.confirmation_no_address` |
+| `confirmation` | address | `tour.confirmation` / `tour.confirmation_no_address` (untouched, Phase A) |
 | `day_before` | none | `tour.day_before` |
-| `morning_of` | address | `tour.morning_of` / `tour.morning_of_no_address` |
+| `morning_of` | NONE | `tour.morning_of` (address clause via `{addressLine}`, 6.4) |
 | `en_route` | tour type | `tour.en_route_self_guided` / `tour.en_route_landlord_led` |
 | `no_show_checkin` | none | `tour.no_show_checkin` |
 
@@ -849,7 +877,8 @@ New coverage this change owes:
   the self-guided entry - covering BOTH zero-roster and zero-primary.
 - Read-failure vs absence on a read path and on a send path (6.3).
 - The EXHAUSTIVE compose matrix from 9.1.
-- `tour.morning_of_no_address` does not declare `where`.
+- `tour.morning_of` composed with NO address ends cleanly - no trailing
+  `Address is`, no literal `{where}`, no double space (6.4).
 - A pending `confirmation` row still composes after the rung stops arming.
 - The new skip reason's operator label.
 

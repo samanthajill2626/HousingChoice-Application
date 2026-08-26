@@ -386,3 +386,23 @@ describe('Inbox - the Unread truncation notice', () => {
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 });
+
+describe('the Unknown tab empty state (contact-side read, 2026-08-25)', () => {
+  it('an empty ready page renders the honest empty copy, never the failure banner', () => {
+    state = baseState();
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.getByText('No unknown numbers')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('an empty page the server calls truncated DOES banner - which is why the unknown branch must never set the flag (requirement 5)', () => {
+    // This pins the DEPENDENCY, not a wish: serverEndedEarlyEmpty is not
+    // filter-gated (Inbox.tsx:42), so the server-side rule "no truncated on
+    // filter=unknown" (routes/inbox.ts, the unknown branch's return) is what
+    // keeps a cleared triage queue from rendering as a load failure.
+    state = baseState({ truncated: true });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.queryByText('No unknown numbers')).toBeNull();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+});

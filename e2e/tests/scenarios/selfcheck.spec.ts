@@ -5,6 +5,9 @@
 // that must FAIL loudly (asserted with rejects.toThrow) rather than silently pass.
 import { test, expect } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 test('framework: a real verb passes and a wrong assertion fails loudly', async ({ page, request }) => {
   const flow = new Scenario(page, request);

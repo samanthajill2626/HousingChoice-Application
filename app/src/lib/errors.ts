@@ -8,6 +8,10 @@ import {
   type CorrelationContext,
 } from './context.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
+// Phone-bearing routes put a real E.164 number in req.path; every arm of the
+// express error handler masks it (log-hygiene spec section 4). phone.ts is a
+// zero-import leaf, so this adds no cycle to the logger import above.
+import { maskPhonesInText } from './phone.js';
 
 function toError(value: unknown): Error {
   if (value instanceof Error) return value;
@@ -168,7 +172,10 @@ export function createExpressErrorHandler(log: Logger = defaultLogger): ErrorReq
   return (err, req, res, next) => {
     if (res.headersSent) {
       log.error(
-        { err: toError(err), method: req.method, path: req.path },
+        // Merge reconcile (log-hygiene x error-surface): main's branch-distinct
+        // msg with the ROUTE TEMPLATE (routeLabel never carries a raw path) +
+        // this branch's masked raw-path field.
+        { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
         `unhandled error after response started: ${req.method} ${routeLabel(req)}`,
       );
       next(err);
@@ -180,14 +187,14 @@ export function createExpressErrorHandler(log: Logger = defaultLogger): ErrorReq
     // (not ERROR), so it never trips the hc-<env>-error-logs alarm.
     if (err instanceof URIError) {
       log.warn(
-        { err: toError(err), method: req.method, path: req.path },
+        { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
         `malformed URI in request - rejected as 400: ${req.method} ${routeLabel(req)}`,
       );
       res.status(400).json({ error: 'bad request' });
       return;
     }
     log.error(
-      { err: toError(err), method: req.method, path: req.path },
+      { err: toError(err), method: req.method, path: maskPhonesInText(req.path) },
       `unhandled error while handling request: ${req.method} ${routeLabel(req)}`,
     );
     res.status(500).json({ error: 'internal server error' });

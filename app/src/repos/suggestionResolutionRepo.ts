@@ -17,6 +17,7 @@ import {
   BatchGetCommand,
   GetCommand,
   PutCommand,
+  ScanCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
@@ -166,6 +167,19 @@ export interface PhaseInput {
   nextPhase: ResolutionPhase;
 }
 
+/**
+ * The sweep's projection of an active journal row - identity and timing only.
+ * NOT a narrowing of ActiveSuggestionResolution: it is deliberately the exact
+ * attribute set listActiveResolutionRows asks DynamoDB for, so widening this
+ * shape is a decision to read more of the journal, snapshot included.
+ */
+export interface ActiveResolutionRow {
+  contactId: string;
+  target: string;
+  leaseExpiresAt: string;
+  claimedAt: string;
+}
+
 export interface SuggestionResolutionRepo {
   get(contactId: string, target: string): Promise<SuggestionResolutionItem | undefined>;
   /**
@@ -177,6 +191,26 @@ export interface SuggestionResolutionRepo {
    * ordinary read repeats the enumeration.
    */
   listJournals(contactId: string): Promise<SuggestionResolutionItem[]>;
+  /**
+   * ONE Scan page of ACTIVE journal rows, for the daily abandoned-journal sweep
+   * (log-hygiene spec 9.2). A Scan and not an index: `resolve#` rows are
+   * deliberately in no GSI, because every ai_extraction index projects ALL and
+   * would therefore copy each active journal's PII snapshot into it.
+   *
+   * The two server-side clauses (`begins_with` on the key + state) do the real
+   * narrowing. The AGE gate is deliberately NOT here - it is applied by the
+   * caller, because a server-side filter never returns the excluded row, so the
+   * fail-toward-scrub rule for an unparseable `claimedAt` would be unrunnable.
+   *
+   * Projected to four fields ONLY: the sweep needs identity and timing, and a
+   * PII-hygiene duty must not pull snapshots or replay plans into memory.
+   * `limit` bounds rows EVALUATED, not matches, so a page can legitimately
+   * return zero rows and still carry a `nextCursor`.
+   */
+  listActiveResolutionRows(opts: { cursor?: string; limit: number }): Promise<{
+    rows: ActiveResolutionRow[];
+    nextCursor?: string;
+  }>;
   claim(input: ClaimResolutionInput): Promise<ResolutionClaimResult>;
   takeover(input: {
     contactId: string;
@@ -546,6 +580,35 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         );
       }
       return found;
+    },
+
+    async listActiveResolutionRows(opts) {
+      const res = await doc.send(new ScanCommand({
+        TableName: extractionTable,
+        FilterExpression: 'begins_with(#id, :p) AND #state = :active',
+        // `state` AND `target` are both DynamoDB reserved words. `#state` is
+        // needed by the filter; `#target` exists only because the projection
+        // names it.
+        ExpressionAttributeNames: { '#id': 'itemId', '#state': 'state', '#target': 'target' },
+        ExpressionAttributeValues: { ':p': 'resolve#', ':active': 'active' },
+        // The PII fence: without this, a Scan of active journals reads every
+        // snapshot and replay plan on the page into this process's memory (and
+        // into anything that later logs a row). Four fields is the whole duty.
+        ProjectionExpression: 'contactId, #target, leaseExpiresAt, claimedAt',
+        Limit: opts.limit,
+        ...(opts.cursor !== undefined && {
+          ExclusiveStartKey: JSON.parse(opts.cursor) as Record<string, unknown>,
+        }),
+      }));
+      return {
+        rows: (res.Items ?? []) as ActiveResolutionRow[],
+        // ai_extraction is HASH-KEY-ONLY (itemId, S), so the LastEvaluatedKey is
+        // one string attribute and the JSON round-trip through the settings
+        // record is lossless.
+        ...(res.LastEvaluatedKey !== undefined && {
+          nextCursor: JSON.stringify(res.LastEvaluatedKey),
+        }),
+      };
     },
 
     async claim(input) {

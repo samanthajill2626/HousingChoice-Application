@@ -138,7 +138,45 @@ export function createPushService(deps: PushServiceDeps): PushService {
    * bound (D10 / section 5) rather than "for the whole outage".
    */
   const STALE_SERVE_MAX_MS = 5 * USERS_CACHE_TTL_MS;
-  let usersCache: { items: UserItem[]; fetchedAt: number } | undefined;
+  // `scannedAt` is the ATTEMPT-START stamp of the Scan that produced the
+  // items - the write guard below compares it so an older Scan settling late
+  // cannot overwrite a newer attempt's data with a fresher fetchedAt
+  // (re-review R-3: overlapping attempts are legal when a Scan outlives the
+  // 30s floor).
+  let usersCache: { items: UserItem[]; fetchedAt: number; scannedAt: number } | undefined;
+  /**
+   * Floor between listAll ATTEMPTS (log-hygiene spec 6.1): one Scan attempt +
+   * one ERROR/WARN per ~30s window PER INSTANCE (about six instances exist per
+   * process), instead of one per inbound message. Stamped on every attempt,
+   * immediately BEFORE it starts; a successful refresh naturally resets the
+   * cadence, because the 60s TTL then decides when the next one is due.
+   *
+   * STAMPING BEFORE THE AWAIT IS WHY `refreshInFlight` EXISTS. The stamp fences
+   * the calls that arrive while an attempt is STILL RUNNING, so on a cold
+   * process a second sendToAll used to see no cache AND a millisecond-old
+   * stamp, take the floored arm, find nothing servable, and DROP the
+   * notification at debug - invisible in both deployed envs, where LOG_LEVEL is
+   * info, and the window opens on every process start and every deploy, exactly
+   * when a burst of queued webhooks lands. A floored caller now JOINS the
+   * attempt already in flight instead of guessing: at most one Scan attempt
+   * per 30s floor window PER INSTANCE, and a floored caller never drops while
+   * THE ATTEMPT IT JOINED can still answer - a caller that joined attempt N
+   * can still drop if N fails while a LATER attempt is in flight (it wakes to
+   * an empty cache and does not re-join; accepted, the next send retries).
+   * NOT "never a second Scan": a Scan that outlives the floor
+   * legitimately overlaps its successor - the join slot is identity-guarded
+   * so the LATEST attempt stays joinable, and the cache write is
+   * ordered-by-attempt so an older Scan settling late cannot overwrite newer
+   * data (see the guard at the assignment below).
+   *
+   * READ THE CATCH ARMS BELOW WITH THIS IN MIND: they still leave `fetchedAt`
+   * untouched on failure, so the refresh IS retried and the age keeps counting
+   * toward the stale bound - but the retry now waits out this floor rather than
+   * riding the very next send.
+   */
+  const REFRESH_RETRY_FLOOR_MS = 30_000;
+  let lastRefreshAttemptAt: number | undefined;
+  let refreshInFlight: Promise<void> | undefined;
 
   /**
    * The shared per-device loop: allowlist prune, send, Gone prune, transient
@@ -185,7 +223,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
           // next send retries the prune.
           failed += 1;
           log.warn(
-            { userId, kind, err: (err as Error).message },
+            { userId, kind, err },
             'push: pruning a non-allowlisted endpoint failed - kept, not sent',
           );
           continue;
@@ -216,7 +254,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
             // failed. The subscription stays and the next send retries it.
             failed += 1;
             log.warn(
-              { userId, kind, err: (pruneErr as Error).message },
+              { userId, kind, err: pruneErr },
               'push: pruning a Gone endpoint failed - kept, retried on the next send',
             );
             continue;
@@ -231,8 +269,25 @@ export function createPushService(deps: PushServiceDeps): PushService {
         // correlated (the logger mixin stamps the correlationId) and move
         // on; one dead device must not fail the whole notification.
         failed += 1;
+        // Guarded BOTH ways (re-review R-4): optional chaining covers a
+        // `throw null`, and the try covers a hostile `statusCode` ACCESSOR -
+        // `?.` still invokes a getter, and the docblock above promises this
+        // helper never rejects per device. The never-rejects invariant
+        // outranks the diagnostic field.
+        let pushStatusCode: number | undefined;
+        try {
+          const raw = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+          if (typeof raw === 'number') pushStatusCode = raw;
+        } catch {
+          pushStatusCode = undefined;
+        }
         log.warn(
-          { userId, kind, err: (err as Error).message },
+          {
+            userId,
+            kind,
+            err,
+            ...(pushStatusCode !== undefined && { pushStatusCode }),
+          },
           'push: send to one device failed (transient) — kept subscription',
         );
       }
@@ -291,44 +346,101 @@ export function createPushService(deps: PushServiceDeps): PushService {
       }
 
       if (usersCache === undefined || now() - usersCache.fetchedAt >= USERS_CACHE_TTL_MS) {
-        try {
-          usersCache = { items: await users.listAll(), fetchedAt: now() };
-        } catch (err) {
-          // A lookup failure must never break the caller (the send is
-          // fire-and-forget off a webhook/ingest path): it is logged, never
-          // thrown, exactly as the voice founder lookup does.
-          if (usersCache === undefined) {
-            // No list has ever been fetched, so there is nobody to send to:
-            // log ERROR and drop the broadcast (spec 3.1).
-            log.error(
-              { err, kind: notification.kind },
-              'push: listing users failed - broadcast not sent',
-            );
-            return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
-          }
-          const staleMs = now() - usersCache.fetchedAt;
-          if (staleMs >= STALE_SERVE_MAX_MS) {
-            // The cached list is past the bound, so it is no longer a
-            // trustworthy recipient set: give up exactly as 3.1 says - ERROR
-            // (a permanently broken Scan MUST reach the error-log alarm, per
-            // this repo's 436c0388 precedent), zeroed result, never a throw.
-            log.error(
+        const floored =
+          lastRefreshAttemptAt !== undefined && now() - lastRefreshAttemptAt < REFRESH_RETRY_FLOOR_MS;
+        if (!floored) {
+          const attemptStartedAt = now();
+          lastRefreshAttemptAt = attemptStartedAt;
+          try {
+            // The listAll CALL sits inside the try: the production repo cannot
+            // throw synchronously (async fn), but this function's contract is
+            // that a lookup failure NEVER escapes to the fire-and-forget
+            // caller, and an injected/decorated repo must not be able to
+            // reopen that structurally (adversarial review, phase 6).
+            //
+            // PUBLISH the attempt before awaiting it, so a floored caller has
+            // something to join. The joinable copy neutralizes BOTH
+            // settlements - it is not the error handler, this try/catch is -
+            // so joining it can never reject into someone else's call. The
+            // cleanup is IDENTITY-GUARDED: two attempts can be live at once
+            // (the 30s floor is shorter than a slow Scan under throttle), and
+            // an unguarded finally let the FIRST attempt's cleanup un-publish
+            // its successor - a floored caller then found nothing to join and
+            // dropped the broadcast, the exact window this join closes.
+            const attempt = users.listAll();
+            const published = attempt.then(() => undefined, () => undefined);
+            refreshInFlight = published;
+            void published.finally(() => {
+              if (refreshInFlight === published) refreshInFlight = undefined;
+            });
+            const items = await attempt;
+            // ORDERED-BY-ATTEMPT write (re-review R-3): only publish these
+            // items when no LATER attempt has already written the cache - an
+            // older Scan settling last would otherwise overwrite newer user
+            // data under a fresher fetchedAt, hiding a just-added device for
+            // up to an extra TTL.
+            if (usersCache === undefined || usersCache.scannedAt <= attemptStartedAt) {
+              usersCache = { items, fetchedAt: now(), scannedAt: attemptStartedAt };
+            }
+          } catch (err) {
+            // A lookup failure must never break the caller (the send is
+            // fire-and-forget off a webhook/ingest path): it is logged, never
+            // thrown, exactly as the voice founder lookup does.
+            if (usersCache === undefined) {
+              // No list has ever been fetched, so there is nobody to send to:
+              // log ERROR and drop the broadcast (spec 3.1).
+              log.error(
+                { err, kind: notification.kind },
+                'push: listing users failed - broadcast not sent',
+              );
+              return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+            }
+            const staleMs = now() - usersCache.fetchedAt;
+            if (staleMs >= STALE_SERVE_MAX_MS) {
+              // The cached list is past the bound, so it is no longer a
+              // trustworthy recipient set: give up exactly as 3.1 says - ERROR
+              // (a permanently broken Scan MUST reach the error-log alarm, per
+              // this repo's 436c0388 precedent), zeroed result, never a throw.
+              log.error(
+                { err, kind: notification.kind, staleMs },
+                'push: listing users failed and the cached list is too stale to serve - broadcast not sent',
+              );
+              return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+            }
+            // A cached list exists and is still INSIDE the bound, so fan out to
+            // it instead of dropping the notification. Deliberate, spec-amended
+            // deviation from 3.1's original literal wording (see 3.1 / D10 /
+            // section 5): D1 ("everyone with a subscription is notified") plus
+            // the late-better-than-never posture make a slightly stale fan-out
+            // strictly better than a silent drop on a transient Dynamo blip.
+            // `fetchedAt` is left UNCHANGED, so the very next send retries the
+            // refresh AND the age keeps counting toward the bound above.
+            log.warn(
               { err, kind: notification.kind, staleMs },
-              'push: listing users failed and the cached list is too stale to serve - broadcast not sent',
+              'push: refreshing the user list failed - fanning out to the cached list (stale)',
+            );
+          }
+        } else {
+          // FLOORED, which means one of two things. Either an attempt is STILL
+          // IN FLIGHT - so join it and read the cache state it settles, rather
+          // than guessing from a cache that has not been written yet: the
+          // attempter's own continuation (the line that assigns usersCache) is
+          // scheduled ahead of this join's, so the join wakes to the settled
+          // state. Or the last attempt already FAILED, and its window-opening
+          // line has already told the operator. Either way, what follows is the
+          // same: serve the cache when it is inside the stale bound; otherwise
+          // drop quietly (debug, not warn/error).
+          if (refreshInFlight !== undefined) await refreshInFlight;
+          if (usersCache === undefined || now() - usersCache.fetchedAt >= STALE_SERVE_MAX_MS) {
+            log.debug(
+              { kind: notification.kind },
+              'push: refresh floored and no servable cache - broadcast dropped',
             );
             return { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
           }
-          // A cached list exists and is still INSIDE the bound, so fan out to
-          // it instead of dropping the notification. Deliberate, spec-amended
-          // deviation from 3.1's original literal wording (see 3.1 / D10 /
-          // section 5): D1 ("everyone with a subscription is notified") plus
-          // the late-better-than-never posture make a slightly stale fan-out
-          // strictly better than a silent drop on a transient Dynamo blip.
-          // `fetchedAt` is left UNCHANGED, so the very next send retries the
-          // refresh AND the age keeps counting toward the bound above.
-          log.warn(
-            { err, kind: notification.kind, staleMs },
-            'push: refreshing the user list failed - fanning out to the cached list (stale)',
+          log.debug(
+            { kind: notification.kind },
+            'push: refresh floored - fanning out to the cached list',
           );
         }
       }
@@ -377,7 +489,7 @@ export function createPushService(deps: PushServiceDeps): PushService {
           // `record.endpoint` throw before the per-device try.
           failed += subs.length;
           log.warn(
-            { userId: user.userId, kind: notification.kind, err: (err as Error).message },
+            { userId: user.userId, kind: notification.kind, err },
             'push: broadcast to one user failed - continuing',
           );
         }

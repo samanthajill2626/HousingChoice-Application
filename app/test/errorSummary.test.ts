@@ -113,7 +113,9 @@ describe('logger redaction, as defense in depth', () => {
     const line = lines.join('');
     expect(line).not.toContain('U0tsaXZlOnNlY3JldC1hcGkta2V5');
     expect(line).not.toContain('15551110001');
-    expect(line).toContain('[REDACTED]');
+    // The serializer (lib/logSerializers.ts) strips config/request/response
+    // before redaction runs - the credential is ABSENT, not censored.
+    expect(line).not.toContain('[REDACTED]');
   });
 
   it('a NETWORK-failed vendor call leaks no credential through err.request._header', () => {
@@ -137,7 +139,9 @@ describe('logger redaction, as defense in depth', () => {
 
     const line = lines.join('');
     expect(line).not.toContain('U0tsaXZlOnNlY3JldC1hcGkta2V5');
-    expect(line).toContain('[REDACTED]');
+    // The serializer (lib/logSerializers.ts) strips config/request/response
+    // before redaction runs - the credential is ABSENT, not censored.
+    expect(line).not.toContain('[REDACTED]');
   });
 
   it('the summarized form is what a call site should log - and it is clean by construction', () => {

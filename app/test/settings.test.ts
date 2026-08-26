@@ -4,11 +4,22 @@
 // against the in-memory settings repo in the harness. Asserts defaults, the
 // admin-only PUT gate, validation, the field-level merge, and the
 // settings_updated audit event.
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import {
+  GetCommand,
+  UpdateCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FOUNDER_MISSED_CALL_AUTOTEXT, WELCOME_SMS } from '../src/lib/smsCompliance.js';
-import { createSettingsRepo, DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
+import {
+  createSettingsRepo,
+  DEFAULT_ORG_SETTINGS,
+  GROUP_CROSSCHECK_SWEEP_LAST_RUN_AT_ID,
+  JOURNAL_SWEEP_LAST_RUN_AT_ID,
+  JOURNAL_SWEEP_SCAN_CURSOR_ID,
+} from '../src/repos/settingsRepo.js';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -557,5 +568,193 @@ describe('settingsRepo.getOrgSettings - defensive quiet-hours projection', () =>
       quietHoursEnd: '06:15',
       timezone: 'America/Chicago',
     });
+  });
+});
+
+// --- Repo-level cadence + cursor records for the abandoned-journal sweep
+// (log-hygiene spec section 9). SCOPE NOTE: the file header above scopes this
+// file to the founder-settings ROUTES; like the defensive-projection block
+// directly above, everything below is repo-level and runs against the REAL
+// createSettingsRepo through a fake document client - the usersRepo.test.ts
+// precedent, no Docker and no DynamoDB Local.
+//
+// The fake is STATEFUL and models claimGroupPeriod's ConditionExpression, so
+// "the new cadence id claims independently of the four group ids" is proved
+// against the repo rather than against a hand-written repo fake (the
+// groupGuardrails.test.ts / devGroupGuardrailTicks.test.ts settings fakes never
+// construct createSettingsRepo, so they cannot carry this claim).
+interface StatefulSettingsDoc {
+  doc: DynamoDBDocumentClient;
+  items: Map<string, Record<string, unknown>>;
+  updates: UpdateCommand[];
+}
+
+/** Resolve a `#alias` through ExpressionAttributeNames (a literal passes through). */
+function resolveAttrName(raw: string, names: Record<string, string>): string {
+  return raw.startsWith('#') ? (names[raw] ?? raw) : raw;
+}
+
+function statefulSettingsDoc(): StatefulSettingsDoc {
+  const items = new Map<string, Record<string, unknown>>();
+  const updates: UpdateCommand[] = [];
+  const doc = {
+    send: async (cmd: unknown) => {
+      if (cmd instanceof GetCommand) {
+        const { settingId } = cmd.input.Key as { settingId: string };
+        const item = items.get(settingId);
+        return { Item: item === undefined ? undefined : { ...item } };
+      }
+      if (cmd instanceof UpdateCommand) {
+        updates.push(cmd);
+        const { settingId } = cmd.input.Key as { settingId: string };
+        const item = items.get(settingId) ?? { settingId };
+        const names = cmd.input.ExpressionAttributeNames ?? {};
+        const values = (cmd.input.ExpressionAttributeValues ?? {}) as Record<string, unknown>;
+        const condition = cmd.input.ConditionExpression;
+        if (condition === 'attribute_not_exists(recorded_at) OR recorded_at <= :notBefore') {
+          const stored = item['recorded_at'];
+          if (typeof stored === 'string' && stored > (values[':notBefore'] as string)) {
+            throw new ConditionalCheckFailedException({ message: 'claimed', $metadata: {} });
+          }
+        } else if (condition !== undefined) {
+          throw new Error(`fake settings doc: unhandled condition ${condition}`);
+        }
+        const expression = cmd.input.UpdateExpression ?? '';
+        const set = /^SET (\S+) = (:\w+)$/.exec(expression);
+        const remove = /^REMOVE (\S+)$/.exec(expression);
+        if (set !== null) {
+          item[resolveAttrName(set[1]!, names)] = values[set[2]!];
+        } else if (remove !== null) {
+          delete item[resolveAttrName(remove[1]!, names)];
+        } else {
+          throw new Error(`fake settings doc: unhandled update ${expression}`);
+        }
+        items.set(settingId, item);
+        return {};
+      }
+      throw new Error('fake settings doc: unexpected command');
+    },
+  } as unknown as DynamoDBDocumentClient;
+  return { doc, items, updates };
+}
+
+describe('settingsRepo.claimGroupPeriod - the journal-sweep cadence id', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  it('claims independently of the four group cadence ids (one record per duty)', async () => {
+    const { doc } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    const at = '2026-08-25T09:00:00.000Z';
+    const notBefore = new Date(Date.parse(at) - DAY_MS).toISOString();
+
+    // A group duty claiming its own period must not consume the sweep's.
+    expect(await repo.claimGroupPeriod(GROUP_CROSSCHECK_SWEEP_LAST_RUN_AT_ID, at, notBefore)).toBe(
+      true,
+    );
+    expect(await repo.claimGroupPeriod(JOURNAL_SWEEP_LAST_RUN_AT_ID, at, notBefore)).toBe(true);
+
+    // ... and the sweep's own second claim inside the same day is refused,
+    // which is the whole cadence gate.
+    const later = '2026-08-25T09:00:30.000Z';
+    expect(
+      await repo.claimGroupPeriod(
+        JOURNAL_SWEEP_LAST_RUN_AT_ID,
+        later,
+        new Date(Date.parse(later) - DAY_MS).toISOString(),
+      ),
+    ).toBe(false);
+  });
+
+  it('a forced claim (notBefore = now) bypasses the gate, as the __dev tick needs', async () => {
+    const { doc } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    const at = '2026-08-25T09:00:00.000Z';
+    expect(
+      await repo.claimGroupPeriod(JOURNAL_SWEEP_LAST_RUN_AT_ID, at, new Date(Date.parse(at) - DAY_MS).toISOString()),
+    ).toBe(true);
+    const forced = '2026-08-25T09:00:01.000Z';
+    expect(await repo.claimGroupPeriod(JOURNAL_SWEEP_LAST_RUN_AT_ID, forced, forced)).toBe(true);
+  });
+
+  it('sends the SAME conditional write for the new id as for the group ids', async () => {
+    const { doc, updates } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    await repo.claimGroupPeriod(
+      JOURNAL_SWEEP_LAST_RUN_AT_ID,
+      '2026-08-25T09:00:00.000Z',
+      '2026-08-24T09:00:00.000Z',
+    );
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.input).toMatchObject({
+      Key: { settingId: 'journal_sweep_last_run_at' },
+      UpdateExpression: 'SET recorded_at = :at',
+      ConditionExpression: 'attribute_not_exists(recorded_at) OR recorded_at <= :notBefore',
+      ExpressionAttributeValues: {
+        ':at': '2026-08-25T09:00:00.000Z',
+        ':notBefore': '2026-08-24T09:00:00.000Z',
+      },
+    });
+  });
+});
+
+describe('settingsRepo - the journal-sweep Scan cursor', () => {
+  it('reads undefined before any run has stored one (a fresh stack scans from the top)', async () => {
+    const { doc } = statefulSettingsDoc();
+    expect(await createSettingsRepo({ doc }).getJournalSweepCursor()).toBeUndefined();
+  });
+
+  it('round-trips a cursor on its OWN record, never on the cadence record', async () => {
+    const { doc, items } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    const cursor = JSON.stringify({ itemId: 'resolve#contact-9#pets' });
+
+    await repo.claimGroupPeriod(
+      JOURNAL_SWEEP_LAST_RUN_AT_ID,
+      '2026-08-25T09:00:00.000Z',
+      '2026-08-24T09:00:00.000Z',
+    );
+    await repo.putJournalSweepCursor(cursor);
+
+    expect(await repo.getJournalSweepCursor()).toBe(cursor);
+    // Two separate settings rows: a cadence stamp can never clobber the cursor.
+    expect(items.get(JOURNAL_SWEEP_SCAN_CURSOR_ID)?.['cursor']).toBe(cursor);
+    expect(items.get(JOURNAL_SWEEP_LAST_RUN_AT_ID)?.['cursor']).toBeUndefined();
+  });
+
+  it('putJournalSweepCursor(undefined) CLEARS the stored cursor (a run that exhausted the table)', async () => {
+    const { doc } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    await repo.putJournalSweepCursor(JSON.stringify({ itemId: 'resolve#contact-1#pets' }));
+    await repo.putJournalSweepCursor(undefined);
+    expect(await repo.getJournalSweepCursor()).toBeUndefined();
+  });
+
+  it('a stored value that is not JSON reads as NO CURSOR - a full rescan, never a poisoned Scan', async () => {
+    // The Scan caller does the JSON.parse (listActiveResolutionRows feeds the
+    // string straight to ExclusiveStartKey), so a type-and-length check alone
+    // let an unparseable value through to throw on page 1 of EVERY run: the
+    // enumeration never reached the persist that would have replaced it, so
+    // the duty stayed dead behind a daily ERROR that no waiting could clear.
+    const { doc } = statefulSettingsDoc();
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const repo = createSettingsRepo({ doc, logger: log as never });
+    await repo.putJournalSweepCursor('not-json-at-all');
+
+    expect(await repo.getJournalSweepCursor()).toBeUndefined();
+    // And it SAYS so. A silent self-heal leaves the operator with no way to
+    // tell a restarted cycle from a completed one - the run that follows a
+    // cleared cursor looks exactly like a healthy wrap.
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(String(log.warn.mock.calls[0]![1])).toContain('unparseable');
+    // Never the value itself: it is garbage of unknown provenance, and this key
+    // is a Scan position over rows that carry a PII snapshot.
+    expect(JSON.stringify(log.warn.mock.calls[0])).not.toContain('not-json-at-all');
+  });
+
+  it('clearing an absent cursor is a no-op, not a throw (the common exhausted case)', async () => {
+    const { doc } = statefulSettingsDoc();
+    const repo = createSettingsRepo({ doc });
+    await expect(repo.putJournalSweepCursor(undefined)).resolves.toBeUndefined();
+    expect(await repo.getJournalSweepCursor()).toBeUndefined();
   });
 });

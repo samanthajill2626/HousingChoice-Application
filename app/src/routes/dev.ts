@@ -72,6 +72,7 @@ import {
   type GroupGuardrailDuty,
   type RunGroupGuardrailsDeps,
 } from '../jobs/groupGuardrails.js';
+import { runJournalSweep, type JournalSweepDeps } from '../jobs/journalSweep.js';
 import {
   createGroupSendStaleness,
   type GroupSendStalenessService,
@@ -115,6 +116,9 @@ export interface DevRouterDeps {
   relayReplayDeps?: RelayReplayDeps;
   /** Deps for POST /__dev/group-guardrails/tick (T6.3) - injected in tests. */
   groupGuardrailDeps?: RunGroupGuardrailsDeps;
+  /** Deps for POST /__dev/journal-sweep/tick (log-hygiene spec 9.3) - injected
+   *  in tests; defaults to the worker's construction (worker.ts). */
+  journalSweepDeps?: JournalSweepDeps;
   /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
   groupStaleness?: GroupSendStalenessService;
   performanceReseed?: typeof resetPerformanceData;
@@ -216,7 +220,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // A16 (BINDING): this is the APP process only. The hermetic lane also spawns
   // a real worker whose WARN/ERROR never lands here, so a spec asserting a
   // guardrail line must drive the APP-side tick (/__dev/group-guardrails/tick,
-  // /__dev/group-send-staleness/check, ...), never wait on the worker.
+  // /__dev/group-send-staleness/check, /__dev/journal-sweep/tick, ...), never
+  // wait on the worker.
   //
   // Query: level=warn|error (default warn), since=<ISO>, contains=<substr of
   // msg>, event=<exact `event` field>, limit=<n>. Newest last.
@@ -539,6 +544,26 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       { force, ...(duties !== undefined && { duties }) },
     );
     log.info({ now: nowIso, force, ran: outcome.ran }, 'dev group-guardrail tick ran');
+    res.status(200).json({ ok: true, ...outcome });
+  });
+
+  // POST /__dev/journal-sweep/tick { now?, force? } - app-side driver for
+  // the abandoned-journal sweep (A16: worker logs never reach /__dev/logtail
+  // and the worker shares the cadence record - force defaults TRUE, same
+  // rationale as the group-guardrails tick).
+  router.post('/__dev/journal-sweep/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown; force?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    const force = body.force === undefined ? true : body.force === true;
+    const outcome = await runJournalSweep(nowIso, deps.journalSweepDeps ?? { logger: log }, { force });
+    log.info({ now: nowIso, ...outcome }, 'dev journal-sweep tick ran');
     res.status(200).json({ ok: true, ...outcome });
   });
 

@@ -239,7 +239,10 @@ export interface AiRunListRowLive {
   notedLines: number;
 }
 
-export type AiRunListRow = AiRunListRowLive | { runId: string; sortKey: string; expired: true };
+// `unavailable` is OPTIONAL on the single non-live member, not a member of its
+// own: the list narrows on `expired` and then reads `unavailable` truthily.
+// Mirrors AiRunListEntry in app/src/repos/aiRunsRepo.ts - move both together.
+export type AiRunListRow = AiRunListRowLive | { runId: string; sortKey: string; expired: true; unavailable?: true };
 
 export interface AiRunListPage {
   runs: AiRunListRow[];

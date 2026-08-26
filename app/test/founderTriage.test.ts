@@ -44,6 +44,7 @@ import {
 import { TEST_ADMIN_USER, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { pushCallerIdentity } from '../src/routes/webhooks/voice.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
@@ -118,6 +119,44 @@ function founderHarness(world: FakeWorld) {
   return harness;
 }
 
+// The PUSH-ONLY caller label, unit-tested directly (log-hygiene spec section 7;
+// operator ruling D4 + the 2026-08-25 role-word amendment). The role word is
+// KEPT - it is load-bearing context on an incoming call - and the identity half
+// resolves through the message pushes' naming chain. Nothing may carry LESS
+// information than the masked label it replaces.
+describe('pushCallerIdentity', () => {
+  const tenant = { contactId: 'c1', type: 'tenant', firstName: 'Jane', lastName: 'Doe' } as never;
+  const namelessTenant = { contactId: 'c2', type: 'tenant' } as never;
+
+  it('known, named: role + FULL name', () => {
+    expect(pushCallerIdentity(tenant, undefined, CALLER)).toBe('Tenant - Jane Doe');
+  });
+
+  it('known, nameless: role + formatted number (never less than today)', () => {
+    expect(pushCallerIdentity(namelessTenant, undefined, CALLER)).toBe('Tenant - (555) 017-7777');
+  });
+
+  it('falls back to the conversation display name when no contact resolves', () => {
+    const conv = { participant_display_name: 'Jane Doe' } as never;
+    expect(pushCallerIdentity(undefined, conv, CALLER)).toBe('Jane Doe');
+  });
+
+  it('an EMPTY participant_display_name is skipped, not selected', () => {
+    const conv = { participant_display_name: '' } as never;
+    expect(pushCallerIdentity(undefined, conv, CALLER)).toBe('(555) 017-7777');
+  });
+
+  it('an EMPTY phone is skipped at the terminal rung, not selected', () => {
+    // participant_phone is '' for email participants; a bare `?? phone` there
+    // would return an empty string and ship a body reading "New voicemail - ".
+    expect(pushCallerIdentity(undefined, undefined, '')).toBe('Unknown caller');
+  });
+
+  it('terminal fallback: never empty, never undefined', () => {
+    expect(pushCallerIdentity(undefined, undefined, undefined)).toBe('Unknown caller');
+  });
+});
+
 describe('founder call-triage — the inbound bridge (M1.9b)', () => {
   it('To=business number → pre-ring push to the founder (admin), then <Pause>+<Dial> the founder cell from the business number', async () => {
     const world = createFakeWorld();
@@ -170,8 +209,9 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(push.notification.kind).toBe('pre_ring');
     expect(push.notification.payload.kind).toBe('pre_ring');
     expect(push.notification.payload.callId).toBe('CAbiz0001');
-    // Masked: the role + abbreviated name, NEVER the raw phone.
-    expect(push.notification.payload.body).toBe('Incoming call — Tenant (Jane D.)');
+    // Role word + FULL identity (D4 + the 2026-08-25 role-word amendment) -
+    // still NEVER the raw phone for a caller we can name.
+    expect(push.notification.payload.body).toBe('Incoming call — Tenant - Jane Doe');
     expect(JSON.stringify(push.notification.payload)).not.toContain(CALLER);
   });
 
@@ -564,9 +604,43 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     return app;
   }
 
+  it('VOICEMAIL push body carries the role word + the full identity', async () => {
+    // The voicemail push body was previously unpinned anywhere (log-hygiene
+    // spec section 7 called for this test). Driven end-to-end from THIS suite's
+    // harness: ring the bridge for a named tenant, miss it, then deliver the
+    // recording callback that upgrades the outcome to voicemail and fires the
+    // push. NOTE the separator here is an ASCII hyphen ('New voicemail - '),
+    // unlike the em dash the pre-ring/missed templates use; the doubled ' - '
+    // in the resulting body is deliberate and accepted.
+    const app = await seedRingingBridge({ type: 'tenant', firstName: 'Jane', lastName: 'Doe' });
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', {
+      CallSid: 'CAbiz0001',
+      RecordingSid: 'RE1111',
+      RecordingStatus: 'completed',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/ACxxx/Recordings/RE1111',
+      RecordingDuration: '37',
+      AccountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+
+    const voicemail = world.pushSends.find((p) => p.notification.kind === 'voicemail');
+    expect(voicemail).toBeDefined();
+    expect(voicemail!.notification.payload.title).toBe('New voicemail');
+    expect(voicemail!.notification.payload.body).toBe('New voicemail - Tenant - Jane Doe');
+    // The raw caller number never reaches the payload.
+    expect(JSON.stringify(voicemail!.notification.payload)).not.toContain(CALLER);
+  });
+
   it('no-answer → missed-call push (with quick-reply actions); a KNOWN tenant gets no auto-text', async () => {
-    // A named tenant caller: the push must still fire (and carry the masked
-    // role+name label), while the intake gate suppresses the auto-text - we
+    // A named tenant caller: the push must still fire (and carry the role word
+    // + full name), while the intake gate suppresses the auto-text - we
     // already hold this caller's details, so the "text us your name, voucher
     // size, and housing authority" copy would be wrong to send.
     const app = await seedRingingBridge({ type: 'tenant', firstName: 'Jane', lastName: 'Doe' });
@@ -581,13 +655,13 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(call.call_status).toBe('no-answer');
     expect(call.call_outcome).toBe('missed');
 
-    // Missed-call push to the founder, kind missed_call, masked body, actions
-    // from the (default) quickReplies, callId for the /quick-reply deep link.
+    // Missed-call push to the founder, kind missed_call, role + full identity,
+    // actions from the (default) quickReplies, callId for the deep link.
     const missed = world.pushSends.find((p) => p.notification.kind === 'missed_call');
     expect(missed).toBeDefined();
     expect(missed!.userId).toBe(TEST_ADMIN_USER.userId);
     expect(missed!.notification.payload.callId).toBe('CAbiz0001');
-    expect(missed!.notification.payload.body).toBe('Missed call — Tenant (Jane D.)');
+    expect(missed!.notification.payload.body).toBe('Missed call — Tenant - Jane Doe');
     const actions = missed!.notification.payload.actions as { action: string; title: string }[];
     expect(actions).toHaveLength(2); // default quickReplies are 2
     expect(actions[0]!.action).toBe('qr-0');

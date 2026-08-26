@@ -3,9 +3,10 @@ id: twilio-sdk-error-logs-leak-credentials
 title: App-wide sweep - log.warn({ err }) on a raw Twilio SDK AxiosError writes a live API credential and the request body to CloudWatch
 type: security
 severity: high
-status: open
+status: resolved
 area: app
 created: 2026-08-11
+resolved: 2026-08-25
 refs: app/src/adapters/messaging.ts:607, app/src/lib/logger.ts:150, app/src/lib/errors.ts:79, app/src/services/groupRail.ts:328, app/src/services/groupSend.ts:317
 ---
 
@@ -79,3 +80,86 @@ already been shown to be easy to miss with.
 
 Do NOT close this by only re-checking the group-texting call sites - those are
 already done. The value here is entirely in the sites nobody has looked at.
+
+**Resolution (2026-08-25).** Closed structurally on `feat/log-hygiene`, not by
+call-site discipline. `app/src/lib/logSerializers.ts` exports
+`serializeLoggedError`, which `createLogger` binds to the four error-carrying
+keys named by `LOG_SERIALIZER_KEYS` (`err`, `error`, `cause`, `reason`). An
+`instanceof Error` value now emits an ALLOWLIST and nothing else - `type`,
+`message`, `stack`, `code`, `status`, `statusCode`, `moreInfo`, a four-field
+`$metadata` projection, an Error `cause` recursed to depth 3, and at most five
+`aggregateErrors`. `config`, `request` and `response` have no path onto the
+line, so an `AxiosError` cannot carry `config.headers.Authorization` or
+`config.data` into CloudWatch even from a brand-new call site. `status` is
+lifted from `err.status` or `err.response.status` BEFORE `response` is dropped,
+so the diagnostic that mattered survives. `type` prefers the DECLARED `err.name`
+when it is present and not the generic 'Error', else the constructor name, so
+vendor classes stay identifiable. The serializer never throws; a hostile getter
+degrades the value to `{ type: 'UnserializableError' }`.
+
+Deliberately NOT a blanket sanitizer: primitives and non-Error objects pass
+through UNCHANGED. `reason` and `error` are live domain string fields on 25+
+production lines, and `{ err: summarizeError(x) }` (11 sites) plus
+`err: { name }` (7 sites) are deliberate summary shapes whose fields must keep
+reaching the line. Every member of the dangerous class extends Error, so
+`instanceof Error` is the allowlist trigger rather than a structural
+message-check, which would have gutted domain objects carrying a `message`. The
+redact list of item 4 is KEPT verbatim as the belt-and-suspenders backstop.
+
+Item 3 (enforceability) shipped as two guards rather than the eslint rule the
+issue suggested. (1) A runtime credential probe,
+`app/test/logSanitization.test.ts`: a real `createLogger` over a capture stream
+fed a synthetic AxiosError-shaped Error carrying a clearly-FAKE credential
+sentinel, once per wired key and once in the first-arg
+`logger.warn(err, msg)` form, asserting the sentinel and the body digits are
+absent AND that `[REDACTED]` does not appear - absent, not censored, which is
+what makes the probe discriminating on `err`. (2) A static AST guard,
+`app/test/logCallSiteGuard.test.ts`: it compiles `app/src` with the real
+`app/tsconfig.json` and fails when an identifier DECLARED BY A CATCH CLAUSE (or
+any Error-typed value) is assigned to a logger-call property that is not a
+top-level wired key. Its allowlist starts and remains EMPTY; a virtual canary
+overlaid into the real program is the positive control, and a health case
+asserts >50 source files and zero TS2307 diagnostics so a misconfigured program
+cannot scan an empty world and pass.
+
+The sweep item 1 asked for was done and classified: 334 grep hits across
+`app/src` - 235 WIRED-OK, 38 non-payload matches (parameter types, catch
+bindings, comment prose), 32 in the five files excluded by the concurrent C1
+mission (all already the wired `{ err }` shape), 23 KEPT-SUMMARY, 2
+KEPT-STRICTER, 4 CONVERTED. The four conversions are the `pushService.ts`
+per-device WARNs, which now log the error OBJECT under `err` instead of
+`(err as Error).message` (see
+[push-failure-status-not-surfaced](./push-failure-status-not-surfaced.md)).
+
+Residuals, named rather than implied:
+
+- Vendor MESSAGE TEXT is an accepted residual. `message` and `stack` ride the
+  allowlist by design, and a vendor is free to put anything in them.
+- NESTED smuggling under a non-wired key has no runtime defense. The serializer
+  only sees the four wired keys, and the static guard is a ratchet against the
+  common literal form, not a proof: a payload hoisted into a const, a spread of
+  a helper's return, a catch variable laundered through a local, and an error
+  stringified into the message argument are all invisible to it. That territory
+  is covered by the guard plus the sweep baseline, and by nothing else.
+- Three other `err: (x as Error).message` sites remain unconverted -
+  `routes/auth.ts:311`, `services/systemStatus.ts:204` and `:258`. A string
+  under a wired key can carry no vendor object, so this is a posture choice, not
+  a leak; recorded so a later pass can revisit it deliberately.
+- The email path's `errFields` convention (`services/inboundEmail.ts`,
+  `services/sendEmailMessage.ts`: 2 helper definitions + 11 spread call sites)
+  was deliberately NOT converted - it is a stricter 200-char PII bound, not
+  drift.
+- The `summarizeVendorError(err)` helper item 2 proposed was not written. The
+  serializer supersedes it: correctness no longer depends on any call site
+  choosing the right helper.
+- WHAT "CLOSED" MEANS, precisely (phase-6 adversarial review): the CREDENTIAL
+  class is closed structurally - config/request/response and every future
+  enumerable an SDK invents cannot serialize through a wired key. The
+  serializer deliberately KEEPS `message` and `stack` (operator-approved spec
+  residual, 1.2): vendor error prose can and does name phone numbers (Twilio
+  21211 echoes the To number), so `{ err }` lines on send paths still carry
+  phone PII in `err.message` - accepted under the lifted 2026-08-15 telemetry
+  PII gate, and the reason `summarizeError` (which drops message) remains the
+  right choice for terse outcome lines. A future stricter posture would mask
+  E.164s inside the serializer's message/stack fields; nothing structural
+  prevents that.

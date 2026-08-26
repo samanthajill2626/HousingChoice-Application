@@ -408,20 +408,47 @@ describe('cloudwatch adapter - getLogRecord', () => {
     expect(out.fields['msg']).toBe('job failed: relay.warm');
   });
 
-  it('drops every other err nest AT ANY DEPTH, including err.cause', async () => {
+  it('keeps the write-side serializer leaves, at top level and down the chains', async () => {
+    // lib/logSerializers.ts emits these on every serialized Error: dropping
+    // them here would gut the panel for post-serializer records. Chain
+    // segments (cause / aggregateErrors.N) are normalized away before the
+    // allowlist match because the serializer guarantees those subtrees carry
+    // only its own leaves.
+    const out = await seamFor({
+      '@log': `9:${CONFIG.errorLogGroupName}`,
+      'err.statusCode': '413',
+      'err.moreInfo': 'https://www.twilio.com/docs/errors/30007',
+      'err.$metadata.httpStatusCode': '400',
+      'err.$metadata.requestId': 'r-1',
+      'err.cause.message': 'socket hang up',
+      'err.cause.cause.code': 'ECONNRESET',
+      'err.aggregateErrors.0.message': 'first leg failed',
+    }).getLogRecord('PTR');
+    expect(out.fields['err.statusCode']).toBe('413');
+    expect(out.fields['err.moreInfo']).toBe('https://www.twilio.com/docs/errors/30007');
+    expect(out.fields['err.$metadata.httpStatusCode']).toBe('400');
+    expect(out.fields['err.$metadata.requestId']).toBe('r-1');
+    expect(out.fields['err.cause.message']).toBe('socket hang up');
+    expect(out.fields['err.cause.cause.code']).toBe('ECONNRESET');
+    expect(out.fields['err.aggregateErrors.0.message']).toBe('first leg failed');
+  });
+
+  it('drops every NON-allowlisted err nest at any depth - a chain segment is no ticket', async () => {
     const out = await seamFor({
       '@log': `9:${CONFIG.errorLogGroupName}`,
       'err.message': 'boom',
       'err.config.params': 'To=%2B14045551234',
       'err.config.url': 'https://api.twilio.com/x',
       'err.cause.config.headers.Authorization': 'Basic c2lkOnNlY3JldA==',
+      'err.aggregateErrors.0.request._header': 'POST /x HTTP/1.1',
     }).getLogRecord('PTR');
     expect(out.fields['err.config.params']).toBeUndefined();
     expect(out.fields['err.config.url']).toBeUndefined();
     expect(out.fields['err.cause.config.headers.Authorization']).toBeUndefined();
+    expect(out.fields['err.aggregateErrors.0.request._header']).toBeUndefined();
   });
 
-  it('KEEPS a scalar string err - six call sites log err as a message', async () => {
+  it('KEEPS a scalar string err - three call sites still log err as a message', async () => {
     const out = await seamFor({
       '@log': `9:${CONFIG.errorLogGroupName}`,
       err: 'Insights query failed',

@@ -153,20 +153,25 @@ export interface ErrorEventView {
  * The ONLY `err.*` paths that leave this adapter.
  *
  * AN ALLOWLIST, NOT A DENYLIST, and the distinction is load-bearing. Write-time
- * credential redaction (lib/logger.ts) is a BEST-EFFORT PATH LIST - it names
- * three literal `err.config` paths and no wildcard, so `err.config.url`,
- * `err.config.params`, `err.config.baseURL` and `err.config.auth` are NOT
- * redacted at rest. A denylist here would inherit that failure mode and
- * `err.cause.config.headers.Authorization` would walk straight through it.
+ * defense is now STRUCTURAL for the wired keys (lib/logSerializers.ts: an
+ * `instanceof Error` under err/error/cause/reason emits only its own
+ * allowlist, so config/request/response never reach the log at all), with the
+ * lib/logger.ts redact path list as belt-and-suspenders - but HISTORICAL
+ * records written before that serializer landed (2026-08-25) still carry raw
+ * vendor nests, and a denylist here would hand those straight through:
+ * `err.cause.config.headers.Authorization` would walk out of the panel. This
+ * allowlist is the read-side boundary that holds for both eras.
  *
  * WHAT THIS CLOSES, EXACTLY. By construction it closes the whole `err.*`
  * subtree (any depth, including nests nobody has met) PLUS an object-valued
  * bare `err` - see isAllowedKey, which re-reads the value rather than trusting
  * the key. What it does NOT close is every OTHER key: non-`err` fields pass
  * through BY DESIGN, because app-authored fields are the point of the detail
- * view. A vendor error logged under a non-`err` key (`log.error({ response })`,
- * `log.error({ error: e })`) is therefore OUTSIDE this control and is owned by
- * write-time redaction plus call-site discipline; a sweep of every
+ * view. A vendor error logged under a non-`err` key is therefore OUTSIDE this
+ * control and is owned by the write side: the serializer also wires `error`,
+ * `cause` and `reason`, and the static guard test
+ * (app/test/logCallSiteGuard.test.ts) fails the build when a catch-clause
+ * identifier is logged outside a wired key; a sweep of every
  * log.error/warn/fatal in app/src on 2026-08-25 found zero live cases (the two
  * `error:` hits are refusal-code STRINGS). Do not read the allowlist as a
  * whole-record redaction boundary; it is the `err` boundary.
@@ -177,6 +182,14 @@ export interface ErrorEventView {
  */
 export const ERR_ALLOWLIST: readonly string[] = [
   'err.message', 'err.stack', 'err.type', 'err.name', 'err.code', 'err.status', 'err.response.status',
+  // The write-side serializer's remaining leaves (lib/logSerializers.ts):
+  // dropping them here would silently gut the panel for post-2026-08-25
+  // records. `err.name` above stays live too - summarizeError PLAIN OBJECTS
+  // pass the serializer through and carry `name`, and pre-serializer records
+  // carry it; `err.response.status` survives for the historical era only.
+  'err.statusCode', 'err.moreInfo',
+  'err.$metadata.httpStatusCode', 'err.$metadata.requestId',
+  'err.$metadata.attempts', 'err.$metadata.totalRetryDelay',
 ];
 
 /** Cap for a non-JSON record's raw text; carries its OWN flag. */
@@ -201,8 +214,9 @@ const DROPPED_KEYS = new Set([
 
 /**
  * Decide one record key/value pair. The VALUE matters for exactly one key:
- * bare `err`. Six call sites log `err` as a plain string message, which is why
- * it is admitted at all - but GetLogRecord only dot-flattens what it flattened,
+ * bare `err`. Three call sites still log `err` as a plain string message
+ * (docs/issues/err-string-log-sites-remain.md), which is why it is admitted at
+ * all - but GetLogRecord only dot-flattens what it flattened,
  * and an `err` handed back UNFLATTENED (a nesting-depth or field-count limit on
  * discovery would do it) would carry the entire vendor object - `config.headers.
  * Authorization` included - past the allowlist that exists to stop exactly that.
@@ -210,7 +224,18 @@ const DROPPED_KEYS = new Set([
  */
 function isAllowedKey(key: string, value: string): boolean {
   if (key === 'err') return !isJsonObject(value);        // scalar err: the message itself
-  if (key.startsWith('err.')) return ERR_ALLOWLIST.includes(key);
+  if (key.startsWith('err.')) {
+    // The serializer emits structural cause chains (depth <= 3) and
+    // aggregateErrors (<= 5 entries) whose subtrees carry ONLY its own
+    // allowlisted leaves - so a nested key is admitted exactly when its leaf
+    // path is allowlisted with the chain segments stripped. A vendor nest
+    // cannot ride this: `err.cause.config.headers.Authorization` normalizes to
+    // `err.config.headers.Authorization`, which is not in the list (the
+    // existing any-depth drop test pins that).
+    const normalized =
+      'err.' + key.slice('err.'.length).replace(/^(?:(?:cause|aggregateErrors\.\d+)\.)+/, '');
+    return ERR_ALLOWLIST.includes(normalized);
+  }
   if (DROPPED_KEYS.has(key)) return false;
   if (DROPPED_PREFIXES.some((p) => key.startsWith(p))) return false;
   return true;                                           // app-authored field
@@ -238,7 +263,8 @@ function isJsonObject(value: string): boolean {
  */
 const PRIORITY_FIELDS = new Set([
   'msg', 'err', 'err.message', 'err.type', 'err.name', 'err.code', 'err.status',
-  'err.response.status', 'event', 'jobName', 'jobId', 'hopCount', 'durationMs',
+  'err.response.status', 'err.statusCode', 'err.moreInfo',
+  'event', 'jobName', 'jobId', 'hopCount', 'durationMs',
   'level', 'time', 'correlationId', 'requestId', 'pollRunId',
   '@log', '@logStream', '@ingestionTime',
 ]);

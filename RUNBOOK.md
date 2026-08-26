@@ -2105,6 +2105,10 @@ fields @timestamp, @logStream, correlationId, msg, err.stack
 | sort @timestamp desc
 ```
 
+Three sites still log `err` as a STRING, so their rows come back with an empty `err.stack` column -
+`routes/auth.ts` and two in `services/systemStatus.ts` (see
+`docs/issues/err-string-log-sites-remain.md`); read `msg` on those.
+
 **(c) Orphan lines (no correlationId)** — these should be **ZERO**, always, and they alarm
 (`hc-<env>-orphan-logs`). Boot/shutdown lines carry a `bootId` correlationId since 2026-06-12,
 so ANY hit from this query is a real bug — a code path logging outside the context gates:

@@ -58,8 +58,12 @@ describe('express error handler messages', () => {
     expect(line!.msg).not.toContain('+14045551234');
     expect(line!.msg).toContain('/api/contacts/:contactId/phones/:phone');
     expect(line!.msg).toContain('DELETE');
-    // path REMAINS a structured field - only its promotion into msg is refused.
-    expect(line!.obj['path']).toBe('/api/contacts/c-1/phones/+14045551234');
+    // path REMAINS a structured field - but MASKED (log-hygiene merge
+    // reconcile): maskPhonesInText rewrites the E.164 segment at every
+    // request-path log sink, this handler included. The raw digits must not
+    // appear anywhere on the line.
+    expect(line!.obj['path']).toBe('/api/contacts/c-1/phones/+1...34');
+    expect(JSON.stringify(line!.obj)).not.toContain('14045551234');
   });
 
   it('uses the (unrouted) token when req.route is unset', () => {

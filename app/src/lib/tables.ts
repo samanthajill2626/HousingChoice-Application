@@ -212,8 +212,9 @@ export const TABLES: readonly TableSpec[] = [
     stream: 'NEW_AND_OLD_IMAGES', // feeds side effects (doc §5)
     // TTL (adv M3): real conversation messages NEVER set `expires_at`. The
     // items that do are all short-lived bookkeeping rows in their own pointer
-    // partitions, each with its own authoritative consume step - TTL is only the
-    // backstop that closes the unbounded-accrual gap when a consume never comes:
+    // partitions, each (except syssid#, below) with its own authoritative
+    // consume step - TTL is only the backstop that closes the
+    // unbounded-accrual gap when a consume never comes:
     //   - F12 parked SES events (`emailevent#<sesId>`, 7d)
     //   - group-texting due rows (`groupdue#send` for the per-send delivery
     //     staleness deadline and `groupdue#xc` for the cross-check deadline,
@@ -221,6 +222,12 @@ export const TABLES: readonly TableSpec[] = [
     //     GROUP_CROSSCHECK_DUE_PARTITION) and parked group receipts
     //     (`groupreceipt#<IMxx>`), where the horizon is deliberately far
     //     past the alarm deadline - spec 15.5: TTL is NEVER the alarm mechanism.
+    //   - syssid# system-send SID markers (messagesRepo.putSystemSidMarker):
+    //     READ-ONLY acks with NO consume step - getSystemSidMarker never
+    //     deletes. TTL (30d) is deliberately their ONLY reaper; the stated
+    //     exception to the rule above (log-hygiene spec 2026-08-24). Rows
+    //     written before 2026-08 carry no expires_at and persist; the count is
+    //     tiny.
     ttlAttribute: 'expires_at',
   },
   {

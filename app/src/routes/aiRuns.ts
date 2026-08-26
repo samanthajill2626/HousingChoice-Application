@@ -194,7 +194,8 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
     }
     const runs = page.entries.map((entry) =>
       entry.expired
-        ? { runId: entry.runId, sortKey: entry.sortKey, expired: true as const }
+        ? { runId: entry.runId, sortKey: entry.sortKey, expired: true as const,
+            ...(entry.unavailable !== undefined && { unavailable: true as const }) }
         : {
             runId: entry.runId,
             sortKey: entry.sortKey,

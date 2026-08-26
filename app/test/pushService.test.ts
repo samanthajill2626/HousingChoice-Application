@@ -244,6 +244,101 @@ describe('pushService.sendToUser', () => {
     // The non-PII kind IS logged.
     expect(serialized).toContain('missed_call');
   });
+
+  it('a transient device failure logs the error OBJECT and pushStatusCode', async () => {
+    // Log-hygiene spec 6.2. This WARN used to carry `err: <string>`, throwing
+    // away the push service's status code - the one field that separates a 413
+    // payload-too-large from a 500 blip. The safe serializer makes the OBJECT
+    // loggable, and the code is ALSO lifted to a top-level field for cheap
+    // querying: pushStatusCode, NOT statusCode, because the request logger owns
+    // top-level statusCode for HTTP response statuses.
+    const config = loadConfig(VAPID_ENV);
+    const fakeUsers = makeFakeUsersRepo([
+      testUserItem({
+        push_subscriptions: [
+          { ...sub('https://fcm.googleapis.com/fcm/send/a'), created_at: '2026-06-01T00:00:00.000Z' },
+        ],
+      }),
+    ]);
+    const capture = createLogCapture();
+    const adapter: WebPushAdapter = {
+      async sendToSubscription() {
+        throw Object.assign(new Error('Received unexpected response code'), { statusCode: 413 });
+      },
+    };
+    const service = createPushService({
+      config,
+      usersRepo: fakeUsers.repo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'missed_call',
+      payload: { title: 'x' },
+    });
+
+    expect(result).toMatchObject({ sent: 0, pruned: 0, failed: 1 });
+    const warn = capture.atLevel(40).find((l) => /send to one device failed/.test(String(l['msg'])));
+    expect(warn).toBeDefined();
+    // FIELDS, never object identity: the serializer transforms Error values on
+    // their way to the line, so the captured `err` is the allowlist projection.
+    const err = warn!['err'] as Record<string, unknown>;
+    expect(err['type']).toBe('Error');
+    expect(err['statusCode']).toBe(413);
+    expect(String(err['message'])).toContain('Received unexpected response code');
+    expect(warn!['pushStatusCode']).toBe(413);
+  });
+
+  it('a failed Gone-prune logs the error under err with its message intact', async () => {
+    // The sibling conversion: the prune-write WARN carried the message string
+    // only, so a DynamoDB fault arrived with no type, no code and no stack.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById(userId: string) {
+        return {
+          userId,
+          email: `${userId}@example.com`,
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              ...sub('https://fcm.googleapis.com/fcm/send/dead'),
+              created_at: '2026-06-01T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+      async removePushSubscription() {
+        throw new Error('prune-boom');
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({
+      'https://fcm.googleapis.com/fcm/send/dead': { result: 'gone' },
+    });
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    const result = await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'test',
+      payload: { title: 'x' },
+    });
+
+    expect(result).toMatchObject({ sent: 0, pruned: 0, failed: 1 });
+    const warn = capture
+      .atLevel(40)
+      .find((l) => /pruning a Gone endpoint failed/.test(String(l['msg'])));
+    expect(warn).toBeDefined();
+    const err = warn!['err'] as Record<string, unknown>;
+    expect(err['type']).toBe('Error');
+    expect(err['message']).toBe('prune-boom');
+  });
 });
 
 /** An allowlisted (FCM) push endpoint for the named device. */
@@ -587,8 +682,11 @@ describe('pushService.sendToAll', () => {
       capture.atLevel(40).some((l) => /refreshing the user list failed/.test(String(l['msg']))),
     ).toBe(true);
 
-    // fetchedAt was left untouched, so the very next send retries the scan.
+    // fetchedAt was left untouched, so the scan IS retried - but the 30s
+    // attempt floor (log-hygiene 6.1) governs when: a send at t=60_000 would be
+    // floored, so the retry lands on the first send past 60_000 + 30_000.
     world.setFailListAll(false);
+    t = 91_000;
     await service.sendToAll(note);
     expect(world.calls.listAll).toBe(3);
   });
@@ -625,9 +723,12 @@ describe('pushService.sendToAll', () => {
     expect(sentTo).toEqual([ep('a1')]);
     expect(capture.atLevel(50)).toHaveLength(0);
 
-    // AT the bound: the list is given up on.
+    // PAST the bound - and past the 30s attempt floor (log-hygiene 6.1), so the
+    // retry actually runs and its catch can reach the give-up arm. At t=300_000
+    // the previous attempt is 1ms old, so the floor would skip the Scan
+    // entirely and the ERROR below would never fire.
     sentTo.length = 0;
-    t = 300_000;
+    t = 330_000;
     const past = await service.sendToAll(note);
     expect(past).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
     expect(sentTo).toEqual([]);
@@ -844,5 +945,506 @@ describe('pushService.sendToAll', () => {
     await service.sendToAll({ kind: 'message', payload: { title: 'x' } });
 
     expect(seenOptions).toEqual([undefined, undefined]);
+  });
+
+  // Log-hygiene spec 6.1: the refresh ATTEMPT floor. Before it, a down Scan
+  // produced one ERROR/WARN and one Scan attempt per INBOUND MESSAGE; now it is
+  // one per ~30s window per instance. These cases assert BEHAVIOUR - listAll
+  // call counts, returned tallies, and the ABSENCE of repeat warn/error lines -
+  // never the new debug lines, which this capture (info level) cannot see.
+
+  it('floors the refresh RETRY: a send inside the 30s window does not re-attempt listAll', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    t = 60_000;
+    world.setFailListAll(true);
+    await service.sendToAll(note);
+
+    // The FAILED attempt itself still opens the window with its stale-serve
+    // WARN - the floor silences the sends that follow, not the first alarm.
+    expect(world.calls.listAll).toBe(2);
+    const warnsAfterTheFailure = capture.atLevel(40).length;
+    expect(warnsAfterTheFailure).toBeGreaterThan(0);
+
+    // 10s later the TTL is still lapsed, but the floor is not: no second Scan,
+    // no second alarm line, and the cached list is still served.
+    sentTo.length = 0;
+    t = 70_000;
+    const floored = await service.sendToAll(note);
+
+    expect(world.calls.listAll).toBe(2);
+    expect(floored).toEqual({
+      configured: true,
+      users: 1,
+      attempted: 1,
+      sent: 1,
+      pruned: 0,
+      failed: 0,
+    });
+    expect(sentTo).toEqual([ep('a1')]);
+    expect(capture.atLevel(40)).toHaveLength(warnsAfterTheFailure);
+    expect(capture.atLevel(50)).toHaveLength(0);
+  });
+
+  it('re-attempts listAll once the 30s floor has elapsed', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    t = 60_000;
+    world.setFailListAll(true);
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+
+    // Inside the floor: skipped.
+    t = 70_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+
+    // 31s after the failed ATTEMPT (not after the last send): retried.
+    world.setFailListAll(false);
+    t = 91_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(3);
+  });
+
+  it('floors the repeat ERROR too when no list has ever been fetched', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    world.setFailListAll(true);
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    const first = await service.sendToAll(note);
+    expect(first).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(world.calls.listAll).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+
+    // The zeroed drop is UNCHANGED - what the floor removes is the second Scan
+    // and the second ERROR (the line that used to fire per inbound message).
+    t = 10_000;
+    const second = await service.sendToAll(note);
+    expect(second).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(world.calls.listAll).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+  });
+
+  it('never delays a refresh that follows a SUCCESSFUL one', async () => {
+    // Non-regression guard: the floor is stamped on every attempt, successes
+    // included, but the 60s cache TTL is longer than the 30s floor - so by the
+    // time a post-success refresh is due, the stamp is always older than the
+    // floor and the Scan runs immediately.
+    const config = loadConfig(VAPID_ENV);
+    const world = makeBroadcastWorld([{ userId: 'usr_a', endpoints: [ep('a1')] }]);
+    const { adapter } = fakeAdapter({});
+    let t = 0;
+    const service = createPushService({
+      config,
+      usersRepo: world.usersRepo,
+      adapter,
+      now: () => t,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(1);
+
+    t = 60_000;
+    await service.sendToAll(note);
+    expect(world.calls.listAll).toBe(2);
+  });
+
+  it('does NOT drop a second broadcast issued while the first COLD-START scan is in flight', async () => {
+    // The floor is stamped BEFORE `await users.listAll()`, so it fences the
+    // calls that arrive while an attempt is still in flight as well as the ones
+    // that follow a failure. On a cold process the second call therefore sees
+    // no cache AND a millisecond-old stamp - and it used to take the floored
+    // arm, find nothing servable, and drop the notification at debug,
+    // invisible in both deployed envs, where LOG_LEVEL is info. The window is
+    // the length of a users-table Scan and it opens on every process start and
+    // every deploy, i.e. exactly when a burst of queued webhooks lands. The
+    // floored arm now JOINS the attempt already in flight and re-reads the
+    // cache, so ONE Scan serves both callers and neither is dropped. listAll is
+    // held on a gate here so both calls are provably inside that window.
+    const config = loadConfig(VAPID_ENV);
+    let release: () => void = () => {};
+    const scanInFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        await scanInFlight;
+        return [
+          {
+            userId: 'usr_a',
+            email: 'usr_a@example.com',
+            role: 'admin',
+            status: 'active',
+            created_at: '2026-08-16T00:00:00.000Z',
+            push_subscriptions: [
+              {
+                endpoint: ep('a1'),
+                keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+                created_at: '2026-08-16T00:00:00.000Z',
+              },
+            ],
+          },
+        ];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // Both issued before either can resolve: A suspends inside listAll, then B
+    // runs its gate check with the cache still empty.
+    const a = service.sendToAll(note);
+    const b = service.sendToAll(note);
+    release();
+    const [resultA, resultB] = await Promise.all([a, b]);
+
+    // ONE Scan, TWO fan-outs: B joined A's attempt and read the cache A wrote,
+    // so nothing is dropped and nothing is scanned twice.
+    expect(listAllCalls).toBe(1);
+    expect(resultA).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(resultB).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(sentTo).toEqual([ep('a1'), ep('a1')]);
+    // A dropped broadcast was silent; a delivered one raises nothing either.
+    expect(capture.atLevel(40)).toHaveLength(0);
+    expect(capture.atLevel(50)).toHaveLength(0);
+  });
+
+  it('joins a SLOW FAILING scan: one attempt, one ERROR, both broadcasts zeroed', async () => {
+    // The alarm-flood shape the floor exists for, at its hardest: the failure
+    // is SLOW (a throttle or a timeout, not an instant ValidationException), so
+    // the second broadcast arrives while the first attempt is still running.
+    // Stamping before the await fences that caller and the join makes the fence
+    // safe - B never starts a second Scan and never logs a second ERROR, and
+    // both calls still return the zeroed drop the empty-cache arm owes them.
+    const config = loadConfig(VAPID_ENV);
+    let failTheScan: () => void = () => {};
+    const scanInFlight = new Promise<never>((_resolve, reject) => {
+      failTheScan = () => reject(new Error('ProvisionedThroughputExceededException'));
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        await scanInFlight;
+        return [];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // Both issued before either can settle: A suspends inside listAll, then B
+    // runs its gate check against the stamp A just wrote.
+    const a = service.sendToAll(note);
+    const b = service.sendToAll(note);
+    failTheScan();
+    const [resultA, resultB] = await Promise.all([a, b]);
+
+    const zeroed = { configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 };
+    expect(listAllCalls).toBe(1);
+    expect(capture.atLevel(50)).toHaveLength(1);
+    expect(capture.atLevel(40)).toHaveLength(0);
+    expect(resultA).toEqual(zeroed);
+    expect(resultB).toEqual(zeroed);
+  });
+
+  it('a slow FAILED first scan cannot un-publish its successor: the join slot is identity-guarded', async () => {
+    // Two attempts can be live at once - the 30s floor is shorter than a Scan
+    // under throttle-and-retry - and an UNGUARDED cleanup let the FIRST
+    // attempt's finally null out the SECOND attempt's published join slot. A
+    // floored caller then found nothing to join, read the still-empty cache,
+    // and dropped its broadcast at debug: the exact cold-start window the join
+    // exists to close, re-opened (adversarial review, phase 6).
+    const config = loadConfig(VAPID_ENV);
+    let clock = 0;
+    let failScan1: () => void = () => {};
+    const scan1 = new Promise<never>((_resolve, reject) => {
+      failScan1 = () => reject(new Error('ProvisionedThroughputExceededException'));
+    });
+    let releaseScan2: () => void = () => {};
+    const scan2 = new Promise<void>((resolve) => {
+      releaseScan2 = resolve;
+    });
+    const userItems = [
+      {
+        userId: 'usr_a',
+        email: 'usr_a@example.com',
+        role: 'admin',
+        status: 'active',
+        created_at: '2026-08-16T00:00:00.000Z',
+        push_subscriptions: [
+          {
+            endpoint: ep('a1'),
+            keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+            created_at: '2026-08-16T00:00:00.000Z',
+          },
+        ],
+      },
+    ];
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        if (listAllCalls === 1) {
+          await scan1;
+          return [];
+        }
+        await scan2;
+        return userItems;
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => clock,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    // t=0: A starts attempt 1 (slow, will fail).
+    const a = service.sendToAll(note);
+    // t=31s: past the floor, C legitimately starts attempt 2 and publishes it.
+    clock = 31_000;
+    const c = service.sendToAll(note);
+    // Attempt 1 now fails; A settles and its cleanup runs. With the identity
+    // guard, attempt 2's published slot survives that cleanup.
+    failScan1();
+    const resultA = await a;
+    await Promise.resolve(); // let attempt 1's finally run
+    // t=45s: D is floored (14s into C's window) and must JOIN attempt 2.
+    clock = 45_000;
+    const d = service.sendToAll(note);
+    releaseScan2();
+    const [resultC, resultD] = await Promise.all([c, d]);
+
+    expect(listAllCalls).toBe(2);
+    expect(resultA).toEqual({ configured: true, users: 0, attempted: 0, sent: 0, pruned: 0, failed: 0 });
+    expect(resultC).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    // THE PIN: D joined the live attempt and fanned out - an un-published slot
+    // would have dropped it to the zeroed result invisibly.
+    expect(resultD).toMatchObject({ users: 1, attempted: 1, sent: 1 });
+    expect(sentTo).toEqual([ep('a1'), ep('a1')]);
+    expect(capture.atLevel(50)).toHaveLength(1); // attempt 1's window-opening ERROR only
+  });
+
+  it('a null throw from the adapter is counted, never escaped (per-device never-rejects invariant)', async () => {
+    // `err` in a catch is unknown; an unguarded property read for
+    // pushStatusCode turned a `throw null` into the catch's OWN TypeError,
+    // which escaped sendToDevices against its documented contract
+    // (adversarial review, phase 6). web-push itself only rejects with
+    // WebPushError - this pins the invariant against injected adapters.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById() {
+        return {
+          userId: 'usr_a',
+          email: 'usr_a@example.com',
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              endpoint: ep('a1'),
+              keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+              created_at: '2026-08-16T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as UsersRepo;
+    const adapter = {
+      async sendToSubscription() {
+        throw null;
+      },
+    } as never;
+    const capture = createLogCapture();
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+
+    const result = await service.sendToUser('usr_a', { kind: 'test', payload: { title: 'x' } });
+
+    expect(result).toMatchObject({ configured: true, attempted: 1, sent: 0, failed: 1 });
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect('pushStatusCode' in warns[0]!).toBe(false);
+  });
+
+  it('a hostile statusCode ACCESSOR cannot break the never-rejects invariant either (re-review R-4)', async () => {
+    // `?.` still invokes a getter - the second hostile shape the null test
+    // does not cover.
+    const config = loadConfig(VAPID_ENV);
+    const usersRepo = {
+      async findById() {
+        return {
+          userId: 'usr_a',
+          email: 'usr_a@example.com',
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-08-16T00:00:00.000Z',
+          push_subscriptions: [
+            {
+              endpoint: ep('a1'),
+              keys: { p256dh: 'p256-a1', auth: 'auth-a1' },
+              created_at: '2026-08-16T00:00:00.000Z',
+            },
+          ],
+        };
+      },
+    } as unknown as UsersRepo;
+    const hostile = new Error('vendor blip');
+    Object.defineProperty(hostile, 'statusCode', {
+      get() {
+        throw new Error('trap');
+      },
+      enumerable: true,
+    });
+    const adapter = {
+      async sendToSubscription() {
+        throw hostile;
+      },
+    } as never;
+    const capture = createLogCapture();
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => 0,
+    });
+
+    const result = await service.sendToUser('usr_a', { kind: 'test', payload: { title: 'x' } });
+
+    expect(result).toMatchObject({ configured: true, attempted: 1, sent: 0, failed: 1 });
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(1);
+    expect('pushStatusCode' in warns[0]!).toBe(false);
+  });
+
+  it('an older Scan settling LAST cannot overwrite a newer attempt\'s cache (re-review R-3)', async () => {
+    // Overlapping attempts are legal (a Scan can outlive the 30s floor); the
+    // cache write is ordered by ATTEMPT START, not settle order - without the
+    // guard the old list resurfaced under a fresher fetchedAt and hid a
+    // just-added device for up to an extra TTL.
+    const config = loadConfig(VAPID_ENV);
+    let clock = 0;
+    let releaseOldScan: () => void = () => {};
+    const oldScan = new Promise<void>((resolve) => {
+      releaseOldScan = resolve;
+    });
+    let releaseNewScan: () => void = () => {};
+    const newScan = new Promise<void>((resolve) => {
+      releaseNewScan = resolve;
+    });
+    const userWith = (endpoint: string) => ({
+      userId: 'usr_a',
+      email: 'usr_a@example.com',
+      role: 'admin',
+      status: 'active',
+      created_at: '2026-08-16T00:00:00.000Z',
+      push_subscriptions: [
+        { endpoint, keys: { p256dh: 'p', auth: 'a' }, created_at: '2026-08-16T00:00:00.000Z' },
+      ],
+    });
+    let listAllCalls = 0;
+    const usersRepo = {
+      async listAll() {
+        listAllCalls += 1;
+        if (listAllCalls === 1) {
+          await oldScan;
+          return [userWith(ep('old1'))];
+        }
+        await newScan;
+        return [userWith(ep('new1'))];
+      },
+    } as unknown as UsersRepo;
+    const capture = createLogCapture();
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({
+      config,
+      usersRepo,
+      adapter,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      now: () => clock,
+    });
+    const note = { kind: 'message', payload: { title: 'x' } };
+
+    const a = service.sendToAll(note); // t=0, attempt 1 (old data, slow)
+    clock = 31_000;
+    const c = service.sendToAll(note); // past the floor: attempt 2 (new data)
+    releaseNewScan();
+    const resultC = await c; // attempt 2 wrote the cache first
+    releaseOldScan();
+    const resultA = await a; // attempt 1 settles LAST - must NOT overwrite
+    clock = 40_000; // inside attempt 2's TTL: no refresh, serve the cache
+    const resultD = await service.sendToAll(note);
+
+    expect(listAllCalls).toBe(2);
+    expect(resultC).toMatchObject({ users: 1, sent: 1 });
+    expect(resultA).toMatchObject({ users: 1, sent: 1 });
+    expect(resultD).toMatchObject({ users: 1, sent: 1 });
+    // THE PIN: nothing ever fans out to the OLD list once the newer attempt
+    // has published.
+    expect(sentTo.every((endpoint) => endpoint === ep('new1'))).toBe(true);
+    expect(capture.atLevel(50)).toHaveLength(0);
   });
 });

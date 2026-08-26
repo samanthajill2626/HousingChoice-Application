@@ -74,12 +74,35 @@ export const GROUP_SEND_STALENESS_LAST_RUN_AT_ID = 'group_send_staleness_last_ru
 export const GROUP_CHANNEL_QUIET_LAST_RUN_AT_ID = 'group_channel_quiet_last_run_at';
 export const GROUP_INBOUND_HEARTBEAT_LAST_RUN_AT_ID = 'group_inbound_heartbeat_last_run_at';
 
-/** The four cadence record ids - closed, like the liveness union above. */
+/**
+ * The abandoned-journal sweep's cadence record (log-hygiene spec 9.3). It rides
+ * the SAME claim mechanism as the four ids above despite not carrying their
+ * GROUP_ naming: the mechanism is generic - one conditional write per elapsed
+ * period - and the names are historical, because the first four duties on it
+ * happened to be group-texting duties. Do not read the prefix as a scope.
+ */
+export const JOURNAL_SWEEP_LAST_RUN_AT_ID = 'journal_sweep_last_run_at';
+
+/** The five cadence record ids - closed, like the liveness union above. */
 export type GroupPeriodRecordId =
   | typeof GROUP_CROSSCHECK_SWEEP_LAST_RUN_AT_ID
   | typeof GROUP_SEND_STALENESS_LAST_RUN_AT_ID
   | typeof GROUP_CHANNEL_QUIET_LAST_RUN_AT_ID
-  | typeof GROUP_INBOUND_HEARTBEAT_LAST_RUN_AT_ID;
+  | typeof GROUP_INBOUND_HEARTBEAT_LAST_RUN_AT_ID
+  | typeof JOURNAL_SWEEP_LAST_RUN_AT_ID;
+
+/**
+ * The abandoned-journal sweep's Scan cursor (log-hygiene spec 9.2). Its own
+ * record, holding ONE `cursor` string - the JSON-encoded LastEvaluatedKey the
+ * last run stopped on - so the next run RESUMES instead of restarting from the
+ * table's internal ordering and permanently orphaning whatever hashes past the
+ * page cap. Absent = start from the top of the table (also what a run that
+ * exhausted the table writes: the cycle wraps).
+ *
+ * Separate from the cadence record on purpose: the cadence stamp is written by
+ * a conditional claim that must not carry unrelated payload.
+ */
+export const JOURNAL_SWEEP_SCAN_CURSOR_ID = 'journal_sweep_scan_cursor';
 
 /**
  * The founder-editable settings (CO2). Defaults are CO2's copy, applied by
@@ -198,6 +221,19 @@ export interface SettingsRepo {
    * race it).
    */
   claimGroupPeriod(id: GroupPeriodRecordId, at: string, notBefore: string): Promise<boolean>;
+  /**
+   * The abandoned-journal sweep's stored Scan cursor, or undefined when no run
+   * has stored one (or the last run exhausted the table). See
+   * JOURNAL_SWEEP_SCAN_CURSOR_ID.
+   */
+  getJournalSweepCursor(): Promise<string | undefined>;
+  /**
+   * Persist the sweep's Scan cursor. `undefined` CLEARS it (a REMOVE), which is
+   * what a run that reached the end of the table writes so the next cycle wraps
+   * to the top. Unconditional: one daily writer, and the last write is the
+   * truth.
+   */
+  putJournalSweepCursor(cursor: string | undefined): Promise<void>;
 }
 
 export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
@@ -392,6 +428,58 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       );
       const at = (Item as { recorded_at?: unknown } | undefined)?.recorded_at;
       return typeof at === 'string' && at.length > 0 ? at : undefined;
+    },
+
+    async putJournalSweepCursor(cursor) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { settingId: JOURNAL_SWEEP_SCAN_CURSOR_ID },
+          // `cursor` is a DynamoDB RESERVED WORD - it has to be aliased in the
+          // expression even though the stored attribute name is plain `cursor`.
+          ExpressionAttributeNames: { '#cursor': 'cursor' },
+          // REMOVE on an absent attribute (or an absent item) is a no-op, so
+          // clearing an already-clear cursor never throws.
+          ...(cursor === undefined
+            ? { UpdateExpression: 'REMOVE #cursor' }
+            : {
+                UpdateExpression: 'SET #cursor = :cursor',
+                ExpressionAttributeValues: { ':cursor': cursor },
+              }),
+        }),
+      );
+    },
+
+    async getJournalSweepCursor() {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { settingId: JOURNAL_SWEEP_SCAN_CURSOR_ID } }),
+      );
+      // Same defensive projection as getGroupTimestamp: a malformed stored value
+      // reads as "no cursor", i.e. a full rescan, never as a corrupt
+      // ExclusiveStartKey the Scan would reject on every run.
+      const cursor = (Item as { cursor?: unknown } | undefined)?.cursor;
+      if (typeof cursor !== 'string' || cursor.length === 0) return undefined;
+      // The type check alone did NOT keep that promise: the stored value is a
+      // JSON-encoded ExclusiveStartKey that the Scan caller parses
+      // (suggestionResolutionRepo.listActiveResolutionRows), so any non-empty
+      // string passed this guard and then threw inside the Scan on page 1 of
+      // every run, forever. Parse-check it here so an unparseable value really
+      // does degrade to "no cursor" - a full rescan - as stated above.
+      try {
+        JSON.parse(cursor);
+      } catch {
+        // Say so ONCE, at WARN: the degrade is silent otherwise, so the run
+        // that follows looks exactly like a healthy wrap and an operator has no
+        // way to tell a restarted cycle from a completed one. The VALUE is
+        // deliberately not logged - it is garbage of unknown provenance, and
+        // this cursor is an ExclusiveStartKey over rows that carry a PII
+        // snapshot. NOTE this getter issues NO write - the stored garbage is
+        // IGNORED here and overwritten by the run's own cursor persist; the
+        // message must not claim a clear that never happened.
+        log.warn({}, 'settings: stored journal-sweep cursor is unparseable - ignored, this run rescans from the start');
+        return undefined;
+      }
+      return cursor;
     },
   };
 }

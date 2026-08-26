@@ -208,6 +208,43 @@ export function createSuggestionResolutionFake(deps: {
       return [...items.values()].filter((item) => item.contactId === contactId);
     },
 
+    // The sweep's Scan page (log-hygiene spec 9.2). Ordered by itemId so the
+    // cursor means the same thing here as it does in DynamoDB, and projected to
+    // the same four fields - a caller that reads a snapshot off one of these
+    // rows must fail here too, not only in production.
+    async listActiveResolutionRows(opts) {
+      const ordered = [...items.values()]
+        .map((item) => ({ itemId: resolutionItemId(item.contactId, item.target), item }))
+        .sort((a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0));
+      const after =
+        opts.cursor === undefined
+          ? undefined
+          : (JSON.parse(opts.cursor) as { itemId: string }).itemId;
+      const window = after === undefined ? ordered : ordered.filter((e) => e.itemId > after);
+      // `limit` bounds rows EVALUATED, not matches - the filter runs INSIDE the
+      // window, exactly like a real Scan page.
+      const evaluated = window.slice(0, opts.limit);
+      const rows = evaluated
+        .filter((e) => e.item.state === 'active')
+        .map((e) => {
+          const active = e.item as ActiveSuggestionResolution;
+          return {
+            contactId: active.contactId,
+            target: active.target,
+            leaseExpiresAt: active.leaseExpiresAt,
+            claimedAt: active.claimedAt,
+          };
+        });
+      const last = evaluated.at(-1);
+      return {
+        rows,
+        ...(last !== undefined &&
+          window.length > evaluated.length && {
+            nextCursor: JSON.stringify({ itemId: last.itemId }),
+          }),
+      };
+    },
+
     async claim(input) {
       const mapKey = key(input.suggestion.ownerContactId, input.suggestion.target);
       const identityKey = suggestionIdentityKey(input.suggestion);

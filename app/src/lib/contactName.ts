@@ -52,8 +52,10 @@ export function parseContactName(raw: string): ParsedContactName | undefined {
 // SCOPE GUARD: five PRIVATE copies of this derivation already exist
 // (routes/contacts.ts, routes/units.ts, lib/rosterResolution.ts,
 // services/groupMembers.ts, services/inboundEmail.ts). This export is
-// consumed by the inbound-message PUSH sites only; consolidating the
-// older copies is tracked in
+// consumed by PUSH-COPY sites only - the inbound-message pushes, and (since
+// 2026-08-25, log-hygiene spec section 7) the voice pre-ring / missed-call /
+// voicemail pushes via pushCallerIdentity in routes/webhooks/voice.ts;
+// consolidating the older copies is tracked in
 // docs/issues/consolidate-contact-display-name-helpers.md - do not
 // re-point them here as a drive-by.
 //

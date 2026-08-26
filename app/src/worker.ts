@@ -285,7 +285,7 @@ runWithContext(bootContext, () => {
 // Every poll loop below starts through jobs/pollLoop.ts, which wraps the whole
 // tick (including the rejection handler) in a fresh pollRunId context - see
 // that module for why the previous bare setIntervals made every poll log line
-// an orphan. Bound once here so the five call sites stay one line each.
+// an orphan. Bound once here so the six call sites stay one line each.
 function startPoll(pollName: string, run: (nowIso: string) => Promise<unknown>): void {
   startPollLoop(pollName, run, {
     logger,
@@ -510,6 +510,14 @@ if (config.aiExtractionEnabled) {
   const guardrailDeps = { logger };
 
   startPoll('group guardrail', (now) => runGroupGuardrails(now, guardrailDeps));
+}
+
+// Abandoned-journal sweep (log-hygiene spec section 9): daily cadence behind
+// a settings-record claim; the poll itself is the shared interval.
+{
+  const { runJournalSweep } = await import('./jobs/journalSweep.js');
+
+  startPoll('journal sweep', (now) => runJournalSweep(now, { logger }));
 }
 
 // Keep the process alive until a shutdown signal arrives (also covers the

@@ -21,6 +21,10 @@ import type { RequestHandler } from 'express';
 import twilio from 'twilio';
 import type { RequestWithRawBody } from '../app.js';
 import type { Logger } from '../lib/logger.js';
+// Phone-bearing routes put a real E.164 number in req.path (log-hygiene 4).
+// All six sinks here log req.path; the `url` locals below feed signature
+// computation and stay raw.
+import { maskPhonesInText } from '../lib/phone.js';
 
 export interface TwilioSignatureOptions {
   /** TWILIO_AUTH_TOKEN — reserved for webhook HMAC validation (never REST). */
@@ -41,14 +45,17 @@ export function twilioSignatureMiddleware(opts: TwilioSignatureOptions): Request
         // Fail closed: in production a missing token/base URL is an outage,
         // not a bypass. ERROR level on purpose — this IS the alarm.
         logger.error(
-          { path: req.path, missing: { twilioAuthToken: !authToken, publicBaseUrl: !publicBaseUrl } },
+          {
+            path: maskPhonesInText(req.path),
+            missing: { twilioAuthToken: !authToken, publicBaseUrl: !publicBaseUrl },
+          },
           'twilio webhook REJECTED: signature validation unconfigured in production (fail closed)',
         );
         res.status(403).json({ error: 'forbidden' });
         return;
       }
       logger.warn(
-        { path: req.path },
+        { path: maskPhonesInText(req.path) },
         'twilio webhook accepted WITHOUT signature validation (unconfigured — local dev only)',
       );
       next();
@@ -72,7 +79,7 @@ export function twilioSignatureMiddleware(opts: TwilioSignatureOptions): Request
       logger.warn(
         {
           event: 'webhook_signature_rejected',
-          path: req.path,
+          path: maskPhonesInText(req.path),
           remoteIp: req.socket.remoteAddress ?? null,
           reason: typeof signature === 'string' ? 'signature mismatch' : 'signature header missing',
         },
@@ -107,14 +114,17 @@ export function twilioJsonSignatureMiddleware(opts: TwilioSignatureOptions): Req
         // Fail closed: same posture as the form middleware - a missing
         // token/base URL in production is an outage, not a bypass.
         logger.error(
-          { path: req.path, missing: { twilioAuthToken: !authToken, publicBaseUrl: !publicBaseUrl } },
+          {
+            path: maskPhonesInText(req.path),
+            missing: { twilioAuthToken: !authToken, publicBaseUrl: !publicBaseUrl },
+          },
           'twilio JSON webhook REJECTED: signature validation unconfigured in production (fail closed)',
         );
         res.status(403).json({ error: 'forbidden' });
         return;
       }
       logger.warn(
-        { path: req.path },
+        { path: maskPhonesInText(req.path) },
         'twilio JSON webhook accepted WITHOUT signature validation (unconfigured - local dev only)',
       );
       next();
@@ -138,7 +148,7 @@ export function twilioJsonSignatureMiddleware(opts: TwilioSignatureOptions): Req
       logger.warn(
         {
           event: 'webhook_signature_rejected',
-          path: req.path,
+          path: maskPhonesInText(req.path),
           remoteIp: req.socket.remoteAddress ?? null,
           reason: typeof signature === 'string' ? 'signature mismatch' : 'signature header missing',
         },

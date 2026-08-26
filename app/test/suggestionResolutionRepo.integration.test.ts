@@ -165,6 +165,14 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(takeover.status).toBe('taken_over');
     if (takeover.status !== 'taken_over') throw new Error('takeover failed');
     expect(takeover.journal.fence).toBe(2);
+    // ...and claimedAt is EXACTLY what claim() wrote. takeover SETs leaseId and
+    // leaseExpiresAt and ADDs fence, nothing else. The daily journal sweep's
+    // post-loop truth check DEPENDS on that: it re-reads journals it has just
+    // taken over, and the claim age is the one staleness signal it cannot forge
+    // against itself. A takeover that started stamping claimedAt would silence
+    // that poison-journal ERROR forever - and every case in journalSweep.test.ts
+    // would stay green, because none of them calls takeover.
+    expect(takeover.journal.claimedAt).toBe(claimed.journal.claimedAt);
 
     expect(await resolutions.commitContactEffect({
       token: tokenFor(claimed.journal),
@@ -895,5 +903,118 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
 
     await expect(dismissal).resolves.toBe('committed');
     expect(await extraction.getSuggestion(contactId, 'pets')).toBeUndefined();
+  });
+});
+
+// listActiveResolutionRows is the abandoned-journal sweep's ONLY enumeration
+// (log-hygiene spec 9.2): resolve# rows are deliberately in no GSI, so a
+// bounded Scan is all there is. It gets its OWN table prefix rather than
+// sharing the describe above, because a Scan sees every row in the table and
+// the protocol suite leaves dozens of active journals behind - "returns ONLY
+// the rows I seeded" is only assertable on a table nothing else wrote to.
+describe.skipIf(!reachable)('listActiveResolutionRows against DynamoDB Local', () => {
+  const testEnv = { TABLE_PREFIX: `hc-resolution-scan-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const extraction = createExtractionRepo({ doc, env: testEnv, logger });
+  const resolutions = createSuggestionResolutionRepo({ doc, env: testEnv, logger });
+  const extractionTable = tableName('ai_extraction', testEnv);
+
+  beforeAll(async () => {
+    await ensureTable(client, getTableSpec('ai_extraction'), extractionTable);
+  }, 120_000);
+
+  afterAll(async () => {
+    await deleteTableIfExists(client, extractionTable);
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  async function claimJournal(contactId: string, target = 'pets', now = '2026-08-08T12:01:00.000Z') {
+    const suggestion = (await extraction.putSuggestion({
+      ownerContactId: contactId,
+      target,
+      suggestedValue: 'two cats',
+      conversationId: `conversation-${contactId}`,
+      createdAt: '2026-08-08T12:00:00.000Z',
+      runId: `run-${contactId}`,
+    })).item;
+    const claimed = await resolutions.claim({
+      suggestion,
+      action: 'accept',
+      plan: {
+        kind: 'contact',
+        patch: { pets: 'two cats' },
+        guard: { pets: { exists: false } },
+        audit: { eventType: 'suggestion_accepted', payload: { target } },
+      },
+      now,
+      leaseId: `lease-${contactId}-${target}`,
+      leaseMs: 30_000,
+    });
+    if (claimed.status !== 'claimed') throw new Error(`claim failed: ${claimed.status}`);
+    return claimed.journal;
+  }
+
+  it('returns ONLY active resolve# rows - completed journals and sugg# rows are filtered server-side', async () => {
+    const active = await claimJournal('scan-active');
+    const finished = await claimJournal('scan-completed');
+    const finishedToken = tokenFor(finished);
+    expect(await resolutions.advancePhase({
+      token: finishedToken, expectedPhase: 'claimed', nextPhase: 'verdict_attempted',
+    })).toBe('committed');
+    expect(await resolutions.complete({
+      token: finishedToken, expectedPhase: 'verdict_attempted', completedAt: '2026-08-08T12:05:00.000Z',
+    })).toBe('completed');
+    // A pending suggestion row shares the table and carries a claimedAt-free
+    // shape; the begins_with clause is what keeps it out.
+    await extraction.putSuggestion({
+      ownerContactId: 'scan-suggestion-only',
+      target: 'pets',
+      suggestedValue: 'a dog',
+      conversationId: 'conversation-scan-suggestion-only',
+      createdAt: '2026-08-08T12:00:00.000Z',
+      runId: 'run-scan-suggestion-only',
+    });
+
+    const page = await resolutions.listActiveResolutionRows({ limit: 200 });
+    expect(page.rows).toEqual([
+      {
+        contactId: 'scan-active',
+        target: 'pets',
+        leaseExpiresAt: active.leaseExpiresAt,
+        claimedAt: active.claimedAt,
+      },
+    ]);
+    expect(page.nextCursor).toBeUndefined();
+  });
+
+  it('projects the four sweep fields ONLY - the PII snapshot and replay plan never leave DynamoDB', async () => {
+    const page = await resolutions.listActiveResolutionRows({ limit: 200 });
+    expect(page.rows.length).toBeGreaterThan(0);
+    for (const row of page.rows) {
+      expect(Object.keys(row).sort()).toEqual(['claimedAt', 'contactId', 'leaseExpiresAt', 'target']);
+    }
+    expect(JSON.stringify(page.rows)).not.toContain('two cats');
+  });
+
+  it('round-trips nextCursor so a capped page resumes instead of rescanning', async () => {
+    await claimJournal('scan-page-two');
+
+    const first = await resolutions.listActiveResolutionRows({ limit: 1 });
+    expect(first.nextCursor).toBeDefined();
+    const seen = [...first.rows.map((r) => r.contactId)];
+
+    let cursor = first.nextCursor;
+    // Limit bounds rows EVALUATED, not matches, so a page can contribute zero
+    // rows - walk to exhaustion rather than assuming one row per page.
+    for (let page = 0; page < 20 && cursor !== undefined; page += 1) {
+      const next = await resolutions.listActiveResolutionRows({ cursor, limit: 1 });
+      seen.push(...next.rows.map((r) => r.contactId));
+      cursor = next.nextCursor;
+    }
+    expect(cursor).toBeUndefined();
+    expect(seen.sort()).toEqual(['scan-active', 'scan-page-two']);
   });
 });

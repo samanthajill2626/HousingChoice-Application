@@ -162,6 +162,17 @@ describe('AiRunsSection', () => {
     expect(screen.queryByRole('columnheader', { name: 'Hash' })).not.toBeInTheDocument();
   });
   it('renders an expired row as expired rather than crashing', () => { useAiRunList.mockReturnValueOnce({ rows: [{ runId: 'gone', sortKey: 's0', expired: true }], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByText(/expired/i)).toBeInTheDocument(); });
+  it('tells a throttled row apart from a reaped one, as plain non-interactive text', () => {
+    useAiRunList.mockReturnValueOnce({ rows: [{ runId: 'held', sortKey: 's0', expired: true, unavailable: true }], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+    renderSection();
+    const held = within(screen.getByRole('list', { name: 'AI runs' })).getByRole('listitem');
+    expect(held).toHaveTextContent('Run held temporarily unavailable - reload the page to retry');
+    // The forensic point of the whole state: it must NOT read as expired.
+    expect(held).not.toHaveTextContent(/expired/i);
+    // Deliberately NO per-row control - a third button breaks the e2e
+    // one-button-per-row pin, and retry() would reset the list to page 1.
+    expect(within(held).queryByRole('button')).toBeNull();
+  });
   it('shows a retryable error block when the fetch fails', () => { useAiRunList.mockReturnValueOnce({ rows: [], status: 'error', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByRole('alert')).toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument(); });
   it('tells the operator when a load more failed and retries the SAME page, keeping Load more', async () => {
     const loadMore = vi.fn();

@@ -201,7 +201,13 @@ test("a manual run reads aged history that an automatic run cannot see", async (
   // NO reload between the tick and these assertions: the chip and the resolved
   // banner both arrive over SSE (suggestion.updated / ai_run.completed).
   const chip = page.getByRole("group", { name: "AI suggestion for pets" });
-  await expect(chip).toBeVisible({ timeout: 15_000 });
+  // 30s, not 15s: this waits on the WHOLE manual-extraction chain - the job
+  // runs in-process locally (JOBS_QUEUE_URL unset), writes a suggestion, and
+  // the chip arrives over SSE with no reload. Every link in that is latency the
+  // machine's speed decides, and 15s expired here under 1.90x suite load on
+  // 2026-08-26 while the test itself had used only 24.1s of its 180s cap - a
+  // budget firing with the enclosing test nowhere near its ceiling.
+  await expect(chip).toBeVisible({ timeout: 30_000 });
   await expect(chip).toContainText('AI heard "Two cats"');
   // The run suggested and wrote nothing, so the banner names only the half that
   // happened. It must NOT say "Updated 0 fields" - see ContactDetail's

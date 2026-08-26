@@ -2,7 +2,12 @@
 // for manual + public contact entry, so its NANP assumption and its rejections
 // are both load-bearing.
 import { describe, expect, it } from 'vitest';
-import { formatPhoneForDisplay, isE164, normalizeToE164 } from '../src/lib/phone.js';
+import {
+  formatPhoneForDisplay,
+  isE164,
+  maskPhonesInText,
+  normalizeToE164,
+} from '../src/lib/phone.js';
 
 describe('normalizeToE164', () => {
   it('passes through an already-canonical E.164 number', () => {
@@ -64,5 +69,42 @@ describe('formatPhoneForDisplay', () => {
   it('returns undefined for undefined/empty', () => {
     expect(formatPhoneForDisplay(undefined)).toBeUndefined();
     expect(formatPhoneForDisplay('')).toBeUndefined();
+  });
+});
+
+// Log-hygiene spec section 4: the server-only masking helper the request-path
+// log sinks and the OTel span hooks both call. Its cases are shaped by the
+// SINKS - bare path segments, URL-encoded query values, phone: memberKeys.
+describe('maskPhonesInText', () => {
+  it('masks a bare E.164 path segment to first digit + last two', () => {
+    expect(maskPhonesInText('/api/contacts/abc/phones/+14045551234')).toBe(
+      '/api/contacts/abc/phones/+1...34',
+    );
+  });
+
+  it('masks the URL-encoded %2B variant, both casings', () => {
+    expect(maskPhonesInText('/x?phone=%2B14045551234')).toBe('/x?phone=%2B1...34');
+    expect(maskPhonesInText('/x?phone=%2b14045551234')).toBe('/x?phone=%2b1...34');
+  });
+
+  it('masks phone: memberKey segments', () => {
+    expect(maskPhonesInText('/api/tours/t1/members/phone:+14045551234')).toBe(
+      '/api/tours/t1/members/phone:+1...34',
+    );
+  });
+
+  it('masks every phone in a multi-phone string (the span case)', () => {
+    expect(maskPhonesInText('https://x/a/+14045551234/b?to=%2B15551230000')).toBe(
+      'https://x/a/+1...34/b?to=%2B1...00',
+    );
+  });
+
+  it('passes phone-free text through unchanged', () => {
+    const clean = '/api/units?limit=25&status=active';
+    expect(maskPhonesInText(clean)).toBe(clean);
+  });
+
+  it('does not mask short digit runs that are not phones', () => {
+    expect(maskPhonesInText('/api/things/+123')).toBe('/api/things/+123');
   });
 });

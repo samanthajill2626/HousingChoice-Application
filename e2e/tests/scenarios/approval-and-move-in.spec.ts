@@ -45,6 +45,9 @@ import {
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
+import { useScenarioBudget } from '../../support/scenarioBudget.js';
+
+useScenarioBudget();
 
 // Distinct money amounts (determined vs accepted final rent) — see the header note.
 const DETERMINED_RENT = 1850;
@@ -162,7 +165,6 @@ test('happy path: walk EVERY approval → move-in stage in ladder order (no skip
   page,
   request,
 }) => {
-  test.slow(); // the packed no-skip walk — nine stages, gated modals, derivations.
   const flow = new Scenario(page, request);
   const { tenant, unit, placementId, tenantContactId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Mover',

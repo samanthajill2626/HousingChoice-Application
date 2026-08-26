@@ -6,8 +6,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { isMemberSuppressed, sendRelayAnnouncement } from '../src/services/relayAnnouncements.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 const ALICE = '+15550100001';
+const BOB = '+15550100002';
 
 function deps(world: ReturnType<typeof createFakeWorld>) {
   return {
@@ -18,6 +21,90 @@ function deps(world: ReturnType<typeof createFakeWorld>) {
     events: world.events,
   };
 }
+
+describe('sendRelayAnnouncement - system-SID markers on persist:false legs', () => {
+  // WHY (log-hygiene spec section 5): legs-only mode (the dev intro replay's
+  // only originator) writes NO delivery slot and NO relaysid pointer, so every
+  // DLR for those legs reaches the /status webhook's unknown-SID ERROR backstop
+  // and feeds the error alarm. A syssid# marker resolves them to the INFO ack.
+  async function openGroup(world: ReturnType<typeof createFakeWorld>, poolNumber: string) {
+    return world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [
+        { phone: ALICE, contactId: 'c-a', name: 'Alice' },
+        { phone: BOB, contactId: 'c-b', name: 'Bob' },
+      ],
+    });
+  }
+
+  it('writes ONE marker per sent leg, keyed by the send providerSid and tagged with kind', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100060');
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Welcome to the group.',
+      kind: 'relay.intro',
+      persist: false,
+    });
+
+    expect(result?.sentCount).toBe(2);
+    expect(world.systemSidMarkers.size).toBe(2);
+    // The marker key is the SID the carrier will quote back on the DLR.
+    for (const [sid, markerKind] of world.systemSidMarkers) {
+      expect(sid).toMatch(/^SMfake-out-/);
+      expect(markerKind).toBe('relay.intro');
+    }
+  });
+
+  it('writes NO markers in persist mode (the slot + relaysid pointer already resolve those DLRs)', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100061');
+
+    const result = await sendRelayAnnouncement(deps(world), {
+      conversationId: conv.conversationId,
+      body: 'Tour tomorrow.',
+      kind: 'tour.day_before',
+    });
+
+    expect(result?.sentCount).toBe(2);
+    expect(world.systemSidMarkers.size).toBe(0);
+  });
+
+  it('a marker write that throws WARNs and leaves the announcement successful', async () => {
+    const world = createFakeWorld();
+    const conv = await openGroup(world, '+15550100062');
+    vi.spyOn(world.messagesRepo, 'putSystemSidMarker').mockRejectedValue(new Error('marker-boom'));
+    const capture = createLogCapture();
+
+    const result = await sendRelayAnnouncement(
+      { ...deps(world), logger: createLogger({ destination: capture.stream }) },
+      {
+        conversationId: conv.conversationId,
+        body: 'Welcome to the group.',
+        kind: 'relay.intro',
+        persist: false,
+      },
+    );
+
+    // Both legs really went out; a best-effort marker must not un-send them.
+    expect(world.sent).toHaveLength(2);
+    expect(result?.sentCount).toBe(2);
+    // WARN, not ERROR: the marker try/catch is its OWN, so this must never
+    // reach the per-member send catch (which would log a spurious
+    // alarm-feeding send-failure ERROR).
+    const warns = capture.atLevel(40);
+    expect(warns).toHaveLength(2);
+    expect(warns[0]?.['msg']).toContain('system-SID marker write failed');
+    expect((warns[0]?.['err'] as { message?: string })?.message).toBe('marker-boom');
+    expect(warns[0]?.['kind']).toBe('relay.intro');
+    // logSafeMemberKey, never the loop-local memberKey: a contact-less member
+    // would put a raw phone in the line through relayMemberKey's fallback.
+    expect(warns[0]?.['memberKey']).toBe('c-a');
+    expect(capture.atLevel(50)).toEqual([]);
+    expect(JSON.stringify(capture.lines)).not.toContain(ALICE);
+  });
+});
 
 describe('sendRelayAnnouncement - closed-gate hardening (spec 4.4)', () => {
   it('skips a CLOSED relay group even though the pool number is still present', async () => {

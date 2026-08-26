@@ -225,6 +225,15 @@ interface FakeDoc {
 
 function makeFakeDoc(opts: {
   throttleFirstN?: number;
+  /**
+   * Echo exactly these itemIds as UnprocessedKeys on EVERY BatchGet that asks
+   * for them - a chunk-local, call-count-independent withhold. `throttleFirstN`
+   * cannot express this: it halves the withheld set on each retry and counts
+   * calls across chunks, so it always drains and can never leave a FIXED
+   * leftover behind after the retry budget. When this option is absent the
+   * `throttleFirstN` behaviour is untouched.
+   */
+  withholdItemIds?: string[];
   failTransactAfter?: number;
   beforeFirstMarkerTransaction?: (store: Map<string, Row>) => void;
   hideFirstMarkerGet?: boolean;
@@ -235,6 +244,7 @@ function makeFakeDoc(opts: {
   const getInputs: GetCommand[] = [];
   const rejectedTransactionKeys: string[][] = [];
   const throttleFirstN = opts.throttleFirstN ?? 0;
+  const withholdItemIds = new Set(opts.withholdItemIds ?? []);
   const failTransactAfter = opts.failTransactAfter;
   let markerTransactionIntercepted = false;
   let markerGets = 0;
@@ -294,7 +304,9 @@ function makeFakeDoc(opts: {
         if (keys.length > 100) {
           throw validationException('Too many items requested for the BatchGetItem call');
         }
-        const withhold = batchGetCalls <= throttleFirstN ? keys.slice(Math.ceil(keys.length / 2)) : [];
+        const withhold = withholdItemIds.size > 0
+          ? keys.filter((k) => withholdItemIds.has(k.itemId))
+          : (batchGetCalls <= throttleFirstN ? keys.slice(Math.ceil(keys.length / 2)) : []);
         const served = keys.filter((k) => !withhold.some((w) => w.itemId === k.itemId));
         const items = served
           .map((k) => store.get(k.itemId))
@@ -610,6 +622,54 @@ describe('aiRunsRepo - listByEntity', () => {
     expect(entries).toHaveLength(6);
     expect(entries.every((e) => e.expired === false)).toBe(true);
     expect(batchGetCalls()).toBeGreaterThan(1);
+  });
+
+  // Keys STILL unprocessed after the whole 4-attempt budget are sustained
+  // pressure, not a TTL reap. Rendering them as plain expired told an operator
+  // the forensic record was gone when it was merely unread.
+  it('reports keys unprocessed after the retry budget as unavailable, not expired', async () => {
+    const { doc, batchGetCalls } = makeFakeDoc({ withholdItemIds: ['run#run-01', 'run#run-03'] });
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+    const { entries } = await repo.listByEntity('global');
+    expect(entries).toHaveLength(5);
+    expect(entries.filter((e) => e.expired && e.unavailable === true).map((e) => e.runId))
+      .toEqual(['run-03', 'run-01']);
+    // The rest of the page is untouched - one throttled key does not degrade it.
+    expect(entries.filter((e) => !e.expired).map((e) => e.runId)).toEqual(['run-04', 'run-02', 'run-00']);
+    // The full retry budget was spent before giving up on those two keys.
+    expect(batchGetCalls()).toBe(4);
+  });
+
+  it('leaves a genuinely absent run# row a plain expired entry, with no unavailable key', async () => {
+    const { doc, store } = makeFakeDoc({ withholdItemIds: ['run#run-02'] });
+    const repo = repoWith(doc);
+    await seed(repo, 4);
+    store.delete('run#run-01');
+    const { entries } = await repo.listByEntity('global');
+    const reaped = entries.find((e) => e.runId === 'run-01');
+    const throttled = entries.find((e) => e.runId === 'run-02');
+    expect(reaped).toEqual({ runId: 'run-01', sortKey: '2026-08-06T10:01:00.000Z#run-01', expired: true });
+    // toEqual treats an explicit `undefined` as absent, so assert the KEY.
+    expect(Object.hasOwn(reaped!, 'unavailable')).toBe(false);
+    expect(throttled).toEqual({
+      runId: 'run-02', sortKey: '2026-08-06T10:02:00.000Z#run-02', expired: true, unavailable: true,
+    });
+  });
+
+  // The leftovers are chunk-local: the first chunk's `keys` binding is gone by
+  // the time the second chunk runs, so they have to be accumulated per call.
+  it('accumulates unprocessed keys across BOTH chunks, not just the last one', async () => {
+    const { doc, batchGetCalls } = makeFakeDoc({ withholdItemIds: ['run#run-149', 'run#run-000'] });
+    const repo = repoWith(doc);
+    await seedMany(repo, 150);
+    const { entries } = await repo.listByEntity('global', { limit: 150 });
+    expect(entries).toHaveLength(150);
+    // run-149 is newest (first chunk); run-000 is oldest (second chunk).
+    expect(entries.filter((e) => e.expired && e.unavailable === true).map((e) => e.runId))
+      .toEqual(['run-149', 'run-000']);
+    expect(entries.filter((e) => e.expired).map((e) => e.runId)).toEqual(['run-149', 'run-000']);
+    expect(batchGetCalls()).toBe(8);
   });
 
   it('renders a pointer whose run# row already TTLd as expired, never erroring', async () => {

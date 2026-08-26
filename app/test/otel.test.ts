@@ -13,7 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { metrics } from '@opentelemetry/sdk-node';
-import { buildOtelSdkConfig, startOtel } from '../src/lib/otel.js';
+import {
+  buildOtelSdkConfig,
+  maskIncomingSpanAttributes,
+  maskOutgoingSpanAttributes,
+  startOtel,
+} from '../src/lib/otel.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -79,6 +84,166 @@ describe('buildOtelSdkConfig: service identity', () => {
   it('HC_PROCESS=worker → worker service name', async () => {
     const config = await buildOtelSdkConfig({ HC_PROCESS: 'worker' });
     expect(config.serviceName).toBe('housingchoice-worker');
+  });
+});
+
+// Log-hygiene spec section 4: the two EXPORTED span hooks that mask
+// phone-bearing URL attributes. They are pure functions, so they are unit
+// tested directly - the instrumentation wiring itself is asserted by nothing
+// here, deliberately (starting the SDK would patch http for the whole run).
+//
+// The semconv cases are the load-bearing half: returning an attribute key the
+// ACTIVE mode never sets would FABRICATE it onto the span, so each mode is
+// pinned separately, including the two parser edge cases (an UPPERCASE token
+// still activates stable mode; a token that merely CONTAINS 'http' does not).
+function withSemconv(value: string | undefined, fn: () => void): void {
+  const prev = process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+  if (value === undefined) delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+  else process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] = value;
+  try {
+    fn();
+  } finally {
+    if (prev === undefined) delete process.env['OTEL_SEMCONV_STABILITY_OPT_IN'];
+    else process.env['OTEL_SEMCONV_STABILITY_OPT_IN'] = prev;
+  }
+}
+
+describe('span attribute masking hooks', () => {
+  it('incoming (default): masks and emits ONLY the old family', () => {
+    withSemconv(undefined, () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/api/contacts/c1/phones/+14045551234?x=%2B15551230000',
+        headers: { host: 'app.example.com' },
+      } as never);
+      expect(attrs).toEqual({
+        'http.url': 'http://app.example.com/api/contacts/c1/phones/+1...34?x=%2B1...00',
+        'http.target': '/api/contacts/c1/phones/+1...34?x=%2B1...00',
+      });
+    });
+  });
+
+  it('incoming (stable-only "http"): emits ONLY masked url.path/url.query', () => {
+    withSemconv('http', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234?x=1',
+        headers: { host: 'h' },
+      } as never);
+      expect(attrs).toEqual({ 'url.path': '/a/+1...34', 'url.query': 'x=1' });
+    });
+  });
+
+  it('incoming: a URL ending in a BARE ? emits url.path only - no fabricated empty query', () => {
+    withSemconv('http', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a?',
+        headers: { host: 'h' },
+      } as never);
+      // The instrumentation gates url.query on a truthy search string, so the
+      // key is ABSENT rather than empty. Asserting the whole object pins that.
+      expect(attrs).toEqual({ 'url.path': '/a' });
+      expect('url.query' in attrs).toBe(false);
+    });
+  });
+
+  it('incoming ("http/dup"): emits BOTH families', () => {
+    withSemconv('http/dup', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['http.target']).toBe('/a/+1...34');
+      expect(attrs['url.path']).toBe('/a/+1...34');
+    });
+  });
+
+  it('an UPPERCASE token still activates stable mode (the parser lowercases)', () => {
+    withSemconv('HTTP', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['url.path']).toBe('/a/+1...34');
+      expect(attrs['http.target']).toBeUndefined();
+    });
+  });
+
+  it('a token that merely CONTAINS http activates nothing stable', () => {
+    withSemconv('http-anything,database', () => {
+      const attrs = maskIncomingSpanAttributes({
+        url: '/a/+14045551234',
+        headers: { host: 'h' },
+      } as never) as Record<string, string>;
+      expect(attrs['url.path']).toBeUndefined();
+      expect(attrs['http.target']).toBe('/a/+1...34');
+    });
+  });
+
+  it('outgoing (default): masks and emits ONLY the old family', () => {
+    withSemconv(undefined, () => {
+      const attrs = maskOutgoingSpanAttributes({
+        hostname: 'api.twilio.com',
+        path: '/2010-04-01/Messages.json?To=%2B15551230000',
+        protocol: 'https:',
+      } as never);
+      expect(attrs).toEqual({
+        'http.url': 'https://api.twilio.com/2010-04-01/Messages.json?To=%2B1...00',
+        'http.target': '/2010-04-01/Messages.json?To=%2B1...00',
+      });
+    });
+  });
+
+  it('outgoing (stable-only "http"): emits ONLY masked url.full', () => {
+    withSemconv('http', () => {
+      const attrs = maskOutgoingSpanAttributes({
+        hostname: 'h',
+        path: '/p/+14045551234',
+        protocol: 'https:',
+      } as never);
+      expect(attrs).toEqual({ 'url.full': 'https://h/p/+1...34' });
+    });
+  });
+
+  it('never throws on malformed request objects (no-op-safe)', () => {
+    expect(maskIncomingSpanAttributes({} as never)).toEqual({});
+    expect(maskOutgoingSpanAttributes(undefined as never)).toEqual({});
+  });
+
+  it('re-applies the library signed-query redaction the overwrite would otherwise disable', () => {
+    // getAbsoluteUrl REDACTS sig/Signature/AWSAccessKeyId/X-Goog-Signature
+    // values before writing url attributes; hook attributes are assigned LAST,
+    // so an unredacted reconstruction would WIN over the redacted one
+    // (adversarial review, phase 6). The values here are clearly-fake.
+    const attrs = maskOutgoingSpanAttributes({
+      hostname: 'storage.example.com',
+      path: '/obj?X-Goog-Signature=fakesig123&sig=fakesig456&keep=1&AWSAccessKeyId=AKIAFAKE&Signature=fakesig789',
+      protocol: 'https:',
+    } as never) as Record<string, string>;
+    expect(attrs['http.url']).toBe(
+      'https://storage.example.com/obj?X-Goog-Signature=REDACTED&sig=REDACTED&keep=1&AWSAccessKeyId=REDACTED&Signature=REDACTED',
+    );
+    expect(attrs['http.target']).not.toContain('fakesig');
+    const incoming = maskIncomingSpanAttributes({
+      url: '/cb?Signature=fakesig123&phone=%2B14045551234',
+      headers: { host: 'h' },
+    } as never) as Record<string, string>;
+    expect(incoming['http.target']).toBe('/cb?Signature=REDACTED&phone=%2B1...34');
+  });
+
+  it('preserves a non-default outgoing port the way getAbsoluteUrl does', () => {
+    const attrs = maskOutgoingSpanAttributes({
+      hostname: 'localhost',
+      port: 4566,
+      path: '/x',
+      protocol: 'http:',
+    } as never) as Record<string, string>;
+    expect(attrs['http.url']).toBe('http://localhost:4566/x');
+    const defaultPort = maskOutgoingSpanAttributes({
+      hostname: 'api.twilio.com',
+      port: '443',
+      path: '/x',
+      protocol: 'https:',
+    } as never) as Record<string, string>;
+    expect(defaultPort['http.url']).toBe('https://api.twilio.com/x');
   });
 });
 

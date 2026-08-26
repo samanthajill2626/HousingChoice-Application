@@ -17,6 +17,8 @@
 import type { RequestHandler } from 'express';
 import type { AppConfig } from '../lib/config.js';
 import type { Logger } from '../lib/logger.js';
+// Phone-bearing routes put a real E.164 number in req.path (log-hygiene 4).
+import { maskPhonesInText } from '../lib/phone.js';
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -58,7 +60,7 @@ export function csrfOriginMiddleware(opts: CsrfOriginOptions): RequestHandler {
     }
     // Origin values are attacker-chosen but not PII — log them.
     logger.warn(
-      { origin, method: req.method, path: req.path },
+      { origin, method: req.method, path: maskPhonesInText(req.path) },
       'cross-origin mutating request rejected (CSRF origin check)',
     );
     res.status(403).json({ error: 'forbidden' });

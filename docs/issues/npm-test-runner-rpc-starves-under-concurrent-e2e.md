@@ -3,10 +3,11 @@ id: npm-test-runner-rpc-starves-under-concurrent-e2e
 title: Under concurrent e2e load, vitest's own worker RPC times out - the run reports "unhandled error" and its results stop being evidence
 type: bug
 severity: med
-status: open
+status: resolved
 area: app/test-infra
-refs: node_modules/vitest/dist/chunks/index.B521nVV-.js:3, node_modules/vitest/dist/chunks/rpc.-pEldfrD.js:48
+refs: app/vitest.config.ts, node_modules/vitest/dist/chunks/index.B521nVV-.js:3
 created: 2026-08-26
+resolved: 2026-08-26
 ---
 
 **Problem.** Running `npm test` while the machine carries concurrent e2e suites
@@ -27,6 +28,12 @@ transport is birpc, bundled into vitest 3.2.6 with `DEFAULT_TIMEOUT = 6e4` -
 **60 seconds**. So this error means the vitest MAIN process did not service a
 worker RPC for a full minute.
 
+**THE SIGNATURE TO SEARCH FOR: the run exits 1 with ZERO failing tests.** The
+unhandled error alone sets a non-zero exit, so the reproduction below ended
+`336 passed | 1 skipped`, `5977 passed`, no `FAIL` line anywhere - and exit
+code 1. Someone reading that exit code goes hunting for a broken test that does
+not exist, which is the expensive part of this bug.
+
 **Read vitest's own warning literally: the run's results are not evidence.**
 When task updates are dropped, the reporter's view of what ran diverges from
 what actually ran - which is why vitest says "this might cause false positive
@@ -38,11 +45,20 @@ worktrees, a third e2e suite, a `npm test`, and a 6-worker CPU load generator,
 on 16 cores. Healthy reference on a quiet box the same day: 241 files, 3559
 tests, 0 failures, app workspace 74s wall clock.
 
-**Not tunable.** The 60s value is a hardcoded constant inside vitest's bundled
-birpc, not exposed through `vitest.config.ts`. There is no `rpcTimeout` option
-in 3.2.x. The remedy is scheduling, not configuration: **do not run `npm test`
-on a box that is running e2e suites.** e2e is unaffected by this - it is only
-the vitest runner whose IPC starves.
+**The 60s timeout is not tunable** - it is a hardcoded constant inside vitest's
+bundled birpc, not exposed through `vitest.config.ts`, and there is no
+`rpcTimeout` option in 3.2.x. But the timeout was never the problem.
+
+**ROOT CAUSE: the pool claimed every core, including the coordinator's.**
+`app/vitest.config.ts` set no `poolOptions`, so vitest defaulted `maxThreads` to
+`availableParallelism()` - 16 threads on a 16-core box - leaving the MAIN
+process no core to run on. That process is what answers worker RPCs. Solo it
+still squeaks through; add any external load and it starves.
+
+**An earlier version of this issue recommended not running `npm test` while e2e
+runs. That was wrong and is retracted.** It asked people to work around a
+defect at the cost of their workflow, which is a rule nobody follows and which
+would not have fixed anything. Capping the pool fixes it outright.
 
 **Distinct from
 [`npm-test-dynamodb-local-contention`](./npm-test-dynamodb-local-contention.md).**
@@ -64,9 +80,24 @@ per-file `failed`. It narrows the search but does not name the answer: the flag
 persists until a file passes again, so it also lists stale entries (a 2026-08-25
 read of it turned up two deleted scratch files alongside the real failure).
 
-**Suggested fix.** Documentation and scheduling rather than code - AGENTS.md's
-gate ordering should say plainly that `npm test` needs a box that is not running
-e2e. If this recurs often enough to be worth code, the options are pinning a
-vitest version that exposes the RPC timeout, or reducing `poolOptions` thread
-count so the main process stays schedulable under contention; neither is worth
-doing on one sighting.
+**Fix: `poolOptions: { threads: { maxThreads: 4 } }`** in `app/vitest.config.ts`.
+
+Sized by A/B, all four runs 336 files / 5977 tests, same commit:
+
+| condition | maxThreads | duration | RPC errors | exit |
+|---|---|---|---|---|
+| quiet box | 16 (default) | 249.8s | 0 | 0 |
+| quiet box | **4** | **253.1s** | 0 | 0 |
+| under load | 16 (default) | 347.8s | **1** | **1** |
+| under load | **4** | 361.7s | **0** | **0** |
+
+Capping costs **1.3% on an idle box** and removes the failure entirely. The
+parallelism above 4 was buying close to nothing even when idle, because this
+suite is bound by DynamoDB Local I/O rather than CPU - it was only ever costing
+the coordinator its core. Note the cumulative figures move the same way
+(collect 394.6s -> 215.8s, tests 727.8s -> 508.2s): fewer threads did less
+thrashing, not less work.
+
+**Raising this number is not a speed win, it is a way to reintroduce the false
+red.** If someone wants more parallelism later, measure a quiet-box run first -
+the 1.3% gap is the entire prize.

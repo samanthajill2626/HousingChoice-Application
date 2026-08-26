@@ -70,7 +70,7 @@ function makeDeps(
   logger?: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> },
   seams?: Pick<
     InboxRouterDeps,
-    'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize' | 'unknownSweepBudget'
+    'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize'
   >,
 ): InboxRouterDeps {
   const log = logger ?? { info: vi.fn(), warn: vi.fn() };
@@ -148,11 +148,11 @@ describe('filter=unknown - the contact-side read', () => {
   it('costs one partition Query, never the open-partition walk: 40 open threads, 1 unknown -> 1 listByType, 0 listByLastActivity, 0 findByPhone, 0 listRelayGroups', async () => {
     // THE STARVED FIXTURE (spec section 6): many open conversations, few
     // matches. Under the old pager this cost one findByPhone per conversation.
-    // NOTHING here is unread ON PURPOSE: the resurfacing sweep resolves a
-    // contact (findByPhone) for every VISIBLE unread index item, so an unread
-    // fixture would make findByPhone count the sweep's O(unread) cost instead
-    // of isolating the queue read. The sweep's own costs are pinned in the
-    // class (d) tests below.
+    // (Nothing here is unread, which used to matter: a resurfacing sweep
+    // resolved a contact per visible unread index item and would have polluted
+    // the findByPhone count. The sweep was deleted 2026-08-26 and the
+    // unread-independence is now pinned outright by THE READ THAT SHIPS
+    // below, which DOES carry unread rows and still expects zero.)
     const contacts: ContactItem[] = [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002000' }];
     const conversations: ConversationItem[] = [
       conv({ conversationId: 'cv-unk', participant_phone: '+15550002000', last_activity_at: '2026-06-12T12:00:00.000Z' }),
@@ -174,7 +174,7 @@ describe('filter=unknown - the contact-side read', () => {
     expect(calls.listByType).toBe(1);
     expect(calls.listByLastActivity).toBe(0); // the pager never runs
     expect(calls.findByPhone).toBe(0); // no per-conversation contact resolution
-    expect(calls.queryUnreadPage).toBe(1); // the sweep: one Query on an empty index
+    expect(calls.queryUnreadPage).toBe(0); // the branch does not touch byUnread at all
     expect(calls.listRelayGroups).toBe(0); // nothing to filter away
     expect(calls.listGroupTexts).toBe(0);
   });
@@ -308,75 +308,13 @@ describe('filter=unknown - the contact-side read', () => {
     expect(page.rows).toEqual([]);
   });
 
-  it('class d via byUnread: a soft-deleted unknown with a fresh post-deletion inbound resurfaces; outbound-only does not; a deleted team_member NEVER does', async () => {
-    const seed: Seed = {
-      contacts: [
-        { contactId: 'c-res', type: 'unknown', status: 'needs_review', phone: '+15550002500', deleted_at: '2026-06-10T00:00:00.000Z' },
-        { contactId: 'c-out', type: 'unknown', status: 'needs_review', phone: '+15550002501', deleted_at: '2026-06-10T00:00:00.000Z' },
-        // The side-door probe: roleFromContact falls team_member through to
-        // 'unknown', but the ruling (class c) keeps them out of the queue. A
-        // sweep filtered on roleFromContact instead of type === 'unknown'
-        // admits this row and goes red here.
-        { contactId: 'c-team', type: 'team_member', status: 'active', phone: '+15550002502', deleted_at: '2026-06-10T00:00:00.000Z' },
-      ],
-      conversations: [
-        conv({ conversationId: 'cv-res', participant_phone: '+15550002500', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
-        conv({ conversationId: 'cv-out', participant_phone: '+15550002501', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 1 }),
-        conv({ conversationId: 'cv-team', participant_phone: '+15550002502', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1, type: 'tenant_1to1' }),
-      ],
-      latestMessage: {
-        'cv-res': { type: 'sms', direction: 'inbound', body: 'still there?', created_at: '2026-06-12T10:00:00.000Z' },
-        'cv-out': { type: 'sms', direction: 'outbound', body: 'scheduled straggler', created_at: '2026-06-12T11:00:00.000Z' },
-        'cv-team': { type: 'sms', direction: 'inbound', body: 'colleague ping', created_at: '2026-06-12T12:00:00.000Z' },
-      },
-    };
-    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
-    expect(page.rows).toHaveLength(1);
-    expect(page.rows[0]).toMatchObject({ contactId: 'c-res', deleted: true, needsTriage: true });
-  });
-
-  it('a CAPPED sweep is a floor and says so - capped MASKS truncated in CollectResult, so the branch must read both flags', async () => {
-    // The sweep pins maxRows to its budget (requirement 3: no second bound),
-    // so shrinking the seam makes the CAP the stop: two visible unread
-    // candidates fill maxRows before the third index item - the deleted
-    // unknown - is ever scanned. collectUnreadRows then returns capped: true
-    // and truncated: FALSE (truncated = !capped && !scanExhausted,
-    // unreadFeed.ts) - a branch that reads only `truncated` is silent here,
-    // and the class-(d) row vanishes with no trace. That silence is the
-    // round-2 blocking finding; this probe goes red if the `|| capped` is
-    // ever dropped.
-    const seed: Seed = {
-      contacts: [
-        { contactId: 'c-t1', type: 'tenant', phone: '+15550002800' },
-        { contactId: 'c-t2', type: 'tenant', phone: '+15550002801' },
-        { contactId: 'c-del', type: 'unknown', status: 'needs_review', phone: '+15550002802', deleted_at: '2026-06-10T00:00:00.000Z' },
-      ],
-      conversations: [
-        conv({ conversationId: 'cv-t1', type: 'tenant_1to1', participant_phone: '+15550002800', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1 }),
-        conv({ conversationId: 'cv-t2', type: 'tenant_1to1', participant_phone: '+15550002801', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 1 }),
-        conv({ conversationId: 'cv-del', participant_phone: '+15550002802', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
-      ],
-      latestMessage: {
-        'cv-del': { type: 'sms', direction: 'inbound', body: 'hello?', created_at: '2026-06-12T10:00:00.000Z' },
-      },
-    };
-    const info = vi.fn();
-    const warn = vi.fn();
-    const page = await aggregateInbox(
-      { filter: 'unknown', limit: 25 },
-      makeDeps(seed, emptyCalls(), { info, warn }, { unknownSweepBudget: 2 }),
-    );
-    // The deleted unknown sits past the cap: it does NOT resurface this page.
-    expect(page.rows).toEqual([]);
-    // ...but that is REPORTED, never silent: the floor WARN fires and names
-    // the cap as the stop.
-    const floorWarn = warn.mock.calls.find((c) =>
-      String(c[1]).includes('resurfacing sweep stopped early'),
-    );
-    expect(floorWarn?.[0]).toMatchObject({ capped: true });
-    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
-    expect(assembled?.resurfaceCapped).toBe(true);
-  });
+  // DELETED 2026-08-26 with the resurfacing sweep itself: "class d via
+  // byUnread" (a soft-deleted unknown resurfacing HERE) and "a CAPPED sweep is
+  // a floor and says so". Both pinned sweep mechanics, and a soft-deleted
+  // unknown no longer enters this queue at all - the ruling is that a contact
+  // you deliberately deleted has already been triaged. The surviving class (d)
+  // pin lives in test/inboxUnknownParity.test.ts, where it asserts the ABSENCE
+  // here alongside the `filter: 'all'` row that keeps the trade honest.
 
   it('a failed triage-partition Query is LOUD: the branch propagates (route 500), never an empty queue impersonating health', async () => {
     // The module norm is best-effort, but "no unknown contacts" and "the
@@ -396,13 +334,22 @@ describe('filter=unknown - the contact-side read', () => {
     ).rejects.toThrow('byTypeStatus unavailable');
   });
 
-  it('THE READ THAT SHIPS: one partition Query plus a byUnread sweep whose contact reads scale with the VISIBLE UNREAD set', async () => {
+  it('THE READ THAT SHIPS: ONE partition Query and nothing else - no byUnread walk, no contact read per unread item', async () => {
     // The starved pin above zeroes the unread index to isolate the queue
-    // read; this one prices the whole configuration production runs - the
-    // spec-accepted O(all unread) sweep included (requirement 3) - so the
-    // branch's cost claim is on the record, not assumed. Fixture: one live
-    // queue row (no unread), two unread tenant threads, one deleted unknown
-    // with a fresh post-deletion inbound.
+    // read; this one prices the whole configuration production runs, on a
+    // fixture that is DELIBERATELY unread-heavy, so the branch's cost claim is
+    // on the record rather than assumed. Fixture: one live queue row (no
+    // unread), two unread tenant threads, one deleted unknown with a fresh
+    // post-deletion inbound.
+    //
+    // REWRITTEN 2026-08-26 when the resurfacing sweep was deleted. It used to
+    // assert the CHEAPER-IN-QUANTITY-BUT-WORSE-IN-CONSTANT shape the sweep
+    // bought: `queryUnreadPage: 1` and `findByPhone: 3` - one index page plus
+    // ONE contact resolution per VISIBLE UNREAD ITEM, on every page load and
+    // re-paid on every debounced refetch. Both are now ZERO, and the unread
+    // population no longer appears in this branch's cost at all. A cost claim
+    // with no test is how the old open-partition walk survived so long, which
+    // is why this pin was rewritten rather than deleted.
     const seed: Seed = {
       contacts: [
         { contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002900' },
@@ -426,31 +373,38 @@ describe('filter=unknown - the contact-side read', () => {
       { filter: 'unknown', limit: 25 },
       makeDeps(seed, calls, { info, warn: vi.fn() }),
     );
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk', 'c-del']);
+    // c-del is soft-deleted: listByType's `deleted` option is a tri-state with
+    // no "both", so it cannot come from the partition read, and nothing else
+    // looks for it any more.
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk']);
     // The queue read: one partition Query, no open-partition walk.
     expect(calls.listByType).toBe(1);
     expect(calls.listByLastActivity).toBe(0);
-    // The sweep: one index page (3 visible items), then ONE contact
-    // resolution PER VISIBLE UNREAD ITEM - cv-t1, cv-t2, cv-del - which is
-    // the O(all unread) term the design accepts and this pin makes visible.
-    expect(calls.queryUnreadPage).toBe(1);
-    expect(calls.findByPhone).toBe(3);
-    // Thread resolution: the queue row and the resurfaced row (one distinct
-    // phone each).
-    expect(calls.findByParticipantPhone).toBe(2);
-    // Message reads: the collector's resurfacing probe on cv-del, plus one
-    // latest-message hydration per rendered row (cv-q, cv-del).
-    expect(calls.listByConversation).toBe(3);
-    // And the cost is ON THE LOG, unconditionally: the assembled line carries
-    // the sweep's raw-scan volume even when nothing stopped early - the one
-    // per-request signal for the O(visible unread) term growing in production.
+    // THE CHEAPER SHAPE, and the whole point of the rewrite: the byUnread
+    // index is never touched, so three unread threads cost nothing here. These
+    // two zeros are what make this branch's cost independent of how far behind
+    // the operator is.
+    expect(calls.queryUnreadPage).toBe(0);
+    expect(calls.findByPhone).toBe(0);
+    // Thread resolution: the one queue row.
+    expect(calls.findByParticipantPhone).toBe(1);
+    // Message reads: one latest-message hydration for the one rendered row
+    // (cv-q). The collector's resurfacing probe on cv-del is gone with the
+    // sweep.
+    expect(calls.listByConversation).toBe(1);
+    // And the retired cost field is GONE from the log, not zeroed - an old
+    // query for it must return nothing rather than a misleading 0.
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
-    expect(assembled?.sweepScanned).toBe(3);
+    expect(assembled).not.toHaveProperty('sweepScanned');
     // If any of these counts move, find WHICH read moved and why before
     // repinning - each number above names its buyer.
   });
 
-  it('sorts partition rows and resurfaced rows together, newest displayed activity first', async () => {
+  it('sorts the triage rows newest displayed activity first - and the soft-deleted unknown between them is simply not there', async () => {
+    // c-mid is a soft-deleted unknown with an unread post-deletion inbound,
+    // and it sits BETWEEN the two live rows by activity - so if anything ever
+    // re-admits deleted contacts to this queue, this pin catches it in the
+    // middle of the list rather than at an edge.
     const seed: Seed = {
       contacts: [
         { contactId: 'c-old', type: 'unknown', status: 'needs_review', phone: '+15550002600' },
@@ -467,7 +421,7 @@ describe('filter=unknown - the contact-side read', () => {
       },
     };
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-new', 'c-mid', 'c-old']);
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-new', 'c-old']);
   });
 
   it('the type guard drops a non-unknown row - reached ONLY through an override, because no real Query can produce one', async () => {
@@ -503,11 +457,12 @@ describe('filter=unknown - the contact-side read', () => {
 
   it('a DUPLICATED queue item ships ONE row: the partition loop consults `emitted`, like its sibling sweep loop', async () => {
     // REGRESSION TEST for round-2 finding N5. Before the guard landed, the
-    // partition loop ADDED to `emitted` and never read it, while the sweep loop
-    // three statements later did - so this fixture produced two identical
-    // `kind: 'contact'` rows on the wire, which the dashboard keys identically
-    // (useInbox `rowKey` -> `c:<contactId>`): a duplicate React key and a
-    // doubled row.
+    // partition loop ADDED to `emitted` and never read it (the resurfacing
+    // sweep, deleted 2026-08-26, was the only reader) - so this fixture
+    // produced two identical `kind: 'contact'` rows on the wire, which the
+    // dashboard keys identically (useInbox `rowKey` -> `c:<contactId>`): a
+    // duplicate React key and a doubled row. The guard is NOT sweep leftovers:
+    // it guards the PARTITION read, and this is the shape it guards.
     //
     // WHY A DUPLICATE IS REACHABLE AT ALL, stated narrowly. A Query resuming
     // from an ExclusiveStartKey cannot re-serve an item unless the item's index

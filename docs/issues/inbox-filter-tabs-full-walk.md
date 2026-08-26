@@ -157,12 +157,11 @@ other half.**
   `app/src/lib/unknownQueue.ts` (branch `feat/inbox-unread-cluster`, design
   [`2026-08-25-inbox-unknown-tab-walk-design.md`](../superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md)):
   a bounded fill loop (`UNKNOWN_QUEUE_MAX_PAGES` 10 x `UNKNOWN_QUEUE_PAGE_SIZE`
-  100), a hard result cap (`UNKNOWN_QUEUE_MAX_ROWS` 200), a truncation WARN, and
-  deleted-contact resurfacing through ONE budget-bounded `byUnread` sweep whose
-  two stop flags - `capped` and `truncated` - are BOTH floor signals (`capped`
-  masks `truncated` in `CollectResult`, so reading either one alone
-  under-reports). The read applies NO `status` narrowing and NO `excludeOrigin`
-  (spec section 3, classes f and a). This issue still tracks the unknown tab:
+  100), a hard result cap (`UNKNOWN_QUEUE_MAX_ROWS` 200) and a truncation WARN.
+  The read applies NO `status` narrowing and NO `excludeOrigin` (spec section 3,
+  classes f and a), and - since the 2026-08-26 ruling below - NO `byUnread`
+  sweep: the triage partition Query is the branch's only read. This issue still
+  tracks the unknown tab:
   what the branch deliberately did NOT close is in the RESOLVED block at the end
   of this file.
   - **CORRECTED 2026-08-25, kept for the record.** This bullet ORIGINALLY read
@@ -356,70 +355,71 @@ Neither cut has a Load-more affordance: the branch mints no cursor and returns
 skips rows). Contactless conversations - class (e), measured at ZERO rows in dev
 and prod - surface on the All tab only.
 
-**The sweep's ceiling and crossover, so a future reader comparing "684 before"
-finds the after-number.** The deleted-contact resurfacing sweep is
-O(visible unread): one contact read per visible unread index item, hard-capped
-at `UNREAD_WALK_LIMIT` (2000, `app/src/lib/unreadFeed.ts:46`) raw items per
-Unknown page load. So past roughly 700 visible unread threads - the size of the
-open partition whose ~684-lookup walk this design removed - the tab costs MORE
-contact reads than the read it replaced, worst case about 3x. That trade was
-taken deliberately: unread DRAINS with triage, while the open partition only
-ever grows, so the new bound rides a self-limiting quantity and the old one did
-not. Signals if the assumption breaks: the UNCONDITIONAL `sweepScanned` field on
-the `inbox feed assembled` log line (every request, not just past a tripwire),
-and the shared 500-item scan tripwire (`UNREAD_WALK_WARN`).
+**CLASS (d) RESOLVES ON THE ALL AND UNREAD TABS, NOT HERE - human ruling
+2026-08-26, and the resurfacing sweep is DELETED.** A soft-deleted unknown
+contact who texts back no longer reappears on the Unknown tab.
 
-**Why the sweep is paid even when no soft-deleted unknown exists, and what the
-real objection to skipping it is.** Both environments measured ZERO soft-deleted
-unknown contacts, so the obvious optimisation is a cheap pre-check that skips the
-sweep when that population is empty. It was considered and NOT taken - but not
-for the reason first recorded here, which was wrong and is corrected so nobody
-inherits it. The wrong reason was that a pre-check violates approved requirement
-3: it does not. Requirement 3 says the sweep carries NO SECOND BOUND (`maxRows`
-is pinned to the budget so no candidate cap can crowd class-(d) rows out), and a
-check that decides whether to RUN the sweep adds no bound to it.
+The product requirement is that the CONVERSATION resurfaces in the inbox, not
+that the deleted CONTACT re-enters the triage queue - and both halves of that
+already hold with no sweep, verified rather than assumed:
 
-The real objection is that the pre-check cannot cheaply answer "zero".
-`listByType('unknown', { deleted: true })` is itself a filter-after-limit read
-over the very partition this design argues accumulates soft-deleted residue
-FOREVER, so a bounded probe can return "none found" while truncated - and
-skipping the sweep on that answer would reintroduce exactly the
-"missing for two different reasons" ambiguity the whole branch exists to remove.
-An unbounded probe is the forever-growing walk requirement 3 replaced. So the
-optimisation is sound only with a source that can answer "zero" authoritatively
-and cheaply; reopen it if one appears.
+- the `filter=all` pager resurfaces the row through `buildContactRow`'s
+  resurfacing predicate (untouched by this branch), and the Unread tab gets the
+  same predicate through the unread walk; and
+- `GET /api/contacts/:contactId` does NOT 404 a soft-deleted contact (it 404s a
+  missing contact or a phone-pointer record), so clicking the row opens the
+  contact page normally.
 
-**The capped-sweep residual, forced JOINTLY by approved requirements 2 and 5 and
-not fixable here.** A sweep that stops early can leave the tab rendering the
-ordinary "No unknown numbers" empty state over a knowingly incomplete answer.
-The wire must NOT carry `truncated` on this filter - requirement 5 - because the
-dashboard's failure gate is not filter-aware (`serverEndedEarlyEmpty =
-serverRowCount === 0 && truncated`, `dashboard/src/routes/inbox/Inbox.tsx:42`,
-banner at `:183`), so an empty page carrying the flag would render "We couldn't
-load your inbox." over a normal, cleared queue. The floor WARN
-("the unknown-tab resurfacing sweep stopped early - the deleted-row set is a
-floor") and the `resurfaceCapped` / `resurfaceTruncated` log fields are
-therefore the ONLY signals that it happened. **Reopen this issue here** if any
-of these three trades goes wrong: a silent incomplete empty state an operator
-actually hits, a cap cut that hides new inbound, or a sweep crossover that shows
-up in `sweepScanned`.
+**The durable reason is the product one, not the cost one.** A contact you
+deliberately deleted is one you have ALREADY TRIAGED - you decided it was spam.
+Putting it back into the queue of "people I have not identified yet" is the
+wrong behaviour. The message still needs attention, which is what All and Unread
+are for.
 
-**The COLLECTOR-truncation residual - the SAME shape as the capped-sweep one,
-and likelier** (added 2026-08-25, adversarial MED-5; the block above recorded
-only the sweep half). `collectUnknownTriageQueue` can legitimately return
+The cost that went with it: one `collectUnreadRows` walk over `byUnread` per
+Unknown page load, up to `UNREAD_WALK_LIMIT` (2000) raw index items with one
+contact lookup per visible item, re-paid on every debounced refetch. Both
+environments measured ZERO soft-deleted unknown contacts, so it was buying
+nothing anyone was using.
+
+**Three passages that stood here are DELETED, not merely superseded**, because
+they describe code that no longer exists: the sweep's ceiling-and-crossover
+note, the argument for why the sweep was paid even at a measured population of
+zero, and the capped-sweep residual (its floor WARN "the unknown-tab resurfacing
+sweep stopped early" and the `resurfaceCapped` / `resurfaceTruncated` /
+`sweepScanned` log fields are all gone - an old log query for them returns
+nothing rather than zeroes). The COLLECTOR-truncation residual below is a
+different mechanism and still stands.
+
+**The "~700 crossover" figure is retracted, and not merely because it is now
+moot.** It claimed the tab began costing more contact reads than the ~684-lookup
+walk it replaced past roughly 700 visible unread threads. It was wrong ON ITS
+OWN TERMS: it priced one page LOAD against one walk, while
+`dashboard/src/routes/inbox/useInbox.ts` refetches the current filter's first
+page on every debounced `conversation.updated`, so the sweep was re-paid per
+INBOUND MESSAGE, not per navigation - the same amplification this issue's own
+opening section documents for the original walk. Do not resurrect the number in
+a corrected form; there is no sweep left to price.
+
+**Reopen this issue here** if the two remaining trades go wrong: a silent
+incomplete empty state an operator actually hits, or a cap cut that hides new
+inbound.
+
+**The COLLECTOR-truncation residual - now the ONLY residual of its shape**
+(added 2026-08-25, adversarial MED-5; it was recorded as the second and likelier
+of a pair, and the sweep half was deleted 2026-08-26 with the sweep).
+`collectUnknownTriageQueue` can legitimately return
 `{ contacts: [], truncated: true }`: the page budget expires while every page it
-read was residue. On that result the branch assembles ZERO rows and - by the
-same approved requirement 5 - must NOT set the wire `truncated`, so the
-dashboard renders the ordinary "No unknown numbers" empty state over a triage
-queue that has rows in it. The only signals are the collector's own WARN ("the
-unknown-queue walk ended with rows still behind it") and the
-`queueTruncated` field on the `inbox feed assembled` line - a DIFFERENT WARN and
-a DIFFERENT field from the sweep's, so a reader who only knows about the sweep
-residual will not think to look. It is the likelier of the two because this
-module's own header argues that soft-deleted unknowns "accumulate in this
-partition FOREVER", and because of the ordering defect below the `active` block
-can consume the whole budget on its own. Same reopen trigger as the sweep
-residual.
+read was residue. On that result the branch assembles ZERO rows and - by
+approved requirement 5 - must NOT set the wire `truncated`, so the dashboard
+renders the ordinary "No unknown numbers" empty state over a triage queue that
+has rows in it. The only signals are the collector's own WARN ("the
+unknown-queue walk ended with rows still behind it") and the `queueTruncated`
+field on the `inbox feed assembled` line. It is reachable because this module's
+own header argues that soft-deleted unknowns "accumulate in this partition
+FOREVER", and because of the ordering defect below the `active` block can
+consume the whole budget on its own. **Reopen here** on a silent incomplete
+empty state an operator actually hits.
 
 **NAMED REOPEN POINT: the cap starves `needs_review`** (found 2026-08-25 by
 adversarial review, HIGH-1; recorded here rather than fixed, by ruling).
@@ -535,10 +535,11 @@ trips per request.
 
 NOT TAKEN on this branch, knowingly: it is a PERFORMANCE change with its own
 test surface (nothing currently pins the hydration count for this branch), and
-the branch's fix waves were chartered not to move behaviour. Whoever takes it
-must leave the SWEEP path alone - there `latestMessageOf` is a VISIBILITY
-predicate deciding whether a resurfaced row exists at all, so it cannot move
-after the window, and that path is not cap-bound.
+the branch's fix waves were chartered not to move behaviour. (This deferral used
+to carry a carve-out for the SWEEP path, where `latestMessageOf` was a
+VISIBILITY predicate rather than presentation and so could not move after the
+window. The sweep was deleted 2026-08-26, so the branch has ONE hydration path
+and the carve-out is gone with it.)
 
 **DEFERRED, not dropped (human ruling 2026-08-25): spec section 5's
 open-partition safety net.** A raw-scan budget plus cursor plus `truncated`

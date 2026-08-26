@@ -99,7 +99,6 @@ import {
   UNKNOWN_QUEUE_MAX_PAGES,
   UNKNOWN_QUEUE_MAX_ROWS,
   UNKNOWN_QUEUE_PAGE_SIZE,
-  UNKNOWN_QUEUE_TYPES,
 } from '../lib/unknownQueue.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -203,13 +202,6 @@ export interface InboxRouterDeps {
   unknownQueuePageSize?: number;
   unknownQueueMaxPages?: number;
   unknownQueueMaxRows?: number;
-  /**
-   * TEST SEAM for the unknown tab's resurfacing sweep (production:
-   * UNREAD_WALK_LIMIT). Deliberately NOT `unreadWalkLimit`: that seam belongs
-   * to the unread branch, and a route test shrinking it to reach the unread
-   * `truncated` posture must never silently reshape the Unknown tab's sweep.
-   */
-  unknownSweepBudget?: number;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -635,10 +627,12 @@ export async function aggregateInbox(
   // - The `unknown` branch answers the same zero-row question with its OWN
   //   fields on the shared 'inbox feed assembled' line: `queueContacts` /
   //   `queuePages` (what the triage partition returned), `threadReadFailures`,
-  //   `sweepScanned`, `resurfaceTruncated` / `resurfaceCapped`, plus this
-  //   block's own `drops` object - which IS shared, because `dropped()` is.
-  //   `rawScanned` / `rawQueries` stay zero there; nothing pages the open
-  //   partition on that filter any more.
+  //   plus this block's own `drops` object - which IS shared, because
+  //   `dropped()` is. `rawScanned` / `rawQueries` stay zero there; nothing
+  //   pages the open partition on that filter any more. (It also carried
+  //   `sweepScanned` / `resurfaceTruncated` / `resurfaceCapped` until the
+  //   resurfacing sweep was deleted on 2026-08-26; those fields are gone, so
+  //   an old log query for them returns nothing rather than zeroes.)
   // - `rawScanned == count + sum(drops)` DOES NOT HOLD, in ANY case - including
   //   the `count: 0` one. `count` includes relay and group rows that no chunk
   //   Query ever scanned; a page that FILLS stops mid-chunk with the remaining
@@ -999,9 +993,11 @@ export async function aggregateInbox(
     // DEAD ARM (spec 4.5), same reason as the unknown-branch arm above.
     if (filter === 'unread' && unreadSum === 0) return dropped('unreadZeroContact');
     // Deleted fast-path: nothing unread -> hidden, no message read needed. NOT
-    // dead - it still runs for `all`. (It ran for `unknown` too until the
-    // 2026-08-25 contact-side read moved that filter off this path; the
-    // equivalent guard now lives in the unknown branch's resurfacing loop.)
+    // dead - it still runs for `all`, which since the 2026-08-26 ruling is the
+    // ONLY pager path a soft-deleted contact can resurface on. (`unknown` ran
+    // through here too until the 2026-08-25 contact-side read, then through a
+    // resurfacing sweep of its own until that ruling deleted it; a soft-deleted
+    // contact no longer re-enters the triage queue at all.)
     if (deleted && unreadSum === 0) return dropped('deletedNoUnread');
 
     const row = await buildContactRow(contact, convs, maxConv, unreadSum, deleted);
@@ -1556,11 +1552,10 @@ export async function aggregateInbox(
   // this branch's fix waves are chartered not to move behaviour. Recorded as a
   // deferral in docs/issues/inbox-filter-tabs-full-walk.md.
   //
-  // THE SWEEP PATH IS GENUINELY DIFFERENT and must not be "optimised" the same
-  // way: there `latestMessageOf` is a VISIBILITY predicate (buildContactRow's
-  // resurfacing test reads the newest message to decide whether the row exists
-  // at all), so it has to run before the row is known to exist - and that path
-  // is not cap-bound.
+  // (This block used to carve out an exception for the resurfacing sweep,
+  // where `latestMessageOf` WAS a visibility predicate rather than
+  // presentation. The sweep was deleted 2026-08-26, so the branch now has one
+  // hydration path and the caveat is gone with it.)
   //
   // The
   // coverage decisions - what each class of row does under the new source -
@@ -1651,10 +1646,14 @@ export async function aggregateInbox(
         dropped('unknownQueueRetyped');
         continue;
       }
-      // ONE ROW PER CONTACT (round-2 finding N5). The sweep loop below has
-      // carried this same check all along - its own comment calls it "a belt" -
-      // and this loop only ADDED to `emitted` without ever consulting it, which
-      // reads as an oversight rather than a decision.
+      // ONE ROW PER CONTACT (round-2 finding N5). It landed alongside the
+      // resurfacing sweep, which carried the same check, and this loop only
+      // ADDED to `emitted` without ever consulting it. The sweep is gone
+      // (2026-08-26 ruling, below), but this guard is NOT its leftover: it
+      // protects the PARTITION read against the mid-walk status flip described
+      // next, which has nothing to do with resurfacing. It has its own
+      // regression test (test/inboxUnknownTab.test.ts, "a DUPLICATED queue
+      // item ships ONE row").
       //
       // NARROW, and stated honestly rather than dressed up: a Query resuming
       // from an ExclusiveStartKey cannot re-serve an item unless that item's
@@ -1693,103 +1692,31 @@ export async function aggregateInbox(
       unknownRows.push(row);
     }
 
-    // Class d - deleted-contact resurfacing. listByType's `deleted` option is
-    // a TRI-STATE with no "both", so soft-deleted unknowns cannot come from
-    // the partition read above - but a resurfacing row is UNREAD BY
-    // DEFINITION, so the sparse byUnread index already carries it. ONE collect
-    // on the shared unread-request budget, and NO second bound (design
-    // requirement 3): `maxRows` is pinned to the budget itself - a walk of N
-    // raw items can emit at most N candidates - so the budget is the ONE stop
-    // that matters, and no third caller's cap (the badge's BADGE_COUNT_CAP
-    // counts ALL candidate kinds) can silently crowd deleted unknowns out of
-    // the sweep. Its per-request probe tripwire fires here like it does on the
-    // badge path.
+    // CLASS D - A SOFT-DELETED UNKNOWN DOES NOT RE-ENTER THIS QUEUE (human
+    // ruling 2026-08-26). listByType's `deleted` option is a TRI-STATE with no
+    // "both", so soft-deleted unknowns cannot come from the partition read
+    // above, and until this ruling the branch bought them back with a
+    // resurfacing sweep: ONE collectUnreadRows walk over the byUnread index,
+    // up to UNREAD_WALK_LIMIT (2000) raw items and one contact lookup per
+    // visible item, on EVERY Unknown page load - and re-paid on every
+    // debounced refetch, because useInbox refetches the current filter on
+    // incoming messages. That is deleted.
     //
-    // THE PRICE OF THAT COMPLETENESS, on the record (round-3 review): with no
-    // candidate cap, the sweep runs to the budget - up to UNREAD_WALK_LIMIT
-    // (2000) raw index items, ONE findByPhone per VISIBLE item, on every
-    // Unknown page load. The CROSSOVER is at roughly the open partition's own
-    // size: the walk this design removed paid ~684 contact lookups (one per
-    // open 1:1 conversation, prod 2026-08-25), so past ~700 visible unread
-    // threads this tab costs MORE contact reads than the read it replaced,
-    // with a hard worst case of ~2000 (~3x). Accepted because the QUANTITY is
-    // better even when the constant is worse: open conversations never shrink
-    // (nothing closes a 1:1), while unread DRAINS as the operator triages - a
-    // backlogged org pays more than a caught-up one, the exact inversion of
-    // the pathology the spec measured. The scan tripwire below is the early
-    // signal; docs/issues/inbox-filter-tabs-full-walk.md records where to
-    // reopen this.
-    const sweepBudget = deps.unknownSweepBudget ?? UNREAD_WALK_LIMIT;
-    const collected = await collectUnreadRows(
-      { conversations, contacts, messages, logger: log },
-      { maxRows: sweepBudget, budget: sweepBudget },
-    );
-    warnDeletedProbes(log, {
-      probes: collected.deletedProbes,
-      wasted: collected.wastedProbes,
-      skipped: collected.skippedDeletedThreads,
-    });
-    // The raw-scan tripwire, same threshold the rest of the route uses
-    // (UNREAD_WALK_WARN, 500). The in-walk warn inside the collector fires for
-    // a single collect too, but this branch follows the unread branch's
-    // convention so the request-level signal is explicit at the caller - the
-    // two bind to ONE module-scope limiter, so a request that trips both emits
-    // one line, never two.
-    warnUnreadScanned(log, sweepBudget - collected.remainingBudget);
-    for (const candidate of collected.candidates) {
-      if (candidate.kind !== 'contact') continue;
-      // TYPE MEMBERSHIP against the derived queue-type list, never
-      // roleFromContact: a deleted team_member's fresh inbound must not
-      // re-enter the triage queue through this side door - the fall-through
-      // renders team_member as 'unknown' (class c ruling) - and a future type
-      // mapped 'queried' in UNKNOWN_TAB_TYPE_DECISIONS is admitted here the
-      // moment it is admitted to the partition read, with no second list to
-      // update.
-      if (!UNKNOWN_QUEUE_TYPES.includes(candidate.contact.type)) continue;
-      // Live unknowns already came from the partition read; only soft-deleted
-      // ones need this source. (The partition read excludes deleted rows, so
-      // the two sources are disjoint - the emitted-set check is a belt.)
-      if (!isDeleted(candidate.contact)) continue;
-      if (emitted.has(candidate.contact.contactId)) continue;
-      const open = await resolveOpenThreads(candidate.contact);
-      if (open === undefined) continue;
-      const maxConv = newestOf(open);
-      // Counted, unlike a bare continue: this branch's log line exists to make
-      // zero-row pages diagnosable, and a resurfacing candidate lost to a
-      // closed-or-relay-only thread set is a drop like any other.
-      if (maxConv === undefined) {
-        dropped('resurfaceNoOpenThread');
-        continue;
-      }
-      const unreadSum = open.reduce((sum, c) => sum + unreadOf(c), 0);
-      // Read since the index offered it: the resurfacing window has closed.
-      if (unreadSum === 0) {
-        dropped('deletedNoUnread');
-        continue;
-      }
-      const row = await buildContactRow(candidate.contact, open, maxConv, unreadSum, true);
-      if (row === undefined) {
-        dropped('resurfaceHidden');
-        continue;
-      }
-      emitted.add(candidate.contact.contactId);
-      unknownRows.push(row);
-    }
-    if (collected.truncated || collected.capped) {
-      // BOTH flags are floor signals, and `capped` MASKS `truncated` in
-      // CollectResult (truncated = !capped && !scanExhausted, unreadFeed.ts) -
-      // reading `truncated` alone made a capped sweep silently drop class-(d)
-      // rows past the cap, the round-2 blocking finding. The WARN names which
-      // stop it was. NEVER the wire `truncated` flag (see the return below).
-      log.warn(
-        {
-          scanned: sweepBudget - collected.remainingBudget,
-          ...(collected.capped && { capped: true }),
-          ...(collected.truncated && { truncated: true }),
-        },
-        'inbox: the unknown-tab resurfacing sweep stopped early - the deleted-row set is a floor',
-      );
-    }
+    // THE PRODUCT REASON, which is the durable one: a contact you deliberately
+    // deleted is one you have ALREADY TRIAGED - you decided it was spam.
+    // Putting it back into the queue of "people I have not identified yet" is
+    // the wrong behaviour. The message still needs attention, and that is what
+    // the All and Unread tabs are for.
+    //
+    // THE REQUIREMENT IS STILL MET, and it is pinned rather than asserted.
+    // What the product needs is that the CONVERSATION resurfaces in the inbox,
+    // not that the CONTACT reappears here, and both halves already hold with
+    // no sweep: the `all` pager runs buildContactRow's resurfacing predicate
+    // (see its `deleted` block above) and so does the unread branch, and
+    // GET /api/contacts/:contactId does not 404 a soft-deleted contact, so the
+    // row opens normally when clicked. test/inboxUnknownParity.test.ts class
+    // (d) asserts the `all` half in the same world as the absence here - if
+    // that ever goes red, this deletion's premise is wrong.
 
     // Requirement 2: the whole KEPT queue, sorted in memory, newest first -
     // the byTypeStatus index has no activity dimension, so index-order paging
@@ -1861,13 +1788,6 @@ export async function aggregateInbox(
         queuePages: queue.pagesWalked,
         ...(queue.truncated && { queueTruncated: true }),
         ...(threadReadFailures > 0 && { threadReadFailures }),
-        // UNCONDITIONAL, like the unread branch's `scanned`: this is the one
-        // cost that grows with backlog, and a sweep that drains 1500 items
-        // NORMALLY is exactly the curve an operator needs to see per request,
-        // not only past the 500-item tripwire.
-        sweepScanned: sweepBudget - collected.remainingBudget,
-        ...(collected.truncated && { resurfaceTruncated: true }),
-        ...(collected.capped && { resurfaceCapped: true }),
         ...(Object.keys(drops).length > 0 && { drops }),
       },
       'inbox feed assembled',

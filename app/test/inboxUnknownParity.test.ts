@@ -132,8 +132,20 @@ describe('filter=unknown parity, class by class (design section 3)', () => {
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-stub']);
   });
 
-  it('class d: a soft-deleted unknown with an unread post-deletion inbound resurfaces, deleted:true (must survive the flip)', async () => {
-    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
+  it('class d: a soft-deleted unknown with an unread post-deletion inbound leaves the triage queue (RULED 2026-08-26) but resurfaces on All - the accepted trade', async () => {
+    // THE RULING (2026-08-26). The Unknown tab used to run a resurfacing sweep
+    // over the byUnread index - one full collectUnreadRows walk on every page
+    // load - purely so this row reappeared HERE. It was deleted: the product
+    // requirement is that the CONVERSATION resurfaces in the inbox, not that a
+    // deliberately deleted CONTACT re-enters the triage queue. A contact you
+    // deleted is one you have ALREADY triaged; putting it back into the queue
+    // of "people I have not identified yet" is the wrong answer. The message
+    // still needs attention, which is what All and Unread are for.
+    //
+    // The `all` assertion below is what makes this trade honest rather than a
+    // silent loss, exactly as class (e) does. If it ever goes red, the ruling's
+    // premise is wrong and the sweep was load-bearing after all.
+    const world: World = {
       contacts: [{
         contactId: 'c-del',
         type: 'unknown',
@@ -145,9 +157,16 @@ describe('filter=unknown parity, class by class (design section 3)', () => {
       latestMessage: {
         'cv-del': { type: 'sms', direction: 'inbound', body: 'hello?', created_at: '2026-06-12T07:00:00.000Z' },
       },
-    }));
-    expect(page.rows).toHaveLength(1);
-    expect(page.rows[0]).toMatchObject({ contactId: 'c-del', deleted: true, needsTriage: true });
+    };
+    // ASSERTED FIRST, deliberately: this is the premise the deletion rests on,
+    // and it must be provable on its own rather than as a footnote to the
+    // absence below.
+    const all = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(world));
+    expect(all.rows).toHaveLength(1);
+    expect(all.rows[0]).toMatchObject({ contactId: 'c-del', deleted: true, needsTriage: true });
+    // FLIPPED 2026-08-26 when the resurfacing sweep was deleted.
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(world));
+    expect(unknown.rows).toEqual([]);
   });
 
   it('class e: a CONTACTLESS unknown number leaves the triage queue (decided 2026-08-25) but stays on All - the accepted trade', async () => {

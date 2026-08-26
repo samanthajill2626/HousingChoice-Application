@@ -766,10 +766,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
   it('filter=unknown never walks the open partition: a tenant world costs one listByType and nothing per-conversation', async () => {
     const calls = emptyCallCounts();
-    // unread_count is 0 here ON PURPOSE (the old test seeded 1): the
-    // resurfacing sweep resolves a contact for every visible unread index
-    // item, so an unread thread would put a findByPhone back on this page for
-    // a reason unrelated to the partition walk this test pins.
+    // unread_count is 0 here for a reason that EXPIRED on 2026-08-26 and is
+    // kept only so nobody re-derives it: a resurfacing sweep used to resolve a
+    // contact per visible unread index item, so an unread thread would have
+    // put a findByPhone back on this page unrelated to the partition walk.
+    // The sweep is deleted; this branch no longer reads byUnread at all, so
+    // the seed value no longer matters here.
     const page = await aggregateInbox(
       { filter: 'unknown', limit: 30 },
       makeDeps({
@@ -792,9 +794,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
     expect(page.rows).toEqual([]);
     expect(calls).toEqual({
-      // One byUnread probe: the deleted-resurfacing sweep (class d) rides the
-      // sparse index; an empty index is one cheap Query.
-      queryUnreadPage: 1,
+      // ZERO byUnread probes since 2026-08-26: the deleted-resurfacing sweep
+      // that rode the sparse index was deleted, so this branch's only read is
+      // the triage partition.
+      queryUnreadPage: 0,
       findByPhone: 0, // the per-conversation contact resolution is GONE
       findByParticipantPhone: 0,
       listByConversation: 0,

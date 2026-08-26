@@ -57,10 +57,14 @@ DynamoDB (byTypeStatus GSI + byUnread sparse GSI), Vitest, Playwright e2e.
   reached" (unfaithful on that axis too) - but it backs the `today.ts` triage
   suite, whose fill-loop pins are calibrated against those semantics, and
   re-ordering it moves pins in a suite this branch has no business touching.
-  ACCEPTED CONSEQUENCE, stated so nobody rediscovers it: `inboxApi.test.ts`
+  ACCEPTED CONSEQUENCES, stated so nobody rediscovers them: `inboxApi.test.ts`
   exercises the new branch through this unfaithful fake, so the route-level
-  tests cannot produce the short-page-with-LEK shape; Task 4 covers the
-  collector against the faithful helper and Task 6 covers the real index.
+  tests cannot produce the short-page-with-LEK shape; and the harness has no
+  sparse-status filter either, so a status-less `type='unknown'` contact is
+  VISIBLE through the route suite and INVISIBLE through the Task 1 helper -
+  two suites, same input, opposite answers, with production siding with the
+  helper. Task 4 covers the collector against the faithful helper and Task 6
+  covers the real index.
 
 ## Out of scope (deliberately deferred)
 
@@ -216,6 +220,13 @@ short-page-with-LEK shape the fill loop exists for.
 //      exact trap): a walk over exactly n * limit rows costs one MORE round
 //      trip than items-remaining modelling suggests, and call-count pins built
 //      on the weaker model are one Query short of production.
+//
+// FAKE-ONLY CAVEAT on rule 5: `limit ?? 50` SYNTHESIZES a Limit for a caller
+// that passes none, so an un-limited call over a partition of exactly 50+ rows
+// reports "Limit reached" and mints a LEK where the real repo omits `Limit`
+// entirely and pages at 1MB. Inert for every current caller (the collector
+// always passes pageSize); pass an explicit `limit` in any new test that
+// walks a partition of 50 or more.
 // A fake that filters before slicing can never exercise the fill loop the
 // unknown-queue read carries (docs/superpowers/specs/
 // 2026-08-25-inbox-unknown-tab-walk-design.md, section 3 class d), and a fake
@@ -1045,6 +1056,14 @@ export async function collectUnknownTriageQueue(
 ): Promise<UnknownQueueResult> {
   const log = deps.logger ?? defaultLogger;
   const collected: ContactItem[] = [];
+  // NOTE on the multi-partition generality (round-3 review): with exactly one
+  // 'queried' type in the map today, the second-partition path below is
+  // UNEXERCISED - no test drives it, and the cap-with-types-remaining guard is
+  // dead code until a second type is mapped. Whoever maps one must also know:
+  // `maxPages` bounds EACH partition's walk, so the total read ceiling becomes
+  // types.length * maxPages * pageSize, while `pagesWalked` (and the WARN's
+  // `pages` field) is the REQUEST total across partitions - a request total
+  // reported against a per-partition bound. Add a two-type test then.
   let pagesWalked = 0;
   let exhaustedAll = true;
   const types = [...UNKNOWN_QUEUE_TYPES];
@@ -1132,7 +1151,8 @@ fake gained `listByType` in Task 2. Run it anyway.
   from `app/src/lib/unknownQueue.js` (Task 4); existing in-file closures
   `buildContactRow`, `newestOf`, `unreadOf`, `dropped`, `drops`,
   `roleFromContact`; existing imports `conversationsForContact`,
-  `collectUnreadRows`, `UNREAD_WALK_LIMIT`, `warnDeletedProbes`, `isDeleted`.
+  `collectUnreadRows`, `UNREAD_WALK_LIMIT`, `warnDeletedProbes`,
+  `warnUnreadScanned`, `isDeleted`.
 - Produces: the new wire behavior (single page, `nextCursor: null`, no
   `truncated` key, cursor -> 400) and four test seams on `InboxRouterDeps`:
   `unknownQueuePageSize?: number`, `unknownQueueMaxPages?: number`,
@@ -1561,7 +1581,11 @@ describe('filter=unknown - the contact-side read', () => {
       },
     };
     const calls = emptyCalls();
-    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, calls));
+    const info = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, calls, { info, warn: vi.fn() }),
+    );
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk', 'c-del']);
     // The queue read: one partition Query, no open-partition walk.
     expect(calls.listByType).toBe(1);
@@ -1577,6 +1601,11 @@ describe('filter=unknown - the contact-side read', () => {
     // Message reads: the collector's resurfacing probe on cv-del, plus one
     // latest-message hydration per rendered row (cv-q, cv-del).
     expect(calls.listByConversation).toBe(3);
+    // And the cost is ON THE LOG, unconditionally: the assembled line carries
+    // the sweep's raw-scan volume even when nothing stopped early - the one
+    // per-request signal for the O(visible unread) term growing in production.
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.sweepScanned).toBe(3);
     // If any of these counts move, find WHICH read moved and why before
     // repinning - each number above names its buyer.
   });
@@ -1631,9 +1660,10 @@ If it fails on a fixture TypeError instead, fix the fixture first.
 - [ ] **Step 3: inbox.ts - imports and deps seams**
 
 Add to the imports (the `unreadFeed.js` import block already carries
-`collectUnreadRows`, `UNREAD_WALK_LIMIT` and `warnDeletedProbes` - verify, they
-are all imported at `inbox.ts:86-96`; the branch does NOT use
-`BADGE_COUNT_CAP`, deliberately - see the sweep comment in Step 5):
+`collectUnreadRows`, `UNREAD_WALK_LIMIT`, `warnDeletedProbes` AND
+`warnUnreadScanned` - verify, they are all imported at `inbox.ts:86-96`; the
+branch does NOT use `BADGE_COUNT_CAP`, deliberately - see the sweep comment in
+Step 5; it stays imported for `countUnreadRows`, so nothing orphans):
 
 ```ts
 import {
@@ -1796,6 +1826,21 @@ BEFORE `const rows: InboxRow[] = [];`:
     // counts ALL candidate kinds) can silently crowd deleted unknowns out of
     // the sweep. Its per-request probe tripwire fires here like it does on the
     // badge path.
+    //
+    // THE PRICE OF THAT COMPLETENESS, on the record (round-3 review): with no
+    // candidate cap, the sweep runs to the budget - up to UNREAD_WALK_LIMIT
+    // (2000) raw index items, ONE findByPhone per VISIBLE item, on every
+    // Unknown page load. The CROSSOVER is at roughly the open partition's own
+    // size: the walk this design removed paid ~684 contact lookups (one per
+    // open 1:1 conversation, prod 2026-08-25), so past ~700 visible unread
+    // threads this tab costs MORE contact reads than the read it replaced,
+    // with a hard worst case of ~2000 (~3x). Accepted because the QUANTITY is
+    // better even when the constant is worse: open conversations never shrink
+    // (nothing closes a 1:1), while unread DRAINS as the operator triages - a
+    // backlogged org pays more than a caught-up one, the exact inversion of
+    // the pathology the spec measured. The scan tripwire below is the early
+    // signal; docs/issues/inbox-filter-tabs-full-walk.md records where to
+    // reopen this.
     const sweepBudget = deps.unknownSweepBudget ?? UNREAD_WALK_LIMIT;
     const collected = await collectUnreadRows(
       { conversations, contacts, messages, logger: log },
@@ -1806,6 +1851,13 @@ BEFORE `const rows: InboxRow[] = [];`:
       wasted: collected.wastedProbes,
       skipped: collected.skippedDeletedThreads,
     });
+    // The raw-scan tripwire, same threshold the rest of the route uses
+    // (UNREAD_WALK_WARN, 500). The in-walk warn inside the collector fires for
+    // a single collect too, but this branch follows the unread branch's
+    // convention (inbox.ts:1351) so the request-level signal is explicit at
+    // the caller - the two bind to ONE module-scope limiter, so a request that
+    // trips both emits one line, never two.
+    warnUnreadScanned(log, sweepBudget - collected.remainingBudget);
     for (const candidate of collected.candidates) {
       if (candidate.kind !== 'contact') continue;
       // TYPE MEMBERSHIP against the derived queue-type list, never
@@ -1899,6 +1951,11 @@ BEFORE `const rows: InboxRow[] = [];`:
         queuePages: queue.pagesWalked,
         ...(queue.truncated && { queueTruncated: true }),
         ...(threadReadFailures > 0 && { threadReadFailures }),
+        // UNCONDITIONAL, like the unread branch's `scanned` (inbox.ts:1434):
+        // this is the one cost that grows with backlog, and a sweep that
+        // drains 1500 items NORMALLY is exactly the curve an operator needs to
+        // see per request, not only past the 500-item tripwire.
+        sweepScanned: sweepBudget - collected.remainingBudget,
         ...(collected.truncated && { resurfaceTruncated: true }),
         ...(collected.capped && { resurfaceCapped: true }),
         ...(Object.keys(drops).length > 0 && { drops }),
@@ -1981,7 +2038,12 @@ In `app/test/inboxUnknownParity.test.ts`:
 ```
 
 Every OTHER parity test must pass UNCHANGED - if one fails, that is a coverage
-regression in the branch, not a pin to update. Fix the branch.
+regression in the branch, not a pin to update. Fix the branch. ONE known
+exception class, so this rule does not misdirect you: a `type: 'unknown'`
+FIXTURE that carries no `status` is invisible to the queue read BY DESIGN (the
+helper's GSI-sparseness rule) - that is a fixture to complete, not a branch
+bug; Step 9 names the two known sites in inboxFeed.test.ts. The parity file's
+own fixtures all carry a status already.
 
 - [ ] **Step 9: Update inboxFeed.test.ts's two changed pins**
 
@@ -2049,11 +2111,32 @@ never walks the open partition at all:
 NOTE the sweep makes `queryUnreadPage: 1` - if the run reports a different
 count, read the branch (did the collect loop page?) before touching the pin.
 
-Also re-run the two unknown-filter tests that must pass UNCHANGED:
-~387-409 (partner excluded; rows `[]` both before and after) and ~411-436
-(type=unknown contact appears; same rows) and ~519-543 (relay matrix; the
-unknown pin `['+14049824978']` still holds because that phone's contact
-`c-unk` IS type unknown in that seed).
+Then give the file's two `type: 'unknown'` fixtures an indexed `status` -
+**this is a required edit, not a red to diagnose in the branch.** DECISION
+(round 3, both reviewers): the helper's GSI-sparseness rule STAYS - it is real
+DynamoDB behaviour (`byTypeStatus` range key is `status`; an item missing a key
+attribute is not indexed) and the helper is positioned as the authority on
+partition semantics - so the two pre-existing status-less fixtures must gain
+the field production always writes. A status-less unknown contact is not a
+shape any write path produces (see the facts block), so these fixtures were
+always slightly wrong; the sparseness rule just made it observable. Under the
+OLD pager they resolved through `findByPhone`, which ignores `status`; under
+the contact-side read a row must be INDEXED to exist, which is the point.
+
+`grep -n "type: 'unknown'" app/test/inboxFeed.test.ts` returns exactly two
+sites; add `status: 'needs_review'` to both contact literals:
+
+- ~415-421 (the `c-unk` contact with firstName Alexis): add
+  `status: 'needs_review',` after `type: 'unknown',`. Its test's assertions
+  (`unknown.rows` length 1, `contactId === 'c-unk'`) then pass unchanged.
+- ~521 (the relay-matrix seed): change to
+  `{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+14049824978' }`.
+  Its pin `['+14049824978']` then holds - because the contact is type unknown
+  AND indexed. "IS type unknown" alone stopped being sufficient when the
+  sparseness rule landed.
+
+After those two edits, re-run the remaining unknown-filter test that needs no
+edit at all: ~387-409 (partner excluded; rows `[]` both before and after).
 
 - [ ] **Step 10: Update inboxApi.test.ts**
 
@@ -2350,7 +2433,10 @@ git commit -m "test(e2e): Unknown tab shows the captured caller and an honest em
 
 **Files:**
 - Modify: `docs/issues/inbox-filter-tabs-full-walk.md`
-- Modify: `e2e/README.md` (the Unknown-surface description around lines 185-195)
+- Check, likely NO edit: `e2e/README.md` (round-3 review read lines 184-195:
+  the profiled shape `GET /api/inbox?filter=unknown&limit=30` is unchanged by
+  the flip and nothing there claims the tab pages or mints a cursor - so the
+  expected outcome of Step 2 is "no edit needed")
 
 **Interfaces:**
 - Consumes: the issue's existing structure (its line 153 currently reads
@@ -2384,8 +2470,26 @@ git commit -m "test(e2e): Unknown tab shows the captured caller and an honest em
    so past ~200 untriaged contacts the newest inbound can be among the hidden
    rows (WARNed, with the index-order caveat in the copy). No Load-more
    affordance exists for either cut. Contactless conversations (class e,
-   measured zero) surface on the All tab only. Reopen here if any of these
-   trades goes wrong.
+   measured zero) surface on the All tab only.
+
+   The SWEEP's ceiling and crossover, so a future reader comparing "684
+   before" finds the after-number: the resurfacing sweep is O(visible unread),
+   one contact read per visible unread index item, hard-capped at
+   `UNREAD_WALK_LIMIT` (2000) raw items per Unknown page load - so past
+   roughly 700 visible unread threads (the size of the open partition whose
+   ~684-lookup walk this design removed) the tab costs MORE contact reads than
+   the read it replaced, worst case ~3x. Accepted deliberately: unread drains
+   with triage while the open partition only grows, so the bound is on a
+   self-limiting quantity. Signals: the unconditional `sweepScanned` log field
+   per request, and the shared 500-item scan tripwire.
+
+   Also record the capped-sweep residual (forced by approved requirements 2
+   and 5 together, not fixable here): a sweep stopped early can leave the tab
+   rendering the ordinary "No unknown numbers" empty state over a knowingly
+   incomplete answer - the wire must not carry `truncated` (the dashboard
+   would render the failure banner over a normal empty queue), so the floor
+   WARN and the `resurfaceCapped`/`resurfaceTruncated` log fields are the only
+   signals. Reopen here if any of these trades goes wrong.
 4. Record the DEFERRAL (human ruling 2026-08-25): spec section 5's
    open-partition safety net - a raw-scan budget + cursor + `truncated`
    contract for the `filter=all` pager - is deferred, NOT built on this
@@ -2398,14 +2502,15 @@ git commit -m "test(e2e): Unknown tab shows the captured caller and an honest em
    replacing the pager loop's tail orphans the `moreChunks` binding at
    `inbox.ts:1481` (a gate-5 no-unused-vars error unless deleted with it).
 
-- [ ] **Step 2: Update e2e/README.md**
+- [ ] **Step 2: Check e2e/README.md - expected outcome: NO edit**
 
-Lines ~185-195 describe the profiled Unknown surface. The profiled request
-shape (`GET /api/inbox?filter=unknown&limit=30`, no cursor) is UNCHANGED, but
-if the surrounding text describes the Unknown tab as paging the open partition
-or carrying a cursor, correct it: the Unknown feed is now a single
-contact-partition page that mints no cursor and answers 400 to any cursor.
-Read the section before editing; touch only sentences the flip made false.
+Lines ~184-195 describe the profiled Unknown surface. The profiled request
+shape (`GET /api/inbox?filter=unknown&limit=30`, no cursor) is UNCHANGED, and
+round-3 review found nothing there that calls the tab a pager or claims it
+mints a cursor - so expect to change NOTHING. Edit only if you find a sentence
+the flip made false (the Unknown feed now mints no cursor and answers 400 to
+any cursor); do not invent an edit to justify the check, and stage the file
+only if you actually changed it.
 
 - [ ] **Step 3: Regenerate the index**
 
@@ -2415,9 +2520,11 @@ Expected: exit 0 (INDEX.md is gitignored).
 - [ ] **Step 4: Commit**
 
 ```
-git add docs/issues/inbox-filter-tabs-full-walk.md e2e/README.md
+git add docs/issues/inbox-filter-tabs-full-walk.md
 git commit -m "docs(issues): unknown-tab walk resolved by the contact-side read; section-5 safety net deferred with its gate named"
 ```
+
+(Add `e2e/README.md` to the `git add` ONLY if Step 2 actually changed it.)
 
 ---
 
@@ -2432,12 +2539,20 @@ it belongs).
   the gates (ask the human first if `main` has advanced into conflict with
   this work); report later drift rather than chasing it.
 
-- [ ] **Step 1: Sync main once**
+- [ ] **Step 1: Sync main once - LOCAL main, not origin/main**
 
 ```
-git -C W:\tmp\inbox-unread-cluster fetch origin
-git -C W:\tmp\inbox-unread-cluster merge origin/main
+git -C W:\tmp\inbox-unread-cluster merge main
 ```
+
+LOCAL `main` on purpose (round-3 review): in this repo the shared working
+`main` checkout is ~83 commits AHEAD of `origin/main`, so `merge origin/main`
+merges an ancestor, reports "Already up to date", and silently skips the gate
+precondition while appearing to satisfy it. No `git fetch` either - it is not
+needed for a local-main sync and can block a non-interactive session on a
+credential prompt. Verify the merge actually brought something in (or that
+`git merge-base --is-ancestor main HEAD` already holds) rather than trusting
+"Already up to date".
 
 Preserve both sides' intent in any conflict; if the merge looks contentious,
 STOP and ask.
@@ -2487,8 +2602,11 @@ deliberate spec decisions with their parity-test locations; the section-5
 deferral (human ruling, recorded in the issue with its unsolved gate named);
 the sweep's cost model as pinned by the read-that-ships test (one partition
 Query plus an O(visible-unread) contact-resolution sweep - the spec-accepted
-trade from requirement 3); and the perf-seed suite's unchanged pass (Task 6
-Step 5).
+trade from requirement 3, ceiling `UNREAD_WALK_LIMIT` = 2000 raw items with a
+crossover near ~700 visible unread threads, past which the tab out-costs the
+~684-lookup walk it replaced - worst case ~3x, on a quantity that drains with
+triage where the old one only grew); and the perf-seed suite's unchanged pass
+(Task 6 Step 5).
 
 OFFER, do not run: the end-to-end price on DEPLOYED data can be re-measured
 with the corrected instrument the spec's numbers came from -
@@ -2531,5 +2649,11 @@ Do not merge to `main`; that is the human's call.
   `UNKNOWN_QUEUE_TYPES`, `listByTypeFromContacts`, drop reasons
   `unknownQueueRetyped` / `unknownThreadReadFailed` / `unknownNoOpenThread` /
   `deletedNoUnread` / `resurfaceHidden` / `resurfaceNoOpenThread`, log fields
-  `resurfaceTruncated` / `resurfaceCapped`, seams
-  `unknownQueuePageSize/MaxPages/MaxRows` and `unknownSweepBudget`.
+  `resurfaceTruncated` / `resurfaceCapped` / `sweepScanned` (unconditional),
+  seams `unknownQueuePageSize/MaxPages/MaxRows` and `unknownSweepBudget`.
+- Round-3 fold: the two status-less `type: 'unknown'` fixtures in
+  inboxFeed.test.ts gain `status: 'needs_review'` in Task 5 Step 9 (sparseness
+  KEPT - the helper stays the authority on partition semantics); the sweep's
+  ceiling (2000) and ~700-unread crossover are recorded in the branch comment,
+  the issue, and the handback; `warnUnreadScanned` fires at the caller and
+  `sweepScanned` logs unconditionally; the main sync uses LOCAL `main`.

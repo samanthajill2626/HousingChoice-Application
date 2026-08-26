@@ -1,7 +1,7 @@
 # Inbound media content-type fidelity - design
 
 Date: 2026-08-26
-Status: DRAFT (spec review round 3)
+Status: DRAFT (spec review round 4 - the cap)
 Branch: `feat/media-content-type-fidelity` (cut from `main` @3c2962a4)
 Design review: spec R1 + R2 adjudicated at
 `.superpowers/design-review/adjudications.md`
@@ -143,10 +143,18 @@ resolveMediaTier(raw: string | undefined):
 
 It takes the media-type ESSENCE (everything before the first `;`, trimmed,
 lowercased), matches it against the two sets in order, and returns the
-CANONICAL SET MEMBER plus its extension - never the caller's raw string. The
-serve route (6.2) and `normalizeStoredMediaType` (5.2) both call it and nothing
-re-implements the decision, so the tier, the response header and the extension
-can never disagree.
+CANONICAL SET MEMBER plus its EMITTED extension - never the caller's raw
+string. For the opaque tier it returns `canonical: 'application/octet-stream'`
+and `ext: '.bin'`. The serve route (6.2) and `normalizeStoredMediaType` (5.2)
+both call it and nothing re-implements the decision, so THE TIER AND THE
+RESPONSE CONTENT-TYPE can never disagree.
+
+The EXTENSION is deliberately not bound that tightly: 6.3 rule 2 lets an opaque
+attachment keep a stored `.xlsx` while its Content-Type stays
+`application/octet-stream`. That is intentional, and it is the one place tier
+and extension may differ. It needs a second, separate helper - a reverse lookup
+`isAcceptedExtension(ext): boolean` over the ACCEPTED-EXTENSION SET defined in
+6.3 - which `resolveMediaTier` does not provide and must not be conflated with.
 
 Essence matching is required because parameters are ordinary wire forms:
 `text/plain; charset=utf-8` and `video/3gpp; codecs=...` would fall to the
@@ -223,24 +231,42 @@ downloaded file - turning today's inert `attachment-0` into `invoice.exe`. The
 whole point of the feature is a filename the OS acts on, which is exactly why
 the sender must not choose it.
 
+TWO EXTENSION SETS, deliberately different sizes. Do not build one from the
+other:
+
+- The EMISSION map, type -> one extension, used by `resolveMediaTier`. One
+  value per type, our choice: `image/jpeg -> .jpg`.
+- The ACCEPTED-EXTENSION SET, used only by rule 2 below. It is the emission
+  map's values PLUS the ordinary spelling variants of the same formats -
+  `.jpeg`, `.tif`, `.heif`, `.3gp`, `.mpeg`, `.vcf` and so on. It is a closed,
+  hand-written set and it contains no active extension, ever.
+
+  Deriving this set from the emission map's values is a defect, not a
+  shortcut: the map emits `.jpg`, so a derived set would reject `photo.jpeg`
+  and produce `photo.bin` - precisely the outcome rule 2 exists to prevent.
+
+SPLITTING A STORED NAME. The extension is the LAST dot and everything after it;
+the stem is everything before that dot. `data.tar.csv` splits to stem
+`data.tar` + `.csv`. Interior dots stay in the stem. A name with no dot is all
+stem. A name whose only dot is leading (`.env`) is all EXTENSION and has an
+empty stem - it therefore has no usable stem and falls to stem rule 3.
+
 EXTENSION, in order:
 
-1. The extension for the resolved tier's canonical type, when the tier is
-   inline or declarable.
-2. OPAQUE TIER ONLY: if the stored filename ends in an extension that is a
-   VALUE IN OUR OWN EXTENSION MAP, use that. This is a lookup against our
-   closed set, not a passthrough - `.xlsx` is accepted because we already emit
-   it, `.exe` can never be. It exists for one real population: historical
-   inbound EMAIL attachments, whose stored type is permanently unrecoverable
-   (8.5) but whose real filename we still hold. Without this rule the timeline
-   shows `budget.xlsx` while the download is `budget.bin`, which is a worse
-   outcome than the bug being fixed.
+1. The emitted extension for the resolved tier's canonical type, when the tier
+   is inline or declarable. The stored name's own extension is DISCARDED here.
+2. OPAQUE TIER ONLY: if the stored name's extension is in the ACCEPTED set,
+   keep it. This is a membership test against our closed set, never a
+   passthrough - `.xlsx` is accepted because we recognise it, `.exe` can never
+   be. It exists for one real population: historical inbound EMAIL attachments,
+   whose stored type is permanently unrecoverable (8.5) but whose real filename
+   we still hold. Without it the timeline shows `budget.xlsx` while the
+   download is `budget.bin`, which is worse than the bug being fixed.
 3. Otherwise `.bin`.
 
 STEM, in order:
 
-1. The stored `attachments[idx].filename`, reduced to its base name with any
-   existing extension removed, then sanitized.
+1. The stored `attachments[idx].filename`, split as above, sanitized as below.
 2. If that stem is empty after sanitizing, or matches `^attachment-\d+$`, treat
    it as absent. `lib/emailMime.ts:100-106` synthesizes exactly
    `attachment-<i>` for a nameless MIME part, so without this rule the stored
@@ -248,17 +274,25 @@ STEM, in order:
    this feature exists to remove.
 3. Otherwise the synthesized stem `attachment-<idx + 1>`.
 
-The final name is `<stem><ext>`, joined with exactly one `.` which the
-extension carries (map values include the dot; the stem never ends in one).
-A stored name that is ALL extension and no stem (a dotfile such as `.env`) has
-an empty stem and falls to rule 3.
+STEM SANITIZATION, in this exact order. Each verb means REMOVE THE MATCHED
+CHARACTERS, never "discard the whole name":
 
-Stem sanitization, in this order: strip CR, LF and NUL; strip `"` and `\`;
-strip path separators; reject `..`; collapse whitespace; THEN apply the
-100-character cap. The cap runs last so it can never re-expose a sequence an
-earlier rule removed. Emit an ASCII-only `filename="..."`, and when the
-original stem contained non-ASCII ALSO emit `filename*=UTF-8''<percent-encoded>`
-per RFC 5987.
+1. remove CR, LF, NUL, `"` and `\`
+2. remove path separators (`/` and `\`) and every `..` sequence
+3. collapse runs of whitespace to one space, then trim leading/trailing
+   whitespace
+4. remove trailing dots. This is what makes the "stem never ends in a dot"
+   premise TRUE rather than assumed - without it a stored `report.` yields a
+   stem `report` only by luck of the split, and `report..bin` otherwise.
+5. truncate to 100 characters
+
+THE CAP BOUNDS THE STEM, NOT THE EMITTED NAME. Capping the final name would
+truncate the extension itself - a 100-character name ending `.xlsx` would ship
+as `.xls`, silently changing the file type the OS sees. The emitted name is
+therefore at most 100 + the longest extension.
+
+Emit an ASCII-only `filename="..."`, and when the original stem contained
+non-ASCII ALSO emit `filename*=UTF-8''<percent-encoded>` per RFC 5987.
 
 Note the deliberate off-by-one correction: the header is 0-based today
 (`attachment-0`) while the UI labels the same attachment "Attachment 1". The
@@ -285,15 +319,26 @@ import from `app/`, so the four raster types are mirrored in
 already mirrors other server constants. Both components consume the shared
 helper; neither keeps its own predicate.
 
-LABEL RULES, exhaustively, because the current fallback has three cases and the
-change must not disturb two of them:
+LABEL RULES, exhaustively. A stored filename still wins over the fallback in
+every case; these govern the FALLBACK only:
 
 - image `alt`: UNCHANGED. No kind prefix - it is already known to be an image.
 - PDF file link: UNCHANGED. Keeps "PDF attachment N", which already names its
   kind.
-- every other file link: the positional fallback gains the kind, so
-  "Attachment 1" becomes "Video - Attachment 1". A stored filename still wins
-  over the fallback in all cases.
+- DECLARABLE-tier file link: gains the kind, so "Attachment 1" becomes
+  "Video - Attachment 1". The kind word comes from the canonical type's family
+  (Video / Audio / Image / Document / Contact card) - a closed mapping beside
+  the type sets.
+- OPAQUE-tier file link: UNCHANGED, bare "Attachment N". THERE IS NO KIND WORD
+  FOR `application/octet-stream`, and inventing one ("File - Attachment 1")
+  would be noise.
+
+That last rule is load-bearing for the existing tests and was wrong in the
+round-2 draft, which said "every other file link" gains a kind. Both
+assertions in `Timeline.email.test.tsx` (`:88` and `:107`) are on attachments
+that are `application/octet-stream` with NO filename - so they are opaque-tier
+fallbacks, and under this rule they do not move. The genuinely
+filename-labelled assertion in that file is `:87`.
 
 ### 6.5 Media pointer rows - the second persisted copy
 
@@ -389,12 +434,28 @@ the same pacing as the apply run: a bounded concurrency (small, single digit)
 and a retry with backoff on 429, and its report must state the number of vendor
 calls it made.
 
-IDEMPOTENCY, stated exactly: a second run is a no-op for every attachment it
-repaired. It is NOT a no-op for rows carrying a permanently unrepairable
-attachment - the predicate is row-granular, so those rows are re-selected and
-re-queried against Twilio every run. That is the cost of not writing a
-"tried and failed" marker, it is bounded by the skip counts in the report, and
-it is accepted deliberately rather than overlooked.
+IDEMPOTENCY, stated exactly against the three writes. "Repaired" means REACHED
+STEP 5 - the row write is what clears the re-scan predicate, so it is the only
+write that makes a second run skip anything.
+
+- An attachment that reached step 5: a second run does not select it. True
+  no-op.
+- An attachment interrupted BETWEEN its step-4 S3 write and its message's step
+  5: the row still says octet-stream, so the next run re-selects it,
+  re-queries Twilio and re-copies the object. Harmless (both are idempotent)
+  but not free, and it is why the vendor-call count in the report can exceed
+  the number of repairs.
+- A row carrying a permanently unrepairable attachment: re-selected and
+  re-queried EVERY run, because the predicate is row-granular. That is the cost
+  of not writing a "tried and failed" marker; it is bounded and visible in the
+  skip counts, and it is accepted deliberately rather than overlooked.
+
+LOGGING: `annotateMessage` emits an INFO line per call carrying
+`conversationId` and `tsMsgId` (`repos/messagesRepo.ts:2528-2537`), so an apply
+run writes one CloudWatch line per repaired MESSAGE in addition to the script's
+own counts-only report. That is IDs only and consistent with the PII rules, but
+it is a deliberate acceptance rather than an oversight: the script's "counts
+only" claim describes ITS report, not the repo methods it calls.
 
 REPORTING (counts and type histogram only, never keys, bodies or numbers):
 rows scanned, attachments eligible, recovered by type, skipped-unparseable-key,
@@ -454,8 +515,13 @@ the allowlist it enforces:
 - `normalizeStoredMediaType` - inbound MMS mirror, deferred mirror job, inbound
   email attachments. Widened by this change; closed allowlist via the resolver.
 - presigned-POST MMS uploads (`routes/mmsMedia.ts:78`, `isInlineMediaType`).
-- MMS transcode output (`routes/mmsMedia.ts:143`) - writes the transcoder's own
-  produced type, which `planMmsMedia` constrains to deliverable renditions.
+- MMS transcode output (`routes/mmsMedia.ts:143`) - writes
+  `result.contentType`, which is the literal `'image/jpeg'` the encoder always
+  produces (`adapters/mediaTranscode.ts:28,80,109` - the return type is the
+  string literal, so it is constrained by TYPE, not by policy). NOT
+  `planMmsMedia`, which only decides a PLAN from the source type and constrains
+  no output. Named precisely because this bullet has been wrong in every
+  previous draft.
 - presigned-POST email attachments (`routes/emailMedia.ts`, `isEmailAttachmentType`).
 - presigned-POST unit photos (`routes/units.ts:516,686`, `isImageMediaType`).
 - call recordings (`routes/webhooks/voice.ts:1995`) - hardcoded `audio/mpeg`.
@@ -535,6 +601,14 @@ READERS:
   their real filename, and 6.3's extension rule 2 is what lets `budget.xlsx`
   still download as `budget.xlsx` rather than `budget.bin`.
 
+  KNOWN LIMIT on that recovery: inbound email caps the SUMMED attachment
+  filename bytes (`services/inboundEmail.ts:115,682-685`). The cap is
+  codepoint-safe but not extension-aware, so a name truncated mid-extension
+  (`budget.xls`, `budget.xl`) falls out of the ACCEPTED set and degrades to
+  `.bin` for exactly the population rule 2 serves. Accepted, not fixed: making
+  the cap extension-aware is a change to the inbound email write path for a
+  cosmetic gain on already-truncated historical names.
+
 ### 8.6 A serving change this spec does NOT scope away: outbound email attachments
 
 Outbound email attachments are stored by the presign/confirm path with types
@@ -547,6 +621,21 @@ That is the intended behavior and an improvement, but it is a behavior change
 outside the reported bug, so it is named here rather than discovered later, and
 section 9 covers it with a test. It does not contradict non-goal 4, which
 excludes the SEND path; nothing about sending changes.
+
+IT IS ALSO THE ONLY SUCH POPULATION, and here is the enumeration that shows it,
+so the next reader does not have to redo it. Only objects reachable through
+`media_attachments` are served by this route, which excludes most writers
+outright:
+
+| Stored population | Reachable via `media_attachments`? | Tier move? |
+|---|---|---|
+| inbound MMS/relay mirror | yes | only after the backfill (6.6) |
+| inbound email attachments | yes | new ones via 6.1; old ones never (8.5) |
+| OUTBOUND email attachments | yes | YES, immediately, no backfill |
+| outbound MMS uploads + transcode output | yes, but bounded to jpeg/png/gif by `resolveAttachmentKeys` | no - already inline tier |
+| unit photos | no - own route (`unitMediaServe.ts`) | n/a |
+| call recordings | no - own route + `recording_s3_key` | n/a |
+| seeds | only `cast.ts:1210`, `image/jpeg` | no - already inline tier |
 
 ## 9. Testing
 
@@ -566,10 +655,15 @@ Unit (app):
   extension when the tier is inline or declarable (`invoice.exe` typed
   `video/mp4` downloads as `invoice.mp4`); an OPAQUE attachment named
   `budget.xlsx` keeps `.xlsx` (6.3 rule 2) while one named `invoice.exe`
-  becomes `invoice.bin`; a stored `attachment-0` is treated as absent; a
-  dotfile stem falls through; a filename carrying CRLF and quotes cannot inject
-  a header; a non-ASCII stem produces `filename*`; `nosniff` and CSP present on
-  all three tiers.
+  becomes `invoice.bin`; `photo.jpeg` on the OPAQUE tier keeps `.jpeg` (the
+  ACCEPTED set is wider than the emission map - the regression guard for the
+  variant-spelling defect); `nosniff` and CSP present on all three tiers.
+- Filename construction, as its own unit (pure function, no route): a stored
+  `attachment-0` is treated as absent; `.env` has an empty stem and falls
+  through; `data.tar.csv` splits at the LAST dot; `report.` does not produce a
+  double dot; a 120-character stem is capped to 100 WITHOUT truncating the
+  extension; a filename carrying CRLF and quotes cannot inject a header; a
+  non-ASCII stem produces `filename*`.
 - OUTBOUND EMAIL ATTACHMENT (8.6): an `xlsx` attachment on an outbound email
   message is served `application/vnd...sheet` + `attachment` + `.xlsx`.
 - Mirror: a `video/mp4` target stores `video/mp4`; `text/html` still stores
@@ -585,7 +679,11 @@ Unit (app):
 
 Dashboard: `image/heic` renders as a file link in BOTH `AttachmentGallery` and
 `MediaGallery`; `image/jpeg` still renders inline in both; email attachment
-filename still labels the link.
+filename still labels the link. NEW, and absent from every earlier draft: a
+DECLARABLE attachment with no filename is labelled with its kind
+("Video - Attachment 1"), and an OPAQUE one with no filename is still labelled
+bare ("Attachment 1") - the two halves of 6.4's fallback rule, neither of which
+any existing test covers.
 
 e2e: inbound `.mp4` into a relay thread via the fake -> the attachment link is
 a file link, and the served response carries `video/mp4`,
@@ -598,11 +696,13 @@ change as a broken guard):
   `content-disposition` is UNDEFINED on the inline path. The inline tier now
   sends `inline; filename=...` (6.2, rationale in 7.3), so these change from
   "absent" to "starts with inline".
-- `dashboard/src/routes/contact/Timeline.test.tsx:555` is the PDF file-link
-  label. 6.4 keeps "PDF attachment N" deliberately, so this assertion must NOT
-  change - it is listed to stop a builder "fixing" it. `:552` is the image
-  `alt`, likewise unchanged by 6.4's exemption.
-- `Timeline.email.test.tsx:88,107` cover filename-labelled links, unchanged.
+- NONE of the dashboard label assertions change. They are listed to stop a
+  builder "fixing" one: `Timeline.test.tsx:552` is the image `alt` (6.4
+  exempts it), `:555` is the PDF file link (6.4 keeps "PDF attachment N"), and
+  `Timeline.email.test.tsx:88,107` are OPAQUE-tier fallbacks - both attachments
+  are `application/octet-stream` with no filename, which 6.4's opaque rule
+  leaves bare. `Timeline.email.test.tsx:87` is the filename-labelled case, also
+  unchanged.
 
 ## 10. Ops
 

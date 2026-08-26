@@ -150,23 +150,28 @@ describe('filter=unknown parity, class by class (design section 3)', () => {
     expect(page.rows[0]).toMatchObject({ contactId: 'c-del', deleted: true, needsTriage: true });
   });
 
-  it('class e: a CONTACTLESS unknown number is a triage row today. FLIP: it leaves the queue (stays on All) - amend this pin at the flip commit', async () => {
+  it('class e: a CONTACTLESS unknown number leaves the triage queue (decided 2026-08-25) but stays on All - the accepted trade', async () => {
     const world: World = {
       contacts: [],
       conversations: [conv({ conversationId: 'cv-noc', participant_phone: '+14049824978', last_activity_at: '2026-06-12T06:00:00.000Z', unread_count: 1 })],
     };
     const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(world));
-    expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']); // FLIP: becomes []
+    // FLIPPED at the contact-side read: a queue built from contacts cannot see
+    // a number with no contact record, by construction.
+    expect(unknown.rows).toEqual([]);
     const all = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(world));
     expect(all.rows.map((r) => r.phone)).toEqual(['+14049824978']); // the mitigation - must survive
   });
 
-  it('class c: a team_member with an open thread is a triage row today (the LATENT BUG). FLIP: absent, per the 2026-08-25 ruling - amend this pin at the flip commit', async () => {
+  it('class c: a team_member never enters the triage queue (RULED 2026-08-25 - the old tab showing them was the bug)', async () => {
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
       contacts: [{ contactId: 'c-team', type: 'team_member', status: 'active', phone: '+15550001005' }],
       conversations: [conv({ conversationId: 'cv-team', participant_phone: '+15550001005', last_activity_at: '2026-06-12T05:00:00.000Z', type: 'tenant_1to1' })],
     }));
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-team']); // FLIP: becomes []
+    // FLIPPED at the contact-side read: listByType('unknown') is an EXACT
+    // match, so the roleFromContact fall-through that admitted team_member is
+    // gone by construction.
+    expect(page.rows).toEqual([]);
   });
 
   it('a resolved tenant/landlord/partner is never a triage row (must survive the flip)', async () => {

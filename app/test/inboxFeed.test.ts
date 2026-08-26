@@ -429,6 +429,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     const contact: ContactItem = {
       contactId: 'c-unk',
       type: 'unknown',
+      // REQUIRED since the 2026-08-25 contact-side read: byTypeStatus is
+      // (hash: type, range: status) and a GSI does not index an item missing a
+      // key attribute, so a status-less unknown is invisible to the queue read.
+      // Every production write path sets a status; this fixture was always
+      // slightly wrong, and the sparseness rule just made it observable.
+      status: 'needs_review',
       firstName: 'Alexis',
       lastName: 'Monroe',
       phone: '+15550009999',
@@ -532,7 +538,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
   it('relay filter matrix: in "all"+"unread" (when unread>0); NEVER in "unknown"', async () => {
     const seed: Seed = {
-      contacts: [{ contactId: 'c-unk', type: 'unknown', phone: '+14049824978' }],
+      // `status` is REQUIRED here since the 2026-08-25 contact-side read: the
+      // byTypeStatus GSI is sparse, so "IS type unknown" alone stopped being
+      // sufficient - the contact must be INDEXED to reach the queue.
+      contacts: [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+14049824978' }],
       conversations: [
         relayConv({ conversationId: 'r-unread', pool_number: '+15550160001', last_activity_at: '2026-06-14T10:00:00.000Z', unread_count: 3,
           participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
@@ -622,8 +631,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     );
 
     const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(baseSeed));
-    expect(unknown.rows.every((r) => r.needsTriage)).toBe(true);
-    expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
+    // Class e (design 2026-08-25): a contactless conversation leaves the
+    // TRIAGE QUEUE - a queue built from contacts cannot see it - but stays
+    // visible, replyable and reachable on the All tab.
+    expect(unknown.rows).toEqual([]);
+    const allAgain = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(baseSeed));
+    expect(allAgain.rows.some((r) => r.kind === 'unknown' && r.phone === '+14049824978')).toBe(true);
   });
 
   // The four tests below used to pin the RETIRED contract: `filter=unread`
@@ -751,8 +764,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     });
   });
 
-  it('rejects a resolved non-unknown contact before conversation and message hydration', async () => {
+  it('filter=unknown never walks the open partition: a tenant world costs one listByType and nothing per-conversation', async () => {
     const calls = emptyCallCounts();
+    // unread_count is 0 here ON PURPOSE (the old test seeded 1): the
+    // resurfacing sweep resolves a contact for every visible unread index
+    // item, so an unread thread would put a findByPhone back on this page for
+    // a reason unrelated to the partition walk this test pins.
     const page = await aggregateInbox(
       { filter: 'unknown', limit: 30 },
       makeDeps({
@@ -762,7 +779,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
             conversationId: 'conv-tenant',
             participant_phone: '+14045550105',
             last_activity_at: '2026-06-12T10:00:00.000Z',
-            unread_count: 1,
+            unread_count: 0,
             placementId: 'placement-tenant',
           }),
         ],
@@ -775,15 +792,15 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
     expect(page.rows).toEqual([]);
     expect(calls).toEqual({
-      queryUnreadPage: 0,
-      findByPhone: 1,
+      // One byUnread probe: the deleted-resurfacing sweep (class d) rides the
+      // sparse index; an empty index is one cheap Query.
+      queryUnreadPage: 1,
+      findByPhone: 0, // the per-conversation contact resolution is GONE
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
-      listByType: 0,
-      // The unknown filter walks the open-partition pager once today. The
-      // contact-side read replaces that walk; this pin is what will show it.
-      listByLastActivity: 1,
+      listByType: 1, // the triage partition is the only read
+      listByLastActivity: 0, // the open-partition pager never runs
     });
   });
 

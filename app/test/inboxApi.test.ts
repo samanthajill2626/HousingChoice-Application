@@ -211,10 +211,24 @@ describe('GET /api/inbox (C8)', () => {
       unread.body.rows.map((r: { contactId?: string; phone?: string }) => r.contactId ?? r.phone).sort(),
     ).toEqual(['+14049824978', 'c-unread'].sort());
 
+    // Class e (design 2026-08-25): the contactless number leaves the triage
+    // queue but stays on All. A type=unknown CONTACT is the queue's row shape.
+    seedContact(world, { contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+14045550777' });
+    seedConversation(world, 'conv-unk-contact', {
+      participant_phone: '+14045550777',
+      last_activity_at: '2026-06-12T10:00:00.000Z',
+      type: 'unknown_1to1',
+      unread_count: 1,
+    });
+
     const unknown = await auth(request(app).get('/api/inbox?filter=unknown'));
     expect(unknown.status).toBe(200);
     expect(unknown.body.rows.every((r: { needsTriage: boolean }) => r.needsTriage)).toBe(true);
-    expect(unknown.body.rows.map((r: { phone: string }) => r.phone)).toEqual(['+14049824978']);
+    expect(unknown.body.rows.map((r: { contactId?: string }) => r.contactId)).toEqual(['c-unk']);
+    expect(unknown.body.rows.map((r: { phone?: string }) => r.phone)).toEqual(['+14045550777']);
+
+    const all = await auth(request(app).get('/api/inbox'));
+    expect(all.body.rows.some((r: { kind: string; phone?: string }) => r.kind === 'unknown' && r.phone === '+14049824978')).toBe(true);
   });
 
   it('placementContext is surfaced when the representative conversation has a placementId', async () => {
@@ -250,6 +264,13 @@ describe('GET /api/inbox (C8)', () => {
   it('400 on a malformed cursor (NOT 500)', async () => {
     const { app } = makeWebhookHarness();
     const res = await auth(request(app).get('/api/inbox?cursor=not-base64-json!!!'));
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on filter=unknown with any cursor (the unknown feed mints none)', async () => {
+    const { app } = makeWebhookHarness();
+    const foreign = Buffer.from(JSON.stringify({ idx: 0 }), 'utf8').toString('base64url');
+    const res = await auth(request(app).get(`/api/inbox?filter=unknown&cursor=${foreign}`));
     expect(res.status).toBe(400);
   });
 

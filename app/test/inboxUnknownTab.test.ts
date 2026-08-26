@@ -1,0 +1,481 @@
+// app/test/inboxUnknownTab.test.ts
+//
+// The filter=unknown CONTACT-SIDE read (design 2026-08-25): behavior, coverage
+// classes, failure discrimination, and the cost inversion. The parity file
+// (inboxUnknownParity.test.ts) pins row CONTENT across the flip; this file
+// pins the NEW mechanics - what is read, what is not, and what happens when a
+// read fails.
+import { describe, expect, it, vi } from 'vitest';
+import {
+  aggregateInbox,
+  InboxBadRequestError,
+  type InboxRouterDeps,
+} from '../src/routes/inbox.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { MessageItem } from '../src/repos/messagesRepo.js';
+import { listByTypeFromContacts } from './helpers/contactsPartitionFake.js';
+import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
+
+interface Seed {
+  contacts: ContactItem[];
+  conversations: ConversationItem[];
+  latestMessage?: Record<string, Partial<MessageItem>>;
+  /** Make findByParticipantPhone THROW for exactly this phone (requirement 4). */
+  threadLookupErrorPhone?: string;
+  /** Override the listByType answer wholesale (the retype-race test). */
+  listByTypeOverride?: (type: string) => { items: ContactItem[] };
+}
+
+interface Calls {
+  listByType: number;
+  listByLastActivity: number;
+  listRelayGroups: number;
+  listGroupTexts: number;
+  queryUnreadPage: number;
+  findByPhone: number;
+  findByParticipantPhone: number;
+  listByConversation: number;
+}
+
+function emptyCalls(): Calls {
+  return {
+    listByType: 0,
+    listByLastActivity: 0,
+    listRelayGroups: 0,
+    listGroupTexts: 0,
+    queryUnreadPage: 0,
+    findByPhone: 0,
+    findByParticipantPhone: 0,
+    listByConversation: 0,
+  };
+}
+
+function conv(
+  over: Partial<ConversationItem> & { conversationId: string; last_activity_at: string },
+): ConversationItem {
+  return {
+    status: 'open',
+    type: 'unknown_1to1',
+    ai_mode: 'auto',
+    created_at: '2026-06-01T00:00:00.000Z',
+    ...unreadFlagFor(over),
+    ...over,
+  };
+}
+
+function makeDeps(
+  seed: Seed,
+  calls: Calls = emptyCalls(),
+  logger?: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> },
+  seams?: Pick<
+    InboxRouterDeps,
+    'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize' | 'unknownSweepBudget'
+  >,
+): InboxRouterDeps {
+  const log = logger ?? { info: vi.fn(), warn: vi.fn() };
+  return {
+    logger: { ...log, error: vi.fn(), debug: vi.fn() } as never,
+    ...seams,
+    conversationsRepo: {
+      async getById(id: string) {
+        return seed.conversations.find((c) => c.conversationId === id);
+      },
+      async queryUnreadPage(opts: { limit: number; exclusiveStartKey?: Record<string, unknown> }) {
+        calls.queryUnreadPage += 1;
+        return queryUnreadPageFromItems(seed.conversations, opts);
+      },
+      async listByLastActivity({ limit }: { status: string; limit?: number }) {
+        calls.listByLastActivity += 1;
+        const open = seed.conversations
+          .filter((c) => c.status === 'open')
+          .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
+        return { items: open.slice(0, limit ?? 50) };
+      },
+      async findByParticipantPhone(phone: string) {
+        calls.findByParticipantPhone += 1;
+        if (seed.threadLookupErrorPhone === phone) throw new Error('participant GSI unavailable');
+        return seed.conversations.filter((c) => c.participant_phone === phone);
+      },
+      async findByParticipantEmail(email: string) {
+        return seed.conversations.filter((c) => c.participant_email === email);
+      },
+      async listRelayGroups(status: string) {
+        calls.listRelayGroups += 1;
+        return {
+          items: seed.conversations.filter((c) => c.type === 'relay_group' && c.status === status),
+          truncated: false,
+        };
+      },
+      async listGroupTexts() {
+        calls.listGroupTexts += 1;
+        return { items: [], truncated: false };
+      },
+    } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
+    contactsRepo: {
+      async findByPhone(phone: string) {
+        calls.findByPhone += 1;
+        return seed.contacts.find((c) => c.phone === phone);
+      },
+      async findByEmail(email: string) {
+        return seed.contacts.find((c) => c.email === email);
+      },
+      async getById(contactId: string) {
+        return seed.contacts.find((c) => c.contactId === contactId);
+      },
+      async listByType(type: string, opts = {}) {
+        calls.listByType += 1;
+        if (seed.listByTypeOverride !== undefined) return seed.listByTypeOverride(type);
+        return listByTypeFromContacts(seed.contacts, type, opts);
+      },
+    } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
+    messagesRepo: {
+      async listByConversation(conversationId: string) {
+        calls.listByConversation += 1;
+        const latest = seed.latestMessage?.[conversationId];
+        return latest ? [latest as MessageItem] : [];
+      },
+    } as unknown as NonNullable<InboxRouterDeps['messagesRepo']>,
+    placementsRepo: {
+      async getById() {
+        return undefined;
+      },
+    } as unknown as NonNullable<InboxRouterDeps['placementsRepo']>,
+  };
+}
+
+describe('filter=unknown - the contact-side read', () => {
+  it('costs one partition Query, never the open-partition walk: 40 open threads, 1 unknown -> 1 listByType, 0 listByLastActivity, 0 findByPhone, 0 listRelayGroups', async () => {
+    // THE STARVED FIXTURE (spec section 6): many open conversations, few
+    // matches. Under the old pager this cost one findByPhone per conversation.
+    // NOTHING here is unread ON PURPOSE: the resurfacing sweep resolves a
+    // contact (findByPhone) for every VISIBLE unread index item, so an unread
+    // fixture would make findByPhone count the sweep's O(unread) cost instead
+    // of isolating the queue read. The sweep's own costs are pinned in the
+    // class (d) tests below.
+    const contacts: ContactItem[] = [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002000' }];
+    const conversations: ConversationItem[] = [
+      conv({ conversationId: 'cv-unk', participant_phone: '+15550002000', last_activity_at: '2026-06-12T12:00:00.000Z' }),
+    ];
+    for (let i = 0; i < 40; i += 1) {
+      contacts.push({ contactId: `c-t-${i}`, type: 'tenant', phone: `+1555100${String(i).padStart(4, '0')}` });
+      conversations.push(
+        conv({
+          conversationId: `cv-t-${i}`,
+          type: 'tenant_1to1',
+          participant_phone: `+1555100${String(i).padStart(4, '0')}`,
+          last_activity_at: `2026-06-11T${String(10 + (i % 12)).padStart(2, '0')}:00:00.000Z`,
+        }),
+      );
+    }
+    const calls = emptyCalls();
+    const page = await aggregateInbox({ filter: 'unknown', limit: 30 }, makeDeps({ contacts, conversations }, calls));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk']);
+    expect(calls.listByType).toBe(1);
+    expect(calls.listByLastActivity).toBe(0); // the pager never runs
+    expect(calls.findByPhone).toBe(0); // no per-conversation contact resolution
+    expect(calls.queryUnreadPage).toBe(1); // the sweep: one Query on an empty index
+    expect(calls.listRelayGroups).toBe(0); // nothing to filter away
+    expect(calls.listGroupTexts).toBe(0);
+  });
+
+  it('a cap-cut queue: single page, no truncated key, WARNed - and the cut is INDEX order, so the newest rows can be the hidden ones', async () => {
+    // Partition order here is contactId order (c-u0..c-u3) while activity
+    // order is the REVERSE (c-u3 newest). The collector cap keeps the first
+    // maxRows in PARTITION order - the byTypeStatus range key is `status`,
+    // which has no recency dimension - so the two NEWEST contacts are exactly
+    // the hidden ones, and the rendered list is "newest-first of what
+    // survived", NOT "the newest of the queue". This is the documented,
+    // deliberate limitation of cap-plus-WARN (spec requirement 2); the WARN
+    // copy names it, and this pin is what keeps anyone from quietly claiming
+    // otherwise.
+    const contacts = Array.from({ length: 4 }, (_, i) => ({
+      contactId: `c-u${i}`,
+      type: 'unknown' as const,
+      status: 'needs_review',
+      phone: `+155500021${String(i).padStart(2, '0')}`,
+    }));
+    const conversations = contacts.map((c, i) =>
+      conv({
+        conversationId: `cv-u${i}`,
+        participant_phone: c.phone!,
+        last_activity_at: `2026-06-12T0${i}:00:00.000Z`, // c-u3 is the newest
+      }),
+    );
+    const warn = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 30 },
+      makeDeps({ contacts, conversations }, emptyCalls(), { info: vi.fn(), warn }, { unknownQueueMaxRows: 2 }),
+    );
+    // Kept: c-u0 and c-u1 (partition order), then sorted newest-first.
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-u1', 'c-u0']);
+    expect(page.nextCursor).toBeNull();
+    // The wire flag belongs to the unread branch (InboxPage.truncated) - and
+    // an empty page carrying it renders the dashboard FAILURE banner on a tab
+    // whose normal state is an empty queue (requirement 5).
+    expect('truncated' in page).toBe(false);
+    expect('groupsTruncated' in page).toBe(false);
+    // The collector's WARN is the truncation signal, and its copy carries the
+    // index-order caveat.
+    expect(
+      warn.mock.calls.some((c) => String(c[1]).includes('untriaged contacts still behind it')),
+    ).toBe(true);
+  });
+
+  it('windows the sorted result to the request limit and WARNs about the rows it could not show', async () => {
+    const contacts = Array.from({ length: 5 }, (_, i) => ({
+      contactId: `c-w${i}`,
+      type: 'unknown' as const,
+      status: 'active',
+      phone: `+155500022${String(i).padStart(2, '0')}`,
+    }));
+    const conversations = contacts.map((c, i) =>
+      conv({
+        conversationId: `cv-w${i}`,
+        participant_phone: c.phone!,
+        last_activity_at: `2026-06-12T0${i}:00:00.000Z`,
+      }),
+    );
+    const warn = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 3 },
+      makeDeps({ contacts, conversations }, emptyCalls(), { info: vi.fn(), warn }),
+    );
+    // Newest first, exactly `limit` rows.
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-w4', 'c-w3', 'c-w2']);
+    expect(page.nextCursor).toBeNull();
+    expect(warn.mock.calls.some((c) => String(c[1]).includes('could not show every triage row'))).toBe(true);
+  });
+
+  it('rejects any cursor: the unknown feed mints none, so a cursor here is foreign (400 posture, not a wrong-partition Query)', async () => {
+    const deps = makeDeps({ contacts: [], conversations: [] });
+    const allCursor = Buffer.from(JSON.stringify({ idx: 0 }), 'utf8').toString('base64url');
+    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: allCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    const unreadCursor = Buffer.from(
+      JSON.stringify({ u: 1, a: '2026-06-12T10:00:00.000Z', c: 'cv-x', s: [] }),
+      'utf8',
+    ).toString('base64url');
+    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: unreadCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+  });
+
+  it('requirement 4: a THROWN thread read withholds ONE row loudly - it neither 500s the tab nor impersonates an empty thread set', async () => {
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-ok', type: 'unknown', status: 'needs_review', phone: '+15550002300' },
+        { contactId: 'c-broken', type: 'unknown', status: 'needs_review', phone: '+15550002301' },
+        { contactId: 'c-empty', type: 'unknown', status: 'needs_review', phone: '+15550002302' }, // no threads at all
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-ok', participant_phone: '+15550002300', last_activity_at: '2026-06-12T10:00:00.000Z' }),
+        conv({ conversationId: 'cv-broken', participant_phone: '+15550002301', last_activity_at: '2026-06-12T11:00:00.000Z' }),
+      ],
+      threadLookupErrorPhone: '+15550002301',
+    };
+    const info = vi.fn();
+    const warn = vi.fn();
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, emptyCalls(), { info, warn }));
+    // The page SERVES (no throw), minus exactly the broken row.
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-ok']);
+    // The failure is its OWN code path: the specific WARN with the contactId...
+    const failLine = warn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'));
+    expect(failLine?.[0]).toMatchObject({ contactId: 'c-broken' });
+    // ...and its OWN drop reason, distinct from the empty-thread-set drop. A
+    // build that routes this through the best-effort contactConversations seam
+    // (which returns [] for both) collapses these two counters into one and
+    // goes red here.
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1, unknownNoOpenThread: 1 });
+    expect(assembled?.threadReadFailures).toBe(1);
+  });
+
+  it('class b: a contact whose only threads are closed or relay_group yields no row', async () => {
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps({
+      contacts: [{ contactId: 'c-b', type: 'unknown', status: 'needs_review', phone: '+15550002400' }],
+      conversations: [
+        conv({ conversationId: 'cv-closed', participant_phone: '+15550002400', last_activity_at: '2026-06-12T10:00:00.000Z', status: 'closed' }),
+        conv({ conversationId: 'cv-relay', participant_phone: '+15550002400', last_activity_at: '2026-06-12T11:00:00.000Z', type: 'relay_group' }),
+      ],
+    }));
+    expect(page.rows).toEqual([]);
+  });
+
+  it('class d via byUnread: a soft-deleted unknown with a fresh post-deletion inbound resurfaces; outbound-only does not; a deleted team_member NEVER does', async () => {
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-res', type: 'unknown', status: 'needs_review', phone: '+15550002500', deleted_at: '2026-06-10T00:00:00.000Z' },
+        { contactId: 'c-out', type: 'unknown', status: 'needs_review', phone: '+15550002501', deleted_at: '2026-06-10T00:00:00.000Z' },
+        // The side-door probe: roleFromContact falls team_member through to
+        // 'unknown', but the ruling (class c) keeps them out of the queue. A
+        // sweep filtered on roleFromContact instead of type === 'unknown'
+        // admits this row and goes red here.
+        { contactId: 'c-team', type: 'team_member', status: 'active', phone: '+15550002502', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-res', participant_phone: '+15550002500', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-out', participant_phone: '+15550002501', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-team', participant_phone: '+15550002502', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1, type: 'tenant_1to1' }),
+      ],
+      latestMessage: {
+        'cv-res': { type: 'sms', direction: 'inbound', body: 'still there?', created_at: '2026-06-12T10:00:00.000Z' },
+        'cv-out': { type: 'sms', direction: 'outbound', body: 'scheduled straggler', created_at: '2026-06-12T11:00:00.000Z' },
+        'cv-team': { type: 'sms', direction: 'inbound', body: 'colleague ping', created_at: '2026-06-12T12:00:00.000Z' },
+      },
+    };
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({ contactId: 'c-res', deleted: true, needsTriage: true });
+  });
+
+  it('a CAPPED sweep is a floor and says so - capped MASKS truncated in CollectResult, so the branch must read both flags', async () => {
+    // The sweep pins maxRows to its budget (requirement 3: no second bound),
+    // so shrinking the seam makes the CAP the stop: two visible unread
+    // candidates fill maxRows before the third index item - the deleted
+    // unknown - is ever scanned. collectUnreadRows then returns capped: true
+    // and truncated: FALSE (truncated = !capped && !scanExhausted,
+    // unreadFeed.ts) - a branch that reads only `truncated` is silent here,
+    // and the class-(d) row vanishes with no trace. That silence is the
+    // round-2 blocking finding; this probe goes red if the `|| capped` is
+    // ever dropped.
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-t1', type: 'tenant', phone: '+15550002800' },
+        { contactId: 'c-t2', type: 'tenant', phone: '+15550002801' },
+        { contactId: 'c-del', type: 'unknown', status: 'needs_review', phone: '+15550002802', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-t1', type: 'tenant_1to1', participant_phone: '+15550002800', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-t2', type: 'tenant_1to1', participant_phone: '+15550002801', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-del', participant_phone: '+15550002802', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+      ],
+      latestMessage: {
+        'cv-del': { type: 'sms', direction: 'inbound', body: 'hello?', created_at: '2026-06-12T10:00:00.000Z' },
+      },
+    };
+    const info = vi.fn();
+    const warn = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, emptyCalls(), { info, warn }, { unknownSweepBudget: 2 }),
+    );
+    // The deleted unknown sits past the cap: it does NOT resurface this page.
+    expect(page.rows).toEqual([]);
+    // ...but that is REPORTED, never silent: the floor WARN fires and names
+    // the cap as the stop.
+    const floorWarn = warn.mock.calls.find((c) =>
+      String(c[1]).includes('resurfacing sweep stopped early'),
+    );
+    expect(floorWarn?.[0]).toMatchObject({ capped: true });
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.resurfaceCapped).toBe(true);
+  });
+
+  it('a failed triage-partition Query is LOUD: the branch propagates (route 500), never an empty queue impersonating health', async () => {
+    // The module norm is best-effort, but "no unknown contacts" and "the
+    // query broke" must not be indistinguishable - the failure mode is the
+    // whole triage queue silently vanishing behind a healthy empty state.
+    // Same posture, same reason as the group source (inbox.ts
+    // readGroupSource).
+    const seed: Seed = {
+      contacts: [],
+      conversations: [],
+      listByTypeOverride: () => {
+        throw new Error('byTypeStatus unavailable');
+      },
+    };
+    await expect(
+      aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed)),
+    ).rejects.toThrow('byTypeStatus unavailable');
+  });
+
+  it('THE READ THAT SHIPS: one partition Query plus a byUnread sweep whose contact reads scale with the VISIBLE UNREAD set', async () => {
+    // The starved pin above zeroes the unread index to isolate the queue
+    // read; this one prices the whole configuration production runs - the
+    // spec-accepted O(all unread) sweep included (requirement 3) - so the
+    // branch's cost claim is on the record, not assumed. Fixture: one live
+    // queue row (no unread), two unread tenant threads, one deleted unknown
+    // with a fresh post-deletion inbound.
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002900' },
+        { contactId: 'c-t1', type: 'tenant', phone: '+15550002901' },
+        { contactId: 'c-t2', type: 'tenant', phone: '+15550002902' },
+        { contactId: 'c-del', type: 'unknown', status: 'needs_review', phone: '+15550002903', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-q', participant_phone: '+15550002900', last_activity_at: '2026-06-12T13:00:00.000Z' }),
+        conv({ conversationId: 'cv-t1', type: 'tenant_1to1', participant_phone: '+15550002901', last_activity_at: '2026-06-12T12:00:00.000Z', unread_count: 1 }),
+        conv({ conversationId: 'cv-t2', type: 'tenant_1to1', participant_phone: '+15550002902', last_activity_at: '2026-06-12T11:00:00.000Z', unread_count: 2 }),
+        conv({ conversationId: 'cv-del', participant_phone: '+15550002903', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+      ],
+      latestMessage: {
+        'cv-del': { type: 'sms', direction: 'inbound', body: 'still there?', created_at: '2026-06-12T10:00:00.000Z' },
+      },
+    };
+    const calls = emptyCalls();
+    const info = vi.fn();
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, calls, { info, warn: vi.fn() }),
+    );
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk', 'c-del']);
+    // The queue read: one partition Query, no open-partition walk.
+    expect(calls.listByType).toBe(1);
+    expect(calls.listByLastActivity).toBe(0);
+    // The sweep: one index page (3 visible items), then ONE contact
+    // resolution PER VISIBLE UNREAD ITEM - cv-t1, cv-t2, cv-del - which is
+    // the O(all unread) term the design accepts and this pin makes visible.
+    expect(calls.queryUnreadPage).toBe(1);
+    expect(calls.findByPhone).toBe(3);
+    // Thread resolution: the queue row and the resurfaced row (one distinct
+    // phone each).
+    expect(calls.findByParticipantPhone).toBe(2);
+    // Message reads: the collector's resurfacing probe on cv-del, plus one
+    // latest-message hydration per rendered row (cv-q, cv-del).
+    expect(calls.listByConversation).toBe(3);
+    // And the cost is ON THE LOG, unconditionally: the assembled line carries
+    // the sweep's raw-scan volume even when nothing stopped early - the one
+    // per-request signal for the O(visible unread) term growing in production.
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.sweepScanned).toBe(3);
+    // If any of these counts move, find WHICH read moved and why before
+    // repinning - each number above names its buyer.
+  });
+
+  it('sorts partition rows and resurfaced rows together, newest displayed activity first', async () => {
+    const seed: Seed = {
+      contacts: [
+        { contactId: 'c-old', type: 'unknown', status: 'needs_review', phone: '+15550002600' },
+        { contactId: 'c-new', type: 'unknown', status: 'active', phone: '+15550002601' },
+        { contactId: 'c-mid', type: 'unknown', status: 'needs_review', phone: '+15550002602', deleted_at: '2026-06-10T00:00:00.000Z' },
+      ],
+      conversations: [
+        conv({ conversationId: 'cv-old', participant_phone: '+15550002600', last_activity_at: '2026-06-12T08:00:00.000Z' }),
+        conv({ conversationId: 'cv-new', participant_phone: '+15550002601', last_activity_at: '2026-06-12T12:00:00.000Z' }),
+        conv({ conversationId: 'cv-mid', participant_phone: '+15550002602', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1 }),
+      ],
+      latestMessage: {
+        'cv-mid': { type: 'sms', direction: 'inbound', body: 'hey', created_at: '2026-06-12T10:00:00.000Z' },
+      },
+    };
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
+    expect(page.rows.map((r) => r.contactId)).toEqual(['c-new', 'c-mid', 'c-old']);
+  });
+
+  it('the live type re-check drops a stale-index row that no longer renders as unknown', async () => {
+    // Models the retype race: the partition Query hands back an image whose
+    // type has already moved on. roleFromContact says tenant -> not a triage
+    // row, whatever partition it arrived from.
+    const seed: Seed = {
+      contacts: [],
+      conversations: [conv({ conversationId: 'cv-x', participant_phone: '+15550002700', last_activity_at: '2026-06-12T10:00:00.000Z' })],
+      listByTypeOverride: () => ({
+        items: [{ contactId: 'c-retyped', type: 'tenant', phone: '+15550002700' } as ContactItem],
+      }),
+    };
+    const info = vi.fn();
+    const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, emptyCalls(), { info, warn: vi.fn() }));
+    expect(page.rows).toEqual([]);
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled?.drops).toMatchObject({ unknownQueueRetyped: 1 });
+  });
+});

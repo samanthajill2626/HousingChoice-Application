@@ -42,10 +42,15 @@ describe('listByTypeFromContacts', () => {
   });
 
   it('excludeOrigin filters the PAGE (spends slots), like the real FilterExpression', () => {
+    // The ids encode the SORT position, not the seed position (rule 6): every
+    // row here shares a status, so the tie-break is `contactId` ascending and
+    // the two excluded stubs must sort AHEAD of the surviving row for the
+    // page-slot claim to be the thing under test. Naming the third row 'real'
+    // put it first and quietly turned this into a different assertion.
     const seed = [
       c({ contactId: 's1', origin: 'group_detection' }),
       c({ contactId: 's2', origin: 'group_detection' }),
-      c({ contactId: 'real' }),
+      c({ contactId: 's3-real' }),
     ];
     const page1 = listByTypeFromContacts(seed, 'unknown', {
       limit: 2,
@@ -85,6 +90,34 @@ describe('listByTypeFromContacts', () => {
     });
     expect(page2.items).toEqual([]);
     expect(page2.lastEvaluatedKey).toBeUndefined();
+  });
+
+  it('rule 6 - the partition comes back sorted by the RANGE KEY: status ascending, then contactId, NOT seed order', () => {
+    // The Query sets no ScanIndexForward (contactsRepo.ts:1009-1020), so it is
+    // ascending on `status`. Within type='unknown' the legal statuses are
+    // 'needs_review' and 'active', and 'active' < 'needs_review' - so every
+    // active row precedes every needs_review one. The seed below is in the
+    // OPPOSITE order on purpose: a fake returning seed order passes nothing
+    // here.
+    const seed = [
+      c({ contactId: 'z-review', status: 'needs_review' }),
+      c({ contactId: 'a-review', status: 'needs_review' }),
+      c({ contactId: 'z-active', status: 'active' }),
+      c({ contactId: 'a-active', status: 'active' }),
+    ];
+    expect(listByTypeFromContacts(seed, 'unknown', { limit: 10 }).items.map((x) => x.contactId)).toEqual([
+      'a-active',
+      'z-active',
+      'a-review',
+      'z-review',
+    ]);
+    // And the sort is what the PAGE cuts: a Limit smaller than the partition
+    // keeps the active block and leaves needs_review behind. This is the
+    // starvation HIGH-1 named; unknownQueue.test.ts pins it end to end.
+    expect(listByTypeFromContacts(seed, 'unknown', { limit: 2 }).items.map((x) => x.contactId)).toEqual([
+      'a-active',
+      'z-active',
+    ]);
   });
 
   it('the GSI is sparse: a status-less contact is not indexed at all', () => {

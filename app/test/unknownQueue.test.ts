@@ -50,7 +50,10 @@ describe('collectUnknownTriageQueue', () => {
       { contactId: 'c-ten', type: 'tenant', phone: '+15550009000' },
     ]);
     const result = await collectUnknownTriageQueue(deps, WIDE);
-    expect(result.contacts.map((c) => c.contactId)).toEqual(['c-unk-001', 'c-unk-002', 'c-unk-003']);
+    // RANGE-KEY ORDER, not seed order: the partition sorts on `status`
+    // ascending, and 'active' < 'needs_review' - so c-unk-002 (the class-f
+    // active row) comes back FIRST. See the starvation test below.
+    expect(result.contacts.map((c) => c.contactId)).toEqual(['c-unk-002', 'c-unk-001', 'c-unk-003']);
     expect(result).toMatchObject({ pagesWalked: 1, truncated: false });
     expect(calls).toHaveLength(1);
     // THE MAP DRIVES THE READ: the queried partitions are exactly
@@ -134,6 +137,43 @@ describe('collectUnknownTriageQueue', () => {
     expect(result.contacts).toHaveLength(4);
     expect(result.truncated).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('THE CAP STARVES needs_review: the partition is status-ordered, so a cut keeps the ALREADY-REVIEWED rows and discards the front door', async () => {
+    // The defect adversarial review HIGH-1 named, pinned as a FACT so the next
+    // reader meets it instead of rediscovering it.
+    //
+    // byTypeStatus is (hash: type, range: status) and contactsRepo.listByType
+    // sets NO ScanIndexForward (contactsRepo.ts:1009-1020), so the Query is
+    // ASCENDING on status. Within type='unknown' the only legal statuses are
+    // 'needs_review' and 'active' (NON_TENANT_STATUSES), and
+    // 'active' < 'needs_review' - so every active row precedes every
+    // needs_review one. The cap therefore does NOT cut a recency-arbitrary
+    // slice: it cuts STATUS-FIRST, keeping rows somebody already looked at and
+    // discarding the ones nobody has.
+    //
+    // NOT A REGRESSION TEST - it pins CURRENT behaviour. The mitigation (a
+    // ScanIndexForward: false option on the repo read) is deliberately NOT
+    // taken on this branch: listByType is a SHARED read that today.ts's triage
+    // block also uses, so flipping its direction is the human's call. Reopen
+    // point: docs/issues/inbox-filter-tabs-full-walk.md.
+    const seed = [
+      unk(1), // needs_review - the untriaged front door
+      unk(2), // needs_review
+      unk(3, { status: 'active' }), // reviewed but never re-typed (MED-3)
+      unk(4, { status: 'active' }),
+    ];
+    const { deps } = makeDeps(seed);
+    const result = await collectUnknownTriageQueue(deps, { pageSize: 10, maxPages: 10, maxRows: 2 });
+    // The cap is 2 and the partition holds 2 of each status. Both survivors are
+    // `active`; NEITHER needs_review row is reachable, however recent its
+    // inbound. A cut that were truly "arbitrary with respect to recency" could
+    // not produce this every single time - and it does, because intra-partition
+    // order is stable.
+    expect(result.contacts.map((c) => c.contactId)).toEqual(['c-unk-003', 'c-unk-004']);
+    expect(result.contacts.map((c) => c.status)).toEqual(['active', 'active']);
+    expect(result.contacts.some((c) => c.status === 'needs_review')).toBe(false);
+    expect(result.truncated).toBe(true);
   });
 
   it('production constants are named and sane', () => {

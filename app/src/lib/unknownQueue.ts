@@ -25,7 +25,24 @@
 //   NOT COPIED - `status: 'needs_review'`: a contact CREATED as unknown
 //   defaults to status 'active' (routes/contacts.ts:881-884), so
 //   (unknown, active) is the DEFAULT, not an edge case - class f. The type
-//   alone is the queue: triage retypes the contact out of the partition.
+//   alone is the queue.
+//
+//   AND THE TYPE ALONE IS ALSO HOW A ROW LEAVES IT. This block used to say
+//   "triage retypes the contact out of the partition"; that is FALSE
+//   (corrected 2026-08-25, adversarial MED-3). PATCH /api/contacts/:id
+//   supports a STATUS-ONLY triage - routes/contacts.ts handles
+//   `'status' in patch && !('type' in patch)` and re-validates it against
+//   statusAllowlistFor(stored.type), which for `unknown` is
+//   ['needs_review','active'] - and the dashboard's edit form reaches it. An
+//   operator can therefore mark an unknown contact `active` while it stays
+//   type='unknown': it leaves Today's triage block (which DOES narrow on
+//   needs_review) but it NEVER leaves this queue. Only a RE-TYPE drains a row.
+//
+//   That compounds with the range-key ordering documented on
+//   UnknownQueueResult.contacts: a status-only triage moves the row from the
+//   needs_review block to the `active` block, which the ascending Query
+//   returns FIRST - so a half-triaged row is promoted to the front of the read
+//   and crowds out rows nobody has looked at.
 //
 //   NOT COPIED - `excludeOrigin: GROUP_DETECTION_ORIGIN`: today.ts can afford
 //   that exclusion ONLY because it is a two-source union ("a real unknown
@@ -89,11 +106,35 @@ export const UNKNOWN_QUEUE_TYPES: readonly ContactType[] = (
 
 export interface UnknownQueueResult {
   /**
-   * At most `maxRows` live (non-deleted) queue contacts, in PARTITION order -
-   * this index has NO activity dimension (its range key is `status`), so when
-   * the cap or the page budget cuts this list, the cut is ARBITRARY with
-   * respect to recency: the newest untriaged contact can be among the hidden
-   * rows. The caller's newest-first sort orders only what survived the cut.
+   * At most `maxRows` live (non-deleted) queue contacts, in PARTITION order.
+   *
+   * PARTITION ORDER IS `status` ASCENDING, and that is worse than arbitrary
+   * (corrected 2026-08-25, adversarial HIGH-1 - this doc previously called the
+   * cut "ARBITRARY with respect to recency", which is what would stop a reader
+   * from looking). byTypeStatus is (hash: type, range: status) and
+   * contactsRepo.listByType sets NO `ScanIndexForward`
+   * (contactsRepo.ts:1009-1020), so the Query ascends the range key. Within
+   * type='unknown' the only legal statuses are 'needs_review' and 'active'
+   * (NON_TENANT_STATUSES, lib/statusModel.ts:194) and 'active' <
+   * 'needs_review' lexicographically - so EVERY `active` unknown is returned
+   * before ANY `needs_review` one.
+   *
+   * Consequence: when the cap or the page budget cuts this list, the cut is
+   * STATUS-FIRST and DETERMINISTIC. It keeps the already-reviewed-but-never-
+   * re-typed rows and starves `needs_review` - the status that means nobody
+   * has looked at this contact yet. Recency does not enter into it: the newest
+   * untriaged contact is among the hidden rows whenever the `active` block
+   * alone can fill the budget. Intra-partition order is stable, so the same
+   * rows are hidden on every render.
+   *
+   * NOT MITIGATED HERE, deliberately: the fix is a `ScanIndexForward: false`
+   * option on the repo read, and `listByType` is a SHARED read that today.ts's
+   * triage block also uses - flipping its direction is a repo-wide change and
+   * therefore the human's call, not this branch's. Pinned as a fact by
+   * test/unknownQueue.test.ts ("THE CAP STARVES needs_review"); reopen point
+   * recorded in docs/issues/inbox-filter-tabs-full-walk.md.
+   *
+   * The caller's newest-first sort orders only what survived the cut.
    */
   contacts: ContactItem[];
   pagesWalked: number;
@@ -167,10 +208,13 @@ export async function collectUnknownTriageQueue(
   if (truncated) {
     // The precedent's WARN (today.ts:884-889): counts only, no PII. The copy
     // names the ordering caveat because the operator-facing list LOOKS
-    // newest-first while the hidden rows were chosen by index order.
+    // newest-first while the hidden rows were chosen by the index's range key,
+    // `status` - ascending, so 'active' before 'needs_review' (see the
+    // UnknownQueueResult.contacts doc). The copy says WHICH rows are starved
+    // rather than "index order", which reads as harmless.
     log.warn(
       { pages: pagesWalked, kept: contacts.length, collected: collected.length },
-      'inbox: the unknown-queue walk ended with untriaged contacts still behind it - the cut is in index order, so the newest untriaged contact may be among the hidden rows',
+      'inbox: the unknown-queue walk ended with untriaged contacts still behind it - the cut is in status order (active before needs_review), so the hidden rows are the ones nobody has reviewed yet',
     );
   }
   return { contacts, pagesWalked, truncated };

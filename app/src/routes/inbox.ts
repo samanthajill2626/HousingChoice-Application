@@ -956,8 +956,18 @@ export async function aggregateInbox(
     //
     // FOR THE LOG READER: `unknownFilterRole` is this counter's ONLY site in
     // the file, so it can never appear on an assembled line again. Its absence
-    // means the arm is dead, NOT that nothing was rejected - the equivalent
-    // rejection now happens as `unknownQueueRetyped` on the unknown branch.
+    // means the arm is dead, NOT that nothing was rejected.
+    //
+    // AND THERE IS NO REPLACEMENT COUNTER TO LOOK AT (corrected 2026-08-25,
+    // adversarial MED-2 - this used to send you to `unknownQueueRetyped`,
+    // which fires NOWHERE: see the guard's own comment on the unknown branch
+    // for why it is structurally unreachable). What replaced this rejection is
+    // the partition Query itself: listByType('unknown') hashes on `type`, so a
+    // non-unknown contact is excluded BY CONSTRUCTION, before any row exists
+    // to count. Rejections that used to be visible as a drop count are now
+    // invisible because they never happen. If you need to know what the queue
+    // read saw, the assembled line's `queueContacts` / `queuePages` are the
+    // fields that carry it.
     const role = roleFromContact(contact);
     if (filter === 'unknown' && role !== 'unknown') return dropped('unknownFilterRole');
 
@@ -1520,7 +1530,15 @@ export async function aggregateInbox(
   // The old read walked the ENTIRE open partition and paid one contact lookup
   // per conversation to find a handful of triage rows (~684 lookups across 24
   // Queries for at most 8 rows, measured in prod). This read queries the
-  // (type='unknown') byTypeStatus partition and pays per row RETURNED. The
+  // (type='unknown') byTypeStatus partition and pays per row COLLECTED -
+  // bounded by UNKNOWN_QUEUE_MAX_ROWS, NOT by the `limit` the caller asked
+  // for. (Corrected 2026-08-25, adversarial MED-4: this said "per row
+  // RETURNED", which is off by the whole cap. Hydration runs inside the loop
+  // over queue.contacts below, while the window `slice(0, limit)` happens
+  // AFTER the sort - so a cap-full queue hydrates up to 200 rows serially to
+  // render 30.) That ordering is REQUIRED and is not a defect to restructure
+  // away: the sort key is the hydrated activity, so the window cannot be
+  // applied before the rows exist. The
   // coverage decisions - what each class of row does under the new source -
   // are section 3 of docs/superpowers/specs/
   // 2026-08-25-inbox-unknown-tab-walk-design.md; the parity suite
@@ -1581,14 +1599,30 @@ export async function aggregateInbox(
     const unknownRows: InboxRow[] = [];
 
     for (const contact of queue.contacts) {
-      // The precedent's STATUS re-check does not carry over (the query no
-      // longer narrows on status - class f); its honest replacement is a live
-      // TYPE check with the same predicate the tab renders with. On a queried
-      // partition item this equals `type === 'unknown'` (the partition key IS
-      // the type), so it can only fire on a stale index image - and
-      // team_member, which falls THROUGH roleFromContact to 'unknown', can
-      // never be returned by listByType('unknown') in the first place
-      // (class c ruling, 2026-08-25: internal staff are not triage).
+      // UNREACHABLE FROM A REAL QUERY - a belt, not a check (corrected
+      // 2026-08-25, adversarial MED-2). The precedent's STATUS re-check does
+      // not carry over (the query no longer narrows on status - class f), and
+      // this was presented as its honest replacement. It is not one:
+      // listByType('unknown') Queries the index whose HASH KEY IS `type`, so
+      // every item it can return carries type === 'unknown' by construction,
+      // and roleFromContact reads that same attribute off that same image.
+      // The stale-index case this was written for FAILS to fire too: a retype
+      // race leaves the OLD index entry under type='unknown' with its
+      // projected `type` stale in lockstep with its key - i.e. still 'unknown'.
+      // So `unknownQueueRetyped` cannot appear on a real log line.
+      //
+      // KEPT anyway, cheaply: it would matter if a second type were ever
+      // mapped 'queried' in UNKNOWN_TAB_TYPE_DECISIONS, or if this loop were
+      // ever handed contacts from somewhere other than a byTypeStatus Query
+      // (the base table, a BatchGet, a future caller). It costs one predicate
+      // per collected row.
+      //
+      // What ACTUALLY replaced the old roleFromContact rejection is the
+      // partition Query itself, which excludes non-unknown contacts silently
+      // and by construction, with no counter. team_member in particular falls
+      // THROUGH roleFromContact to 'unknown' but can never be returned by
+      // listByType('unknown') at all (class c ruling, 2026-08-25: internal
+      // staff are not triage).
       if (roleFromContact(contact) !== 'unknown') {
         dropped('unknownQueueRetyped');
         continue;
@@ -1717,22 +1751,52 @@ export async function aggregateInbox(
     // Requirement 2: the whole KEPT queue, sorted in memory, newest first -
     // the byTypeStatus index has no activity dimension, so index-order paging
     // would yield globally out-of-order pages. TWO different cuts can hide
-    // rows, and they are NOT the same claim: this WINDOW cut (below) really is
-    // newest-first, so what it hides is the older tail and triage drains
-    // toward it; the COLLECTOR's cap/page-budget cut (already WARNed inside
-    // collectUnknownTriageQueue) is in INDEX order, so past
-    // UNKNOWN_QUEUE_MAX_ROWS untriaged contacts the hidden rows are arbitrary
-    // with respect to recency and the newest inbound can be among them. The
-    // sort orders what SURVIVED; it cannot repair what the collector never
+    // rows, and they are NOT the same claim.
+    //
+    // 1. This WINDOW cut (below) really is newest-first, so what it hides is
+    //    the older tail.
+    // 2. The COLLECTOR's cap/page-budget cut (already WARNed inside
+    //    collectUnknownTriageQueue) is in STATUS-ASCENDING order. Corrected
+    //    2026-08-25 (adversarial HIGH-1) - this used to call it "arbitrary
+    //    with respect to recency", which is both wrong and reassuring.
+    //    byTypeStatus's RANGE KEY is `status` and contactsRepo.listByType sets
+    //    no `ScanIndexForward` (contactsRepo.ts:1009-1020), so the Query
+    //    ascends it; within type='unknown' the legal statuses are
+    //    'needs_review' and 'active', and 'active' < 'needs_review'. So past
+    //    UNKNOWN_QUEUE_MAX_ROWS the hidden rows are not a random slice - they
+    //    are DETERMINISTICALLY the `needs_review` ones, the contacts nobody
+    //    has looked at, however recent their inbound. Stable order means the
+    //    same rows are hidden on every render.
+    //
+    //    NOT MITIGATED HERE, deliberately: the fix is a
+    //    `ScanIndexForward: false` option on the repo read, and listByType is
+    //    a SHARED read that today.ts's triage block also uses - reversing it
+    //    is a repo-wide change and the human's call. Reopen point:
+    //    docs/issues/inbox-filter-tabs-full-walk.md. Pinned as a fact by
+    //    test/unknownQueue.test.ts ("THE CAP STARVES needs_review").
+    //
+    // The sort orders what SURVIVED; it cannot repair what the collector never
     // read.
     unknownRows.sort((a, b) =>
       a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
     );
     // The response window is the wire limit (route-clamped, dashboard sends
     // 30). Rows past it are NOT silently gone: the WARN below names the count,
-    // and - for THIS cut only, see above - triage drains the queue
-    // newest-first, so the remainder becomes reachable as rows are retyped
-    // away. No cursor - an offset page over a mutating in-memory sort
+    // and - for THIS cut only, see above - the remainder becomes reachable as
+    // rows are RE-TYPED away.
+    //
+    // RE-TYPED, not merely triaged (corrected 2026-08-25, adversarial MED-3:
+    // this used to say "triage drains the queue newest-first", which is the
+    // justification for shipping no cursor and is only half true). PATCH
+    // /api/contacts/:id supports a STATUS-ONLY triage - see the block on
+    // NOT-COPIED status in lib/unknownQueue.ts - so an operator can mark an
+    // unknown contact `active` and it stays type='unknown' and stays in this
+    // queue forever. Worse, per the ordering note above, `active` sorts FIRST,
+    // so a status-only triage PROMOTES that row to the front of the collector's
+    // read and crowds out rows nobody has reviewed. Only a type change (to
+    // tenant/landlord/partner) actually drains a row, and until it happens the
+    // rows past `limit` have no affordance that reaches them. No cursor - an
+    // offset page over a mutating in-memory sort
     // re-serves and skips rows, and the design settled on cap-plus-WARN
     // (requirement 2). The affordance gap is recorded in
     // docs/issues/inbox-filter-tabs-full-walk.md.

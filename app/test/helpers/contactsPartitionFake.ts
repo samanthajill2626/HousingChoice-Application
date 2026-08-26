@@ -16,6 +16,24 @@
 //      exact trap): a walk over exactly n * limit rows costs one MORE round
 //      trip than items-remaining modelling suggests, and call-count pins built
 //      on the weaker model are one Query short of production.
+//   6. The partition is SORTED BY THE RANGE KEY, ascending: `status` first,
+//      then the table key `contactId` as the tie-break (DynamoDB orders items
+//      sharing a GSI range-key value by their table key). A Query returns the
+//      partition in range-key order unless it sets `ScanIndexForward: false`,
+//      and contactsRepo.listByType sets NO such key (contactsRepo.ts:1009-1020)
+//      - so ASCENDING is what production does.
+//
+//      WHY THIS RULE EXISTS (added by the 2026-08-25 fix wave, adversarial
+//      finding HIGH-1): returning items in SEED-ARRAY order made the
+//      partition's most consequential property INEXPRESSIBLE. Within
+//      `type='unknown'` the only legal statuses are 'needs_review' and 'active'
+//      (NON_TENANT_STATUSES, lib/statusModel.ts:194) and 'active' <
+//      'needs_review' lexicographically, so EVERY 'active' unknown is returned
+//      before ANY 'needs_review' one - which means the unknown queue's page
+//      budget and result cap cut STATUS-FIRST and starve the status that means
+//      "nobody has looked at this yet". No test in the suite could state that
+//      until this fake modelled the sort. Pinned by
+//      test/unknownQueue.test.ts ("the cap starves needs_review...").
 //
 // KEY SHAPE (rule 5's other half): the real repo hands back DynamoDB's raw
 // `LastEvaluatedKey` from a GSI Query (contactsRepo.ts:1021-1025), which
@@ -57,7 +75,18 @@ export function listByTypeFromContacts(
     // SPARSE index: no range-key attribute, no index entry (rule 1).
     .filter((c) => c.status !== undefined)
     .filter((c) => c.type === type)
-    .filter((c) => (opts.status === undefined ? true : c.status === opts.status));
+    .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
+    // RANGE-KEY SORT (rule 6): ascending `status`, then `contactId`. Seed-array
+    // order is NOT what a Query returns, and the difference is load-bearing -
+    // see the rule's note. `status` is non-undefined here (the sparse filter
+    // above), so the String() coercions are for the type checker only.
+    .slice()
+    .sort((a, b) => {
+      const sa = String(a.status);
+      const sb = String(b.status);
+      if (sa !== sb) return sa < sb ? -1 : 1;
+      return a.contactId < b.contactId ? -1 : a.contactId > b.contactId ? 1 : 0;
+    });
   const start =
     typeof opts.exclusiveStartKey?.['contactId'] === 'string'
       ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1

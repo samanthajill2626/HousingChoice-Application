@@ -179,16 +179,22 @@ describe('filter=unknown - the contact-side read', () => {
     expect(calls.listGroupTexts).toBe(0);
   });
 
-  it('a cap-cut queue: single page, no truncated key, WARNed - and the cut is INDEX order, so the newest rows can be the hidden ones', async () => {
-    // Partition order here is contactId order (c-u0..c-u3) while activity
-    // order is the REVERSE (c-u3 newest). The collector cap keeps the first
-    // maxRows in PARTITION order - the byTypeStatus range key is `status`,
-    // which has no recency dimension - so the two NEWEST contacts are exactly
-    // the hidden ones, and the rendered list is "newest-first of what
-    // survived", NOT "the newest of the queue". This is the documented,
-    // deliberate limitation of cap-plus-WARN (spec requirement 2); the WARN
-    // copy names it, and this pin is what keeps anyone from quietly claiming
-    // otherwise.
+  it('a cap-cut queue: single page, no truncated key, WARNed - and the cut is PARTITION order, so the newest rows can be the hidden ones', async () => {
+    // Every contact here shares status='needs_review', so the range-key sort
+    // ties and partition order falls back to contactId (c-u0..c-u3) - while
+    // activity order is the REVERSE (c-u3 newest). The collector cap keeps the
+    // first maxRows in PARTITION order, and the byTypeStatus range key is
+    // `status`, which carries no recency dimension - so the two NEWEST
+    // contacts are exactly the hidden ones, and the rendered list is
+    // "newest-first of what survived", NOT "the newest of the queue". This is
+    // the documented, deliberate limitation of cap-plus-WARN (spec
+    // requirement 2); the WARN copy names it, and this pin is what keeps
+    // anyone from quietly claiming otherwise.
+    //
+    // A SINGLE-STATUS fixture isolates the recency half of the problem. The
+    // MIXED-status case - where the cut is not merely recency-blind but
+    // deterministically starves `needs_review` - is pinned at the collector in
+    // test/unknownQueue.test.ts ("THE CAP STARVES needs_review").
     const contacts = Array.from({ length: 4 }, (_, i) => ({
       contactId: `c-u${i}`,
       type: 'unknown' as const,
@@ -461,10 +467,23 @@ describe('filter=unknown - the contact-side read', () => {
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-new', 'c-mid', 'c-old']);
   });
 
-  it('the live type re-check drops a stale-index row that no longer renders as unknown', async () => {
-    // Models the retype race: the partition Query hands back an image whose
-    // type has already moved on. roleFromContact says tenant -> not a triage
-    // row, whatever partition it arrived from.
+  it('the type guard drops a non-unknown row - reached ONLY through an override, because no real Query can produce one', async () => {
+    // READ THIS BEFORE TRUSTING THE PIN. The guard it exercises is
+    // STRUCTURALLY UNREACHABLE in production (adversarial MED-2, 2026-08-25):
+    // listByType('unknown') Queries the index whose HASH KEY IS `type`, so
+    // every item it can return carries type === 'unknown', and roleFromContact
+    // reads that same attribute off that same image. Even the retype race this
+    // was originally written for does not reach it - a stale index entry stays
+    // keyed type='unknown' with its projected `type` stale to match.
+    //
+    // So `listByTypeOverride` below is not a convenience: it is the ONLY way
+    // to drive this arm, and it deliberately supplies an item shape
+    // (`type: 'tenant'` from the unknown partition) that the shared
+    // DynamoDB-faithful fake would never emit. What this test pins is the
+    // guard's BEHAVIOUR if a future caller ever hands the loop contacts from
+    // somewhere other than a byTypeStatus Query - not a path any production
+    // request takes, and `unknownQueueRetyped` will never appear on a real log
+    // line.
     const seed: Seed = {
       contacts: [],
       conversations: [conv({ conversationId: 'cv-x', participant_phone: '+15550002700', last_activity_at: '2026-06-12T10:00:00.000Z' })],

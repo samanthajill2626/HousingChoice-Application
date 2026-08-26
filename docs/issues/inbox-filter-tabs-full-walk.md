@@ -290,13 +290,35 @@ on the approved `contactId` denormalization.
 The unbounded walk is gone (see the UNKNOWN bullet above). Everything below is
 recorded HERE, in the registry, so that none of it rides only on a design doc.
 
-**The class (c) ruling: internal staff are not triage.** A `team_member` contact
-no longer appears on the Unknown tab. `roleFromContact` falls every type that is
-not tenant / landlord / partner through to `'unknown'`, which put colleagues in
-the operator's triage queue - the latent bug recorded above. It was RULED
-2026-08-25 that team members do not belong there, and the contact-side read
-excludes them by construction: it queries the CONTACTS partition, and
-`listByType('unknown')` cannot return a `team_member`. The decision is enforced
+**The class (c) ruling: internal staff are not triage - enforced for TAB
+MEMBERSHIP ONLY.** A `team_member` contact no longer appears on the Unknown tab.
+`roleFromContact` falls every type that is not tenant / landlord / partner
+through to `'unknown'`, which put colleagues in the operator's triage queue -
+the latent bug recorded above. It was RULED 2026-08-25 that team members do not
+belong there, and the contact-side read excludes them from the QUEUE by
+construction: it queries the CONTACTS partition, and `listByType('unknown')`
+cannot return a `team_member`.
+
+**What shipped is narrower than "the mechanism is closed", and this block used
+to imply otherwise (corrected 2026-08-25, adversarial MED-7).**
+`roleFromContact` (`app/src/routes/inbox.ts:422-429` - an earlier note in this
+file cited `:396-403`, which is stale) is UNTOUCHED. It still falls
+`team_member` through to `'unknown'`, so on the **All** and **Unread** tabs a
+team member's 1:1 row still ships `role: 'unknown'` and `needsTriage: true`
+(`inbox.ts:873`) and the dashboard still renders the "Needs triage" chip on it
+(`dashboard/src/routes/inbox/InboxRow.tsx`). The "one-line fix" this file said
+would be needed "if that design does not land" is therefore STILL NEEDED for the
+labelling half; only the queue half is closed.
+
+Widening `roleFromContact` was deliberately NOT done on this branch: it is a
+WIRE change (the `role` union reaches `dashboard/src/api/types.ts`) with its own
+blast radius across every tab, and it wants its own change. The alternative
+shape, if someone prefers the smaller one, is to narrow `needsTriage` to
+`contact.type === 'unknown'` and leave `role` alone. Impact today is ZERO rows
+in both environments (measured), so this is a half-fixed mechanism and a
+record-accuracy item, not a live defect.
+
+The queue-side decision is enforced
 rather than decorative - `UNKNOWN_TAB_TYPE_DECISIONS` in
 `app/src/lib/unknownQueue.ts` is the table of per-type rulings, and the list of
 types actually queried is DERIVED from it, so a future type cannot be added to
@@ -312,14 +334,22 @@ They are separate claims and must not be collapsed into one:
 
 - **The WINDOW cut** - rows past the request `limit` (the dashboard sends 30).
   These are WARNed ("the unknown tab could not show every triage row - the queue
-  is a floor") and they genuinely become reachable as triage drains the queue,
-  because the assembled rows are sorted newest displayed activity first, so the
-  cut is at the OLD end.
-- **The COLLECTOR cap** - `UNKNOWN_QUEUE_MAX_ROWS` (200). This one cuts in INDEX
-  order, with NO recency guarantee, so past roughly 200 untriaged contacts the
-  NEWEST inbound can be among the hidden rows. Also WARNed, and the WARN copy
-  carries the index-order caveat. Do not read the window cut's newest-first
-  reasoning onto this one.
+  is a floor") and they become reachable as rows are RE-TYPED away, because the
+  assembled rows are sorted newest displayed activity first, so the cut is at
+  the OLD end. **RE-TYPED, not merely triaged** (corrected 2026-08-25,
+  adversarial MED-3): this bullet used to say "as triage drains the queue", and
+  a STATUS-ONLY triage does not drain it. `PATCH /api/contacts/:id` supports
+  `'status' in patch && !('type' in patch)`, re-validated against
+  `statusAllowlistFor(stored.type)` - `['needs_review','active']` for `unknown`
+  - and the dashboard's contact edit form reaches it. An operator can therefore
+  mark an unknown contact `active` while it stays `type='unknown'`; it leaves
+  Today's triage block (which DOES narrow on `needs_review`) but it never leaves
+  this queue. Only a type change drains a row.
+- **The COLLECTOR cap** - `UNKNOWN_QUEUE_MAX_ROWS` (200), plus the page budget
+  (10 x 100). This one cuts in **status-ascending order, and it starves
+  `needs_review`** - see the named reopen point below. It is NOT
+  "recency-arbitrary", which is what this bullet said before 2026-08-25. Also
+  WARNed. Do not read the window cut's newest-first reasoning onto this one.
 
 Neither cut has a Load-more affordance: the branch mints no cursor and returns
 `nextCursor: null` (an offset page over a mutating in-memory sort re-serves and
@@ -353,6 +383,76 @@ therefore the ONLY signals that it happened. **Reopen this issue here** if any
 of these three trades goes wrong: a silent incomplete empty state an operator
 actually hits, a cap cut that hides new inbound, or a sweep crossover that shows
 up in `sweepScanned`.
+
+**The COLLECTOR-truncation residual - the SAME shape as the capped-sweep one,
+and likelier** (added 2026-08-25, adversarial MED-5; the block above recorded
+only the sweep half). `collectUnknownTriageQueue` can legitimately return
+`{ contacts: [], truncated: true }`: the page budget expires while every page it
+read was residue. On that result the branch assembles ZERO rows and - by the
+same approved requirement 5 - must NOT set the wire `truncated`, so the
+dashboard renders the ordinary "No unknown numbers" empty state over a triage
+queue that has rows in it. The only signals are the collector's own WARN ("the
+unknown-queue walk ended with untriaged contacts still behind it") and the
+`queueTruncated` field on the `inbox feed assembled` line - a DIFFERENT WARN and
+a DIFFERENT field from the sweep's, so a reader who only knows about the sweep
+residual will not think to look. It is the likelier of the two because this
+module's own header argues that soft-deleted unknowns "accumulate in this
+partition FOREVER", and because of the ordering defect below the `active` block
+can consume the whole budget on its own. Same reopen trigger as the sweep
+residual.
+
+**NAMED REOPEN POINT: the cap starves `needs_review`** (found 2026-08-25 by
+adversarial review, HIGH-1; recorded here rather than fixed, by ruling).
+
+`byTypeStatus` is `(hash: type, range: status)` and `contactsRepo.listByType`
+sets **no `ScanIndexForward`**, so the Query returns the partition ASCENDING by
+`status`. Within `type='unknown'` the only legal statuses are `needs_review` and
+`active` (`NON_TENANT_STATUSES`), and `'active' < 'needs_review'`
+lexicographically. **Every `active` unknown is therefore returned before any
+`needs_review` one.** So `UNKNOWN_QUEUE_MAX_ROWS` and the page budget do not cut
+a recency-arbitrary slice - they cut STATUS-FIRST and deterministically, keeping
+rows somebody already reviewed and discarding the ones nobody has looked at. The
+order is stable, so the same rows are hidden on every render.
+
+It COMPOUNDS with the status-only-triage fact recorded on the WINDOW cut above:
+a status-only triage moves a row into the `active` block, which is the block the
+Query returns FIRST - so half-triaged rows are promoted to the front of the read
+and crowd out untriaged ones.
+
+Failure shapes to watch for:
+
+- 200+ live `(unknown, active)` contacts with an open thread: the cap fills
+  entirely from the `active` block and NO `needs_review` contact can appear on
+  the tab at all.
+- 1000+ rows of `(unknown, active)` or soft-deleted residue ahead of the
+  `needs_review` block: the page budget expires before a single `needs_review`
+  row is read, and the tab renders the empty state (the collector-truncation
+  residual above) with only a server WARN behind it.
+
+**Live impact today: none.** Measured 2026-08-25: 16 unknown contacts in dev, 7
+in prod, with ZERO `(unknown, active)` in either - two orders of magnitude from
+the cap. This is a latent-behaviour and design-record item.
+
+**THE MITIGATION, and why it was NOT taken on this branch.** Pass
+`ScanIndexForward: false` on the `listByType` Query (or add it as an option and
+have the unknown queue opt in), which would reverse the partition and put
+`needs_review` first. It was not done here because `listByType` is a **shared
+read** - `today.ts`'s triage block, `GET /api/contacts?type=`, and the importer
+all use it - so changing its direction, even behind an option, is a repo-wide
+change with its own review, and the spec that governs this branch is
+human-gated. It is the human's call. Two alternatives if the option is
+unattractive: query the two statuses explicitly and interleave
+(`needs_review` first, two bounded Queries), or make the cut status-aware rather
+than positional.
+
+The fact is PINNED so it cannot be quietly rediscovered or contradicted:
+`app/test/unknownQueue.test.ts` ("THE CAP STARVES needs_review") drives the real
+collector over a mixed-status partition and asserts the `needs_review` rows are
+the ones cut, and `app/test/helpers/contactsPartitionFake.ts` rule 6 models the
+range-key sort that makes it expressible at all (its absence is why no test
+could catch this before). **Reopen here** if a deployment's unknown partition
+approaches either bound, or the moment anyone wants `(unknown, active)` rows to
+stop crowding the queue.
 
 **DEFERRED, not dropped (human ruling 2026-08-25): spec section 5's
 open-partition safety net.** A raw-scan budget plus cursor plus `truncated`

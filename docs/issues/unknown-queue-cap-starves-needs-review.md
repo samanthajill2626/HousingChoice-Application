@@ -3,11 +3,46 @@ id: unknown-queue-cap-starves-needs-review
 title: The Unknown tab's bounded read cuts in STATUS order, so its cap starves `needs_review` and keeps already-reviewed rows
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-26
+updated: 2026-08-26
 refs: app/src/lib/unknownQueue.ts, app/src/routes/inbox.ts, app/src/repos/contactsRepo.ts, app/src/lib/tables.ts:90-93, app/test/unknownQueue.test.ts, app/test/helpers/contactsPartitionFake.ts
 ---
+
+**RESOLVED 2026-08-26 by suggested fix 2 - "query the two statuses explicitly
+and interleave" - taken as far as it goes: the tab now reads ONE bounded Query
+per status BLOCK, `needs_review` first and `active` second, and pages the blocks
+with the index's own cursor. There is no cap left to starve anything.**
+
+The block list and its order are one named, isolated decision
+(`UNKNOWN_QUEUE_BLOCKS` in `app/src/lib/unknownQueue.ts`), derived from an
+exhaustive `satisfies Record<...>` map over the statuses `statusAllowlistFor`
+declares legal for `unknown` - so a newly-legal status is a TYPECHECK failure,
+not a silently unread block. Coverage did not narrow: every legal status is a
+block and every block is read, so `(unknown, active)` contacts - class f - stay
+on the tab exactly as before. Only the ORDER changed.
+
+`listByType` was NOT reversed (suggested fix 1), so the sibling
+`broadcast-audience-truncation-drops-searching-tenants` is untouched and still
+open on its own terms.
+
+**What replaced the cap:** a per-request SCAN BUDGET on raw index rows
+(`UNKNOWN_QUEUE_SCAN_BUDGET`, 1000). Spending it returns the rows found so far
+PLUS the cursor the request stopped at, so nothing is withheld and the wire
+`truncated` flag is never set - the cursor is the continuation signal.
+
+**Pins:** `app/test/unknownQueue.test.ts` ("the UNTRIAGED block is exhausted
+BEFORE the reviewed block is read"), `app/test/inboxUnknownTab.test.ts` ("THE
+FULL WALK"), and an integration walk against the real byTypeStatus index in
+`app/test/inbox.integration.test.ts`. The old pin, "THE CAP STARVES
+needs_review", is deleted - it asserted the defect as a fact and there is no cap
+for it to describe.
+
+The rest of this file is the original record, kept because the mechanism it
+documents (the ascending range key, the status-only triage PATCH that
+manufactures `(unknown, active)` rows and never drains them) is still true of
+the index and of the product; only the CONSEQUENCE is gone.
 
 **Problem.** The Unknown inbox tab reads the `(type='unknown')` byTypeStatus
 partition under two bounds - a hard result cap (`UNKNOWN_QUEUE_MAX_ROWS`, 200)
@@ -63,12 +98,14 @@ narrowed run structurally cannot produce.
 `feat/inbox-unread-cluster`, and reproduced live on the real index during that
 branch's self-QA. Recorded rather than fixed, by ruling - see below.
 
-**The fact is PINNED so it cannot be quietly rediscovered or contradicted:**
-`app/test/unknownQueue.test.ts` ("THE CAP STARVES needs_review") drives the real
-collector over a mixed-status partition and asserts the `needs_review` rows are
-the ones cut, and `app/test/helpers/contactsPartitionFake.ts` rule 6 models the
-range-key sort that makes it expressible at all - its absence is why no test
-could catch this before.
+**The fact WAS pinned so it could not be quietly rediscovered or contradicted:**
+`app/test/unknownQueue.test.ts` ("THE CAP STARVES needs_review") drove the real
+collector over a mixed-status partition and asserted the `needs_review` rows
+were the ones cut. That pin was DELETED on 2026-08-26 with the cap it described;
+see the resolution at the top for what replaced it.
+`app/test/helpers/contactsPartitionFake.ts` rule 6 still models the range-key
+sort that made this expressible at all - its absence is why no test could catch
+it before.
 
 **Suggested fix.** Three options; none was taken on the branch that found it,
 because `listByType` is a SHARED read and the governing spec is human-gated.

@@ -95,10 +95,11 @@ import {
   type UnreadScanPosition,
 } from '../lib/unreadFeed.js';
 import {
-  collectUnknownTriageQueue,
-  UNKNOWN_QUEUE_MAX_PAGES,
-  UNKNOWN_QUEUE_MAX_ROWS,
+  readUnknownQueue,
+  UNKNOWN_QUEUE_BLOCKS,
   UNKNOWN_QUEUE_PAGE_SIZE,
+  UNKNOWN_QUEUE_SCAN_BUDGET,
+  type UnknownQueuePosition,
 } from '../lib/unknownQueue.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -196,12 +197,15 @@ export interface InboxRouterDeps {
   /**
    * TEST SEAMS for the unknown-tab queue read, mirroring unreadWalkLimit:
    * production leaves them undefined and takes the lib/unknownQueue.ts
-   * constants; tests set them small so the fill-loop, cap and WARN postures
-   * are reachable without 200-contact fixtures.
+   * constants; tests set them small so the fill loop, the block roll-over and
+   * the budget-stopped short page are reachable without 1000-contact fixtures.
+   *
+   * There is no result-cap seam any more. The cap it drove
+   * (`unknownQueueMaxRows`) was deleted with the cap itself on 2026-08-26 -
+   * this feed is paged, not windowed.
    */
   unknownQueuePageSize?: number;
-  unknownQueueMaxPages?: number;
-  unknownQueueMaxRows?: number;
+  unknownQueueScanBudget?: number;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -305,7 +309,98 @@ function decodeCursor(cursor: string): Record<string, unknown> {
   if (typeof (parsed as { u?: unknown }).u === 'number') {
     throw new InboxBadRequestError('cursor does not match this filter');
   }
+  // AND THE SAME AGAIN for `filter=unknown`, which pages the byTypeStatus
+  // blocks with its own `{q,b,k}` cursor (2026-08-26). Its `k` is a
+  // byTypeStatus ExclusiveStartKey - the WRONG index for the 'open' partition
+  // Query this key feeds - so replaying one here is exactly the cross-partition
+  // mis-Query the namespacing exists to prevent.
+  if (typeof (parsed as { q?: unknown }).q === 'number') {
+    throw new InboxBadRequestError('cursor does not match this filter');
+  }
   return parsed as Record<string, unknown>;
+}
+
+// --- The unknown-queue cursor (rework 2026-08-26) ----------------------------
+// A THIRD cursor namespace: `{q:1, b, k}` where `b` is the index into
+// UNKNOWN_QUEUE_BLOCKS the walk is inside and `k` is that block's byTypeStatus
+// ExclusiveStartKey. An absent `k` means "the block's first page", which is
+// also how a roll-over to the next block is expressed - so ONE shape covers
+// both "resume mid-block" and "start the next block", and a block boundary
+// needs no special case on either side of the wire.
+//
+// The tag is what keeps the three namespaces apart: an `all` cursor is a bare
+// LastEvaluatedKey with no tag, `groups` carries a string `t`, `unread` carries
+// a numeric `u`, and this one carries a numeric `q`. Every decoder rejects the
+// tags that are not its own, so a foreign cursor is a 400 and never a Query
+// against the wrong partition.
+
+interface UnknownCursor {
+  /** Namespace tag. Any other value is a cursor from another filter -> 400. */
+  q: 1;
+  /** Index into UNKNOWN_QUEUE_BLOCKS. */
+  b: number;
+  /** The block Query's ExclusiveStartKey; absent = the block's first page. */
+  k?: Record<string, unknown>;
+}
+
+function encodeUnknownCursor(position: UnknownQueuePosition): string {
+  const payload: UnknownCursor = {
+    q: 1,
+    b: position.block,
+    ...(position.key !== undefined && { k: position.key }),
+  };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode + validate an unknown-queue cursor.
+ *
+ * `b` is fully ours, so it is fully checked: an out-of-range block index would
+ * otherwise index UNKNOWN_QUEUE_BLOCKS to `undefined` and crash the reader, and
+ * the range shrinks whenever a status leaves the allowlist - so an OLD but
+ * honest cursor can go out of range too, and a 400 (the client drops it and
+ * refetches page one) is the right answer for both.
+ *
+ * `k` is a repo-defined ExclusiveStartKey, so its KEY NAMES are deliberately
+ * not pinned here - the same posture `decodeCursor` takes and for the same
+ * reason. Its VALUES are checked to be non-empty strings, which is the one
+ * tamper that turns a 400-by-design into a 500: DynamoDB permits an empty
+ * String for a non-key attribute ONLY, so an empty key attribute raises a
+ * ValidationException that nothing on this path maps (the same trap the unread
+ * decoder's adversarial A4 fix closed).
+ */
+function decodeUnknownCursor(cursor: string): UnknownQueuePosition {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  const payload = parsed as { q?: unknown; b?: unknown; k?: unknown };
+  // A cursor minted under `all` (a bare LastEvaluatedKey), `groups` (the repo's
+  // `{t,k}`) or `unread` (`{u,a,c,s}`) carries no `q:1` and is rejected here.
+  if (payload.q !== 1) throw new InboxBadRequestError('cursor does not match this filter');
+  if (
+    typeof payload.b !== 'number' ||
+    !Number.isInteger(payload.b) ||
+    payload.b < 0 ||
+    payload.b >= UNKNOWN_QUEUE_BLOCKS.length
+  ) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  if (payload.k === undefined) return { block: payload.b };
+  if (typeof payload.k !== 'object' || payload.k === null || Array.isArray(payload.k)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  const entries = Object.entries(payload.k as Record<string, unknown>);
+  if (entries.length === 0) throw new InboxBadRequestError('invalid cursor');
+  if (entries.some(([, value]) => typeof value !== 'string' || value.length === 0)) {
+    throw new InboxBadRequestError('invalid cursor');
+  }
+  return { block: payload.b, key: payload.k as Record<string, unknown> };
 }
 
 // --- The unread cursor (spec 4.3) -------------------------------------------
@@ -353,11 +448,9 @@ function decodeUnreadCursor(cursor: string): UnreadCursor {
     throw new InboxBadRequestError('invalid cursor');
   }
   const payload = parsed as { u?: unknown; a?: unknown; c?: unknown; s?: unknown };
-  // A cursor minted under `all` (a bare LastEvaluatedKey) or under `groups`
-  // (the repo's `{t,k}`) carries no `u:1` and lands here. `unknown` MINTS NO
-  // CURSOR AT ALL since the 2026-08-25 contact-side read - its branch rejects
-  // every cursor it is handed before any decode runs - so nothing of its own
-  // can arrive here either.
+  // A cursor minted under `all` (a bare LastEvaluatedKey), under `groups` (the
+  // repo's `{t,k}`) or under `unknown` (the `{q,b,k}` block cursor, 2026-08-26)
+  // carries no `u:1` and lands here.
   if (payload.u !== 1) throw new InboxBadRequestError('cursor does not match this filter');
   if (typeof payload.a !== 'string' || typeof payload.c !== 'string') {
     throw new InboxBadRequestError('invalid cursor');
@@ -589,11 +682,9 @@ export async function aggregateInbox(
   // here. The other three filters own their own cursor NAMESPACE: `groups`
   // decodes inside listGroupTexts (the repo's tagged `{t,k}`), `unread` via
   // decodeUnreadCursor (the `{u,a,c,s}` index cursor) in its branch below, and
-  // `unknown` MINTS NO CURSOR at all since the 2026-08-25 contact-side read -
-  // it serves one sorted window over a bounded queue and 400s any cursor it is
-  // handed (its branch below). Decoding any of those as an 'open'-partition
-  // LastEvaluatedKey is precisely the cross-partition replay the namespacing
-  // exists to prevent.
+  // `unknown` via decodeUnknownCursor (the `{q,b,k}` block cursor, 2026-08-26)
+  // in its own. Decoding any of those as an 'open'-partition LastEvaluatedKey
+  // is precisely the cross-partition replay the namespacing exists to prevent.
   const startKey =
     filter === 'all' && cursor !== undefined ? decodeCursor(cursor) : undefined;
 
@@ -625,14 +716,16 @@ export async function aggregateInbox(
   //   there still carries the ambiguity this removed for `all`. Filed rather
   //   than fixed here: see docs/issues/inbox-read-accounting-gaps.md.
   // - The `unknown` branch answers the same zero-row question with its OWN
-  //   fields on the shared 'inbox feed assembled' line: `queueContacts` /
-  //   `queuePages` (what the triage partition returned), `threadReadFailures`,
-  //   plus this block's own `drops` object - which IS shared, because
-  //   `dropped()` is. `rawScanned` / `rawQueries` stay zero there; nothing
-  //   pages the open partition on that filter any more. (It also carried
-  //   `sweepScanned` / `resurfaceTruncated` / `resurfaceCapped` until the
-  //   resurfacing sweep was deleted on 2026-08-26; those fields are gone, so
-  //   an old log query for them returns nothing rather than zeroes.)
+  //   fields on the shared 'inbox feed assembled' line: `queueRows` (contacts
+  //   consumed from the triage blocks), `queueScanned` / `queueQueries` (what
+  //   the blocks cost), `threadReadFailures`, plus this block's own `drops`
+  //   object - which IS shared, because `dropped()` is. `rawScanned` /
+  //   `rawQueries` stay zero there; nothing pages the open partition on that
+  //   filter any more. (It carried `sweepScanned` / `resurfaceTruncated` /
+  //   `resurfaceCapped` until the resurfacing sweep was deleted on 2026-08-26,
+  //   and `queueContacts` / `queuePages` / `queueTruncated` until the cap was
+  //   deleted the same day; those fields are gone, so an old log query for them
+  //   returns nothing rather than zeroes.)
   // - `rawScanned == count + sum(drops)` DOES NOT HOLD, in ANY case - including
   //   the `count: 0` one. `count` includes relay and group rows that no chunk
   //   Query ever scanned; a page that FILLS stops mid-chunk with the remaining
@@ -960,8 +1053,8 @@ export async function aggregateInbox(
     // non-unknown contact is excluded BY CONSTRUCTION, before any row exists
     // to count. Rejections that used to be visible as a drop count are now
     // invisible because they never happen. If you need to know what the queue
-    // read saw, the assembled line's `queueContacts` / `queuePages` are the
-    // fields that carry it.
+    // read saw, the assembled line's `queueRows` / `queueQueries` /
+    // `queueScanned` are the fields that carry it.
     const role = roleFromContact(contact);
     if (filter === 'unknown' && role !== 'unknown') return dropped('unknownFilterRole');
 
@@ -1522,70 +1615,46 @@ export async function aggregateInbox(
     };
   }
 
-  // --- filter=unknown: the triage partition IS the feed (design 2026-08-25) --
-  // The old read walked the ENTIRE open partition and paid one contact lookup
-  // per conversation to find a handful of triage rows (~684 lookups across 24
-  // Queries for at most 8 rows, measured in prod). This read queries the
-  // (type='unknown') byTypeStatus partition and pays per row COLLECTED -
-  // bounded by UNKNOWN_QUEUE_MAX_ROWS, NOT by the `limit` the caller asked
-  // for. (Corrected 2026-08-25, adversarial MED-4: this said "per row
-  // RETURNED", which is off by the whole cap. Hydration runs inside the loop
-  // over queue.contacts below, while the window `slice(0, limit)` happens
-  // AFTER the sort - so a cap-full queue hydrates up to 200 rows serially to
-  // render 30.)
+  // --- filter=unknown: the triage BLOCKS are the feed (reworked 2026-08-26) --
+  // The original read walked the ENTIRE open partition and paid one contact
+  // lookup per conversation to find a handful of triage rows (~684 lookups
+  // across 24 Queries for at most 8 rows, measured in prod). The 2026-08-25
+  // rewrite replaced that with a contact-side read of the (type='unknown')
+  // byTypeStatus partition - but bounded it with a hard result cap and served
+  // ONE sorted window with no cursor, so rows past the window were unreachable
+  // and the cap cut in STATUS order, keeping already-reviewed rows and
+  // starving untriaged ones.
   //
-  // ONLY THE THREAD RESOLUTION HAS TO PRECEDE THE SORT (corrected again
-  // 2026-08-25, round-2 finding N1). This block used to add "that ordering is
-  // REQUIRED ... the sort key is the hydrated activity, so the window cannot
-  // be applied before the rows exist", which is FALSE and told the next reader
-  // a real saving did not exist. The sort key is `row.lastActivityAt`, which
-  // buildContactRow copies verbatim from `maxConv.last_activity_at` - a
-  // CONVERSATION field, produced by resolveOpenThreads. `latestMessageOf`
-  // (channel/direction/preview) and `placementLabel` are PRESENTATION ONLY and
-  // are not sort inputs, so on this deleted=false path they could move AFTER
-  // `slice(0, limit)`.
+  // THIS READ IS PAGED AND UNBOUNDED (human ruling 2026-08-26). It issues one
+  // bounded Query per STATUS BLOCK, in the order UNKNOWN_QUEUE_BLOCKS declares
+  // - `needs_review` first, then `active` - and pages with the index's own
+  // cursor, rolling from one block to the next when a block exhausts. Coverage
+  // is UNCHANGED: both blocks are read, so a live (unknown, active) contact,
+  // coverage class f, is still on the tab. Only the ORDER changed, and the
+  // trade it buys is stated plainly at the per-page sort below.
   //
-  // KNOWINGLY DEFERRED, not impossible: at the cap that is up to 200 message
-  // reads and up to 200 placement reads to render 30 rows - roughly 340
-  // discarded serial round trips. Taking it is a PERFORMANCE change with its
-  // own test surface (nothing on this branch pins the hydration count), and
-  // this branch's fix waves are chartered not to move behaviour. Recorded as a
-  // deferral in docs/issues/inbox-filter-tabs-full-walk.md.
+  // THE COST IS NOW PROPORTIONAL TO THE PAGE. Thread resolution has to run
+  // during filtering - it is what decides whether a contact HAS a row - so it
+  // costs one participant-GSI read per contact CONSUMED. Everything else is
+  // presentation and runs only for the rows actually returned: `latestMessageOf`
+  // (channel/direction/preview) and `placementLabel` are not filter inputs and
+  // not sort inputs, so hydration is a per-PAGE cost, not a per-partition one.
+  // The old reader hydrated every collected row before a window discarded most
+  // of them - up to 200 message reads and 200 placement reads to render 30.
   //
-  // (This block used to carve out an exception for the resurfacing sweep,
-  // where `latestMessageOf` WAS a visibility predicate rather than
-  // presentation. The sweep was deleted 2026-08-26, so the branch now has one
-  // hydration path and the caveat is gone with it.)
-  //
-  // The
-  // coverage decisions - what each class of row does under the new source -
+  // The coverage decisions - what each class of row does under this source -
   // are section 3 of docs/superpowers/specs/
   // 2026-08-25-inbox-unknown-tab-walk-design.md; the parity suite
-  // (test/inboxUnknownParity.test.ts) pins them one by one.
+  // (test/inboxUnknownParity.test.ts) pins them one by one, and a parity
+  // failure is a defect in this reader, never a pin to update.
   if (filter === 'unknown') {
-    // The unknown feed is a single sorted window over a bounded queue: it
-    // MINTS no cursor, so any cursor here is foreign (another filter's, or
-    // tampered). 400, never a wrong-partition Query - the same namespacing
-    // posture every other filter takes.
-    if (cursor !== undefined) {
-      throw new InboxBadRequestError('cursor does not match this filter');
-    }
-
-    // LOUD BY CONTRACT, like the group source (readGroupSource above): the
-    // module norm is best-effort hydration, but a failed triage-partition
-    // Query is NOT swallowed - "no unknown contacts" and "the query broke"
-    // must not be indistinguishable, because the failure mode is the entire
-    // triage queue silently vanishing behind a healthy-looking empty state.
-    // collectUnknownTriageQueue does not catch; the throw propagates to the
-    // route's 500.
-    const queue = await collectUnknownTriageQueue(
-      { contacts, logger: log },
-      {
-        pageSize: deps.unknownQueuePageSize ?? UNKNOWN_QUEUE_PAGE_SIZE,
-        maxPages: deps.unknownQueueMaxPages ?? UNKNOWN_QUEUE_MAX_PAGES,
-        maxRows: deps.unknownQueueMaxRows ?? UNKNOWN_QUEUE_MAX_ROWS,
-      },
-    );
+    // This filter's OWN cursor namespace (`{q,b,k}`): a cursor minted by `all`,
+    // `groups` or `unread` is rejected as foreign - 400, never a
+    // wrong-partition Query - and so is a tampered block index. See
+    // decodeUnknownCursor.
+    const resume = cursor !== undefined ? decodeUnknownCursor(cursor) : undefined;
+    const queuePageSize = deps.unknownQueuePageSize ?? UNKNOWN_QUEUE_PAGE_SIZE;
+    const queueBudget = deps.unknownQueueScanBudget ?? UNKNOWN_QUEUE_SCAN_BUDGET;
 
     let threadReadFailures = 0;
     /**
@@ -1614,82 +1683,177 @@ export async function aggregateInbox(
       }
     };
 
+    // PER-REQUEST, and it cannot dedupe ACROSS pages (stated because the name
+    // invites the opposite reading). Nothing persists between requests but the
+    // cursor, and the cursor carries a POSITION, not a set - so a contact whose
+    // index key moves backwards between two requests can, in principle, be
+    // served on two different pages. That is the same class of gap the
+    // within-request guard below covers, at a scale no set could close without
+    // an unbounded cursor; the unread branch pays for its cross-page seen-set
+    // with a hard depth cap, which is exactly the boundedness this feed exists
+    // to escape.
     const emitted = new Set<string>();
-    const unknownRows: InboxRow[] = [];
 
-    for (const contact of queue.contacts) {
-      // UNREACHABLE FROM A REAL QUERY - a belt, not a check (corrected
-      // 2026-08-25, adversarial MED-2). The precedent's STATUS re-check does
-      // not carry over (the query no longer narrows on status - class f), and
-      // this was presented as its honest replacement. It is not one:
-      // listByType('unknown') Queries the index whose HASH KEY IS `type`, so
-      // every item it can return carries type === 'unknown' by construction,
-      // and roleFromContact reads that same attribute off that same image.
-      // The stale-index case this was written for FAILS to fire too: a retype
-      // race leaves the OLD index entry under type='unknown' with its
-      // projected `type` stale in lockstep with its key - i.e. still 'unknown'.
-      // So `unknownQueueRetyped` cannot appear on a real log line.
-      //
-      // KEPT anyway, cheaply: it would matter if a second type were ever
-      // mapped 'queried' in UNKNOWN_TAB_TYPE_DECISIONS, or if this loop were
-      // ever handed contacts from somewhere other than a byTypeStatus Query
-      // (the base table, a BatchGet, a future caller). It costs one predicate
-      // per collected row.
-      //
-      // What ACTUALLY replaced the old roleFromContact rejection is the
-      // partition Query itself, which excludes non-unknown contacts silently
-      // and by construction, with no counter. team_member in particular falls
-      // THROUGH roleFromContact to 'unknown' but can never be returned by
-      // listByType('unknown') at all (class c ruling, 2026-08-25: internal
-      // staff are not triage).
-      if (roleFromContact(contact) !== 'unknown') {
-        dropped('unknownQueueRetyped');
-        continue;
+    /**
+     * A contact that PASSED filtering, held until the page is closed.
+     *
+     * ONLY THE THREAD RESOLUTION RUNS DURING FILTERING - it decides whether a
+     * contact has a row at all. The message read and the placement read are
+     * PRESENTATION and run afterwards, over exactly the rows being returned,
+     * which is what makes hydration a per-PAGE cost.
+     */
+    const keptContacts: {
+      contact: ContactItem;
+      open: ConversationItem[];
+      maxConv: ConversationItem;
+      unreadSum: number;
+    }[] = [];
+
+    let position: UnknownQueuePosition | undefined = resume;
+    /** Where the NEXT request resumes; undefined = the queue is exhausted. */
+    let boundary: UnknownQueuePosition | undefined;
+    let remainingBudget = queueBudget;
+    let queueScanned = 0;
+    let queueQueries = 0;
+    let queueRows = 0;
+    let budgetStopped = false;
+
+    // FILL-OR-EXHAUST, the same invariant the other two paged branches provide.
+    // It TERMINATES: a read that returns without filling `want` either
+    // exhausted every block (next undefined) or spent budget, and a read that
+    // continues charged at least `pageSize` against a strictly decreasing
+    // budget for every page that had more behind it.
+    for (;;) {
+      const read = await readUnknownQueue(
+        { contacts },
+        {
+          ...(position !== undefined && { start: position }),
+          want: limit - keptContacts.length,
+          budget: remainingBudget,
+          pageSize: queuePageSize,
+        },
+      );
+      queueScanned += read.scanned;
+      queueQueries += read.queries;
+      remainingBudget = Math.max(0, remainingBudget - read.scanned);
+
+      let filled = false;
+      for (const { contact, after } of read.rows) {
+        queueRows += 1;
+        // UNREACHABLE FROM A REAL QUERY - a belt, not a check (corrected
+        // 2026-08-25, adversarial MED-2). listByType('unknown') Queries the
+        // index whose HASH KEY IS `type`, so every item it can return carries
+        // type === 'unknown' by construction, and roleFromContact reads that
+        // same attribute off that same image. The stale-index case this was
+        // written for FAILS to fire too: a retype race leaves the OLD index
+        // entry under type='unknown' with its projected `type` stale in
+        // lockstep with its key - i.e. still 'unknown'. So
+        // `unknownQueueRetyped` cannot appear on a real log line.
+        //
+        // KEPT anyway, cheaply: it would matter if a second type were ever
+        // mapped 'queried' in UNKNOWN_TAB_TYPE_DECISIONS, or if this loop were
+        // ever handed contacts from somewhere other than a byTypeStatus Query
+        // (the base table, a BatchGet, a future caller). It costs one predicate
+        // per consumed row.
+        //
+        // What ACTUALLY replaced the old roleFromContact rejection is the
+        // partition Query itself, which excludes non-unknown contacts silently
+        // and by construction, with no counter. team_member in particular falls
+        // THROUGH roleFromContact to 'unknown' but can never be returned by
+        // listByType('unknown') at all (class c ruling, 2026-08-25: internal
+        // staff are not triage).
+        if (roleFromContact(contact) !== 'unknown') {
+          dropped('unknownQueueRetyped');
+          continue;
+        }
+        // ONE ROW PER CONTACT, WITHIN THIS REQUEST (round-2 finding N5). It
+        // protects the block read against the mid-walk status flip described
+        // next. It has its own regression test
+        // (test/inboxUnknownTab.test.ts, "a DUPLICATED queue item ships ONE
+        // row").
+        //
+        // NARROW, and stated honestly rather than dressed up: a Query resuming
+        // from an ExclusiveStartKey cannot re-serve an item unless that item's
+        // INDEX KEY MOVED, and `status` IS this index's range key - so a
+        // contact flipped 'active' -> 'needs_review' between two pages of the
+        // SAME walk moves FORWARD past the cursor and is read twice. That needs
+        // a multi-page walk (>UNKNOWN_QUEUE_PAGE_SIZE unknown contacts) AND a
+        // write landing between two sequential Queries; it is not a state
+        // anyone hits this week. The mirror flip ('needs_review' -> 'active')
+        // moves the row BACKWARD and silently skips it, which no guard here can
+        // see. Under BLOCK reading that flip is also a block change, so the
+        // same two shapes are now "read again in the later block" and "skipped
+        // from the earlier one" - identical consequences, same guard.
+        //
+        // Cheap insurance against a user-visible symptom: the dashboard keys
+        // the wire row by contactId (useInbox `rowKey` -> `c:<contactId>`), so
+        // a duplicate ships a doubled row under a duplicate React key.
+        if (emitted.has(contact.contactId)) continue;
+        const open = await resolveOpenThreads(contact);
+        if (open === undefined) continue; // threw - counted and WARNed above
+        const maxConv = newestOf(open);
+        // No open non-relay thread -> no row: threadless group-detection stubs
+        // (class a - which is also why excludeOrigin buys nothing here) and
+        // contacts whose only thread is relay or closed (class b).
+        if (maxConv === undefined) {
+          dropped('unknownNoOpenThread');
+          continue;
+        }
+        emitted.add(contact.contactId);
+        keptContacts.push({
+          contact,
+          open,
+          maxConv,
+          unreadSum: open.reduce((sum, c) => sum + unreadOf(c), 0),
+        });
+        if (keptContacts.length >= limit) {
+          // THE PAGE IS FULL. Resume AFTER this row, not after the page the
+          // reader happened to fetch - rows it read past this point are simply
+          // re-read next request. That exactness is why UnknownQueueRow carries
+          // its own `after` instead of the caller keying on a
+          // LastEvaluatedKey.
+          //
+          // CONSERVATIVE AT AN EXACT MULTIPLE, and deliberately: a queue of
+          // exactly n * limit rows fills its last page at its last row, so a
+          // cursor is minted and the client pays ONE more round trip that
+          // returns an empty page with nextCursor null. Proving "nothing is
+          // behind this position" costs a Query, and a spurious Load more is
+          // accepted over paying it on every page - the same trade DynamoDB's
+          // own LastEvaluatedKey makes.
+          boundary = after;
+          filled = true;
+          break;
+        }
       }
-      // ONE ROW PER CONTACT (round-2 finding N5). It landed alongside the
-      // resurfacing sweep, which carried the same check, and this loop only
-      // ADDED to `emitted` without ever consulting it. The sweep is gone
-      // (2026-08-26 ruling, below), but this guard is NOT its leftover: it
-      // protects the PARTITION read against the mid-walk status flip described
-      // next, which has nothing to do with resurfacing. It has its own
-      // regression test (test/inboxUnknownTab.test.ts, "a DUPLICATED queue
-      // item ships ONE row").
-      //
-      // NARROW, and stated honestly rather than dressed up: a Query resuming
-      // from an ExclusiveStartKey cannot re-serve an item unless that item's
-      // INDEX KEY MOVED, and `status` IS this index's range key - so a contact
-      // flipped 'active' -> 'needs_review' between two pages of the SAME walk
-      // moves FORWARD past the cursor and is collected twice. That needs a
-      // multi-page walk (>UNKNOWN_QUEUE_PAGE_SIZE unknown contacts) AND a write
-      // landing between two sequential Queries; it is not a state anyone hits
-      // this week. The mirror flip ('needs_review' -> 'active') moves the row
-      // BACKWARD and silently skips it, which no guard here can see.
-      //
-      // Cheap insurance against a user-visible symptom: the dashboard keys the
-      // wire row by contactId (useInbox `rowKey` -> `c:<contactId>`), so a
-      // duplicate ships a doubled row under a duplicate React key.
-      if (emitted.has(contact.contactId)) continue;
-      const open = await resolveOpenThreads(contact);
-      if (open === undefined) continue; // threw - counted and WARNed above
-      const maxConv = newestOf(open);
-      // No open non-relay thread -> no row: threadless group-detection stubs
-      // (class a - which is also why excludeOrigin buys nothing here) and
-      // contacts whose only thread is relay or closed (class b).
-      if (maxConv === undefined) {
-        dropped('unknownNoOpenThread');
-        continue;
+      if (filled) break;
+      // Every row the reader returned was consumed, so its own resume point is
+      // the boundary - and it is ahead of the last row's `after` whenever the
+      // final page ended in soft-deleted residue, which saves re-reading it.
+      // `undefined` here means every block was read to its end, and that is the
+      // ONLY thing that ends paging.
+      boundary = read.next;
+      if (read.next === undefined) break;
+      position = read.next;
+      if (read.budgetSpent || remainingBudget === 0) {
+        // THE SCAN BUDGET RAN OUT - a SHORT PAGE, not a truncated one. The
+        // rows found so far ship WITH the cursor we stopped at, so nothing is
+        // withheld: the client's Load more continues from here.
+        //
+        // AND DELIBERATELY NOT THE WIRE `truncated` FLAG. That field is the
+        // unread branch's contract (see InboxPage.truncated) and the dashboard
+        // renders its FAILURE banner on an empty page carrying it - which is
+        // not filter-gated, so setting it here would put "We couldn't load your
+        // inbox" over a tab whose normal state is an empty queue. The CURSOR is
+        // the continuation signal; `truncated` is an error signal.
+        //
+        // NAMED HONESTLY: a budget-stopped page that kept ZERO rows returns an
+        // EMPTY page WITH a cursor. The dashboard then shows its ordinary empty
+        // state plus a live Load more. That looks odd, and it is the honest
+        // rendering - "nothing here yet, there is more to read" - rather than
+        // the failure banner, which would be a lie.
+        budgetStopped = true;
+        break;
       }
-      const unreadSum = open.reduce((sum, c) => sum + unreadOf(c), 0);
-      const row = await buildContactRow(contact, open, maxConv, unreadSum, false);
-      // Unreachable with deleted=false (buildContactRow's single-cause
-      // return); kept as the belt so a future deleted-path change here cannot
-      // silently drop rows.
-      if (row === undefined) {
-        dropped('resurfaceHidden');
-        continue;
-      }
-      emitted.add(contact.contactId);
-      unknownRows.push(row);
     }
 
     // CLASS D - A SOFT-DELETED UNKNOWN DOES NOT RE-ENTER THIS QUEUE (human
@@ -1718,86 +1882,68 @@ export async function aggregateInbox(
     // (d) asserts the `all` half in the same world as the absence here - if
     // that ever goes red, this deletion's premise is wrong.
 
-    // Requirement 2: the whole KEPT queue, sorted in memory, newest first -
-    // the byTypeStatus index has no activity dimension, so index-order paging
-    // would yield globally out-of-order pages. TWO different cuts can hide
-    // rows, and they are NOT the same claim.
+    // HYDRATE EXACTLY THE PAGE. With paging there is no window discarding most
+    // of what was built, so presentation runs once per RETURNED row: one
+    // latest-message read and (when the thread carries a placement) one
+    // placement label, both already per-request cached.
+    const unknownRows: InboxRow[] = [];
+    for (const { contact, open, maxConv, unreadSum } of keptContacts) {
+      const row = await buildContactRow(contact, open, maxConv, unreadSum, false);
+      // Unreachable with deleted=false (buildContactRow's single-cause
+      // return); kept as the belt so a future deleted-path change here cannot
+      // silently drop rows.
+      if (row === undefined) {
+        dropped('resurfaceHidden');
+        continue;
+      }
+      unknownRows.push(row);
+    }
+
+    // A PER-PAGE SORT, and that is the accepted trade rather than an oversight.
+    // Rows are READ in queue order - the untriaged block drained before the
+    // reviewed one is touched - so the TOTAL order across pages is QUEUE order,
+    // not activity order. This sort only makes each page read naturally
+    // top-to-bottom. Page 2 can therefore contain a row NEWER than anything on
+    // page 1, which is exactly what "page in queue order" means and what the
+    // 2026-08-26 ruling chose: a triage queue's job is that nothing rots
+    // unseen, and recency is what the All and Unread tabs are for.
     //
-    // 1. This WINDOW cut (below) really is newest-first, so what it hides is
-    //    the older tail.
-    // 2. The COLLECTOR's cap/page-budget cut (already WARNed inside
-    //    collectUnknownTriageQueue) is in STATUS-ASCENDING order. Corrected
-    //    2026-08-25 (adversarial HIGH-1) - this used to call it "arbitrary
-    //    with respect to recency", which is both wrong and reassuring.
-    //    byTypeStatus's RANGE KEY is `status` and contactsRepo.listByType sets
-    //    no `ScanIndexForward` (contactsRepo.ts:1009-1020), so the Query
-    //    ascends it; within type='unknown' the legal statuses are
-    //    'needs_review' and 'active', and 'active' < 'needs_review'. So past
-    //    UNKNOWN_QUEUE_MAX_ROWS the hidden rows are not a random slice - they
-    //    are DETERMINISTICALLY the `needs_review` ones, the contacts nobody
-    //    has looked at, however recent their inbound. Stable order means the
-    //    same rows are hidden on every render.
-    //
-    //    NOT MITIGATED HERE, deliberately: the fix is a
-    //    `ScanIndexForward: false` option on the repo read, and listByType is
-    //    a SHARED read that today.ts's triage block also uses - reversing it
-    //    is a repo-wide change and the human's call. Reopen point:
-    //    docs/issues/inbox-filter-tabs-full-walk.md. Pinned as a fact by
-    //    test/unknownQueue.test.ts ("THE CAP STARVES needs_review").
-    //
-    // The sort orders what SURVIVED; it cannot repair what the collector never
-    // read.
+    // Global newest-first is not impossible, it is just not free: `ContactItem`
+    // carries no activity attribute, so ordering the whole queue means
+    // resolving every candidate's threads before rendering one row - which is
+    // what forced the old cap. The fix is a denormalized `last_activity_at`
+    // plus an activity-ordered GSI, filed as
+    // docs/issues/denormalize-contact-last-activity-for-ordered-paging.md. When
+    // it lands, UNKNOWN_QUEUE_BLOCKS is the one thing that has to change.
     unknownRows.sort((a, b) =>
       a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
     );
-    // The response window is the wire limit (route-clamped, dashboard sends
-    // 30). Rows past it are NOT silently gone: the WARN below names the count,
-    // and - for THIS cut only, see above - the remainder becomes reachable as
-    // rows are RE-TYPED away.
-    //
-    // RE-TYPED, not merely triaged (corrected 2026-08-25, adversarial MED-3:
-    // this used to say "triage drains the queue newest-first", which is the
-    // justification for shipping no cursor and is only half true). PATCH
-    // /api/contacts/:id supports a STATUS-ONLY triage - see the block on
-    // NOT-COPIED status in lib/unknownQueue.ts - so an operator can mark an
-    // unknown contact `active` and it stays type='unknown' and stays in this
-    // queue forever. Worse, per the ordering note above, `active` sorts FIRST,
-    // so a status-only triage PROMOTES that row to the front of the collector's
-    // read and crowds out rows nobody has reviewed. Only a TYPE change - to any
-    // other ContactType, team_member included - or a SOFT-DELETE actually
-    // drains a row (completed 2026-08-25, round 2: this said "a type change (to
-    // tenant/landlord/partner)", which omits both). Until one of those happens
-    // the rows past `limit` have no affordance that reaches them. No cursor - an
-    // offset page over a mutating in-memory sort
-    // re-serves and skips rows, and the design settled on cap-plus-WARN
-    // (requirement 2). The affordance gap is recorded in
-    // docs/issues/inbox-filter-tabs-full-walk.md.
-    const windowed = unknownRows.slice(0, limit);
-    if (windowed.length < unknownRows.length) {
-      log.warn(
-        { shown: windowed.length, assembled: unknownRows.length, limit },
-        'inbox: the unknown tab could not show every triage row - the queue is a floor',
-      );
-    }
 
+    const unknownCursor = boundary === undefined ? null : encodeUnknownCursor(boundary);
     log.info(
       {
         filter,
-        count: windowed.length,
-        queueContacts: queue.contacts.length,
-        queuePages: queue.pagesWalked,
-        ...(queue.truncated && { queueTruncated: true }),
+        count: unknownRows.length,
+        // What the blocks cost and what they yielded. `queueRows` is contacts
+        // CONSUMED (each one paid a thread resolution); `queueScanned` is raw
+        // index rows charged against the budget, which is larger whenever
+        // soft-deleted residue ate page slots.
+        queueRows,
+        queueQueries,
+        queueScanned,
+        hasMore: unknownCursor !== null,
+        ...(budgetStopped && { budgetStopped: true }),
         ...(threadReadFailures > 0 && { threadReadFailures }),
         ...(Object.keys(drops).length > 0 && { drops }),
       },
       'inbox feed assembled',
     );
     // NEVER the `truncated` wire flag here: that field is the unread branch's
-    // contract (see InboxPage.truncated), and an empty page carrying it
-    // renders the dashboard's FAILURE banner - on a tab whose NORMAL state is
-    // an empty, cleared queue (design requirement 5). Truncation on this
-    // branch is a WARN, by design.
-    return { rows: windowed, nextCursor: null };
+    // contract (see InboxPage.truncated), and an empty page carrying it renders
+    // the dashboard's FAILURE banner - on a tab whose NORMAL state is an empty,
+    // cleared queue. This feed has no truncation to report anyway: the cursor
+    // continues from wherever the request stopped.
+    return { rows: unknownRows, nextCursor: unknownCursor };
   }
 
   const rows: InboxRow[] = [];

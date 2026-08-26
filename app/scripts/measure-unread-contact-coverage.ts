@@ -692,11 +692,15 @@ async function auditTriagePartition(): Promise<void> {
       `    rows returned      ${rawRows}`,
       `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,
       `    soft-deleted seen  ${deletedSeen}`,
-      // THE REOPEN NUMBERS for `unknown-queue-cap-starves-needs-review`: the
-      // Query ascends the range key `status` and 'active' < 'needs_review', so
-      // the `active` block is read FIRST and a cap fills from it. Read the
-      // `active` count against UNKNOWN_QUEUE_MAX_ROWS (200), not the total.
-      '    partition statuses (the cap fills from the TOP of this list):',
+      // THE STATUS BREAKDOWN. It was filed as the reopen number for
+      // `unknown-queue-cap-starves-needs-review` while an un-narrowed Query
+      // ascended the range key `status` ('active' < 'needs_review') and a
+      // result cap filled from the `active` block first. That cap is GONE
+      // (2026-08-26): the tab reads one bounded Query per status block,
+      // untriaged FIRST, and pages with the index's own cursor - so there is no
+      // number to compare against a cap any more. The breakdown stays because
+      // it is the honest shape of the partition and it prices the walk.
+      '    partition statuses:',
       ...[...partitionStatuses.entries()]
         .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
         .map(([k, v]) => `      ${k.padEnd(20)}${v}`),

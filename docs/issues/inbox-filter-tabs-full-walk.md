@@ -156,12 +156,15 @@ other half.**
   partition - the repo's own "human triage queue" - through the collector in
   `app/src/lib/unknownQueue.ts` (branch `feat/inbox-unread-cluster`, design
   [`2026-08-25-inbox-unknown-tab-walk-design.md`](../superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md)):
-  a bounded fill loop (`UNKNOWN_QUEUE_MAX_PAGES` 10 x `UNKNOWN_QUEUE_PAGE_SIZE`
-  100), a hard result cap (`UNKNOWN_QUEUE_MAX_ROWS` 200) and a truncation WARN.
-  The read applies NO `status` narrowing and NO `excludeOrigin` (spec section 3,
-  classes f and a), and - since the 2026-08-26 ruling below - NO `byUnread`
-  sweep: the triage partition Query is the branch's only read. This issue still
-  tracks the unknown tab:
+  and - since the 2026-08-26 rework - PAGED: one bounded Query per status BLOCK
+  (`UNKNOWN_QUEUE_BLOCKS`, `needs_review` first), rolling block to block, with
+  the index's own cursor on the wire and a per-request SCAN BUDGET
+  (`UNKNOWN_QUEUE_SCAN_BUDGET`, 1000 raw rows) in place of the original bounded
+  fill loop (10 x 100), hard result cap (200) and truncation WARN. The read
+  applies NO `excludeOrigin` (spec section 3, class a) and every legal status is
+  a block, so class f is covered too; since the 2026-08-26 ruling below there is
+  NO `byUnread` sweep either - the block Queries are the branch's only read.
+  This issue still tracks the unknown tab:
   what the branch deliberately did NOT close is in the RESOLVED block at the end
   of this file.
   - **CORRECTED 2026-08-25, kept for the record.** This bullet ORIGINALLY read
@@ -328,32 +331,44 @@ drop a contact out of the sparse `byTypeStatus` partition and off this tab; no
 caller nulls status today, so this is not a shipping defect - but "no caller
 does it" is the accurate wording, not "impossible".
 
-**The deliberate remainder: TWO different cuts, and neither has a Load-more.**
-They are separate claims and must not be collapsed into one:
+**BOTH CUTS ARE GONE - the tab is PAGED and UNBOUNDED (human ruling
+2026-08-26).** This section used to describe two deliberate cuts with no
+Load-more affordance: a WINDOW cut at the request `limit`, and the COLLECTOR cap
+(`UNKNOWN_QUEUE_MAX_ROWS`, 200, plus a 10 x 100 page budget) that cut in
+status-ascending order and starved `needs_review`. Both were deleted with the
+sort that forced them.
 
-- **The WINDOW cut** - rows past the request `limit` (the dashboard sends 30).
-  These are WARNed ("the unknown tab could not show every triage row - the queue
-  is a floor") and they become reachable as rows are RE-TYPED away, because the
-  assembled rows are sorted newest displayed activity first, so the cut is at
-  the OLD end. **RE-TYPED, not merely triaged** (corrected 2026-08-25,
-  adversarial MED-3): this bullet used to say "as triage drains the queue", and
-  a STATUS-ONLY triage does not drain it. `PATCH /api/contacts/:id` supports
-  `'status' in patch && !('type' in patch)`, re-validated against
-  `statusAllowlistFor(stored.type)` - `['needs_review','active']` for `unknown`
-  - and the dashboard's contact edit form reaches it. An operator can therefore
-  mark an unknown contact `active` while it stays `type='unknown'`; it leaves
-  Today's triage block (which DOES narrow on `needs_review`) but it never leaves
-  this queue. Only a type change drains a row.
-- **The COLLECTOR cap** - `UNKNOWN_QUEUE_MAX_ROWS` (200), plus the page budget
-  (10 x 100). This one cuts in **status-ascending order, and it starves
-  `needs_review`** - see the named reopen point below. It is NOT
-  "recency-arbitrary", which is what this bullet said before 2026-08-25. Also
-  WARNed. Do not read the window cut's newest-first reasoning onto this one.
+The ruling: **drop the global activity sort and page in QUEUE ORDER instead -
+untriaged block first, then reviewed** - using the index's own cursor. The read
+issues one bounded Query per status BLOCK (`UNKNOWN_QUEUE_BLOCKS`), rolls to the
+next block when one exhausts, and mints a `{q,b,k}` cursor from the last row it
+served; `nextCursor` is null only when every block is exhausted. `hasMore` in
+`useInbox` is `cursor !== null`, so Load more lights up with no dashboard
+change. A per-request SCAN BUDGET (1000 raw index rows) bounds the cost of
+walking soft-deleted residue and returns a SHORT page WITH its cursor rather
+than truncating - the wire `truncated` flag is still never set here, because it
+renders the dashboard's failure banner and this feed has nothing to fail about.
 
-Neither cut has a Load-more affordance: the branch mints no cursor and returns
-`nextCursor: null` (an offset page over a mutating in-memory sort re-serves and
-skips rows). Contactless conversations - class (e), measured at ZERO rows in dev
-and prod - surface on the All tab only.
+What that trades away, stated plainly rather than buried: the sort is now
+PER PAGE, so the total order across pages is queue order, not activity order.
+Page 2 can carry a row newer than anything on page 1. Recency is what the All
+and Unread tabs are for; global newest-first comes back if
+[`denormalize-contact-last-activity-for-ordered-paging`](denormalize-contact-last-activity-for-ordered-paging.md)
+is ever built, and `UNKNOWN_QUEUE_BLOCKS` is the single thing it would replace.
+
+The STATUS-ONLY triage PATCH is still real and still relevant, just no longer
+harmful here (corrected 2026-08-25, adversarial MED-3):
+`PATCH /api/contacts/:id` supports `'status' in patch && !('type' in patch)`,
+re-validated against `statusAllowlistFor(stored.type)` -
+`['needs_review','active']` for `unknown` - and the dashboard's contact edit form
+reaches it. An operator can mark an unknown contact `active` while it stays
+`type='unknown'`; it leaves Today's triage block (which DOES narrow on
+`needs_review`) but it never leaves this queue. Only a type change or a
+soft-delete drains a row. Under the old reader those rows sorted FIRST and
+crowded out the front door; under this one they are simply the second block.
+
+Contactless conversations - class (e), measured at ZERO rows in dev and prod -
+surface on the All tab only.
 
 **CLASS (d) RESOLVES ON THE ALL AND UNREAD TABS, NOT HERE - human ruling
 2026-08-26, and the resurfacing sweep is DELETED.** A soft-deleted unknown
@@ -401,28 +416,31 @@ INBOUND MESSAGE, not per navigation - the same amplification this issue's own
 opening section documents for the original walk. Do not resurrect the number in
 a corrected form; there is no sweep left to price.
 
-**Reopen this issue here** if the two remaining trades go wrong: a silent
-incomplete empty state an operator actually hits, or a cap cut that hides new
-inbound.
+**Reopen this issue here** if the remaining trade goes wrong: an empty state an
+operator hits that is not actually the end of the queue.
 
-**The COLLECTOR-truncation residual - now the ONLY residual of its shape**
-(added 2026-08-25, adversarial MED-5; it was recorded as the second and likelier
-of a pair, and the sweep half was deleted 2026-08-26 with the sweep).
-`collectUnknownTriageQueue` can legitimately return
-`{ contacts: [], truncated: true }`: the page budget expires while every page it
-read was residue. On that result the branch assembles ZERO rows and - by
-approved requirement 5 - must NOT set the wire `truncated`, so the dashboard
-renders the ordinary "No unknown numbers" empty state over a triage queue that
-has rows in it. The only signals are the collector's own WARN ("the
-unknown-queue walk ended with rows still behind it") and the `queueTruncated`
-field on the `inbox feed assembled` line. It is reachable because this module's
-own header argues that soft-deleted unknowns "accumulate in this partition
-FOREVER", and because of the ordering defect below the `active` block can
-consume the whole budget on its own. **Reopen here** on a silent incomplete
-empty state an operator actually hits.
+**The BUDGET-STOPPED EMPTY PAGE - what the collector-truncation residual became**
+(added 2026-08-25 as adversarial MED-5; rewritten 2026-08-26 when the cap and
+the page budget were replaced by a scan budget). A request whose scan budget
+expires while every page it read was soft-deleted residue assembles ZERO rows.
+It still does NOT set the wire `truncated` (that flag renders the dashboard's
+failure banner, and this tab's normal state is an empty queue) - but it is no
+longer silent OR incomplete: the response carries the CURSOR the request stopped
+at, so the dashboard shows its ordinary empty state PLUS a live Load more, and
+continuing reaches the rows behind the residue. `budgetStopped` on the
+`inbox feed assembled` line names it for an operator. The remaining oddity is
+cosmetic - "nothing here" next to a Load more button - and it is the honest
+rendering. **Reopen here** if that shape is confusing enough in practice to want
+a dedicated affordance.
 
-**NAMED REOPEN POINT: the cap starves `needs_review`** (found 2026-08-25 by
-adversarial review, HIGH-1; recorded here rather than fixed, by ruling).
+**CLOSED 2026-08-26: the cap starves `needs_review`** (found 2026-08-25 by
+adversarial review, HIGH-1; recorded here rather than fixed at the time, then
+fixed by the block rework - see
+[`unknown-queue-cap-starves-needs-review`](unknown-queue-cap-starves-needs-review.md),
+now `resolved`). The mechanism below is still true OF THE INDEX; what is gone is
+the cap that turned it into starvation. The blocks are now read
+untriaged-first, and the untriaged block is exhausted before the reviewed one is
+queried.
 
 > **TRACKED SEPARATELY, and that file is the authority:**
 > [`unknown-queue-cap-starves-needs-review`](unknown-queue-cap-starves-needs-review.md)
@@ -432,14 +450,18 @@ adversarial review, HIGH-1; recorded here rather than fixed, by ruling).
 > ever disagree, the standalone issue wins.
 
 `byTypeStatus` is `(hash: type, range: status)` and `contactsRepo.listByType`
-sets **no `ScanIndexForward`**, so the Query returns the partition ASCENDING by
-`status`. Within `type='unknown'` the only legal statuses are `needs_review` and
-`active` (`NON_TENANT_STATUSES`), and `'active' < 'needs_review'`
-lexicographically. **Every `active` unknown is therefore returned before any
-`needs_review` one.** So `UNKNOWN_QUEUE_MAX_ROWS` and the page budget do not cut
-a recency-arbitrary slice - they cut STATUS-FIRST and deterministically, keeping
-rows somebody already reviewed and discarding the ones nobody has looked at. The
-order is stable, so the same rows are hidden on every render.
+sets **no `ScanIndexForward`**, so an UN-NARROWED Query returns the partition
+ASCENDING by `status`. Within `type='unknown'` the only legal statuses are
+`needs_review` and `active` (`NON_TENANT_STATUSES`), and
+`'active' < 'needs_review'` lexicographically. **Every `active` unknown is
+therefore returned before any `needs_review` one.** So the cap and the page
+budget did not cut a recency-arbitrary slice - they cut STATUS-FIRST and
+deterministically, keeping rows somebody already reviewed and discarding the
+ones nobody has looked at. The order is stable, so the same rows were hidden on
+every render. (Fixed 2026-08-26: the reader no longer issues an un-narrowed
+Query at all. It queries `status='needs_review'` to exhaustion, THEN
+`status='active'`, so the ascending range key never decides what an operator
+sees.)
 
 It COMPOUNDS with the status-only-triage fact recorded on the WINDOW cut above:
 a status-only triage moves a row into the `active` block, which is the block the
@@ -485,24 +507,24 @@ unattractive: query the two statuses explicitly and interleave
 (`needs_review` first, two bounded Queries), or make the cut status-aware rather
 than positional.
 
-The fact is PINNED so it cannot be quietly rediscovered or contradicted:
-`app/test/unknownQueue.test.ts` ("THE CAP STARVES needs_review") drives the real
-collector over a mixed-status partition and asserts the `needs_review` rows are
-the ones cut, and `app/test/helpers/contactsPartitionFake.ts` rule 6 models the
-range-key sort that makes it expressible at all (its absence is why no test
-could catch this before).
+**THE FIX, taken 2026-08-26:** alternative 2 from the list above - query the
+statuses explicitly, untriaged block first. `listByType` was NOT reversed, so
+the shared-read objection never had to be answered and the sibling caller below
+is untouched. The pins moved with it:
+`app/test/unknownQueue.test.ts` ("the UNTRIAGED block is exhausted BEFORE the
+reviewed block is read") asserts the ordering structurally,
+`app/test/inboxUnknownTab.test.ts` ("THE FULL WALK") asserts the union of all
+pages is the whole queue, and `app/test/inbox.integration.test.ts` walks the
+real index across the block boundary. The old pin ("THE CAP STARVES
+needs_review") is deleted - it asserted the defect as a fact.
+`app/test/helpers/contactsPartitionFake.ts` rule 6 still models the range-key
+sort; without it none of this was expressible.
 
-**Reopen here** if a deployment's unknown partition approaches either bound, or
-the moment anyone wants `(unknown, active)` rows to stop crowding the queue. The
-re-check is TWO numbers, not one (added 2026-08-26, round-2 finding N6), both
-from `--audit-triage-partition --no-status-narrow`:
-
-1. the unknown partition SIZE, against `UNKNOWN_QUEUE_MAX_ROWS` (200) and the
-   page budget (10 x 100); and
-2. the **`(unknown, active)` count**, which is half the trigger on its own - it
-   is the block that fills the cap first, so it can starve the queue long before
-   the partition as a whole looks large. A narrowed run reports it as zero
-   unconditionally and is not evidence of anything.
+There is no bound left to compare a partition size against, so the old two-number
+reopen check retires with the cap. The `--audit-triage-partition
+--no-status-narrow` breakdown is still the way to see the partition's shape, and
+the `(unknown, active)` count is still the number that says whether the reviewed
+block is growing - it just no longer threatens anything.
 
 **THE SAME UNSTATED SORT LIVES IN THE BROADCAST AUDIENCE WALK**, filed
 separately as
@@ -515,31 +537,22 @@ audience keeps inactive tenants and drops `searching` ones first. Latent today
 that has to be considered if the `ScanIndexForward: false` mitigation above is
 taken, and because the flip helps the two callers in opposite senses.
 
-**DEFERRED, not dropped (2026-08-26, round-2 finding N1): the unknown tab
-hydrates up to the CAP to render one WINDOW.** `buildContactRow` runs inside the
-loop over `queue.contacts` (`app/src/routes/inbox.ts`, the `filter === 'unknown'`
-branch), while the window `slice(0, limit)` happens AFTER the sort - so a
-cap-full queue pays hydration for up to `UNKNOWN_QUEUE_MAX_ROWS` (200) rows to
-render the dashboard's 30.
+**CLOSED 2026-08-26 (was: DEFERRED, round-2 finding N1): the unknown tab
+hydrated up to the CAP to render one WINDOW.** `buildContactRow` used to run
+inside the collection loop while the window `slice(0, limit)` happened AFTER the
+sort, so a cap-full queue paid hydration for up to 200 rows to render the
+dashboard's 30 - roughly 340 discarded serial round trips per request.
 
-Only PART of that hydration has to precede the sort, and the code briefly
-claimed otherwise ("the sort key is the hydrated activity, so the window cannot
-be applied before the rows exist" - false, and now corrected in place). The sort
-key is `row.lastActivityAt`, copied verbatim from `maxConv.last_activity_at`, a
-CONVERSATION field produced by the thread resolution. `latestMessageOf`
-(channel / direction / preview) and `placementLabel` are PRESENTATION ONLY and
-are not sort inputs, so on the `deleted=false` path they could move after the
-`slice`. Measured shape at the cap: up to 200 message reads and up to 200
-placement reads where 30 of each would do - roughly 340 discarded serial round
-trips per request.
-
-NOT TAKEN on this branch, knowingly: it is a PERFORMANCE change with its own
-test surface (nothing currently pins the hydration count for this branch), and
-the branch's fix waves were chartered not to move behaviour. (This deferral used
-to carry a carve-out for the SWEEP path, where `latestMessageOf` was a
-VISIBILITY predicate rather than presentation and so could not move after the
-window. The sweep was deleted 2026-08-26, so the branch has ONE hydration path
-and the carve-out is gone with it.)
+The analysis was that only PART of that hydration had to precede the sort: the
+sort key is `row.lastActivityAt`, copied verbatim from
+`maxConv.last_activity_at`, a CONVERSATION field produced by the thread
+resolution, while `latestMessageOf` (channel / direction / preview) and
+`placementLabel` are PRESENTATION ONLY. That is what the block rework took.
+There is no window now, so the branch resolves threads for the rows it CONSUMES
+and hydrates exactly the rows it RETURNS. Pinned by
+`app/test/inboxUnknownTab.test.ts` ("THE COST IS THE PAGE, NOT THE PARTITION"),
+which is the hydration-count pin whose absence was the stated reason for
+deferring.
 
 **DEFERRED, not dropped (human ruling 2026-08-25): spec section 5's
 open-partition safety net.** A raw-scan budget plus cursor plus `truncated`

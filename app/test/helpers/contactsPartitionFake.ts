@@ -53,9 +53,9 @@
 // carries the INDEX keys plus the table key - `{ type, status, contactId }`,
 // not `{ contactId }` alone. This fake mints that full shape so the one helper
 // positioned as the authority on partition semantics does not pin a key
-// production never emits. RESUMING, however, reads only `contactId`: that is
-// the field this fake needs to find its position, and a test may hand back any
-// key that carries it.
+// production never emits. RESUMING reads `status` + `contactId` and seeks to
+// that POSITION in the sort order (see the resume block below); a hand-built
+// key carrying `contactId` alone still resolves by identity.
 //
 // FAKE-ONLY CAVEAT on rule 5: `limit ?? 50` SYNTHESIZES a Limit for a caller
 // that passes none, so an un-limited call over a partition of exactly 50+ rows
@@ -100,10 +100,34 @@ export function listByTypeFromContacts(
       if (sa !== sb) return sa < sb ? -1 : 1;
       return a.contactId < b.contactId ? -1 : a.contactId > b.contactId ? 1 : 0;
     });
-  const start =
-    typeof opts.exclusiveStartKey?.['contactId'] === 'string'
-      ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1
-      : 0;
+  // RESUME IS POSITIONAL, not identity-based (2026-08-26). DynamoDB does not
+  // require an ExclusiveStartKey to name an item that still exists - it seeks
+  // to the key's POSITION in the sort order and returns everything after it -
+  // and the unknown-queue reader now mints its cursor from a CONSUMED
+  // contact's own (type, status, contactId), so a contact re-typed or deleted
+  // between two requests is exactly the ordinary case. An identity findIndex
+  // returns -1 there and, +1, silently RESTARTS the partition, which would
+  // model the paging bug (duplicate rows on page 2) as correct behaviour.
+  //
+  // Compares the (status, contactId) tuple, matching the sort in rule 6. A key
+  // carrying no `status` falls back to identity: the fake has minted the full
+  // three-attribute key since it was written, but a hand-built key is allowed
+  // to carry contactId alone (see KEY SHAPE above).
+  const startKey = opts.exclusiveStartKey;
+  const startContactId =
+    typeof startKey?.['contactId'] === 'string' ? startKey['contactId'] : undefined;
+  const startStatus = typeof startKey?.['status'] === 'string' ? startKey['status'] : undefined;
+  let start = 0;
+  if (startContactId !== undefined && startStatus !== undefined) {
+    start = partition.findIndex((c) => {
+      const s = String(c.status);
+      if (s !== startStatus) return s > startStatus;
+      return c.contactId > startContactId;
+    });
+    if (start === -1) start = partition.length;
+  } else if (startContactId !== undefined) {
+    start = partition.findIndex((c) => c.contactId === startContactId) + 1;
+  }
   const limit = opts.limit ?? 50;
   const page = partition.slice(start, start + limit);
   const filtered = page

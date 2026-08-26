@@ -1,10 +1,11 @@
 // app/test/inboxUnknownTab.test.ts
 //
-// The filter=unknown CONTACT-SIDE read (design 2026-08-25): behavior, coverage
-// classes, failure discrimination, and the cost inversion. The parity file
+// The filter=unknown CONTACT-SIDE read (design 2026-08-25; reworked into a
+// paged, unbounded read 2026-08-26): behavior, coverage classes, failure
+// discrimination, paging, and the cost inversion. The parity file
 // (inboxUnknownParity.test.ts) pins row CONTENT across the flip; this file
-// pins the NEW mechanics - what is read, what is not, and what happens when a
-// read fails.
+// pins the MECHANICS - what is read, in what order, what happens when a read
+// fails, and what the cursor guarantees.
 import { describe, expect, it, vi } from 'vitest';
 import {
   aggregateInbox,
@@ -12,7 +13,7 @@ import {
   type InboxRouterDeps,
 } from '../src/routes/inbox.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { ContactItem, ListContactsOpts } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { listByTypeFromContacts } from './helpers/contactsPartitionFake.js';
 import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
@@ -24,7 +25,7 @@ interface Seed {
   /** Make findByParticipantPhone THROW for exactly this phone (requirement 4). */
   threadLookupErrorPhone?: string;
   /** Override the listByType answer wholesale (the retype-race test). */
-  listByTypeOverride?: (type: string) => { items: ContactItem[] };
+  listByTypeOverride?: (type: string, opts: ListContactsOpts) => { items: ContactItem[] };
 }
 
 interface Calls {
@@ -68,10 +69,7 @@ function makeDeps(
   seed: Seed,
   calls: Calls = emptyCalls(),
   logger?: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> },
-  seams?: Pick<
-    InboxRouterDeps,
-    'unknownQueueMaxRows' | 'unknownQueueMaxPages' | 'unknownQueuePageSize'
-  >,
+  seams?: Pick<InboxRouterDeps, 'unknownQueueScanBudget' | 'unknownQueuePageSize'>,
 ): InboxRouterDeps {
   const log = logger ?? { info: vi.fn(), warn: vi.fn() };
   return {
@@ -123,9 +121,9 @@ function makeDeps(
       async getById(contactId: string) {
         return seed.contacts.find((c) => c.contactId === contactId);
       },
-      async listByType(type: string, opts = {}) {
+      async listByType(type: string, opts: ListContactsOpts = {}) {
         calls.listByType += 1;
-        if (seed.listByTypeOverride !== undefined) return seed.listByTypeOverride(type);
+        if (seed.listByTypeOverride !== undefined) return seed.listByTypeOverride(type, opts);
         return listByTypeFromContacts(seed.contacts, type, opts);
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
@@ -144,15 +142,32 @@ function makeDeps(
   };
 }
 
+/** One unknown contact plus its open 1:1 thread. */
+function queueContact(
+  id: string,
+  status: 'needs_review' | 'active',
+  phoneTail: number,
+  lastActivityAt: string,
+): { contact: ContactItem; conversation: ConversationItem } {
+  const phone = `+1555${String(3_000_000 + phoneTail).padStart(7, '0')}`;
+  return {
+    contact: { contactId: id, type: 'unknown', status, phone },
+    conversation: conv({
+      conversationId: `cv-${id}`,
+      participant_phone: phone,
+      last_activity_at: lastActivityAt,
+    }),
+  };
+}
+
 describe('filter=unknown - the contact-side read', () => {
-  it('costs one partition Query, never the open-partition walk: 40 open threads, 1 unknown -> 1 listByType, 0 listByLastActivity, 0 findByPhone, 0 listRelayGroups', async () => {
+  it('costs one Query PER BLOCK, never the open-partition walk: 40 open threads, 1 unknown -> 2 listByType, 0 listByLastActivity, 0 findByPhone', async () => {
     // THE STARVED FIXTURE (spec section 6): many open conversations, few
-    // matches. Under the old pager this cost one findByPhone per conversation.
-    // (Nothing here is unread, which used to matter: a resurfacing sweep
-    // resolved a contact per visible unread index item and would have polluted
-    // the findByPhone count. The sweep was deleted 2026-08-26 and the
-    // unread-independence is now pinned outright by THE READ THAT SHIPS
-    // below, which DOES carry unread rows and still expects zero.)
+    // matches. Under the original pager this cost one findByPhone per
+    // conversation. TWO listByType calls now, not one: the read issues a
+    // bounded Query per STATUS BLOCK (needs_review, then active) so a
+    // (unknown, active) contact stays covered - coverage class f - while the
+    // untriaged block is drained first.
     const contacts: ContactItem[] = [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550002000' }];
     const conversations: ConversationItem[] = [
       conv({ conversationId: 'cv-unk', participant_phone: '+15550002000', last_activity_at: '2026-06-12T12:00:00.000Z' }),
@@ -171,7 +186,8 @@ describe('filter=unknown - the contact-side read', () => {
     const calls = emptyCalls();
     const page = await aggregateInbox({ filter: 'unknown', limit: 30 }, makeDeps({ contacts, conversations }, calls));
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk']);
-    expect(calls.listByType).toBe(1);
+    expect(page.nextCursor).toBeNull(); // both blocks drained
+    expect(calls.listByType).toBe(2); // one per block
     expect(calls.listByLastActivity).toBe(0); // the pager never runs
     expect(calls.findByPhone).toBe(0); // no per-conversation contact resolution
     expect(calls.queryUnreadPage).toBe(0); // the branch does not touch byUnread at all
@@ -179,84 +195,82 @@ describe('filter=unknown - the contact-side read', () => {
     expect(calls.listGroupTexts).toBe(0);
   });
 
-  it('a cap-cut queue: single page, no truncated key, WARNed - and the cut is PARTITION order, so the newest rows can be the hidden ones', async () => {
-    // Every contact here shares status='needs_review', so the range-key sort
-    // ties and partition order falls back to contactId (c-u0..c-u3) - while
-    // activity order is the REVERSE (c-u3 newest). The collector cap keeps the
-    // first maxRows in PARTITION order, and the byTypeStatus range key is
-    // `status`, which carries no recency dimension - so the two NEWEST
-    // contacts are exactly the hidden ones, and the rendered list is
-    // "newest-first of what survived", NOT "the newest of the queue". This is
-    // the documented, deliberate limitation of cap-plus-WARN (spec
-    // requirement 2); the WARN copy names it, and this pin is what keeps
-    // anyone from quietly claiming otherwise.
-    //
-    // A SINGLE-STATUS fixture isolates the recency half of the problem. The
-    // MIXED-status case - where the cut is not merely recency-blind but
-    // deterministically starves `needs_review` - is pinned at the collector in
-    // test/unknownQueue.test.ts ("THE CAP STARVES needs_review").
-    const contacts = Array.from({ length: 4 }, (_, i) => ({
-      contactId: `c-u${i}`,
-      type: 'unknown' as const,
-      status: 'needs_review',
-      phone: `+155500021${String(i).padStart(2, '0')}`,
-    }));
-    const conversations = contacts.map((c, i) =>
-      conv({
-        conversationId: `cv-u${i}`,
-        participant_phone: c.phone!,
-        last_activity_at: `2026-06-12T0${i}:00:00.000Z`, // c-u3 is the newest
-      }),
+  it('THE FULL WALK: every row is reachable across both blocks - the union of all pages is the whole queue, with no duplicates and no skips', async () => {
+    // The pin the rework exists for. The pre-rework read served ONE window and
+    // minted no cursor, so row 31 was unreachable by any client action; this
+    // walks a queue three pages deep and proves the union is exact.
+    const seeds = [
+      queueContact('c-n0', 'needs_review', 10, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-n1', 'needs_review', 11, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-n2', 'needs_review', 12, '2026-06-12T03:00:00.000Z'),
+      queueContact('c-n3', 'needs_review', 13, '2026-06-12T04:00:00.000Z'),
+      queueContact('c-a0', 'active', 14, '2026-06-12T05:00:00.000Z'),
+      queueContact('c-a1', 'active', 15, '2026-06-12T06:00:00.000Z'),
+      queueContact('c-a2', 'active', 16, '2026-06-12T07:00:00.000Z'),
+    ];
+    const seed: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const pages: string[][] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page = await aggregateInbox(
+        { filter: 'unknown', limit: 3, ...(cursor !== undefined && { cursor }) },
+        makeDeps(seed),
+      );
+      pages.push(page.rows.map((r) => r.contactId!));
+      if (page.nextCursor === null) break;
+      cursor = page.nextCursor;
+    }
+    const seen = pages.flat();
+    // NO SKIPS: the union is the whole queue.
+    expect([...seen].sort()).toEqual(
+      ['c-a0', 'c-a1', 'c-a2', 'c-n0', 'c-n1', 'c-n2', 'c-n3'],
     );
-    const warn = vi.fn();
-    const page = await aggregateInbox(
-      { filter: 'unknown', limit: 30 },
-      makeDeps({ contacts, conversations }, emptyCalls(), { info: vi.fn(), warn }, { unknownQueueMaxRows: 2 }),
-    );
-    // Kept: c-u0 and c-u1 (partition order), then sorted newest-first.
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-u1', 'c-u0']);
-    expect(page.nextCursor).toBeNull();
-    // The wire flag belongs to the unread branch (InboxPage.truncated) - and
-    // an empty page carrying it renders the dashboard FAILURE banner on a tab
-    // whose normal state is an empty queue (requirement 5).
-    expect('truncated' in page).toBe(false);
-    expect('groupsTruncated' in page).toBe(false);
-    // The collector's WARN is the truncation signal, and its copy carries the
-    // ordering caveat. The matched phrase moved with the round-2 N2 rewrite:
-    // the copy no longer claims WHICH rows were hidden (false on an
-    // all-`active` partition), only the status-ascending mechanism that is true
-    // in every composition.
-    expect(
-      warn.mock.calls.some((c) => String(c[1]).includes('needs_review rows are cut FIRST')),
-    ).toBe(true);
+    // NO DUPLICATES.
+    expect(new Set(seen).size).toBe(seen.length);
+    // Three pages of 3/3/1, and the last one ends paging.
+    expect(pages.map((p) => p.length)).toEqual([3, 3, 1]);
+
+    // UNTRIAGED BEFORE REVIEWED, ACROSS THE PAGE BOUNDARY. Every needs_review
+    // row is served on a page no later than the first page carrying a reviewed
+    // one - which is what the 2026-08-26 ruling bought, and what makes the
+    // starvation the old cap caused impossible.
+    const pageOf = (id: string) => pages.findIndex((p) => p.includes(id));
+    const lastUntriaged = Math.max(...['c-n0', 'c-n1', 'c-n2', 'c-n3'].map(pageOf));
+    const firstReviewed = Math.min(...['c-a0', 'c-a1', 'c-a2'].map(pageOf));
+    expect(lastUntriaged).toBeLessThanOrEqual(firstReviewed);
+    // Page 1 is untriaged rows ONLY, sorted newest-first WITHIN the page - the
+    // per-page sort, not a global one. The global order is queue order, which
+    // is why c-a2 (the newest row in the whole queue) is on the LAST page.
+    expect(pages[0]).toEqual(['c-n2', 'c-n1', 'c-n0']);
+    expect(pages[2]).toEqual(['c-a2']);
   });
 
-  it('windows the sorted result to the request limit and WARNs about the rows it could not show', async () => {
-    const contacts = Array.from({ length: 5 }, (_, i) => ({
-      contactId: `c-w${i}`,
-      type: 'unknown' as const,
-      status: 'active',
-      phone: `+155500022${String(i).padStart(2, '0')}`,
-    }));
-    const conversations = contacts.map((c, i) =>
-      conv({
-        conversationId: `cv-w${i}`,
-        participant_phone: c.phone!,
-        last_activity_at: `2026-06-12T0${i}:00:00.000Z`,
-      }),
+  it('a page that fills mints a cursor that resumes EXACTLY after the last row it served - no re-serve, no skip', async () => {
+    const seeds = [
+      queueContact('c-p0', 'needs_review', 20, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-p1', 'needs_review', 21, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-p2', 'needs_review', 22, '2026-06-12T03:00:00.000Z'),
+    ];
+    const seed: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const first = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(seed));
+    expect(first.rows.map((r) => r.contactId)).toEqual(['c-p1', 'c-p0']);
+    expect(first.nextCursor).not.toBeNull();
+    // ROUND TRIP: the cursor this branch minted is accepted by this branch.
+    const second = await aggregateInbox(
+      { filter: 'unknown', limit: 2, cursor: first.nextCursor! },
+      makeDeps(seed),
     );
-    const warn = vi.fn();
-    const page = await aggregateInbox(
-      { filter: 'unknown', limit: 3 },
-      makeDeps({ contacts, conversations }, emptyCalls(), { info: vi.fn(), warn }),
-    );
-    // Newest first, exactly `limit` rows.
-    expect(page.rows.map((r) => r.contactId)).toEqual(['c-w4', 'c-w3', 'c-w2']);
-    expect(page.nextCursor).toBeNull();
-    expect(warn.mock.calls.some((c) => String(c[1]).includes('could not show every triage row'))).toBe(true);
+    expect(second.rows.map((r) => r.contactId)).toEqual(['c-p2']);
+    expect(second.nextCursor).toBeNull();
   });
 
-  it('rejects any cursor: the unknown feed mints none, so a cursor here is foreign (400 posture, not a wrong-partition Query)', async () => {
+  it('rejects a FOREIGN cursor (400, never a wrong-partition Query) - and its own cursor is foreign to filter=all', async () => {
     const deps = makeDeps({ contacts: [], conversations: [] });
     const allCursor = Buffer.from(JSON.stringify({ idx: 0 }), 'utf8').toString('base64url');
     await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: allCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
@@ -265,6 +279,100 @@ describe('filter=unknown - the contact-side read', () => {
       'utf8',
     ).toString('base64url');
     await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: unreadCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    const groupCursor = Buffer.from(JSON.stringify({ t: 'g', k: {} }), 'utf8').toString('base64url');
+    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: groupCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    // Tampered payloads inside our OWN namespace: an out-of-range block index,
+    // and an ExclusiveStartKey with an empty key attribute (which DynamoDB
+    // answers with a ValidationException nothing on this path maps - i.e. the
+    // one tamper that would turn a 400-by-design into a 500).
+    const badBlock = Buffer.from(JSON.stringify({ q: 1, b: 99 }), 'utf8').toString('base64url');
+    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: badBlock }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    const emptyKey = Buffer.from(
+      JSON.stringify({ q: 1, b: 0, k: { type: 'unknown', status: 'needs_review', contactId: '' } }),
+      'utf8',
+    ).toString('base64url');
+    await expect(aggregateInbox({ filter: 'unknown', limit: 25, cursor: emptyKey }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+    // THE OTHER DIRECTION: an unknown cursor replayed under `all` would hand
+    // the 'open' partition Query a byTypeStatus key.
+    const ourCursor = Buffer.from(JSON.stringify({ q: 1, b: 0 }), 'utf8').toString('base64url');
+    await expect(aggregateInbox({ filter: 'all', limit: 25, cursor: ourCursor }, deps)).rejects.toBeInstanceOf(InboxBadRequestError);
+  });
+
+  it('the SCAN BUDGET returns a SHORT page WITH a cursor - never the wire `truncated` flag, and nothing is lost', async () => {
+    // A wall of soft-deleted residue: the FilterExpression runs after Limit, so
+    // the pages come back empty with a key in hand. The budget stops the
+    // request; the CURSOR is the continuation signal.
+    //
+    // A budget-stopped page that keeps ZERO rows returns an EMPTY page WITH a
+    // cursor. The dashboard renders its ordinary empty state plus a live Load
+    // more - odd-looking, honest, and specifically NOT the failure banner that
+    // `truncated` would light (it is not filter-gated in useInbox/Inbox.tsx).
+    const contacts: ContactItem[] = [];
+    const conversations: ConversationItem[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const { contact, conversation } = queueContact(`c-d${i}`, 'needs_review', 40 + i, '2026-06-12T01:00:00.000Z');
+      contacts.push({ ...contact, deleted_at: '2026-06-01T00:00:00.000Z' });
+      conversations.push(conversation);
+    }
+    const live = queueContact('c-live', 'needs_review', 60, '2026-06-12T09:00:00.000Z');
+    contacts.push(live.contact);
+    conversations.push(live.conversation);
+
+    const info = vi.fn();
+    const seams = { unknownQueuePageSize: 2, unknownQueueScanBudget: 4 };
+    const page = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps({ contacts, conversations }, emptyCalls(), { info, warn: vi.fn() }, seams),
+    );
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).not.toBeNull();
+    expect('truncated' in page).toBe(false);
+    expect('groupsTruncated' in page).toBe(false);
+    const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
+    expect(assembled).toMatchObject({ count: 0, budgetStopped: true });
+
+    // AND THE ROW BEHIND THE WALL IS REACHABLE: keep paging with the same tiny
+    // budget and it arrives. The deleted page-budget behaviour reported
+    // `truncated` and stranded it.
+    let cursor: string | null = page.nextCursor;
+    const reached: string[] = [];
+    for (let guard = 0; guard < 12 && cursor !== null; guard += 1) {
+      const next: Awaited<ReturnType<typeof aggregateInbox>> = await aggregateInbox(
+        { filter: 'unknown', limit: 25, cursor },
+        makeDeps({ contacts, conversations }, emptyCalls(), undefined, seams),
+      );
+      reached.push(...next.rows.map((r) => r.contactId!));
+      cursor = next.nextCursor;
+    }
+    expect(reached).toEqual(['c-live']);
+  });
+
+  it('THE COST IS THE PAGE, NOT THE PARTITION: a small page pays thread resolutions for the rows it serves, not for the queue', async () => {
+    // The pin that replaces the old hydration-cost claim. The pre-rework read
+    // resolved threads AND hydrated every collected row (up to the 200 cap)
+    // before a window discarded most of them; this one stops consuming the
+    // moment the page is full.
+    const seeds = Array.from({ length: 10 }, (_, i) =>
+      queueContact(`c-c${i}`, 'needs_review', 70 + i, `2026-06-12T0${i % 10}:00:00.000Z`),
+    );
+    const seed: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const calls = emptyCalls();
+    const page = await aggregateInbox({ filter: 'unknown', limit: 2 }, makeDeps(seed, calls));
+    expect(page.rows).toHaveLength(2);
+    // ONE block Query (the page filled inside the untriaged block, so the
+    // reviewed block is never touched)...
+    expect(calls.listByType).toBe(1);
+    // ...TWO thread resolutions, one per row SERVED - not ten, one per row in
+    // the partition...
+    expect(calls.findByParticipantPhone).toBe(2);
+    // ...and TWO latest-message reads, because presentation hydration runs only
+    // over the rows being returned.
+    expect(calls.listByConversation).toBe(2);
+    // If any of these counts move, find WHICH read moved and why before
+    // repinning - each number above names its buyer.
   });
 
   it('requirement 4: a THROWN thread read withholds ONE row loudly - it neither 500s the tab nor impersonates an empty thread set', async () => {
@@ -315,6 +423,13 @@ describe('filter=unknown - the contact-side read', () => {
   // you deliberately deleted has already been triaged. The surviving class (d)
   // pin lives in test/inboxUnknownParity.test.ts, where it asserts the ABSENCE
   // here alongside the `filter: 'all'` row that keeps the trade honest.
+  //
+  // DELETED 2026-08-26 with the RESULT CAP: "a cap-cut queue" and "windows the
+  // sorted result to the request limit and WARNs". Both described a windowed,
+  // cursorless feed that no longer exists - the first pinned rows being hidden
+  // in partition order, the second a WARN for rows the response could not
+  // reach. There is no window and no unreachable tail now; THE FULL WALK above
+  // is what replaced them, and it asserts the opposite property.
 
   it('a failed triage-partition Query is LOUD: the branch propagates (route 500), never an empty queue impersonating health', async () => {
     // The module norm is best-effort, but "no unknown contacts" and "the
@@ -334,7 +449,7 @@ describe('filter=unknown - the contact-side read', () => {
     ).rejects.toThrow('byTypeStatus unavailable');
   });
 
-  it('THE READ THAT SHIPS: ONE partition Query and nothing else - no byUnread walk, no contact read per unread item', async () => {
+  it('THE READ THAT SHIPS: block Queries and nothing else - no byUnread walk, no contact read per unread item', async () => {
     // The starved pin above zeroes the unread index to isolate the queue
     // read; this one prices the whole configuration production runs, on a
     // fixture that is DELIBERATELY unread-heavy, so the branch's cost claim is
@@ -374,11 +489,11 @@ describe('filter=unknown - the contact-side read', () => {
       makeDeps(seed, calls, { info, warn: vi.fn() }),
     );
     // c-del is soft-deleted: listByType's `deleted` option is a tri-state with
-    // no "both", so it cannot come from the partition read, and nothing else
-    // looks for it any more.
+    // no "both", so it cannot come from the block read, and nothing else looks
+    // for it any more.
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-unk']);
-    // The queue read: one partition Query, no open-partition walk.
-    expect(calls.listByType).toBe(1);
+    // The queue read: one Query per block, no open-partition walk.
+    expect(calls.listByType).toBe(2);
     expect(calls.listByLastActivity).toBe(0);
     // THE CHEAPER SHAPE, and the whole point of the rewrite: the byUnread
     // index is never touched, so three unread threads cost nothing here. These
@@ -392,19 +507,26 @@ describe('filter=unknown - the contact-side read', () => {
     // (cv-q). The collector's resurfacing probe on cv-del is gone with the
     // sweep.
     expect(calls.listByConversation).toBe(1);
-    // And the retired cost field is GONE from the log, not zeroed - an old
-    // query for it must return nothing rather than a misleading 0.
+    // And the retired cost fields are GONE from the log, not zeroed - an old
+    // query for them must return nothing rather than a misleading 0.
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
     expect(assembled).not.toHaveProperty('sweepScanned');
-    // If any of these counts move, find WHICH read moved and why before
-    // repinning - each number above names its buyer.
+    expect(assembled).not.toHaveProperty('queueContacts');
+    expect(assembled).not.toHaveProperty('queuePages');
+    expect(assembled).not.toHaveProperty('queueTruncated');
   });
 
-  it('sorts the triage rows newest displayed activity first - and the soft-deleted unknown between them is simply not there', async () => {
+  it('sorts the triage rows on ONE page newest displayed activity first - and the soft-deleted unknown between them is simply not there', async () => {
     // c-mid is a soft-deleted unknown with an unread post-deletion inbound,
     // and it sits BETWEEN the two live rows by activity - so if anything ever
     // re-admits deleted contacts to this queue, this pin catches it in the
     // middle of the list rather than at an edge.
+    //
+    // NOTE what this does NOT say: c-new is `active` and c-old is
+    // `needs_review`, so they come from DIFFERENT blocks and the read order is
+    // c-old first. The per-PAGE sort is what puts c-new on top, and it applies
+    // only because both fit on one page. Across a page boundary the untriaged
+    // row would come FIRST - see THE FULL WALK above.
     const seed: Seed = {
       contacts: [
         { contactId: 'c-old', type: 'unknown', status: 'needs_review', phone: '+15550002600' },
@@ -436,17 +558,15 @@ describe('filter=unknown - the contact-side read', () => {
     // So `listByTypeOverride` below is not a convenience: it is the ONLY way
     // to drive this arm, and it deliberately supplies an item shape
     // (`type: 'tenant'` from the unknown partition) that the shared
-    // DynamoDB-faithful fake would never emit. What this test pins is the
-    // guard's BEHAVIOUR if a future caller ever hands the loop contacts from
-    // somewhere other than a byTypeStatus Query - not a path any production
-    // request takes, and `unknownQueueRetyped` will never appear on a real log
-    // line.
+    // DynamoDB-faithful fake would never emit. It is scoped to the FIRST block
+    // so the row is offered once, not once per block.
     const seed: Seed = {
       contacts: [],
       conversations: [conv({ conversationId: 'cv-x', participant_phone: '+15550002700', last_activity_at: '2026-06-12T10:00:00.000Z' })],
-      listByTypeOverride: () => ({
-        items: [{ contactId: 'c-retyped', type: 'tenant', phone: '+15550002700' } as ContactItem],
-      }),
+      listByTypeOverride: (_type, opts) =>
+        opts.status === 'needs_review'
+          ? { items: [{ contactId: 'c-retyped', type: 'tenant', phone: '+15550002700' } as ContactItem] }
+          : { items: [] },
     };
     const info = vi.fn();
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed, emptyCalls(), { info, warn: vi.fn() }));
@@ -455,24 +575,19 @@ describe('filter=unknown - the contact-side read', () => {
     expect(assembled?.drops).toMatchObject({ unknownQueueRetyped: 1 });
   });
 
-  it('a DUPLICATED queue item ships ONE row: the partition loop consults `emitted`, like its sibling sweep loop', async () => {
-    // REGRESSION TEST for round-2 finding N5. Before the guard landed, the
-    // partition loop ADDED to `emitted` and never read it (the resurfacing
-    // sweep, deleted 2026-08-26, was the only reader) - so this fixture
+  it('a DUPLICATED queue item ships ONE row: the block loop consults `emitted`', async () => {
+    // REGRESSION TEST for round-2 finding N5. Without the guard this fixture
     // produced two identical `kind: 'contact'` rows on the wire, which the
     // dashboard keys identically (useInbox `rowKey` -> `c:<contactId>`): a
-    // duplicate React key and a doubled row. The guard is NOT sweep leftovers:
-    // it guards the PARTITION read, and this is the shape it guards.
+    // duplicate React key and a doubled row.
     //
     // WHY A DUPLICATE IS REACHABLE AT ALL, stated narrowly. A Query resuming
     // from an ExclusiveStartKey cannot re-serve an item unless the item's index
     // key MOVED - and `status` IS byTypeStatus's range key, so a contact
-    // flipped 'active' -> 'needs_review' between two pages of the SAME walk
-    // moves forward past the cursor and is collected twice. That needs a
-    // multi-page walk (>100 unknown contacts) and a write landing between two
-    // sequential Queries. `listByTypeOverride` is how the shape is driven here,
-    // because the DynamoDB-faithful fake pages a static array and will never
-    // race itself.
+    // flipped 'active' -> 'needs_review' between two reads moves forward past
+    // the cursor and is read twice. `listByTypeOverride` is how the shape is
+    // driven here, because the DynamoDB-faithful fake pages a static array and
+    // will never race itself.
     const dup: ContactItem = {
       contactId: 'c-dup',
       type: 'unknown',
@@ -488,7 +603,8 @@ describe('filter=unknown - the contact-side read', () => {
           last_activity_at: '2026-06-12T11:00:00.000Z',
         }),
       ],
-      listByTypeOverride: () => ({ items: [dup, dup] }),
+      listByTypeOverride: (_type, opts) =>
+        opts.status === 'needs_review' ? { items: [dup, dup] } : { items: [] },
     };
     const page = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-dup']);

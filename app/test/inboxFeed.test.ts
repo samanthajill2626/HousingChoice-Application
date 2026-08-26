@@ -764,7 +764,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     });
   });
 
-  it('filter=unknown never walks the open partition: a tenant world costs one listByType and nothing per-conversation', async () => {
+  it('filter=unknown never walks the open partition: a tenant world costs one listByType PER BLOCK and nothing per-conversation', async () => {
     const calls = emptyCallCounts();
     // unread_count is 0 here for a reason that EXPIRED on 2026-08-26 and is
     // kept only so nobody re-derives it: a resurfacing sweep used to resolve a
@@ -802,7 +802,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
-      listByType: 1, // the triage partition is the only read
+      // ONE Query PER STATUS BLOCK - needs_review, then active - and nothing
+      // else (2026-08-26). Both blocks are read here because neither yielded a
+      // row, so the reader never filled its page and walked the queue to its
+      // end. Coverage is unchanged by the narrowing: every legal status is a
+      // block.
+      listByType: 2,
       listByLastActivity: 0, // the open-partition pager never runs
     });
   });

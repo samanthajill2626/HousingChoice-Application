@@ -2101,8 +2101,15 @@ export async function aggregateInbox(
     // - so the moment the operator clicks Load more, page 2's reviewed rows can
     // sit above page 1's untriaged ones on screen. Untriaged-first is a
     // property of the FETCH, and of any single page, not of the rendered list.
-    // Whether the client should stop re-sorting for this filter is a product
-    // question and is with the human; do not "fix" either side unilaterally.
+    // RULED 2026-08-26: LEAVE IT. The client keeps re-sorting the accumulation
+    // for every filter, this branch included. So what the operator SEES is
+    // "newest of whatever has been fetched so far", and what untriaged-first
+    // buys is FETCH PRIORITY - the untriaged block is drained before a single
+    // Query is spent on the reviewed one, so no amount of reviewed backlog can
+    // delay an untriaged row's retrieval. That is the property the ruling
+    // wanted; the display order was never the point. Do NOT "fix" either side
+    // unilaterally on the theory that the two sorts disagree - they answer
+    // different questions, and this one is settled.
     //
     // Global newest-first is not impossible, it is just not free: `ContactItem`
     // carries no activity attribute, so ordering the whole queue means

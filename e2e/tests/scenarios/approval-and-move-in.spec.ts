@@ -165,6 +165,25 @@ test('happy path: walk EVERY approval → move-in stage in ladder order (no skip
   page,
   request,
 }) => {
+  // THE ONE OUTLIER IN scenarios/. Nine stages, no skips, gated modals and
+  // derivations at every rung - roughly twice the work of its deviation
+  // siblings, and the only test in the directory that has ever gone past 56% of
+  // the shared budget. Measured across six pressure runs: 25.6s idle, then
+  // 38.1s at 1.83x, 62.8s at 2.06x, 74.8s at 2.21x. It does NOT plateau; the
+  // top end climbs with load, and at 2.21x it was already at 75% of the 100s
+  // directory budget.
+  //
+  // Given its own budget rather than raising SCENARIO_TIMEOUT_MS, on the same
+  // reasoning that constant documents: widening the shared number to cover one
+  // outlier hands 42 other tests margin they have never needed, and a budget
+  // long enough to never fire is long enough to hide a real hang. This runs
+  // AFTER useScenarioBudget()'s beforeEach, so it wins.
+  //
+  // TODO(concurrent-capacity-budget-tail): if THIS fires at ~180s, do not raise
+  // it again without first checking the test's duration - 180s is ~2.4x the
+  // worst figure ever measured here, so a timeout at that length is far more
+  // likely to be a hang than a slow machine.
+  test.setTimeout(180_000);
   const flow = new Scenario(page, request);
   const { tenant, unit, placementId, tenantContactId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Mover',

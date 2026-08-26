@@ -32,6 +32,8 @@ import {
   phoneRefId,
   PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
+  REQUIRED_INDEX_KEY_ATTRIBUTES,
+  RequiredIndexKeyRemovalError,
   type ContactEmail,
   type ContactFlag,
   type ContactItem,
@@ -1793,6 +1795,12 @@ export function createFakeWorld(): FakeWorld {
         // clear passed every unit test and 500'd in a live request.
         if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
           throw new EmptyIndexKeyError(key);
+        }
+        // Mirror the other half too. A fake that lets `status: null` through
+        // would keep the contact in this array and so keep it "visible", which
+        // is precisely the illusion the real byTypeStatus GSI does not offer.
+        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new RequiredIndexKeyRemovalError(key, contactId);
         }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;

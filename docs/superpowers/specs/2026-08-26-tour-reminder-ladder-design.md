@@ -419,11 +419,11 @@ clamp is applied by the caller at `:250`.
 
 | Kind | Raw due at | Change |
 | --- | --- | --- |
-| `confirmation` | n/a | no longer armed |
+| `confirmation` | `now` (immediate) | UNCHANGED in Phase A - still armed, see section 2 |
 | `day_before` | 19:30 org-local on the day BEFORE the tour's local date | was `scheduledAt - 24h` |
 | `morning_of` | `scheduledAt - 4h` | was 08:00 org-local on the tour's local date |
 | `en_route` | `scheduledAt - 1h` | unchanged |
-| `no_show_checkin` | `scheduledAt + 30m` | never armed in production; see 9.4 |
+| `no_show_checkin` | `scheduledAt + 30m` | never auto-armed; manual send only, unchanged |
 
 "7:30pm EST" means 7:30pm local to the property (Cameron, 2026-08-26). We hold a
 single org-level timezone; per-property is future work. Resolve it with

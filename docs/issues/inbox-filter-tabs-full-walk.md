@@ -150,17 +150,32 @@ other half.**
   pre-filter: `filter=unread` no longer walks `byLastActivity` at all. It reads
   the new sparse `byUnread` GSI, so the tab hydrates only rows that are actually
   unread. Same read model backs the nav badge and Today's unread sections.
-- **UNKNOWN: STILL OPEN.** `filter=unknown` still walks `byLastActivity` and
-  still needs the contact to decide `needsTriage`, so its walk is still
-  O(open conversations) when matches are sparse. This issue tracks the unknown
-  tab from here on.
-  - **CORRECTED 2026-08-25.** This bullet originally read "STILL OPEN,
-    unchanged" and repeated the "hydrates every open conversation" cost. Both
-    were already wrong when written: `39c1aa41` had moved the role check ahead
-    of hydration two days earlier, on 2026-08-14. The walk survives; the
-    hydration does not. See the cost-model correction above. The bullet's
-    closing claim - that "a triage flag or second sparse index remains the
-    escalation" - is disproven above and must not be built.
+- **UNKNOWN: RESOLVED 2026-08-25 by the contact-side read.** `filter=unknown` no
+  longer walks `byLastActivity` and no longer resolves a contact per open
+  conversation. It reads the `(type='unknown')` contacts `byTypeStatus`
+  partition - the repo's own "human triage queue" - through the collector in
+  `app/src/lib/unknownQueue.ts` (branch `feat/inbox-unread-cluster`, design
+  [`2026-08-25-inbox-unknown-tab-walk-design.md`](../superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md)):
+  a bounded fill loop (`UNKNOWN_QUEUE_MAX_PAGES` 10 x `UNKNOWN_QUEUE_PAGE_SIZE`
+  100), a hard result cap (`UNKNOWN_QUEUE_MAX_ROWS` 200), a truncation WARN, and
+  deleted-contact resurfacing through ONE budget-bounded `byUnread` sweep whose
+  two stop flags - `capped` and `truncated` - are BOTH floor signals (`capped`
+  masks `truncated` in `CollectResult`, so reading either one alone
+  under-reports). The read applies NO `status` narrowing and NO `excludeOrigin`
+  (spec section 3, classes f and a). This issue still tracks the unknown tab:
+  what the branch deliberately did NOT close is in the RESOLVED block at the end
+  of this file.
+  - **CORRECTED 2026-08-25, kept for the record.** This bullet ORIGINALLY read
+    "STILL OPEN, unchanged" and repeated the "hydrates every open conversation"
+    cost; the corrected STILL-OPEN wording that replaced it is in turn what the
+    resolution above replaced. Both original claims were already wrong when
+    written: `39c1aa41` had moved the role check ahead of hydration two days
+    earlier, on 2026-08-14. The walk survived that correction; the hydration did
+    not. See the cost-model correction above. The bullet's closing claim - that
+    "a triage flag or second sparse index remains the escalation" - is disproven
+    above and must not be built. That instruction still stands, and the shipped
+    fix honours it: the contact-side read adds no triage flag and no second
+    index, it reads a CONTACTS partition that already existed.
 
 **MEASURED 2026-08-25 on both deployed environments. It is worse than filed,
 and `medium` -> `high`.** One Unknown-tab page render, replicating the pager
@@ -266,3 +281,94 @@ the stale 4-6-calls-per-conversation cost model was rewritten in place, the
 sparse-triage-index remedy was disproven against three live `conv.type` /
 `needsTriage` divergences, and the suggested fix is now a walk bound plus a ride
 on the approved `contactId` denormalization.
+
+---
+
+**RESOLVED 2026-08-25 - the rulings, the remainder, and one deferral.** Branch
+`feat/inbox-unread-cluster`, design
+[`2026-08-25-inbox-unknown-tab-walk-design.md`](../superpowers/specs/2026-08-25-inbox-unknown-tab-walk-design.md).
+The unbounded walk is gone (see the UNKNOWN bullet above). Everything below is
+recorded HERE, in the registry, so that none of it rides only on a design doc.
+
+**The class (c) ruling: internal staff are not triage.** A `team_member` contact
+no longer appears on the Unknown tab. `roleFromContact` falls every type that is
+not tenant / landlord / partner through to `'unknown'`, which put colleagues in
+the operator's triage queue - the latent bug recorded above. It was RULED
+2026-08-25 that team members do not belong there, and the contact-side read
+excludes them by construction: it queries the CONTACTS partition, and
+`listByType('unknown')` cannot return a `team_member`. The decision is enforced
+rather than decorative - `UNKNOWN_TAB_TYPE_DECISIONS` in
+`app/src/lib/unknownQueue.ts` is the table of per-type rulings, and the list of
+types actually queried is DERIVED from it, so a future type cannot be added to
+one without an answer in the other. One clause for whoever next touches contact
+writes: `contactsRepo.update`'s documented `null -> REMOVE` convention makes
+`update(id, { status: null })` a legal, index-dropping write that would silently
+drop a contact out of the sparse `byTypeStatus` partition and off this tab; no
+caller nulls status today, so this is not a shipping defect - but "no caller
+does it" is the accurate wording, not "impossible".
+
+**The deliberate remainder: TWO different cuts, and neither has a Load-more.**
+They are separate claims and must not be collapsed into one:
+
+- **The WINDOW cut** - rows past the request `limit` (the dashboard sends 30).
+  These are WARNed ("the unknown tab could not show every triage row - the queue
+  is a floor") and they genuinely become reachable as triage drains the queue,
+  because the assembled rows are sorted newest displayed activity first, so the
+  cut is at the OLD end.
+- **The COLLECTOR cap** - `UNKNOWN_QUEUE_MAX_ROWS` (200). This one cuts in INDEX
+  order, with NO recency guarantee, so past roughly 200 untriaged contacts the
+  NEWEST inbound can be among the hidden rows. Also WARNed, and the WARN copy
+  carries the index-order caveat. Do not read the window cut's newest-first
+  reasoning onto this one.
+
+Neither cut has a Load-more affordance: the branch mints no cursor and returns
+`nextCursor: null` (an offset page over a mutating in-memory sort re-serves and
+skips rows). Contactless conversations - class (e), measured at ZERO rows in dev
+and prod - surface on the All tab only.
+
+**The sweep's ceiling and crossover, so a future reader comparing "684 before"
+finds the after-number.** The deleted-contact resurfacing sweep is
+O(visible unread): one contact read per visible unread index item, hard-capped
+at `UNREAD_WALK_LIMIT` (2000, `app/src/lib/unreadFeed.ts:46`) raw items per
+Unknown page load. So past roughly 700 visible unread threads - the size of the
+open partition whose ~684-lookup walk this design removed - the tab costs MORE
+contact reads than the read it replaced, worst case about 3x. That trade was
+taken deliberately: unread DRAINS with triage, while the open partition only
+ever grows, so the new bound rides a self-limiting quantity and the old one did
+not. Signals if the assumption breaks: the UNCONDITIONAL `sweepScanned` field on
+the `inbox feed assembled` log line (every request, not just past a tripwire),
+and the shared 500-item scan tripwire (`UNREAD_WALK_WARN`).
+
+**The capped-sweep residual, forced JOINTLY by approved requirements 2 and 5 and
+not fixable here.** A sweep that stops early can leave the tab rendering the
+ordinary "No unknown numbers" empty state over a knowingly incomplete answer.
+The wire must NOT carry `truncated` on this filter - requirement 5 - because the
+dashboard's failure gate is not filter-aware (`serverEndedEarlyEmpty =
+serverRowCount === 0 && truncated`, `dashboard/src/routes/inbox/Inbox.tsx:42`,
+banner at `:183`), so an empty page carrying the flag would render "We couldn't
+load your inbox." over a normal, cleared queue. The floor WARN
+("the unknown-tab resurfacing sweep stopped early - the deleted-row set is a
+floor") and the `resurfaceCapped` / `resurfaceTruncated` log fields are
+therefore the ONLY signals that it happened. **Reopen this issue here** if any
+of these three trades goes wrong: a silent incomplete empty state an operator
+actually hits, a cap cut that hides new inbound, or a sweep crossover that shows
+up in `sweepScanned`.
+
+**DEFERRED, not dropped (human ruling 2026-08-25): spec section 5's
+open-partition safety net.** A raw-scan budget plus cursor plus `truncated`
+contract for the `filter=all` pager was NOT built on this branch. The reason is
+that section 5 ships its own named gate unsolved: a budget-stopped ZERO-ROW
+`filter=all` page carrying `truncated` lights the same non-filter-gated failure
+gate above (`Inbox.tsx:42` / `:183`) on an org where nothing failed, and the
+spec says that must be solved FIRST. Two traps found in plan review, for whoever
+picks it up:
+
+1. The empty-page invariant NULLS the cursor, so "Load more" cannot be the
+   affordance in exactly the state that needs one.
+2. Replacing the pager loop's tail orphans the `moreChunks` binding
+   (`app/src/routes/inbox.ts:1799` post-flip; its ONLY reader is the loop's tail
+   at `:1840`), which is a gate-5 `no-unused-vars` error unless the binding is
+   deleted along with the tail.
+
+The unbounded read this issue was filed for is gone from `filter=unknown`; the
+safety net is about `filter=all`, and it is still owed.

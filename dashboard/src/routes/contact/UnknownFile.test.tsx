@@ -2,8 +2,14 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { UnknownFile } from './UnknownFile.js';
 import type { SuggestedContactKind } from './contactProfile.js';
+import type { CommsMediaItem } from './media.js';
 import type { Contact, GroupThreadRow, SuggestionItem } from '../../api/index.js';
 
 const UNKNOWN: Contact = {
@@ -25,22 +31,25 @@ function renderIt(opts: {
   groupThreads?: GroupThreadRow[];
   onTriage?: (kind: SuggestedContactKind) => void;
   triaging?: boolean;
+  media?: CommsMediaItem[];
 } = {}): void {
   render(
     <MemoryRouter>
-      <UnknownFile
-        contact={UNKNOWN}
-        phones={[{ phone: '+15550100001', primary: true }]}
-        placements={[]}
-        units={[]}
-        media={[]}
-        suggestions={opts.suggestions ?? []}
-        onTriage={opts.onTriage ?? vi.fn()}
-        triaging={opts.triaging}
-        groupThreadsPending={false}
-        groupThreads={opts.groupThreads ?? []}
-        groupThreadsTruncated={false}
-      />
+      <ImageViewerProvider>
+        <UnknownFile
+          contact={UNKNOWN}
+          phones={[{ phone: '+15550100001', primary: true }]}
+          placements={[]}
+          units={[]}
+          media={opts.media ?? []}
+          suggestions={opts.suggestions ?? []}
+          onTriage={opts.onTriage ?? vi.fn()}
+          triaging={opts.triaging}
+          groupThreadsPending={false}
+          groupThreads={opts.groupThreads ?? []}
+          groupThreadsTruncated={false}
+        />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -97,6 +106,33 @@ describe('UnknownFile classification actions', () => {
     renderIt({ triaging: true });
     for (const name of ['Mark as Tenant', 'Mark as Landlord', 'Mark as Partner', 'Mark as Property Manager']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+  });
+});
+
+describe('UnknownFile media gallery', () => {
+  it('opens an eligible media image in the shared viewer', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    try {
+      renderIt({
+        media: [{
+          key: 'MMUNKNOWN:0',
+          src: '/api/messages/MMUNKNOWN/media/0',
+          contentType: 'image/png',
+          at: '2026-08-27T12:00:00Z',
+        }],
+      });
+
+      expect(screen.getByRole('heading', { name: 'Media from comms' })).toBeInTheDocument();
+      const trigger = screen.getByRole('button', { name: 'View image attachment' });
+      expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Image attachment' });
+      const viewerImage = await loadViewerImage(dialog, 'Image attachment');
+      expect(viewerImage).toHaveAttribute('src', '/api/messages/MMUNKNOWN/media/0');
+    } finally {
+      restoreResizeObserver();
     }
   });
 });

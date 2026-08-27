@@ -1,6 +1,6 @@
 // Canned MMS assets for the fake-phones dev UI. Small, committed RASTER images
 // (PNG), a PDF and a vCard, served as same-origin STATIC FILES from the host's
-// public/ dir (public/canned/) — deliberately NOT imported through Vite. Vite inlines any
+// public/ dir (public/canned/) - deliberately NOT imported through Vite. Vite inlines any
 // asset under `assetsInlineLimit` (4 KB) as a `data:…;base64,…` URI, and a data:
 // URL (a) fails the engine's http(s)-only media guard (sendAsParty throws) and
 // (b) for SVG is itself an XSS vector. PNG/PDF are also chosen because the

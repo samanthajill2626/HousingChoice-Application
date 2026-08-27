@@ -52,6 +52,11 @@ export function toCommsMediaItem(item: ContactMediaItem): CommsMediaItem {
 // A media-type PREFIX test is NOT a substitute for 2 and 3: it collides on
 // application/octet-stream against the OOXML application/... types, and on
 // text/vcard against text/plain. Source of truth: app/src/lib/mediaTypes.ts.
+//
+// Both collections are EXPORTED so mediaTypeMirror.test.ts can compare them
+// SET-FOR-SET against the app's own, which is the only thing that makes the
+// "source of truth" claim above true rather than aspirational. Nothing else
+// imports them; components go through the three predicates below.
 
 /** Everything before the first `;`, trimmed and lowercased. */
 function essenceOf(contentType: string): string {
@@ -61,7 +66,7 @@ function essenceOf(contentType: string): string {
 /** The raster types a browser renders in an <img>. NOT the server's inline
  *  allowlist, which also contains application/pdf - a PDF is a file link
  *  here. */
-const INLINE_RENDERABLE_TYPES: ReadonlySet<string> = new Set([
+export const INLINE_RENDERABLE_TYPES: ReadonlySet<string> = new Set([
   'image/jpeg',
   'image/png',
   'image/gif',
@@ -69,7 +74,7 @@ const INLINE_RENDERABLE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Declarable type -> the word we put in front of the positional fallback. */
-const KIND_WORDS: ReadonlyMap<string, string> = new Map([
+export const KIND_WORDS: ReadonlyMap<string, string> = new Map([
   ['video/mp4', 'Video'],
   ['video/quicktime', 'Video'],
   ['video/3gpp', 'Video'],

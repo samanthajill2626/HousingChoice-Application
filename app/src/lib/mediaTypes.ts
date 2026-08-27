@@ -1,10 +1,16 @@
-// One source of truth for which MMS media Content-Types are safe to render
-// INLINE in the dashboard, shared by the WRITE side (webhooks/twilio.ts mirror,
-// which normalizes the sender-supplied type before storing) and the READ side
-// (routes/api.ts media-serve, which only serves these inline). MMS
-// MediaContentType{i} is attacker-controlled, so anything off this list is
-// treated as an opaque download — never rendered same-origin (stored-XSS guard).
+// One source of truth for the THREE media-type tiers, shared by the WRITE side
+// (services/mediaMirror.ts for inbound MMS and services/inboundEmail.ts for
+// inbound email, both of which normalize the sender-supplied type before
+// storing) and the READ side (routes/api.ts media-serve). MMS
+// MediaContentType{i} and an email part's Content-Type are attacker-controlled,
+// so the tier - never the caller's string - decides what is emitted:
+//   INLINE     rendered same-origin (INLINE_MEDIA_TYPES below),
+//   DECLARABLE served with its TRUE type but ALWAYS as a download,
+//   OPAQUE     everything else, collapsed to application/octet-stream.
+// Nothing off the first two lists is ever rendered same-origin (stored-XSS
+// guard). See resolveMediaTier below, which is where all three are decided.
 //
+// THE INLINE TIER, in detail (the declarable one is documented at its own set):
 // Raster images + PDF. A browser's built-in PDF viewer runs PDF content in its
 // own sandbox: embedded PDF JS cannot reach the SERVING ORIGIN's DOM or cookies,
 // so a malicious PDF can't achieve same-origin XSS here (combined with nosniff,

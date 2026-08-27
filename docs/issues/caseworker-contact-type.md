@@ -3,9 +3,11 @@ id: caseworker-contact-type
 title: Extraction cannot classify a caseworker - 'partner' exists but is not a suggestable type
 type: decision
 severity: med
-status: open
+status: resolved
 area: app/contacts
 created: 2026-07-17
+updated: 2026-08-26
+resolved: 2026-08-26
 refs: app/src/services/extraction/prompt.ts:65, app/src/services/extraction/schema.ts:124, app/src/adapters/extraction.ts:76, dashboard/src/routes/contact/UnknownFile.tsx:98, app/src/lib/import/merge.ts:410
 ---
 
@@ -81,3 +83,12 @@ Related: `lean-seed-ha-staffer-should-be-partner` (the lean seed's HA staffer is
 still typed `team_member` for the same historical reason - `partner` did not exist
 yet), and `housing-authority-free-text-drift`, which carries the still-owed agency
 ENTITY and the caseworker-to-agency link.
+
+## Resolution
+
+Resolved by `feat/ai-contact-kind-suggestions`. The extraction contract now
+supports Partner and the existing Property Manager preset, the Unknown card
+offers all four canonical kind actions, and type suggestions are reconciled
+against kind-changing contact revisions. Property Manager remains a Landlord-
+based record with the exact `Property Manager` role. The change is forward-only:
+no existing contact or suggestion was scanned or backfilled.

@@ -75,6 +75,25 @@ async function findUnknownContactId(request: APIRequestContext, phone: string): 
   return contactId!;
 }
 
+async function readContact(
+  request: APIRequestContext,
+  contactId: string,
+): Promise<Record<string, unknown>> {
+  const res = await request.get(`${NEXT}/api/contacts/${contactId}`);
+  expect(res.ok(), `read contact ${contactId}`).toBeTruthy();
+  return (await res.json()).contact as Record<string, unknown>;
+}
+
+async function readConversationType(request: APIRequestContext, contactId: string): Promise<string> {
+  const res = await request.post(`${NEXT}/api/contacts/${contactId}/conversation`);
+  expect(res.ok(), `resolve conversation ${contactId}`).toBeTruthy();
+  return (await res.json()).conversation.type as string;
+}
+
+function formattedPhone(phone: string): string {
+  return `(${phone.slice(2, 5)}) ${phone.slice(5, 8)}-${phone.slice(8)}`;
+}
+
 // A clean slate once for the file (standard fixture); each test still uses fresh
 // per-run contacts so this is belt-and-braces (and keeps the extraction table empty
 // for the debounce-slide count).
@@ -293,6 +312,95 @@ test('type recommendation: an unknown contact gets an AI-suggests line and triag
   });
 });
 
+test('type recommendation: an unknown caseworker triages to Partner and clears Today review', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const phone = uniquePhone();
+
+  await sendExtractSms(request, phone, {
+    typeSuggestion: { value: 'partner', reason: 'caseworker at Hope Atlanta' },
+    noteLines: ['Identified as a caseworker at Hope Atlanta'],
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  const contactId = await findUnknownContactId(page.request, phone);
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const triage = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Needs triage' }) });
+  await expect(triage.getByText(/^AI suggests: Partner(?: - |$)/)).toBeVisible();
+  await expect(triage.getByRole('button', { name: 'Mark as Tenant' })).toBeVisible();
+  await expect(triage.getByRole('button', { name: 'Mark as Landlord' })).toBeVisible();
+  await expect(triage.getByRole('button', { name: 'Mark as Partner' })).toBeVisible();
+  await expect(triage.getByRole('button', { name: 'Mark as Property Manager' })).toBeVisible();
+
+  await triage.getByRole('button', { name: 'Mark as Partner' }).click();
+  await expect(page.getByRole('button', { name: 'Mark as Partner' })).toHaveCount(0);
+  await expect(page.getByText('Partner', { exact: true })).toBeVisible();
+
+  const contact = await readContact(page.request, contactId);
+  expect(contact).toMatchObject({ type: 'partner', status: 'active' });
+  expect(contact['role']).toBeUndefined();
+  expect(String(contact['notes'])).toContain('Identified as a caseworker at Hope Atlanta');
+  expect(await readConversationType(page.request, contactId)).toBe('partner_1to1');
+
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  const item = page
+    .getByRole('list', { name: 'AI suggestions to review' })
+    .getByRole('listitem')
+    .filter({ hasText: formattedPhone(phone) });
+  await expect(item).toHaveCount(0);
+});
+
+test('type recommendation: an unknown property manager triages to the landlord preset and clears Today review', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const phone = uniquePhone();
+
+  await sendExtractSms(request, phone, {
+    typeSuggestion: { value: 'property_manager', reason: 'manages properties for the owner' },
+    noteLines: ['Identified as property manager for Example Homes'],
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  const contactId = await findUnknownContactId(page.request, phone);
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const triage = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Needs triage' }) });
+  await expect(triage.getByText(/^AI suggests: Property Manager(?: - |$)/)).toBeVisible();
+
+  await triage.getByRole('button', { name: 'Mark as Property Manager' }).click();
+  await expect(page.getByRole('button', { name: 'Mark as Property Manager' })).toHaveCount(0);
+  const propertyManagerLabels = page.getByText('Property Manager', { exact: true });
+  await expect(propertyManagerLabels).toHaveCount(2);
+  await expect(propertyManagerLabels.first()).toBeVisible();
+
+  const contact = await readContact(page.request, contactId);
+  expect(contact).toMatchObject({
+    type: 'landlord',
+    role: 'Property Manager',
+    status: 'interested',
+  });
+  expect(String(contact['notes'])).toContain('Identified as property manager for Example Homes');
+  expect(await readConversationType(page.request, contactId)).toBe('landlord_1to1');
+
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+  const item = page
+    .getByRole('list', { name: 'AI suggestions to review' })
+    .getByRole('listitem')
+    .filter({ hasText: formattedPhone(phone) });
+  await expect(item).toHaveCount(0);
+});
+
 test('Today tile: a phone-only contact shows its number in the AI-suggestions-to-review group', async ({
   page,
   request,
@@ -317,7 +425,7 @@ test('Today tile: a phone-only contact shows its number in the AI-suggestions-to
   await expectTodayReady(page);
   const group = page.getByRole('list', { name: 'AI suggestions to review' });
   await expect(group).toBeVisible({ timeout: 10_000 });
-  const expectedPhone = `(${phone.slice(2, 5)}) ${phone.slice(5, 8)}-${phone.slice(8)}`;
+  const expectedPhone = formattedPhone(phone);
   const item = group.getByRole('listitem').filter({ hasText: expectedPhone });
   await expect(item).toBeVisible();
   await expect(item).not.toContainText(contactId);

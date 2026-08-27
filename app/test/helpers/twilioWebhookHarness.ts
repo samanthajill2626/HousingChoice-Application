@@ -3362,6 +3362,11 @@ export function createFakeWorld(): FakeWorld {
       }
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
     },
+    // Stub: only the one-time content-type backfill reads this, and nothing in
+    // this harness runs it. Undefined = "Twilio no longer has the media".
+    async getMediaContentType() {
+      return undefined;
+    },
     async getRecordingStream(recordingUrl) {
       // M1.9c: simulate the authed recording-media fetch. A URL in
       // failRecordingUrls throws (the fetch-failure path); otherwise stream
@@ -3538,6 +3543,9 @@ export function createFakeWorld(): FakeWorld {
       mediaObjects.delete(key);
       deletedMediaKeys.push(key);
     },
+    // Stub: the in-place Content-Type rewrite is used only by the one-time
+    // backfill, which no webhook-harness test drives.
+    async setContentType() {},
   };
 
   const suggestionResolutionFake = createSuggestionResolutionFake({

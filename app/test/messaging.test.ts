@@ -13,6 +13,7 @@ import {
   VoiceCapabilityError,
   createMessagingAdapter,
   mapTwilioStatus,
+  type MessagingAdapter,
   type TwilioClientLike,
 } from '../src/adapters/messaging.js';
 import { loadConfig } from '../src/lib/config.js';
@@ -1024,5 +1025,80 @@ describe('ConsoleMessagingDriver - attach/detach (no-op)', () => {
     });
     await expect(driver.attachToMessagingService('PN123')).resolves.toBeUndefined();
     await expect(driver.detachFromMessagingService('+15551234567')).resolves.toBeUndefined();
+  });
+});
+
+describe('TwilioMessagingDriver.getMediaContentType', () => {
+  // A LOCAL builder, not the makeDriver above: that one takes zero arguments and
+  // is scoped to the getMediaStream describe, so it cannot inject a client.
+  function driverWith(client: unknown) {
+    return new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      appEnv: 'local',
+      client: client as never,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+  }
+
+  /** The REAL SDK's `messages` is a function that also carries `.create`. */
+  function callableClient(fetchImpl: () => Promise<unknown>) {
+    return {
+      messages: Object.assign((_sid: string) => ({ media: (_m: string) => ({ fetch: fetchImpl }) }), {
+        create: vi.fn(),
+      }),
+    };
+  }
+
+  it('reads the content type off a callable messages resource', async () => {
+    const d = driverWith(callableClient(async () => ({ contentType: 'video/mp4' })));
+    expect(await d.getMediaContentType('MM1', 'ME1')).toBe('video/mp4');
+  });
+
+  it('returns undefined when Twilio no longer has the media', async () => {
+    const d = driverWith(
+      callableClient(async () => {
+        throw Object.assign(new Error('gone'), { status: 404, code: 20404 });
+      }),
+    );
+    expect(await d.getMediaContentType('MM1', 'ME1')).toBeUndefined();
+  });
+
+  it('rethrows anything that is not a 404', async () => {
+    // A 429 must reach the backfill so it can count throttling separately
+    // from retention loss.
+    const d = driverWith(
+      callableClient(async () => {
+        throw Object.assign(new Error('slow down'), { status: 429 });
+      }),
+    );
+    await expect(d.getMediaContentType('MM1', 'ME1')).rejects.toThrow('slow down');
+  });
+
+  it('degrades against a message-only fake rather than throwing', async () => {
+    // Every existing fake supplies a plain object with only `create`. This
+    // path must degrade, not crash, or one new interface member breaks
+    // several unrelated suites.
+    const d = driverWith({ messages: { create: vi.fn() } });
+    expect(await d.getMediaContentType('MM1', 'ME1')).toBeUndefined();
+  });
+});
+
+describe('ConsoleMessagingDriver.getMediaContentType (no-op)', () => {
+  it('resolves undefined without touching a provider', async () => {
+    // Typed as the INTERFACE deliberately: the no-op declares no parameters
+    // (it ignores both), so this both pins the assignability the console
+    // driver exists for and exercises the two-argument call every real caller
+    // makes.
+    const driver: MessagingAdapter = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(driver.getMediaContentType('MM1', 'ME1')).resolves.toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

@@ -127,6 +127,14 @@ export interface MessagingAdapter {
   /** Streams-only media fetch (Builder B: MMS → S3 mirroring). */
   getMediaStream(mediaUrl: string): Promise<Readable>;
   /**
+   * The Content-Type Twilio holds for one inbound media resource - METADATA
+   * ONLY, no bytes. Used by the one-time content-type backfill to recover a
+   * type our own mirror discarded before the declarable tier existed.
+   * Resolves undefined when Twilio no longer has the media (404), so an aged-
+   * out attachment is a skip rather than a failure.
+   */
+  getMediaContentType(messageSid: string, mediaSid: string): Promise<string | undefined>;
+  /**
    * Streams-only RECORDING-media fetch (M1.9c founder-bridge call recording):
    * the recordingStatusCallback hands us a RecordingUrl on api.twilio.com that
    * needs the same basic-auth first hop + the same SSRF allowlist + size cap as
@@ -483,6 +491,19 @@ export interface TwilioClientLike {
         };
       };
     };
+  };
+}
+
+/**
+ * The callable shape the REAL Twilio SDK exposes for per-message
+ * sub-resources. TwilioClientLike models only what our fakes implement
+ * (`messages.create`), so this narrower view is asserted at the one call site
+ * that needs it rather than widening the seam - the same reason `calls` is
+ * optional on that interface.
+ */
+interface MessageMediaResource {
+  messages(messageSid: string): {
+    media(mediaSid: string): { fetch(): Promise<{ contentType?: string | null }> };
   };
 }
 
@@ -914,6 +935,26 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     return this.fetchTwilioMediaStream(mediaUrl, 'getMediaStream');
   }
 
+  async getMediaContentType(messageSid: string, mediaSid: string): Promise<string | undefined> {
+    // A message-only fake has a plain object here, not a function. Degrade
+    // rather than crash: one new method must not break unrelated suites.
+    if (typeof (this.client as { messages?: unknown }).messages !== 'function') return undefined;
+    const client = this.client as unknown as MessageMediaResource;
+    try {
+      const media = await client.messages(messageSid).media(mediaSid).fetch();
+      return typeof media.contentType === 'string' ? media.contentType : undefined;
+    } catch (err) {
+      // The media is gone (retention, deletion). Not an error for the
+      // backfill - it counts it and moves on. Twilio surfaces this as HTTP 404
+      // with code 20404; check BOTH, because the repo has already been bitten
+      // by assuming one shape. Anything else (a 429 especially) RETHROWS so the
+      // caller can tell throttling from retention loss.
+      const e = err as { status?: number; code?: number };
+      if (e.status === 404 || e.code === 20404) return undefined;
+      throw err;
+    }
+  }
+
   async getRecordingStream(recordingUrl: string): Promise<Readable> {
     // M1.9c: the founder-bridge recording media. RecordingUrl comes off the
     // recordingStatusCallback (api.twilio.com/.../Recordings/RExxxx) — same
@@ -1042,6 +1083,11 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
       );
     }
     return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+  }
+
+  async getMediaContentType(): Promise<string | undefined> {
+    this.log.info({}, 'console messaging driver: getMediaContentType is a no-op');
+    return undefined;
   }
 
   async getRecordingStream(recordingUrl: string): Promise<Readable> {

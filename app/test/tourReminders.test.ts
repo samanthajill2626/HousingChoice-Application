@@ -1466,6 +1466,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       async getMediaStream() {
         throw new Error('adapter spy: getMediaStream not expected');
       },
+      async getMediaContentType() {
+        return undefined;
+      },
       async getRecordingStream() {
         throw new Error('adapter spy: getRecordingStream not expected');
       },

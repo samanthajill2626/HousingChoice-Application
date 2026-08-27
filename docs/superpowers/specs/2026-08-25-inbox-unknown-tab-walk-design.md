@@ -4,6 +4,32 @@ Status: **DRAFT 4.** Drafts 1-3 are in git history. Drafts 1 and 2 were
 rejected outright; draft 3 was judged the right shape needing one editing pass
 by one reviewer and a revision by the other. Not gated.
 
+## POST-APPROVAL CORRECTIONS (2026-08-26) - READ BEFORE SECTION 4
+
+**Three of this document's five requirements no longer describe what shipped.**
+Every departure was ruled by the founder after two adversarial review rounds, and
+every one is recorded in code comments, the issue registry and the handbacks -
+but until now, not here, in the governing document. That gap is itself the
+defect: a reader could take a requirement below as current and be wrong.
+
+The original text is left INTACT below. Nothing is rewritten; these are
+corrections layered on top, so the design's movement is visible rather than
+laundered.
+
+| requirement | as approved | as SHIPPED | why it moved |
+| --- | --- | --- | --- |
+| **1** (in part) | a bounded fill loop, a hard cap on the RESULT, and a truncation WARN | **no cap and no truncation WARN.** A per-request SCAN BUDGET bounds raw rows examined; spending it returns the rows found so far PLUS the cursor to resume at | the cap cut in STATUS order, not arbitrarily - `listByType` sets no `ScanIndexForward`, so `'active' < 'needs_review'` and the cap starved the untriaged front door. Founder ruling: no fixed windows. See `unknown-queue-cap-starves-needs-review` |
+| **2** | read the WHOLE capped queue, sort in memory, do NOT page it | **paged with the index's own cursor**, one bounded Query per status BLOCK, `needs_review` first then `active`; sorted per PAGE, not globally | requirement 2's premise was that activity-order paging "does not exist". True - but the cap was the PRICE of that sort, because `ContactItem` carries no activity attribute. Founder ruling: drop the global sort, page in queue order (untriaged first). Rendered order was separately ruled "leave it" - the client re-sorts, so what untriaged-first buys is FETCH PRIORITY |
+| **3** | handle soft-delete resurfacing via a `byUnread` sweep, on the shared unread budget | **DELETED OUTRIGHT.** There is no sweep | the requirement solved the wrong problem. Founder ruling: resurfacing needs the CONVERSATION in the inbox, not the deleted CONTACT back in the triage queue. Verified end to end - the All tab runs the same resurfacing predicate, Unread gets it via the unread walk, and `GET /api/contacts/:id` does not 404 a soft-deleted contact. A contact you deliberately deleted is one you have already triaged |
+
+Requirements **4** (discriminate a failed thread read from an empty one) and
+**5** (an empty state must not look like a failure) shipped as approved and are
+still current. Requirement 4 gained a bounded retry after review; requirement 5
+is why the wire `truncated` flag is still never set on this filter.
+
+**Section 1's measurements stand as taken** - but see the correction to the
+prod "4" in section 3 class (d) below before quoting it.
+
 Branch: `feat/inbox-unread-cluster`, cut from `main`.
 Issue: [`inbox-filter-tabs-full-walk`](../../issues/inbox-filter-tabs-full-walk.md).
 Reviews (4 rounds, 2 reviewers each; rounds 1-2 rejected, rounds 3-4 BUILDABLE): `W:\tmp\handbacks\unknown-tab-review-r1-2026-08-25\`,
@@ -134,7 +160,7 @@ build needs.
 | (a) group-detection stubs | **SOMETIMES** - a stub that later TEXTS gets a 1:1 thread and shows on the tab today | YES - they fill the partition | **Do NOT copy `excludeOrigin`** - see below. A threadless stub yields no `maxConv` and so no row anyway. prod 3, dev 3. |
 | (b) contact whose only thread is a relay group or closed | NO | Returned by the CONTACT query, then dropped | **Already handled by the seam**: `contactConversations` filters `status === 'open' && type !== 'relay_group'`. No new work. |
 | (c) `team_member` contacts | **YES** - `roleFromContact` falls `team_member` through to `'unknown'` | **NO** - `listByType('unknown')` cannot return them | **RULED 2026-08-25: they do NOT belong in a triage queue.** The redesign is correct by construction and today's tab carries the bug. Measured zero in both environments. |
-| (d) soft-deleted under the resurfacing rule | YES, deliberately, while an unread post-deletion inbound exists | NO by default - and see the constraint below | Must be handled explicitly or the resurfacing feature is silently deleted. prod 4, dev 0. |
+| (d) soft-deleted under the resurfacing rule | YES, deliberately, while an unread post-deletion inbound exists | NO by default - and see the constraint below | **SUPERSEDED 2026-08-26 - see the post-approval corrections at the top. Class (d) now leaves the triage queue; the conversation stays on All and Unread.** prod 4, dev 0 - but read the correction directly below, because that 4 does NOT mean four resurfacing rows. |
 | (e) contactless conversations | YES (phone, no contact) | NO - there is no contact to return | Measured ZERO in both environments. See the caveat below. |
 | **(f) `type=unknown` with a status other than `needs_review`** | **YES** | **NO, if the query narrows on status** | **Query `type=unknown` with NO status filter.** See below - this class is STRUCTURAL, not incidental. |
 
@@ -172,6 +198,25 @@ retyped), so the type alone is the queue. This removes class (f), removes the
 type-versus-status product question, and removes one failure mode - at the cost
 of returning `active` unknowns the tab already shows today, which is the
 behaviour we want to preserve.
+
+**CORRECTION (2026-08-26): what the prod "4" counts, and what is actually
+zero.** The issue registry justifies deleting the sweep with "both environments
+measured ZERO soft-deleted unknown contacts", while section 1 and this table
+record prod 4. Both are true, of DIFFERENT quantities, and the ambiguity is the
+kind that gets a feature deleted for the wrong reason:
+
+- **4** is soft-deleted unknown contacts that EXIST in the partition with an open
+  thread. `--audit-tab-vs-partition` builds its tab set by resolving contacts
+  from open conversations and does NOT apply the resurfacing predicate - the
+  script says so itself where it calls these "the benign class".
+- **RESURFACING additionally requires an unread post-deletion INBOUND.** Prod
+  carries ONE unread conversation in total (measured 2026-08-25, dev 0), so at
+  most one of those 4 could ever have resurfaced, and only if that single unread
+  row belongs to one of them AND its latest message is inbound AND post-deletion.
+
+So the honest statement is **"at most 1, probably 0"**, not "zero". The ruling
+does not depend on which - it turns on WHERE the row belongs (the inbox, not the
+triage queue), not on how many there are.
 
 **A hard constraint on (d).** `listByType`'s `deleted` option is a TRI-STATE
 with no "both": it applies either `attribute_exists(deleted_at)` or

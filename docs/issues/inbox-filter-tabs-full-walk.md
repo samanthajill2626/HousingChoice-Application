@@ -393,9 +393,21 @@ are for.
 
 The cost that went with it: one `collectUnreadRows` walk over `byUnread` per
 Unknown page load, up to `UNREAD_WALK_LIMIT` (2000) raw index items with one
-contact lookup per visible item, re-paid on every debounced refetch. Both
-environments measured ZERO soft-deleted unknown contacts, so it was buying
-nothing anyone was using.
+contact lookup per visible item, re-paid on every debounced refetch.
+
+**How many rows it was actually buying, stated precisely** (corrected
+2026-08-26; the earlier wording here said "both environments measured ZERO
+soft-deleted unknown contacts", which conflates two different quantities and
+sits in plain contradiction with the spec's own "prod 4"). Prod has **4**
+soft-deleted unknown contacts with an open thread. But RESURFACING additionally
+requires an unread post-deletion INBOUND, and prod carries **one** unread
+conversation in total (dev: zero) - so the sweep was buying **at most one row,
+probably none**.
+
+That is the honest number, and the ruling does not rest on it either way: the
+sweep was deleted because of WHERE the row belongs - the conversation surfaces
+on All and Unread, and a contact you deliberately deleted is one you have
+already triaged - not because the count was small.
 
 **Three passages that stood here are DELETED, not merely superseded**, because
 they describe code that no longer exists: the sweep's ceiling-and-crossover

@@ -1,0 +1,466 @@
+# AI contact-kind suggestions - design
+
+**Status:** Design approved; adversarial review pending.
+**Date:** 2026-08-26.
+**Branch:** `feat/ai-contact-kind-suggestions`.
+**Surface:** Conversation fact extraction, Unknown contact triage, AI run log.
+
+## 1. Problem
+
+The conversation fact extractor can currently recommend only `tenant` or
+`landlord` for an Unknown contact. That is narrower than the staff-facing contact
+model:
+
+- `partner` is a first-class `ContactType` for an outside service or program
+  collaborator, such as a caseworker, agency contact, inspector, or housing
+  navigator.
+- Property Manager is a distinct staff-facing contact kind based on the Landlord
+  record shape. It is stored as `type: 'landlord'` plus
+  `role: 'Property Manager'`, but staff must not see it collapsed to Landlord.
+
+The current extraction prompt explicitly suppresses a caseworker type suggestion
+and writes only a note. It also describes every external contact as a person
+seeking housing help, which biases classification toward Tenant. The JSON schema,
+parser, TypeScript adapter, and Unknown triage card support only Tenant and
+Landlord. As a result, the AI cannot recommend Partner or Property Manager even
+when the transcript states either kind clearly.
+
+This feature makes the AI recommendation match the existing staff-facing kind
+model without auto-classifying anyone.
+
+## 2. Goals
+
+1. Let extraction recommend four canonical staff-facing kinds for an Unknown
+   contact: Tenant, Landlord, Property Manager, and Partner.
+2. Keep Property Manager distinct from both Landlord and Partner while preserving
+   its existing Landlord base record behavior.
+3. Let staff apply any of the four recommendations from the Unknown contact card.
+4. Record an AI type decision as accepted only when the resulting full kind
+   matches the recommendation.
+5. Preserve concise role and organization facts in reconciled notes.
+6. Keep the change forward-only, advisory, auditable, race-safe, and compatible
+   with existing Tenant and Landlord suggestions.
+
+## 3. Non-goals
+
+- No automatic classification. A staff member must click a classification action.
+- No migration, scan, or backfill of existing contacts, notes, suggestions, or AI
+  runs.
+- No production data read or write for the example contact that motivated the
+  feature.
+- No new `ContactType` member for Property Manager or caseworker.
+- No general custom-kind extraction. The only custom kind added to the AI contract
+  is the existing Property Manager preset.
+- No new reusable custom-kind registry.
+- No change to contact-list filing: Property Managers continue to use the
+  Landlord base and therefore remain in Landlord-backed queries while displaying
+  as Property Manager.
+- No change to partner, landlord, or tenant lifecycle definitions.
+- No new dependency, environment variable, infrastructure resource, or deploy
+  operation.
+
+## 4. Decisions
+
+### D1. The model emits a canonical staff-facing kind
+
+Keep the existing wire key `typeSuggestion` and pending suggestion target `type`
+for compatibility. Widen the suggestion value to this closed union:
+
+```ts
+type SuggestedContactKind =
+  | 'tenant'
+  | 'landlord'
+  | 'property_manager'
+  | 'partner';
+```
+
+The structured-output sentinel remains `none`. The JSON schema enum is therefore:
+
+```ts
+['tenant', 'landlord', 'property_manager', 'partner', 'none']
+```
+
+`typeSuggestion` is an established name and the persisted target stays `type`, but
+the value now describes the complete staff-facing classification kind. Existing
+pending `tenant` and `landlord` suggestions remain valid without migration.
+
+### D2. Kind and stored contact shape are separate
+
+The canonical kind maps to the existing contact document as follows:
+
+| Suggested kind | Staff label | Contact PATCH | Resulting conversation type | Default status from existing triage |
+| --- | --- | --- | --- | --- |
+| `tenant` | Tenant | `{ type: 'tenant', role: '' }` | `tenant_1to1` | `onboarding` |
+| `landlord` | Landlord | `{ type: 'landlord', role: '' }` | `landlord_1to1` | `interested` |
+| `property_manager` | Property Manager | `{ type: 'landlord', role: 'Property Manager' }` | `landlord_1to1` | `interested` |
+| `partner` | Partner | `{ type: 'partner', role: '' }` | `partner_1to1` | `active` |
+
+The action sets both `type` and `role` deliberately. A standard-kind selection
+clears a stale custom role, matching the existing KindPicker behavior. Property
+Manager writes the exact existing preset role. This makes the resulting displayed
+kind equal to the action the staff member chose.
+
+The backend and dashboard each need one canonical mapping at their boundary. The
+dashboard already owns `PM_ROLE = 'Property Manager'` for KindPicker and display.
+The backend must use the same exact value when it derives the resulting kind for
+AI-verdict comparison. Tests pin the value on both sides so they cannot drift
+silently.
+
+### D3. Classification is about the current contact, not people they mention
+
+The prompt must stop defining every contact as a person seeking housing. It must
+define the transcript's existing `client` speaker label as the external contact
+whose profile is being classified. The wire label and `speakerRoles` values stay
+unchanged for compatibility.
+
+Facts and kinds apply only to that current contact. A represented tenant, owner,
+caseworker, or other person mentioned in the conversation does not determine the
+speaker's kind and must not have their facts written onto the current contact.
+
+Examples pinned in the prompt contract:
+
+- "I am looking for a two-bedroom home for my family" -> Tenant.
+- "I own three rental properties" -> Landlord.
+- "I manage three properties for the owner" -> Property Manager, not Landlord
+  and not Partner.
+- "I am her caseworker at Hope Atlanta" -> Partner.
+- "My caseworker at Hope Atlanta told me to call" -> Tenant when the speaker is
+  seeking housing for themselves; the mentioned caseworker is not the contact.
+- "I am calling about a client" without a clear outside role -> no suggestion.
+
+### D4. The four kinds are mutually exclusive and evidence-based
+
+`typeSuggestion` is allowed only when `CURRENT PROFILE.contactType` is `unknown`
+and the transcript clearly establishes one of these:
+
+1. **Tenant:** seeks housing for themselves or their household.
+2. **Landlord:** owns or personally offers housing they control.
+3. **Property Manager:** manages, leases, lists, or coordinates properties on
+   behalf of an owner or landlord. Working for the landlord does not make the
+   contact a Partner.
+4. **Partner:** works in an outside service, program, agency, inspection, or
+   navigation role for a tenant or housing process and is neither the housing
+   seeker nor the property owner/manager.
+
+When evidence overlaps or does not establish the distinction, emit `none`. The
+prompt must not guess from an organization name, a third-person reference, or a
+single ambiguous word such as "manager", "agent", or "client".
+
+### D5. Notes preserve role facts without becoming a backfill mechanism
+
+When a transcript clearly identifies a Partner or Property Manager, the model also
+adds a concise note line containing the useful role or organization fact, for
+example:
+
+- `Identified as a caseworker at Hope Atlanta`
+- `Identified as property manager for Example Homes`
+
+The existing note reconciliation rules remain authoritative: do not repeat a fact
+already present in profile notes, append only new detail, and never infer an
+organization that was not stated. A note survives a dismissed type suggestion,
+but an old note does not by itself create a new suggestion. There is no scan or
+backfill.
+
+### D6. Suggestions remain advisory and Unknown-only
+
+The schema parser accepts only the four canonical values. The apply layer continues
+to persist a pending `target: 'type'` suggestion only while the contact is
+`unknown`. A classified contact produces the existing
+`type_already_classified` dropped decision. No extraction result writes `type` or
+`role` directly.
+
+The raw-operation parser continues to retain off-enum values as attempted output
+for audit diagnostics. That diagnostic behavior must not make an off-enum value
+applicable.
+
+### D7. The Unknown card is the only acceptance surface
+
+The Unknown contact's Needs triage card displays the suggestion through an
+explicit kind label map, so `property_manager` renders as `Property Manager`
+rather than `Property_manager`.
+
+The card copy names the four available kinds and offers four buttons in the same
+order as the standard KindPicker segments:
+
+1. Mark as Tenant
+2. Mark as Landlord
+3. Mark as Partner
+4. Mark as Property Manager
+
+The actions use the mappings in D2. The action container wraps at narrow widths so
+four buttons do not overflow. Existing disabled/in-flight behavior applies to all
+four actions.
+
+The generic suggestion accept endpoint continues to refuse target `type`; contact
+classification remains owned by the triage PATCH because that route also handles
+status, conversation propagation, audit, and AI-verdict resolution.
+
+### D8. Verdicts compare the complete resulting kind
+
+The contact PATCH route already snapshots the exact pending suggestion identity,
+writes the contact, conditionally deletes only that retained suggestion, and then
+stamps its originating AI run. Preserve that ordering and race fence.
+
+For pending target `type`, derive the applied canonical kind from the updated
+contact:
+
+- `type: 'landlord'` plus exact role `Property Manager` -> `property_manager`
+- otherwise `tenant`, `landlord`, or `partner` -> the matching canonical value
+- every other shape -> no comparable supported kind
+
+Normalize and compare that complete kind to the pending `suggestedValue`:
+
+- same kind -> `accepted`
+- a different kind or unsupported result -> `superseded_by_human_edit`
+
+This prevents a Property Manager suggestion from being counted as accepted when a
+staff member chooses plain Landlord merely because both share the stored Landlord
+base. It also preserves the existing rule that choosing Landlord after a Tenant
+suggestion supersedes the model.
+
+### D9. Existing base behavior remains authoritative after classification
+
+The existing contact PATCH route owns all downstream effects:
+
+- Tenant -> `tenant_1to1`, status `onboarding`, and immediate triage
+  re-extraction when enabled.
+- Landlord and Property Manager -> `landlord_1to1`, status `interested`, with no
+  tenant re-extraction.
+- Partner -> `partner_1to1`, status `active`, with no tenant re-extraction.
+- Linked phone and email conversations flip only from `unknown_1to1`; an already
+  resolved conflicting conversation is not overwritten.
+- Contact and conversation update events, audit records, conditional suggestion
+  deletion, and AI verdicts retain their current best-effort/error contracts.
+
+This feature does not introduce a parallel classification route or duplicate those
+side effects in the dashboard.
+
+### D10. Staff-facing audit renderers show kind labels
+
+The AI run detail currently renders `proposedValue` raw. For the `type` decision,
+the renderer must use the same canonical kind label mapping as the Unknown card,
+so `property_manager` displays as `Property Manager`. Other decision values retain
+their current rendering.
+
+The stored AI run decision remains the canonical wire value for audit accuracy.
+Only display is humanized.
+
+## 5. Data flow
+
+### 5.1 Extraction generation
+
+1. The run window builds the current profile and transcript exactly as today.
+2. The revised system prompt defines the external-contact meaning of `client`, the
+   four kind rules, the property-manager boundary, and positive/negative examples.
+3. Structured output restricts `typeSuggestion.value` to the four canonical kinds
+   plus `none`.
+4. Prompt and schema changes naturally produce a new extraction prompt
+   fingerprint. No manual fingerprint constant is updated.
+
+### 5.2 Parse, apply, and persistence
+
+1. `parseExtractionText` folds `none` and invalid values to an absent suggestion
+   and returns a typed four-kind value otherwise.
+2. `applyExtraction` persists the canonical value as the existing `target: 'type'`
+   pending suggestion only for an Unknown contact.
+3. The run decision ledger records the same value as proposed/coerced and keeps its
+   current pending verdict behavior.
+4. Existing suggestion replacement, dismissal tombstones, revision identity, SSE,
+   and journal recovery mechanisms remain unchanged because the target and item
+   shape do not change.
+
+### 5.3 Staff review
+
+1. The Unknown card reads the pending type suggestion and shows its canonical
+   staff label and reason.
+2. Staff chooses any of the four explicit classification actions.
+3. The dashboard sends the D2 `type` and `role` patch through the existing contact
+   update client.
+4. A failed request leaves the contact Unknown and re-enables all actions for a
+   retry. It does not optimistically remove the card.
+
+### 5.4 Resolution
+
+1. The route reads the current contact and exact pending suggestion identity.
+2. It applies the contact patch and existing status/conversation effects.
+3. It conditionally deletes only the suggestion identity read before the write.
+4. If the suggestion is still current and has a run id, it derives the full kind
+   from the updated contact and records accepted or superseded.
+5. The returned contact immediately selects the existing TenantFile,
+   LandlordFile, PartnerFile, or Property Manager display through current
+   type/role behavior.
+
+## 6. Existing surfaces that must move together
+
+### 6.1 Model contract and backend readers/writers
+
+- `app/src/services/extraction/prompt.ts`: external-contact framing, four-kind
+  rules, examples, and notes.
+- `app/src/services/extraction/schema.ts`: JSON schema enum and
+  `parseExtractionText` allowlist/types.
+- `app/src/adapters/extraction.ts`: shared `ExtractionResult` kind union.
+- `app/src/adapters/extractionFake.ts`: no protocol change, but its typed fake
+  payload must accept both new values through `ExtractionResult`.
+- `app/src/services/extraction/apply.ts`: persist the two new canonical values
+  through the existing Unknown-only suggestion path.
+- `app/src/services/extraction/ops.ts`: no behavior change; retain off-enum
+  diagnostic attempts and cover the new valid values in tests.
+- `app/src/routes/contacts.ts`: full-kind derivation and verdict comparison after
+  contact update; preserve conditional suggestion identity deletion and all
+  existing triage side effects.
+- `app/src/routes/suggestions.ts`: no behavior change; target `type` remains
+  triage-only.
+- `app/src/repos/extractionRepo.ts`, suggestion-resolution services, events, and
+  Today aggregation: no stored shape or target change; verify they remain generic
+  over `suggestedValue` and require no modification.
+
+### 6.2 Dashboard writers/readers/renderers
+
+- `dashboard/src/routes/contact/UnknownFile.tsx`: four labels, four actions, and
+  widened callback kind.
+- `dashboard/src/routes/contact/UnknownFile.module.css`: responsive action wrap.
+- `dashboard/src/routes/contact/ContactDetail.tsx`: map the selected canonical kind
+  to the D2 contact patch and apply the returned contact in place.
+- `dashboard/src/routes/contact/contactProfile.ts`: reuse the canonical
+  `PM_ROLE`; add or expose a four-kind label/mapping helper rather than scattering
+  string transforms.
+- `dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx`: humanize the `type`
+  decision's canonical kind without changing stored values.
+- `dashboard/src/api/types.ts` and `endpoints.ts`: widen callback/request typing as
+  needed; the persisted `SuggestionItem.suggestedValue` remains a string wire
+  field.
+- TenantFile, LandlordFile, PartnerFile, contact-list filters, inbox readers, and
+  KindPicker: no behavior change. Verify that the returned type/role selects their
+  current behavior correctly.
+
+### 6.3 Seeds, imports, and operational seams
+
+- Lean/full/performance seeds do not gain records or change byte-stable fixtures.
+- Import classification remains authoritative for imported records and is not
+  rerun.
+- Manual extraction uses the same forward-only model contract but does not scan
+  old contacts automatically.
+- No production contact is read, edited, or queued by this feature.
+- `docs/issues/caseworker-contact-type.md` closes when the implementation and
+  verification are complete; its history remains in the issue body.
+
+## 7. Error and race behavior
+
+- A refusal, parse failure, truncated response, driver failure, or unsupported
+  kind follows the existing AI-run failure/drop behavior and never changes the
+  contact.
+- A type suggestion for an already classified contact is dropped as
+  `type_already_classified`.
+- A contact PATCH failure leaves the pending suggestion intact unless the route's
+  existing post-write best-effort path is the failing step.
+- A suggestion created or replaced during the contact update is not deleted or
+  stamped because resolution uses the pre-write identity fence.
+- A classification action never overwrites an already resolved conflicting
+  conversation type; the existing triage conflict behavior remains.
+- Role strings are never inferred from organization names. Property Manager uses
+  only the exact preset role, and Partner role/organization detail stays in notes.
+
+## 8. Testing
+
+### 8.1 Backend unit and integration tests
+
+1. Schema enum contains the four kinds plus `none`.
+2. `parseExtractionText` returns Partner and Property Manager values, folds
+   `none`, and drops an unsupported value.
+3. Prompt-contract tests pin:
+   - external contact is not assumed to seek housing;
+   - owner versus property manager;
+   - property manager versus partner;
+   - caseworker self-identification versus mentioning one's caseworker;
+   - ambiguous evidence produces no suggestion;
+   - represented-person facts do not belong to the current contact;
+   - concise reconciled note behavior.
+4. `applyExtraction` persists Partner and Property Manager suggestions only for
+   Unknown contacts and records the canonical decision values.
+5. Raw operation parsing recognizes the two new valid values while preserving an
+   off-enum attempted value for diagnostics.
+6. Contact triage tests prove:
+   - Partner produces `partner_1to1` and `active`;
+   - Property Manager stores the Landlord base plus exact preset role, produces
+     `landlord_1to1`, and lands `interested`;
+   - standard Landlord clears a stale Property Manager role;
+   - a matching Property Manager suggestion is accepted;
+   - choosing Landlord for a Property Manager suggestion is superseded;
+   - matching Partner is accepted;
+   - conditional suggestion replacement remains pending.
+7. Existing Tenant and Landlord triage and verdict tests remain green.
+
+### 8.2 Dashboard component tests
+
+1. Partner and Property Manager suggestions render their exact labels and reasons.
+2. All four buttons render, are accessible by role/name, share busy/disabled state,
+   and call the intended canonical kind.
+3. ContactDetail sends each D2 `type`/`role` patch, uses the returned contact, and
+   leaves the Unknown view retryable on failure.
+4. The AI run detail renders `property_manager` as `Property Manager` only for the
+   type decision.
+5. Existing Tenant/Landlord Unknown card tests remain green.
+
+### 8.3 End-to-end tests
+
+Extend the existing conversation fact extraction flow using the fake extraction
+marker and a newly created Unknown contact:
+
+1. Partner flow: fake extraction emits Partner plus a caseworker reason/note; the
+   card shows `AI suggests: Partner`; staff clicks Mark as Partner; the Needs
+   triage card disappears; the contact displays as Partner; the linked thread is
+   `partner_1to1`; the suggestion is resolved.
+2. Property Manager flow: fake extraction emits Property Manager plus a management
+   reason/note; the card shows `AI suggests: Property Manager`; staff clicks Mark
+   as Property Manager; the contact displays as Property Manager; its stored base
+   behavior is Landlord; the linked thread is `landlord_1to1`; the suggestion is
+   resolved.
+
+The fake driver proves application plumbing, not real-model semantic accuracy. The
+prompt contract, structured schema, and changed prompt fingerprint are the
+deterministic proof available without a production model call.
+
+### 8.4 Feature completion gates
+
+After implementation, from the isolated feature worktree and after the one final
+sync from current `main`, run these bare commands with real exit codes:
+
+1. `npm run typecheck`
+2. `npm test`
+3. `npm run smoke`
+4. `npm run e2e`
+5. Touched-file ESLint against `main...HEAD`, following the repository ratchet and
+   empty-list rules in `AGENTS.md`.
+
+Also run a hermetic interactive browser session for live self-QA of both new
+classifications. Do not use production or the human's lane-0 dashboard.
+
+## 9. Acceptance criteria
+
+1. A clear caseworker or other outside service/program collaborator can produce a
+   pending Partner suggestion for an Unknown contact.
+2. A clear property manager can produce a pending Property Manager suggestion and
+   is not suggested as Landlord or Partner.
+3. An owner is Landlord; a manager acting for the owner is Property Manager.
+4. A tenant who mentions their caseworker is not classified as that caseworker.
+5. Ambiguous evidence produces no type suggestion.
+6. Staff can apply all four kinds from the Unknown card; none auto-apply.
+7. Property Manager acceptance stores the Landlord base plus exact Property
+   Manager role and retains existing Landlord-backed conversation/status behavior.
+8. AI-run verdicts distinguish Property Manager acceptance from a plain Landlord
+   override.
+9. Notes preserve stated role/organization facts without duplicates or inferred
+   data.
+10. Existing suggestions remain compatible, existing seeds/imports remain
+    unchanged, and no backfill runs.
+11. Staff-facing suggestion and audit renderers never show raw
+    `property_manager`.
+12. All required tests, full gates, adversarial reviews, and hermetic live QA pass
+    before the branch is declared merge-ready.
+
+## 10. Post-merge obligations
+
+None expected beyond the normal human-owned deploy and feature-flag process. There
+is no migration or backfill. Enabling or changing `AI_EXTRACTION_ENABLED`, deploying
+the application, and any targeted production extraction run remain explicit human
+operations outside this feature mission.

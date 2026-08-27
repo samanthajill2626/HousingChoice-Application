@@ -360,12 +360,13 @@ describe('prompt builders', () => {
   it('classifies the current external contact into four mutually exclusive kinds', () => {
     const sys = buildExtractionSystemPrompt();
     expect(sys).toContain('CURRENT external contact');
+    expect(sys).toMatch(/existing wire label "client" means the CURRENT external\s+contact/);
+    expect(sys).not.toContain('person seeking housing help');
     const examples = [
       ['I am looking for a two-bedroom home for my family', 'Tenant'],
       ['I own three rental properties', 'Landlord'],
       ['I manage three properties for the owner', 'Property Manager'],
       ['I am her caseworker at Hope Atlanta', 'Partner'],
-      ['My caseworker at Hope Atlanta told me to call', 'Tenant'],
       ['I am calling about a client', 'none'],
     ] as const;
     for (const [phrase, expected] of examples) {
@@ -379,6 +380,10 @@ describe('prompt builders', () => {
     const mentionedCaseworkerLine = sys.split('\n')
       .find((line) => line.includes('My caseworker at Hope Atlanta told me to call'));
     expect(mentionedCaseworkerLine).toContain('mentioned caseworker is not the contact');
+    expect(mentionedCaseworkerLine).toContain(
+      'only when other current-transcript evidence establishes the caller seeks housing for themselves or their household',
+    );
+    expect(mentionedCaseworkerLine).toContain('This sentence alone -> none');
     expect(sys).toContain('value "none"');
   });
 

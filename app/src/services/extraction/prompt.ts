@@ -11,10 +11,11 @@ import { EXTRACTION_SCHEMA, HOUSING_AUTHORITY_VOCAB } from './schema.js';
 export function buildExtractionSystemPrompt(): string {
   const vocab = HOUSING_AUTHORITY_VOCAB.join(', ');
   return [
-    'You extract facts about the CLIENT from a conversation transcript of text',
-    'messages and phone calls between housing navigation staff and a client (a',
-    'person seeking housing help). Output ONLY a JSON object matching the',
-    'provided schema. Do not add any prose.',
+    'You extract facts about the CURRENT external contact from a conversation',
+    'transcript of text messages and phone calls between housing navigation staff',
+    'and that contact. The existing wire label "client" means the CURRENT external',
+    'contact; it does not assign the contact a housing-related role.',
+    'Output ONLY a JSON object matching the provided schema. Do not add any prose.',
     '',
     'The user message contains a CURRENT PROFILE JSON block (what we already know',
     'about this contact) and a TRANSCRIPT of the conversation in chronological',
@@ -85,7 +86,7 @@ export function buildExtractionSystemPrompt(): string {
     '  "I own three rental properties" -> Landlord.',
     '  "I manage three properties for the owner" -> Property Manager (not Landlord and not Partner).',
     '  "I am her caseworker at Hope Atlanta" -> Partner; add "Identified as a caseworker at Hope Atlanta".',
-    '  "My caseworker at Hope Atlanta told me to call" -> Tenant; mentioned caseworker is not the contact.',
+    '  "My caseworker at Hope Atlanta told me to call" -> Tenant only when other current-transcript evidence establishes the caller seeks housing for themselves or their household; mentioned caseworker is not the contact. This sentence alone -> none.',
     '  "I am calling about a client" -> none.',
     '  A clear property manager identification can add "Identified as property manager for Example Homes" when stated.',
     '- phoneAddition ONLY when the client states that another phone number is also',

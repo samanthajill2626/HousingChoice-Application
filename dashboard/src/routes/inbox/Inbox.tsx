@@ -8,7 +8,7 @@ import { useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { InboxFilter } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
-import { INBOX_FILTERS, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
+import { INBOX_FILTERS, emptyClearedCopy, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
 import { InboxRow } from './InboxRow.js';
 import { rowKey, useInbox } from './useInbox.js';
 import styles from './Inbox.module.css';
@@ -42,12 +42,28 @@ export function Inbox(): React.JSX.Element {
   // is the same server quantity the truncation notice and the failure banner
   // below are gated on, for the same reason - see those two comments.
   //
-  // The client-emptied-with-more-behind state therefore keeps `emptyCopy`
-  // ("You're all caught up") ALONGSIDE a live Load more. That pairing is
-  // deliberate and reviewed: the button is an improvement (there really are
-  // more unread behind it), and inventing a third string for the state is a
-  // copy decision nobody has taken.
-  const empty = inbox.serverRowCount === 0 && inbox.hasMore ? emptyMoreCopy() : emptyCopy(filter);
+  // THE CLIENT-EMPTIED-WITH-MORE-BEHIND STATE GETS ITS OWN COPY (2026-08-26,
+  // phase-6 review). It used to fall through to `emptyCopy`, which put "You're
+  // all caught up" next to a live Load more - two sentences that contradict
+  // each other, on the tab an operator lives in all day. The previous round
+  // swapped one false sentence for another; this splits the state out instead
+  // of choosing between two claims that are each wrong somewhere.
+  //
+  // THREE STATES, EACH GATED ON A SERVER QUANTITY - the doctrine every other
+  // gate in this file follows (`serverRowCount`, never `rows`, for anything
+  // that speaks about the server page):
+  //   serverRowCount === 0 && hasMore  the SERVER page was empty and stopped
+  //                                    early -> emptyMoreCopy()
+  //   serverRowCount  > 0 && hasMore   the server filled it and the OPERATOR
+  //                                    cleared it -> emptyClearedCopy()
+  //   otherwise                        the filter's own copy
+  // `rows.length === 0` is not in any of them because the block that renders
+  // `empty` is already inside it. No filter gate either: off Unread, `rows` is
+  // `base` unnarrowed, so `serverRowCount > 0` with an empty list cannot arise -
+  // and `emptyClearedCopy` is worded to stay true if it ever does.
+  const empty = inbox.hasMore
+    ? (inbox.serverRowCount === 0 ? emptyMoreCopy() : emptyClearedCopy())
+    : emptyCopy(filter);
   // A26: the count comes from the hook's server-page tally, NOT from a filter
   // over `inbox.rows`. `rows` is the DISPLAYED list - already narrowed by the
   // Unread filter and already patched by the optimistic mark-read - so counting

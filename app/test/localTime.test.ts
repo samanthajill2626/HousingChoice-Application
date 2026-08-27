@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatLocalDate, formatLocalTime, toAscii } from '../src/lib/localTime.js';
+import { formatLocalDate, formatLocalTime, shiftLocalDate, toAscii } from '../src/lib/localTime.js';
 
 const NY = 'America/New_York';
 
@@ -74,4 +74,25 @@ describe('output is always ASCII (the SMS budget depends on it)', () => {
       expect(formatLocalTime(iso, NY)).not.toMatch(NON_ASCII);
     });
   }
+});
+
+describe('shiftLocalDate', () => {
+  it('steps back one day', () => {
+    expect(shiftLocalDate('2026-07-23', -1)).toBe('2026-07-22');
+  });
+  it('crosses a month boundary', () => {
+    expect(shiftLocalDate('2026-08-01', -1)).toBe('2026-07-31');
+  });
+  it('crosses a year boundary', () => {
+    expect(shiftLocalDate('2026-01-01', -1)).toBe('2025-12-31');
+  });
+  it('handles a leap day', () => {
+    expect(shiftLocalDate('2028-03-01', -1)).toBe('2028-02-29');
+  });
+  it('throws its OWN error on a malformed date, never a bare RangeError', () => {
+    // 'ab' parses to NaN, which is defined - a bare undefined-check would pass
+    // it through to Date.UTC and throw a RangeError from toISOString instead.
+    expect(() => shiftLocalDate('2026-ab-23', -1)).toThrow(/shiftLocalDate: unparseable/);
+    expect(() => shiftLocalDate('nonsense', -1)).toThrow(/shiftLocalDate: unparseable/);
+  });
 });

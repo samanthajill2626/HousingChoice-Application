@@ -32,6 +32,8 @@ import {
   phoneRefId,
   PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
+  REQUIRED_INDEX_KEY_ATTRIBUTES,
+  RequiredIndexKeyRemovalError,
   type ContactEmail,
   type ContactFlag,
   type ContactItem,
@@ -1681,6 +1683,14 @@ export function createFakeWorld(): FakeWorld {
           .map((contact) => [contact.contactId, contact] as const),
       );
     },
+    // FROZEN, and frozen for a named reason: the today.ts triage pins are
+    // calibrated against THIS fake's semantics, so changing them moves pins
+    // that have nothing to do with whatever you came here for. Do NOT add
+    // `filter=unknown` / unknown-queue coverage here - use
+    // test/helpers/contactsPartitionFake.ts, which is the shared helper
+    // positioned as the authority on partition semantics (it models the sparse
+    // index, filter-after-limit, the limit-reached LEK rule, and the range-key
+    // sort). Noted 2026-08-25, round-2 finding C3.
     async listByType(type, opts = {}) {
       const partition = contacts
         // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.
@@ -1689,11 +1699,19 @@ export function createFakeWorld(): FakeWorld {
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
         .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)));
-      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6): the
-      // page is drawn FIRST and any FilterExpression is applied to what came
-      // back, so a filtered-out row still spends a page slot. A fake that
-      // filtered before slicing could never see the defect the Today fill loop
-      // exists to close.
+      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6) FOR
+      // `excludeOrigin` ONLY - the page is drawn FIRST and that filter is
+      // applied to what came back, so an excluded-origin row still spends a
+      // page slot, which is the defect the Today fill loop exists to close.
+      //
+      // IT IS NOT TRUE OF THE OTHER TWO (corrected 2026-08-25, round-2 finding
+      // C3; the claim above was unqualified and read as covering all of them).
+      // `deleted` and `status` are filtered ABOVE, before the slice, so this
+      // fake charges no page slot for a soft-deleted or wrong-status row where
+      // DynamoDB would. It also does not model the range-key SORT that
+      // contactsPartitionFake.ts gained in the same fix wave: this partition
+      // comes back in SEED-ARRAY order, not `status`-ascending. All three gaps
+      // are why new coverage belongs on the shared helper (see the note above).
       const start = typeof opts.exclusiveStartKey?.['contactId'] === 'string'
         ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1
         : 0;
@@ -1777,6 +1795,12 @@ export function createFakeWorld(): FakeWorld {
         // clear passed every unit test and 500'd in a live request.
         if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
           throw new EmptyIndexKeyError(key);
+        }
+        // Mirror the other half too. A fake that lets `status: null` through
+        // would keep the contact in this array and so keep it "visible", which
+        // is precisely the illusion the real byTypeStatus GSI does not offer.
+        if (value === null && REQUIRED_INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new RequiredIndexKeyRemovalError(key, contactId);
         }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;

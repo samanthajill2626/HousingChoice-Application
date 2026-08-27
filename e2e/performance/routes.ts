@@ -396,10 +396,20 @@ const PLACEMENT_TERMINAL = terminal(
   [locator('list', undefined, 'role_only')], [locator('text', 'No active placements.')],
   [locator('alert', "We couldn't load placements. Please try again.")], [locator('searchbox', 'Search placements')],
 );
+// TWO empty alternatives, not one (2026-08-26). A page that stopped early -
+// the Unknown feed's scan-budget exit, or its thread-read-failure exit - comes
+// back with NO rows and a cursor, and the dashboard renders `emptyMoreCopy()`
+// there instead of the per-filter title (dashboard/src/routes/inbox/
+// inboxFilters.ts). With only the per-filter alternative that sample matches
+// neither populated nor empty, so `terminalStateFor` answers 'unknown',
+// readiness never resolves, and the run fails as `ready_timeout` - a failure
+// naming the readiness gate rather than the copy that caused it. Unreachable on
+// today's perf seed (its unknown count is far below the scan budget); pinned so
+// it stays a copy change rather than a mystery timeout.
 function inboxTerminal(emptyTitle: string): TerminalContract {
   return terminal(
     [locator('list', 'Conversations')],
-    [locator('text', emptyTitle)],
+    [locator('text', emptyTitle), locator('text', 'Nothing on this page yet')],
     [L.alert],
     [locator('tablist', 'Inbox filters')],
   );

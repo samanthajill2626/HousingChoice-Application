@@ -126,6 +126,16 @@ export function createAudienceResolutionService(
             limit: pageSize,
             ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
           })
+        // TODO(broadcast-audience-truncation-drops-searching-tenants): this
+        // walk is bounded (maxPages x pageSize) and byTypeStatus's RANGE KEY is
+        // `status`, which listByType reads ASCENDING (no ScanIndexForward). So
+        // a truncated audience does not drop a random tail: TENANT_STATUSES
+        // ascending starts at `inactive` and ends at `searching`, so the cut
+        // keeps inactive tenants and drops SEARCHING ones first - the exact
+        // population a property-match send is for. Latent only today (10,000
+        // bound vs ~641 tenants, so the partition exhausts every run); the
+        // byHousingAuthority branch above is hash-only and has no ordering at
+        // all. Do NOT lower these bounds believing the cut is arbitrary.
         : await contacts.listByType('tenant', {
             limit: pageSize,
             ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),

@@ -226,7 +226,7 @@ describe('GET /api/messages/:providerSid/media/:idx (authed)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('image/jpeg');
     // Allowlisted image → INLINE (no attachment disposition) so the <img> renders.
-    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.headers['content-disposition']).toMatch(/^inline; filename="/);
     // Defense headers on every media response.
     expect(res.headers['content-security-policy']).toContain('sandbox');
     expect(res.headers['x-content-type-options']).toBe('nosniff');

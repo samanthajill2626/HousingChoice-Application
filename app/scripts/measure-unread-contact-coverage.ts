@@ -323,6 +323,16 @@ async function auditWalk(): Promise<void> {
  *
  * This replicates the pager: same partition, same order, same per-conversation
  * contact resolution, same break condition. Counts only, no PII.
+ *
+ * HISTORICAL AS OF `feat/inbox-unread-cluster` (2026-08-25, round-2 ruling C1).
+ * The app no longer performs this read: `filter=unknown` was moved onto the
+ * (type='unknown') contacts byTypeStatus partition, so nothing in production
+ * walks `byLastActivity` resolving a contact per open conversation any more.
+ * This mode is RETAINED UNCHANGED, deliberately, so the before/after comparison
+ * still runs against the same instrument that produced the published figures -
+ * do not "modernise" it to match the new read, and do not read its output as
+ * the current cost of the Unknown tab. Use `--audit-triage-partition`
+ * (with `--no-status-narrow`) for what the tab reads today.
  */
 async function auditUnknownPage(pageLimit: number): Promise<void> {
   // The pager's own chunk size: min(FETCH_BATCH=100, max(limit, DEFAULT=25)).
@@ -599,18 +609,32 @@ async function auditDenorm(): Promise<void> {
  * this measures that directly rather than assuming it away.
  */
 async function auditTriagePartition(): Promise<void> {
+  // `--no-status-narrow` prices the read the design ACTUALLY proposes. Draft 4's
+  // requirement 1 queries type=unknown with NO status filter, because a contact
+  // created as `unknown` defaults to status 'active' rather than 'needs_review'
+  // - so narrowing on needs_review measures a strictly SMALLER partition than
+  // the one that would be read. Every figure published before this flag existed
+  // priced the narrowed shape.
+  const narrow = !argv.includes('--no-status-narrow');
   const PAGE = 100;
   const MAX_PAGES = 10; // today.ts's TRIAGE_MAX_PAGES - the precedent's budget.
   let queries = 0;
   let rawRows = 0;
   let statusMismatch = 0;
   let deletedSeen = 0;
+  // The PARTITION's own status composition. Added 2026-08-26 because the issue
+  // `unknown-queue-cap-starves-needs-review` names the `(unknown, active)` count
+  // as half its reopen trigger, and NOTHING printed it: the tab-vs-partition
+  // audit breaks down the TAB's rows, not the partition's, and `statusMismatch`
+  // is inert under --no-status-narrow. A reopen check nobody can run is not a
+  // check. Print-only; no measured value changes.
+  const partitionStatuses = new Map<string, number>();
   let cursor: Record<string, unknown> | undefined;
   let exhausted = false;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const read = await contacts.listByType('unknown', {
-      status: 'needs_review',
+      ...(narrow ? { status: 'needs_review' } : {}),
       limit: PAGE,
       ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
     });
@@ -618,7 +642,9 @@ async function auditTriagePartition(): Promise<void> {
     rawRows += read.items.length;
     for (const c of read.items) {
       if ((c as { deleted_at?: unknown }).deleted_at !== undefined) deletedSeen += 1;
-      if (c.status !== 'needs_review') statusMismatch += 1;
+      if (narrow && c.status !== 'needs_review') statusMismatch += 1;
+      const st = typeof c.status === 'string' && c.status !== '' ? c.status : '(none)';
+      partitionStatuses.set(st, (partitionStatuses.get(st) ?? 0) + 1);
     }
     cursor = read.lastEvaluatedKey;
     if (cursor === undefined) {
@@ -635,7 +661,7 @@ async function auditTriagePartition(): Promise<void> {
   let filteredExhausted = false;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const read = await contacts.listByType('unknown', {
-      status: 'needs_review',
+      ...(narrow ? { status: 'needs_review' } : {}),
       limit: PAGE,
       excludeOrigin: GROUP_DETECTION_ORIGIN,
       ...(fcursor === undefined ? {} : { exclusiveStartKey: fcursor }),
@@ -659,12 +685,35 @@ async function auditTriagePartition(): Promise<void> {
       `  table prefix        ${tablePrefix}`,
       `  page size ${PAGE}, page budget ${MAX_PAGES} (today.ts's own)`,
       '',
-      '  UNFILTERED (type=unknown, status=needs_review):',
+      `  query shape: type=unknown${narrow ? ', status=needs_review (NARROWED - NOT what the design proposes; pass --no-status-narrow)' : " (NO status narrowing - the design's actual read)"}`,
+      '',
+      '  UNFILTERED:',
       `    Queries issued     ${queries}`,
       `    rows returned      ${rawRows}`,
       `    partition ${exhausted ? 'EXHAUSTED within budget' : 'NOT exhausted - more rows behind the budget'}`,
       `    soft-deleted seen  ${deletedSeen}`,
-      `    status mismatch    ${statusMismatch}  (should be 0 - the range key is the status)`,
+      // THE STATUS BREAKDOWN. It was filed as the reopen number for
+      // `unknown-queue-cap-starves-needs-review` while an un-narrowed Query
+      // ascended the range key `status` ('active' < 'needs_review') and a
+      // result cap filled from the `active` block first. That cap is GONE
+      // (2026-08-26): the tab reads one bounded Query per status block,
+      // untriaged FIRST, and pages with the index's own cursor - so there is no
+      // number to compare against a cap any more. The breakdown stays because
+      // it is the honest shape of the partition and it prices the walk.
+      '    partition statuses:',
+      ...[...partitionStatuses.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        .map(([k, v]) => `      ${k.padEnd(20)}${v}`),
+      // PRINTED ONLY WHEN IT CAN MEAN SOMETHING (2026-08-25, round-2 ruling
+      // C1). `statusMismatch` is incremented under `if (narrow && ...)` above,
+      // so under `--no-status-narrow` it is structurally inert - and printing
+      // an inert `0` next to the words "should be 0" reads as a PASSED CHECK,
+      // inside the output of the very run the HIGH-1 record depends on. No
+      // measured value changes; the line simply does not claim a check that
+      // was never made.
+      ...(narrow
+        ? [`    status mismatch    ${statusMismatch}  (should be 0 - the range key is the status)`]
+        : []),
       '',
       '  WITH the group-detection origin exclusion (what today.ts actually issues):',
       `    Queries issued     ${filteredQueries}`,
@@ -712,6 +761,11 @@ if (argv.includes('--audit-index')) {
  * whole point.
  */
 async function auditTabVsPartition(pageLimit: number): Promise<void> {
+  // Same flag as --audit-triage-partition, and for the same reason: draft 4's
+  // requirement 1 queries type=unknown with NO status narrowing. Left narrowed,
+  // this diff reports every `active` unknown as "in tab, NOT in partition" -
+  // losses the design would never actually incur.
+  const narrow = !argv.includes('--no-status-narrow');
   // 1. Walk the open partition exactly as the pager does, collecting the
   //    contact ids the tab would show. No page limit here - we want the whole
   //    set, not the first page, because a row missing from page 3 is still
@@ -759,7 +813,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
     let cursor: Record<string, unknown> | undefined;
     for (let page = 0; page < 10; page += 1) {
       const read = await contacts.listByType('unknown', {
-        status: 'needs_review',
+        ...(narrow ? { status: 'needs_review' } : {}),
         limit: 100,
         ...(excludeOrigin ? { excludeOrigin: GROUP_DETECTION_ORIGIN } : {}),
         ...(cursor === undefined ? {} : { exclusiveStartKey: cursor }),
@@ -802,7 +856,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
     let dcursor: Record<string, unknown> | undefined;
     for (let page = 0; page < 10; page += 1) {
       const read = await contacts.listByType('unknown', {
-        status: 'needs_review',
+        ...(narrow ? { status: 'needs_review' } : {}),
         limit: 100,
         deleted: true,
         ...(dcursor === undefined ? {} : { exclusiveStartKey: dcursor }),
@@ -839,6 +893,7 @@ async function auditTabVsPartition(pageLimit: number): Promise<void> {
       '==============================================',
       `  endpoint            ${endpoint ?? '(AWS default resolution)'}`,
       `  table prefix        ${tablePrefix}`,
+      `  query shape         type=unknown${narrow ? ', status=needs_review (NARROWED - NOT the design; pass --no-status-narrow)' : " (NO status narrowing - the design's read)"}`,
       '',
       `  tab would show (by contact)   ${tabContactIds.size}`,
       '    their statuses:',

@@ -2,6 +2,12 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboxRow as InboxRowData } from '../../api/index.js';
+// THE COPY IS IMPORTED, NEVER RE-TYPED (2026-08-26, phase-6 review). A sentence
+// re-typed into a pin is a sentence that got HARDER to correct: the Unknown
+// tab's empty copy stood false for months partly because "fixing" it meant
+// hunting every verbatim copy of it. `inboxFilters.ts` is the one source; these
+// tests assert that what the page renders is what that module returns.
+import { emptyClearedCopy, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
 import type { InboxState } from './useInbox.js';
 
 let state: InboxState;
@@ -133,12 +139,96 @@ describe('Inbox', () => {
   // couldn't load your inbox.", an error banner with no server statement behind
   // it. The gate is `serverRowCount` - a server claim judged against a server
   // quantity - so the two states stay exact complements.
-  it('a truncated page whose rows were all marked read is caught up, NOT an error', () => {
-    state = baseState({ status: 'ready', rows: [], truncated: true, serverRowCount: 3 });
+  //
+  // `hasMore: true` IS PART OF THE FIXTURE (fix wave 2, F2). It was left at
+  // `baseState`'s default `false`, and that alone is why this pin stayed green
+  // while fix wave 1 gated the empty COPY on `hasMore` - the state it is named
+  // for carries a cursor (a page that FILLED mints one), so the pin could not
+  // see the regression it exists to catch. A pin that cannot fail is worse than
+  // no pin.
+  it('a truncated page whose rows were all marked read is NOT an error', () => {
+    state = baseState({
+      status: 'ready',
+      rows: [],
+      truncated: true,
+      serverRowCount: 3,
+      hasMore: true,
+    });
     renderInbox('/inbox?filter=unread');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText(/couldn.t load your inbox/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
+    // The COPY assertion moved from "all caught up" to the cleared-page copy on
+    // 2026-08-26 (phase-6 review, FIX 4) - this fixture carries `hasMore: true`,
+    // so "all caught up" here stood next to a live Load more. What this pin is
+    // NAMED for is unchanged and unweakened: no alert, no failure copy.
+    expect(screen.getByText(emptyClearedCopy().title)).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).toBeNull();
+  });
+
+  // F2, THE ORDINARY END OF A TRIAGE SESSION - and the state both round-2
+  // reviewers found independently. The server filled a page of 30 unread and
+  // minted a cursor because it FILLED, not because it stopped early. The
+  // operator marks all 30 read, which is what the tab is for, and `useInbox`
+  // narrows them out of `rows`. Gated on `hasMore` alone the empty copy became
+  // "This search stopped early to stay fast" - false on both halves, and a
+  // successful session ended by telling the operator the app had degraded.
+  //
+  // THE GATE IS A SERVER QUANTITY, `serverRowCount === 0 && hasMore`, which is
+  // the same doctrine the truncation notice and the failure banner above
+  // already carry: a claim about the SERVER page is never judged against
+  // `rows`. The Load more STAYS - the server has not said the feed ended.
+  //
+  // AND THE COPY IS ITS OWN, as of 2026-08-26 (phase-6 review, FIX 4). Fix wave
+  // 2 sent this state back to `emptyCopy('unread')`, which renders "You're all
+  // caught up" - beside the very Load more this pin asserts is present. Those
+  // two are a contradiction on the daily-driver tab, so the state got a third
+  // string rather than a second wrong one. The three-way split is pinned
+  // together below so nobody can quietly collapse it back to two.
+  it('gets its OWN copy - neither "stopped early" nor "all caught up" - after the operator clears a full unread page', () => {
+    state = baseState({
+      status: 'ready',
+      rows: [],
+      truncated: false,
+      serverRowCount: 30,
+      hasMore: true,
+    });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(emptyClearedCopy().title)).toBeInTheDocument();
+    expect(screen.getByText(emptyClearedCopy().body)).toBeInTheDocument();
+    // NOT the server's stopped-early copy: the server did not stop early, it
+    // filled the page.
+    expect(screen.queryByText(emptyMoreCopy().title)).toBeNull();
+    expect(screen.queryByText(/stopped early/i)).toBeNull();
+    // ...and NOT "all caught up", which is what the Load more contradicts.
+    expect(screen.queryByText(/all caught up/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument();
+  });
+
+  // THE THREE-WAY SPLIT, in one place. Each empty copy is selected by a SERVER
+  // quantity, and the pin exists because collapsing any two of them is exactly
+  // the mistake this state has now attracted twice: fix wave 1 merged "cleared"
+  // into "stopped early", fix wave 2 merged it into "all caught up". Both
+  // produced a sentence that was false next to what was rendered beside it.
+  it('selects the empty copy from the SERVER page, three ways', () => {
+    const cases: { over: Partial<InboxState>; title: string }[] = [
+      // The server page was empty AND there is more behind it: it stopped early.
+      { over: { serverRowCount: 0, hasMore: true }, title: emptyMoreCopy().title },
+      // The server filled the page; the OPERATOR emptied the list.
+      { over: { serverRowCount: 30, hasMore: true }, title: emptyClearedCopy().title },
+      // No cursor: the feed really has ended, so the filter's own copy is true.
+      { over: { serverRowCount: 0, hasMore: false }, title: emptyCopy('unread').title },
+    ];
+    const titles = new Set(cases.map((c) => c.title));
+    expect(titles.size).toBe(3);
+    for (const { over, title } of cases) {
+      state = baseState({ status: 'ready', rows: [], ...over });
+      const view = renderInbox('/inbox?filter=unread');
+      expect(screen.getByText(title)).toBeInTheDocument();
+      for (const other of [...titles].filter((t) => t !== title)) {
+        expect(screen.queryByText(other)).toBeNull();
+      }
+      view.unmount();
+    }
   });
 
   it('renders rows and a Load more button when there is another page', () => {
@@ -384,5 +474,61 @@ describe('Inbox - the Unread truncation notice', () => {
     );
     expect(screen.queryByRole('list', { name: 'Conversations' })).toBeNull();
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+});
+
+describe('the Unknown tab empty state (contact-side read, 2026-08-25)', () => {
+  it('an empty ready page renders the honest empty copy, never the failure banner', () => {
+    state = baseState();
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.getByText(emptyCopy('unknown').title)).toBeInTheDocument();
+    // BOTH LINES, from the module. The body is the half that was false until
+    // 2026-08-26 and the half nothing rendered-side had ever pinned.
+    expect(screen.getByText(emptyCopy('unknown').body)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  // M1 / blast-radius finding 2, THE DEAD END. The server deliberately returns
+  // an EMPTY page WITH a cursor when its per-request scan budget expires
+  // (app/src/routes/inbox.ts, the unknown branch's budget exit; pinned app-side
+  // by test/inboxUnknownTab.test.ts "the SCAN BUDGET returns a SHORT page WITH
+  // a cursor"). Load more used to be nested inside `rows.length > 0`, so that
+  // state rendered the empty copy with NO affordance and every row behind the
+  // budget was unreachable from the UI - the exact defect the rework was
+  // chartered to remove, reintroduced one layer up. There was no dashboard pin,
+  // so it shipped green.
+  it('renders Load more on an EMPTY page that still carries a cursor - a budget-stopped page is not a dead end', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: true });
+    renderInbox('/inbox?filter=unknown');
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  // ...and the COPY changes with it. "No unknown numbers" over a live Load more
+  // is a contradiction an operator reads as a broken app; the honest sentence is
+  // that this page found nothing YET and there is more to read.
+  it('says the page found nothing YET - not that the queue is empty - while a cursor stands', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: true });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.queryByText(emptyCopy('unknown').title)).toBeNull();
+    expect(screen.getByText(emptyMoreCopy().title)).toBeInTheDocument();
+  });
+
+  it('keeps the real empty copy - and no Load more - once the walk has actually ended', () => {
+    state = baseState({ status: 'ready', rows: [], hasMore: false });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.getByText(emptyCopy('unknown').title)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /load more/i })).toBeNull();
+  });
+
+  it('an empty page the server calls truncated DOES banner - which is why the unknown branch must never set the flag (requirement 5)', () => {
+    // This pins the DEPENDENCY, not a wish: serverEndedEarlyEmpty is not
+    // filter-gated (Inbox.tsx:42), so the server-side rule "no truncated on
+    // filter=unknown" (routes/inbox.ts, the unknown branch's return) is what
+    // keeps a cleared triage queue from rendering as a load failure.
+    state = baseState({ truncated: true });
+    renderInbox('/inbox?filter=unknown');
+    expect(screen.queryByText(emptyCopy('unknown').title)).toBeNull();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 });

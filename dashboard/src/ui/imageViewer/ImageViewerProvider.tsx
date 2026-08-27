@@ -48,6 +48,12 @@ interface InertSnapshot {
   inert: boolean;
 }
 
+interface PendingFocusRestore {
+  returnLocationKey: string;
+  trigger: HTMLElement;
+  animationFrame?: number;
+}
+
 const MAX_RETAINED_IMAGES = 20;
 const ImageViewerContext = createContext<ImageViewerContextValue | undefined>(undefined);
 
@@ -69,6 +75,10 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
   const normalizedMarkersRef = useRef(new Set<string>());
   const previousActiveRef = useRef<ActiveViewer | undefined>(undefined);
   const releasePortalRef = useRef<(() => void) | undefined>(undefined);
+  const pendingFocusRestoreRef = useRef<PendingFocusRestore | undefined>(undefined);
+  const providerMountedRef = useRef(false);
+  const currentLocationKeyRef = useRef(location.key);
+  const currentMarkerTokenRef = useRef<string | undefined>(undefined);
   const [portalNode] = useState(() => {
     const node = document.createElement('div');
     node.dataset.imageViewerPortal = 'true';
@@ -82,8 +92,37 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
     [entry, marker],
   );
 
+  const cancelPendingFocusRestore = useCallback((): void => {
+    const pending = pendingFocusRestoreRef.current;
+    if (pending?.animationFrame !== undefined) {
+      cancelAnimationFrame(pending.animationFrame);
+    }
+    pendingFocusRestoreRef.current = undefined;
+  }, []);
+
+  useLayoutEffect(() => {
+    providerMountedRef.current = true;
+    return () => {
+      providerMountedRef.current = false;
+      cancelPendingFocusRestore();
+    };
+  }, [cancelPendingFocusRestore]);
+
+  useLayoutEffect(() => {
+    currentLocationKeyRef.current = location.key;
+    currentMarkerTokenRef.current = marker?.token;
+    const pending = pendingFocusRestoreRef.current;
+    if (
+      pending !== undefined &&
+      (marker !== undefined || location.key !== pending.returnLocationKey)
+    ) {
+      cancelPendingFocusRestore();
+    }
+  }, [cancelPendingFocusRestore, location.key, marker]);
+
   const openImage = useCallback(
     (image: ViewerImage, trigger: HTMLElement): void => {
+      cancelPendingFocusRestore();
       if (readImageViewerMarker(location.state) !== undefined) return;
 
       const token = crypto.randomUUID();
@@ -112,7 +151,7 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
         },
       );
     },
-    [location, navigate],
+    [cancelPendingFocusRestore, location, navigate],
   );
 
   const requestDismiss = useCallback(
@@ -171,7 +210,40 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
     releasePortalRef.current?.();
     restoreScrollOwners(previous.entry.scroll);
     if (previous.entry.trigger.isConnected) {
-      previous.entry.trigger.focus({ preventScroll: true });
+      const pending: PendingFocusRestore = {
+        returnLocationKey: previous.marker.returnLocationKey,
+        trigger: previous.entry.trigger,
+      };
+      pendingFocusRestoreRef.current = pending;
+      queueMicrotask(() => {
+        if (
+          !providerMountedRef.current ||
+          pendingFocusRestoreRef.current !== pending ||
+          currentLocationKeyRef.current !== pending.returnLocationKey ||
+          currentMarkerTokenRef.current !== undefined
+        ) {
+          return;
+        }
+        if (!pending.trigger.isConnected) {
+          pendingFocusRestoreRef.current = undefined;
+          return;
+        }
+        pending.trigger.focus({ preventScroll: true });
+        pending.animationFrame = requestAnimationFrame(() => {
+          if (
+            !providerMountedRef.current ||
+            pendingFocusRestoreRef.current !== pending ||
+            currentLocationKeyRef.current !== pending.returnLocationKey ||
+            currentMarkerTokenRef.current !== undefined
+          ) {
+            return;
+          }
+          pendingFocusRestoreRef.current = undefined;
+          if (pending.trigger.isConnected && document.activeElement !== pending.trigger) {
+            pending.trigger.focus({ preventScroll: true });
+          }
+        });
+      });
     }
   }, [active, location.key]);
 

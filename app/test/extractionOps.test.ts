@@ -73,6 +73,11 @@ describe('parseExtractionOps - per-target mapping', () => {
   it('maps typeSuggestion.value, treating an OFF-ENUM value as a failed attempt not a decline', () => {
     expect(parseExtractionOps('{"typeSuggestion":{"value":"tenant","reason":"r"}}').type)
       .toEqual({ op: 'suggest', value: 'tenant', reason: 'r' });
+    for (const kind of ['partner', 'property_manager']) {
+      expect(parseExtractionOps(JSON.stringify({
+        typeSuggestion: { value: kind, reason: 'stated role' },
+      })).type).toEqual({ op: 'suggest', value: kind, reason: 'stated role' });
+    }
     expect(parseExtractionOps('{"typeSuggestion":{"value":"none","reason":""}}').type).toEqual({ op: 'none' });
     expect(parseExtractionOps('{"typeSuggestion":{"value":"caseworker","reason":""}}').type)
       .toEqual({ op: 'suggest', value: 'caseworker' });

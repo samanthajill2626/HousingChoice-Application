@@ -15,6 +15,7 @@ import type {
   ExtractableField,
   ExtractionFieldOp,
   ExtractionResult,
+  SuggestedContactKind,
 } from '../../adapters/extraction.js';
 import { cleanAddressParts, normalizeAddressForCompare } from './address.js';
 import { DECISION_TARGETS, type DecisionTarget, type ProposedOp } from './runTypes.js';
@@ -37,6 +38,18 @@ export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
  * apply layer and the contacts PATCH provenance-clear gate always agree.
  */
 export const PROVENANCE_FIELDS: readonly string[] = [...EXTRACTABLE_FIELDS, 'address'];
+
+const SUGGESTED_CONTACT_KINDS = [
+  'tenant',
+  'landlord',
+  'property_manager',
+  'partner',
+] as const satisfies readonly SuggestedContactKind[];
+
+function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
+  return typeof value === 'string'
+    && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
+}
 
 /**
  * Controlled vocabulary of housing-authority values - EXACT strings as stored
@@ -121,7 +134,7 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
       additionalProperties: false,
       properties: {
         // "none" is the required-key sentinel for "no suggestion".
-        value: { type: 'string', enum: ['tenant', 'landlord', 'none'] },
+        value: { type: 'string', enum: ['tenant', 'landlord', 'property_manager', 'partner', 'none'] },
         reason: { type: 'string' },
       },
       required: ['value', 'reason'],
@@ -240,10 +253,10 @@ export function parseExtractionText(text: string): ExtractionResult {
   }
 
   // "none" is the all-required wire sentinel for "no type suggestion" - any
-  // value other than the two real types folds to absent.
+  // unsupported value folds to absent.
   const typeSuggestion = root.typeSuggestion;
-  if (isRecord(typeSuggestion) && (typeSuggestion.value === 'tenant' || typeSuggestion.value === 'landlord')) {
-    const value: { value: 'tenant' | 'landlord'; reason?: string } = { value: typeSuggestion.value };
+  if (isRecord(typeSuggestion) && isSuggestedContactKind(typeSuggestion.value)) {
+    const value: { value: SuggestedContactKind; reason?: string } = { value: typeSuggestion.value };
     if (typeof typeSuggestion.reason === 'string' && typeSuggestion.reason.trim().length > 0) {
       value.reason = clamp(typeSuggestion.reason, MAX_REASON_CHARS);
     }

@@ -338,6 +338,18 @@ export interface FakeWorld {
   pendingRosterActionsRepo: PendingRosterActionsRepo;
   /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
   suggestions: Map<string, SuggestionItem>;
+  /** Hooks at the real extraction read/delete boundaries for race tests. */
+  suggestionHooks: {
+    beforeGetSuggestion?: (
+      contactId: string,
+      target: string,
+      opts?: { consistentRead?: boolean },
+    ) => Promise<void> | void;
+    beforeDeleteTypeSuggestion?: (
+      suggestion: SuggestionItem,
+      expectedContactRevision: number,
+    ) => Promise<void> | void;
+  };
   /** scheduleExtraction calls through the world extraction repo, in order (the
    *  API-side schedule sites, e.g. the triage re-extraction hook). The WEBHOOK
    *  schedule path keeps asserting via opts.extractionRepo. */
@@ -3089,6 +3101,7 @@ export function createFakeWorld(): FakeWorld {
   // conversation-fact-extraction (T8): pending AI suggestions, keyed by itemId
   // (`sugg#<contactId>#<target>`).
   const suggestions = new Map<string, SuggestionItem>();
+  const suggestionHooks: FakeWorld['suggestionHooks'] = {};
   // API-side scheduleExtraction calls (triage re-extraction hook), in order.
   const extractionSchedules: FakeWorld['extractionSchedules'] = [];
   // API-side requestManualExtraction calls (the manual trigger route), in order.
@@ -3251,7 +3264,8 @@ export function createFakeWorld(): FakeWorld {
       suggestions.set(itemId, item);
       return { item: { ...item }, ...(prior !== undefined && { displaced: prior }) };
     },
-    async getSuggestion(contactId, target) {
+    async getSuggestion(contactId, target, opts) {
+      await suggestionHooks.beforeGetSuggestion?.(contactId, target, opts);
       const hit = suggestions.get(`sugg#${contactId}#${target}`);
       return hit ? { ...hit } : undefined;
     },
@@ -3282,6 +3296,7 @@ export function createFakeWorld(): FakeWorld {
       return true;
     },
     async deleteTypeSuggestionIfCurrentAtContactRevision(suggestion, expectedRevision) {
+      await suggestionHooks.beforeDeleteTypeSuggestion?.(suggestion, expectedRevision);
       const contact = contacts.find((item) => item.contactId === suggestion.ownerContactId);
       if (
         contact === undefined
@@ -3692,6 +3707,7 @@ export function createFakeWorld(): FakeWorld {
     pendingRosterActionsMap,
     pendingRosterActionsRepo,
     suggestions,
+    suggestionHooks,
     extractionSchedules,
     manualExtractionRequests,
     failManualExtractionFor,

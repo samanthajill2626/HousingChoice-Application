@@ -122,6 +122,46 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.extractionSchedules).toEqual([]);
   });
 
+  it('setting the exact Property Manager role keeps the landlord lifecycle and conversation type', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', role: 'Property Manager' })
+      .expect(200);
+
+    expect(res.body.contact).toMatchObject({
+      type: 'landlord',
+      role: 'Property Manager',
+      status: 'interested',
+    });
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('landlord_1to1');
+    expect(world.extractionSchedules).toEqual([]);
+  });
+
+  it('clears a prior Property Manager role when triaged as a plain landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const existing = world.contacts.find((contact) => contact.contactId === 'contact-triage-1');
+    if (existing === undefined) throw new Error('expected seeded contact');
+    existing.type = 'landlord';
+    existing.role = 'Property Manager';
+    existing.status = 'interested';
+
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', role: '' })
+      .expect(200);
+
+    expect(res.body.contact.type).toBe('landlord');
+    expect(res.body.contact.role).toBeUndefined();
+  });
+
   it('setting type=partner propagates -> partner_1to1 and auto-advances to active (a resolved NON_TENANT identity)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);

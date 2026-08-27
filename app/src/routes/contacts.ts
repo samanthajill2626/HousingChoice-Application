@@ -46,6 +46,7 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   contactEmails,
   contactPhones,
+  contactClassificationRevision,
   createContactsRepo,
   isDeleted,
   PHONE_REF_PREFIX,
@@ -91,6 +92,8 @@ import {
 } from '../repos/contactVocabularyRepo.js';
 import {
   createExtractionRepo,
+  sameSuggestionIdentity,
+  type GuardedTypeDeleteResult,
   type ExtractionRepo,
   type SuggestionItem,
 } from '../repos/extractionRepo.js';
@@ -101,6 +104,7 @@ import {
   formatAddressParts,
 } from '../services/extraction/address.js';
 import { isDecisionTarget } from '../services/extraction/runTypes.js';
+import { canonicalSuggestedContactKind } from '../services/extraction/contactKinds.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -1503,10 +1507,26 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // Type/role are one stored classification. The type-specific protocol owns
+    // target=type below; its pre-read is only advisory because a writer may
+    // publish while this PATCH is committing.
+    const changesKind = 'type' in parsed.patch || 'role' in parsed.patch;
+    let pendingTypeBefore: SuggestionItem | undefined;
+    if (changesKind) {
+      try {
+        pendingTypeBefore = await extraction.getSuggestion(contactId, 'type', {
+          consistentRead: true,
+        });
+      } catch (err) {
+        log.warn({ err, contactId }, 'type suggestion pre-write read failed (best-effort)');
+      }
+    }
+
     // Snapshot exact pending identities before the contact write. A failed read
     // means this request has no safe identity to delete after the write.
     const pendingByField = new Map<string, SuggestionItem>();
     for (const f of parsed.changedFields) {
+      if (f === 'type') continue;
       try {
         const pending = await extraction.getSuggestion(contactId, f);
         if (pending !== undefined) pendingByField.set(f, pending);
@@ -1555,6 +1575,89 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         });
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
+      }
+    }
+
+    // A type suggestion is judged against the COMPLETE persisted kind, not
+    // against just PATCH.type: Property Manager is landlord plus an exact role,
+    // and role-only dashboard edits are classifications too. Drain a bounded
+    // number of older rows so a replacement racing the contact write cannot
+    // remain actionable for an already-committed classification.
+    if (changesKind) {
+      const committedRevision = contactClassificationRevision(updated);
+      const appliedKind = canonicalSuggestedContactKind(updated);
+      let candidate = pendingTypeBefore;
+      let exhausted = true;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (candidate === undefined) {
+          try {
+            candidate = await extraction.getSuggestion(contactId, 'type', {
+              consistentRead: true,
+            });
+          } catch (err) {
+            log.warn({ err, contactId }, 'type suggestion drain read failed (best-effort)');
+            exhausted = false;
+            break;
+          }
+          if (candidate === undefined) {
+            exhausted = false;
+            break;
+          }
+        }
+
+        const candidateContactRevision = candidate.contactClassificationRevision ?? 0;
+        if (candidateContactRevision >= committedRevision) {
+          exhausted = false;
+          break;
+        }
+
+        let result: GuardedTypeDeleteResult;
+        try {
+          result = await extraction.deleteTypeSuggestionIfCurrentAtContactRevision(
+            candidate,
+            committedRevision,
+          );
+        } catch (err) {
+          log.warn({ err, contactId }, 'type suggestion drain failed (best-effort)');
+          exhausted = false;
+          break;
+        }
+        if (result === 'contact_revision_changed') {
+          exhausted = false;
+          break;
+        }
+        if (result === 'suggestion_changed_or_absent') {
+          candidate = undefined;
+          continue;
+        }
+
+        const wasPrewriteIdentity = pendingTypeBefore !== undefined
+          && sameSuggestionIdentity(candidate, pendingTypeBefore);
+        const verdict = wasPrewriteIdentity
+          && appliedKind !== undefined
+          && normalizeSuggestionValue('type', candidate.suggestedValue)
+            === normalizeSuggestionValue('type', appliedKind)
+          ? 'accepted'
+          : 'superseded_by_human_edit';
+        if (candidate.runId !== undefined) {
+          try {
+            await aiRuns.setVerdict(candidate.runId, 'type', verdict, {
+              at: verdictAt,
+              expectedVerdict: 'pending',
+              freshSuggestionCreatedAt: candidate.createdAt,
+              ...(req.user?.userId !== undefined && { by: req.user.userId }),
+            });
+          } catch (err) {
+            log.warn(
+              { err, contactId, field: 'type' },
+              'ai run verdict stamp failed (best-effort)',
+            );
+          }
+        }
+        candidate = undefined;
+      }
+      if (exhausted) {
+        log.warn({ contactId }, 'type suggestion drain exhausted bounded retries');
       }
     }
 

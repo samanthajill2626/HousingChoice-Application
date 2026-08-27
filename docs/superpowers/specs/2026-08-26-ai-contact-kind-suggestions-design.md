@@ -1,6 +1,6 @@
 # AI contact-kind suggestions - design
 
-**Status:** Design approved; adversarial review pending.
+**Status:** Design approved; adversarial review round 1 changes in progress.
 **Date:** 2026-08-26.
 **Branch:** `feat/ai-contact-kind-suggestions`.
 **Surface:** Conversation fact extraction, Unknown contact triage, AI run log.
@@ -113,9 +113,16 @@ define the transcript's existing `client` speaker label as the external contact
 whose profile is being classified. The wire label and `speakerRoles` values stay
 unchanged for compatibility.
 
-Facts and kinds apply only to that current contact. A represented tenant, owner,
-caseworker, or other person mentioned in the conversation does not determine the
-speaker's kind and must not have their facts written onto the current contact.
+The model contract applies facts and kinds only to that current contact. A
+represented tenant, owner, caseworker, or other person mentioned in the
+conversation does not determine the speaker's kind and must not have their facts
+written onto the current contact.
+
+This is a semantic extraction rule, not a server-verifiable provenance guarantee.
+The model receives the current profile, including existing notes, and the
+transcript in one request. The server cannot prove which input sentence caused a
+valid structured value. Prompt-contract tests pin the intended rule; the
+structured schema and Unknown-only apply guard constrain what can be persisted.
 
 Examples pinned in the prompt contract:
 
@@ -155,11 +162,17 @@ example:
 - `Identified as a caseworker at Hope Atlanta`
 - `Identified as property manager for Example Homes`
 
-The existing note reconciliation rules remain authoritative: do not repeat a fact
-already present in profile notes, append only new detail, and never infer an
-organization that was not stated. A note survives a dismissed type suggestion,
-but an old note does not by itself create a new suggestion. There is no scan or
-backfill.
+The existing note reconciliation behavior remains authoritative. The prompt tells
+the model not to repeat a fact already present in profile notes, to append only new
+detail, and never to infer an organization that was not stated. The apply layer
+continues to remove exact repeated lines before appending. A note survives a
+dismissed type suggestion.
+
+This feature does not add semantic note normalization or deterministic paraphrase
+deduplication. Nor does it add a scan, migration, scheduled pass, or other backfill
+mechanism. The prompt must require current-transcript evidence for a suggestion,
+but the server does not attempt to prove that semantic provenance after the model
+returns a valid structured value.
 
 ### D6. Suggestions remain advisory and Unknown-only
 
@@ -173,7 +186,7 @@ The raw-operation parser continues to retain off-enum values as attempted output
 for audit diagnostics. That diagnostic behavior must not make an off-enum value
 applicable.
 
-### D7. The Unknown card is the only acceptance surface
+### D7. Classification stays on the existing contact PATCH surface
 
 The Unknown contact's Needs triage card displays the suggestion through an
 explicit kind label map, so `property_manager` renders as `Property Manager`
@@ -191,9 +204,15 @@ The actions use the mappings in D2. The action container wraps at narrow widths 
 four buttons do not overflow. Existing disabled/in-flight behavior applies to all
 four actions.
 
-The generic suggestion accept endpoint continues to refuse target `type`; contact
-classification remains owned by the triage PATCH because that route also handles
-status, conversation propagation, audit, and AI-verdict resolution.
+The existing Edit contact action remains a second UI writer for an Unknown contact.
+Its KindPicker sends the same D2 contact shapes through the same PATCH route, so it
+can accept or supersede a pending AI type suggestion as part of a manual edit. It
+must not gain a parallel mapping or resolution path.
+
+The generic suggestion accept endpoint continues to refuse target `type`; both UI
+entry points keep contact classification owned by the triage PATCH because that
+route also handles status, conversation propagation, audit, and AI-verdict
+resolution.
 
 ### D8. Verdicts compare the complete resulting kind
 
@@ -205,8 +224,10 @@ For pending target `type`, derive the applied canonical kind from the updated
 contact:
 
 - `type: 'landlord'` plus exact role `Property Manager` -> `property_manager`
-- otherwise `tenant`, `landlord`, or `partner` -> the matching canonical value
-- every other shape -> no comparable supported kind
+- `tenant`, `landlord`, or `partner` plus an absent or empty role -> the matching
+  canonical value
+- every other shape, including any other non-empty custom role -> no comparable
+  supported kind
 
 Normalize and compare that complete kind to the pending `suggestedValue`:
 
@@ -215,8 +236,9 @@ Normalize and compare that complete kind to the pending `suggestedValue`:
 
 This prevents a Property Manager suggestion from being counted as accepted when a
 staff member chooses plain Landlord merely because both share the stored Landlord
-base. It also preserves the existing rule that choosing Landlord after a Tenant
-suggestion supersedes the model.
+base. It also prevents any custom role, such as Leasing Agent, from being counted
+as a plain canonical kind, and preserves the existing rule that choosing Landlord
+after a Tenant suggestion supersedes the model.
 
 ### D9. Existing base behavior remains authoritative after classification
 
@@ -235,15 +257,18 @@ The existing contact PATCH route owns all downstream effects:
 This feature does not introduce a parallel classification route or duplicate those
 side effects in the dashboard.
 
-### D10. Staff-facing audit renderers show kind labels
+### D10. Decision renderers show kind labels; forensic payloads remain raw
 
 The AI run detail currently renders `proposedValue` raw. For the `type` decision,
-the renderer must use the same canonical kind label mapping as the Unknown card,
-so `property_manager` displays as `Property Manager`. Other decision values retain
-their current rendering.
+the decision-ledger renderer must use the same canonical kind label mapping as the
+Unknown card, so `property_manager` displays as `Property Manager`. Other decision
+values retain their current rendering.
 
 The stored AI run decision remains the canonical wire value for audit accuracy.
-Only display is humanized.
+Only the decision label is humanized. The explicitly diagnostic `Raw model
+response` and `Parsed result` panes remain exact forensic payloads and may contain
+the canonical wire value `property_manager`; they must not be rewritten or
+redacted by this feature.
 
 ## 5. Data flow
 
@@ -273,11 +298,12 @@ Only display is humanized.
 
 1. The Unknown card reads the pending type suggestion and shows its canonical
    staff label and reason.
-2. Staff chooses any of the four explicit classification actions.
+2. Staff chooses any of the four explicit classification actions, or uses the
+   existing Edit contact KindPicker.
 3. The dashboard sends the D2 `type` and `role` patch through the existing contact
    update client.
-4. A failed request leaves the contact Unknown and re-enables all actions for a
-   retry. It does not optimistically remove the card.
+4. A failed card action leaves the contact Unknown and re-enables all actions for
+   a retry. It does not optimistically remove the card.
 
 ### 5.4 Resolution
 
@@ -303,8 +329,9 @@ Only display is humanized.
   payload must accept both new values through `ExtractionResult`.
 - `app/src/services/extraction/apply.ts`: persist the two new canonical values
   through the existing Unknown-only suggestion path.
-- `app/src/services/extraction/ops.ts`: no behavior change; retain off-enum
-  diagnostic attempts and cover the new valid values in tests.
+- `app/src/services/extraction/schema.ts` (`parseExtractionOps`): no raw-operation
+  behavior change; retain off-enum diagnostic attempts and cover the new valid
+  values in tests.
 - `app/src/routes/contacts.ts`: full-kind derivation and verdict comparison after
   contact update; preserve conditional suggestion identity deletion and all
   existing triage side effects.
@@ -321,6 +348,9 @@ Only display is humanized.
 - `dashboard/src/routes/contact/UnknownFile.module.css`: responsive action wrap.
 - `dashboard/src/routes/contact/ContactDetail.tsx`: map the selected canonical kind
   to the D2 contact patch and apply the returned contact in place.
+- `dashboard/src/routes/contact/ContactEditForm.tsx` and `KindPicker.tsx`: retain
+  the existing Edit contact classification path and D2 mappings; verify that an
+  edit resolves the pending type decision through the shared PATCH route.
 - `dashboard/src/routes/contact/contactProfile.ts`: reuse the canonical
   `PM_ROLE`; add or expose a four-kind label/mapping helper rather than scattering
   string transforms.
@@ -359,6 +389,10 @@ Only display is humanized.
   conversation type; the existing triage conflict behavior remains.
 - Role strings are never inferred from organization names. Property Manager uses
   only the exact preset role, and Partner role/organization detail stays in notes.
+- Existing profile notes are context for the model, not independently validated
+  provenance. Current-transcript-only classification is a pinned model-contract
+  rule, while the application-enforced forward-only guarantee is that no scan,
+  migration, or scheduled backfill is introduced.
 
 ## 8. Testing
 
@@ -387,6 +421,9 @@ Only display is humanized.
    - a matching Property Manager suggestion is accepted;
    - choosing Landlord for a Property Manager suggestion is superseded;
    - matching Partner is accepted;
+   - a non-empty custom role on tenant, landlord, or partner is unsupported and
+     supersedes a pending plain-kind suggestion;
+   - Edit contact uses the same full-kind verdict rules as the card actions;
    - conditional suggestion replacement remains pending.
 7. Existing Tenant and Landlord triage and verdict tests remain green.
 
@@ -397,9 +434,11 @@ Only display is humanized.
    and call the intended canonical kind.
 3. ContactDetail sends each D2 `type`/`role` patch, uses the returned contact, and
    leaves the Unknown view retryable on failure.
-4. The AI run detail renders `property_manager` as `Property Manager` only for the
-   type decision.
-5. Existing Tenant/Landlord Unknown card tests remain green.
+4. Edit contact retains the D2 KindPicker mappings and resolves a pending type
+   suggestion through the shared PATCH route.
+5. The AI run detail renders `property_manager` as `Property Manager` in the type
+   decision ledger while preserving raw forensic payload panes verbatim.
+6. Existing Tenant/Landlord Unknown card tests remain green.
 
 ### 8.3 End-to-end tests
 
@@ -449,12 +488,14 @@ classifications. Do not use production or the human's lane-0 dashboard.
    Manager role and retains existing Landlord-backed conversation/status behavior.
 8. AI-run verdicts distinguish Property Manager acceptance from a plain Landlord
    override.
-9. Notes preserve stated role/organization facts without duplicates or inferred
-   data.
+9. Partner and Property Manager extraction can append concise stated
+   role/organization facts through the existing prompt reconciliation and
+   exact-line duplicate filter; semantic paraphrase deduplication is out of scope.
 10. Existing suggestions remain compatible, existing seeds/imports remain
     unchanged, and no backfill runs.
-11. Staff-facing suggestion and audit renderers never show raw
-    `property_manager`.
+11. Staff-facing suggestion labels and AI decision-ledger cells show `Property
+    Manager`; explicitly raw forensic response/result panes retain canonical wire
+    values.
 12. All required tests, full gates, adversarial reviews, and hermetic live QA pass
     before the branch is declared merge-ready.
 

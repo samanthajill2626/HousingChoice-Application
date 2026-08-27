@@ -19,7 +19,27 @@
 // leave the gallery permanently wrong with no way to notice. Writing the
 // predicate LAST means every partial failure is simply re-runnable: the object
 // may already carry the right type, the row still says octet-stream, and the
-// next run finishes the job. Nothing here is destructive on a re-run.
+// next run finishes the job.
+//
+// The THIRD write repeats the second: `annotateMessage` calls `putMediaPointers`
+// itself (messagesRepo.ts:2544-2549), so the explicit pointer write above it is
+// deliberately redundant. It is not dead code - the repo's internal call
+// SWALLOWS pointer failures, and the explicit one does not, which is the only
+// way a pointer failure can stop the predicate-clearing write. Deleting either
+// one changes behavior; deleting the explicit one silently restores the hazard.
+//
+// THE ROW WRITE IS A RE-READ-THEN-MERGE, not a blind replace of the scan-time
+// snapshot. `annotateMessage` SETs `media_attachments` wholesale, and the
+// deferred `media.mirror` job APPENDS to that same list for up to ~3 minutes
+// after an inbound MMS lands (jobs/mediaMirror.ts). Writing the snapshot back
+// would silently DELETE an attachment appended between the Scan and the write -
+// the only permanent data-loss path there was here. So each row is re-read
+// immediately before its writes, ITS list is the base, and the staged canonical
+// types are applied onto entries matched BY s3Key. That SHRINKS the window to
+// the re-read-to-write gap; it does not close it (the write carries no
+// optimistic-concurrency condition, and the re-read is not a consistent read),
+// which is why the RUNBOOK still calls a quiet window the belt-and-braces
+// choice. Nothing here is destructive on a re-run.
 //
 // `--dry-run` WRITES NOTHING but STILL READS THE LIVE TWILIO ACCOUNT - one
 // authenticated Media metadata fetch per candidate attachment. It is a
@@ -34,6 +54,15 @@
 // nothing, and EXIT GREEN - indistinguishable from a completed repair. See
 // `main` below for the guard and why `messagingDriver === 'twilio'` is the
 // load-bearing half of it.
+//
+// The WRONG-ACCOUNT half of that hazard is closed with evidence the scan
+// already parses: every stored Twilio media URL embeds the account SID that
+// owns it, so `expectedAccountSid` compares it against the configured account
+// and the FIRST mismatch ABORTS - the same semantics as an auth failure, never
+// a skip counter. `TWILIO_API_BASE_URL` is refused outright by the CLI for the
+// same reason: it redirects every REST call, media metadata included, so a
+// shell that still carries the fake-Twilio override would read a fake account
+// and report retention loss for the whole population.
 //
 // PII: logs COUNTS and IDs only - never a filename, a media URL, a body or a
 // phone number.
@@ -96,7 +125,10 @@ export interface BackfillResult {
    *  the wrong object and nothing downstream could detect it. */
   skippedUnparseableKey: number;
   /** The parsed index has no usable Twilio media URL in the row's stored
-   *  `mediaUrls` (absent, out of range, or not a `/Media/ME<32 hex>` URL). */
+   *  `mediaUrls` (absent, out of range, or not a `/Media/ME<32 hex>` URL). An
+   *  absent or non-string `provider_sid` lands here too: without the MessageSid
+   *  the media hangs off there is no addressable Twilio evidence, and querying
+   *  `messages(undefined)` would 404 and read as retention loss. */
   skippedNoUrl: number;
   /** Twilio no longer holds the media (404). PERMANENT: these are gone, and a
    *  steady state where they are re-queried on every run is expected. */
@@ -112,7 +144,10 @@ export interface BackfillResult {
   skippedStillOpaque: number;
   /** ROW-level: an inbound row carrying attachments but no `mediaUrls` - an
    *  inbound EMAIL. There is no Twilio media behind it; counted separately so
-   *  it does not inflate the histogram the ops decision reads. */
+   *  it does not inflate the histogram the ops decision reads. Counted on EVERY
+   *  run, repaired or not: the test runs before any per-attachment predicate,
+   *  so this names a PERMANENTLY out-of-scope storage shape rather than a set of
+   *  declined candidates, and it does not shrink as the backfill progresses. */
   skippedEmailRow: number;
   /** ROW-level: a legacy row carrying only `media_s3_keys` (no
    *  `media_attachments`). Its "type" is synthesized at read time, so there is
@@ -131,8 +166,16 @@ export interface BackfillMediaContentTypesOpts {
   adapter: Pick<MessagingAdapter, 'getMediaContentType'>;
   /** Rewrites the stored object's Content-Type in place. */
   mediaStore: Pick<MediaStore, 'setContentType'>;
-  /** Writes the pointer rows and then the message row. */
-  messagesRepo: Pick<MessagesRepo, 'putMediaPointers' | 'annotateMessage'>;
+  /** Re-reads each row immediately before its writes, then writes the pointer
+   *  rows and the message row. */
+  messagesRepo: Pick<MessagesRepo, 'getByTsMsgId' | 'putMediaPointers' | 'annotateMessage'>;
+  /** The Twilio account the injected adapter is credentialed for. When given,
+   *  every candidate's media URL must name THAT account and the first mismatch
+   *  ABORTS the run. Omitted by the suite (whose fake adapter answers for any
+   *  account); the CLI always passes `config.twilioAccountSid`, so every ops run
+   *  is guarded. See `main` for why a wrong-account run is otherwise a silent
+   *  green exit. */
+  expectedAccountSid?: string;
   /** Read + report, write NOTHING. Twilio is still read. */
   dryRun?: boolean;
   /** Env used for physical table resolution (TABLE_PREFIX). */
@@ -162,6 +205,19 @@ export function parseMediaIndexFromKey(s3Key: string): number | undefined {
  */
 export function parseMediaSid(url: string): string | undefined {
   return /\/Media\/(ME[0-9a-fA-F]{32})/.exec(url)?.[1];
+}
+
+/**
+ * The OWNING Twilio account SID out of a stored media URL
+ * (`.../2010-04-01/Accounts/<AccountSid>/Messages/...`). Deliberately loose
+ * (`[^/]+`) rather than `AC` + 32 hex: this value is only ever COMPARED against
+ * the configured account, so a shape that does not match the strict form must
+ * still be reported as a mismatch rather than silently ignored. Returns
+ * undefined only when the URL carries no `/Accounts/<x>/` segment at all, which
+ * is the one case with no evidence either way.
+ */
+export function parseAccountSid(url: string): string | undefined {
+  return /\/Accounts\/([^/]+)\//.exec(url)?.[1];
 }
 
 /** One message row with at least one attachment worth attempting. */
@@ -205,7 +261,7 @@ const defaultSleep = (ms: number): Promise<void> =>
 export async function backfillMediaContentTypes(
   opts: BackfillMediaContentTypesOpts,
 ): Promise<BackfillResult> {
-  const { doc, adapter, mediaStore, messagesRepo } = opts;
+  const { doc, adapter, mediaStore, messagesRepo, expectedAccountSid } = opts;
   const dryRun = opts.dryRun === true;
   const sleep = opts.sleep ?? defaultSleep;
   const table = tableName('messages', opts.env ?? process.env);
@@ -373,17 +429,36 @@ export async function backfillMediaContentTypes(
         }
         const url = mediaUrls[mediaIndex];
         const mediaSid = url === undefined ? undefined : parseMediaSid(url);
-        if (mediaSid === undefined) {
+        // The row's OWN provider SID - the Twilio MessageSid the media hangs
+        // off - rather than one re-parsed out of the URL. A row missing it has
+        // no addressable Twilio evidence, so it is dropped HERE, before the
+        // vendor call: fetching `messages(undefined)` 404s and would be counted
+        // as retention loss, which is exactly the conflation skippedThrottled
+        // was kept out of skippedTwilio404 to avoid.
+        const messageSid = raw.provider_sid;
+        if (mediaSid === undefined || url === undefined || typeof messageSid !== 'string') {
           result.skippedNoUrl += 1;
           continue;
+        }
+        // WRONG-ACCOUNT ABORT. Every prod media SID 404s on a dev credential,
+        // so a shell carrying the other environment's TWILIO_* values reports
+        // "all aged out", writes nothing and exits green. The stored URL names
+        // the owning account, so that outcome is detectable before the first
+        // vendor call - and it is an AUTH-CLASS failure, so it throws rather
+        // than incrementing a counter nobody would read as a stop sign.
+        if (expectedAccountSid !== undefined) {
+          const accountSid = parseAccountSid(url);
+          if (accountSid !== undefined && accountSid !== expectedAccountSid) {
+            throw new Error(
+              `backfill:media-content-types - REFUSING to continue: stored media belongs to Twilio account ${accountSid} but the configured account is ${expectedAccountSid}. The credentials point at the WRONG ENVIRONMENT; every media read would 404 and be miscounted as retention loss.`,
+            );
+          }
         }
         candidates.push({
           row,
           position,
           s3Key: attachment.s3Key,
-          // The row's OWN provider SID - the Twilio MessageSid the media hangs
-          // off - rather than one re-parsed out of the URL.
-          messageSid: raw.provider_sid,
+          messageSid,
           mediaSid,
         });
         rowHasCandidate = true;
@@ -397,21 +472,51 @@ export async function backfillMediaContentTypes(
       const repaired = row.staged.filter((canonical) => canonical !== undefined).length;
       if (repaired === 0) continue;
       if (dryRun) continue;
-      // SAME ARRAY, SAME ORDER - only the contentType of repaired entries
-      // changes. Positional identity is load-bearing twice over: pointer sort
-      // keys are built from the array position (mediaPointerSk), and the
-      // dashboard addresses bytes as /media/:idx where idx IS that position.
-      // Hence map() - never filter, never reorder, never append.
-      const merged: MediaAttachment[] = row.attachments.map((attachment, position) => {
+      // The staged repairs keyed by the S3 OBJECT they belong to. s3Key is the
+      // stable identity here; array POSITION is not, because the deferred
+      // media.mirror job can append between the Scan and this write.
+      const stagedByKey = new Map<string, string>();
+      for (let position = 0; position < row.attachments.length; position += 1) {
         const canonical = row.staged[position];
-        return canonical === undefined ? attachment : { ...attachment, contentType: canonical };
-      });
+        const attachment = row.attachments[position];
+        if (canonical !== undefined && attachment !== undefined) {
+          stagedByKey.set(attachment.s3Key, canonical);
+        }
+      }
+      let applied = 0;
       try {
+        // RE-READ, THEN MERGE. annotateMessage SETs media_attachments
+        // wholesale, so handing it the scan-time snapshot would delete any
+        // attachment the mirror appended since - permanently, and with the
+        // pointer row surviving to point at a /media/:idx the row no longer
+        // exposes. THE ROW IS THE TRUTH: its list is the base array and keeps
+        // its order, entries it gained are preserved untouched, and entries the
+        // snapshot had but the row no longer does are simply gone.
+        const current = await messagesRepo.getByTsMsgId(row.conversationId, row.tsMsgId);
+        const base = current === undefined ? undefined : current.media_attachments;
+        if (!Array.isArray(base)) {
+          // Deleted, or rewritten to a shape with no stored attachment list.
+          // Nothing to repair and nothing safe to write; the next run re-selects
+          // it if it comes back.
+          continue;
+        }
+        // Positional identity is still load-bearing WITHIN the re-read list:
+        // pointer sort keys are built from the array position
+        // (mediaPointerSk), and the dashboard addresses bytes as /media/:idx
+        // where idx IS that position. Hence map() - never filter, never
+        // reorder, never append.
+        const merged: MediaAttachment[] = base.map((attachment) => {
+          const canonical = stagedByKey.get(attachment.s3Key);
+          if (canonical === undefined) return attachment;
+          applied += 1;
+          return { ...attachment, contentType: canonical };
+        });
+        if (applied === 0) continue;
         await messagesRepo.putMediaPointers(row.conversationId, row.tsMsgId, merged);
         await messagesRepo.annotateMessage(row.conversationId, row.tsMsgId, {
           mediaAttachments: merged,
         });
-        result.written += repaired;
+        result.written += applied;
       } catch (err) {
         // One bad row must not abort a long ops run. The row still says
         // octet-stream, so the next run repairs it.
@@ -443,7 +548,7 @@ export async function backfillMediaContentTypes(
  * because it looks like a completed repair.
  *
  * THE DRIVER CHECK IS THE LOAD-BEARING HALF. `createMessagingAdapter`
- * (adapters/messaging.ts:1162-1193) selects on `config.messagingDriver`, and
+ * (adapters/messaging.ts:1208-1239) selects on `config.messagingDriver`, and
  * `loadConfig` (lib/config.ts:618) defaults that to 'console' whenever
  * MESSAGING_DRIVER is unset and NODE_ENV is not 'production' - EVEN WITH every
  * twilio* credential present. An operator shell with credentials exported but
@@ -453,23 +558,40 @@ export async function backfillMediaContentTypes(
  * fail-fasts them, plus TWILIO_AUTH_TOKEN, when the driver is twilio -
  * lib/config.ts:623-629).
  *
+ * TWILIO_API_BASE_URL IS REFUSED OUTRIGHT, for the same green-exit reason one
+ * layer along: `TwilioMessagingDriver` installs a redirecting HTTP client for
+ * EVERY REST call when `apiBaseUrl` is set (adapters/messaging.ts:604-611),
+ * media metadata reads included, and `loadConfig` only rejects the variable
+ * under NODE_ENV=production (lib/config.ts:543-546) - which an operator shell
+ * running a `tsx` script is not. A shell still carrying the fake-Twilio
+ * override would read a fake account, find nothing, and report the whole
+ * population as aged out. There is no legitimate reason to point an ops repair
+ * of real stored media at a redirected host, so this is a refusal rather than a
+ * warning.
+ *
  * An after-the-fact "recovered is empty" test is the WRONG predicate and is not
  * used: a fully repaired environment legitimately recovers nothing forever, and
  * a single aged-out attachment would trip it. The final report WARNS in that
  * case - a warning is informational, an exit code is a claim.
+ *
+ * Exported for its own unit test: it is pure, and it is the one guard whose
+ * failure mode is a green exit rather than a red one.
  */
-function messagingMisconfiguration(config: AppConfig): string | undefined {
+export function messagingMisconfiguration(config: AppConfig): string | undefined {
   if (config.messagingDriver !== 'twilio') {
     return 'MESSAGING_DRIVER is not "twilio", so this process would use the CONSOLE driver and read undefined for every attachment';
   }
   if (!config.twilioAccountSid || !config.twilioApiKeySid || !config.twilioApiKeySecret) {
     return 'MESSAGING_DRIVER=twilio but TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET are not all set';
   }
+  if (config.twilioApiBaseUrl !== undefined) {
+    return 'TWILIO_API_BASE_URL is set, which redirects EVERY Twilio REST call - media metadata included - away from the real account, so every attachment would read as aged out';
+  }
   return undefined;
 }
 
 const HOW_TO_FIX =
-  'Set MESSAGING_DRIVER=twilio and TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID (plus MEDIA_BUCKET and TABLE_PREFIX) for the TARGET environment, then re-run.';
+  'Set MESSAGING_DRIVER=twilio and TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID (plus MEDIA_BUCKET and TABLE_PREFIX) for the TARGET environment, UNSET TWILIO_API_BASE_URL, then re-run.';
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes('--dry-run');
@@ -528,6 +650,10 @@ async function main(): Promise<void> {
     adapter,
     mediaStore,
     messagesRepo,
+    // ALWAYS passed on an ops run: the guard above proved the field is set, and
+    // this is what turns a wrong-environment credential from a silent green
+    // exit into a hard stop before the first write.
+    expectedAccountSid: config.twilioAccountSid,
     dryRun,
   });
 

@@ -168,15 +168,18 @@ function convWith(contactId: string): ConversationItem {
 }
 
 function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionRepo {
+  const suggestions = new Map<string, Awaited<ReturnType<ExtractionRepo['getSuggestion']>>>();
   const put = vi.fn(
-    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<PutSuggestionResult> => ({
-      item: {
+    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<PutSuggestionResult> => {
+      const item = {
         ...s,
         itemId: `sugg#${s.ownerContactId}#${s.target}`,
         _pendingPartition: 'pending',
         createdAt: NOW,
-      },
-    }),
+      };
+      suggestions.set(item.itemId, item);
+      return { item };
+    },
   );
   return {
     scheduleExtraction: vi.fn(async () => {}),
@@ -187,9 +190,13 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
     fail: vi.fn(async () => {}),
     getDue: vi.fn(async () => undefined),
     putSuggestion: put,
-    getSuggestion: vi.fn(async () => undefined),
+    getSuggestion: vi.fn(async (contactId: string, target: string) =>
+      suggestions.get(`sugg#${contactId}#${target}`),
+    ),
     listSuggestionsByContact: vi.fn(async () => []),
-    deleteSuggestion: vi.fn(async () => {}),
+    deleteSuggestion: vi.fn(async (contactId: string, target: string) => {
+      suggestions.delete(`sugg#${contactId}#${target}`);
+    }),
     deleteSuggestionIfCurrent: vi.fn(async () => true),
     deleteTypeSuggestionIfCurrentAtContactRevision: vi.fn(
       async () => 'suggestion_changed_or_absent' as const,
@@ -961,21 +968,38 @@ describe('runDueExtractions - the run log envelope', () => {
     });
   });
 
-  it('leaves the route-owned finalization marker to preserve its terminal verdict', async () => {
+  it('merges a route-owned finalization verdict over a pending type suggestion', async () => {
+    const markers = new Map<string, { verdict: 'superseded_by_human_edit'; at: string }>();
     let record: AiRunRecordInput | undefined;
+    const sequence: string[] = [];
     const aiRuns = {
-      beginFinalization: vi.fn(async () => true),
+      beginFinalization: vi.fn(async (runId: string) => {
+        sequence.push('beginFinalization');
+        markers.set(runId, { verdict: 'superseded_by_human_edit', at: '' });
+        return true;
+      }),
       putRun: vi.fn(async (input: AiRunRecordInput) => {
+        sequence.push('putRun');
+        const marker = markers.get(input.runId);
         record = {
           ...input,
           decisions: {
             ...input.decisions,
-            type: { ...input.decisions.type!, verdict: 'superseded_by_human_edit' },
+            type: marker === undefined || input.decisions.type?.verdict !== 'pending'
+              ? input.decisions.type
+              : { ...input.decisions.type, verdict: marker.verdict, verdictAt: marker.at },
           },
         };
+        markers.delete(input.runId);
         return { ...record, itemId: `run#${record.runId}`, expires_at: 0 };
       }),
-      setVerdict: vi.fn(async () => true),
+      setVerdict: vi.fn(async (runId: string, target: string, verdict: 'superseded_by_human_edit', opts?: { at?: string }) => {
+        sequence.push('setVerdict');
+        expect(target).toBe('type');
+        expect(markers.has(runId)).toBe(true);
+        markers.set(runId, { verdict, at: opts?.at ?? NOW });
+        return true;
+      }),
     };
     const source = unknownContact();
     const h = makeHarness({
@@ -988,6 +1012,20 @@ describe('runDueExtractions - the run log envelope', () => {
     (h.deps.contacts.getById as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(source)
       .mockResolvedValueOnce({ ...source, type: 'tenant' as const, classification_revision: 1 });
+    const originalPut = h.repo.putSuggestion as ReturnType<typeof vi.fn>;
+    const putSuggestion = originalPut.getMockImplementation()!;
+    originalPut.mockImplementation(async (suggestion) => {
+      const result = await putSuggestion(suggestion);
+      sequence.push('putSuggestion');
+      expect(await h.repo.getSuggestion('c1', 'type')).toMatchObject({
+        itemId: 'sugg#c1#type',
+        runId: suggestion.runId,
+      });
+      await h.repo.deleteSuggestion('c1', 'type');
+      sequence.push('routeDelete');
+      await aiRuns.setVerdict(suggestion.runId!, 'type', 'superseded_by_human_edit', { at: NOW });
+      return result;
+    });
     (h.repo.deleteTypeSuggestionIfCurrentAtContactRevision as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce('suggestion_changed_or_absent');
 
@@ -996,6 +1034,15 @@ describe('runDueExtractions - the run log envelope', () => {
     expect(record!.decisions.type).toMatchObject({
       outcome: 'suggested', verdict: 'superseded_by_human_edit',
     });
+    expect(await h.repo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(sequence).toEqual([
+      'beginFinalization', 'putSuggestion', 'routeDelete', 'setVerdict', 'putRun',
+    ]);
+    expect(aiRuns.putRun).toHaveBeenCalledWith(expect.objectContaining({
+      decisions: expect.objectContaining({
+        type: expect.objectContaining({ outcome: 'suggested', verdict: 'pending' }),
+      }),
+    }));
   });
 
   it('records a no_new_client SKIP with a LIGHT window - ids and cursor, no bytes', async () => {

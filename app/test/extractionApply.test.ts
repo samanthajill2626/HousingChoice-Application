@@ -474,6 +474,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     }));
     expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision)
       .toHaveBeenCalledWith(records.suggestions[0], 1);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
     expect(records.emits).toEqual([{ name: 'suggestion.updated', payload: { contactId: 'c1' } }]);
   });
 
@@ -487,6 +488,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     expect(out.decisions[0]).toMatchObject({
       outcome: 'dropped', dropReason: 'type_classification_changed',
     });
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
   });
 
   it('preserves a pending decision when guarded cleanup finds a replacement or marker', async () => {
@@ -499,6 +501,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     });
     expect(out.suggested).toEqual(['type']);
     expect(out.decisions[0]).toMatchObject({ target: 'type', outcome: 'suggested' });
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
   });
 
   it('re-reads after a contact revision conflict and retries against the newer revision', async () => {
@@ -511,6 +514,8 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     const { deps } = makeDeps({ getByIdImpl: getById, guardedDeleteImpl: guardedDelete });
     await run(deps, makeContact({ type: 'unknown' }), { fields: {}, typeSuggestion: { value: 'tenant' } });
     expect(getById).toHaveBeenCalledTimes(2);
+    expect(getById).toHaveBeenNthCalledWith(1, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(2, 'c1', { consistentRead: true });
     expect(guardedDelete).toHaveBeenNthCalledWith(1, expect.anything(), 1);
     expect(guardedDelete).toHaveBeenNthCalledWith(2, expect.anything(), 2);
   });
@@ -523,6 +528,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
       fields: {}, typeSuggestion: { value: 'tenant' },
     });
     expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
     expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision).not.toHaveBeenCalled();
   });
 
@@ -532,6 +538,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
       fields: {}, typeSuggestion: { value: 'tenant' },
     });
     expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
     expect(deps.extraction.deleteTypeSuggestionIfCurrentAtContactRevision).not.toHaveBeenCalled();
     expect(logCapture.atLevel(40)).toContainEqual(expect.objectContaining({
       msg: 'type suggestion reconciliation found no live contact (best-effort)',
@@ -546,6 +553,7 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
       fields: {}, typeSuggestion: { value: 'tenant' },
     });
     expect(out.suggested).toEqual(['type']);
+    expect(deps.contacts.getById).toHaveBeenCalledWith('c1', { consistentRead: true });
     expect(logCapture.atLevel(40)).toContainEqual(expect.objectContaining({
       msg: 'type suggestion reconciliation failed (best-effort)',
     }));
@@ -560,6 +568,10 @@ describe('applyExtraction - typeSuggestion (item 6)', () => {
     });
     expect(out.suggested).toEqual(['type']);
     expect(getById).toHaveBeenCalledTimes(4);
+    expect(getById).toHaveBeenNthCalledWith(1, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(2, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(3, 'c1', { consistentRead: true });
+    expect(getById).toHaveBeenNthCalledWith(4, 'c1', { consistentRead: true });
     expect(guardedDelete).toHaveBeenCalledTimes(4);
   });
 });

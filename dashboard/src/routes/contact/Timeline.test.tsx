@@ -557,6 +557,47 @@ describe('Timeline', () => {
     expect(pdf).toHaveAttribute('target', '_blank');
   });
 
+  /** The MMS bubble above, parameterized over its attachments, so a type-tier
+   *  case differs from the known-good image/PDF bubble in exactly one
+   *  dimension.
+   *
+   *  An ARROW is load-bearing: it keeps the narrowing of MESSAGE_OUT (a
+   *  `kind: 'message'` const of the TimelineItem union), which a hoisted
+   *  `function` declaration discards - the spread would then distribute over
+   *  every union member and tsc rejects `tsMsgId` against TimelineCall. */
+  const mmsWith = (
+    attachments: { s3Key: string; contentType: string; filename?: string }[],
+  ): TimelineItem => {
+    const mms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'mms1',
+      tsMsgId: '2026-06-08T09:20:00#SM123', // <provider_ts>#<sid>
+      type: 'mms',
+      body: 'see attached',
+      media_attachments: attachments,
+    };
+    return mms;
+  };
+
+  it('renders a HEIC attachment as a file link, not a broken image', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'image/heic' }]);
+    renderTimeline({ items: [mms] });
+    expect(screen.queryByRole('img', { name: /Attachment 1/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Attachment 1/i })).toBeInTheDocument();
+  });
+
+  it('labels a declarable attachment with its kind', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'video/mp4' }]);
+    renderTimeline({ items: [mms] });
+    expect(screen.getByRole('link', { name: /Video - Attachment 1/i })).toBeInTheDocument();
+  });
+
+  it('leaves an opaque attachment labelled bare', () => {
+    const mms = mmsWith([{ s3Key: 'k', contentType: 'application/octet-stream' }]);
+    renderTimeline({ items: [mms] });
+    expect(screen.getByRole('link', { name: /^\W*Attachment 1$/i })).toBeInTheDocument();
+  });
+
   it('falls back to a count chip when no provider sid can be derived', () => {
     const mms: TimelineItem = {
       ...MESSAGE_OUT,

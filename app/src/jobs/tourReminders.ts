@@ -47,7 +47,7 @@ import {
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import type { UnitsRepo } from '../repos/unitsRepo.js';
+import type { UnitItem, UnitsRepo } from '../repos/unitsRepo.js';
 import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
@@ -55,11 +55,11 @@ import {
 } from '../services/sendMessage.js';
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
-import type { Address } from '../lib/address.js';
 import {
   composeTourReminderBody,
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
+import { resolveTourContactNames } from '../lib/tourContacts.js';
 import {
   clampOutOfQuietHours,
   instantAtLocalTime,
@@ -362,7 +362,7 @@ export interface RunDueTourRemindersDeps {
   contactsRepo: ContactsRepo;
   conversationsRepo: ConversationsRepo;
   /**
-   * ONE unit read serving TWO consumers - both must survive any future edit:
+   * ONE unit read serving THREE consumers - all must survive any future edit:
    *   1. Roster resolution (contact-rosters D11): the tenant-1:1 suppression
    *      check resolves the tour's CURRENT roster, whose default rung is the
    *      property's primary contact. REQUIRED so no call site can silently
@@ -370,8 +370,13 @@ export interface RunDueTourRemindersDeps {
    *   2. The ADDRESS in composed reminder copy (tour-reminder-details). A
    *      missing unit or a read failure degrades to the no-address variant -
    *      never blocks a send.
+   *   3. The PROPERTY CONTACT behind {propertyContactFirstName} in the
+   *      landlord-led en_route copy (tour-reminder-ladder, 2026-08-26): the
+   *      unit is what resolveTourContactNames reads the primary-contact /
+   *      landlord-of-record rule from. A read failure here degrades to the
+   *      self-guided wording today; Task 5 makes it block the send instead.
    * Merged from both sides at the 2026-08-06 second main sync: each branch had
-   * declared this dep for its own consumer. Dropping either consumer still
+   * declared this dep for its own consumer. Dropping any consumer still
    * compiles, and is silently wrong.
    */
   unitsRepo: UnitsRepo;
@@ -521,10 +526,18 @@ async function claimSkipRow(
 }
 
 /**
- * Compose one rung's body, resolving the unit and the timezone. Total EXCEPT for
- * UncomposableReminderError, which the caller must contain (see the module
- * header). A unit-read failure degrades to no address rather than propagating -
- * a reminder must never be lost over a missing street.
+ * Compose one rung's body, resolving the unit, the two NAMES and the timezone.
+ * Total EXCEPT for UncomposableReminderError, which the caller must contain (see
+ * the module header). A unit-read failure degrades to no address rather than
+ * propagating - a reminder must never be lost over a missing street.
+ *
+ * INTERIM (Task 4 of the tour-reminder-ladder plan), stated honestly:
+ * resolveTourContactNames NEVER throws, so a throwing CONTACT read is currently
+ * swallowed into absence names and this path composes the fallback copy -
+ * failure temporarily masquerades as absence, which spec 6.3b forbids. Task 5
+ * closes it with the assessNamesReadFailure gate (defer on the poll, refuse on
+ * force-send). The split exists so the failure semantics can be test-driven
+ * against a working baseline.
  *
  * EVERY caller must run this ABOVE its claimSend: the claim IS the sentAt stamp,
  * so a compose that threw after it would burn the rung permanently (spec W6).
@@ -533,24 +546,37 @@ async function composeBodyForRow(
   row: TourReminderItem,
   tour: TourItem,
   window: QuietHoursWindow,
-  deps: Pick<RunDueTourRemindersDeps, 'unitsRepo'>,
+  deps: Pick<RunDueTourRemindersDeps, 'unitsRepo' | 'contactsRepo'>,
   log: Logger,
+  /** The poll's 1:1 route has already fetched the tenant
+   *  (resolveReminderTarget target.contact) - pass it through rather than
+   *  reading twice. The GROUP route has read nothing; both reads happen
+   *  here (spec 6.3a, ruled in scope). */
+  tenantContact?: ContactItem,
 ): Promise<string> {
-  let address: Address | string | undefined;
+  let unit: UnitItem | undefined;
   try {
-    const unit = await deps.unitsRepo.getById(tour.unitId);
-    address = unit?.address;
+    unit = await deps.unitsRepo.getById(tour.unitId);
   } catch (err) {
     log.warn(
       { err, tourId: tour.tourId, kind: row.kind },
       'tour reminder: unit read failed - composing without an address',
     );
   }
+  const resolved = await resolveTourContactNames({
+    tenantId: tour.tenantId,
+    unit,
+    ...(tenantContact !== undefined && { tenantContact }),
+    contactsRepo: deps.contactsRepo,
+    logger: log,
+  });
   return composeTourReminderBody({
     kind: row.kind,
     scheduledAt: tour.scheduledAt ?? '',
     timezone: window.timezone,
-    ...(address !== undefined && { address }),
+    tourType: tour.tourType,
+    names: resolved.names,
+    ...(unit?.address !== undefined && { address: unit.address }),
   });
 }
 
@@ -843,7 +869,7 @@ async function processReminderRow(
   // re-listed by every tick forever; the claim-skip retires it exactly once.
   let body: string;
   try {
-    body = await composeBodyForRow(row, tour, window, deps, log);
+    body = await composeBodyForRow(row, tour, window, deps, log, target.contact);
   } catch (err) {
     if (err instanceof UncomposableReminderError) {
       log.error(
@@ -1221,7 +1247,14 @@ export async function forceSendReminder(
   const window = await readQuietHoursWindow(deps.settingsRepo, log);
   let body: string;
   try {
-    body = await composeBodyForRow(row, target.tour, window, deps, log);
+    body = await composeBodyForRow(
+      row,
+      target.tour,
+      window,
+      deps,
+      log,
+      target.route === 'one_to_one' ? target.contact : undefined,
+    );
   } catch (err) {
     if (err instanceof UncomposableReminderError) {
       // PRE-CLAIM REFUSAL, never a claim-skip: a human action must not retire a

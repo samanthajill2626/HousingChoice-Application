@@ -67,8 +67,8 @@ import {
   newComposeFailTally,
   recordComposeFail,
 } from '../lib/composeFailTally.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
-import type { Address } from '../lib/address.js';
+import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import { resolveTourContactNames } from '../lib/tourContacts.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import {
   buildStandaloneOpenPreview,
@@ -221,19 +221,49 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     }
     const rows = await tourReminders.listByTour(tour.tourId);
     // The composing inputs, read ONCE per request: the ORG zone (through
-    // readQuietHoursWindow, never settings.timezone - spec D8) and the owner
-    // tour's unit address. A failed unit read composes without an address
-    // rather than failing the bucket.
+    // readQuietHoursWindow, never settings.timezone - spec D8), the owner
+    // tour's unit address, and the two NAMES the copy interpolates. A failed
+    // unit read composes without an address rather than failing the bucket.
+    //
+    // THE RESOLVE IS HOISTED (spec 6.3a): the compose below runs inside a
+    // SYNCHRONOUS IIFE inside .map(), so an async resolve cannot be dropped
+    // behind it. There is exactly ONE tour per request here, so one resolve
+    // serves every row. This is the ONE preview surface that serves ONLY
+    // non-self_guided tours (the early return above), i.e. the exact place a
+    // dropped propertyContactFirstName would flip the preview to the
+    // self-guided entry while the group SEND says the landlord-led one.
     const window = await readQuietHoursWindow(settings, log);
-    let address: Address | string | undefined;
+    let unit: UnitItem | undefined;
+    let unitReadFailed = false;
     try {
-      address = (await units.getById(tour.unitId))?.address;
+      unit = await units.getById(tour.unitId);
     } catch (err) {
+      unitReadFailed = true;
       log.warn(
         { err, tourId: tour.tourId },
         'group scheduled bucket: unit read failed - composing without an address',
       );
     }
+    const resolved = await resolveTourContactNames({
+      tenantId: tour.tenantId,
+      unit,
+      contactsRepo: contacts,
+      logger: log,
+    });
+    // Bundled the way composeInputsOf bundles the same five values on
+    // routes/tourReminders.ts, so the two surfaces stay readable side by side.
+    // The three FAILURE flags are carried, not consumed, in Task 4: Task 5's
+    // withhold branch inside the IIFE below is what reads them (through
+    // assessNamesReadFailure). Keeping them on one object is also what lets
+    // unitReadFailed exist here at all - a loose local nothing reads yet is a
+    // lint error.
+    const composeInputs = {
+      ...(unit?.address !== undefined && { address: unit.address }),
+      names: resolved.names,
+      tenantReadFailed: resolved.tenantReadFailed,
+      propertyReadFailed: resolved.propertyReadFailed,
+      unitReadFailed,
+    };
     const composeFails = newComposeFailTally();
     const scheduled = rows
       .filter(
@@ -252,14 +282,18 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         // scheduledAt yields body: '' instead of 500ing the whole bucket.
         // DUPLICATED SHAPE (3 copies, keep in sync) - twins in
         // routes/tourReminders.ts (bodyFor) and routes/contactTimeline.ts
-        // (tourReminderBodyOrEmpty). See the note on bodyFor.
+        // (tourReminderBodyOrEmpty). See the note on bodyFor. NAME RESOLUTION
+        // IS HOISTED above this map on all three copies (spec 6.3a) - here it
+        // has to be, the composer is synchronous and this is an IIFE.
         body: ((): string => {
           try {
             return composeTourReminderBody({
               kind: row.kind,
               scheduledAt: tour.scheduledAt ?? '',
               timezone: window.timezone,
-              ...(address !== undefined && { address }),
+              tourType: tour.tourType,
+              names: composeInputs.names,
+              ...(composeInputs.address !== undefined && { address: composeInputs.address }),
             });
           } catch (err) {
             if (err instanceof UncomposableReminderError) {

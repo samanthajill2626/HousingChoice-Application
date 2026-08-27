@@ -1097,23 +1097,32 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 // (no DynamoDB) so the gather's three walks + suppression are exercised.
 // ---------------------------------------------------------------------------
 
-// Tour bodies are COMPOSED, not resolved: every tour.* default carries
-// {when}/{time}/{where}, so the expectation has to be built from the same
-// context the route composes from - this bucket's tour instant, the org-default
-// zone the quiet-hours window resolves to (the stubs all inherit
-// DEFAULT_ORG_SETTINGS.timezone), and no address (these fixtures seed no unit,
-// so both sides take the _no_address variant).
+// Tour bodies are COMPOSED, not resolved: every tour.* default carries at least
+// one required token, so the expectation has to be built from the same context
+// the route composes from - this bucket's tour instant, the org-default zone the
+// quiet-hours window resolves to (the stubs all inherit
+// DEFAULT_ORG_SETTINGS.timezone), no address (these fixtures seed no unit) and
+// no names.
+// `names: {}` is the fixtures' REAL value: no contact in this file carries a
+// firstName, so the route composes the "Hey there," fallbacks. `tourType` is
+// VALUE-IRRELEVANT for these two kinds - only the en_route rung forks on it
+// (tourCopy.ts idFor) - so 'self_guided' cannot disagree with the landlord_led
+// fixtures further down.
 /** The instant every tour fixture in this bucket books. */
 const TOUR_AT = '2099-01-10T10:00:00.000Z';
 const CONFIRMATION_BODY = composeTourReminderBody({
   kind: 'confirmation',
   scheduledAt: TOUR_AT,
   timezone: DEFAULT_ORG_SETTINGS.timezone,
+  tourType: 'self_guided',
+  names: {},
 });
 const DAY_BEFORE_BODY = composeTourReminderBody({
   kind: 'day_before',
   scheduledAt: TOUR_AT,
   timezone: DEFAULT_ORG_SETTINGS.timezone,
+  tourType: 'self_guided',
+  names: {},
 });
 const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 

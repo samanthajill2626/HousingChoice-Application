@@ -98,7 +98,7 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
+  const { tenant, unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
 
   // The whole ladder is armed and upcoming right after booking; confirmation
   // (dueAt = arm-time now) is the earliest → the highlighted NEXT rung.
@@ -126,7 +126,15 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   // composing-zone half is pinned by the app's unit tests.
   await expect(
     reminders.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.day_before }),
-  ).toContainText(tourReminderBody('day_before', tourReminderContext(unit, times)));
+  ).toContainText(
+    tourReminderBody(
+      'day_before',
+      tourReminderContext(unit, times, {
+        tourType: 'self_guided',
+        names: { tenantFirstName: tenant.firstName },
+      }),
+    ),
+  );
 
   // Fire the confirmation rung → the panel now reads it SENT, and day_before is
   // still upcoming (a future rung the tick left untouched).
@@ -145,7 +153,13 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   // The exact text this tour's day_before rung composes to - address + org-local
   // time - so both the Upcoming preview and the sent bubble are matched against
   // the real body rather than a template.
-  const dayBefore = tourReminderBody('day_before', tourReminderContext(unit, times));
+  const dayBefore = tourReminderBody(
+    'day_before',
+    tourReminderContext(unit, times, {
+      tourType: 'self_guided',
+      names: { tenantFirstName: tenant.firstName },
+    }),
+  );
 
   // BEFORE any tick: the day_before rung is a pinned Upcoming item on the tenant's
   // timeline — its body, a "Tour reminder" tag, and an honest state line. Since
@@ -218,7 +232,13 @@ test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-
   // "Will be skipped — contact opted out".
   await flow.expectUpcomingSuppressed(
     tenantId,
-    tourReminderBody('day_before', tourReminderContext(unit, times)),
+    tourReminderBody(
+      'day_before',
+      tourReminderContext(unit, times, {
+        tourType: 'self_guided',
+        names: { tenantFirstName: tenant.firstName },
+      }),
+    ),
   );
 
   // Tick past its dueAt → the poller refuses the send (honest suppression): the

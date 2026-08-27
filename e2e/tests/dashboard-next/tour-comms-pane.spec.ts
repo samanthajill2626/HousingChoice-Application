@@ -199,8 +199,11 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const { unitId, line1 } = await createAvailableUnit(req, landlord.contactId);
     const tenant = await createContact(req, 'tenant', `Cpsgt${stamp}`);
 
-    // 48h out: every rung is still in the future at arm time, so day_before
-    // (scheduled - 24h) is a real UPCOMING item rather than an already-fired one.
+    // 48h out: every rung is still in the future at arm time, so day_before is
+    // a real UPCOMING item rather than an already-fired one. The offset is
+    // deliberately NOT restated here - computeDueAt owns it (it moves to 19:30
+    // org-local in the tour-reminder-ladder retiming), and a duplicated
+    // "scheduled - 24h" is exactly the comment that goes stale unnoticed.
     const scheduledAt = new Date(Date.now() + 48 * 3_600_000).toISOString();
     const tourId = await createTour(req, {
       tenantId: tenant.contactId,
@@ -232,6 +235,8 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
         scheduledAt,
         timezone: ORG_TIMEZONE,
         address: line1,
+        tourType: 'self_guided',
+        names: { tenantFirstName: tenant.firstName },
       }),
     });
     await expect(dayBefore).toHaveCount(1, { timeout: 15_000 });

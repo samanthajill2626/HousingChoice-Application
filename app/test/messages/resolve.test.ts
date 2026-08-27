@@ -14,8 +14,9 @@ function fakeSettingsRepo(s: OrgSettings): Pick<SettingsRepo, 'getOrgSettings'> 
 }
 
 describe('resolveMessage', () => {
-  // relay.group_closed is the TOKEN-FREE editable example: every tour.* default
-  // now carries {when}/{time}/{where}, and resolving one bare would (rightly)
+  // relay.group_closed is the TOKEN-FREE editable example: after the 2026-08-26
+  // founder rewrite every tour.* default carries at least one required token (a
+  // name, and/or {when}/{time}/{where}), and resolving one bare would (rightly)
   // throw on the missing vars rather than exercise override precedence.
   it('returns the catalog default when no override is supplied', () => {
     expect(resolveMessage('relay.group_closed')).toBe(MESSAGE_CATALOG['relay.group_closed'].default);

@@ -238,13 +238,17 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(reminders.map((r) => r.state)).toEqual(['sent', 'upcoming', 'canceled']);
 
     // Bodies are the composed rung text: this tour's instant in the org zone
-    // the route composes in, with no address ('unit-states-1' is not seeded).
+    // the route composes in, with no address ('unit-states-1' is not seeded)
+    // and no names ('contact-states-1' is never pushed onto world.contacts, so
+    // the route's tenant read finds nothing and the copy greets "there").
     for (const r of reminders) {
       expect(r.body).toBe(
         composeTourReminderBody({
           kind: r.kind,
           scheduledAt: '2026-07-15T10:00:00.000Z',
           timezone: world.settings.timezone,
+          tourType: 'landlord_led',
+          names: {},
         }),
       );
       // A non-self_guided tour still gets no RECIPIENT-state estimate (Task 2
@@ -839,12 +843,15 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(typeof res.body.reminder.sentAt).toBe('string');
     // The snapshot the force-send claimed, composed in the zone the settings
     // stub above installs (quietWindowAroundNow evaluates in UTC), with no
-    // address ('unit-sendnow-1' is not seeded).
+    // address ('unit-sendnow-1' is not seeded) and no names (seedSendNowTour's
+    // tenant contact carries a phone but no firstName).
     expect(res.body.reminder.body).toBe(
       composeTourReminderBody({
         kind: 'day_before',
         scheduledAt: '2026-07-20T14:00:00.000Z',
         timezone: world.settings.timezone,
+        tourType: 'self_guided',
+        names: {},
       }),
     );
 
@@ -1089,6 +1096,11 @@ describe('composed reminder bodies', () => {
         kind: 'day_before',
         scheduledAt: '2026-12-01T20:00:00.000Z',
         timezone: world.settings.timezone,
+        tourType: 'self_guided',
+        // seedQuietTour's tenant carries no firstName, and seedComposedTour's
+        // unit points at a landlordId that is never pushed onto world.contacts
+        // - so BOTH names resolve to absence and the copy greets "there".
+        names: {},
         // formatStreet projects line1(+line2) only - the street the fixture seeds.
         address: { line1: '412 Sender Way NW' },
       }),
@@ -1197,5 +1209,127 @@ describe('uncomposable rungs on the tour-reminder read paths', () => {
     // Untouched: no sentAt, no skip stamp - still the poll's to deliver.
     expect(world.tourRemindersMap.get(pendingId)?.sentAt).toBeUndefined();
     expect(world.tourRemindersMap.get(pendingId)?.skippedAt).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// RESOLVED NAMES (tour-reminder-ladder, spec 6.3/6.3a/6.3b). Every compose
+// path now resolves the tenant and the unit's property contact BEFORE it
+// composes. These three cases pin the reachable ABSENCE semantics; the FAILURE
+// semantics (a throwing read must not send a wrong-but-valid message) are the
+// next task's, and case 2 below is written so it survives that change.
+// ===========================================================================
+describe('resolved names on the tour-reminder compose paths', () => {
+  it('the no-show draft greets the tenant by first name', async () => {
+    // Spec 9.2: this route used to resolve tour.no_show_checkin DIRECTLY, which
+    // 500s the moment the copy carries {tenantFirstName}. It now runs through
+    // the ONE composer with the tenant resolved.
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-draft-named',
+      type: 'tenant',
+      phone: '+15550720001',
+      firstName: 'Alice',
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    const created = await world.toursRepo.create({
+      tenantId: 'contact-draft-named',
+      unitId: 'unit-draft-named',
+      scheduledAt: '2026-07-20T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    const res = await authed(app).get(
+      `/api/tours/${created.tourId}/no-show-checkin-draft`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ body: 'Hi Alice! Do you need to reschedule?' });
+  });
+
+  it('REGRESSION PIN: a throwing property-contact read still answers the ladder 200', async () => {
+    // NOT TDD - expected green on its first run, because resolveTourContactNames
+    // never throws by contract. It is a pin on that contract: the ladder is a
+    // READ path and must never 500 over a name (spec 6.3b).
+    //
+    // The fixture is deliberately SELF_GUIDED: no rung of a self_guided tour
+    // needs the property contact, so this pin stays green when the next task's
+    // withhold rule lands (that task owns the landlord_led side).
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-throwing-contact', {
+      unitId: 'unit-throwing-contact',
+      landlordId: 'contact-landlord-throws',
+      status: 'available',
+      address: { line1: '99 Throwing Way NW', city: 'Atlanta', state: 'GA', zip: '30318' },
+      created_at: '2026-07-13T00:00:00.000Z',
+      updated_at: '2026-07-13T00:00:00.000Z',
+    });
+    const created = await world.toursRepo.create({
+      tenantId: 'contact-throw-tenant',
+      unitId: 'unit-throwing-contact',
+      scheduledAt: '2026-07-20T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-throwing-contact',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T14:00:00.000Z',
+    });
+    // Only the LANDLORD read throws; the tenant read stays honest so the two
+    // failure surfaces cannot be confused for each other.
+    const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+    world.contactsRepo.getById = async (contactId: string) => {
+      if (contactId === 'contact-landlord-throws') throw new Error('contacts unavailable');
+      return realGetById(contactId);
+    };
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+
+    expect(res.status).toBe(200);
+    const rung = res.body.reminders[0] as { kind: string; body: string };
+    expect(rung.kind).toBe('day_before');
+    // Absence fallbacks, composed - not blank, not a 500.
+    expect(rung.body).toBe(
+      composeTourReminderBody({
+        kind: 'day_before',
+        scheduledAt: '2026-07-20T14:00:00.000Z',
+        timezone: world.settings.timezone,
+        tourType: 'self_guided',
+        names: {},
+      }),
+    );
+  });
+
+  it('the poll SENDS to a tenant contact that exists but carries no name', async () => {
+    // Genuine ABSENCE must still send (spec 6.3b) - only FAILURE may hold a
+    // rung back, and that is the next task's rule. The greeting degrades to
+    // "there" rather than the rung being lost.
+    //
+    // The fixture is a contact that EXISTS with no firstName, NOT an absent
+    // one: an absent tenant never reaches compose on the 1:1 route
+    // (resolveReminderTarget claim-skips it 'contact_missing' first, and that
+    // is deliberate - spec 6.3b).
+    const spy = makeSendSpy();
+    const { world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const deps = pollDepsFrom(world, spy.service);
+    const tourId = await seedQuietTour(world, 'nameless', '+15550720003');
+    Object.assign(
+      world.contacts.find((c) => c.contactId === 'contact-quiet-nameless')!,
+      { consent_method: 'inbound_text' },
+    );
+    seedReminder(world, {
+      reminderId: 'rem-nameless',
+      tourId,
+      kind: 'day_before',
+      dueAt: '2098-12-09T15:00:00.000Z',
+    });
+
+    await runDueTourReminders('2098-12-09T15:00:01.000Z', deps);
+
+    expect(spy.sent).toHaveLength(1);
+    // toMatch, not a .startsWith() member read: SendMessageInput.body is
+    // optional, so the member form is a TS2532 the vitest run cannot see.
+    expect(spy.sent[0]!.body).toMatch(/^Hey there, /);
   });
 });

@@ -1429,10 +1429,11 @@ describe('relay-group API (M1.7)', () => {
     async function seedTourGroup(
       app: Parameters<typeof request>[0],
       tourType: 'landlord_led' | 'self_guided',
+      unitId = 'unit-1',
     ) {
       const tour = await world.toursRepo.create({
         tenantId: 'c-tenant-1',
-        unitId: 'unit-1',
+        unitId,
         tourType,
         scheduledAt: '2026-08-03T18:00:00.000Z',
       });
@@ -1588,6 +1589,51 @@ describe('relay-group API (M1.7)', () => {
       ]);
       expect(scheduled.every((s) => s['refId'] === tour.tourId)).toBe(true);
       expect(scheduled.every((s) => s['conversationId'] === conversationId)).toBe(true);
+    });
+
+    it('the en_route card NAMES the property contact on a landlord-led tour', async () => {
+      // THE 6.3a DRIFT PIN. This is the one preview surface that serves ONLY
+      // non-self_guided tours (relayGroups.ts's early return), i.e. the exact
+      // place a dropped propertyContactFirstName silently flips the preview to
+      // the SELF-GUIDED entry while the group SEND says the landlord-led one.
+      // The composer degrades to the self-guided wording whenever that name is
+      // absent, so a preview that forgot to resolve it would look plausible and
+      // still be a lie.
+      //
+      // The name is seeded onto world.contacts rather than injected as a repo:
+      // api.ts wires the relay router's contacts from `contactsRepoForRelay`
+      // FIRST and only falls back to `contactsRepo`, and makeWebhookHarness sets
+      // no `contactsRepoForRelay` - so world.contactsRepo IS the repo this route
+      // reads, and seeding the world cannot address the wrong one.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      world.units.set('unit-dana', {
+        unitId: 'unit-dana',
+        landlordId: 'c-landlord-dana',
+        status: 'available',
+        address: { line1: '77 Dana Way NW', city: 'Atlanta', state: 'GA', zip: '30318' },
+        created_at: '2026-08-01T00:00:00.000Z',
+        updated_at: '2026-08-01T00:00:00.000Z',
+      });
+      world.contacts.push({
+        contactId: 'c-landlord-dana',
+        type: 'landlord',
+        phone: '+15550730001',
+        firstName: 'Dana',
+        lastName: 'Doyle',
+        created_at: '2026-08-01T00:00:00.000Z',
+      } as Parameters<typeof world.contacts.push>[0]);
+      const { conversationId } = await seedTourGroup(app, 'landlord_led', 'unit-dana');
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+
+      const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
+      const enRoute = scheduled.find((s) => s['reminderKind'] === 'en_route')!;
+      expect(enRoute).toBeDefined();
+      expect(enRoute['body']).toContain('Dana will be headed that way');
     });
   });
 });

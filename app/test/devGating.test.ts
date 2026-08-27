@@ -453,18 +453,24 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   const TENANT_PHONE = '+15550300001';
   // Rung bodies COMPOSED the way the send path composes them (single source of
   // truth): this tour's instant, the zone the quiet-hours window resolves to
-  // (quietOffSettingsRepo inherits DEFAULT_ORG_SETTINGS.timezone) and no
-  // address - 'unit-tick-1' is never seeded, so both sides take the
-  // _no_address variant.
+  // (quietOffSettingsRepo inherits DEFAULT_ORG_SETTINGS.timezone), no address
+  // ('unit-tick-1' is never seeded) and no names - the tick fixture's tenant
+  // contact carries no firstName, so the send composes the "Hey there,"
+  // fallback. tourType is VALUE-IRRELEVANT for these two kinds: only the
+  // en_route rung forks on it (tourCopy.ts idFor).
   const CONFIRMATION_BODY = composeTourReminderBody({
     kind: 'confirmation',
     scheduledAt: SCHEDULED_AT,
     timezone: DEFAULT_ORG_SETTINGS.timezone,
+    tourType: 'self_guided',
+    names: {},
   });
   const DAY_BEFORE_BODY = composeTourReminderBody({
     kind: 'day_before',
     scheduledAt: SCHEDULED_AT,
     timezone: DEFAULT_ORG_SETTINGS.timezone,
+    tourType: 'self_guided',
+    names: {},
   });
 
   /** Harness app + dev router sharing ONE world: /api/tours arms reminder rows

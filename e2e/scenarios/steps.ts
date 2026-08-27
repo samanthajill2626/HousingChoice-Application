@@ -35,6 +35,12 @@ import {
 // the module is PURE (no repo/AWS deps - resolve.ts's settings dependency was
 // split out into resolveWithSettings.ts), so the e2e bundle stays light.
 import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
+// TYPE-ONLY, and it must stay that way. TourContactNames is re-exported by the
+// composer precisely so the harness never reaches for app/src/lib/tourContacts.js
+// directly: that module VALUE-imports unitContacts from repos/unitsRepo.js, which
+// would drag the AWS SDK into the e2e bundle. toursModel.ts has zero imports.
+import type { TourContactNames } from '../../app/src/messages/tourCopy.js';
+import type { TourType } from '../../app/src/lib/toursModel.js';
 import { expectTodayReady } from '../support/today.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
@@ -136,10 +142,14 @@ export type ReminderKind =
 export const ORG_TIMEZONE = 'America/New_York';
 
 /** What a rung body is composed FROM: the tour's instant, the zone the app
- *  renders it in, and the unit's street (absent -> the `_no_address` variant). */
+ *  renders it in, the unit's street (absent -> the address clause is dropped),
+ *  the tour TYPE (the en_route rung forks on it) and the resolved NAMES the
+ *  copy greets with. */
 export interface TourReminderContext {
   scheduledAt: string;
   timezone: string;
+  tourType: TourType;
+  names: TourContactNames;
   address?: string;
 }
 
@@ -161,8 +171,18 @@ export function instantOf(times: TourTimes): string {
 /** The composition context behind a booking, for specs that need an expected body
  *  outside the reminder step helpers (the helpers derive their own from the tour
  *  the Scenario is driving). */
-export function tourReminderContext(unit: Unit, times: TourTimes): TourReminderContext {
-  return { scheduledAt: instantOf(times), timezone: ORG_TIMEZONE, address: unit.addressLine1 };
+export function tourReminderContext(
+  unit: Unit,
+  times: TourTimes,
+  extra: { tourType: TourType; names: TourContactNames },
+): TourReminderContext {
+  return {
+    scheduledAt: instantOf(times),
+    timezone: ORG_TIMEZONE,
+    address: unit.addressLine1,
+    tourType: extra.tourType,
+    names: extra.names,
+  };
 }
 
 /** A rung body composed by the APP's OWN composer (the single source of truth),
@@ -175,6 +195,8 @@ export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): 
     kind,
     scheduledAt: ctx.scheduledAt,
     timezone: ctx.timezone,
+    tourType: ctx.tourType,
+    names: ctx.names,
     ...(ctx.address !== undefined && { address: ctx.address }),
   });
 }
@@ -185,14 +207,24 @@ export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): 
  *  "did not send" is always asserted against a fragment that is stable across
  *  times and addresses AND present in both the addressed and `_no_address`
  *  variants. (tour-no-show-checkin.spec.ts already uses this idiom.) */
-// Re-picked 2026-08-18 for the founder's rewritten copy. Each fragment is still
-// chosen to appear in BOTH the addressed and `_no_address` variant of its rung,
-// which is what keeps an absence assertion from passing vacuously.
+// Re-picked 2026-08-26 for the founder's rewritten copy. The invariant is that
+// each fragment appears in EVERY variant of its rung - address forks AND
+// tour-type forks (spec 13) - which is what keeps an absence assertion from
+// passing vacuously.
 export const REMINDER_BODY_MARKERS: Record<ReminderKind, string> = {
   confirmation: 'your tour is set for',
   day_before: 'confirming your tour tomorrow at',
-  morning_of: 'excited for you to see',
-  en_route: "let me know when you're on the way",
+  morning_of: 'looking forward to having you tour at',
+  // The marker invariant (spec 13): the fragment must appear in EVERY
+  // variant of its rung. Byte-check both en_route entries: self-guided ends
+  // "...text me when you're on the way?" and landlord-led ends "...text here
+  // when you're on the way?", so "when you're on the way" is a shared
+  // substring of BOTH - the invariant holds. It is preferred over the bare
+  // "on the way" tail because markers back ABSENCE assertions and this
+  // suite relays tenant-authored "On my way!" texts; the longer fragment is
+  // not something a tenant types, so an absence check cannot collide with
+  // relayed traffic.
+  en_route: "when you're on the way",
   no_show_checkin: 'Do you need to reschedule?',
 };
 
@@ -206,6 +238,15 @@ export const REMINDER_KIND_LABELS: Record<ReminderKind, string> = {
   en_route: 'En route',
   no_show_checkin: 'No-show check-in',
 };
+
+/** The Tour type SELECT's option labels, mapped to the stored TourType the
+ *  composer forks on. `satisfies` keeps the values honest against the app's
+ *  own union without widening the keys. */
+const TOUR_TYPE_BY_LABEL = {
+  'Self-guided': 'self_guided',
+  'Landlord-led': 'landlord_led',
+  'PM team': 'pm_team',
+} as const satisfies Record<string, TourType>;
 
 /** A booking time + the reminder-ladder dueAts the backend will arm off it. */
 export interface TourTimes {
@@ -328,6 +369,16 @@ const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
  *  reaches the verbs that produce them. */
 interface ActiveTour {
   tourId: string;
+  /** The type the tour was CREATED with - the en_route rung's copy forks on it
+   *  (spec 9.0: self_guided one way, landlord_led and pm_team the other).
+   *  Required: a defaulted type would silently compose the wrong wording. */
+  tourType: TourType;
+  /** The tenant's first name, for the greeting every rung now carries.
+   *  Deliberately NO propertyContactFirstName twin: nothing in the harness
+   *  records the landlord's name against the active tour, so such a field
+   *  would be a contract with no way to satisfy it - see
+   *  requireTourReminderContext's docblock. */
+  tenantFirstName?: string;
   poolNumber?: string;
   groupThreadId?: string;
   /** The booked instant, ISO. Set by teamBooksTour, REPLACED by
@@ -1715,9 +1766,26 @@ export class Scenario {
       const m = /\/tours\/([^/?#]+)/.exec(this.page.url());
       if (!m) throw new Error('teamCreatesTourFromInterest: expected a /tours/:tourId URL after create');
       const tourId = decodeURIComponent(m[1]!);
-      // Carry the unit's street: the reminder-body helpers compose {where} from
-      // it, and this is the only verb that sees the Unit.
-      this.activeTour = { tourId, addressLine1: unit.addressLine1 };
+      // Carry the unit's street: the reminder-body helpers compose the address
+      // clause from it, and this is the only verb that sees the Unit. The tour
+      // TYPE and the tenant's first name ride along for the same reason - this
+      // is the only verb that knows either at create time.
+      this.activeTour = {
+        tourId,
+        tourType: TOUR_TYPE_BY_LABEL[tourType],
+        addressLine1: unit.addressLine1,
+        // HAZARD (harmless today, ordering luck tomorrow): teamCreatesLandlord
+        // ALSO writes this.activeTenant, with the LANDLORD's name. Every
+        // tour-creating spec happens to create the landlord FIRST and then
+        // switch to the tenant's file, so activeTenant is the tenant by the
+        // time this verb runs - but that is spec ordering, not a contract. A
+        // spec that creates a landlord AFTER the tenant and then books would
+        // greet the tenant by the landlord's name. If that ever happens, track
+        // the tenant explicitly rather than widening this line.
+        ...(this.activeTenant?.firstName !== undefined && {
+          tenantFirstName: this.activeTenant.firstName,
+        }),
+      };
       // Requested + not booked - the rebuilt page shows the tour StatusBadge in
       // the header band (no more <dd> aria-labels) plus a "Not booked" facts line.
       await expect(this.tourStatusBadge('Requested')).toBeVisible();
@@ -3453,7 +3521,19 @@ export class Scenario {
    *  tour is BOOKED, which is also the only moment a ladder is armed - so a
    *  missing one means the caller asserted a rung before anything could have been
    *  scheduled, and that deserves a named error rather than a body composed off
-   *  an invented time. */
+   *  an invented time.
+   *
+   *  EXACT-EQUALITY ASSERTIONS ON THE en_route LANDLORD-LED BODY ARE NOT
+   *  SUPPORTED THROUGH THE STEP HELPERS. The harness records no
+   *  property-contact name against the active tour, so `names` carries only
+   *  the tenant and this context composes the SELF-GUIDED wording for that one
+   *  rung - exactly as the server does for a nameless property contact. A spec
+   *  that needs the landlord-led body must compose it spec-locally with an
+   *  explicit `names` object; the unit-level pin for that copy lives in
+   *  app/test/relayApi.test.ts. The gap is tracked in
+   *  docs/issues/tour-reminder-zero-primary-e2e-gap.md. No current spec asserts
+   *  that body - verified: tours.spec.ts asserts confirmation/day_before
+   *  in-group and en_route only on a self_guided 1:1. */
   private requireTourReminderContext(): TourReminderContext {
     const tour = this.requireActiveTour();
     if (tour.scheduledAt === undefined) {
@@ -3462,6 +3542,10 @@ export class Scenario {
     return {
       scheduledAt: tour.scheduledAt,
       timezone: ORG_TIMEZONE,
+      tourType: tour.tourType,
+      names: {
+        ...(tour.tenantFirstName !== undefined && { tenantFirstName: tour.tenantFirstName }),
+      },
       ...(tour.addressLine1 !== undefined && { address: tour.addressLine1 }),
     };
   }

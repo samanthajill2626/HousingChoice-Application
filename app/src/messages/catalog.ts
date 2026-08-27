@@ -26,16 +26,17 @@ export type MessageClass = 'operational' | 'compliance-locked' | 'voice' | 'tran
 
 /** Every stable message id (also the future operator-override key). */
 export type MessageId =
-  // Operational - tour reminders (jobs/tourReminders.ts). Each address-bearing
-  // rung has a `_no_address` twin for the units whose address we do not hold.
+  // Operational - tour reminders (jobs/tourReminders.ts). Only the CONFIRMATION
+  // pair still has a `_no_address` twin: its copy names the address MID-sentence,
+  // so there is nothing to degrade to. Every other rung either never mentions an
+  // address or takes the computed {addressLine} clause (messages/tourCopy.ts),
+  // and en_route forks on TOUR TYPE instead.
   | 'tour.confirmation'
   | 'tour.confirmation_no_address'
   | 'tour.day_before'
-  | 'tour.day_before_no_address'
   | 'tour.morning_of'
-  | 'tour.morning_of_no_address'
-  | 'tour.en_route'
-  | 'tour.en_route_no_address'
+  | 'tour.en_route_self_guided'
+  | 'tour.en_route_landlord_led'
   | 'tour.no_show_checkin'
   // Operational — placement nudges (jobs/placementNudges.ts)
   | 'nudge.receipt_check'
@@ -95,105 +96,98 @@ export interface MessageDef {
   dead?: boolean;
 }
 
+/** The token set EVERY tour entry declares (see the TOKEN CONTRACT below). */
+const TOUR_NAME_VARS = [
+  'when', 'time', 'tenantFirstName', 'tenantName',
+  'propertyContactFirstName', 'propertyContactName',
+] as const;
+
 export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // --- Operational: tour reminders (moved out of jobs/tourReminders.ts) ---
-  // TOKEN CONTRACT. Address-bearing entries accept {when} {time} {where}; the
-  // _no_address twins accept {when} {time} ONLY. interpolate() iterates over the
-  // DECLARED vars, so a token that is not declared is never inspected - an
-  // override of a _no_address entry containing {where} would emit that text
-  // literally. Declaring {where} on the twins would suppress it only by always
-  // passing a string, which reopens the hole the split exists to close (spec D7).
-  // Unreachable today regardless: settingsToOverrides maps only welcome.sms and
-  // missed_call.autotext, so no tour.* override can exist.
-  // FOUNDER VOICE (Sam, 2026-08-18). The whole ladder was rewritten to read like
-  // one person texting, not a system: first-person singular, no "Reminder:"
-  // prefix, no corporate "we". Two token rules fall out of that wording and are
-  // easy to get wrong on a future edit:
-  //   - {when} is DATE + TIME ("Thu, Aug 20 at 3:00 PM"). It belongs only where
-  //     the day is not already in the sentence - i.e. the confirmation, which
-  //     can go out weeks ahead.
-  //   - {time} is the TIME ALONE ("3:00 PM"). The day_before/morning_of rungs
-  //     say "tomorrow"/"today" in the copy, so {when} there would double up
-  //     ("tomorrow at Thu, Aug 20 at 3:00 PM").
+  // TOKEN CONTRACT (founder rewrite, Sam 2026-08-24, applied 2026-08-26).
+  // Every tour entry declares the FULL token set - when/time/where plus the
+  // four name tokens - even where the current copy does not use one:
+  // interpolate() iterates DECLARED vars and skips tokens absent from the
+  // template, so declaring is what lets a future wording change be a pure
+  // string edit (legal ONLY because these entries are editable:true; the
+  // no-dead-tokens rule in catalog.test.ts applies to non-editable entries).
+  //   - {time} is the TIME ALONE ("3:00 PM"): day_before/morning_of say
+  //     "tomorrow"/"today" in the copy, so {when} there would double up.
+  //   - {when} is DATE + TIME - used only by the confirmation, which can go
+  //     out weeks ahead.
+  //   - {addressLine} (morning_of only) is a WHOLE trailing sentence computed
+  //     in code (tourCopy.ts): "Address is <street>." or the empty string, so
+  //     a unit with no address degrades to a sentence that simply ends -
+  //     never "Address is ." and never a literal {where}. The _no_address
+  //     twin mechanism survives ONLY on the confirmation pair, whose copy
+  //     uses {where} MID-sentence (untouched in Phase A - spec section 2).
+  //   - en_route forks on TOUR TYPE, not address: self_guided vs landlord-led
+  //     wording, with pm_team taking the landlord-led entry (spec 9.0).
   'tour.confirmation': {
     id: 'tour.confirmation',
     default: 'Hey, your tour is set for {when} at {where}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time', 'where'],
+    vars: [...TOUR_NAME_VARS, 'where'],
   },
+  // The one surviving twin, and the one place {where} is still load-bearing:
+  // it sits MID-sentence, so the addressless case needs its own copy rather
+  // than a computed clause. Declaring {where} here would reopen the leak the
+  // split exists to close (spec 6.5) - do not add it.
   'tour.confirmation_no_address': {
     id: 'tour.confirmation_no_address',
     default: 'Hey, your tour is set for {when}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time'],
+    vars: [...TOUR_NAME_VARS],
   },
   'tour.day_before': {
     id: 'tour.day_before',
-    default: 'Hey, confirming your tour tomorrow at {time}. Looking forward to having you tour!',
+    default: 'Hey {tenantFirstName}, confirming your tour tomorrow at {time}. Does that still work for you?',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time', 'where'],
-  },
-  // Byte-identical to its address-bearing twin ON PURPOSE: the founder wording
-  // for this rung never mentions the address, so there is nothing to drop. Keep
-  // both entries - the twin exists so a future edit CAN reintroduce {where} on
-  // the address-bearing side without leaking it into the addressless one.
-  'tour.day_before_no_address': {
-    id: 'tour.day_before_no_address',
-    default: 'Hey, confirming your tour tomorrow at {time}. Looking forward to having you tour!',
-    class: 'operational',
-    editable: true,
-    channel: 'sms',
-    vars: ['when', 'time'],
+    vars: [...TOUR_NAME_VARS, 'where'],
   },
   'tour.morning_of': {
     id: 'tour.morning_of',
     default:
-      'Good morning, excited for you to see {where} today at {time}. Let me know if your timing changes.',
+      'Hey {tenantFirstName}, looking forward to having you tour at {time} today. Does that still work for you? {addressLine}',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time', 'where'],
+    vars: [...TOUR_NAME_VARS, 'where', 'addressLine'],
   },
-  // No address to name, so it falls back to the TENANT-facing noun: "home".
-  // Never "property" here - that is the landlord/staff word (documentation/GLOSSARY.md).
-  'tour.morning_of_no_address': {
-    id: 'tour.morning_of_no_address',
-    default:
-      'Good morning, excited for you to see the home today at {time}. Let me know if your timing changes.',
+  'tour.en_route_self_guided': {
+    id: 'tour.en_route_self_guided',
+    default: "Hey {tenantFirstName}, can you please text me when you're on the way?",
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time'],
+    vars: [...TOUR_NAME_VARS, 'where'],
   },
-  'tour.en_route': {
-    id: 'tour.en_route',
-    default: "Hey, see you soon at {where}. Please let me know when you're on the way.",
+  // Also the pm_team wording (spec 9.0): {propertyContactFirstName} resolves
+  // to the unit's PRIMARY CONTACT, which is what makes the sentence true for
+  // a PM-run tour rather than naming the owner.
+  'tour.en_route_landlord_led': {
+    id: 'tour.en_route_landlord_led',
+    default: "Hey {tenantFirstName}, {propertyContactFirstName} will be headed that way shortly. Can you please text here when you're on the way?",
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: ['when', 'time', 'where'],
+    vars: [...TOUR_NAME_VARS, 'where'],
   },
-  'tour.en_route_no_address': {
-    id: 'tour.en_route_no_address',
-    default: "Hey, see you soon. Please let me know when you're on the way.",
-    class: 'operational',
-    editable: true,
-    channel: 'sms',
-    vars: ['when', 'time'],
-  },
+  // D2 REVERSED (Sam via Cameron, 2026-08-26): the founder asked for the
+  // name here; "vaguer is kinder" was considered and overruled - spec s3.
   'tour.no_show_checkin': {
     id: 'tour.no_show_checkin',
-    default: 'Hi! Do you need to reschedule?',
+    default: 'Hi {tenantFirstName}! Do you need to reschedule?',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: [],
+    vars: [...TOUR_NAME_VARS],
   },
 
   // --- Operational: placement nudges (moved out of jobs/placementNudges.ts) ---

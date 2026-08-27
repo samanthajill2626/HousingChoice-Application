@@ -1491,10 +1491,14 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 // ============================================================================
 
 describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
-  it('returns the templated no-show check-in copy', async () => {
-    // The copy is tour-independent, but mirror the sibling tour routes: book a
-    // tour and read the draft off its id. The route resolves the editable
-    // catalog entry (tour.no_show_checkin) via resolveMessage, no override set.
+  it('returns the templated no-show check-in copy, greeting the tenant', async () => {
+    // Book a tour and read the draft off its id. Since the 2026-08-26 founder
+    // rewrite the copy is TENANT-SPECIFIC, so the route resolves the tenant and
+    // goes through composeTourReminderBody (a bare resolveMessage would throw on
+    // the missing {tenantFirstName}). BASE_CREATE_BODY's 'contact-tenant-1' is
+    // never seeded onto world.contacts, so the read finds nothing and the copy
+    // takes the ABSENCE fallback - the "greets by name" half is pinned in
+    // tourRemindersApi.test.ts, which seeds a named tenant.
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     expect(created.status).toBe(201);
@@ -1503,7 +1507,7 @@ describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/no-show-checkin-draft`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      body: 'Hi! Do you need to reschedule?',
+      body: 'Hi there! Do you need to reschedule?',
     });
   });
 

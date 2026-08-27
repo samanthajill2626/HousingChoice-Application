@@ -46,7 +46,11 @@ import {
   runDueTourReminders as runDueTourRemindersRaw,
   type RunDueTourRemindersDeps,
 } from '../src/jobs/tourReminders.js';
-import { composeTourReminderBody } from '../src/messages/tourCopy.js';
+import {
+  composeTourReminderBody,
+  type TourContactNames,
+} from '../src/messages/tourCopy.js';
+import type { TourType } from '../src/lib/toursModel.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -91,15 +95,35 @@ if (!reachable) {
 /**
  * The body the send paths compose for a rung of a tour booked at `scheduledAt`.
  *
- * Every tour.* default now carries {when}/{time}/{where}, so a bare
+ * Every tour.* default now carries at least one required token, so a bare
  * resolveMessage of one THROWS - the expectation has to be composed from the
  * same context the job composes from. Both settings stubs this suite uses
  * (quietOffSettingsRepo and stubSettingsRepo) inherit
  * DEFAULT_ORG_SETTINGS.timezone, and NO fixture here seeds a unit, so every
- * body takes the _no_address variant.
+ * body composes with no address clause.
+ *
+ * BOTH DEFAULTS ARE VALUE-SAFE HERE, and neither is laziness:
+ *   - `names: {}` - NO fixture contact in this file carries a firstName
+ *     (verified by grep), so the poll really does compose "Hey there," bodies
+ *     and an empty names object is what the job passes.
+ *   - `tourType: 'self_guided'` - with no property-contact name in play, the
+ *     en_route rung DEGRADES to the self-guided entry for every tour type
+ *     (tourCopy.ts idFor), so the default cannot disagree with what the job
+ *     composed. Pass an explicit pair the moment a fixture here gains a name.
  */
-function rungBody(kind: ReminderKind, scheduledAt: string): string {
-  return composeTourReminderBody({ kind, scheduledAt, timezone: DEFAULT_ORG_SETTINGS.timezone });
+function rungBody(
+  kind: ReminderKind,
+  scheduledAt: string,
+  tourType: TourType = 'self_guided',
+  names: TourContactNames = {},
+): string {
+  return composeTourReminderBody({
+    kind,
+    scheduledAt,
+    timezone: DEFAULT_ORG_SETTINGS.timezone,
+    tourType,
+    names,
+  });
 }
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {

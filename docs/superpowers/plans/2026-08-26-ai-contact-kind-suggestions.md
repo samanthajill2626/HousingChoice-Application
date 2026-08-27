@@ -130,7 +130,7 @@ Expected: status lists only the adapter before staging; `MERGE_HEAD` prints noth
 
 **Interfaces:**
 - Consumes: `ContactsRepo.getById(contactId, { consistentRead: true })`, suggestion immutable `revision`, legacy suggestion identity fallback, and `tableName`.
-- Produces: `ContactItem.classification_revision?: number`, `contactClassificationRevision(contact)`, `SuggestionItem.contactClassificationRevision?: number`, consistent suggestion reads, and `deleteTypeSuggestionIfCurrentAtContactRevision`.
+- Produces: `ContactItem.classification_revision?: number`, `contactClassificationRevision(contact)`, `SuggestionItem.contactClassificationRevision?: number`, `sameSuggestionIdentity(a, b)`, consistent suggestion reads, and `deleteTypeSuggestionIfCurrentAtContactRevision`.
 
 - [ ] **Step 1: Add red contact-revision integration tests**
 
@@ -243,7 +243,39 @@ it('requests a consistent point read when the caller asks for one', async () => 
     input: expect.objectContaining({ ConsistentRead: true }),
   }));
 });
+
+it('compares suggestion identity by revision before the legacy fallback', () => {
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: 'rev-1', createdAt: 'old' }),
+    suggestion({ revision: 'rev-1', createdAt: 'new' }),
+  )).toBe(true);
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: 'rev-1' }),
+    suggestion({ revision: 'rev-2' }),
+  )).toBe(false);
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: 'rev-1' }),
+    suggestion({ revision: undefined }),
+  )).toBe(false);
+});
+
+it('requires exact createdAt and present-or-absent runId for legacy rows', () => {
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: undefined, createdAt: 't1', runId: undefined }),
+    suggestion({ revision: undefined, createdAt: 't1', runId: undefined }),
+  )).toBe(true);
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: undefined, createdAt: 't1', runId: undefined }),
+    suggestion({ revision: undefined, createdAt: 't1', runId: 'run-1' }),
+  )).toBe(false);
+  expect(sameSuggestionIdentity(
+    suggestion({ revision: undefined, createdAt: 't1', runId: 'run-1' }),
+    suggestion({ revision: undefined, createdAt: 't2', runId: 'run-1' }),
+  )).toBe(false);
+});
 ```
+
+The helper fixtures must also prove that different `ownerContactId` or `target` values never compare equal.
 
 - [ ] **Step 6: Add red two-table guarded-delete integration tests**
 
@@ -276,7 +308,7 @@ Run:
 npm run test -w @housingchoice/app -- test/extractionRepo.test.ts test/extractionRepo.integration.test.ts
 ```
 
-Expected: FAIL because the optional fields, consistent-read option, guarded-delete type, and method do not exist.
+Expected: FAIL because the optional fields, identity helper, consistent-read option, guarded-delete type, and method do not exist.
 
 - [ ] **Step 8: Add the guarded-delete types and signatures**
 
@@ -297,6 +329,23 @@ export type SuggestionIdentity = Pick<
   SuggestionItem,
   'ownerContactId' | 'target' | 'createdAt' | 'runId' | 'revision'
 >;
+
+export function sameSuggestionIdentity(
+  left: SuggestionIdentity,
+  right: SuggestionIdentity,
+): boolean {
+  if (
+    left.ownerContactId !== right.ownerContactId
+    || left.target !== right.target
+  ) return false;
+  if (left.revision !== undefined || right.revision !== undefined) {
+    return left.revision !== undefined
+      && right.revision !== undefined
+      && left.revision === right.revision;
+  }
+  return left.createdAt === right.createdAt
+    && left.runId === right.runId;
+}
 ```
 
 Widen the interface without changing existing callers:
@@ -362,7 +411,7 @@ TransactItems: [
 ]
 ```
 
-Reuse the existing identity policy: prefer exact `revision`; for a legacy row require absent `revision`, exact `createdAt`, and exact present-or-absent `runId`. On `TransactionCanceledException`, consistently read both rows. Return `contact_revision_changed` first when the live logical contact revision differs; otherwise return `suggestion_changed_or_absent` when the exact row is gone or replaced. Re-throw an unexplained cancellation where both predicates still appear true and re-throw non-transaction failures. A successful transaction returns `deleted`.
+Build the DynamoDB condition from the same fields and precedence as `sameSuggestionIdentity`: prefer exact `revision`; for a legacy row require absent `revision`, exact `createdAt`, and exact present-or-absent `runId`. Use the exported helper for cancellation diagnosis and later route verdict ownership, and pin condition/helper parity in the repository tests. On `TransactionCanceledException`, consistently read both rows. Return `contact_revision_changed` first when the live logical contact revision differs; otherwise return `suggestion_changed_or_absent` when the exact row is gone or replaced. Re-throw an unexplained cancellation where both predicates still appear true and re-throw non-transaction failures. A successful transaction returns `deleted`.
 
 - [ ] **Step 10: Run both repository suites and app typecheck**
 
@@ -769,7 +818,7 @@ Expected: the commit contains only extraction-side reconciliation and necessary 
 - Modify: `app/test/todayApi.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1's canonical kind union; Task 2's contact revision and guarded delete; existing contact PATCH status/conversation/audit behavior; AI run finalization markers.
+- Consumes: Task 1's canonical kind union; Task 2's `contactClassificationRevision`, `GuardedTypeDeleteResult`, `sameSuggestionIdentity`, and guarded delete; existing contact PATCH status/conversation/audit behavior; AI run finalization markers.
 - Produces: `canonicalSuggestedContactKind(contact)`, an exact Property Manager preset constant, and bounded human-writer reconciliation for every type/role PATCH.
 
 - [ ] **Step 1: Add red pure-kind tests**
@@ -1017,7 +1066,7 @@ for (let attempt = 0; attempt < 4; attempt += 1) {
     candidate.contactClassificationRevision ?? 0;
   if (candidateContactRevision >= committedRevision) return;
 
-  let result: DeleteTypeSuggestionResult;
+let result: GuardedTypeDeleteResult;
   try {
     result = await extraction
       .deleteTypeSuggestionIfCurrentAtContactRevision(candidate, committedRevision);
@@ -1541,16 +1590,27 @@ Add explicit positive and negative phrases:
 it('classifies the current external contact into four mutually exclusive kinds', () => {
   const sys = buildExtractionSystemPrompt();
   expect(sys).toContain('CURRENT external contact');
-  expect(sys).toContain('I own three rental properties');
-  expect(sys).toContain('Landlord');
-  expect(sys).toContain('I manage three properties for the owner');
-  expect(sys).toContain('Property Manager');
-  expect(sys).toContain('not Landlord and not Partner');
-  expect(sys).toContain('I am her caseworker at Hope Atlanta');
-  expect(sys).toContain('Partner');
-  expect(sys).toContain('My caseworker at Hope Atlanta told me to call');
-  expect(sys).toContain('mentioned caseworker is not the contact');
-  expect(sys).toContain('I am calling about a client');
+  const examples = [
+    ['I am looking for a two-bedroom home for my family', 'Tenant'],
+    ['I own three rental properties', 'Landlord'],
+    ['I manage three properties for the owner', 'Property Manager'],
+    ['I am her caseworker at Hope Atlanta', 'Partner'],
+    ['My caseworker at Hope Atlanta told me to call', 'Tenant'],
+    ['I am calling about a client', 'none'],
+  ] as const;
+  for (const [phrase, expected] of examples) {
+    const line = sys.split('\n').find((candidate) => candidate.includes(phrase));
+    expect(line, phrase).toBeDefined();
+    expect(line).toContain(`-> ${expected}`);
+  }
+  const managerLine = sys.split('\n')
+    .find((line) => line.includes('I manage three properties for the owner'));
+  expect(managerLine).toContain('not Landlord and not Partner');
+  const mentionedCaseworkerLine = sys.split('\n')
+    .find((line) => line.includes('My caseworker at Hope Atlanta told me to call'));
+  expect(mentionedCaseworkerLine).toContain(
+    'mentioned caseworker is not the contact',
+  );
   expect(sys).toContain('value "none"');
 });
 

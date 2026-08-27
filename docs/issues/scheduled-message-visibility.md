@@ -30,9 +30,19 @@ they should be designed together.
 The tour detail page (`dashboard/src/routes/tours/TourDetail.tsx`, `/tours/:tourId`) shows
 Status / Scheduled / Type / exit-gate but **nothing about reminders**, even though a full
 5-rung ladder is armed on scheduling (`armTourReminders` in `app/src/jobs/tourReminders.ts`):
-`confirmation` (immediate), `day_before` (−24h), `morning_of` (08:00 day-of), `en_route`
-(−2h), `no_show_checkin` (+30m). Each row (`tourRemindersRepo`) carries `dueAt`, `kind`,
+`confirmation` (immediate), `day_before`, `morning_of`, `en_route`, `no_show_checkin`
+(+30m). Each row (`tourRemindersRepo`) carries `dueAt`, `kind`,
 `sentAt?`, `canceledAt?`.
+
+TIMINGS UPDATED 2026-08-26 (this file's original text stated the 2026-07 ladder:
+`day_before` -24h, `morning_of` 08:00 day-of, `en_route` -2h - all three now
+false). CURRENT: `confirmation` immediate; `day_before` 19:30 org-local the
+evening before; `morning_of` scheduledAt - 4h (staff label "4 hours before");
+`en_route` scheduledAt - 1h (founder decision 2026-08-18); `no_show_checkin`
++30m and MANUAL-SEND only, so only FOUR rungs auto-arm. The whole ladder is also
+PAUSED (manual-only, founder decision 2026-08-20). None of this changes what
+Part A/B built - it is corrected here only because a resolved registry entry is
+still read as a description of the system.
 
 - The repo already has `listByTour(tourId)` + a `byTour` GSI — but **no HTTP route exposes
   it** and there is no client type/fetcher. So the read capability exists at the data layer

@@ -750,7 +750,8 @@ const touredYesTenant = {
     burned_phones: new Set([PHONES.touredYes, '+15550100002']),
     provisioned_at: CW,
   },
-  // Tour: toured, outcome move_forward, convertible (no reminder rows — all sent already)
+  // Tour: toured, outcome move_forward, convertible. Its three reminder rows
+  // sit just below and are ALL history (every one already sent).
   tour: {
     tourId: TOUR_TOURED,
     tenantId: C_TOURED_YES,
@@ -765,7 +766,17 @@ const touredYesTenant = {
     createdAt: CW,
     updatedAt: CZ,
   },
-  // Reminder rows: confirmation sent, day_before sent, morning_of sent (all history)
+  // Reminder rows: confirmation sent, day_before sent, morning_of sent (all
+  // history). The two ladder instants follow the founder retiming of
+  // 2026-08-26: day_before at 19:30 org-local the evening before (19:30 EDT
+  // May 9 = 23:30Z), morning_of at scheduledAt - 4h (14:00Z).
+  //
+  // DECIDED 2026-08-26: seeds write NO sentBody, here or anywhere. A read path
+  // renders a stored sentBody only when one exists and otherwise RECOMPOSES
+  // from the live catalog, so these months-old "already sent" rows re-render in
+  // TODAY's wording. Accepted deliberately over backfilling synthetic sentBody
+  // snapshots, which would fabricate send history in a store whose whole point
+  // is recording what actually went out.
   reminders: [
     {
       reminderId: reminderId(SLUG_TOURED_YES, 'confirmation'),
@@ -780,18 +791,18 @@ const touredYesTenant = {
       reminderId: reminderId(SLUG_TOURED_YES, 'day-before'),
       tourId: TOUR_TOURED,
       kind: 'day_before',
-      dueAt: '2026-05-09T18:00:00.000Z',
+      dueAt: '2026-05-09T23:30:00.000Z',
       _reminderPartition: 'reminders',
-      sentAt: '2026-05-09T18:00:00.000Z',
+      sentAt: '2026-05-09T23:30:00.000Z',
       createdAt: CW,
     },
     {
       reminderId: reminderId(SLUG_TOURED_YES, 'morning-of'),
       tourId: TOUR_TOURED,
       kind: 'morning_of',
-      dueAt: '2026-05-10T08:00:00.000Z',
+      dueAt: '2026-05-10T14:00:00.000Z',
       _reminderPartition: 'reminders',
-      sentAt: '2026-05-10T08:00:00.000Z',
+      sentAt: '2026-05-10T14:00:00.000Z',
       createdAt: CW,
     },
   ],

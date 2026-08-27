@@ -7,10 +7,18 @@ status: resolved
 area: e2e
 created: 2026-07-10
 resolved: 2026-08-24
-updated: 2026-08-21
+updated: 2026-08-26
 refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:103, e2e/tests/scenarios/scheduled-visibility.spec.ts:132, e2e/scenarios/steps.ts:3242
+---
 
 <!--
+  FRONTMATTER DELIMITER RESTORED 2026-08-26. The closing `---` was missing after
+  `refs:`, so scripts/issues.mjs parsed everything down to the stray `---` that
+  used to sit below the paragraph as frontmatter - the HTML comment and the
+  "Remaining scope" paragraph included. It survived only because no line in
+  there happened to match `^word:`; any future body line starting `Note:` at
+  column 0 would have become a bogus field.
+-->
   TITLE CORRECTED 2026-08-21. It still advertised the DETERMINISTIC 08:00
   wall-clock failure, which `150fbfa4` closed on 2026-08-05 ("full-ladder
   assertions book a 14:00-local tour - kills the 00:00-08:00 wall-clock flake").
@@ -25,7 +33,6 @@ Two sightings, 2026-07-10 and 2026-08-03, both a Reminders-panel rung not
 visible inside its 10s budget under full-suite load, both on branches with zero
 intersection with tours. Not reproduced since 2026-08-05 across a 204-pass gate
 run and four per-file runs.
----
 
 **Resolution (2026-08-24).** The remaining scope after the 08:00 half closed
 was a rare confirmation-rung visibility race: two sightings (2026-07-10,
@@ -109,7 +116,8 @@ logic. Log: `.superpowers/sdd/planner-gate-e2e.log` (gitignored, session-local).
 The third sighting is NOT a race, and it reproduces SOLO. Full suite on
 `28a92974`: 203 passed, 1 failed - Part A again, this time on
 
-    "App: Reminders panel shows 'Morning of' as upcoming"   (spec line 98)
+    "App: Reminders panel shows '4 hours before' as upcoming"   (spec line 98)
+    [label renamed from 'Morning of', 2026-08-26]
 
 An immediate ISOLATED re-run of the same file failed identically (4 passed,
 1 failed, same rung). The app's own log gives the answer:
@@ -122,25 +130,49 @@ make the assertion pass. Mechanism (post quiet-hours, 2026-08-03):
 
 - `bookedSelfGuidedTour` books the tour at `tourSchedule()` = **now + 48h**, so
   the tour's org-local TIME OF DAY equals the wall clock's time of day.
-- `computeDueAt('morning_of')` is now **08:00 ORG-LOCAL on the tour's local
+- `computeDueAt('morning_of')` was then **08:00 ORG-LOCAL on the tour's local
   day** (app/src/jobs/tourReminders.ts, the 4am-text fix), NOT `scheduled - Nh`.
 - `armTourReminders` skip rule (b): `if (dueAt >= scheduledIso) continue`.
 
-So whenever the suite runs between local **midnight and 08:00**, the tour lands
-at (say) 02:07 local and morning_of lands at 08:00 local the SAME day - six
-hours AFTER the tour start - and is correctly skipped. The run above was at
-02:07 America/New_York. Outside that window the rung arms and Part A passes,
-which is exactly why this has read as an intermittent flake for a month: the
+So whenever the suite ran between local **midnight and 08:00**, the tour landed
+at (say) 02:07 local and morning_of landed at 08:00 local the SAME day - six
+hours AFTER the tour start - and was correctly skipped. The run above was at
+02:07 America/New_York. Outside that window the rung armed and Part A passed,
+which is exactly why this read as an intermittent flake for a month: the
 suite usually runs during the day.
 
 The 2026-08-03 `Confirmation` sighting has a different shape (confirmation's
 dueAt is arm-time `now`, which rule (b) cannot skip), so that one may still be
 a genuine race - keep this issue open for both.
 
+**THE MECHANISM ABOVE IS HISTORY, AND THE ROLES ARE NOW REVERSED (2026-08-26,
+`feat/tour-reminder-ladder`).** Read the four paragraphs above as a record of
+what happened on 2026-08-04, not as current behaviour:
+
+- `morning_of` is no longer anchored to 08:00 org-local. It is a pure
+  `scheduledAt - 4h` OFFSET, so it can never land after the tour start and the
+  midnight-to-08:00 failure band described above cannot recur for that rung.
+  The quoted log line at the top of this sighting is preserved as evidence and
+  is no longer reproducible.
+- `day_before` took over the wall-clock sensitivity: it is now anchored to
+  **19:30 org-local the evening before** the tour's local date. It is the rung
+  whose presence depends on the wall clock the suite runs at, and on the org's
+  quiet window (an org whose window contains 19:30 retires every `day_before`
+  as superseded, with a warn naming the cause).
+- Two new arm-time rules retire `day_before` and `morning_of` as VISIBLE
+  `booked_too_late` rows when a tour is booked too close to them, so a
+  short-horizon booking now produces MORE rows, not fewer.
+- The operator label for `morning_of` is `4 hours before`, not `Morning of`.
+
 **Suggested next step (spec-side, NOT product-side - the skip is correct
-behavior).** Either (a) book Part A's tour at a fixed org-local afternoon
-time instead of `now + 48h` so every rung is armable at any wall clock, or
-(b) drop the `morning_of` rung assertion from Part A (it is the one rung whose
-presence is wall-clock dependent) and pin the skip explicitly elsewhere. Owner
-= scheduled-visibility / quiet-hours. Deliberately NOT changed by the
-contact-comms-pane branch (different feature, judgment call).
+behavior). REWRITTEN 2026-08-26; the original (b) is now backwards.** Part A's
+tour is already booked at a fixed org-local afternoon time (`150fbfa4`, option
+(a) below), which is what closed the deterministic half. What remains, if this
+ever reopens: (a) keep booking Part A at a fixed org-local afternoon time rather
+than `now + 48h`, so every rung is armable at any wall clock; and (b) if a rung
+assertion has to be dropped for wall-clock dependence, it is the `day_before`
+one - NOT `morning_of`, which is now a pure offset - and the right fix there is
+the one Task 9 of the ladder change shipped: read the ARMED `dueAt` back from
+the reminders API and drive the tick from that, rather than computing 19:30
+host-side. Owner = scheduled-visibility / quiet-hours. Deliberately NOT changed
+by the contact-comms-pane branch (different feature, judgment call).

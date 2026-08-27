@@ -96,7 +96,9 @@ time. Booking stamps the tour `scheduled` - that IS the confirmed state.
 
 > 2026-07-08: the `confirmed` tour status was removed - `scheduled` covers it
 > (scheduled and confirmed were the same step; the booking-time [AUTO] text
-> already says "confirmed"). The `confirmation` reminder RUNG below is a
+> already states the booked slot back to the tenant - "your tour is set for
+> ...", which is the confirmation, not the literal word). The `confirmation`
+> reminder RUNG below is a
 > message, not a status, and stays. Where the architecture doc's Figure 3 says
 > the tour is stamped "confirmed" once the slot is coordinated, the built
 > status for that moment is `scheduled`.
@@ -107,17 +109,32 @@ to the tenant's **1:1 thread** for self-guided tours.
 
 | Rung | When it fires | Purpose |
 |------|---------------|---------|
-| `confirmation` | immediately, at booking | "Your tour is confirmed." |
-| `day_before` | 24h before | day-before reminder |
-| `morning_of` | 08:00 UTC on the tour day | morning-of reminder |
-| `en_route` | 2h before | asks the tenant to text when on the way |
-| `no_show_checkin` | 30m **after** the scheduled time | check-in if they may have missed it |
+| `confirmation` | immediately, at booking | "Your tour is set." |
+| `day_before` | 19:30 the evening before (org-local) | day-before check-in |
+| `morning_of` | 4 hours before (staff label: "4 hours before") | same-day check-in, carries the address |
+| `en_route` | 1h before | asks the tenant to text when on the way |
+| `no_show_checkin` | 30m **after** the scheduled time (manual send) | check-in if they may have missed it |
 
 The ladder is **durable** (reminder rows in the database, fired by a worker poll —
 not in-process timers), so it survives restarts. Rescheduling **cancels and
-re-arms** the ladder; canceling or closing the tour **cancels** it. Rungs whose
-time is already past when armed are skipped (except `confirmation`, which is
-always "now").
+re-arms** the ladder; canceling or closing the tour **cancels** it.
+
+Rungs booked too late for their lead time are retired at arm time as VISIBLE
+"booked too late" rows, so a founder who booked late sees why a rung is missing
+instead of finding a gap (founder retiming, 2026-08-26). Two rules apply, both
+against the RAW offsets and both evaluated at the ARM instant (so a reschedule or
+a revival re-runs them): a `day_before` armed later than four hours before its
+own 19:30 due instant, and a `morning_of` on a tour booked the same org-local day
+later than six hours before the start. MOST other arm-time retirements are
+visible rows too - a clamped time landing at or past the tour start, a rung
+colliding with a later rung's slot, a `day_before` clamped onto the tour's own
+local date. The one SILENT retirement left is a clamped time already behind
+`now`, which after the retiming reaches only `en_route` and clamped rungs.
+`confirmation` is always "now" and is never retired this way.
+
+The ladder is currently **PAUSED** (manual-only, founder decision 2026-08-20):
+every rung still arms and displays on the Reminders panel, but nothing sends
+automatically - a human presses **Send now**.
 
 ### 4. Tour day
 
@@ -130,8 +147,10 @@ always "now").
   For landlord-led/PM tours that lands in the group thread, so the landlord/PM
   gets the en-route heads-up (Figure 3's step 11) without a separate step.
 - The tenant tours the unit; the team **logs the outcome** (`toured`).
-- **No-show:** if the tenant never shows, the `[AUTO]` no-show check-in asks
-  whether they want to reschedule. The team either **reschedules** (cancels and
+- **No-show:** if the tenant never shows, the no-show check-in asks whether they
+  want to reschedule. That rung is a MANUAL send - it never auto-arms; the tour
+  page prefills the draft and a human sends it. The team either **reschedules**
+  (cancels and
   re-arms the ladder) or logs a **no-show**. Both `canceled` and `no_show` tours
   remain reschedulable back to `scheduled`.
 

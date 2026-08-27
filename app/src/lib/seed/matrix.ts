@@ -24,6 +24,9 @@
 import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, STAGE_PHASE, STAGE_STUCK_THRESHOLDS, deriveStatuses, type PlacementStage, type PlacementPhase } from '../statusModel.js';
 import { TOUR_STATUSES, type TourStatus } from '../toursModel.js';
 import { deadlineIdFor } from '../../repos/placementDeadlinesRepo.js';
+import { DEFAULT_ORG_SETTINGS } from '../../repos/settingsRepo.js';
+import { instantAtLocalTime, localDateOf } from '../quietHours.js';
+import { shiftLocalDate } from '../localTime.js';
 import type { ConversationParticipant } from '../../repos/conversationsRepo.js';
 import { SEED } from './lean.js';
 import type { SeedConversationRow } from './types.js';
@@ -955,7 +958,15 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
       }
       const scheduledAt = iso(scheduledMs);
       const createdAt = iso(createdMs);
-      const dayBeforeDueAt = iso(scheduledMs - 24 * HOUR_MS); // computeDueAt('day_before') parity
+      // computeDueAt('day_before') parity (founder retiming 2026-08-26):
+      // 19:30 ORG-LOCAL the evening before the tour's local date. Upcoming
+      // matrix tours sit 3-5 days out, so this instant is always in the
+      // future at seed time and listDue(now) can never return the pending
+      // row - the live-fire invariant below survives the retime.
+      const tz = DEFAULT_ORG_SETTINGS.timezone;
+      const dayBeforeDueAt = instantAtLocalTime(
+        shiftLocalDate(localDateOf(scheduledAt, tz), -1), '19:30', tz,
+      );
 
       const tour: Record<string, unknown> = {
         tourId,
@@ -981,8 +992,10 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
       });
 
       if (upcoming) {
-        // day_before is PENDING but its dueAt (scheduledAt − 24h) is ≥ now, so
-        // listDue(now) never returns it — the live-fire bug cannot recur.
+        // day_before is PENDING but its dueAt (19:30 org-local the evening
+        // before the tour) is at least a full day ahead of now for a tour 3-5
+        // days out, so listDue(now) never returns it - the live-fire bug
+        // cannot recur.
         reminders.push({
           reminderId: `rem-mx-${tourId}-dbf`,
           tourId,
@@ -993,10 +1006,15 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
           createdAt,
         });
       } else if (status === 'canceled') {
-        // Canceled between the day_before due instant and the scheduled time: the
-        // pending day_before was canceled (never sent). canceledAt sits between its
-        // dueAt and scheduledAt (and after createdAt).
-        const canceledAt = iso(scheduledMs - 6 * HOUR_MS);
+        // Canceled between the day_before due instant and the tour. The new
+        // 19:30-anchored dueAt can land AFTER sched-6h for small local
+        // times-of-day (the reseed clock leaks into past tours), so take the
+        // later of the two candidates: the coherence invariant
+        // createdAt <= dueAt <= canceledAt must hold at ANY reseed wall clock.
+        const canceledAt = iso(Math.max(
+          scheduledMs - 6 * HOUR_MS,
+          Date.parse(dayBeforeDueAt) + HOUR_MS,
+        ));
         reminders.push({
           reminderId: `rem-mx-${tourId}-dbf`,
           tourId,

@@ -3,10 +3,12 @@ id: tourcopy-messageid-cast-unguarded
 title: composeTourReminderBody casts to MessageId, so a new ReminderKind without catalog twins fails OPEN at runtime
 type: bug
 severity: low
-status: open
+status: resolved
 area: app/messages
 created: 2026-08-06
-refs: app/src/messages/tourCopy.ts, app/src/repos/tourRemindersRepo.ts, app/test/tourCopyCallSites.test.ts
+updated: 2026-08-26
+resolved: 2026-08-26
+refs: app/src/messages/tourCopy.ts, app/src/repos/tourRemindersRepo.ts, app/test/tourCopyCallSites.test.ts, app/test/tourCopy.test.ts
 ---
 
 **Problem.** `composeTourReminderBody` picks its catalog entry by building the
@@ -45,16 +47,32 @@ a natural, small-looking change, and nothing in the type system, the test suite,
 or `app/test/tourCopyCallSites.test.ts` (which enforces "route through the
 composer", not "the composer can resolve every kind") will object.
 
-**Suggested fix.** A parity test is the cheap, durable option: iterate the
-`ReminderKind` union and assert that every kind except `no_show_checkin` has
-BOTH a `tour.<kind>` and a `tour.<kind>_no_address` entry in `MESSAGE_CATALOG`.
-That converts the runtime crash into a red test the moment the union grows.
+**Suggested fix (SUPERSEDED 2026-08-26 - read the Resolution below first).**
+Everything in the two paragraphs that follow is written in terms of the
+`tour.<kind>_no_address` twins, which the tour-reminder-ladder change
+(spec 2026-08-26, section 6.4) REMOVED entirely - `{addressLine}` on a single
+entry replaced them. A parity test over twins that no longer exist would assert
+nothing. Kept for the record, not as instructions.
 
-A stricter alternative is to drop the cast in favour of an explicit
-`Record<ReminderKind, { withAddress: MessageId; withoutAddress: MessageId }>`
-map, which makes the compiler enforce exhaustiveness directly. That is a larger
-edit to code three review passes just verified; the parity test buys most of the
-safety for a fraction of the churn.
+> A parity test is the cheap, durable option: iterate the
+> `ReminderKind` union and assert that every kind except `no_show_checkin` has
+> BOTH a `tour.<kind>` and a `tour.<kind>_no_address` entry in `MESSAGE_CATALOG`.
+> That converts the runtime crash into a red test the moment the union grows.
+>
+> A stricter alternative is to drop the cast in favour of an explicit
+> `Record<ReminderKind, { withAddress: MessageId; withoutAddress: MessageId }>`
+> map, which makes the compiler enforce exhaustiveness directly. That is a larger
+> edit to code three review passes just verified; the parity test buys most of the
+> safety for a fraction of the churn.
+
+**Resolution (2026-08-26).** The cast is gone: `idFor()` in
+`app/src/messages/tourCopy.ts` is an exhaustive switch over `ReminderKind`, and
+the exhaustive compose-matrix test in `app/test/tourCopy.test.ts` pins every
+kind x address x tourType x names combination composing without a throw. Adding
+a `ReminderKind` member now fails the switch's exhaustiveness check at compile
+time instead of failing OPEN into a bare `TypeError` at runtime, so neither the
+poll loop nor the three read endpoints described above can be reached that way.
+Landed on `feat/tour-reminder-ladder`.
 
 **Provenance.** Found independently by both the planner's spec-conformance pass
 (residual R2) and the plan-blind adversarial pass during the

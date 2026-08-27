@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-08-17
+updated: 2026-08-26
 refs: app/src/messages/catalog.ts, app/src/lib/smsCompliance.ts, app/src/messages/tourCopy.ts, app/src/jobs/relayFanOut.ts, app/src/routes/webhooks/voice.ts, app/src/routes/settings.ts
 ---
 
@@ -59,6 +60,25 @@ plain catalog-default text swap and are tracked here so they are not lost.
    sent back to the founder) lists exactly which tokens ARE live for each
    tour-reminder slot today so she can resubmit within that constraint, or
    flag which ones are worth the plumbing work.
+
+   **DONE 2026-08-26 (`feat/tour-reminder-ladder`) - this item's tour half is
+   closed; items 1, 2 and 4 are untouched and this issue stays open for them.**
+   The plumbing landed: `composeTourReminderBody` now takes a resolved `names`
+   object (`tenantFirstName` / `tenantName` / `propertyContactFirstName` /
+   `propertyContactName`) plus a required `tourType`, resolution lives in
+   `app/src/lib/tourContacts.ts`, and every compose path resolves names before
+   composing. The `_no_address` twins are GONE for the retimed rungs - a single
+   `{addressLine}` clause replaced them - so the re-add-`{where}`-to-the-twin
+   objection above no longer applies to `day_before`; only
+   `tour.confirmation` / `tour.confirmation_no_address` still carry the split,
+   and Phase B disposes of them. Timings moved too: `day_before` to 19:30
+   org-local the evening before, `morning_of` to `scheduledAt - 4h`, and
+   `en_route` forks on tour type. **D2 IS REVERSED** - Sam, via Cameron,
+   2026-08-26: `tour.no_show_checkin` now greets by first name
+   (`Hi {tenantFirstName}! Do you need to reschedule?`), so the open
+   `no_show_checkin` name-token question this file was tracking is CLOSED, not
+   deferred. Sub-item (b) of the Suggested fix below is therefore delivered;
+   (a) and (c) remain.
 
 4. **Voice `voicemail_prompt` and `voicemail_thanks` were left unchanged.**
    Her rewrite gives both the same generic "please text us your name..."

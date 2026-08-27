@@ -1,6 +1,7 @@
 # AI contact-kind suggestions - design
 
-**Status:** Design approved; adversarial review round 2 changes in progress.
+**Status:** Design approved; adversarial review converged in round 4; awaiting
+human specification approval.
 **Date:** 2026-08-26.
 **Branch:** `feat/ai-contact-kind-suggestions`.
 **Surface:** Conversation fact extraction, Unknown contact triage, AI run log.
@@ -339,6 +340,11 @@ Use both revisions in a two-sided protocol:
 The guarded delete is the only new cross-table coordination operation. It must use
 a DynamoDB transaction with a contact `ConditionCheck` plus an exact suggestion
 revision `Delete`; a read followed by an independent delete is not sufficient.
+For logical contact revision `0`, the physical condition is
+`attribute_not_exists(classification_revision) OR classification_revision = 0`;
+for later revisions it is exact numeric equality. DynamoDB does not equate an
+absent attribute with numeric zero. The same absent-or-zero semantics apply
+wherever the repository compares a legacy contact revision.
 Its service contract distinguishes `deleted`, `suggestion_changed_or_absent`, and
 `contact_revision_changed` (a post-failure consistent read may classify DynamoDB's
 transaction cancellation). Extraction preserves pending for the second result and
@@ -346,6 +352,13 @@ re-reads for the third; a route retries the second within its bound and stops on
 the third.
 Repository failures keep the existing best-effort log-and-continue boundary rather
 than failing an otherwise successful contact PATCH.
+
+`classification_revision` orders committed kind-changing writes. It does not add
+request-start optimistic concurrency or change the contact route's existing
+last-commit-wins policy. A request that began earlier but commits its contact
+update last is the authoritative human edit and may supersede a suggestion that
+appeared while it was in flight. Preventing stale browser submissions from
+committing would be a separate contact-edit concurrency feature.
 
 This is a type-specific exception. The generic replacement policy for all other
 suggestion targets stays unchanged.
@@ -371,7 +384,8 @@ suggestion targets stays unchanged.
    performs D11's live-contact post-write check.
 3. A suggestion that survives that check records the same value as
    proposed/coerced with a pending verdict. A successfully cleaned stale write is
-   dropped as `type_already_classified`.
+   dropped as `type_already_classified` when the live contact is classified or as
+   `type_classification_changed` when the contact is Unknown in a newer revision.
 4. Existing suggestion replacement, dismissal tombstones, suggestion revision
    identity, SSE, and journal recovery semantics remain unchanged. The optional
    contact-classification revision is used only to fence type reconciliation.
@@ -545,6 +559,10 @@ suggestion targets stays unchanged.
    - classification, retype to Unknown, a new epoch suggestion, and the delayed
      older drain preserve the new actionable row;
    - a later matching classification accepts that new epoch suggestion;
+   - a physically absent legacy contact revision behaves as logical zero in a real
+     two-table DynamoDB integration test: a stale row on a classified contact is
+     cleaned, while a revision-0 row on an unchanged Unknown contact remains
+     pending without migration;
    - when the classification drain deletes a row before its extraction finalizes,
      the finalization marker's terminal `superseded_by_human_edit` verdict wins
      over the extraction's still-pending decision;
@@ -624,8 +642,9 @@ classifications. Do not use production or the human's lane-0 dashboard.
     Manager`; explicitly raw forensic response/result panes retain canonical wire
     values.
 12. After successful race-reconciliation reads and writes, no stale pending type
-    suggestion or pending linked type verdict remains, and an older classification
-    request cannot delete or judge a later revision's actionable suggestion.
+    suggestion or pending linked type verdict remains, and an earlier committed
+    classification route cannot delete or judge a later committed revision's
+    actionable suggestion.
 13. All required tests, full gates, adversarial reviews, and hermetic live QA pass
     before the branch is declared merge-ready.
 

@@ -2,7 +2,7 @@
 // validate. Self-skips when DynamoDB Local is unavailable.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -205,5 +205,78 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
       revisionOneSuggestion.item,
       1,
     )).resolves.toBe('deleted');
+  });
+
+  it('executes exact legacy suggestion identities and later numeric contact fences', async () => {
+    const putLegacyTypeSuggestion = async (
+      contactId: string,
+      createdAt: string,
+      opts: { runId?: string; revision?: string } = {},
+    ) => {
+      await doc.send(new PutCommand({
+        TableName: tableName('ai_extraction', testEnv),
+        Item: {
+          itemId: `sugg#${contactId}#type`,
+          ownerContactId: contactId,
+          target: 'type',
+          suggestedValue: 'partner',
+          conversationId: `conv-${contactId}`,
+          _pendingPartition: 'pending',
+          createdAt,
+          ...(opts.runId !== undefined && { runId: opts.runId }),
+          ...(opts.revision !== undefined && { revision: opts.revision }),
+        },
+      }));
+      return (await repo.getSuggestion(contactId, 'type'))!;
+    };
+
+    const absentRunContact = await contacts.create({ type: 'unknown' });
+    const absentRun = await putLegacyTypeSuggestion(
+      absentRunContact.contactId,
+      '2026-08-26T01:00:00.000Z',
+    );
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(absentRun, 0))
+      .resolves.toBe('deleted');
+
+    const runMismatchContact = await contacts.create({ type: 'unknown' });
+    const absentRunIdentity = await putLegacyTypeSuggestion(
+      runMismatchContact.contactId,
+      '2026-08-26T01:01:00.000Z',
+    );
+    await putLegacyTypeSuggestion(
+      runMismatchContact.contactId,
+      '2026-08-26T01:01:00.000Z',
+      { runId: 'run-present' },
+    );
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(absentRunIdentity, 0))
+      .resolves.toBe('suggestion_changed_or_absent');
+    expect((await repo.getSuggestion(runMismatchContact.contactId, 'type'))?.runId).toBe('run-present');
+
+    const revisionedContact = await contacts.create({ type: 'unknown' });
+    const legacyIdentity = await putLegacyTypeSuggestion(
+      revisionedContact.contactId,
+      '2026-08-26T01:02:00.000Z',
+    );
+    await putLegacyTypeSuggestion(
+      revisionedContact.contactId,
+      '2026-08-26T01:02:00.000Z',
+      { revision: 'replacement-revision' },
+    );
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(legacyIdentity, 0))
+      .resolves.toBe('suggestion_changed_or_absent');
+    expect((await repo.getSuggestion(revisionedContact.contactId, 'type'))?.revision)
+      .toBe('replacement-revision');
+
+    const laterRevisionContact = await contacts.create({ type: 'unknown' });
+    await contacts.update(laterRevisionContact.contactId, { type: 'tenant' });
+    const numericLegacyIdentity = await putLegacyTypeSuggestion(
+      laterRevisionContact.contactId,
+      '2026-08-26T01:03:00.000Z',
+    );
+    await contacts.update(laterRevisionContact.contactId, { role: null });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(numericLegacyIdentity, 1))
+      .resolves.toBe('contact_revision_changed');
+    expect((await repo.getSuggestion(laterRevisionContact.contactId, 'type'))?.createdAt)
+      .toBe('2026-08-26T01:03:00.000Z');
   });
 });

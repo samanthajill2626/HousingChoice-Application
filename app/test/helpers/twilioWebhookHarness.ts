@@ -1772,6 +1772,7 @@ export function createFakeWorld(): FakeWorld {
       if (!contact) {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
+      const changesKind = patch.type !== undefined || patch.role !== undefined;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         // Mirror the real repo's GSI-key guard (F6). A fake that happily stores
@@ -1782,6 +1783,9 @@ export function createFakeWorld(): FakeWorld {
         }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;
+      }
+      if (changesKind) {
+        contact.classification_revision = contactClassificationRevision(contact) + 1;
       }
       return contact;
     },

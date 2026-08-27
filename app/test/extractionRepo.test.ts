@@ -1004,6 +1004,47 @@ describe('extractionRepo suggestions', () => {
     )).toBe(false);
   });
 
+  it('rethrows a transaction cancellation when consistent post-failure reads preserve both guards', async () => {
+    const cancellation = new TransactionCanceledException({
+      message: 'unexplained transaction cancellation',
+      $metadata: {},
+    });
+    const getInputs: GetCommand[] = [];
+    const doc = {
+      async send(cmd: unknown) {
+        if (cmd instanceof TransactWriteCommand) throw cancellation;
+        if (cmd instanceof GetCommand) {
+          getInputs.push(cmd);
+          if (String(cmd.input.TableName).endsWith('contacts')) {
+            return { Item: { contactId: 'contact-legacy', type: 'unknown' } };
+          }
+          return {
+            Item: {
+              itemId: 'sugg#contact-legacy#type',
+              ownerContactId: 'contact-legacy',
+              target: 'type',
+              suggestedValue: 'partner',
+              conversationId: 'conv-legacy',
+              createdAt: T1,
+            },
+          };
+        }
+        throw new Error('unexpected command');
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const repo = repoWith(doc);
+    const legacyIdentity = {
+      ownerContactId: 'contact-legacy',
+      target: 'type',
+      createdAt: T1,
+    };
+
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(legacyIdentity, 0))
+      .rejects.toBe(cancellation);
+    expect(getInputs).toHaveLength(2);
+    expect(getInputs.every((cmd) => cmd.input.ConsistentRead === true)).toBe(true);
+  });
+
   it('putSuggestion stamps itemId, pending partition, createdAt and runId; get round-trips', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);

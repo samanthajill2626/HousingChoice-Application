@@ -29,6 +29,40 @@ const WARN = 40;
 const ERROR = 50;
 const SMS_PATH = '/webhooks/twilio/sms';
 
+describe('webhook harness classification fence', () => {
+  it('preserves sequential kind epochs and blocks an older guarded delete', async () => {
+    const { world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-fence', type: 'unknown' });
+
+    const firstWrite = await world.contactsRepo.update('contact-fence', { type: 'tenant' });
+    expect(firstWrite.classification_revision).toBe(1);
+    const olderSuggestion = await world.extractionRepo.putSuggestion({
+      ownerContactId: 'contact-fence',
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-first',
+      contactClassificationRevision: 1,
+    });
+
+    const secondWrite = await world.contactsRepo.update('contact-fence', { role: null });
+    expect(secondWrite.classification_revision).toBe(2);
+    const laterSuggestion = await world.extractionRepo.putSuggestion({
+      ownerContactId: 'contact-fence',
+      target: 'type',
+      suggestedValue: 'landlord',
+      conversationId: 'conv-second',
+      contactClassificationRevision: 2,
+    });
+
+    await expect(world.extractionRepo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      olderSuggestion.item,
+      1,
+    )).resolves.toBe('contact_revision_changed');
+    expect((await world.extractionRepo.getSuggestion('contact-fence', 'type'))?.revision)
+      .toBe(laterSuggestion.item.revision);
+  });
+});
+
 describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () => {
   it('accepts a correctly signed webhook (200 TwiML) and persists the message', async () => {
     const { app, world } = makeWebhookHarness();

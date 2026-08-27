@@ -3374,7 +3374,43 @@ export function createFakeWorld(): FakeWorld {
     async listByEntity() {
       return { entries: [] };
     },
-    async setVerdict() {
+    async setVerdict(runId, target, verdict, opts = {}) {
+      const at = opts.at ?? new Date().toISOString();
+      const existing = aiRunRows.get(runId);
+      if (existing !== undefined) {
+        const decision = existing.decisions[target];
+        if (
+          decision === undefined
+          || (opts.expectedVerdict !== undefined && decision.verdict !== opts.expectedVerdict)
+        ) return false;
+        aiRunRows.set(runId, {
+          ...existing,
+          decisions: {
+            ...existing.decisions,
+            [target]: {
+              ...decision,
+              verdict,
+              verdictAt: at,
+              ...(opts.by !== undefined && { verdictBy: opts.by }),
+            },
+          },
+        });
+        return true;
+      }
+      const marker = aiRunMarkers.get(runId);
+      if (marker !== undefined) {
+        if (marker[target] !== undefined) return false;
+        marker[target] = { verdict, at, ...(opts.by !== undefined && { by: opts.by }) };
+        return true;
+      }
+      const freshAt = opts.freshSuggestionCreatedAt;
+      const freshAtMs = freshAt === undefined ? Number.NaN : Date.parse(freshAt);
+      if (!Number.isFinite(freshAtMs) || runExpiresAt(freshAt!) <= Math.floor(Date.now() / 1000)) {
+        return false;
+      }
+      aiRunMarkers.set(runId, {
+        [target]: { verdict, at, ...(opts.by !== undefined && { by: opts.by }) },
+      });
       return true;
     },
   };

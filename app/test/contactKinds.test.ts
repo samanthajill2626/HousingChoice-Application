@@ -24,6 +24,8 @@ describe('canonicalSuggestedContactKind', () => {
     { type: 'landlord', role: 'Leasing Agent' },
     { type: 'landlord', role: ' Property Manager' },
     { type: 'landlord', role: 'Property Manager ' },
+    { type: 'landlord', role: 'property manager' },
+    { type: 'landlord', role: 'PROPERTY MANAGER' },
     { type: 'landlord', role: '   ' },
     { type: 'partner', role: 'Inspector' },
     { type: 'unknown', role: '' },

@@ -1408,10 +1408,11 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = SCHEDULED_AT - 24h = '2026-07-14T18:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
-    // morning_of = 08:00 ORG-LOCAL (EDT) on 2026-07-15 = '2026-07-15T12:00:00.000Z'
-    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T12:00:00.000Z');
+    // day_before = 19:30 ORG-LOCAL (EDT) on 2026-07-14, the day before the
+    // tour's local date = '2026-07-14T23:30:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
+    // morning_of = SCHEDULED_AT - 4h = '2026-07-15T14:00:00.000Z'
+    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T14:00:00.000Z');
     // en_route = SCHEDULED_AT - 1h = '2026-07-15T17:00:00.000Z' (was 2h before
     // the founder decision of 2026-08-18; its copy now says "see you soon").
     expect(byKind['en_route']?.dueAt).toBe('2026-07-15T17:00:00.000Z');
@@ -1446,8 +1447,8 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW (injected)
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = NEW_SCHEDULED - 24h = '2026-07-19T18:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T18:00:00.000Z');
+    // day_before = 19:30 EDT Jul 19, the day before NEW_SCHEDULED's local date
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -1594,8 +1595,8 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = BOOKED_AT - 24h
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
+    // day_before = 19:30 EDT Jul 14, the day before BOOKED_AT's local date
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T23:30:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -2729,10 +2730,11 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
     // FIXED_NOW is 08:00 EDT - exactly quiet-END, so the confirmation is stored
     // unclamped (the window is end-EXCLUSIVE).
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before raw = NEW_SCHED - 24h = 06:00 EDT, INSIDE the default quiet
-    // window -> stored pre-clamped at 08:00 EDT. (NEW_SCHED is a 06:00-EDT
-    // tour, so morning_of/en_route land at/after its start and are skipped.)
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T12:00:00.000Z');
+    // day_before = 19:30 EDT Jul 24, the day before NEW_SCHED's local date
+    // (Jul 25). 19:30 local is OUTSIDE the default 21:00-08:00 window, so it is
+    // stored unclamped. (NEW_SCHED is a 06:00-EDT tour, so morning_of/en_route
+    // clamp forward to 08:00 EDT, at/after its start, and are skipped.)
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T23:30:00.000Z');
     expect(byKind['no_show_checkin']).toBeUndefined(); // manual-send only, not auto-armed
   });
 

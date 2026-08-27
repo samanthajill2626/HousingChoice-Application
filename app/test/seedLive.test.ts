@@ -26,6 +26,7 @@ import { castItems } from '../src/lib/seed/cast.js';
 import { seedLive, LIVE_IDS } from '../src/lib/seed/live.js';
 import type { TableNamespace } from '../src/lib/devReset.js';
 import { deriveStatuses } from '../src/lib/statusModel.js';
+import { shiftLocalDate } from '../src/lib/localTime.js';
 import {
   clampOutOfQuietHours,
   instantAtLocalTime,
@@ -40,9 +41,10 @@ import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 // the canonical one in tourReminders.ts.
 //
 // QUIET HOURS (spec 2026-08-03): the seeder arms through the REAL armer, so the
-// copy mirrors BOTH halves of the new rule - morning_of is 08:00 ORG-LOCAL (it
-// used to be 08:00 UTC), and every rung is clamped out of the org's quiet
-// window before it is stored. Only the ladder OFFSETS stay hand-written; the
+// copy mirrors BOTH halves of the new rule - day_before is 19:30 ORG-LOCAL on
+// the day before the tour's local date, and every rung is clamped out of the
+// org's quiet window before it is stored. Only the ladder OFFSETS stay
+// hand-written; the
 // window/timezone arithmetic is imported from the shipped lib (a hand-copied
 // Intl/DST implementation would test the copy, not the product). The seed runs
 // against an empty settings table, so the window is DEFAULT_ORG_SETTINGS.
@@ -57,13 +59,17 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
       case 'confirmation':
         return now;
       case 'day_before':
-        return new Date(scheduled - 24 * 60 * 60 * 1000).toISOString();
-      case 'morning_of':
+        // 19:30 ORG-LOCAL the evening before the tour's LOCAL date (founder
+        // retiming, Cameron 2026-08-26; was scheduledAt - 24h).
         return instantAtLocalTime(
-          localDateOf(scheduledAt, QUIET_WINDOW.timezone),
-          '08:00',
+          shiftLocalDate(localDateOf(scheduledAt, QUIET_WINDOW.timezone), -1),
+          '19:30',
           QUIET_WINDOW.timezone,
         );
+      case 'morning_of':
+        // FOUR hours before the tour (founder retiming, Cameron 2026-08-26;
+        // was 08:00 org-local). The persisted KIND keeps its name.
+        return new Date(scheduled - 4 * 60 * 60 * 1000).toISOString();
       case 'en_route':
         // ONE hour before (founder decision 2026-08-18, was two). This is a
         // DELIBERATE second implementation of jobs/tourReminders.ts computeDueAt

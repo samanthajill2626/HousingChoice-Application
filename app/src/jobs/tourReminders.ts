@@ -61,6 +61,7 @@ import {
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
 import { resolveTourContactNames } from '../lib/tourContacts.js';
+import { shiftLocalDate } from '../lib/localTime.js';
 import {
   clampOutOfQuietHours,
   instantAtLocalTime,
@@ -102,9 +103,13 @@ export class ReminderNamesUnavailableError extends Error {
 /**
  * Compute the RAW dueAt for each reminder kind relative to scheduledAt (the
  * caller clamps it out of quiet hours - see armTourReminders). The window is
- * passed in because `morning_of` is anchored to the ORG's local day, not UTC.
+ * passed in because `day_before` is anchored to the ORG's local day, not UTC.
+ *
+ * EXPORTED for app/test/computeDueAt.test.ts, which pins the raw table
+ * directly. The returned instant is RAW and UNCLAMPED - never add clamping
+ * here; the caller owns it.
  */
-function computeDueAt(
+export function computeDueAt(
   kind: ReminderKind,
   scheduledAt: string,
   now: string,
@@ -115,15 +120,23 @@ function computeDueAt(
     case 'confirmation':
       return now; // immediate (clamped by the caller like every rung)
     case 'day_before':
-      return new Date(scheduled - 24 * 60 * 60 * 1000).toISOString();
-    case 'morning_of':
-      // 08:00 ORG-LOCAL on the tour's local day (quiet-hours spec 2026-08-03).
-      // It used to be 08:00 UTC = 3-4am Eastern - the motivating 4am-text bug.
+      // 19:30 ORG-LOCAL the evening before the tour's LOCAL date (founder
+      // retiming, Cameron 2026-08-26; was scheduledAt - 24h). Calendar-day
+      // step via shiftLocalDate, local-time anchor via instantAtLocalTime -
+      // the same mechanism the old 08:00 morning_of rung used. "7:30pm EST"
+      // means 7:30pm local to the property; we hold one org-level zone
+      // (spec 7).
       return instantAtLocalTime(
-        localDateOf(scheduledAt, window.timezone),
-        '08:00',
+        shiftLocalDate(localDateOf(scheduledAt, window.timezone), -1),
+        '19:30',
         window.timezone,
       );
+    case 'morning_of':
+      // FOUR hours before the tour (founder retiming, Cameron 2026-08-26;
+      // was 08:00 org-local). The persisted KIND keeps its name - renaming
+      // would orphan in-flight rows (spec 9); the staff-facing LABEL is
+      // relabelled instead (dashboard REMINDER_KIND_LABELS).
+      return new Date(scheduled - 4 * 60 * 60 * 1000).toISOString();
     case 'en_route':
       // ONE hour before (founder decision 2026-08-18, was two). Sam had always
       // read this rung as the "hour before" message, and its copy now says "see

@@ -519,7 +519,8 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   }
 
   /** Seed tenant + 1:1 conversation, then arm a tour VIA THE ROUTE with the
-   *  injected clock (confirmation dueAt = FIXED_NOW, day_before = T-24h). */
+   *  injected clock (confirmation dueAt = FIXED_NOW, day_before = 19:30 EDT on
+   *  Jul 14 = '2026-07-14T23:30:00.000Z'). */
   async function armTourViaRoute(app: Express, world: FakeWorld): Promise<string> {
     world.contacts.push({
       contactId: 'contact-tick-tenant',
@@ -564,7 +565,7 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     // A later tick fires the NEXT rung once; the claimed row never re-sends.
     const res2 = await request(app)
       .post('/__dev/tour-reminders/tick')
-      .send({ now: '2026-07-14T18:01:00.000Z' });
+      .send({ now: '2026-07-14T23:31:00.000Z' });
     expect(res2.status).toBe(200);
     expect(world.sent).toHaveLength(2);
     expect(world.sent[1]).toMatchObject({ to: TENANT_PHONE, body: DAY_BEFORE_BODY });
@@ -578,11 +579,11 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     // collapse to '…00.000Z' so rows whose dueAt carries milliseconds fire.
     const res = await request(app)
       .post('/__dev/tour-reminders/tick')
-      .send({ now: '2026-07-14T18:01:00Z' });
+      .send({ now: '2026-07-14T23:31:00Z' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, now: '2026-07-14T18:01:00.000Z' });
+    expect(res.body).toEqual({ ok: true, now: '2026-07-14T23:31:00.000Z' });
 
-    // The day_before row (dueAt @ T-24h, carrying .000 milliseconds) fired
+    // The day_before row (dueAt @ 19:30 EDT Jul 14, carrying .000 ms) fired
     // against the normalized now - proof the ms-less input collapsed. The
     // confirmation rung is due in the SAME batch and is retired unsent by
     // release supersession (quiet-hours spec section 5: only the rung closest

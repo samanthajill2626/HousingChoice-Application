@@ -291,6 +291,7 @@ function makeFakes(
     getMediaStream: async () => {
       throw new Error('not used');
     },
+    getMediaContentType: async () => undefined,
     getRecordingStream: async () => {
       throw new Error('not used');
     },

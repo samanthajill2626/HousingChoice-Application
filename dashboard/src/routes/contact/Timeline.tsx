@@ -49,7 +49,7 @@ import {
   senderLabel as resolveSenderLabel,
 } from '../../lib/memberAttribution.js';
 import { resolveRecipientLabel, type RecipientLabel } from '../../lib/recipientLabel.js';
-import { messageMediaSrc, messageSid } from './media.js';
+import { isInlineRenderable, mediaKindWord, messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
@@ -607,13 +607,21 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 const ICON_CLIP = String.fromCodePoint(0x1f4ce);
 const ICON_PAGE = String.fromCodePoint(0x1f4c4);
 
-/** The visible label for one non-image attachment: the persisted original
- *  filename when present (fix-wave R1 - inbound email + outbound both carry it),
- *  else the positional "Attachment N" / "PDF attachment N" fallback (unchanged
- *  MMS behavior when no filename was stored). */
-function attachmentLabel(filename: string | undefined, isPdf: boolean, i: number): string {
+/** The visible label for one attachment: the persisted original filename when
+ *  present, else a positional fallback. The fallback names the KIND when we
+ *  know it ("Video - Attachment 1"); PDF keeps its existing wording; and the
+ *  opaque tier stays bare, because there is no honest kind word for
+ *  application/octet-stream. */
+function attachmentLabel(
+  filename: string | undefined,
+  contentType: string,
+  isPdf: boolean,
+  i: number,
+): string {
   if (filename !== undefined && filename.trim().length > 0) return filename;
-  return isPdf ? `PDF attachment ${i + 1}` : `Attachment ${i + 1}`;
+  if (isPdf) return `PDF attachment ${i + 1}`;
+  const kind = mediaKindWord(contentType);
+  return kind !== undefined ? `${kind} - Attachment ${i + 1}` : `Attachment ${i + 1}`;
 }
 
 /** The mirrored-attachment gallery for a message (MMS bubble AND email card).
@@ -637,7 +645,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
     <div className={styles.mediaGallery} onClick={(e) => e.stopPropagation()}>
       {attachments.map((att, i) => {
         const src = messageMediaSrc(sid, i);
-        if (att.contentType.startsWith('image/')) {
+        if (isInlineRenderable(att.contentType)) {
           return (
             <a
               key={i}
@@ -649,7 +657,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
               <img
                 className={styles.mediaImg}
                 src={src}
-                alt={attachmentLabel(att.filename, false, i)}
+                alt={attachmentLabel(att.filename, att.contentType, false, i)}
                 loading="lazy"
               />
             </a>
@@ -664,7 +672,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
             target="_blank"
             rel="noopener noreferrer"
           >
-            {isPdf ? ICON_PAGE : ICON_CLIP} {attachmentLabel(att.filename, isPdf, i)}
+            {isPdf ? ICON_PAGE : ICON_CLIP} {attachmentLabel(att.filename, att.contentType, isPdf, i)}
           </a>
         );
       })}

@@ -1,6 +1,6 @@
 // Canned MMS assets for the fake-phones dev UI. Small, committed RASTER images
-// (PNG) and a PDF, served as same-origin STATIC FILES from the host's public/
-// dir (public/canned/) — deliberately NOT imported through Vite. Vite inlines any
+// (PNG), a PDF and a vCard, served as same-origin STATIC FILES from the host's
+// public/ dir (public/canned/) - deliberately NOT imported through Vite. Vite inlines any
 // asset under `assetsInlineLimit` (4 KB) as a `data:…;base64,…` URI, and a data:
 // URL (a) fails the engine's http(s)-only media guard (sendAsParty throws) and
 // (b) for SVG is itself an XSS vector. PNG/PDF are also chosen because the
@@ -34,6 +34,10 @@ export const cannedAssets: readonly CannedAsset[] = [
   { id: 'room', url: cannedUrl('room.png'), label: 'Room' },
   { id: 'kitchen', url: cannedUrl('kitchen.png'), label: 'Kitchen' },
   { id: 'lease-doc', url: cannedUrl('lease-doc.pdf'), label: 'Lease doc' },
+  // The DECLARABLE tier's fixture: a type the dashboard names ("Contact card")
+  // and serves as a download, never inline. Appended, never inserted - the UI
+  // suites address the picker through cannedAssets[0].
+  { id: 'contact-card', url: cannedUrl('contact-card.vcf'), label: 'Contact card' },
 ];
 
 /** Resolve a mediaUrl back to its canned label, for thumbnail alt text. */

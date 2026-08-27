@@ -6,7 +6,7 @@
 // - a document is never out of reach because newer texts buried it.
 import { Spinner } from '../../ui/index.js';
 import { EmptyRow } from './Card.js';
-import type { CommsMediaItem } from './media.js';
+import { isInlineRenderable, type CommsMediaItem } from './media.js';
 import styles from './MediaGallery.module.css';
 
 /** What a paging caller supplies for the "Load older media" control (all three
@@ -33,7 +33,7 @@ export function MediaGallery({
     <div>
       <div className={styles.grid}>
         {media.map((m) =>
-          m.contentType.startsWith('image/') ? (
+          isInlineRenderable(m.contentType) ? (
             <a
               key={m.key}
               className={styles.tile}

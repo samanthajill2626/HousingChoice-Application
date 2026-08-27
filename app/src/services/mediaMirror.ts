@@ -97,10 +97,15 @@ export async function mirrorMediaSet(deps: MediaMirrorDeps, input: MediaMirrorIn
   const out: MediaMirrorOutcome = { attachments: [], failed: [] };
   for (const target of input.targets) {
     const key = inboundMediaKey(input.conversationId, input.messageSid, target.index);
-    // Normalize the SENDER-supplied type before storing: keep it only if it is
-    // an allowlisted inline type, else octet-stream - so a dangerous type
+    // Normalize the SENDER-supplied type before storing: keep the allowlist's
+    // OWN canonical string when the type resolves to the INLINE tier (raster
+    // images + PDF, rendered same-origin) or the DECLARABLE tier (video, audio,
+    // vCard, office documents - served truthfully but ALWAYS as a download);
+    // collapse everything else to octet-stream, so a script-capable type
     // (text/html, image/svg+xml) never enters S3 metadata (stored-XSS guard;
-    // defense-in-depth with the serve-time allowlist).
+    // defense-in-depth with the serve-time allowlist). The tier decision lives
+    // in lib/mediaTypes.ts (resolveMediaTier) and is the SAME one the serve
+    // route makes, so the two can never disagree.
     const contentType = normalizeStoredMediaType(target.contentType);
     let landed = false;
     for (let attempt = 0; attempt <= input.delaysMs.length; attempt += 1) {

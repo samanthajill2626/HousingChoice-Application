@@ -20,7 +20,8 @@ import {
 } from '../adapters/mediaStore.js';
 import type { Semaphore } from '../lib/semaphore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
-import { isInlineMediaType, isTwilioDeliverableType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
+import { isTwilioDeliverableType, resolveMediaTier } from '../lib/mediaTypes.js';
+import { buildMediaFilenameParts, contentDispositionHeader } from '../lib/mediaFilename.js';
 import { renditionFor } from '../lib/mmsRenditions.js';
 import { planMmsBatches } from '../lib/mmsBatching.js';
 import {
@@ -2280,20 +2281,25 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(404).json({ error: 'media_not_found' });
       return;
     }
-    // XSS HARDENING (the stored Content-Type is the MMS sender's, attacker-
-    // controlled): serve INLINE only for allowlisted raster images; anything
-    // else (text/html, image/svg+xml, application/*, absent) is forced to an
-    // octet-stream ATTACHMENT so the browser downloads rather than renders it —
-    // a malicious type/body can't run script same-origin when the attachment
-    // link is opened top-level. Belt-and-braces: a restrictive CSP (no script,
-    // sandboxed) + nosniff on THIS response neuter execution even if a renderer
-    // is reached. nosniff also stops the browser sniffing octet-stream → html.
-    const stored = object.contentType;
-    const inline = isInlineMediaType(stored);
-    res.setHeader('Content-Type', inline ? stored! : 'application/octet-stream');
-    if (!inline) {
-      res.setHeader('Content-Disposition', `attachment; filename="attachment-${idx}"`);
-    }
+    // The stored Content-Type is the MMS sender's, so it is untrusted content
+    // on an authenticated transport. resolveMediaTier is the ONE place that
+    // decides what we do with it:
+    //   inline      - allowlisted raster images + PDF, rendered same-origin
+    //   declarable  - not script-capable, so served TRUTHFULLY, but always as
+    //                 a download (attachment) - never rendered
+    //   opaque      - anything else, including every script-capable type and
+    //                 anything unrecognised: octet-stream + .bin
+    // It runs on the OBJECT's own type, not the message record's: objects
+    // mirrored before the 2026-06-18 normalize fix can still carry text/html
+    // at rest, and that population is why this gate exists at all.
+    // Belt-and-braces regardless of tier: nosniff + a restrictive CSP.
+    const resolved = resolveMediaTier(object.contentType);
+    const filename = buildMediaFilenameParts(attachments[idx]?.filename, idx, resolved);
+    res.setHeader('Content-Type', resolved.canonical);
+    res.setHeader(
+      'Content-Disposition',
+      contentDispositionHeader(resolved.tier === 'inline' ? 'inline' : 'attachment', filename),
+    );
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     if (object.contentLength !== undefined) {
@@ -2301,7 +2307,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
     // Immutable per (MessageSid, idx); private so only this session's browser caches it.
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    log.info({ providerSid, mediaIndex: idx, inline }, 'streaming inbound MMS media to the dashboard');
+    log.info({ providerSid, mediaIndex: idx, tier: resolved.tier }, 'streaming inbound MMS media to the dashboard');
     object.body.on('error', (err) => {
       log.error({ err, providerSid, mediaIndex: idx }, 'media stream errored mid-flight');
       res.destroy(err);

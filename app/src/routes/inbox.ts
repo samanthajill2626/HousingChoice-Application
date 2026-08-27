@@ -1925,14 +1925,41 @@ export async function aggregateInbox(
           //
           // That shape is the one `readUnknownQueue` THROWS to outlaw a file
           // over ("a Load more that never advances and never ends"), so the
-          // retry is capped at one. The previous request already re-read this
-          // row; step OVER it, and say so at ERROR rather than WARN, because
-          // the row is now being DROPPED and not deferred.
+          // retry is capped at one: step OVER the row, and say so at ERROR
+          // rather than WARN, because the row is now being DROPPED and not
+          // deferred.
+          //
+          // `resume !== undefined` IS PART OF THE PREDICATE (2026-08-26, phase-6
+          // review). Without it the cap fired on a request that had never
+          // retried anything: the justification "the previous request already
+          // re-read this row" is FALSE on a fresh page-one load, because there
+          // was no previous request. A transient participant-GSI fault on the
+          // first row of page one therefore dropped a triage row from a walk
+          // that then reported itself COMPLETE (`nextCursor: null`) - silent row
+          // loss on a queue whose entire job is that nothing rots unseen.
+          //
+          // THE SHAPE THE GATE PRODUCES IS WHAT BOUNDS IT. Request one has no
+          // cursor, so it DEFERS: the page stops at this row and mints a cursor
+          // AT it (`retryFrom` is `{ block: 0 }` precisely so a first-row
+          // failure still mints a real one). Request two arrives WITH that
+          // cursor, so `resume` is defined and this branch steps over. Exactly
+          // one retry, then guaranteed progress - the property this guard was
+          // added for, without dropping a row nobody ever re-read. The empty
+          // page carrying a cursor is a rendered state, not a dead end:
+          // Inbox.tsx renders Load more on `hasMore` alone and switches its
+          // empty copy to `emptyMoreCopy()` for exactly that pairing.
+          //
+          // WHAT IT STILL DOES NOT COVER: a cursor minted by the page-FULL exit
+          // (`boundary = after` below) also arrives here as `resume !== undefined`,
+          // so the first row after every filled page gets zero retries rather
+          // than one. Closing that needs the cursor to carry WHY it was minted -
+          // a wire-shape change, filed rather than smuggled in here:
+          // docs/issues/unknown-queue-page-head-drop-after-filled-page.md.
           //
           // (`keptContacts.length === 0` is implied by `!retryFromMoved` - a
           // kept row either advances `retryFrom` or fills the page and breaks -
           // and is stated anyway so the predicate reads as the rule it is.)
-          if (!retryFromMoved && keptContacts.length === 0) {
+          if (resume !== undefined && !retryFromMoved && keptContacts.length === 0) {
             log.error(
               { err: lastThreadReadErr, contactId: contact.contactId },
               'inbox: unknown-queue thread read FAILED at the PAGE HEAD - the row is DROPPED and the walk steps over it',

@@ -526,7 +526,7 @@ describe('filter=unknown - the contact-side read', () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 
-  it('a thread read that fails AT THE PAGE HEAD is STEPPED OVER, not retried forever', async () => {
+  it('a thread read that fails AT THE PAGE HEAD is deferred ONCE, then STEPPED OVER - never retried forever', async () => {
     // F1 (fix wave 2, round-2 review N1). The stop-at-the-failed-row trade above
     // is bounded ONLY when the request has already made progress. When the
     // failure lands on the FIRST row this request consumes and NOTHING has been
@@ -536,10 +536,16 @@ describe('filter=unknown - the contact-side read', () => {
     // readUnknownQueue THROWS to outlaw one file over ("a Load more that never
     // advances and never ends", unknownQueue.ts's budget guard).
     //
-    // So the retry is capped at ONE: the previous request already re-read this
-    // row, and the row is now DROPPED (an ERROR, not the deferral WARN) so the
-    // walk can move. Neither pin above can see this - one failure clears, the
-    // other has a kept row ahead of it.
+    // So the retry is capped at ONE. THE CAP NOW REQUIRES A CURSOR, and this pin
+    // was REWRITTEN on 2026-08-26 (phase-6 review) because the version that
+    // stood here asserted the cap firing on request ONE - a request that had
+    // retried nothing, because there was no previous request to have retried it.
+    // It pinned the silent row loss as the contract. The corrected shape, in the
+    // two requests below: request one has no cursor and DEFERS (WARN, empty page
+    // carrying a cursor AT the row); request two arrives WITH that cursor and
+    // steps over (ERROR, the row is dropped, the walk moves). Exactly one retry,
+    // then guaranteed progress. Neither pin above can see this - one failure
+    // clears, the other has a kept row ahead of it.
     const broken = queueContact('c-h1-broken', 'needs_review', 90, '2026-06-12T01:00:00.000Z');
     const rest = [
       queueContact('c-h2', 'needs_review', 91, '2026-06-12T02:00:00.000Z'),
@@ -550,11 +556,26 @@ describe('filter=unknown - the contact-side read', () => {
       conversations: [broken, ...rest].map((s) => s.conversation),
       threadLookupErrorPhone: broken.contact.phone!,
     };
+    // REQUEST ONE - no cursor, so the row has NOT had its retry yet.
+    const firstWarn = vi.fn();
+    const firstError = vi.fn();
+    const first = await aggregateInbox(
+      { filter: 'unknown', limit: 25 },
+      makeDeps(seed, emptyCalls(), { info: vi.fn(), warn: firstWarn, error: firstError }),
+    );
+    expect(first.rows).toEqual([]);
+    // A cursor AT the failed row - not the end of the queue, and not a drop.
+    expect(first.nextCursor).not.toBeNull();
+    expect(firstWarn.mock.calls.find((c) => String(c[1]).includes('thread read FAILED'))?.[0])
+      .toMatchObject({ contactId: 'c-h1-broken' });
+    expect(firstError.mock.calls.filter((c) => String(c[1]).includes('thread read FAILED'))).toEqual([]);
+
+    // REQUEST TWO - carries that cursor, so the row HAS had its retry.
     const info = vi.fn();
     const warn = vi.fn();
     const error = vi.fn();
     const page = await aggregateInbox(
-      { filter: 'unknown', limit: 25 },
+      { filter: 'unknown', limit: 25, cursor: first.nextCursor! },
       makeDeps(seed, emptyCalls(), { info, warn, error }),
     );
     // THE ROWS BEHIND THE BAD ROW SHIP. Before F1 this page was `[]`.
@@ -568,6 +589,59 @@ describe('filter=unknown - the contact-side read', () => {
     expect(warn.mock.calls.filter((c) => String(c[1]).includes('thread read FAILED'))).toEqual([]);
     const assembled = info.mock.calls.find((c) => c[1] === 'inbox feed assembled')?.[0];
     expect(assembled?.drops).toMatchObject({ unknownThreadReadFailed: 1 });
+  });
+
+  it('a TRANSIENT failure on the FIRST row of page ONE is not silently dropped: the walk still serves it', async () => {
+    // THE PHASE-6 REGRESSION. This is the case the page-head cap used to eat.
+    // Its justification - "the previous request already re-read this row" - is
+    // false on a fresh page-one load, because there is no previous request: the
+    // client sent no cursor. So a single transient participant-GSI fault on the
+    // very first row removed that row from a walk which then reported itself
+    // COMPLETE (`nextCursor: null`), on the tab whose entire purpose is that
+    // nothing rots unseen.
+    //
+    // THE MUTATION PROBE: delete `resume !== undefined` from the page-head guard
+    // in app/src/routes/inbox.ts and this goes RED on the FIRST assertion below
+    // - request one drops c-p1-broken, serves the rows behind it and ends the
+    // walk `nextCursor: null`, so the union of every page is missing a row while
+    // the feed claims to be complete.
+    const seeds = [
+      queueContact('c-p1-broken', 'needs_review', 110, '2026-06-12T01:00:00.000Z'),
+      queueContact('c-p2', 'needs_review', 111, '2026-06-12T02:00:00.000Z'),
+      queueContact('c-p3', 'needs_review', 112, '2026-06-12T03:00:00.000Z'),
+    ];
+    const healthy: Seed = {
+      contacts: seeds.map((s) => s.contact),
+      conversations: seeds.map((s) => s.conversation),
+    };
+    const flaky: Seed = { ...healthy, threadLookupErrorPhone: seeds[0]!.contact.phone! };
+
+    // Request one: the fault lands on the FIRST row consumed, with nothing kept.
+    // The fault then clears, and the walk is driven to its end.
+    const first = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(flaky));
+    const seen: string[] = first.rows.map((r) => r.contactId!);
+    let cursor: string | null = first.nextCursor;
+    let pages = 0;
+    for (; pages < 8 && cursor !== null; pages += 1) {
+      const next: Awaited<ReturnType<typeof aggregateInbox>> = await aggregateInbox(
+        { filter: 'unknown', limit: 25, cursor },
+        makeDeps(healthy),
+      );
+      seen.push(...next.rows.map((r) => r.contactId!));
+      cursor = next.nextCursor;
+    }
+    // NOT ONE ROW SHORT. This is the assertion the defect broke: every queue row
+    // is served exactly once across the walk, transient fault or not.
+    expect([...seen].sort()).toEqual(['c-p1-broken', 'c-p2', 'c-p3']);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(cursor).toBeNull();
+
+    // ...and the SHAPE that buys it: request one DEFERRED rather than dropping -
+    // an empty page carrying a cursor AT the row, which the dashboard renders as
+    // the empty state PLUS a live Load more (Inbox.tsx gates Load more on
+    // `hasMore` alone and switches the empty copy for exactly that pairing).
+    expect(first.rows).toEqual([]);
+    expect(first.nextCursor).not.toBeNull();
   });
 
   it('a page-head failure AFTER A BLOCK ROLL-OVER does not strand the whole later block', async () => {

@@ -24,7 +24,12 @@ import {
   runDueExtractions,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
-import type { DueExtractionItem, ExtractionRepo, PutSuggestionResult } from '../src/repos/extractionRepo.js';
+import type {
+  DueExtractionItem,
+  ExtractionRepo,
+  PutSuggestionResult,
+  SuggestionItem,
+} from '../src/repos/extractionRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
@@ -171,14 +176,15 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
   const suggestions = new Map<string, Awaited<ReturnType<ExtractionRepo['getSuggestion']>>>();
   const put = vi.fn(
     async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<PutSuggestionResult> => {
-      const item = {
+      const item: SuggestionItem = {
         ...s,
         itemId: `sugg#${s.ownerContactId}#${s.target}`,
         _pendingPartition: 'pending',
         createdAt: NOW,
       };
       suggestions.set(item.itemId, item);
-      return { item };
+      const result: PutSuggestionResult = { item };
+      return result;
     },
   );
   return {

@@ -43,6 +43,7 @@ import {
   SuggestionDismissedError,
   sameSuggestionIdentity,
   type ExtractionRepo,
+  type SuggestionIdentity,
   type SuggestionItem,
 } from '../../src/repos/extractionRepo.js';
 import {
@@ -346,7 +347,7 @@ export interface FakeWorld {
       opts?: { consistentRead?: boolean },
     ) => Promise<void> | void;
     beforeDeleteTypeSuggestion?: (
-      suggestion: SuggestionItem,
+      suggestion: SuggestionIdentity,
       expectedContactRevision: number,
     ) => Promise<void> | void;
   };

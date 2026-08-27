@@ -59,9 +59,15 @@ function makeDeps(opts: {
 
   const extraction: ApplyDeps['extraction'] = {
     putSuggestion: vi.fn(async (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]): Promise<PutSuggestionResult> => {
-      const result = opts.putSuggestionImpl ? await opts.putSuggestionImpl(s) : {
-        item: { ...s, itemId: `sugg#${s.ownerContactId}#${s.target}`, _pendingPartition: 'pending', createdAt: NOW },
+      const item: SuggestionItem = {
+        ...s,
+        itemId: `sugg#${s.ownerContactId}#${s.target}`,
+        _pendingPartition: 'pending',
+        createdAt: NOW,
       };
+      const result: PutSuggestionResult = opts.putSuggestionImpl
+        ? await opts.putSuggestionImpl(s)
+        : { item };
       records.suggestions.push(result.item);
       return result;
     }),

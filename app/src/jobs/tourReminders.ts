@@ -3,9 +3,14 @@
 // armTourReminders — writes the ladder of reminder rows for a tour at the
 //   computed dueAt offsets relative to scheduledAt, each CLAMPED out of the
 //   org's quiet-hours window (spec 2026-08-03) so a stored dueAt is the real
-//   send time. Rows whose clamped dueAt is already in the past (relative to
-//   `now`), lands at/after the tour start, or collides with a later rung's
-//   slot are silently skipped.
+//   send time. A rung that cannot usefully fire is RETIRED at arm time, and
+//   almost every retirement writes a VISIBLE skipped row rather than leaving a
+//   gap: landing at/after the tour start, colliding with a later rung's slot,
+//   a stale day_before on the tour's own local date, and (spec 2026-08-26) a
+//   day_before or morning_of armed too late to be worth sending. The ONE
+//   silent retirement left is a clamped dueAt that is already in the past
+//   relative to `now`, which after the booked-too-late rules is reachable only
+//   for en_route and for clamped rungs. See the rule list in the loop.
 //
 // cancelTourReminders — marks all pending (unsent) rows as canceled.
 //
@@ -139,8 +144,10 @@ export function computeDueAt(
       return new Date(scheduled - 4 * 60 * 60 * 1000).toISOString();
     case 'en_route':
       // ONE hour before (founder decision 2026-08-18, was two). Sam had always
-      // read this rung as the "hour before" message, and its copy now says "see
-      // you soon" - which is a stretch at two hours out. Keep the offset and the
+      // read this rung as the "hour before" message, and its copy asks the
+      // tenant to text when they are on the way - which is a stretch at two
+      // hours out. (The older gloss here quoted a "see you soon" wording that
+      // the 2026-08-26 founder rewrite replaced.) Keep the offset and the
       // wording in step if either moves again.
       return new Date(scheduled - 1 * 60 * 60 * 1000).toISOString();
     case 'no_show_checkin':
@@ -246,11 +253,20 @@ export interface ArmTourRemindersDeps {
 /**
  * Arm the full reminder ladder for a tour. Every rung's dueAt is CLAMPED out of
  * the org's quiet-hours window before it is written, so a stored dueAt is the
- * real send time. A rung whose clamped dueAt is already past is skipped with no
- * row (pre-existing rule); one that lands at/after the tour start or collides
- * with a LATER rung's slot is written as a VISIBLE skipped row (skippedAt +
+ * real send time.
+ *
+ * MOST arm-time retirements write a VISIBLE skipped row (skippedAt +
  * skipReason stamped at birth) so the panel shows an honest trace instead of a
- * silent gap - see the skip-rule comment in the loop below.
+ * silent gap: a rung landing at/after the tour start, one colliding with a
+ * LATER rung's slot, a day_before whose clamped time lands on the tour's own
+ * local date, and - since 2026-08-26 - a day_before or morning_of armed too
+ * late to be worth sending (`booked_too_late`, spec section 8). The single
+ * SILENT retirement is a clamped dueAt already behind `now`; the two
+ * booked-too-late rules run AHEAD of it precisely so the most-late booking
+ * still leaves a trace. See the skip-rule comment in the loop below.
+ *
+ * `now` is the ARM instant, not the booking instant: this runs on booking, on
+ * reschedule and on a status revival, and every rule is evaluated against it.
  *
  * Returns the created TourReminderItem rows.
  */
@@ -274,16 +290,51 @@ export async function armTourReminders(
   const window = await readQuietHoursWindow(deps.settingsRepo, log);
   const scheduledIso = new Date(scheduledAt).toISOString();
 
-  // Pass 1: compute every rung's CLAMPED dueAt (the stored time IS the real
-  // send time - the dashboard's honesty depends on it).
+  // Pass 1: compute every rung's RAW dueAt AND its CLAMPED dueAt. BOTH maps
+  // are load-bearing and neither substitutes for the other:
+  //   - `dues` is what gets STORED (the stored time IS the real send time -
+  //     the dashboard's honesty depends on it) and what supersession compares.
+  //   - `raws` is what the booked-too-late rules compare against (spec section
+  //     8 is defined on the RAW offsets, BEFORE clamping). Comparing those
+  //     rules against `dues` happens to agree whenever nothing clamps, which is
+  //     most fixtures - and is wrong for every tour whose day_before does.
+  const raws = new Map<ReminderKind, string>();
   const dues = new Map<ReminderKind, string>();
   for (const kind of REMINDER_KINDS) {
-    dues.set(kind, clampOutOfQuietHours(computeDueAt(kind, scheduledAt, now, window), window));
+    const raw = computeDueAt(kind, scheduledAt, now, window);
+    raws.set(kind, raw);
+    dues.set(kind, clampOutOfQuietHours(raw, window));
   }
 
-  // Pass 2: arm, applying the spec's skip rules (a skip creates NO row - the
-  // pre-existing past-dueAt precedent):
-  //  (a) past-dueAt (pre-existing rule),
+  // Spec 7.1: an org whose quiet window contains 19:30 makes every day_before
+  // clamp onto the tour morning, where staleDayBefore (rule (e) below) retires
+  // it 100% of the time as "superseded". Never fail and never validate the
+  // setting - quiet hours are a general setting and must not be constrained by
+  // one rung - just name the cause so the panel's permanent chips are
+  // explainable. isQuietTime gates on window.enabled, so a disabled window
+  // never warns. Fires once per ARM (booking, reschedule, revival, seed) with
+  // no dedupe, which is acceptable because the default 21:00 start never trips
+  // it.
+  const rawDayBefore = raws.get('day_before');
+  if (rawDayBefore !== undefined && isQuietTime(rawDayBefore, window)) {
+    log.warn(
+      {
+        tourId: tour.tourId,
+        rawDayBefore,
+        quietHoursStart: window.start,
+        quietHoursEnd: window.end,
+      },
+      'tour reminders: the 19:30 day_before anchor is inside the org quiet window - every day_before will clamp to the tour morning and be retired as superseded',
+    );
+  }
+
+  // Pass 2: arm, applying the spec's skip rules. Rules (b) through (e) all
+  // write a VISIBLE skipped row; only (a) writes nothing at all:
+  //  (e) booked-too-late: day_before armed inside 4h of its RAW time, or a
+  //      SAME-DAY morning_of armed inside 6h of the tour (spec section 8,
+  //      2026-08-26). Evaluated FIRST, ahead of (a) - see the branch below.
+  //  (a) past-dueAt (pre-existing rule) - the ONLY silent skip, and after (e)
+  //      it is reachable only for en_route and for clamped rungs.
   //  (b) past-event: a clamp landing at-or-past the tour start,
   //  (c) same-slot supersession: an earlier rung clamped onto a later rung's
   //      slot loses (the later rung's copy is the current one),
@@ -293,6 +344,43 @@ export async function armTourReminders(
   for (const kind of REMINDER_KINDS) {
     const dueAt = dues.get(kind);
     if (dueAt === undefined) continue;
+    // BOOKED-TOO-LATE (spec section 8) - evaluated FIRST, ahead of the silent
+    // past-dueAt drop below: for a same-day tour day_before's RAW is already
+    // past, and for a sub-4h booking morning_of's RAW is already past, so the
+    // MOST-late booking - exactly the one the founder needs explained - is the
+    // one that would otherwise vanish without a trace (spec 8.1). RAW offsets,
+    // BEFORE clamping; boundaries strictly '>'; `now` is the ARM instant, so a
+    // reschedule or a status revival re-evaluates both rules against THAT
+    // moment (spec 11 - which is why the operator label says the reminder was
+    // armed too late, not that the operator was slow).
+    //
+    // Precedence for these two rungs: booked-too-late > past-dueAt >
+    // past-event > supersession/staleDayBefore. Known, accepted
+    // mis-attribution: a rung that is ALSO clamped past the tour reports
+    // booked_too_late (spec 8.1). Do NOT "fix" it by reordering - that reopens
+    // the vanishing-row problem this precedence exists to solve.
+    const rawAt = raws.get(kind);
+    const bookedTooLate =
+      rawAt !== undefined &&
+      ((kind === 'day_before' &&
+        now > new Date(new Date(rawAt).getTime() - 4 * 60 * 60 * 1000).toISOString()) ||
+        (kind === 'morning_of' &&
+          localDateOf(now, window.timezone) === tourLocalDate &&
+          now > new Date(new Date(scheduledIso).getTime() - 6 * 60 * 60 * 1000).toISOString()));
+    if (bookedTooLate) {
+      const row = await deps.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind,
+        dueAt, // the CLAMPED value, like every arm-time skip row (spec 8.2)
+        skipped: { at: now, reason: 'booked_too_late' },
+      });
+      created.push(row);
+      log.info(
+        { tourId: tour.tourId, kind, dueAt, reminderId: row.reminderId },
+        'tour reminder retired at arm (booked too late for this rung) - visible skipped row',
+      );
+      continue;
+    }
     // Skip rows that are already past (they would never be polled).
     if (dueAt < now) {
       log.info({ tourId: tour.tourId, kind, dueAt }, 'tour reminder skipped (dueAt in the past)');
@@ -543,6 +631,10 @@ export async function runDueTourReminders(
  * re-listed and re-skipped every poll forever — the perpetual "sending
  * shortly" bug), and tells live surfaces to refetch so the panel flips to
  * its "Skipped - <reason>" chip.
+ *
+ * `reason` is the FULL ReminderSkipReason union, so the compiler cannot stop
+ * you: `'booked_too_late'` is an ARM-ONLY reason (armTourReminders decides it
+ * from the RAW offsets before any row exists) and must NEVER be passed here.
  */
 async function claimSkipRow(
   row: TourReminderItem,

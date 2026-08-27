@@ -57,6 +57,7 @@ import {
   failingSettingsRepo,
   quietOffSettingsRepo,
   stubSettingsRepo,
+  type SettingsReadRepo,
 } from './helpers/settingsStub.js';
 
 // Since 2026-08-20 the poll holds back EVERY auto-armed rung kind by default
@@ -1260,15 +1261,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 5 — same-day tour: day_before is in the past and skipped
+  // Test 5 - same-day tour: BOTH near rungs are retired booked_too_late
   // ---------------------------------------------------------------------------
-  it('armTourReminders skips day_before when it is in the past (same-day tour)', async () => {
-    // Tour is scheduled for the same day - day_before (19:30 org-local the
-    // evening before) is in the past.
-    //
-    // INTERIM STATE, this task only. Task 7 adds the two booked-too-late rules,
-    // after which BOTH day_before and morning_of become VISIBLE
-    // `booked_too_late` rows here instead of a silent drop and a live rung.
+  it('armTourReminders retires BOTH day_before and morning_of as booked_too_late on a same-day tour', async () => {
+    // A same-day booking, five hours out. Both booked-too-late rules fire, and
+    // both write a VISIBLE row: day_before because its RAW time (19:30 the
+    // evening before) is a day behind us, morning_of because the tour is
+    // same-day and we are inside its six-hour lead. This used to be a silent
+    // drop plus a live rung - the founder saw a gap where the explanation
+    // should have been (spec 8.1).
     const now0 = '2026-07-13T09:00:00.000Z';
     const scheduledAt = '2026-07-13T14:00:00.000Z'; // only 5 hours from now
 
@@ -1287,23 +1288,29 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     const armedKinds = rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind);
 
-    // day_before = 19:30 EDT Jul 12 = '2026-07-12T23:30:00.000Z' < now0 ->
-    // past-dueAt, the pre-existing SILENT skip (no row at all).
-    expect(rows.map((r) => r.kind)).not.toContain('day_before');
+    // day_before RAW = 19:30 EDT Jul 12 = '2026-07-12T23:30:00.000Z'; rule-1
+    // cutoff = RAW - 4h = '2026-07-12T19:30:00.000Z', which now0 is half a day
+    // past. Rule 1 runs AHEAD of the past-dueAt branch, so instead of the old
+    // silent drop there is a visible row carrying the reason - stamped with the
+    // CLAMPED dueAt (identity here: quiet hours are off).
+    const dayBefore = rows.find((r) => r.kind === 'day_before');
+    expect(dayBefore).toBeDefined();
+    expect(dayBefore?.skipReason).toBe('booked_too_late');
+    expect(dayBefore?.dueAt).toBe('2026-07-12T23:30:00.000Z');
 
     // confirmation = now0 - always armed (quiet hours are OFF for this case)
     expect(armedKinds).toContain('confirmation');
 
-    // morning_of = scheduledAt - 4h = '2026-07-13T10:00:00.000Z', still ahead
-    // of now0 (09:00Z), so it arms.
-    //
-    // BOTH RUNGS SURVIVE, three hours apart. Under the retiming they are two
-    // fixed offsets from the tour (-4h and -1h) rather than one wall-clock
-    // anchor and one offset, so they can no longer collide at all.
+    // morning_of RAW = scheduledAt - 4h = '2026-07-13T10:00:00.000Z' and is
+    // still ahead of now0 - but rule 2 does not care about the RAW time being
+    // future, only about the LEAD: the tour is same-day (both local dates are
+    // Jul 13) and now0 09:00Z is past scheduledAt - 6h = 08:00Z. Four hours
+    // notice is not enough for a "your tour is in four hours" text to be worth
+    // sending, so the rung is retired with the same visible reason.
     const morningOf = rows.find((r) => r.kind === 'morning_of');
     expect(morningOf?.dueAt).toBe('2026-07-13T10:00:00.000Z');
-    expect(morningOf?.skippedAt).toBeUndefined();
-    expect(armedKinds).toContain('morning_of');
+    expect(morningOf?.skipReason).toBe('booked_too_late');
+    expect(armedKinds).not.toContain('morning_of');
 
     // en_route = scheduledAt - 1h = '2026-07-13T13:00:00.000Z' > now0 → armed
     expect(rows.find((r) => r.kind === 'en_route')?.dueAt).toBe('2026-07-13T13:00:00.000Z');
@@ -1311,6 +1318,236 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // no_show_checkin is manual-send only now, so it is never auto-armed.
     expect(rows.map((r) => r.kind)).not.toContain('no_show_checkin');
+  });
+
+  // ===========================================================================
+  // THE BOOKED-TOO-LATE ARM RULES (spec section 8, founder retiming 2026-08-26)
+  //
+  //   rule 1: day_before  is skipped when now > rawDueAt - 4h
+  //   rule 2: morning_of  is skipped when sameDay && now > scheduledAt - 6h
+  //
+  // Both compare RAW (pre-clamp) offsets, both boundaries are strictly '>', and
+  // both run BEFORE the silent past-dueAt drop - so the MOST-late booking, the
+  // one a founder most needs explained, gets a VISIBLE skipped row instead of
+  // vanishing. Precedence per rung: booked-too-late > past-dueAt > past-event >
+  // supersession/staleDayBefore. The row stores the CLAMPED dueAt, exactly like
+  // every neighbouring arm-time skip row (spec 8.2); the RAW value is only what
+  // the RULE compares against.
+  //
+  // Shared fixture TOUR: Thu Jul 23 2026, 15:00 EDT.
+  //   day_before RAW = 19:30 EDT Jul 22 = '2026-07-22T23:30:00.000Z'
+  //     rule-1 cutoff  = RAW - 4h       = '2026-07-22T19:30:00.000Z'
+  //   morning_of RAW = sched - 4h       = '2026-07-23T15:00:00.000Z'
+  //     rule-2 cutoff  = sched - 6h     = '2026-07-23T13:00:00.000Z'
+  //   en_route   RAW = sched - 1h       = '2026-07-23T18:00:00.000Z'
+  // ===========================================================================
+  describe('booked-too-late arm rules (spec section 8)', () => {
+    const TOUR = '2026-07-23T19:00:00.000Z';
+    /** The spec-7.1 arm-time warn, byte-exact (jobs/tourReminders.ts). */
+    const QUIET_1930_WARN =
+      'tour reminders: the 19:30 day_before anchor is inside the org quiet window - ' +
+      'every day_before will clamp to the tour morning and be retired as superseded';
+    let seq = 0;
+
+    async function armAt(
+      now: string,
+      opts: { scheduledAt?: string; settingsRepo?: SettingsReadRepo } = {},
+    ) {
+      seq += 1;
+      const tour = await tours.create({
+        tenantId: `contact-btl-${seq}`,
+        unitId: `unit-btl-${seq}`,
+        scheduledAt: opts.scheduledAt ?? TOUR,
+        tourType: 'self_guided',
+      });
+      const rows = await armTourReminders(tour, now, {
+        tourRemindersRepo: tourReminders,
+        settingsRepo: opts.settingsRepo ?? quietOff,
+        logger,
+      });
+      return {
+        tour,
+        rows,
+        byKind: Object.fromEntries(rows.map((r) => [r.kind, r])),
+      };
+    }
+
+    // -- case 1 ---------------------------------------------------------------
+    it('case 1: rule 1 just past the cutoff writes a VISIBLE booked_too_late day_before', async () => {
+      const now = '2026-07-22T19:30:00.001Z'; // one ms past the cutoff
+      const { byKind } = await armAt(now);
+
+      const dayBefore = byKind['day_before'];
+      expect(dayBefore).toBeDefined();
+      expect(dayBefore!.skipReason).toBe('booked_too_late');
+      expect(dayBefore!.skippedAt).toBe(now);
+      // The CLAMPED value - identity here because quiet hours are off. Storing
+      // the raw value would break the shape every other arm-time skip row has.
+      expect(dayBefore!.dueAt).toBe('2026-07-22T23:30:00.000Z');
+
+      // Rule 2 does not reach across the midnight boundary: `now` is 15:30 EDT
+      // Jul 22, whose LOCAL date is Jul 22, not the tour's Jul 23.
+      expect(byKind['morning_of']!.dueAt).toBe('2026-07-23T15:00:00.000Z');
+      expect(byKind['morning_of']!.skippedAt).toBeUndefined();
+      expect(byKind['en_route']!.dueAt).toBe('2026-07-23T18:00:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+    });
+
+    // -- case 2 ---------------------------------------------------------------
+    it('case 2: rule 1 EXACTLY on the cutoff still arms (the boundary is strictly >)', async () => {
+      const now = '2026-07-22T19:30:00.000Z';
+      const { byKind } = await armAt(now);
+
+      expect(byKind['day_before']!.dueAt).toBe('2026-07-22T23:30:00.000Z');
+      expect(byKind['day_before']!.skippedAt).toBeUndefined();
+      expect(byKind['day_before']!.skipReason).toBeUndefined();
+    });
+
+    // -- case 3 ---------------------------------------------------------------
+    it('case 3: rule 1 BEATS the silent past-dueAt drop (same-day booking, day_before raw already past)', async () => {
+      // 10:00 EDT on the tour's own day. day_before's RAW (Jul 22 23:30Z) is
+      // already behind us, so before this change the past-dueAt branch wrote
+      // NOTHING and the founder saw a gap. This case is the ORDERING
+      // discriminator - without it, both placements of the branch pass.
+      const now = '2026-07-23T14:00:00.000Z';
+      const { byKind } = await armAt(now);
+
+      const dayBefore = byKind['day_before'];
+      expect(dayBefore).toBeDefined();
+      expect(dayBefore!.skipReason).toBe('booked_too_late');
+      expect(dayBefore!.dueAt).toBe('2026-07-22T23:30:00.000Z');
+
+      // Rule 2 fires on the same booking: sameDay, and 14:00Z > 13:00Z.
+      const morningOf = byKind['morning_of'];
+      expect(morningOf).toBeDefined();
+      expect(morningOf!.skipReason).toBe('booked_too_late');
+      expect(morningOf!.dueAt).toBe('2026-07-23T15:00:00.000Z');
+
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+      expect(byKind['confirmation']!.skippedAt).toBeUndefined();
+    });
+
+    // -- case 4 ---------------------------------------------------------------
+    it('case 4: rule 2 BEATS the silent past-dueAt drop (booked three hours out)', async () => {
+      // morning_of's RAW (15:00Z) is already past at 16:00Z, so the past-dueAt
+      // branch would have dropped it silently.
+      const now = '2026-07-23T16:00:00.000Z';
+      const { byKind } = await armAt(now);
+
+      const morningOf = byKind['morning_of'];
+      expect(morningOf).toBeDefined();
+      expect(morningOf!.skipReason).toBe('booked_too_late');
+      expect(morningOf!.skippedAt).toBe(now);
+      expect(morningOf!.dueAt).toBe('2026-07-23T15:00:00.000Z');
+
+      // en_route has NO rule of its own and is still ahead of `now`.
+      expect(byKind['en_route']!.dueAt).toBe('2026-07-23T18:00:00.000Z');
+      expect(byKind['en_route']!.skippedAt).toBeUndefined();
+    });
+
+    // -- case 5 ---------------------------------------------------------------
+    it('case 5: rule 2 EXACTLY on the cutoff still arms (the boundary is strictly >)', async () => {
+      const now = '2026-07-23T13:00:00.000Z'; // scheduledAt - 6h to the ms
+      const { byKind } = await armAt(now);
+
+      expect(byKind['morning_of']!.dueAt).toBe('2026-07-23T15:00:00.000Z');
+      expect(byKind['morning_of']!.skippedAt).toBeUndefined();
+      // CAVEAT (research-6, D-4 case 5): day_before IS booked_too_late in this
+      // fixture - the tour is same-day, so rule 1 fired hours ago. Not what
+      // this case is about; noted so nobody reads it as a rule-2 leak.
+      expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
+    });
+
+    // -- case 6 ---------------------------------------------------------------
+    it('case 6: rule 2 is SAME-DAY only - a 4h gap across the local midnight still arms morning_of', async () => {
+      // Tour Jul 24 01:00 EDT (local date Jul 24); armed at Jul 23 21:00 EDT
+      // (local date Jul 23). The gap is 4h, inside the 6h lead - but the local
+      // dates differ, so rule 2 must not fire.
+      const now = '2026-07-24T01:00:00.000Z';
+      const { byKind } = await armAt(now, { scheduledAt: '2026-07-24T05:00:00.000Z' });
+
+      const morningOf = byKind['morning_of'];
+      expect(morningOf).toBeDefined();
+      expect(morningOf!.skippedAt).toBeUndefined();
+      // BOUNDARY, DELIBERATE (A7-3): morning_of's RAW is 05:00Z - 4h = 01:00Z,
+      // which is EXACTLY `now`. The past-dueAt branch is `if (dueAt < now)`, so
+      // the row survives - armed already-due. A builder who "tidies" that
+      // comparison to `<=` breaks this case.
+      expect(morningOf!.dueAt).toBe(now);
+      // day_before still trips rule 1 (its cutoff was 19:30 EDT Jul 23).
+      expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
+    });
+
+    // -- case 8 ---------------------------------------------------------------
+    // Case 7 (reschedule + revival) lives in toursApi.test.ts - it needs the
+    // real PATCH route, not a direct armTourReminders call.
+    //
+    // LOAD-BEARING TWICE OVER (A7-4). After the 19:30 retiming, `staleDayBefore`
+    // can NEVER fire under the DEFAULT window - 19:30 is outside 21:00-08:00, so
+    // day_before never clamps onto the tour's own local date. This case, with
+    // quietHoursStart 19:00, is that rule's ONLY remaining coverage as well as
+    // the 7.1 warn's. Do not delete it as "an unusual org config".
+    it('case 8: quietHoursStart 19:00 clamps day_before onto the tour morning - staleDayBefore retires it AND the 7.1 warn names the cause', async () => {
+      const now = '2026-07-20T12:00:00.000Z'; // 08:00 EDT, three days out
+      const from = logCapture.lines.length;
+      const { byKind } = await armAt(now, {
+        settingsRepo: stubSettingsRepo({ quietHoursStart: '19:00' }),
+      });
+
+      // RAW 19:30 EDT Jul 22 is inside [19:00, 08:00), so it clamps forward to
+      // the next 08:00 local = 08:00 EDT Jul 23 = the TOUR's own local date,
+      // which is exactly what staleDayBefore retires ("your tour is tomorrow"
+      // arriving on tour day). Rule 1 does NOT pre-empt: its cutoff is Jul 22
+      // 19:30Z, two days after `now`.
+      const dayBefore = byKind['day_before'];
+      expect(dayBefore!.dueAt).toBe('2026-07-23T12:00:00.000Z');
+      expect(dayBefore!.skipReason).toBe('quiet_hours_superseded');
+
+      expect(logCapture.lines.slice(from).map((l) => l['msg'])).toContain(QUIET_1930_WARN);
+    });
+
+    it('case 8 (negative): the SAME 19:00 start with quiet hours DISABLED warns nothing', async () => {
+      // quietOffSettingsRepo() would be a VACUOUS control here: it keeps the
+      // DEFAULT 21:00 start, and 19:30 is outside [21:00, 08:00) whether or not
+      // isQuietTime gates on `enabled`. Only a disabled-but-19:00 window
+      // separates "gated on enabled" from "outside the window anyway".
+      const now = '2026-07-20T12:00:00.000Z';
+      const from = logCapture.lines.length;
+      const { byKind } = await armAt(now, {
+        settingsRepo: stubSettingsRepo({ quietHoursEnabled: false, quietHoursStart: '19:00' }),
+      });
+
+      expect(logCapture.lines.slice(from).map((l) => l['msg'])).not.toContain(QUIET_1930_WARN);
+      // and with no clamp the rung simply arms at 19:30 local.
+      expect(byKind['day_before']!.dueAt).toBe('2026-07-22T23:30:00.000Z');
+      expect(byKind['day_before']!.skippedAt).toBeUndefined();
+    });
+
+    // -- case 9 ---------------------------------------------------------------
+    it('case 9: the silent past-dueAt drop survives for en_route, which no booked-too-late rule guards', async () => {
+      // THE PAST-DUEAT REPLACEMENT PIN. Every pre-change assertion of the silent
+      // drop rode day_before, and every one of them inverts once rule 1 lands -
+      // but the branch is NOT dead: en_route has no rule, so a booking inside
+      // its own one-hour lead time still reaches it and still writes NO row.
+      // Deleting this case leaves a live production branch with zero coverage.
+      const now = '2026-07-23T18:30:00.000Z'; // 14:30 EDT, 30 min before the tour
+      const from = logCapture.lines.length;
+      const { rows, byKind } = await armAt(now);
+
+      expect(rows.map((r) => r.kind)).not.toContain('en_route');
+      expect(logCapture.lines.slice(from).map((l) => l['msg'])).toContain(
+        'tour reminder skipped (dueAt in the past)',
+      );
+
+      expect(byKind['day_before']!.skipReason).toBe('booked_too_late');
+      expect(byKind['morning_of']!.skipReason).toBe('booked_too_late');
+      // confirmation is armed at `now`: 18:30Z is still before the 19:00Z tour,
+      // so the past-event rule does not claim it either.
+      expect(byKind['confirmation']!.dueAt).toBe(now);
+      expect(byKind['confirmation']!.skippedAt).toBeUndefined();
+
+      expect(rows).toHaveLength(3);
+    });
   });
 
   // ---------------------------------------------------------------------------

@@ -173,17 +173,17 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         ExpressionAttributeNames: { '#tid': 'tourId' },
         ExpressionAttributeValues: { ':tid': LIVE_IDS.tourToday },
       }));
-      // Quiet hours (default 21:00-08:00 America/New_York) reshape this ladder.
-      // At 09:00 UTC (05:00 EDT - inside the window) seeding a 14:00 UTC
-      // (10:00 EDT) tour: confirmation clamps to 12:00 UTC (08:00 EDT),
-      // day_before is yesterday-14:00 (past - skipped), morning_of is 08:00
-      // EDT = 12:00 UTC, en_route is 12:00 UTC. The three survivors all land on
-      // the SAME 08:00-local instant, so supersession keeps only the last rung.
+      // Quiet hours (default 21:00-08:00 America/New_York) and the two
+      // booked-too-late rules together reshape this ladder. At 09:00 UTC
+      // (05:00 EDT) seeding a 14:00 UTC (10:00 EDT) SAME-DAY tour:
+      // confirmation clamps to 12:00 UTC (08:00 EDT), day_before is retired
+      // booked_too_late, morning_of clamps to 12:00 UTC and is retired
+      // booked_too_late too, and only en_route (13:00 UTC) is left live.
       expect(Items).toBeDefined();
       expect(Items!.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('the in-window seed time collapses the ladder onto one 08:00-local rung', async () => {
+    it('the same-day seed leaves only en_route live: both near rungs are booked_too_late and confirmation is superseded', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -195,22 +195,29 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       // confirmation would have been sent at 05:00 EDT - it is clamped to 08:00
       // EDT, where it collides with morning_of and loses the slot to it. The
       // losers are written as VISIBLE skipped rows (the panel trace, 2026-08-04)
-      // rather than silently absent. day_before (yesterday, past-dueAt) stays
-      // row-less.
+      // rather than silently absent.
       //
-      // en_route NO LONGER shares that 08:00 slot: at 1h before the tour
-      // (founder decision 2026-08-18, was 2h) it sits an hour later and is armed
-      // in its own right, so morning_of now survives as the 08:00 rung.
+      // Since 2026-08-26 the two booked-too-late rules (spec section 8) take
+      // the two near rungs FIRST, so en_route is the only live rung left:
+      //  - day_before RAW = 19:30 EDT yesterday; its rule-1 cutoff (RAW - 4h)
+      //    is well behind the seed clock, so it is retired with a VISIBLE
+      //    booked_too_late row instead of the old silent past-dueAt drop.
+      //  - morning_of is same-day and the seed clock (09:00Z) is past
+      //    scheduledAt - 6h (08:00Z), so rule 2 retires it too - at the CLAMPED
+      //    08:00-local dueAt, exactly like every other arm-time skip row.
+      // en_route (1h before the tour since 2026-08-18) has no rule of its own
+      // and sits an hour clear of the 08:00 slot, so it survives.
       const pending = rows.filter((r) => r['skippedAt'] === undefined);
-      expect(pending.map((r) => r['kind']).sort()).toEqual(['en_route', 'morning_of']);
+      expect(pending.map((r) => r['kind']).sort()).toEqual(['en_route']);
       const morningOf = rows.find((r) => r['kind'] === 'morning_of');
-      expect(morningOf?.['skippedAt']).toBeUndefined();
+      expect(morningOf?.['skipReason']).toBe('booked_too_late');
       expect(morningOf?.['dueAt']).toBe(
         instantAtLocalTime(FIXED_NOW_ISO.slice(0, 10), '08:00', QUIET_WINDOW.timezone),
       );
       const confirmation = rows.find((r) => r['kind'] === 'confirmation');
       expect(confirmation?.['skipReason']).toBe('quiet_hours_superseded');
-      expect(rows.find((r) => r['kind'] === 'day_before')).toBeUndefined();
+      const dayBefore = rows.find((r) => r['kind'] === 'day_before');
+      expect(dayBefore?.['skipReason']).toBe('booked_too_late');
     });
   });
 

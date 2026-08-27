@@ -979,13 +979,20 @@ it.each([
       'run-kind',
       'type',
       verdict,
-      expect.objectContaining({ by: ACTOR }),
+      expect.objectContaining({
+        at: expect.any(String),
+        expectedVerdict: 'pending',
+        freshSuggestionCreatedAt: expect.any(String),
+        by: ACTOR,
+      }),
     );
   },
 );
 ```
 
-Add an Edit-contact-shaped role-only case: the stored base is already `landlord`, a pending `property_manager` suggestion exists, and PATCH `{ role: 'Property Manager' }` must accept it. Add role-only `{ role: '' }` from a stored PM against a pending `landlord` suggestion and expect accepted plain Landlord.
+Use a fixed `createdAt` in one case and assert it is passed exactly as `freshSuggestionCreatedAt`, not replaced by verdict time. Add an Edit-contact-shaped role-only case: the stored base is already `landlord`, a pending `property_manager` suggestion exists, and PATCH `{ role: 'Property Manager' }` must accept it. Add role-only `{ role: '' }` from a stored PM against a pending `landlord` suggestion and expect accepted plain Landlord.
+
+Add a legacy pending type suggestion with no `runId`. Classify the contact, then assert the exact row and Today item are removed but `setVerdict` is not called; no originating run exists to stamp.
 
 - [ ] **Step 7: Add red adversarial race tests for the classification drain**
 
@@ -997,7 +1004,7 @@ Use the harness's repository hooks to prove each D11 interleaving:
 4. Inject a second older-revision replacement after the first delete; assert a second consistent read and exact guarded delete removes it.
 5. Classify, retype to Unknown in a later PATCH, publish a suggestion at the later revision, then release the older route drain; assert the older route receives `contact_revision_changed`, stops, and preserves the new actionable row.
 6. Classify that new epoch later with the matching kind and assert accepted.
-7. Delete an in-flight extraction row before its run finalizes; assert `beginFinalization` marker plus later `putRun` yields terminal `superseded_by_human_edit`, not pending or `not_presented`.
+7. Delete an in-flight extraction row before its run finalizes; assert `beginFinalization` marker plus later `putRun` yields terminal `superseded_by_human_edit`, not pending or `not_presented`. Assert the route call includes `target: 'type'`, `expectedVerdict: 'pending'`, the candidate's exact `createdAt` as `freshSuggestionCreatedAt`, route actor, and route verdict time.
 
 Each test must assert all three surfaces: repository row, contact suggestion list or Today row, and AI run verdict.
 
@@ -1043,6 +1050,7 @@ Use the `classification_revision` returned by `contacts.update`, not the pre-rea
 ```ts
 const committedRevision = contactClassificationRevision(updated);
 const appliedKind = canonicalSuggestedContactKind(updated);
+const verdictAt = new Date().toISOString();
 ```
 
 Implement a maximum of four guarded delete attempts. If the pre-write snapshot is empty or failed, the first iteration must perform a post-write consistent point read before deciding there is nothing to drain. After every delete attempt, clear the candidate so the next iteration performs another consistent point read:
@@ -1088,12 +1096,26 @@ let result: GuardedTypeDeleteResult;
       === normalizeSuggestionValue('type', appliedKind)
       ? 'accepted'
       : 'superseded_by_human_edit';
-  await stampTypeVerdictBestEffort(candidate, verdict);
+  if (candidate.runId !== undefined) {
+    try {
+      await aiRuns.setVerdict(candidate.runId, 'type', verdict, {
+        at: verdictAt,
+        expectedVerdict: 'pending',
+        freshSuggestionCreatedAt: candidate.createdAt,
+        ...(req.user?.userId !== undefined && { by: req.user.userId }),
+      });
+    } catch (err) {
+      log.warn(
+        { err, contactId, field: 'type' },
+        'ai run verdict stamp failed (best-effort)',
+      );
+    }
+  }
   candidate = undefined;
 }
 ```
 
-The identity comparison must prefer `revision`, then use the exact legacy `createdAt` and present-or-absent `runId` fallback. A post-write replacement always gets `superseded_by_human_edit`, even if its value equals `appliedKind`. Stop without deleting when the candidate belongs to the same or a newer classification revision. If the first successful post-write consistent read returns no row, a publication after that read is owned by the extraction writer's post-put contact check from Task 3; do not add polling. Log a warning if four older replacements exhaust the bound. Never fail the already-committed contact PATCH for pre-read, drain-read, guarded-delete, or verdict errors.
+The identity comparison must prefer `revision`, then use the exact legacy `createdAt` and present-or-absent `runId` fallback. A row without `runId` is still deleted when safe but has no AI run to stamp. A post-write replacement always gets `superseded_by_human_edit`, even if its value equals `appliedKind`. Stop without deleting when the candidate belongs to the same or a newer classification revision. If the first successful post-write consistent read returns no row, a publication after that read is owned by the extraction writer's post-put contact check from Task 3; do not add polling. Log a warning if four older replacements exhaust the bound. Never fail the already-committed contact PATCH for pre-read, drain-read, guarded-delete, or verdict errors.
 
 - [ ] **Step 11: Preserve existing route-owned downstream behavior**
 

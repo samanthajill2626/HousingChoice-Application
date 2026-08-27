@@ -2041,7 +2041,7 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     const { app, world, setVerdict } = makeFaithfulRouteWorld();
     const createdAt = '2026-08-26T13:00:00.000Z';
     seedTenant(world, { type: 'unknown', status: 'needs_review' });
-    await world.aiRuns.putRun(pendingTypeRun('run-empty-snapshot', createdAt));
+    await world.aiRuns.putRun(pendingTypeRun('run-empty-snapshot', createdAt, 'tenant'));
     let consistentTypeReads = 0;
     world.suggestionHooks.beforeGetSuggestion = async (_contactId, target, opts) => {
       if (target !== 'type' || opts?.consistentRead !== true) return;
@@ -2070,7 +2070,7 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
       .set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).expect(200);
     expect(today.body.items).not.toContainEqual(expect.objectContaining({ group: 'ai_suggestions', refId: 'c1' }));
     expect((await world.aiRuns.getRun('run-empty-snapshot'))?.decisions.type).toMatchObject({
-      outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
     });
     expect(setVerdict).toHaveBeenCalledWith('run-empty-snapshot', 'type', 'superseded_by_human_edit', expect.objectContaining({
       by: ACTOR, freshSuggestionCreatedAt: createdAt, expectedVerdict: 'pending',
@@ -2170,9 +2170,9 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
       at: expect.any(String), by: ACTOR, expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAt,
     }));
     const verdictOptions = setVerdict.mock.calls.find(([runId]) => runId === 'run-finalizing')?.[3];
-    await world.aiRuns.putRun(pendingTypeRun('run-finalizing', createdAt));
+    await world.aiRuns.putRun(pendingTypeRun('run-finalizing', createdAt, 'tenant'));
     expect((await world.aiRuns.getRun('run-finalizing'))?.decisions.type).toMatchObject({
-      outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
       verdictAt: verdictOptions?.at,
     });
   });

@@ -47,14 +47,159 @@ export function isImageMediaType(type: string | undefined): boolean {
 }
 
 /**
- * Normalize a sender-supplied MMS Content-Type for STORAGE: keep it (lowercased)
- * only when it's an allowlisted inline image, otherwise collapse to
- * `application/octet-stream` — so an attacker-controlled type (text/html,
- * image/svg+xml, …) is never persisted as the object's Content-Type. Layer 1 of
- * the stored-XSS defense; routes/api.ts re-checks at serve time (layer 2).
+ * Types served with their TRUE Content-Type but ALWAYS as a download
+ * (Content-Disposition: attachment) - never rendered same-origin. None is
+ * script-capable, which is the whole entry criterion: a browser handed one of
+ * these cannot execute anything in the dashboard origin.
+ *
+ * DELIBERATELY EXCLUDED, permanently: text/html, application/xhtml+xml,
+ * image/svg+xml, text/xml, application/xml, application/javascript. Those DO
+ * run script on top-level navigation and stay on the opaque tier forever.
+ */
+export const DECLARABLE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  'video/mp4',
+  'video/quicktime',
+  'video/3gpp',
+  'video/3gpp2',
+  'video/webm',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/aac',
+  'audio/ogg',
+  'audio/amr',
+  'audio/wav',
+  'image/heic',
+  'image/heif',
+  'image/bmp',
+  'image/tiff',
+  'text/vcard',
+  'text/x-vcard',
+  'text/plain',
+  'text/csv',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
+
+/**
+ * The EMISSION map: canonical type -> the ONE extension we synthesize for it.
+ * Do NOT build the accepted-extension set below out of these values - see the
+ * comment there for why that is a defect rather than a shortcut.
+ *
+ * Duplicated by design with EMAIL_EXTENSIONS (services/sendEmailMessage.ts),
+ * which names an OUTBOUND MIME part rather than a download we offer. Neither
+ * feeds a security decision, so the divergence is cosmetic and merging them is
+ * out of scope (spec non-goal 4).
+ */
+const MEDIA_TYPE_EXTENSIONS: ReadonlyMap<string, string> = new Map([
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/gif', '.gif'],
+  ['image/webp', '.webp'],
+  ['application/pdf', '.pdf'],
+  ['video/mp4', '.mp4'],
+  ['video/quicktime', '.mov'],
+  ['video/3gpp', '.3gp'],
+  ['video/3gpp2', '.3g2'],
+  ['video/webm', '.webm'],
+  ['audio/mpeg', '.mp3'],
+  ['audio/mp4', '.m4a'],
+  ['audio/aac', '.aac'],
+  ['audio/ogg', '.ogg'],
+  ['audio/amr', '.amr'],
+  ['audio/wav', '.wav'],
+  ['image/heic', '.heic'],
+  ['image/heif', '.heif'],
+  ['image/bmp', '.bmp'],
+  ['image/tiff', '.tiff'],
+  ['text/vcard', '.vcf'],
+  ['text/x-vcard', '.vcf'],
+  ['text/plain', '.txt'],
+  ['text/csv', '.csv'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+]);
+
+/**
+ * Extensions we will KEEP off a stored filename when the type itself is
+ * unrecoverable (the opaque tier). Wider than the emission map on purpose: the
+ * map emits `.jpg`, so a set derived from its values would reject `photo.jpeg`
+ * and produce `photo.bin` - exactly the outcome the opaque-tier rule exists to
+ * prevent. Hand-written, exhaustive, and containing no active extension EVER:
+ * this set decides what reaches an operator's filesystem.
+ */
+const ACCEPTED_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif',
+  '.mp4', '.m4v', '.mov', '.3gp', '.3g2', '.webm',
+  '.mp3', '.m4a', '.aac', '.oga', '.ogg', '.amr', '.wav',
+  '.pdf', '.txt', '.csv', '.vcf', '.docx', '.xlsx',
+]);
+
+export type MediaTier = 'inline' | 'declarable' | 'opaque';
+
+export interface ResolvedMediaType {
+  tier: MediaTier;
+  /** The allowlist's OWN string - never the caller's. */
+  canonical: string;
+  /** The extension we synthesize for `canonical`. `.bin` on the opaque tier. */
+  ext: string;
+}
+
+/** Fresh object per call - never a shared mutable constant a caller could
+ *  alter for everyone else. */
+function opaque(): ResolvedMediaType {
+  return { tier: 'opaque', canonical: 'application/octet-stream', ext: '.bin' };
+}
+
+/**
+ * THE one tier decision. Every caller - the serve route, the write-side
+ * normalizer - goes through this, so the tier, the response Content-Type and
+ * the synthesized extension can never disagree with each other.
+ *
+ * Matches on the media-type ESSENCE (everything before the first `;`) because
+ * `text/plain; charset=utf-8` and `video/3gpp; codecs=...` are ordinary wire
+ * forms; an exact-string lookup drops them to the opaque tier and silently
+ * defeats the feature for the types it adds.
+ *
+ * SECURITY: this NEWLY ADMITS the parameterized forms of ALLOWLISTED types -
+ * `image/png; charset=x` now reaches the inline tier. That is safe because of
+ * the CANONICAL OUTPUT, not the matching: the response header is our own
+ * constant, so a caller-supplied parameterized string never reaches a header.
+ * Non-allowlisted types are unaffected - `text/html; charset=x` has essence
+ * `text/html` and still fails both sets.
+ */
+export function resolveMediaTier(raw: string | undefined): ResolvedMediaType {
+  if (typeof raw !== 'string') return opaque();
+  const essence = raw.split(';')[0]!.trim().toLowerCase();
+  if (essence.length === 0) return opaque();
+  const tier: MediaTier | undefined = INLINE_MEDIA_TYPES.has(essence)
+    ? 'inline'
+    : DECLARABLE_MEDIA_TYPES.has(essence)
+      ? 'declarable'
+      : undefined;
+  if (tier === undefined) return opaque();
+  return { tier, canonical: essence, ext: MEDIA_TYPE_EXTENSIONS.get(essence) ?? '.bin' };
+}
+
+/** True when `ext` (leading dot included) is one we are willing to emit. */
+export function isAcceptedExtension(ext: string): boolean {
+  return ACCEPTED_EXTENSIONS.has(ext.trim().toLowerCase());
+}
+
+/**
+ * Normalize a sender-supplied Content-Type for STORAGE: keep the CANONICAL
+ * allowlist member when the type resolves to the inline OR the declarable tier,
+ * otherwise collapse to `application/octet-stream` - so an attacker-controlled
+ * type (text/html, image/svg+xml, ...) is never persisted as the object's
+ * Content-Type. Layer 1 of the stored-XSS defense; routes/api.ts re-checks at
+ * serve time (layer 2).
+ *
+ * WIDENED: it used to keep only the inline set, which destroyed the real type
+ * of every video, audio clip, vCard and office document at mirror time. The
+ * declarable tier is served truthfully but ALWAYS as a download, so nothing
+ * script-capable gained ground - see resolveMediaTier.
  */
 export function normalizeStoredMediaType(raw: string | undefined): string {
-  return isInlineMediaType(raw) ? raw!.trim().toLowerCase() : 'application/octet-stream';
+  return resolveMediaTier(raw).canonical;
 }
 
 /**

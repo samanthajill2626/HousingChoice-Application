@@ -160,4 +160,38 @@ describe('mirrorMediaSet', () => {
     expect(out.failed).toEqual([{ index: 0, retryable: true }]);
     expect(stream.destroyed).toBe(true);
   });
+
+  it('stores a declarable sender type truthfully', async () => {
+    // The reported bug: a relay member's video was stored as octet-stream and
+    // its real type lost forever the moment the object landed in S3.
+    const f = flakyAdapter(0, () => new Error('never'));
+    const s = storeSpy();
+    const out = await mirrorMediaSet(
+      { adapter: f.adapter, mediaStore: s.mediaStore, logger: silent, sleep: async () => {} },
+      {
+        conversationId: 'conv-1',
+        messageSid: 'MM9',
+        targets: [{ index: 0, url: 'https://api.twilio.com/m/0', contentType: 'video/mp4' }],
+        delaysMs: INLINE_MIRROR_DELAYS_MS,
+      },
+    );
+    expect(out.attachments[0]?.attachment.contentType).toBe('video/mp4');
+    expect(s.puts).toEqual([{ key: 'media/conv-1/MM9/0', contentType: 'video/mp4' }]);
+  });
+
+  it('still collapses a script-capable sender type at rest', async () => {
+    const f = flakyAdapter(0, () => new Error('never'));
+    const s = storeSpy();
+    const out = await mirrorMediaSet(
+      { adapter: f.adapter, mediaStore: s.mediaStore, logger: silent, sleep: async () => {} },
+      {
+        conversationId: 'conv-1',
+        messageSid: 'MM10',
+        targets: [{ index: 0, url: 'https://api.twilio.com/m/0', contentType: 'text/html' }],
+        delaysMs: INLINE_MIRROR_DELAYS_MS,
+      },
+    );
+    expect(out.attachments[0]?.attachment.contentType).toBe('application/octet-stream');
+    expect(s.puts[0]?.contentType).toBe('application/octet-stream');
+  });
 });

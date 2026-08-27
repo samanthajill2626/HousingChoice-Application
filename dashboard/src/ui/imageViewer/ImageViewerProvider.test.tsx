@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useRef, useState } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter, useLocation, useNavigate } from 'react-router-dom';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { addImageViewerMarker } from './history.js';
 import {
   ImageViewerProvider,
@@ -10,6 +10,10 @@ import {
   type ImageViewerContextValue,
   type ViewerImage,
 } from './ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from './ImageViewer.testUtils.js';
 
 const CONTACT_PATH = '/contacts/tenant-1';
 const IMAGE: ViewerImage = {
@@ -21,6 +25,7 @@ const IMAGE: ViewerImage = {
 let latestOpenImage: ImageViewerContextValue['openImage'] | undefined;
 let latestNavigate: ReturnType<typeof useNavigate> | undefined;
 let removeSource: (() => void) | undefined;
+let restoreResizeObserver: (() => void) | undefined;
 
 function Destination(): React.JSX.Element {
   const ref = useRef<HTMLButtonElement>(null);
@@ -136,7 +141,13 @@ async function openViewer(): Promise<{
   return { dialog, trigger };
 }
 
+beforeEach(() => {
+  restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+});
+
 afterEach(() => {
+  restoreResizeObserver?.();
+  restoreResizeObserver = undefined;
   latestOpenImage = undefined;
   latestNavigate = undefined;
   removeSource = undefined;
@@ -166,7 +177,7 @@ describe('ImageViewerProvider lifecycle', () => {
     expect(dialog.parentElement).toHaveAttribute('data-modal-variant', 'media');
     const close = within(dialog).getByRole('button', { name: 'Close' });
     const download = within(dialog).getByRole('link', { name: 'Download' });
-    const image = within(dialog).getByRole('img', { name: IMAGE.alt });
+    const image = await loadViewerImage(dialog, IMAGE.alt);
     expect(close).toHaveFocus();
     expect(download).toHaveAttribute('href', IMAGE.src);
     expect(download).toHaveAttribute('download');

@@ -253,6 +253,28 @@ describe('ContactEditForm', () => {
     expect(updateContact).toHaveBeenCalledWith('k1', { type: 'landlord' });
   });
 
+  it('editing Unknown to Property Manager sends the full landlord and role pair', async () => {
+    const user = userEvent.setup();
+    const unknown: Contact = { ...TENANT, contactId: 'u9', type: 'unknown', status: 'needs_review' };
+    updateContact.mockResolvedValue({ ...unknown, type: 'landlord', role: 'Property Manager' });
+    render(<ContactEditForm contact={unknown} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Property Manager' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'landlord', role: 'Property Manager' });
+  });
+
+  it('editing a stored Property Manager to plain Landlord clears only the role', async () => {
+    const user = userEvent.setup();
+    const propertyManager: Contact = { ...LANDLORD, role: 'Property Manager' };
+    updateContact.mockResolvedValue({ ...propertyManager, role: '' });
+    render(<ContactEditForm contact={propertyManager} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('L1', { role: '' });
+  });
+
   it('does not send { type } when the type is left unchanged', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...TENANT, firstName: 'Natasha' });

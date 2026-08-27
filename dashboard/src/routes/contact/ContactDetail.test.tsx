@@ -431,32 +431,48 @@ describe('ContactDetail', () => {
     // Pill reads "Unknown", NOT "Tenant".
     await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
     expect(screen.queryByText('Tenant')).not.toBeInTheDocument();
-    // Triage CTA present + ENABLED (wired to PATCH /api/contacts/:id { type }).
+    // Triage CTA present + enabled through the complete kind PATCH map.
     expect(screen.getByRole('button', { name: /Mark as Tenant/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Mark as Landlord/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Mark as Partner/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Mark as Property Manager/i })).toBeEnabled();
     // None of the tenant-specific cards/fields leak in.
     expect(screen.queryByText('Voucher size')).not.toBeInTheDocument();
     expect(screen.queryByText('Housing authority')).not.toBeInTheDocument();
     expect(screen.queryByText('Properties sent')).not.toBeInTheDocument();
   });
 
-  it('triages an Unknown contact: clicking "Mark as Tenant" PATCHes type and switches to the Tenant view', async () => {
+  it.each([
+    ['Tenant', { type: 'tenant', role: '' }],
+    ['Landlord', { type: 'landlord', role: '' }],
+    ['Partner', { type: 'partner', role: '' }],
+    ['Property Manager', { type: 'landlord', role: 'Property Manager' }],
+  ] as const)('Mark as %s sends the complete kind PATCH', async (label, patch) => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getContact.mockResolvedValue(UNKNOWN);
-    // The PATCH returns the now-tenant contact; the page applies it in place.
-    updateContact.mockResolvedValue({ ...UNKNOWN, type: 'tenant', status: 'active' });
+    updateContact.mockResolvedValue({ ...UNKNOWN, ...patch, status: 'active' });
     renderAt('u9');
-
     await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
-    await user.click(screen.getByRole('button', { name: /Mark as Tenant/i }));
+    await user.click(screen.getByRole('button', { name: `Mark as ${label}` }));
+    expect(updateContact).toHaveBeenCalledWith('u9', patch);
+    if (label === 'Partner' || label === 'Property Manager') {
+      await screen.findAllByText(label);
+      expect(screen.queryByRole('button', { name: `Mark as ${label}` })).not.toBeInTheDocument();
+    }
+  });
 
-    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
-    // The view re-derives from the returned contact: pill flips to Tenant, the
-    // tenant-only "Voucher size" field now shows, and the triage CTA is gone.
-    await waitFor(() => expect(screen.getByText('Tenant')).toBeInTheDocument());
-    expect(screen.getByText('Voucher size')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Mark as Tenant/i })).not.toBeInTheDocument();
+  it('keeps Unknown actions retryable when triage PATCH rejects', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact.mockRejectedValue(new Error('offline'));
+    renderAt('u9');
+    await screen.findByRole('button', { name: 'Mark as Partner' });
+    await user.click(screen.getByRole('button', { name: 'Mark as Partner' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Partner' })).toBeEnabled());
+    expect(screen.getByRole('button', { name: 'Mark as Property Manager' })).toBeEnabled();
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
   });
 
   it('accepts a voucher-size AI suggestion: applies the returned contact in place (value + Auto badge, chip gone)', async () => {

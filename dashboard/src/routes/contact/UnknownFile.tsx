@@ -1,5 +1,5 @@
 // UnknownFile — the right pane for an UNTRIAGED contact (type 'unknown'): a new
-// inbound we don't yet know is a tenant or landlord. So we show ONLY what's
+// inbound we don't yet know is a tenant, landlord, partner, or property manager. So we show ONLY what's
 // type-agnostic — Details (phones, status), Preferences & notes, any Placements, and
 // Media — and lead with a triage call-to-action. The classify actions are
 // DISABLED until a backend triage endpoint exists (every /api/contacts route is
@@ -23,12 +23,8 @@ import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
 import { suggestionFor } from './suggestionTargets.js';
 import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
+import { suggestedContactKindLabel, type SuggestedContactKind } from './contactProfile.js';
 import styles from './UnknownFile.module.css';
-
-/** Capitalize a triage type value ('tenant' -> 'Tenant') for the AI-suggests line. */
-function capitalize(value: string): string {
-  return value.length > 0 ? value[0]!.toUpperCase() + value.slice(1) : value;
-}
 
 export interface UnknownFileProps {
   contact: Contact;
@@ -51,9 +47,9 @@ export interface UnknownFileProps {
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
-  /** Triage this untriaged contact to a known type (tenant/landlord). In flight,
+  /** Triage this untriaged contact to a known kind. In flight,
    *  `triaging` disables the buttons. */
-  onTriage?: (type: 'tenant' | 'landlord') => void;
+  onTriage?: (kind: SuggestedContactKind) => void;
   triaging?: boolean;
   /** Pending AI suggestions - a `type` suggestion surfaces a recommendation line
    *  inside the triage card (the Mark-as buttons remain the action). */
@@ -89,12 +85,13 @@ export function UnknownFile({
     <>
       <Card title="Needs triage">
         <p className={styles.note}>
-          This contact hasn&apos;t been classified yet. Classify them as a tenant or
-          landlord to file them correctly and unlock the matching workspace.
+          This contact hasn&apos;t been classified yet. Classify them as a Tenant,
+          Landlord, Partner, or Property Manager to file them correctly and unlock the
+          matching workspace.
         </p>
         {typeSuggestion ? (
           <p className={styles.aiSuggest}>
-            {`AI suggests: ${capitalize(typeSuggestion.suggestedValue)}`}
+            {`AI suggests: ${suggestedContactKindLabel(typeSuggestion.suggestedValue)}`}
             {typeSuggestion.reason ? ` - ${typeSuggestion.reason}` : null}
           </p>
         ) : null}
@@ -114,6 +111,22 @@ export function UnknownFile({
             onClick={() => onTriage?.('landlord')}
           >
             Mark as Landlord
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={triaging || !onTriage}
+            onClick={() => onTriage?.('partner')}
+          >
+            Mark as Partner
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={triaging || !onTriage}
+            onClick={() => onTriage?.('property_manager')}
+          >
+            Mark as Property Manager
           </Button>
         </div>
       </Card>

@@ -1728,4 +1728,73 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(good.body).toBe(CONFIRMATION_BODY);
     expect(up.some((i) => i.source === 'placement_nudge')).toBe(true);
   });
+
+  // Expected GREEN on first run (Task 4 built the memo) - this is a DRIFT PIN
+  // on spec 6.3a's batching rule, on the ONE surface that memoizes property
+  // names by unitId. It is where a wrong cache key would stamp one person's
+  // name onto every row, which is the exact bug 6.3a names.
+  it('pin 7: property names are memoized PER UNIT and rendered per unit (one unit read for two tours at one property)', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600051';
+    world.contacts.push({ contactId: 'ct-pin7', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-pin7', phone, 'tenant_1to1');
+    for (const [unitId, contactId, firstName] of [
+      ['u-pin7-a', 'c-pin7-dana', 'Dana'],
+      ['u-pin7-b', 'c-pin7-lee', 'Lee'],
+    ]) {
+      world.units.set(unitId!, {
+        unitId: unitId!,
+        landlordId: contactId!,
+        status: 'available',
+        created_at: '2026-07-13T00:00:00.000Z',
+        updated_at: '2026-07-13T00:00:00.000Z',
+      });
+      world.contacts.push({
+        contactId: contactId!,
+        type: 'landlord',
+        status: 'active',
+        phone: firstName === 'Dana' ? '+15550600052' : '+15550600053',
+        firstName: firstName!,
+      });
+    }
+    // COUNT the unit reads. The stub is wrapped AFTER seeding so only the
+    // gather's own reads are counted.
+    const unitReadIds: string[] = [];
+    const realUnitGet = world.unitsRepo.getById.bind(world.unitsRepo);
+    world.unitsRepo.getById = async (unitId: string) => {
+      unitReadIds.push(unitId);
+      return realUnitGet(unitId);
+    };
+    // landlord_led with NO groupThreadId: the group is unusable, so the walk
+    // INCLUDES these tours on the tenant 1:1. Two units, THREE tours - the
+    // third shares unit A, which is what makes the memo observable.
+    const tourIds: string[] = [];
+    for (const unitId of ['u-pin7-a', 'u-pin7-b', 'u-pin7-a']) {
+      const tour = await world.toursRepo.create({
+        tenantId: 'ct-pin7',
+        unitId,
+        scheduledAt: TOUR_AT,
+        tourType: 'landlord_led',
+      });
+      await world.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind: 'en_route',
+        dueAt: '2099-01-10T09:00:00.000Z',
+      });
+      tourIds.push(tour.tourId);
+    }
+
+    const res = await request(app).get('/api/contacts/ct-pin7/timeline');
+
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(3);
+    const bodyFor = (tourId: string): string =>
+      up.find((i) => i.refId === tourId)!.body as string;
+    expect(bodyFor(tourIds[0]!)).toContain('Dana will be headed');
+    expect(bodyFor(tourIds[1]!)).toContain('Lee will be headed');
+    expect(bodyFor(tourIds[2]!)).toContain('Dana will be headed');
+    // ONE read for the shared unit, not two.
+    expect(unitReadIds.filter((id) => id === 'u-pin7-a')).toHaveLength(1);
+  });
 });

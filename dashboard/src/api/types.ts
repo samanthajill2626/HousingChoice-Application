@@ -1301,6 +1301,16 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // Reminder-only: the tour has no usable date and time, so no body could be
   // composed. Nothing was claimed and the rung is still pending.
   invalid_schedule: 'That tour has no usable date and time, so nothing was sent.',
+  // Reminder-only (spec 2026-08-26 6.3b): a repo read this send needed
+  // failed - the compose gate's name resolution, OR any read inside the
+  // force-send's target resolution (tour / recipient / conversation lookups
+  // share this refusal). Nothing was claimed. The copy is deliberately
+  // cause-agnostic ("everything this message needs", not "the names"):
+  // three of the four target-resolution reads are not name reads, and
+  // telling an operator "could not look up the names" during a tours-table
+  // outage sends them to the wrong next action.
+  names_unavailable:
+    'Could not look up everything this message needs, so nothing was sent - please try again.',
   placement_missing: 'That placement is gone, so nothing was sent.',
   unit_missing: 'That property is gone, so nothing was sent.',
   no_landlord: 'That property has no landlord on file, so nothing was sent.',

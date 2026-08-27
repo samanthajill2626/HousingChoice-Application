@@ -630,4 +630,25 @@ describe('RemindersPanel - Send now', () => {
     expect(alert).not.toHaveTextContent('wat_is_this');
     expect(alert).toHaveTextContent(/try again/i);
   });
+
+  // GIVE THE BLANK A SENTENCE. `body: ''` has two producers server-side (an
+  // unusable scheduledAt, and the new entry-fork withhold), and both leave Send
+  // now refusing - so a bare empty paragraph beside a LIVE Send-now button
+  // reads as a broken app rather than a degraded read.
+  it('an empty body renders the "Preview unavailable" note, not bare emptiness', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-blank', kind: 'day_before', state: 'upcoming', body: '' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    expect(
+      await screen.findByText('Preview unavailable - this message cannot be composed right now.'),
+    ).toBeInTheDocument();
+    // The rest of the row is untouched: the rung is still listed and still
+    // sendable by hand.
+    expect(screen.getByText('Day before')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Send Day before reminder now' }),
+    ).toBeInTheDocument();
+  });
 });

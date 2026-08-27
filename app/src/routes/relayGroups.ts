@@ -59,6 +59,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { resolveMessage, resolveWithSettings } from '../messages/index.js';
 import {
+  assessNamesReadFailure,
   composeTourReminderBody,
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
@@ -252,11 +253,8 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     });
     // Bundled the way composeInputsOf bundles the same five values on
     // routes/tourReminders.ts, so the two surfaces stay readable side by side.
-    // The three FAILURE flags are carried, not consumed, in Task 4: Task 5's
-    // withhold branch inside the IIFE below is what reads them (through
-    // assessNamesReadFailure). Keeping them on one object is also what lets
-    // unitReadFailed exist here at all - a loose local nothing reads yet is a
-    // lint error.
+    // The three FAILURE flags are consumed by the withhold branch inside the
+    // IIFE below, through the shared assessNamesReadFailure.
     const composeInputs = {
       ...(unit?.address !== undefined && { address: unit.address }),
       names: resolved.names,
@@ -280,12 +278,39 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         // rungs are pending-only (the filter above), so there is no sentBody to
         // prefer. READ-PATH CONTAINMENT (spec F1): a tour with no usable
         // scheduledAt yields body: '' instead of 500ing the whole bucket.
+        //
         // DUPLICATED SHAPE (3 copies, keep in sync) - twins in
         // routes/tourReminders.ts (bodyFor) and routes/contactTimeline.ts
-        // (tourReminderBodyOrEmpty). See the note on bodyFor. NAME RESOLUTION
-        // IS HOISTED above this map on all three copies (spec 6.3a) - here it
-        // has to be, the composer is synchronous and this is an IIFE.
+        // (tourReminderBodyOrEmpty). See the note on bodyFor. Each copy carries
+        // TWO `body: ''` rules: the entry-fork WITHHOLD and the
+        // UncomposableReminderError containment.
+        //
+        // THIS COPY DIFFERS IN BRANCH ORDER, and cannot be aligned: the two
+        // twins read a sentBody SNAPSHOT first, and this bucket has no snapshot
+        // branch at all (pending-only), so the withhold check is
+        // unconditionally FIRST here. Do not "fix" that by adding a snapshot
+        // branch - there is no sent rung to read one from.
+        //
+        // NAME RESOLUTION IS HOISTED above this map on all three copies (spec
+        // 6.3a) - here it has to be, the composer is synchronous and this is an
+        // IIFE.
         body: ((): string => {
+          // Spec 6.3a "never a different ENTRY". This is the ONE preview
+          // surface that serves only non-self_guided tours, so it is exactly
+          // where a failed property read would flip the rendered entry to the
+          // self-guided wording while the group SEND says the landlord-led one.
+          // No warn: the unit catch and the resolver already logged once.
+          if (
+            assessNamesReadFailure({
+              kind: row.kind,
+              tourType: tour.tourType,
+              tenantReadFailed: composeInputs.tenantReadFailed,
+              propertyReadFailed: composeInputs.propertyReadFailed,
+              unitReadFailed: composeInputs.unitReadFailed,
+            }).withholdPreview
+          ) {
+            return '';
+          }
           try {
             return composeTourReminderBody({
               kind: row.kind,

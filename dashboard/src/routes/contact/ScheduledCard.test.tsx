@@ -162,4 +162,34 @@ describe('ScheduledCard', () => {
     expect(screen.getByText(`Will wait ${EM} quiet hours`)).toBeInTheDocument();
     expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
   });
+
+  // The twin of RemindersPanel's blank-preview note. A tour-reminder card whose
+  // body the server WITHHELD (a read the copy needed threw, so the preview
+  // would otherwise show text the send never produces) must say so rather than
+  // render an empty line under a "Tour reminder" tag.
+  it('a withheld tour-reminder body renders the "Preview unavailable" note', () => {
+    render(<ScheduledCard item={{ ...BASE, body: '' }} now={NOW} />);
+    expect(
+      screen.getByText('Preview unavailable - this message cannot be composed right now.'),
+    ).toBeInTheDocument();
+  });
+
+  // Scoped to tour reminders: nudge bodies come from a different composer with
+  // no withhold rule, so an empty one is not this sentence's story.
+  it('an empty NUDGE body gets no note', () => {
+    render(
+      <ScheduledCard
+        item={{
+          ...BASE,
+          body: '',
+          source: 'placement_nudge',
+          nudgeKind: 'rta_window_closing',
+          refType: 'placement',
+          refId: 'p-3',
+        }}
+        now={NOW}
+      />,
+    );
+    expect(screen.queryByText(/Preview unavailable/)).not.toBeInTheDocument();
+  });
 });

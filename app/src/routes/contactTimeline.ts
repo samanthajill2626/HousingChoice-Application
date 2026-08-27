@@ -41,6 +41,7 @@ import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/audit
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { Address } from '../lib/address.js';
 import {
+  assessNamesReadFailure,
   composeTourReminderBody,
   UncomposableReminderError,
   type TourContactNames,
@@ -714,19 +715,50 @@ interface ScheduledGatherRepos {
  */
 // DUPLICATED SHAPE (3 copies, keep in sync) - twins in routes/tourReminders.ts
 // (bodyFor) and routes/relayGroups.ts (the scheduled-bucket map). See the note
-// on bodyFor for why they are deliberately not consolidated. NAME RESOLUTION IS
-// HOISTED TO THE CALLER on all three copies (spec 6.3a): the composer is
-// synchronous, so the names arrive already resolved - here from namesOnce,
-// memoized per unitId inside gatherUpcoming.
+// on bodyFor for why they are deliberately not consolidated. TWO `body: ''`
+// rules now live in each copy: the entry-fork WITHHOLD below and the
+// UncomposableReminderError containment under it - change either one here and
+// change it in all three.
+//
+// THE THREE COPIES DIFFER IN BRANCH ORDER: relayGroups has NO sentBody
+// snapshot branch (its bucket is pending-only), so its withhold check is
+// unconditionally first; here and on the reminders route the snapshot renders
+// above both.
+//
+// NAME RESOLUTION IS HOISTED TO THE CALLER on all three copies (spec 6.3a):
+// the composer is synchronous, so the names arrive already resolved - here
+// from namesOnce, memoized per unitId inside gatherUpcoming, which carries the
+// three failure flags with them.
 function tourReminderBodyOrEmpty(
   row: TourReminderItem,
   tour: TourItem,
   timezone: string,
   address: Address | string | undefined,
   names: TourContactNames,
+  flags: {
+    tenantReadFailed: boolean;
+    propertyReadFailed: boolean;
+    unitReadFailed: boolean;
+  },
   tally: ComposeFailTally,
 ): string {
   if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
+  // Spec 6.3a "never a different ENTRY": a failed read that would change WHICH
+  // ENTRY composes renders NO body rather than a wrong one. A failure that
+  // merely blanks a token does NOT withhold - per 6.3b the preview degrades to
+  // the absence fallbacks while the SEND side waits. No warn: the resolver and
+  // unitOnce already logged the underlying failure once per request.
+  if (
+    assessNamesReadFailure({
+      kind: row.kind,
+      tourType: tour.tourType,
+      tenantReadFailed: flags.tenantReadFailed,
+      propertyReadFailed: flags.propertyReadFailed,
+      unitReadFailed: flags.unitReadFailed,
+    }).withholdPreview
+  ) {
+    return '';
+  }
   try {
     return composeTourReminderBody({
       kind: row.kind,
@@ -901,7 +933,7 @@ async function gatherUpcoming(params: {
   // request - it IS the contact whose timeline this is, already in hand, so it
   // costs zero reads.
   //
-  // KEYED BY unitId ONLY, while assessNamesReadFailure (Task 5) also takes a
+  // KEYED BY unitId ONLY, while assessNamesReadFailure also takes a
   // tourType and this walk admits tours of DIFFERENT types at the SAME unit.
   // Safe because the RESOLVER does not branch on tour type - only the flags
   // and the names are memoized here, and the assessor is called per TOUR. A
@@ -956,7 +988,9 @@ async function gatherUpcoming(params: {
         if (!routes1to1) return [];
         const read = await unitOnce(tour.unitId);
         const address = read.unit?.address;
-        const { names } = await namesOnce(tour.unitId);
+        // `read.failed` is the same boolean as the memo's `unitReadFailed` -
+        // take the MEMO's, so the assessor sees exactly one source.
+        const { names, ...nameFlags } = await namesOnce(tour.unitId);
         return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
           // The manual-only hold-back rides the shared evaluator here too, so a
           // rung the poll will never pick up cannot chip "sends in 3h" on the
@@ -976,7 +1010,15 @@ async function gatherUpcoming(params: {
             at: row.dueAt,
             source: 'tour_reminder',
             reminderKind: row.kind,
-            body: tourReminderBodyOrEmpty(row, tour, timezone, address, names, composeFails),
+            body: tourReminderBodyOrEmpty(
+              row,
+              tour,
+              timezone,
+              address,
+              names,
+              nameFlags,
+              composeFails,
+            ),
             ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
             ...(suppression !== undefined && { suppression }),
             refType: 'tour',

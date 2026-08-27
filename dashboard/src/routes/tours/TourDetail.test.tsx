@@ -623,6 +623,50 @@ describe('TourDetail - Send no-show check-in (manual)', () => {
     // Called with the tourId + an AbortSignal (the fetch is aborted on unmount).
     expect(getNoShowCheckinDraft).toHaveBeenCalledWith('tour-abc', expect.any(AbortSignal));
   });
+
+  it('a 409 names_unavailable shows OPERATOR copy and prefills nothing', async () => {
+    // The server refuses the prefill when a read the copy needs threw
+    // (spec 6.3b): a "Hi there!" that masquerades as absence would be
+    // hand-sent to a real tenant. The refusal must reach the navigator as a
+    // sentence, never as the raw machine code - and it is read off err.CODE,
+    // never err.message (client.ts builds message as `code + ' (detail)'`, so
+    // the two diverge the moment any handler adds a detail).
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: PAST_START }));
+    // code and message set to the SAME string on purpose: the assertion cannot
+    // pass by reading the wrong field.
+    getNoShowCheckinDraft.mockRejectedValue(
+      new ApiError(409, 'names_unavailable', 'names_unavailable'),
+    );
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Send no-show check-in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not look up everything this message needs, so nothing was sent - please try again.',
+    );
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+  });
+
+  it('a 404 keeps the LOAD-shaped fallback, never the send map and never the raw code', async () => {
+    // Narrow routing, pinned so a later "simplification" cannot widen the
+    // send-shaped map over a LOAD failure: nothing was being sent here, so
+    // "Couldn't send that just now" would be the wrong sentence, and
+    // `tour_not_found` is not a SEND_NOW_ERROR_COPY key at all (the map's tour
+    // key is `tour_missing`).
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: PAST_START }));
+    getNoShowCheckinDraft.mockRejectedValue(
+      new ApiError(404, 'tour_not_found', 'tour_not_found'),
+    );
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Send no-show check-in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the check-in message');
+    expect(screen.queryByText(/tour_not_found/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't send that just now/)).not.toBeInTheDocument();
+  });
 });
 
 /** A datetime-local value `msFromNow` from the real clock — RELATIVE times so

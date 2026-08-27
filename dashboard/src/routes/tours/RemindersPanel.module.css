@@ -154,6 +154,18 @@
   color: var(--c-text-muted);
 }
 
+/* The WITHHELD-preview note that replaces an empty `.body` paragraph. Same
+ * metrics as `.body` so the row does not jump, italic + subtle so it reads as
+ * an app state rather than as the message text. (`.muted` above is the
+ * panel-level empty state - margin: 0 - and is defined BEFORE `.body`, so
+ * composing the two would just lose to `.body` on every property.) */
+.bodyUnavailable {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  font-style: italic;
+  color: var(--c-text-subtle);
+}
+
 .struck {
   text-decoration: line-through;
   color: var(--c-text-muted);

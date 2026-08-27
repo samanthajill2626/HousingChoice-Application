@@ -3089,4 +3089,333 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(after?.sentAt).toBe(POLL_AFTER_DUE);
     });
   });
+
+  // ===========================================================================
+  // FAILURE IS NOT ABSENCE - the SEND paths (tour-reminder-ladder, spec 6.3b).
+  //
+  // A repo read that THREW is not the same as a contact that has no name. Where
+  // the failed read blanks or corrupts something the composed copy RENDERS, a
+  // send would be a wrong-but-valid message: the poll leaves the rung UNCLAIMED
+  // and force-send REFUSES with 'names_unavailable'. EVERYWHERE ELSE a failure
+  // degrades exactly like absence and the message still goes out - the guards
+  // below (g1-g3) pin that half, and they are green before AND after this task.
+  //
+  // The severity is never read off a bare flag: assessNamesReadFailure derives
+  // it from the CATALOG templates, so a copy edit cannot silently desync it.
+  // ===========================================================================
+  describe('name-read FAILURE on the send paths (spec 6.3b)', () => {
+    const NF_SEEDED = '2026-03-09T15:00:00.000Z';
+    const NF_SCHEDULED = '2026-03-12T18:00:00.000Z';
+    const NF_DUE = '2026-03-11T15:00:00.000Z';
+    const NF_POLL = '2026-03-11T15:01:00.000Z';
+
+    /**
+     * THE SHARED FIXTURE. A `landlord_led` tour with NO groupThreadId, so the
+     * group is unusable and delivery falls back to the tenant 1:1 (whose
+     * contact, phone and conversation all exist), whose unit names a property
+     * contact that CANNOT BE READ.
+     *
+     * TWO NON-OBVIOUS PRECONDITIONS keep it on the COMPOSE path, both verified
+     * against the live tree - know them before calling any red here "red for
+     * the wrong reason":
+     *  (a) the D7 pending-open wait cannot fire, because `createGroupTestRig`
+     *      omits `pendingRosterActionsRepo` and the wait is gated on its
+     *      presence (jobs/tourReminders.ts:797).
+     *  (b) the throwing property read cannot make the ROSTER unreadable:
+     *      memberFromContact catches its own contact-read throw
+     *      (lib/rosterResolution.ts:162-171), so tenantRosterGate still answers
+     *      'on' and neither the roster_unavailable wait nor its refusal token
+     *      can produce a false pass. That is why these cases assert the EXACT
+     *      warn string and the EXACT refusal reason, never just "nothing sent".
+     */
+    async function nameFailRig(opts: {
+      suffix: string;
+      phone: string;
+      kind: ReminderKind;
+      /**
+       * Which read blows up. 'property' throws the read of the unit's landlord
+       * contact; 'unit' throws the unit read itself; 'tenant' throws the tenant
+       * contact read - which on the 1:1 route fails inside resolveReminderTarget
+       * BEFORE compose, so it exercises the target-resolution containment, not
+       * the compose gate.
+       */
+      throwing: 'property' | 'unit' | 'tenant';
+      tourType?: TourType;
+    }) {
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      const tenantId = `contact-nf-${opts.suffix}`;
+      const unitId = `unit-nf-${opts.suffix}`;
+      const landlordId = `c-boom-${opts.suffix}`;
+      seedForceTenant(rig.world, {
+        contactId: tenantId,
+        phone: opts.phone,
+        convId: `conv-nf-${opts.suffix}`,
+        now: NF_SEEDED,
+      });
+      // No address on purpose: none of the rungs these cases drive renders one,
+      // so leaving it out keeps every expected body a bare rungBody(...).
+      rig.world.units.set(unitId, {
+        unitId,
+        landlordId,
+        status: 'available',
+        created_at: NF_SEEDED,
+        updated_at: NF_SEEDED,
+      });
+      if (opts.throwing === 'unit') {
+        rig.world.unitsRepo.getById = async () => {
+          throw new Error('units unavailable');
+        };
+      } else {
+        const boom = opts.throwing === 'tenant' ? tenantId : landlordId;
+        const realGetById = rig.world.contactsRepo.getById.bind(rig.world.contactsRepo);
+        rig.world.contactsRepo.getById = async (contactId: string) => {
+          if (contactId === boom) throw new Error('contacts unavailable');
+          return realGetById(contactId);
+        };
+      }
+      const tour = await tours.create({
+        tenantId,
+        unitId,
+        scheduledAt: NF_SCHEDULED,
+        tourType: opts.tourType ?? 'landlord_led',
+      });
+      const row = await tourReminders.create({
+        tourId: tour.tourId,
+        kind: opts.kind,
+        dueAt: NF_DUE,
+      });
+      const deps = { ...rig.deps, sendMessageService: spy.service };
+      return { rig, spy, deps, tour, row, tenantId, landlordId };
+    }
+
+    async function rowOf(tourId: string, reminderId: string) {
+      return (await tourReminders.listByTour(tourId)).find((r) => r.reminderId === reminderId);
+    }
+
+    /** Log messages emitted since `from` (logCapture is shared by the file). */
+    function msgsSince(from: number): unknown[] {
+      return logCapture.lines.slice(from).map((l) => l['msg']);
+    }
+
+    // The full Step-3 warn. The plan's Step 1 quotes a PREFIX of this string;
+    // the implemented message is the one asserted here.
+    const DEFER_WARN =
+      'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick';
+
+    it('case 1: the POLL DEFERS an en_route rung whose property-contact read threw - unclaimed, not sent', async () => {
+      const f = await nameFailRig({
+        suffix: 'poll1',
+        phone: '+15550240001',
+        kind: 'en_route',
+        throwing: 'property',
+      });
+      const from = logCapture.lines.length;
+
+      await runDueTourReminders(NF_POLL, f.deps);
+
+      expect(f.spy.sent).toHaveLength(0);
+      const after = await rowOf(f.tour.tourId, f.row.reminderId);
+      // No claim, no skip stamp - it re-lists next tick (the quiet-backstop
+      // idiom). A wrong-but-valid self-guided body must never go out instead.
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+      expect(msgsSince(from)).toContain(DEFER_WARN);
+    });
+
+    it('case 2: FORCE-SEND refuses representably with names_unavailable and leaves the row pending', async () => {
+      const f = await nameFailRig({
+        suffix: 'force1',
+        phone: '+15550240002',
+        kind: 'en_route',
+        throwing: 'property',
+      });
+
+      const result = await forceSendReminder(
+        f.row.reminderId,
+        f.tour.tourId,
+        NF_POLL,
+        true,
+        f.deps,
+      );
+
+      // A human pressing Send now needs an ANSWER, not the poll's silence
+      // (spec 6.3b) - and never a claim-skip: a human failure must not retire
+      // a rung.
+      expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+      expect(f.spy.sent).toHaveLength(0);
+      const after = await rowOf(f.tour.tourId, f.row.reminderId);
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+    });
+
+    it('case 3: a NAMELESS landlord on a zero-primary unit degrades to the self-guided wording (the end-to-end join)', async () => {
+      // Spec 13's join: zero-primary (no roster row carries primaryContact, so
+      // the landlord-of-record rule supplies the property contact) PLUS a
+      // landlord who exists with no first name. Absence, not failure: the rung
+      // still SENDS, and the composer degrades the ENTRY rather than rendering
+      // a blank name mid-sentence.
+      const rig = createGroupTestRig();
+      const spy = makeForceSendSpy();
+      seedForceTenant(rig.world, {
+        contactId: 'contact-nf-join',
+        phone: '+15550240003',
+        convId: 'conv-nf-join',
+        now: NF_SEEDED,
+      });
+      rig.world.contacts.push({
+        contactId: 'c-ll',
+        type: 'landlord',
+        phone: '+15550240103',
+        created_at: NF_SEEDED,
+      } as Parameters<typeof rig.world.contacts.push>[0]);
+      Object.assign(
+        rig.world.contacts.find((c) => c.contactId === 'contact-nf-join')!,
+        { firstName: 'Tam' },
+      );
+      rig.world.units.set('unit-nf-join', {
+        unitId: 'unit-nf-join',
+        landlordId: 'c-ll',
+        // primaryContact FALSE on the only row - the zero-primary shape, which
+        // makes unitContacts' landlord-of-record fallback the live path.
+        contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: false }],
+        status: 'available',
+        created_at: NF_SEEDED,
+        updated_at: NF_SEEDED,
+      });
+      const tour = await tours.create({
+        tenantId: 'contact-nf-join',
+        unitId: 'unit-nf-join',
+        scheduledAt: NF_SCHEDULED,
+        tourType: 'landlord_led',
+      });
+      await tourReminders.create({ tourId: tour.tourId, kind: 'en_route', dueAt: NF_DUE });
+
+      await runDueTourReminders(NF_POLL, { ...rig.deps, sendMessageService: spy.service });
+
+      expect(spy.sent).toHaveLength(1);
+      // Exactly the self-guided wording, with the TENANT's name intact.
+      expect(spy.sent[0]!.body).toBe(
+        "Hey Tam, can you please text me when you're on the way?",
+      );
+    });
+
+    it('case 13: FORCE-SEND refuses when TARGET RESOLUTION throws - the dominant failure cell', async () => {
+      // A throwing TENANT read on a self_guided tour fails inside
+      // resolveReminderTarget, ABOVE the compose gate. Uncontained it escapes
+      // the route unwrapped as a 500, where spec 6.3b demands "a REFUSAL the
+      // route can render, not silence". The containment is deliberately a
+      // BLANKET catch: narrowing it to the tenant read alone would re-open the
+      // 500 escape for the tour, group-conversation and conversation lookups.
+      const f = await nameFailRig({
+        suffix: 'force2',
+        phone: '+15550240004',
+        kind: 'day_before',
+        throwing: 'tenant',
+        tourType: 'self_guided',
+      });
+      const from = logCapture.lines.length;
+
+      const result = await forceSendReminder(
+        f.row.reminderId,
+        f.tour.tourId,
+        NF_POLL,
+        true,
+        f.deps,
+      );
+
+      expect(result).toEqual({ outcome: 'refused', reason: 'names_unavailable' });
+      const after = await rowOf(f.tour.tourId, f.row.reminderId);
+      expect(after?.sentAt).toBeUndefined();
+      expect(after?.skippedAt).toBeUndefined();
+      expect(msgsSince(from)).toContain(
+        'tour reminder force-send: target resolution read failed - row left pending',
+      );
+    });
+
+    it('guard g1: a landlord-row outage does NOT block a day_before - the poll still sends it', async () => {
+      // The carve-out's whole point. day_before's copy never names the property
+      // contact, so a failed property read degrades exactly like absence.
+      const f = await nameFailRig({
+        suffix: 'g1',
+        phone: '+15550240005',
+        kind: 'day_before',
+        throwing: 'property',
+      });
+      const from = logCapture.lines.length;
+
+      await runDueTourReminders(NF_POLL, f.deps);
+
+      expect(f.spy.sent).toHaveLength(1);
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
+      expect(msgsSince(from)).not.toContain(DEFER_WARN);
+    });
+
+    it('guard g2: a throwing UNIT read still sends a day_before, without an address', async () => {
+      // "A reminder must never be lost over a missing street" survives for
+      // every rung that does not need the property contact.
+      const f = await nameFailRig({
+        suffix: 'g2',
+        phone: '+15550240006',
+        kind: 'day_before',
+        throwing: 'unit',
+      });
+      const from = logCapture.lines.length;
+
+      await runDueTourReminders(NF_POLL, f.deps);
+
+      expect(f.spy.sent).toHaveLength(1);
+      expect(f.spy.sent[0]!.body).toBe(rungBody('day_before', NF_SCHEDULED));
+      expect(msgsSince(from)).not.toContain(DEFER_WARN);
+    });
+
+    it('guard g3: a confirmation force-send SENDS with the unit read throwing', async () => {
+      // FIXTURE FACT, not a gap: with the unit read throwing, `unit` is
+      // undefined and resolveTourContactNames never ATTEMPTS the property read,
+      // so propertyReadFailed is structurally false here. Do NOT "fix" the
+      // resolver to report a failure for a read it never made - the second
+      // variant below is the property-read coverage.
+      const f = await nameFailRig({
+        suffix: 'g3',
+        phone: '+15550240007',
+        kind: 'confirmation',
+        throwing: 'unit',
+      });
+
+      const result = await forceSendReminder(
+        f.row.reminderId,
+        f.tour.tourId,
+        NF_POLL,
+        true,
+        f.deps,
+      );
+
+      expect(result).toEqual({ outcome: 'sent' });
+      expect(f.spy.sent).toHaveLength(1);
+    });
+
+    it('guard g3b: a confirmation force-send SENDS with only the property-contact read throwing', async () => {
+      // Phase A's confirmation copy renders NO name, so no failed name read can
+      // corrupt it. (The tenant read is deliberately NOT thrown in either g3
+      // variant: that one fails inside target resolution, which is case 13's
+      // behaviour, not the compose gate's.)
+      const f = await nameFailRig({
+        suffix: 'g3b',
+        phone: '+15550240008',
+        kind: 'confirmation',
+        throwing: 'property',
+      });
+
+      const result = await forceSendReminder(
+        f.row.reminderId,
+        f.tour.tourId,
+        NF_POLL,
+        true,
+        f.deps,
+      );
+
+      expect(result).toEqual({ outcome: 'sent' });
+      expect(f.spy.sent).toHaveLength(1);
+    });
+  });
 });

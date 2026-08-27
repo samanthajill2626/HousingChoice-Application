@@ -56,6 +56,7 @@ import {
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
 import {
+  assessNamesReadFailure,
   composeTourReminderBody,
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
@@ -76,6 +77,23 @@ import {
 } from '../repos/pendingRosterActionsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
+
+/** Thrown by composeBodyForRow when a repo read that this rung's copy
+ *  actually NEEDS threw (spec 6.3b via assessNamesReadFailure's blocksSend -
+ *  failure is not absence, and must not degrade into a wrong-but-valid
+ *  message; but a failure the copy never renders degrades exactly like
+ *  absence and the message still goes out). The poll leaves the rung
+ *  UNCLAIMED - it re-lists next tick; a force-send REFUSES with
+ *  'names_unavailable' so the human gets an answer (the no-show DRAFT route
+ *  makes the same refusal with the same token, without this error class).
+ *  Never thrown for genuine absence: absent or nameless contacts compose
+ *  the fallbacks. */
+export class ReminderNamesUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReminderNamesUnavailableError';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // armTourReminders
@@ -369,12 +387,15 @@ export interface RunDueTourRemindersDeps {
    *      skip the check.
    *   2. The ADDRESS in composed reminder copy (tour-reminder-details). A
    *      missing unit or a read failure degrades to the no-address variant -
-   *      never blocks a send.
+   *      never blocks a send, WITH the one carve-out consumer 3 states.
    *   3. The PROPERTY CONTACT behind {propertyContactFirstName} in the
    *      landlord-led en_route copy (tour-reminder-ladder, 2026-08-26): the
    *      unit is what resolveTourContactNames reads the primary-contact /
-   *      landlord-of-record rule from. A read failure here degrades to the
-   *      self-guided wording today; Task 5 makes it block the send instead.
+   *      landlord-of-record rule from. THE CARVE-OUT: on an en_route rung of a
+   *      non-self_guided tour a THROWING unit read now BLOCKS the send
+   *      (ReminderNamesUnavailableError) rather than degrading, because it
+   *      would flip which catalog entry composes; every other rung keeps rule
+   *      2 unchanged.
    * Merged from both sides at the 2026-08-06 second main sync: each branch had
    * declared this dep for its own consumer. Dropping any consumer still
    * compiles, and is silently wrong.
@@ -531,13 +552,20 @@ async function claimSkipRow(
  * the module header). A unit-read failure degrades to no address rather than
  * propagating - a reminder must never be lost over a missing street.
  *
- * INTERIM (Task 4 of the tour-reminder-ladder plan), stated honestly:
- * resolveTourContactNames NEVER throws, so a throwing CONTACT read is currently
- * swallowed into absence names and this path composes the fallback copy -
- * failure temporarily masquerades as absence, which spec 6.3b forbids. Task 5
- * closes it with the assessNamesReadFailure gate (defer on the poll, refuse on
- * force-send). The split exists so the failure semantics can be test-driven
- * against a working baseline.
+ * CARVE-OUT (2026-08-26, tour-reminder-ladder): the unit read also FEEDS the
+ * property-contact resolution now, so on an `en_route` rung of a non-self_guided
+ * tour a THROWING unit read raises ReminderNamesUnavailableError instead of
+ * degrading - the failed read would flip WHICH catalog entry composes, and a
+ * wrong-but-valid message is worse than a deferred one (spec 6.3b). Every other
+ * rung keeps the never-lost-over-a-street rule; the scope is decided by
+ * assessNamesReadFailure, which derives it from the catalog templates.
+ *
+ * FAILURE IS NOT ABSENCE (spec 6.3b): resolveTourContactNames never throws, so
+ * a failed CONTACT read arrives here as a per-read FLAG rather than an
+ * exception. Where the copy renders what that read supplies, this function
+ * throws ReminderNamesUnavailableError - the poll defers the rung, force-send
+ * refuses. Genuine absence (a missing or nameless contact) still composes the
+ * fallbacks and still sends.
  *
  * EVERY caller must run this ABOVE its claimSend: the claim IS the sentAt stamp,
  * so a compose that threw after it would burn the rung permanently (spec W6).
@@ -555,9 +583,11 @@ async function composeBodyForRow(
   tenantContact?: ContactItem,
 ): Promise<string> {
   let unit: UnitItem | undefined;
+  let unitReadFailed = false;
   try {
     unit = await deps.unitsRepo.getById(tour.unitId);
   } catch (err) {
+    unitReadFailed = true;
     log.warn(
       { err, tourId: tour.tourId, kind: row.kind },
       'tour reminder: unit read failed - composing without an address',
@@ -570,6 +600,21 @@ async function composeBodyForRow(
     contactsRepo: deps.contactsRepo,
     logger: log,
   });
+  // THE SHARED ASSESSOR, never a bare flag: which failures matter for THIS
+  // rung is a catalog fact (assessNamesReadFailure derives it from the
+  // templates), so a copy edit cannot silently desync the send semantics.
+  const impact = assessNamesReadFailure({
+    kind: row.kind,
+    tourType: tour.tourType,
+    tenantReadFailed: resolved.tenantReadFailed,
+    propertyReadFailed: resolved.propertyReadFailed,
+    unitReadFailed,
+  });
+  if (impact.blocksSend) {
+    throw new ReminderNamesUnavailableError(
+      `tour reminder name resolution read failed (tourId=${tour.tourId}, kind=${row.kind})`,
+    );
+  }
   return composeTourReminderBody({
     kind: row.kind,
     scheduledAt: tour.scheduledAt ?? '',
@@ -879,6 +924,13 @@ async function processReminderRow(
       await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
       return;
     }
+    if (err instanceof ReminderNamesUnavailableError) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',
+      );
+      return;
+    }
     throw err;
   }
 
@@ -1039,6 +1091,19 @@ async function sendGroupReminder(
       await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
       return;
     }
+    // THE QUIET BACKSTOP, deliberately: no claim, no skip stamp. A PERMANENTLY
+    // failing read therefore re-lists every tick with NO self-clearing bound -
+    // accepted for Phase A because the production poll sits behind the
+    // manual-only filter and spec 8.2 grants no reason token for a bounded
+    // escalation. That acceptance EXPIRES with the pause; it is item (7) of
+    // the Phase B ledger issue, which is what gets read at unpause.
+    if (err instanceof ReminderNamesUnavailableError) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder: name resolution read failed - leaving the rung unclaimed for the next tick',
+      );
+      return;
+    }
     throw err;
   }
 
@@ -1144,6 +1209,13 @@ export type ForceSendRefusal =
    *  PRE-claim and left pending: a human action must never retire a rung (the
    *  poll's own claim-skip is what retires it). */
   | 'invalid_schedule'
+  /** A repo read this send needed threw (spec 6.3b): the compose gate's
+   *  name resolution, or ANY read inside target resolution (tour /
+   *  recipient / conversation lookups) - the latter refuses every kind,
+   *  confirmation included, because the failed read is the recipient
+   *  lookup, not a name. Pre-claim, row left pending; the operator copy is
+   *  deliberately cause-agnostic ("everything this message needs"). */
+  | 'names_unavailable'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -1195,7 +1267,36 @@ export async function forceSendReminder(
     return { outcome: 'not_pending' };
   }
 
-  const target = await resolveReminderTarget(row, deps, log);
+  // CONTAINED (spec 6.3b): target resolution does FOUR bare reads - the tour
+  // (:652), the group conversation, the tenant contact (:673) and the 1:1
+  // conversation lookup. Uncontained, any of them escapes the route unwrapped
+  // as a 500, where 6.3b demands "a REFUSAL the route can render, not silence"
+  // - a panel that degrades gracefully beside a Send-now button that 500s on
+  // the same outage would be indefensible.
+  //
+  // THE BLANKET STAYS A BLANKET, deliberately: narrowing this to the tenant
+  // read alone would re-open the 500 escape for the other three, trading one
+  // wrong behaviour for another. What must not lie is the COPY, so the shared
+  // names_unavailable sentence is cause-agnostic - true for all four reads AND
+  // for the compose gate. Note the boundary: a target-resolution failure
+  // refuses EVERY kind, `confirmation` included (the failed read is the
+  // recipient lookup, not a name); the per-copy scoping applies at the COMPOSE
+  // gate only. The POLL side of the same read is deliberately untouched - its
+  // throw already lands in the per-row catch and leaves the rung unclaimed,
+  // the right net outcome. The row lookups above (listByTour, and the route's
+  // own) stay bare: those are row reads, and 6.3b's obligation is scoped to
+  // resolving the SEND. The `refuse` helper is declared below this point, so
+  // the return is inlined.
+  let target: ReminderTarget;
+  try {
+    target = await resolveReminderTarget(row, deps, log);
+  } catch (err) {
+    log.warn(
+      { err, reminderId, tourId, kind: row.kind },
+      'tour reminder force-send: target resolution read failed - row left pending',
+    );
+    return { outcome: 'refused', reason: 'names_unavailable' };
+  }
   if ('unresolvable' in target) {
     log.warn(
       { reminderId, tourId, kind: row.kind, reason: target.unresolvable },
@@ -1260,6 +1361,12 @@ export async function forceSendReminder(
       // PRE-CLAIM REFUSAL, never a claim-skip: a human action must not retire a
       // rung. The row stays pending and the poll still owns it.
       return refuse('invalid_schedule');
+    }
+    // The compose gate's half of the same posture (spec 6.3b): a read this
+    // rung's copy NEEDS threw, so the human gets an answer rather than a
+    // wrong-but-valid message.
+    if (err instanceof ReminderNamesUnavailableError) {
+      return refuse('names_unavailable');
     }
     throw err;
   }

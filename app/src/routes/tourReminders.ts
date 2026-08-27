@@ -41,6 +41,7 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
+  assessNamesReadFailure,
   composeTourReminderBody,
   UncomposableReminderError,
   type TourContactNames,
@@ -250,24 +251,56 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
    * dashboard mirror and on TimelineScheduled, so it is emptied, never omitted.
    */
   // DUPLICATED SHAPE (3 copies, keep in sync): the sentBody-first read plus
-  // UncomposableReminderError containment also lives in
+  // BOTH `body: ''` rules - the UncomposableReminderError containment below AND
+  // the entry-fork WITHHOLD above it - also live in
   // routes/contactTimeline.ts (tourReminderBodyOrEmpty) and
   // routes/relayGroups.ts (the scheduled-bucket map). Left duplicated on
   // purpose - consolidating would rewrite containment three review passes
-  // verified. If you change the containment RULE here, change it in all three
-  // or the preview surfaces diverge, which is precisely the drift the shared
-  // composer exists to prevent. NAME RESOLUTION IS HOISTED TO THE CALLER on
-  // all three copies (spec 6.3a): the composer is synchronous, so the names
-  // arrive already resolved - here from composeInputsOf, once per request.
+  // verified. If you change either containment RULE here, change it in all
+  // three or the preview surfaces diverge, which is precisely the drift the
+  // shared composer exists to prevent.
+  //
+  // THE THREE COPIES DIFFER IN BRANCH ORDER, not only in content: relayGroups
+  // has NO sentBody snapshot branch at all (its bucket is pending-only), so
+  // its withhold check is unconditionally FIRST, while here and on the
+  // timeline the snapshot renders above both. Do not "align" them by adding a
+  // snapshot branch there or removing one here.
+  //
+  // NAME RESOLUTION IS HOISTED TO THE CALLER on all three copies (spec 6.3a):
+  // the composer is synchronous, so the names arrive already resolved - here
+  // from composeInputsOf, once per request, along with its three failure flags.
   const bodyFor = (
     row: TourReminderItem,
     tour: TourItem,
     tz: string,
     address: Address | string | undefined,
     names: TourContactNames,
+    flags: {
+      tenantReadFailed: boolean;
+      propertyReadFailed: boolean;
+      unitReadFailed: boolean;
+    },
     tally?: ComposeFailTally,
   ): string => {
     if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
+    // Spec 6.3a "never a different ENTRY": a failed read that would change
+    // WHICH ENTRY composes renders NO body rather than a wrong one. A
+    // failure that merely blanks a token the copy renders does NOT withhold:
+    // per 6.3b the preview degrades to the absence fallbacks ("Hey there,")
+    // while the SEND side waits - the spec's own split posture. No warn here:
+    // the resolver and the unit catch already logged the underlying failure
+    // once per request.
+    if (
+      assessNamesReadFailure({
+        kind: row.kind,
+        tourType: tour.tourType,
+        tenantReadFailed: flags.tenantReadFailed,
+        propertyReadFailed: flags.propertyReadFailed,
+        unitReadFailed: flags.unitReadFailed,
+      }).withholdPreview
+    ) {
+      return '';
+    }
     try {
       return composeTourReminderBody({
         kind: row.kind,
@@ -349,7 +382,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // single-row response carries no timezone field of its own - the panel
     // reuses the zone from its list state.
     const window = await readQuietHoursWindow(settings, log);
-    const { address, names } = await composeInputsOf(tour);
+    const { address, names, ...readFlags } = await composeInputsOf(tour);
     if (!won) {
       log.info(
         { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', state: stateOf(after) },
@@ -357,7 +390,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       );
       res.status(409).json({
         error: canceled ? 'reminder_not_cancelable' : 'reminder_not_restorable',
-        reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names)),
+        reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
       });
       return;
     }
@@ -369,7 +402,9 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       { tourId, reminderId, kind: after.kind, canceled },
       canceled ? 'tour reminder canceled via api' : 'tour reminder restored via api',
     );
-    res.json({ reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names)) });
+    res.json({
+      reminder: viewOf(after, bodyFor(after, tour, window.timezone, address, names, readFlags)),
+    });
   });
 
   // POST /:tourId/reminders/:reminderId/send-now - "Send now" (quiet-hours spec
@@ -412,8 +447,8 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // Composing inputs for the echoed view (same no-timezone note as PATCH). A
     // rung the force-send just claimed renders its SNAPSHOT, not a recompose.
     const window = await readQuietHoursWindow(settings, log);
-    const { address, names } = await composeInputsOf(tour);
-    const afterBody = bodyFor(after, tour, window.timezone, address, names);
+    const { address, names, ...readFlags } = await composeInputsOf(tour);
+    const afterBody = bodyFor(after, tour, window.timezone, address, names, readFlags);
 
     if (result.outcome === 'sent') {
       await audit.append(`tours#${tourId}`, 'reminder_force_sent', {
@@ -452,7 +487,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // four viewOf responses used to read settings zero times), and every rung of
     // this tour shares the one unit address AND the one pair of names.
     const window = await readQuietHoursWindow(settings, log);
-    const { address, names } = await composeInputsOf(tour);
+    const { address, names, ...readFlags } = await composeInputsOf(tour);
 
     // Resolve the tenant's send-time suppression estimate ONCE per request (the
     // same conversation/contact backs every 1:1-routed rung). Only needed when
@@ -463,6 +498,11 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     let suppressionOf:
       | ((dueAt: string, paused: boolean) => ScheduledSuppression | undefined)
       | undefined;
+    // Distinguishes "nothing was suppressed" from "we could not tell": with the
+    // containment below, a contacts outage silently flips the `suppressed` log
+    // field from true to false, and an operator reading logs mid-incident would
+    // see a calm ladder. This flag is the only other signal.
+    let suppressionEstimateFailed = false;
     if (tour.tourType === 'self_guided' && hasUpcoming) {
       // Quiet hours (spec 2026-08-03): unlike the state-dependent reasons
       // (opt-out, manual mode), a rung's quiet-ness is a function of the RUNG's
@@ -492,12 +532,43 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // rung identically, so they are resolved once; only the quiet flag is
       // per-row. Stored dueAts are already normalized ISO, so `<=` compares
       // them lexicographically against the normalized nowIso.
-      const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
-      suppressionOf = (dueAt: string, paused: boolean): ScheduledSuppression | undefined =>
-        evaluate(
-          (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
-          paused,
+      //
+      // CONTAINED AT THE CALL SITE (spec 6.3b): resolveTenantSuppression does
+      // the OTHER tenant read on this route, bare, and a rejection would 500
+      // the whole ladder - making composeInputsOf's "read paths must never 500
+      // over a name" aspirational rather than true.
+      //
+      // THE SHAPE MATTERS. Do NOT "simplify" this into an always-undefined
+      // EVALUATOR: the chip ternary below reaches its no-IO
+      // `paused ? { reason: 'paused' } : undefined` fallback ONLY while
+      // suppressionOf is undefined, so a defined-but-empty evaluator would flip
+      // every self_guided chip from "Paused" to the amber "sends in Nh" promise
+      // during a contacts blip - the exact perpetual-"sending shortly" lie the
+      // 2026-08-20 pause chip exists to end. Leaving suppressionOf UNASSIGNED
+      // is what makes a failed read behave exactly like a group-routed tour: a
+      // tenant-read failure changes the BODY, never the pause state.
+      //
+      // KNOWN AND ACCEPTED: this route now reads the same tenant contact TWICE
+      // per request (composeInputsOf and this estimate). Deliberate - threading
+      // the contact through would mean ResolvedTourNames handing a PII-bearing
+      // ContactItem to every preview surface, or another interface revision,
+      // for one saved read. The doubling is per-REQUEST, not per-rung, so spec
+      // 10's batching rule holds. Do NOT couple the estimate's failure to the
+      // body's by "optimizing" the two reads into one.
+      try {
+        const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
+        suppressionOf = (dueAt: string, paused: boolean): ScheduledSuppression | undefined =>
+          evaluate(
+            (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
+            paused,
+          );
+      } catch (err) {
+        suppressionEstimateFailed = true;
+        log.warn(
+          { err, tourId },
+          'tour reminders: suppression estimate read failed - falling back to the no-IO paused chip',
         );
+      }
     }
 
     const tally = newComposeFailTally();
@@ -529,7 +600,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           kind: row.kind,
           dueAt: row.dueAt,
           state,
-          body: bodyFor(row, tour, window.timezone, address, names, tally),
+          body: bodyFor(row, tour, window.timezone, address, names, readFlags, tally),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -550,6 +621,9 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         count: reminderViews.length,
         hasNext: next !== undefined,
         suppressed: reminderViews.some((v) => v.suppression !== undefined),
+        // Read `suppressed` WITH this: when the estimate read failed, a false
+        // `suppressed` means "unknown", not "nothing is held back".
+        suppressionEstimateFailed,
       },
       'tour reminders read',
     );
@@ -573,6 +647,13 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   // TENANT-SPECIFIC since the 2026-08-26 founder rewrite - it greets by first
   // name - so this handler resolves the tenant and goes through the ONE
   // composer, exactly like the reminder-body resolution above.
+  //
+  // THREE TERMINAL SHAPES since 2026-08-26 (it had two):
+  //   200 { body }                        - the prefill
+  //   404 { error: 'tour_not_found' }     - a bogus tour id
+  //   409 { error: 'names_unavailable' }  - a read the copy NEEDS threw
+  // The 409 is the SEND posture, not the preview one: this route is the head of
+  // a HAND send, so it refuses rather than degrading (spec 6.3b).
   router.get('/:tourId/no-show-checkin-draft', async (req, res) => {
     // 404 on an unknown tour, mirroring GET /:tourId/reminders: the draft is
     // always requested for a real tour (whose tenant the copy now names), so a
@@ -590,6 +671,23 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       contactsRepo: contacts,
       logger: log,
     });
+    // THE FIFTH CONSUMER of the shared assessor, and the one Phase A actually
+    // uses. It takes the SEND posture because it is the head of a hand send.
+    const impact = assessNamesReadFailure({
+      kind: 'no_show_checkin',
+      tourType: tour.tourType,
+      tenantReadFailed: resolved.tenantReadFailed,
+      propertyReadFailed: resolved.propertyReadFailed,
+      unitReadFailed: false, // the draft deliberately reads no unit
+    });
+    if (impact.blocksSend) {
+      // A failure-masquerading "Hi there!" prefill would be hand-sent to a
+      // real tenant - the exact wrong-but-valid message 6.3b forbids, on the
+      // ONE path Phase A uses. Refuse with the same token as send-now; the
+      // dashboard renders it through SEND_NOW_ERROR_COPY.
+      res.status(409).json({ error: 'names_unavailable' });
+      return;
+    }
     // Through the ONE composer (spec 9.2): the entry now carries
     // {tenantFirstName}, and a bare resolveMessage would throw in strict
     // mode. unit: undefined is deliberate - this copy names no property.

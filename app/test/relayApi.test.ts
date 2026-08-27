@@ -1635,5 +1635,47 @@ describe('relay-group API (M1.7)', () => {
       expect(enRoute).toBeDefined();
       expect(enRoute['body']).toContain('Dana will be headed that way');
     });
+
+    it('WITHHOLDS the en_route card body when the property-contact read throws, and only that one', async () => {
+      // Spec 6.3a/6.3b on the group bucket. A failed property read would flip
+      // WHICH ENTRY the en_route rung composes (landlord-led -> self-guided),
+      // so this preview renders NO body rather than text the group SEND would
+      // never produce. The other rungs never touch that read, so they compose
+      // normally - blanking them would be a self-inflicted outage.
+      //
+      // The throw is installed by MUTATING world.contactsRepo.getById, which is
+      // the object api.ts hands the relay router (makeWebhookHarness sets no
+      // contactsRepoForRelay), so it cannot address the wrong repo. It is
+      // installed AFTER seedTourGroup because group creation reads contacts.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      world.units.set('unit-boom', {
+        unitId: 'unit-boom',
+        landlordId: 'c-landlord-boom',
+        status: 'available',
+        address: { line1: '13 Boom Way NW', city: 'Atlanta', state: 'GA', zip: '30318' },
+        created_at: '2026-08-01T00:00:00.000Z',
+        updated_at: '2026-08-01T00:00:00.000Z',
+      });
+      const { conversationId } = await seedTourGroup(app, 'landlord_led', 'unit-boom');
+      const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+      world.contactsRepo.getById = async (contactId: string) => {
+        if (contactId === 'c-landlord-boom') throw new Error('contacts unavailable');
+        return realGetById(contactId);
+      };
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+
+      const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
+      const byKind = Object.fromEntries(scheduled.map((s) => [s['reminderKind'] as string, s]));
+      expect(byKind['en_route']!['body']).toBe('');
+      expect(byKind['day_before']!['body']).not.toBe('');
+      expect(byKind['confirmation']!['body']).not.toBe('');
+      // The card itself survives - only the text is withheld.
+      expect(scheduled).toHaveLength(4);
+    });
   });
 });

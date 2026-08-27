@@ -1,6 +1,6 @@
 # AI contact-kind suggestions - design
 
-**Status:** Design approved; adversarial review round 1 changes in progress.
+**Status:** Design approved; adversarial review round 2 changes in progress.
 **Date:** 2026-08-26.
 **Branch:** `feat/ai-contact-kind-suggestions`.
 **Surface:** Conversation fact extraction, Unknown contact triage, AI run log.
@@ -176,11 +176,12 @@ returns a valid structured value.
 
 ### D6. Suggestions remain advisory and Unknown-only
 
-The schema parser accepts only the four canonical values. The apply layer continues
-to persist a pending `target: 'type'` suggestion only while the contact is
-`unknown`. A classified contact produces the existing
-`type_already_classified` dropped decision. No extraction result writes `type` or
-`role` directly.
+The schema parser accepts only the four canonical values. A stable pending
+`target: 'type'` suggestion is valid only while the contact is `unknown`. A
+classified contact produces the existing `type_already_classified` dropped
+decision. No extraction result writes `type` or `role` directly. D11 closes the
+stale-contact race in which an extraction started while the contact was Unknown
+but tries to publish its suggestion as staff classifies the contact.
 
 The raw-operation parser continues to retain off-enum values as attempted output
 for audit diagnostics. That diagnostic behavior must not make an off-enum value
@@ -240,6 +241,11 @@ base. It also prevents any custom role, such as Leasing Agent, from being counte
 as a plain canonical kind, and preserves the existing rule that choosing Landlord
 after a Tenant suggestion supersedes the model.
 
+If the exact pre-write suggestion is still current, its verdict uses this full-kind
+comparison. A replacement first observed after the human write was not reviewed by
+that human action, so its terminal verdict is `superseded_by_human_edit`, even if
+its value happens to match the chosen kind.
+
 ### D9. Existing base behavior remains authoritative after classification
 
 The existing contact PATCH route owns all downstream effects:
@@ -270,6 +276,42 @@ response` and `Parsed result` panes remain exact forensic payloads and may conta
 the canonical wire value `property_manager`; they must not be rewritten or
 redacted by this feature.
 
+### D11. Type suggestions use two-sided post-write race reconciliation
+
+The current generic rule deliberately leaves a suggestion that replaces the
+pre-write snapshot pending. That is correct for fields whose suggestion control
+remains available after an edit. It is not correct for `type`: after classification
+the Unknown card disappears and the generic accept endpoint refuses `type`. A
+replacement would otherwise be visible in Today but have no review surface.
+
+Use the existing suggestion revision identity and conditional delete on both sides
+of the classification race:
+
+1. **Extraction writer check.** After `applyExtraction` successfully puts a type
+   suggestion, it consistently point-reads the current contact. If the contact is
+   no longer Unknown, it conditionally deletes the exact suggestion it just wrote. A
+   successful cleanup records the current extraction decision as dropped with
+   `type_already_classified`, not as pending. If the delete loses to a newer
+   suggestion, that newer writer owns the same post-write check. Any displaced
+   earlier run retains the existing `superseded` stamping path.
+2. **Classification writer drain.** After a contact PATCH results in a non-Unknown
+   contact, the route first attempts the existing exact pre-write-snapshot
+   resolution. It then performs a bounded consistent point-read/CAS drain of any
+   current `target: 'type'` row. If the deleted row is the exact pre-write snapshot, use
+   D8's full-kind verdict. If it was first observed after the contact write, stamp
+   `superseded_by_human_edit`; the staff member did not review that replacement.
+   Retry only when the CAS loses to another replacement, never with an
+   unconditional delete.
+3. **Interleaving invariant.** A suggestion published before the contact write is
+   caught by the route. A suggestion published after the route's last read is
+   caught by the extraction writer's post-put contact read. Thus, when point reads
+   and conditional writes succeed, no pending type row remains on a classified
+   contact. Repository failures keep the existing best-effort log-and-continue
+   boundary rather than failing an otherwise successful contact PATCH.
+
+This is a type-specific exception. The generic replacement policy for all other
+suggestion targets stays unchanged.
+
 ## 5. Data flow
 
 ### 5.1 Extraction generation
@@ -287,9 +329,10 @@ redacted by this feature.
 1. `parseExtractionText` folds `none` and invalid values to an absent suggestion
    and returns a typed four-kind value otherwise.
 2. `applyExtraction` persists the canonical value as the existing `target: 'type'`
-   pending suggestion only for an Unknown contact.
-3. The run decision ledger records the same value as proposed/coerced and keeps its
-   current pending verdict behavior.
+   pending suggestion, then performs D11's live-contact post-write check.
+3. A suggestion that survives that check records the same value as
+   proposed/coerced with a pending verdict. A successfully cleaned stale write is
+   dropped as `type_already_classified`.
 4. Existing suggestion replacement, dismissal tombstones, revision identity, SSE,
    and journal recovery mechanisms remain unchanged because the target and item
    shape do not change.
@@ -309,10 +352,12 @@ redacted by this feature.
 
 1. The route reads the current contact and exact pending suggestion identity.
 2. It applies the contact patch and existing status/conversation effects.
-3. It conditionally deletes only the suggestion identity read before the write.
-4. If the suggestion is still current and has a run id, it derives the full kind
-   from the updated contact and records accepted or superseded.
-5. The returned contact immediately selects the existing TenantFile,
+3. It conditionally deletes the suggestion identity read before the write.
+4. If that exact suggestion is still current and has a run id, it derives the full
+   kind from the updated contact and records accepted or superseded.
+5. D11's bounded CAS drain removes any replacement that raced with the
+   classification and gives its run a terminal superseded verdict.
+6. The returned contact immediately selects the existing TenantFile,
    LandlordFile, PartnerFile, or Property Manager display through current
    type/role behavior.
 
@@ -328,18 +373,23 @@ redacted by this feature.
 - `app/src/adapters/extractionFake.ts`: no protocol change, but its typed fake
   payload must accept both new values through `ExtractionResult`.
 - `app/src/services/extraction/apply.ts`: persist the two new canonical values
-  through the existing Unknown-only suggestion path.
+  through the existing Unknown-only suggestion path, then reconcile the exact
+  written row against a live contact read per D11.
 - `app/src/services/extraction/schema.ts` (`parseExtractionOps`): no raw-operation
   behavior change; retain off-enum diagnostic attempts and cover the new valid
   values in tests.
 - `app/src/routes/contacts.ts`: full-kind derivation and verdict comparison after
-  contact update; preserve conditional suggestion identity deletion and all
-  existing triage side effects.
+  contact update; preserve conditional suggestion identity deletion, add the
+  type-specific bounded replacement drain, and retain all existing triage side
+  effects.
 - `app/src/routes/suggestions.ts`: no behavior change; target `type` remains
   triage-only.
-- `app/src/repos/extractionRepo.ts`, suggestion-resolution services, events, and
-  Today aggregation: no stored shape or target change; verify they remain generic
-  over `suggestedValue` and require no modification.
+- `app/src/repos/extractionRepo.ts`: no stored shape change; let the D11 callers
+  request a consistent `getSuggestion` point read and reuse
+  `deleteSuggestionIfCurrent` revision fencing.
+- Suggestion-resolution services, events, and Today aggregation: no stored shape
+  or target change; verify they remain generic over `suggestedValue`. Today must
+  not retain a type item after successful D11 reconciliation.
 
 ### 6.2 Dashboard writers/readers/renderers
 
@@ -383,8 +433,11 @@ redacted by this feature.
   `type_already_classified`.
 - A contact PATCH failure leaves the pending suggestion intact unless the route's
   existing post-write best-effort path is the failing step.
-- A suggestion created or replaced during the contact update is not deleted or
-  stamped because resolution uses the pre-write identity fence.
+- For targets other than `type`, a suggestion created or replaced during the
+  contact update remains pending and unstamped under the existing identity fence.
+- For `type`, D11 conditionally removes a racing replacement after classification
+  and gives its linked decision a terminal verdict. It never unconditionally
+  deletes a row it did not read.
 - A classification action never overwrites an already resolved conflicting
   conversation type; the existing triage conflict behavior remains.
 - Role strings are never inferred from organization names. Property Manager uses
@@ -410,7 +463,9 @@ redacted by this feature.
    - represented-person facts do not belong to the current contact;
    - concise reconciled note behavior.
 4. `applyExtraction` persists Partner and Property Manager suggestions only for
-   Unknown contacts and records the canonical decision values.
+   Unknown contacts and records the canonical decision values. A contact that is
+   classified between the model call and the post-put live read leaves no pending
+   type row and records `type_already_classified`.
 5. Raw operation parsing recognizes the two new valid values while preserving an
    off-enum attempted value for diagnostics.
 6. Contact triage tests prove:
@@ -424,7 +479,15 @@ redacted by this feature.
    - a non-empty custom role on tenant, landlord, or partner is unsupported and
      supersedes a pending plain-kind suggestion;
    - Edit contact uses the same full-kind verdict rules as the card actions;
-   - conditional suggestion replacement remains pending.
+   - a type replacement injected during a card classification and during an Edit
+     contact classification is conditionally removed, is absent from the
+     contact's pending list and Today, and receives a terminal
+     `superseded_by_human_edit` verdict;
+   - an empty pre-write snapshot followed by a racing type put is reconciled;
+   - a second replacement during the bounded drain is handled by another exact
+     read/CAS attempt;
+   - conditional suggestion replacement for every non-type target retains the
+     existing pending behavior.
 7. Existing Tenant and Landlord triage and verdict tests remain green.
 
 ### 8.2 Dashboard component tests
@@ -496,7 +559,9 @@ classifications. Do not use production or the human's lane-0 dashboard.
 11. Staff-facing suggestion labels and AI decision-ledger cells show `Property
     Manager`; explicitly raw forensic response/result panes retain canonical wire
     values.
-12. All required tests, full gates, adversarial reviews, and hermetic live QA pass
+12. After successful race-reconciliation reads and writes, no pending type
+    suggestion or pending linked type verdict remains on a classified contact.
+13. All required tests, full gates, adversarial reviews, and hermetic live QA pass
     before the branch is declared merge-ready.
 
 ## 10. Post-merge obligations

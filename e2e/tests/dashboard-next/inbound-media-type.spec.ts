@@ -71,6 +71,13 @@ test.describe('Inbound declarable media', () => {
     await expect(link, 'the vCard never rendered as a named file link').toBeVisible({
       timeout: 30_000,
     });
+    // THE NEGATIVE HALF, and the only half that discriminates. BOTH branches of
+    // AttachmentGallery render an <a>, and the inline branch's <img> carries the
+    // SAME string as its alt - so a link's accessible name is identical either
+    // way, and the assertion above passes on precisely the broken-<img> render
+    // this feature exists to prevent. Widen INLINE_RENDERABLE_TYPES to include
+    // text/vcard and only this line goes red.
+    await expect(link.locator('img')).toHaveCount(0);
 
     // (b) Follow the href a human would click. Same page session, so the cookie
     //     the authed media route requires rides along; the relative URL resolves
@@ -86,5 +93,16 @@ test.describe('Inbound declarable media', () => {
     // Declarable means typed truthfully but ALWAYS downloaded, under a name
     // whose extension we chose from our own closed set.
     expect(res.headers()['content-disposition']).toMatch(/^attachment; filename=".*\.vcf"$/);
+    // THE BODY, because the two header assertions above cannot tell a real
+    // round trip from a missing fixture. The fake's SPA fallback does not
+    // reserve /canned, so a GET that express.static misses returns index.html
+    // with 200 - and the mirror types the stored object from the webhook's
+    // MediaContentType0 (derived from the URL's extension), never from the
+    // fetched response, so HTML bytes would land in S3 tagged text/vcard and
+    // both header assertions would still pass. Reachable: `npm run e2e:restart`
+    // reuses the existing fake-UI dist by design, so a newly added canned asset
+    // is absent until a full rebuild. Checking one byte string makes this a real
+    // round trip.
+    expect(await res.text()).toContain('BEGIN:VCARD');
   });
 });

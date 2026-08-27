@@ -6,7 +6,7 @@ severity: high
 status: open
 area: app/relay
 created: 2026-08-26
-refs: app/src/jobs/relayFanOut.ts:494-509, app/src/lib/mediaTypes.ts:211-225, app/src/routes/api.ts:2252
+refs: app/src/jobs/relayFanOut.ts:494-509, app/src/lib/mediaTypes.ts:211-225, app/src/routes/api.ts:2252, docs/issues/mms-forward-received-media.md
 ---
 
 **Problem.** When a relay-group member texts in media, `relayFanOut` presigns
@@ -23,10 +23,13 @@ legMediaUrls = await Promise.all(
 `adapter.sendMessage` at :504-509.)
 
 Twilio fetches each presigned URL and reads the S3 object's Content-Type.
-Only `TWILIO_DELIVERABLE_MMS_TYPES` - jpeg, png and gif
-(`app/src/lib/mediaTypes.ts:216-220`) - can actually be carried as MMS; the same
-file records that Twilio rejects anything else with error 12300. So a member
-who sends a video, a HEIC photo, a PDF or a document produces a leg Twilio
+Everything we ORIGINATE is confined to `TWILIO_DELIVERABLE_MMS_TYPES` - jpeg,
+png and gif (`app/src/lib/mediaTypes.ts:216-220`) - because the same file
+records that Twilio rejects the types we send outside it with error 12300. That
+set is our own send-side rule and is NARROWER than what Twilio actually accepts,
+so it does not by itself predict this path's outcome; what it does establish is
+that a leg carrying a type Twilio refuses fails, and a video is the clearest
+such case. So a member who sends a video very likely produces a leg Twilio
 refuses.
 
 The consequence is worse than losing the attachment: 12300 fails the MESSAGE,
@@ -64,15 +67,33 @@ Found while fixing `docs/superpowers/specs/2026-08-26-media-content-type-fidelit
 dashboard read path and does NOT change this fan-out code.
 
 It DOES change what Twilio sees on this path. The stored Content-Type of
-forwarded inbound media becomes the true type (`video/mp4`) instead of
-`application/octet-stream`, both for new media and - after the one-time
-backfill - for the historical population. The EXPECTED outcome is unchanged,
-since video, audio, HEIC and documents all remain outside
-`TWILIO_DELIVERABLE_MMS_TYPES`, but that is Twilio's decision on an input this
-branch altered, and it HAS NOT BEEN OBSERVED either before or after. Treat "the
-leg still fails" as the expectation, not as a finding. The observable most
-likely to move is the ERROR CODE on the failed leg: an unreadable
-`application/octet-stream` and a readable-but-undeliverable `video/mp4` need not
-produce the same code. Whoever picks this up should re-check a real leg rather
-than inherit the assumption - and either way, the type data any fix here would
-need is finally present.
+forwarded inbound media becomes the true type (`video/mp4`, `text/vcard`,
+`application/pdf`, `image/heic`) instead of `application/octet-stream`, both for
+new media and - after the one-time backfill - for the historical population.
+NEITHER outcome has been observed, before or after, and there are TWO:
+
+1. **The leg still fails.** Do NOT ground this in
+   `TWILIO_DELIVERABLE_MMS_TYPES`. That set (jpeg/png/gif,
+   `app/src/lib/mediaTypes.ts:216-220`) is OUR SELF-IMPOSED SEND-SIDE rule for
+   media we originate, and `relayFanOut` never consults it - it presigns every
+   stored attachment unconditionally. It is not Twilio's accepted-media list,
+   which is materially broader than jpeg/png/gif. So "outside our allowlist"
+   predicts nothing about what Twilio does here. If the leg does still fail, the
+   observable most likely to have moved is the ERROR CODE: an unreadable
+   `application/octet-stream` and a readable-but-undeliverable `video/mp4` need
+   not produce the same one.
+2. **The leg now SUCCEEDS**, for any type Twilio accepts. This is the outcome
+   worth checking first, because it is a behavior change nobody asked for: it
+   would mean relayed inbound media (PDFs, vCards, HEIC and other images) starts
+   REACHING the other members of a relay group where it previously did not. That
+   collides directly with `docs/issues/mms-forward-received-media.md`, which
+   parks staff-initiated forwarding of received media on the ground that the
+   gallery can hold "ID photos, benefit letters, and other PII" and that
+   forwarding it needs a deliberate privacy story. Nothing in this fan-out path
+   has that story; it would simply start doing it.
+
+So the check is one leg on dev, before the prod deploy: send a non-image MMS
+into a relay group and read the forwarded leg's status and error code. It is a
+step in RUNBOOK.md's media content-type backfill sequence. Whoever picks this
+issue up should run that check rather than inherit either assumption - and
+either way, the type data any fix here would need is finally present.

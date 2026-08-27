@@ -939,6 +939,65 @@ describe('runDueExtractions - the run log envelope', () => {
     expect(h.runs[0]!.decisions['voucherSize']).toMatchObject({ outcome: 'dropped', dropReason: 'wrong_contact_type', verdict: 'not_presented' });
   });
 
+  it('records its own successful stale type cleanup as a dropped decision', async () => {
+    const source = unknownContact();
+    const live = { ...source, type: 'tenant' as const, classification_revision: 1 };
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"typeSuggestion":{"value":"tenant"}}')],
+      contact: source,
+      conversation: convWith('c1'),
+    });
+    (h.deps.contacts.getById as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(source)
+      .mockResolvedValueOnce(live);
+    (h.repo.deleteTypeSuggestionIfCurrentAtContactRevision as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce('deleted');
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.runs[0]!.decisions.type).toMatchObject({
+      outcome: 'dropped', dropReason: 'type_already_classified', verdict: 'not_presented',
+    });
+  });
+
+  it('leaves the route-owned finalization marker to preserve its terminal verdict', async () => {
+    let record: AiRunRecordInput | undefined;
+    const aiRuns = {
+      beginFinalization: vi.fn(async () => true),
+      putRun: vi.fn(async (input: AiRunRecordInput) => {
+        record = {
+          ...input,
+          decisions: {
+            ...input.decisions,
+            type: { ...input.decisions.type!, verdict: 'superseded_by_human_edit' },
+          },
+        };
+        return { ...record, itemId: `run#${record.runId}`, expires_at: 0 };
+      }),
+      setVerdict: vi.fn(async () => true),
+    };
+    const source = unknownContact();
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"typeSuggestion":{"value":"tenant"}}')],
+      contact: source,
+      conversation: convWith('c1'),
+      aiRuns,
+    });
+    (h.deps.contacts.getById as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(source)
+      .mockResolvedValueOnce({ ...source, type: 'tenant' as const, classification_revision: 1 });
+    (h.repo.deleteTypeSuggestionIfCurrentAtContactRevision as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce('suggestion_changed_or_absent');
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(record!.decisions.type).toMatchObject({
+      outcome: 'suggested', verdict: 'superseded_by_human_edit',
+    });
+  });
+
   it('records a no_new_client SKIP with a LIGHT window - ids and cursor, no bytes', async () => {
     const seen = msg(10, 'inbound', 'older');
     const h = makeHarness({ dueRows: [dueRow({ cursor: seen.tsMsgId })], messages: [seen], contact: tenantContact(), conversation: convWith('c1') });

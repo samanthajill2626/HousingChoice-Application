@@ -239,6 +239,15 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
         names: { tenantFirstName: tenant.firstName },
       }),
     });
+    // NEAR-MISS, recorded 2026-08-26. `hasText` is a SUBSTRING match and the
+    // rewritten copy brought day_before and morning_of much closer together:
+    // they now share the head "Hey <Name>," AND the tail "Does that still work
+    // for you?". The count of 1 survives only because the middles still differ
+    // ("confirming your tour tomorrow at <t>." vs "looking forward to having you
+    // tour at <t> today."), so the whole day_before body is not a substring of
+    // the morning_of card. If a future copy edit closes that gap, this filter
+    // starts matching two cards - narrow it to the card's own body element
+    // rather than loosening the count.
     await expect(dayBefore).toHaveCount(1, { timeout: 15_000 });
     await expect(dayBefore.getByText('Tour reminder', { exact: true })).toBeVisible();
 

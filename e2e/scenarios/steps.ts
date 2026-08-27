@@ -263,8 +263,11 @@ const TOUR_TYPE_BY_LABEL = {
 export interface TourTimes {
   /** The raw datetime-local value the Book/Reschedule forms send ('YYYY-MM-DDTHH:mm'). */
   scheduledAtLocal: string;
-  /** dueAt of each pre-computed rung, full-ms ISO — feed `justAfter(x)` to the tick. */
-  dayBefore: string;
+  /** dueAt of each pre-computed rung, full-ms ISO - feed `justAfter(x)` to the tick.
+   *  `day_before` is NOT here: since the 2026-08-26 retiming it fires at 19:30
+   *  ORG-LOCAL, which no host-local helper can compute - read it back from the
+   *  server with `Scenario.armedReminderDueAt('day_before')` instead. */
+  morningOf: string;
   enRoute: string;
   noShowCheckin: string;
 }
@@ -277,19 +280,24 @@ function toDatetimeLocal(d: Date): string {
 
 /**
  * Pick a tour time `hoursFromNow` out (default 48h — far enough that EVERY rung
- * is in the future at booking, so the whole ladder arms; day_before = sched-24h
- * must beat the wall clock) and pre-compute the rung dueAts EXACTLY as the
+ * is in the future at booking, so the whole ladder arms; two days out, no
+ * booked-too-late rule can fire at any time of day) and pre-compute the rung
+ * dueAts EXACTLY as the
  * backend does (tourReminders.ts computeDueAt): the dashboard forms send the raw
  * datetime-local value and the app parses it with new Date() (host-local tz), so
  * parsing the same string here yields byte-identical dueAt ISO strings.
  * `confirmation` is not computed — its dueAt is the server's arm-time "now"
  * (tick with no `now` fires it immediately).
  *
- * `morning_of` is deliberately NOT mirrored here (worklist A13): since the
- * quiet-hours change it fires at 08:00 ORG-LOCAL (America/New_York) on the
- * tour's local day, which this host-local helper cannot compute. The field it
- * used to expose was 08:00 UTC and was never read by any spec, so it was
- * removed rather than left as a wrong answer waiting to be used.
+ * `day_before` is deliberately NOT mirrored here (the 2026-08-26 retiming
+ * INVERTED which rung can be): it now fires at 19:30 ORG-LOCAL
+ * (America/New_York) on the evening before the tour's local date, which this
+ * host-local helper cannot compute. Rather than leave a wrong answer waiting to
+ * be used, the field is gone - read the instant the server actually armed via
+ * `Scenario.armedReminderDueAt('day_before')` and drive the tick from that.
+ * `morning_of` made the opposite trip in the same retiming: it stopped being
+ * 08:00 org-local and became a plain `scheduledAt - 4h` offset, so it returns
+ * to the struct as `morningOf`.
  */
 export function tourSchedule(hoursFromNow = 48): TourTimes {
   const sched = new Date(Date.now() + hoursFromNow * 3_600_000);
@@ -299,17 +307,25 @@ export function tourSchedule(hoursFromNow = 48): TourTimes {
 
 /**
  * A tour whose reminder ladder ALWAYS arms in full: `daysOut` days ahead at
- * 14:00 local. Plain tourSchedule() books at "now + 48h", which inherits the
- * suite's time-of-day - run between 00:00 and 08:00 local, that tour STARTS
- * before 08:00, so its morning_of (08:00 tour-day, org-local) lands at/after
- * the start and is born SKIPPED (past_event); at exactly 09:00 (10:00 before
- * the 2026-08-18 move to a 1h en_route), en_route lands ON the morning_of slot
- * and supersedes it. That made the full-ladder assertion a 00:00-08:00
- * wall-clock flake (root-caused 2026-08-04). 14:00 keeps every rung distinct
- * and pre-start: day_before 14:00 D-1 < morning_of 08:00 D < en_route 13:00 D
- * < start. Use this whenever a spec asserts the
- * WHOLE ladder; keep plain tourSchedule() for quiet-hours flows that need
- * dueAts anchored to the wall clock's own time-of-day.
+ * 14:00 local. HISTORY, kept because it explains the fixed hour: plain
+ * tourSchedule() books at "now + 48h", which inherits the suite's time-of-day -
+ * run between 00:00 and 08:00 local, that tour STARTED before 08:00, so its
+ * morning_of (then 08:00 tour-day, org-local) landed at/after the start and was
+ * born SKIPPED (past_event); at exactly 09:00 (10:00 before the 2026-08-18 move
+ * to a 1h en_route), en_route landed ON the morning_of slot and superseded it.
+ * That made the full-ladder assertion a 00:00-08:00 wall-clock flake
+ * (root-caused 2026-08-04). The 2026-08-26 retiming RETIRED that particular
+ * flake - morning_of is now a pure `scheduledAt - 4h` offset, so it cannot
+ * outrun a start more than four hours away whatever the wall clock is - but
+ * the fixed hour is now load-bearing for a second reason: it makes every rung
+ * instant identical run to run, which is what quiet-hours test (2) anchors its
+ * stored window to. New chain at 14:00: day_before 19:30 D-1 < morning_of
+ * 10:00 D < en_route 13:00 D < start 14:00 D (spec 13.2 confirms this booking
+ * survives the new skip rules cleanly). Use this whenever a spec asserts the
+ * WHOLE ladder, and prefer it for a quiet-hours flow too: the old advice to
+ * keep plain tourSchedule() there described the pre-retime contract, where
+ * day_before was `sched - 24h` and therefore landed at the wall clock's own
+ * time of day.
  */
 export function tourScheduleFullLadder(daysOut = 2): TourTimes {
   const sched = new Date(Date.now() + daysOut * 24 * 3_600_000);
@@ -324,7 +340,10 @@ function timesFor(sched: Date): TourTimes {
   const t = parsed.getTime();
   return {
     scheduledAtLocal,
-    dayBefore: new Date(t - 24 * 3_600_000).toISOString(),
+    // FOUR hours before (founder retiming 2026-08-26, was 08:00 org-local on
+    // the tour's local day) - mirrors computeDueAt in
+    // app/src/jobs/tourReminders.ts. Move both together.
+    morningOf: new Date(t - 4 * 3_600_000).toISOString(),
     // ONE hour before (founder decision 2026-08-18, was two) - mirrors
     // computeDueAt in app/src/jobs/tourReminders.ts. Move both together.
     enRoute: new Date(t - 1 * 3_600_000).toISOString(),
@@ -1990,6 +2009,25 @@ export class Scenario {
       await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
       tour.scheduledAt = instantOf(times);
     });
+  }
+
+  /** [App] The ARMED dueAt of one rung, read back from the reminders API.
+   *  Since the 2026-08-26 retiming, day_before fires at 19:30 ORG-LOCAL the
+   *  night before - a host-local mirror cannot compute it (the same reason
+   *  morningOf once left TourTimes), so specs drive ticks from the value the
+   *  server actually stored: correct by construction at any wall clock. */
+  async armedReminderDueAt(kind: ReminderKind): Promise<string> {
+    const tour = this.requireActiveTour();
+    const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}/reminders`);
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const body = (await res.json()) as {
+      reminders: Array<{ kind: ReminderKind; dueAt: string; state: string }>;
+    };
+    const rung = body.reminders.find((r) => r.kind === kind && r.state === 'upcoming');
+    if (rung === undefined) {
+      throw new Error(`armedReminderDueAt: no upcoming '${kind}' rung on tour ${tour.tourId}`);
+    }
+    return rung.dueAt;
   }
 
   /**

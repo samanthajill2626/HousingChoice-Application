@@ -969,13 +969,13 @@ describe('runDueExtractions - the run log envelope', () => {
   });
 
   it('merges a route-owned finalization verdict over a pending type suggestion', async () => {
-    const markers = new Map<string, { verdict: 'superseded_by_human_edit'; at: string }>();
+    const markers = new Map<string, { verdict?: 'superseded_by_human_edit'; at?: string }>();
     let record: AiRunRecordInput | undefined;
     const sequence: string[] = [];
     const aiRuns = {
       beginFinalization: vi.fn(async (runId: string) => {
         sequence.push('beginFinalization');
-        markers.set(runId, { verdict: 'superseded_by_human_edit', at: '' });
+        markers.set(runId, {});
         return true;
       }),
       putRun: vi.fn(async (input: AiRunRecordInput) => {
@@ -985,7 +985,7 @@ describe('runDueExtractions - the run log envelope', () => {
           ...input,
           decisions: {
             ...input.decisions,
-            type: marker === undefined || input.decisions.type?.verdict !== 'pending'
+            type: marker?.verdict === undefined || input.decisions.type?.verdict !== 'pending'
               ? input.decisions.type
               : { ...input.decisions.type, verdict: marker.verdict, verdictAt: marker.at },
           },
@@ -996,7 +996,7 @@ describe('runDueExtractions - the run log envelope', () => {
       setVerdict: vi.fn(async (runId: string, target: string, verdict: 'superseded_by_human_edit', opts?: { at?: string }) => {
         sequence.push('setVerdict');
         expect(target).toBe('type');
-        expect(markers.has(runId)).toBe(true);
+        expect(markers.get(runId)).toEqual({});
         markers.set(runId, { verdict, at: opts?.at ?? NOW });
         return true;
       }),

@@ -104,6 +104,22 @@ describe('buildMediaFilename - sanitizing happens BEFORE splitting', () => {
     expect(out.endsWith('.xlsx')).toBe(true);
   });
 
+  it('does not split a surrogate pair at the cap and lose filename*', () => {
+    // slice() cuts by UTF-16 code unit. A cap landing between the halves of an
+    // astral character leaves a LONE high surrogate, encodeURIComponent throws
+    // URIError, and rfc5987's catch drops filename* ENTIRELY - so a merely long
+    // international name loses the one parameter that could carry it. The catch
+    // exists for hostile input, not for input we mangled ourselves.
+    const stem = `${'a'.repeat(50)}${E_ACUTE.repeat(49)}`;
+    const astral = String.fromCharCode(0xd83d, 0xde00);
+    const parts = buildMediaFilenameParts(`${stem}${astral}tail.dat`, 0, MP4);
+    expect(parts.ascii).toBe(`${'a'.repeat(50)}${'_'.repeat(49)}.mp4`);
+    expect(parts.utf8).toBe(`${stem}.mp4`);
+    expect(contentDispositionHeader('attachment', parts)).toContain(
+      `filename*=UTF-8''${'a'.repeat(50)}${'%C3%A9'.repeat(49)}.mp4`,
+    );
+  });
+
   it('re-strips a trailing dot EXPOSED BY the cap', () => {
     // The stem is 110 chars with a dot at position 99, so the cap turns an
     // INTERIOR dot into a trailing one. Stripping only before the cap emits
@@ -124,6 +140,39 @@ describe('buildMediaFilename - sanitizing happens BEFORE splitting', () => {
     expect(buildMediaFilename(allNonAscii, 0, XLSX)).toBe('attachment-1.xlsx');
     expect(buildMediaFilename('///', 0, MP4)).toBe('attachment-1.mp4');
     expect(buildMediaFilename('   ', 0, MP4)).toBe('attachment-1.mp4');
+  });
+
+  it('treats a Windows RESERVED DEVICE NAME as unusable, extension or not', () => {
+    // CON, NUL, COM1 and friends are not filenames on Windows - they name
+    // devices, and they do so regardless of extension, so PRN.mov is as
+    // unusable as PRN. sanitizeName's own comment promises "a legal filename on
+    // their machine" and only handled reserved CHARACTERS.
+    expect(buildMediaFilename('CON', 0, MP4)).toBe('attachment-1.mp4');
+    expect(buildMediaFilename('nul', 0, MP4)).toBe('attachment-1.mp4');
+    expect(buildMediaFilename('PRN.mov', 0, MP4)).toBe('attachment-1.mp4');
+    expect(buildMediaFilename('COM1', 0, MP4)).toBe('attachment-1.mp4');
+    expect(buildMediaFilename('LPT1.csv', 0, OPAQUE)).toBe('attachment-1.csv');
+  });
+
+  it('leaves a stem that merely STARTS with a device name alone', () => {
+    // The match is on the WHOLE stem. Folding CONTRACT into attachment-1 would
+    // lose a real name to a prefix collision.
+    expect(buildMediaFilename('CONTRACT.pdf', 0, OPAQUE)).toBe('CONTRACT.pdf');
+    expect(buildMediaFilename('COM10', 0, MP4)).toBe('COM10.mp4');
+  });
+
+  it('strips Unicode direction controls so filename* cannot spoof an extension', () => {
+    // U+202E reverses the display of everything after it, so `report<RLO>fdp.csv`
+    // shows as `reportvsc.pdf` in any client honouring filename* - a CSV wearing
+    // a PDF's face. The ASCII form already folded it to `_`; only the UTF-8
+    // companion carried it.
+    const rlo = String.fromCharCode(0x202e);
+    const parts = buildMediaFilenameParts(`rep${rlo}${E_ACUTE}fdp.csv`, 0, OPAQUE);
+    expect(parts).toEqual({ ascii: 'rep_fdp.csv', utf8: `rep${E_ACUTE}fdp.csv` });
+    const header = contentDispositionHeader('attachment', parts);
+    expect(header).not.toContain(rlo);
+    // The percent-encoded form of U+202E, which is how it would reach a client.
+    expect(header).not.toContain('%E2%80%AE');
   });
 
   it('KEEPS the utf8 form even when the ASCII form fell through', () => {

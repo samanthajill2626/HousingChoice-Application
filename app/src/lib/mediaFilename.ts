@@ -19,6 +19,15 @@ const MAX_STEM = 100;
 /** emailMime.ts synthesizes this for a nameless MIME part; it is not a name. */
 const SYNTHESIZED = /^attachment-\d+$/;
 
+/**
+ * The Windows RESERVED DEVICE NAMES. `CON`, `NUL`, `COM1` and friends are not
+ * filenames on Windows at all - they name devices, and they do so regardless of
+ * extension, so `PRN.mov` is as unusable as `PRN`. Matched on the STEM and
+ * case-insensitively, which is why `CONTRACT` (a prefix, not the whole stem) is
+ * untouched.
+ */
+const RESERVED_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
 /** An ASCII name for `filename=`, plus the original for `filename*` when they
  *  differ. */
 export interface MediaFilename {
@@ -46,6 +55,15 @@ function sanitizeName(raw: string): string {
   // to be a legal filename on their machine, and `:` in particular survives
   // every other rule here.
   s = s.replace(/[<>:|?*]/g, '');
+  // Unicode DIRECTION CONTROLS, the one class this REMOVES rather than
+  // replaces. They are invisible, carry no meaning inside a filename, and
+  // reverse the display of everything after them - so `report<U+202E>fdp.csv`
+  // is shown by any client honouring `filename*` as `reportvsc.pdf`, a CSV
+  // wearing a PDF's face. The ASCII form already folds them to `_`; only the
+  // UTF-8 companion carried them through. Removal cannot damage a legitimate
+  // name, because a legitimate name does not depend on an override to read
+  // correctly.
+  s = s.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
   s = s.replace(/\.\./g, '');
   s = s.replace(/\s+/g, ' ').trim();
   return s;
@@ -65,10 +83,31 @@ function splitName(name: string): { stem: string; ext: string } {
   return { stem: name.slice(0, dot), ext: name.slice(dot) };
 }
 
-/** True when nothing a human would recognise as a name survived sanitizing:
- *  empty, only separators/underscores/spaces, or emailMime's placeholder. */
+/** True when nothing a human would recognise as a USABLE name survived
+ *  sanitizing: empty, only separators/underscores/spaces, emailMime's
+ *  placeholder, or a Windows reserved device name. Every one of these falls
+ *  through to the synthesized `attachment-N` stem. */
 function isUnusableStem(stem: string): boolean {
-  return stem.length === 0 || /^[_\s]+$/.test(stem) || SYNTHESIZED.test(stem);
+  return (
+    stem.length === 0 ||
+    /^[_\s]+$/.test(stem) ||
+    SYNTHESIZED.test(stem) ||
+    RESERVED_DEVICE.test(stem)
+  );
+}
+
+/**
+ * Drop a TRAILING LONE HIGH SURROGATE. `slice` cuts by UTF-16 code unit, so
+ * capping the stem can land between the halves of an astral character; a high
+ * surrogate at the very END of a string is unpaired by definition. Left in
+ * place it makes `encodeURIComponent` throw, and the catch in `rfc5987` then
+ * drops `filename*` ENTIRELY - so a merely long international name loses the
+ * parameter that exists for it. The catch is for hostile input; this stops the
+ * code manufacturing that condition out of valid input.
+ */
+function dropLoneHighSurrogate(s: string): string {
+  const last = s.charCodeAt(s.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
 }
 
 /** RFC 5987 ext-value. encodeURIComponent leaves five characters bare that the
@@ -105,7 +144,7 @@ export function buildMediaFilenameParts(
   // it: the cap can turn an interior dot into a trailing one (emitting
   // `name..mp4`), and can equally expose a trailing space (`report .mp4`).
   const trimEnd = (s: string): string => s.replace(/[\s.]+$/, '');
-  const stem = trimEnd(trimEnd(stored?.stem ?? '').slice(0, MAX_STEM));
+  const stem = trimEnd(dropLoneHighSurrogate(trimEnd(stored?.stem ?? '').slice(0, MAX_STEM)));
 
   // Replace, never drop: dropping empties a wholly non-ASCII stem, and an
   // empty ASCII stem would emit filename=".xlsx".
@@ -121,7 +160,10 @@ export function buildMediaFilenameParts(
   const ascii = isUnusableStem(asciiStem)
     ? `attachment-${index + 1}${ext}`
     : `${asciiStem}${ext}`;
-  const utf8Usable = stem.length > 0 && !SYNTHESIZED.test(stem) && stem !== asciiStem;
+  // The SAME usability test on the original: a reserved device name is not a
+  // usable `filename*` either, and offering one there would simply move the
+  // problem into the parameter clients prefer.
+  const utf8Usable = !isUnusableStem(stem) && stem !== asciiStem;
 
   return { ascii, ...(utf8Usable && { utf8: `${stem}${ext}` }) };
 }

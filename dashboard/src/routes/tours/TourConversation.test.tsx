@@ -28,7 +28,12 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, ContactTimelinePage, Tour } from '../../api/index.js';
+import type { Contact, ContactTimelinePage, TimelineItem, Tour } from '../../api/index.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 
 const getContactTimeline = vi.fn();
 const getAllConversations = vi.fn();
@@ -90,6 +95,24 @@ function landlordContact(): Contact {
     phone: '+14045550222',
   };
 }
+
+const HOST_MEDIA_ATTACHMENTS = [
+  { s3Key: 'inbound/MMHOST1/0', contentType: 'image/png', filename: 'Host proof.png' },
+];
+
+const HOST_TIMELINE_MESSAGE: TimelineItem = {
+  kind: 'message',
+  id: 'host-image-message',
+  at: '2026-08-27T12:00:00.000Z',
+  conversationId: 'conv-host',
+  tsMsgId: '2026-08-27T12:00:00.000Z#MMHOST1',
+  direction: 'inbound',
+  author: 'tenant',
+  type: 'mms',
+  body: 'Host image',
+  delivery_status: 'delivered',
+  media_attachments: HOST_MEDIA_ATTACHMENTS,
+};
 
 /** A person feed carrying ONE lifecycle pin - the server-side write of this
  *  tour's events, which is what replaced the old client-side injection. */
@@ -155,7 +178,9 @@ function baseProps(over: Partial<TourConversationProps> = {}): TourConversationP
 function renderConvo(props: TourConversationProps, draft?: TourConversationProps['noShowDraft']) {
   return render(
     <MemoryRouter>
-      <TourConversation {...props} {...(draft !== undefined && { noShowDraft: draft })} />
+      <ImageViewerProvider>
+        <TourConversation {...props} {...(draft !== undefined && { noShowDraft: draft })} />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -192,7 +217,9 @@ describe('TourConversation - no-show check-in seed', () => {
     // A "Send no-show check-in" click bumps the nonce.
     rerender(
       <MemoryRouter>
-        <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        <ImageViewerProvider>
+          <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
 
@@ -219,7 +246,9 @@ describe('TourConversation - no-show check-in seed', () => {
     // remount the pane (initialDraft is a MOUNT-ONLY initializer).
     rerender(
       <MemoryRouter>
-        <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        <ImageViewerProvider>
+          <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
 
@@ -233,7 +262,9 @@ describe('TourConversation - no-show check-in seed', () => {
     const { rerender } = renderConvo(props);
     rerender(
       <MemoryRouter>
-        <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        <ImageViewerProvider>
+          <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     // Seeded once on the tenant pane.
@@ -253,6 +284,34 @@ describe('TourConversation - no-show check-in seed', () => {
 });
 
 describe('TourConversation - 1:1 panes', () => {
+  it('keeps the tenant person tab selected while its Timeline image uses the shared viewer', async () => {
+    const user = userEvent.setup();
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    getContactTimeline.mockResolvedValue({ items: [HOST_TIMELINE_MESSAGE], nextCursor: null });
+
+    try {
+      renderConvo(baseProps());
+      const selectedTab = screen.getByRole('tab', { name: /Ann Tenant/ });
+      await user.click(selectedTab);
+      expect(selectedTab).toHaveAttribute('aria-selected', 'true');
+
+      const trigger = await screen.findByRole('button', { name: 'View Host proof.png' });
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Host proof.png' });
+      await loadViewerImage(dialog, 'Host proof.png');
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(trigger).toHaveFocus();
+      expect(selectedTab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('button', { name: /Comms only/i })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
   it('shows the emptyLabel with the contact FULL display name when the feed is empty', async () => {
     renderConvo(baseProps({ tour: makeTour({ groupThreadId: undefined }) }));
 
@@ -382,7 +441,9 @@ describe('TourConversation - id-keyed person tabs', () => {
     };
     rerender(
       <MemoryRouter>
-        <TourConversation {...trimmed} />
+        <ImageViewerProvider>
+          <TourConversation {...trimmed} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
 
@@ -621,7 +682,9 @@ describe('TourConversation - 1:1 mark-read gates', () => {
     // The operator taps "Conversation": now the pane is genuinely on screen.
     rerender(
       <MemoryRouter>
-        <TourConversation {...props} commsVisible={true} />
+        <ImageViewerProvider>
+          <TourConversation {...props} commsVisible={true} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     await waitFor(() => expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7));

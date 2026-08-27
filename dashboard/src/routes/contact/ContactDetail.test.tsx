@@ -2,7 +2,19 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { Contact, PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
+import type {
+  Contact,
+  PlacementItem,
+  PlacementsPage,
+  TimelineItem,
+  UnitItem,
+  UnitsPage,
+} from '../../api/index.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -129,11 +141,13 @@ import {
 function renderAt(contactId: string) {
   return render(
     <MemoryRouter initialEntries={[`/contacts/${contactId}`]}>
-      <Routes>
-        <Route path="/contacts/:contactId" element={<ContactDetail />} />
-        {/* D2's destination - "Mark unread" leaves for the inbox. */}
-        <Route path="/inbox" element={<div>INBOX</div>} />
-      </Routes>
+      <ImageViewerProvider>
+        <Routes>
+          <Route path="/contacts/:contactId" element={<ContactDetail />} />
+          {/* D2's destination - "Mark unread" leaves for the inbox. */}
+          <Route path="/inbox" element={<div>INBOX</div>} />
+        </Routes>
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -195,6 +209,24 @@ const TENANT: Contact = {
   voucherSize: 2,
   status: 'Active',
   phone: '+14040100007',
+};
+
+const HOST_MEDIA_ATTACHMENTS = [
+  { s3Key: 'inbound/MMHOST1/0', contentType: 'image/png', filename: 'Host proof.png' },
+];
+
+const HOST_TIMELINE_MESSAGE: TimelineItem = {
+  kind: 'message',
+  id: 'host-image-message',
+  at: '2026-08-27T12:00:00.000Z',
+  conversationId: 'conv-host',
+  tsMsgId: '2026-08-27T12:00:00.000Z#MMHOST1',
+  direction: 'inbound',
+  author: 'tenant',
+  type: 'mms',
+  body: 'Host image',
+  delivery_status: 'delivered',
+  media_attachments: HOST_MEDIA_ATTACHMENTS,
 };
 
 const LANDLORD: Contact = {
@@ -298,6 +330,33 @@ describe('ContactDetail', () => {
     expect(screen.getByText(/Voucher 2BR/)).toBeInTheDocument();
     // The comms pane + reply box render.
     expect(screen.getByRole('region', { name: /Communications and activity/i })).toBeInTheDocument();
+  });
+
+  it('keeps the contact route and selected Comms pane while its Timeline image uses the shared viewer', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    getContact.mockResolvedValue(TENANT);
+    getContactTimeline.mockResolvedValue({ items: [HOST_TIMELINE_MESSAGE], nextCursor: null });
+
+    try {
+      renderAt('k1');
+      const routeLabel = await screen.findByText('Tasha Williams');
+      const selectedPane = screen.getByRole('button', { name: 'Comms' });
+      expect(selectedPane).toHaveAttribute('aria-pressed', 'true');
+
+      const trigger = await screen.findByRole('button', { name: 'View Host proof.png' });
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Host proof.png' });
+      await loadViewerImage(dialog, 'Host proof.png');
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+
+      expect(trigger).toHaveFocus();
+      expect(routeLabel).toBeInTheDocument();
+      expect(selectedPane).toHaveAttribute('aria-pressed', 'true');
+    } finally {
+      restoreResizeObserver();
+    }
   });
 
   it('flags a Do-Not-Contact (opted-out) contact with a header badge', async () => {
@@ -870,10 +929,12 @@ describe('ContactDetail', () => {
     // Render with a /contacts landing route so we can assert the post-delete nav.
     render(
       <MemoryRouter initialEntries={['/contacts/k1']}>
-        <Routes>
-          <Route path="/contacts/:contactId" element={<ContactDetail />} />
-          <Route path="/contacts" element={<div>CONTACTS LIST</div>} />
-        </Routes>
+        <ImageViewerProvider>
+          <Routes>
+            <Route path="/contacts/:contactId" element={<ContactDetail />} />
+            <Route path="/contacts" element={<div>CONTACTS LIST</div>} />
+          </Routes>
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
 
@@ -1820,17 +1881,19 @@ describe('ContactDetail', () => {
       );
       render(
         <MemoryRouter initialEntries={['/contacts/k1']}>
-          <Routes>
-            <Route
-              path="/contacts/:contactId"
-              element={
-                <>
-                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
-                  <ContactDetail />
-                </>
-              }
-            />
-          </Routes>
+          <ImageViewerProvider>
+            <Routes>
+              <Route
+                path="/contacts/:contactId"
+                element={
+                  <>
+                    <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                    <ContactDetail />
+                  </>
+                }
+              />
+            </Routes>
+          </ImageViewerProvider>
         </MemoryRouter>,
       );
       await pressRun();
@@ -1897,17 +1960,19 @@ describe('composer isolation across contact-to-contact navigation', () => {
     );
     render(
       <MemoryRouter initialEntries={['/contacts/k1']}>
-        <Routes>
-          <Route
-            path="/contacts/:contactId"
-            element={
-              <>
-                <Link to="/contacts/z99">NAV-TO-OTHER</Link>
-                <ContactDetail />
-              </>
-            }
-          />
-        </Routes>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     await screen.findByText('Tasha Williams');
@@ -2230,18 +2295,20 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
     );
     return render(
       <MemoryRouter initialEntries={['/contacts/k1']}>
-        <Routes>
-          <Route
-            path="/contacts/:contactId"
-            element={
-              <>
-                <Link to="/contacts/z99">NAV-TO-OTHER</Link>
-                <ContactDetail />
-              </>
-            }
-          />
-          <Route path="/inbox" element={<div>INBOX</div>} />
-        </Routes>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+            <Route path="/inbox" element={<div>INBOX</div>} />
+          </Routes>
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
   }

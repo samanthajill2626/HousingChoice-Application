@@ -1549,6 +1549,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // Resolve only identities retained before contacts.update. A suggestion
     // created or replaced during the update remains pending and unstamped.
     const verdictAt = new Date().toISOString();
+    let suggestionStateChanged = false;
     for (const [f, pending] of pendingByField) {
       let deleted = false;
       try {
@@ -1556,6 +1557,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
       }
+      if (deleted) suggestionStateChanged = true;
       if (!deleted || pending.runId === undefined || !isDecisionTarget(f)) continue;
       // The value comparison is CONFINED to `type` (frozen design 7.3): a human
       // triaging a contact to `landlord` after the model suggested `tenant` has
@@ -1631,6 +1633,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
           continue;
         }
 
+        suggestionStateChanged = true;
         const wasPrewriteIdentity = pendingTypeBefore !== undefined
           && sameSuggestionIdentity(candidate, pendingTypeBefore);
         const verdict = wasPrewriteIdentity
@@ -1659,6 +1662,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       if (exhausted) {
         log.warn({ contactId }, 'type suggestion drain exhausted bounded retries');
       }
+    }
+
+    if (suggestionStateChanged) {
+      events.emit('suggestion.updated', { contactId });
     }
 
     // VOUCHER SYNC (placement-deadline-model §6): when this PATCH changed

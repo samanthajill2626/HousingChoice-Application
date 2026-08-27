@@ -1925,6 +1925,38 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     expect(setVerdict).toHaveBeenCalledWith('run-1', 'type', 'superseded_by_human_edit', expect.anything());
   });
 
+  it('emits suggestion.updated when a human field edit deletes a pending suggestion', async () => {
+    const { app, world } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats',
+      conversationId: 'conv-1', runId: 'run-pets',
+    });
+
+    await patch(app, 'c1', { pets: 'a dog' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(world.emitted.filter(({ event }) => event === 'suggestion.updated')).toEqual([
+      { event: 'suggestion.updated', payload: { contactId: 'c1' } },
+    ]);
+  });
+
+  it('emits suggestion.updated when a classification PATCH drains a type suggestion', async () => {
+    const { app, world } = makeWorld();
+    seedTenant(world, { type: 'unknown', status: 'needs_review' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'partner',
+      conversationId: 'conv-1', runId: 'run-type', contactClassificationRevision: 0,
+    });
+
+    await patch(app, 'c1', { type: 'partner' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'type')).toBeUndefined();
+    expect(world.emitted.filter(({ event }) => event === 'suggestion.updated')).toEqual([
+      { event: 'suggestion.updated', payload: { contactId: 'c1' } },
+    ]);
+  });
+
   it.each([
     ['property_manager', { type: 'landlord', role: 'Property Manager' }, 'accepted'],
     ['property_manager', { type: 'landlord', role: 'property manager' }, 'superseded_by_human_edit'],

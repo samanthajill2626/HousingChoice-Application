@@ -54,100 +54,21 @@
 
 ## Dependency order
 
-Task 1 defines the four-value extraction contract. Task 2 adds the persistence primitives. Task 3 consumes both to reconcile extraction writes. Task 4 consumes the repository primitive and backend kind resolver to reconcile human PATCH writes. Task 5 adds the staff UI on top of the stable PATCH contract. Task 6 proves both new flows end-to-end and closes the issue. Task 7 performs the single final `main` sync, complete feature gates, and hermetic live self-QA.
+Task 1 declares the four-value TypeScript union without activating new runtime model output. Task 2 adds the persistence primitives. Task 3 consumes the type and primitives to reconcile extraction writes. Task 4 consumes the repository primitive and backend kind resolver to reconcile human PATCH writes. Task 5 adds the staff UI on top of the stable PATCH contract. Only after every writer and consumer is ready, Task 6 widens the structured schema, parser, and prompt to activate Partner and Property Manager output. Task 7 proves both new flows end-to-end and closes the issue. Task 8 performs the single final `main` sync, complete feature gates, and hermetic live self-QA.
 
 ---
 
-### Task 1: Widen and pin the extraction contract
+### Task 1: Declare the canonical kind type without runtime activation
 
 **Files:**
 - Modify: `app/src/adapters/extraction.ts:73-81`
-- Modify: `app/src/services/extraction/schema.ts:119-128,242-251,420-429`
-- Modify: `app/src/services/extraction/prompt.ts:14-29,50-90`
-- Test: `app/test/extractionSchema.test.ts`
-- Test: `app/test/extractionOps.test.ts`
 
 **Interfaces:**
-- Consumes: the existing `ExtractionResult.typeSuggestion`, `EXTRACTION_SCHEMA`, `parseExtractionText`, `parseExtractionOps`, and prompt fingerprint.
-- Produces: `SuggestedContactKind`, the exact schema enum `['tenant', 'landlord', 'property_manager', 'partner', 'none']`, and a prompt contract that classifies the current contact only.
+- Consumes: the existing inline `ExtractionResult.typeSuggestion.value` union.
+- Produces: the canonical `SuggestedContactKind` TypeScript union needed by the persistence, route, and dashboard-ready backend work.
+- Activation boundary: this task must not change `EXTRACTION_SCHEMA`, `parseExtractionText`, `parseExtractionOps`, or the model prompt. Production extraction must still emit only Tenant or Landlord until Task 6, after the PATCH route and dashboard can honor every new value.
 
-- [ ] **Step 1: Add red parser and schema tests for the four canonical kinds**
-
-Add tests that inspect the actual nested enum, parse the two new values, fold `none`, and reject an unsupported value:
-
-```ts
-it('pins the complete staff-facing kind enum plus the none sentinel', () => {
-  const typeSuggestion = (
-    EXTRACTION_SCHEMA.properties as Record<string, Record<string, unknown>>
-  )['typeSuggestion'];
-  const properties = typeSuggestion?.['properties'] as Record<string, Record<string, unknown>>;
-  expect(properties['value']?.['enum']).toEqual([
-    'tenant',
-    'landlord',
-    'property_manager',
-    'partner',
-    'none',
-  ]);
-});
-
-it.each(['partner', 'property_manager'] as const)(
-  'parses the canonical %s kind',
-  (kind) => {
-    const result = parseExtractionText(JSON.stringify({
-      fields: {},
-      typeSuggestion: { value: kind, reason: 'clear self-identification' },
-    }));
-    expect(result.typeSuggestion).toEqual({
-      value: kind,
-      reason: 'clear self-identification',
-    });
-  },
-);
-
-it('folds none and an unsupported kind to no applicable type suggestion', () => {
-  const none = parseExtractionText(JSON.stringify({ fields: {}, typeSuggestion: { value: 'none', reason: '' } }));
-  const unsupported = parseExtractionText(JSON.stringify({ fields: {}, typeSuggestion: { value: 'caseworker', reason: 'off enum' } }));
-  expect(none.typeSuggestion).toBeUndefined();
-  expect(unsupported.typeSuggestion).toBeUndefined();
-});
-```
-
-- [ ] **Step 2: Add a red raw-operation audit test**
-
-Extend `app/test/extractionOps.test.ts` so both new valid values are retained and an off-enum attempt remains visible rather than becoming a decline:
-
-```ts
-it.each(['partner', 'property_manager'])(
-  'retains %s as the attempted type operation',
-  (kind) => {
-    expect(parseExtractionOps(JSON.stringify({
-      typeSuggestion: { value: kind, reason: 'stated role' },
-    })).type).toEqual({ op: 'suggest', value: kind, reason: 'stated role' });
-  },
-);
-
-it('keeps an off-enum kind as a failed attempted value for diagnostics', () => {
-  expect(parseExtractionOps(JSON.stringify({
-    typeSuggestion: { value: 'caseworker', reason: 'invalid wire value' },
-  })).type).toEqual({
-    op: 'suggest',
-    value: 'caseworker',
-    reason: 'invalid wire value',
-  });
-});
-```
-
-- [ ] **Step 3: Run the focused tests and verify the intended red state**
-
-Run:
-
-```powershell
-npm run test -w @housingchoice/app -- test/extractionSchema.test.ts test/extractionOps.test.ts
-```
-
-Expected: FAIL because the schema/parser and `ExtractionResult` still permit only Tenant and Landlord. The existing off-enum diagnostic assertion must remain green.
-
-- [ ] **Step 4: Add the shared wire union and widen the parser**
+- [ ] **Step 1: Add the shared wire union only**
 
 In `app/src/adapters/extraction.ts`, define and consume:
 
@@ -166,108 +87,31 @@ export interface ExtractionResult {
 }
 ```
 
-In `schema.ts`, use a typed allowlist for the applicable parser while leaving `parseExtractionOps` stringly for forensic attempts:
+Do not touch the runtime schema, parser, raw-operation parser, or prompt in this task. The type widening is compile-time scaffolding only, so it has no behavioral red test and does not activate model output.
 
-```ts
-const SUGGESTED_CONTACT_KINDS = [
-  'tenant',
-  'landlord',
-  'property_manager',
-  'partner',
-] as const satisfies readonly SuggestedContactKind[];
-
-function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
-  return typeof value === 'string'
-    && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
-}
-```
-
-Set the schema enum to `[..., 'none']`, parse only `isSuggestedContactKind(typeSuggestion.value)`, and keep the raw-operation block's rule that every non-empty value except `none` is an attempted suggestion.
-
-- [ ] **Step 5: Add red prompt-contract tests for current-contact identity**
-
-Add one prompt test with explicit positive and negative phrases:
-
-```ts
-it('classifies the current external contact into four mutually exclusive kinds', () => {
-  const sys = buildExtractionSystemPrompt();
-  expect(sys).toContain('CURRENT external contact');
-  expect(sys).toContain('I own three rental properties');
-  expect(sys).toContain('Landlord');
-  expect(sys).toContain('I manage three properties for the owner');
-  expect(sys).toContain('Property Manager');
-  expect(sys).toContain('not Landlord and not Partner');
-  expect(sys).toContain('I am her caseworker at Hope Atlanta');
-  expect(sys).toContain('Partner');
-  expect(sys).toContain('My caseworker at Hope Atlanta told me to call');
-  expect(sys).toContain('mentioned caseworker is not the contact');
-  expect(sys).toContain('I am calling about a client');
-  expect(sys).toContain('value "none"');
-});
-
-it('requires current-transcript evidence and preserves concise role notes', () => {
-  const sys = buildExtractionSystemPrompt();
-  expect(sys).toContain('current transcript');
-  expect(sys).toContain('Identified as a caseworker at Hope Atlanta');
-  expect(sys).toContain('Identified as property manager for Example Homes');
-  expect(sys).toContain('never infer an organization');
-  expect(sys).toContain('RECONCILE every noteLine against the profile notes');
-});
-```
-
-- [ ] **Step 6: Run the prompt tests and verify they fail on the old tenant-biased rule**
+- [ ] **Step 2: Prove the declaration compiles without changing runtime output**
 
 Run:
 
 ```powershell
-npm run test -w @housingchoice/app -- test/extractionSchema.test.ts
-```
-
-Expected: FAIL because the prompt says the person is a tenant or landlord, treats housing management as Landlord, and suppresses caseworker suggestions.
-
-- [ ] **Step 7: Replace the prompt classification block without changing transcript wire labels**
-
-Write an explicit rule block equivalent to:
-
-```ts
-const kindRules = [
-  '- typeSuggestion is about the CURRENT external contact whose transcript lines use the existing "client" speaker label.',
-  '- Use it only when CURRENT PROFILE.contactType is "unknown" and the current transcript clearly establishes exactly one kind.',
-  '- Tenant: seeks housing for themselves or their household.',
-  '- Landlord: owns or personally offers housing they control.',
-  '- Property Manager: manages, leases, lists, or coordinates properties for an owner or landlord; working for a landlord is not Partner and does not make the contact Landlord.',
-  '- Partner: works in an outside service, program, agency, inspection, or navigation role and is not the housing seeker, owner, or property manager.',
-  '- A represented or mentioned person never determines this contact kind and their facts never belong on this profile.',
-  '- Do not guess from an organization name or one ambiguous word such as "manager", "agent", or "client". When evidence overlaps or is unclear, emit value "none".',
-  '- A clear Partner or Property Manager identification also adds one concise role or organization noteLine, using only stated facts and the existing note reconciliation rules.',
-];
-```
-
-Include the six approved examples from D3 verbatim in meaning, retain `client` and `speakerRoles` wire labels, remove the old caseworker suppression, and do not introduce a hard-coded prompt fingerprint. `extractionPromptFingerprint()` already hashes the prompt and schema bytes.
-
-- [ ] **Step 8: Run focused contract tests and app typecheck**
-
-Run:
-
-```powershell
-npm run test -w @housingchoice/app -- test/extractionSchema.test.ts test/extractionOps.test.ts
 npm run typecheck -w @housingchoice/app
+npm run test -w @housingchoice/app -- test/extractionSchema.test.ts test/extractionOps.test.ts
 ```
 
-Expected: both commands PASS. Confirm the optional-parameter-count test remains green and the prompt fingerprint test derives a new value without pinning a literal.
+Expected: both commands PASS. Confirm the existing schema enum and applicable parser still reject Partner and Property Manager at runtime; Task 6 owns the deliberate red/green activation of those paths.
 
-- [ ] **Step 9: Commit the extraction contract**
+- [ ] **Step 3: Commit the compile-time contract**
 
 Run:
 
 ```powershell
 git status --short --branch
 git rev-parse -q --verify MERGE_HEAD
-git add app/src/adapters/extraction.ts app/src/services/extraction/schema.ts app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts app/test/extractionOps.test.ts
-git commit -m "feat: widen AI contact kind contract" -m "Co-Authored-By: GPT-5.6 Codex <noreply@openai.com>"
+git add app/src/adapters/extraction.ts
+git commit -m "refactor: define AI contact kind union" -m "Co-Authored-By: GPT-5.6 Codex <noreply@openai.com>"
 ```
 
-Expected: status lists only the five task files before staging; `MERGE_HEAD` prints nothing; the commit succeeds.
+Expected: status lists only the adapter before staging; `MERGE_HEAD` prints nothing; the commit succeeds. This commit is behavior-neutral and must not be deployed as a claim that the new model output is active.
 
 ---
 
@@ -947,6 +791,9 @@ describe('canonicalSuggestedContactKind', () => {
   it.each([
     { type: 'tenant', role: 'Case Manager' },
     { type: 'landlord', role: 'Leasing Agent' },
+    { type: 'landlord', role: ' Property Manager' },
+    { type: 'landlord', role: 'Property Manager ' },
+    { type: 'landlord', role: '   ' },
     { type: 'partner', role: 'Inspector' },
     { type: 'unknown', role: '' },
     { type: 'team_member', role: '' },
@@ -983,7 +830,7 @@ type ContactKindShape = Pick<ContactItem, 'type'> & { role?: unknown };
 export function canonicalSuggestedContactKind(
   contact: ContactKindShape,
 ): SuggestedContactKind | undefined {
-  const role = typeof contact.role === 'string' ? contact.role.trim() : '';
+  const role = typeof contact.role === 'string' ? contact.role : '';
   if (contact.type === 'landlord' && role === PROPERTY_MANAGER_ROLE) {
     return 'property_manager';
   }
@@ -999,7 +846,7 @@ export function canonicalSuggestedContactKind(
 }
 ```
 
-This helper compares verdicts only. It must not mutate the contact or become a second PATCH mapping.
+This helper compares verdicts only. It must not trim, case-fold, mutate the contact, or become a second PATCH mapping. Only the exact persisted role `Property Manager` is the preset. Any other non-empty string, including whitespace-only or leading/trailing whitespace, is a custom unsupported role.
 
 - [ ] **Step 4: Re-run the pure-kind tests**
 
@@ -1123,15 +970,22 @@ Before the contact write:
 const changesKind = 'type' in parsed.patch || 'role' in parsed.patch;
 let pendingTypeBefore: SuggestionItem | undefined;
 if (changesKind) {
-  pendingTypeBefore = await extraction.getSuggestion(
-    contactId,
-    'type',
-    { consistentRead: true },
-  );
+  try {
+    pendingTypeBefore = await extraction.getSuggestion(
+      contactId,
+      'type',
+      { consistentRead: true },
+    );
+  } catch (err) {
+    log.warn(
+      { err, contactId },
+      'type suggestion pre-write read failed (best-effort)',
+    );
+  }
 }
 ```
 
-Keep the existing `pendingByField` snapshot and exact delete for non-type fields. Skip `f === 'type'` in that generic loop so target `type` is handled once by the new protocol. A `role` suggestion target, if one exists in legacy data, retains generic cleanup; the special path always addresses target `type`.
+Keep the existing `pendingByField` snapshot and exact delete for non-type fields. Skip `f === 'type'` in that generic loop so target `type` is handled once by the new protocol. A `role` suggestion target, if one exists in legacy data, retains generic cleanup; the special path always addresses target `type`. The pre-write read is advisory only: a read failure must be logged and must not block the contact PATCH or the post-write drain.
 
 - [ ] **Step 10: Implement bounded older-revision draining after the contact write**
 
@@ -1142,37 +996,55 @@ const committedRevision = contactClassificationRevision(updated);
 const appliedKind = canonicalSuggestedContactKind(updated);
 ```
 
-Implement a maximum of four guarded delete attempts. The first candidate is `pendingTypeBefore`; after every attempt, consistently point-read target `type` again. For each candidate:
+Implement a maximum of four guarded delete attempts. If the pre-write snapshot is empty or failed, the first iteration must perform a post-write consistent point read before deciding there is nothing to drain. After every delete attempt, clear the candidate so the next iteration performs another consistent point read:
 
 ```ts
-const candidateContactRevision = candidate.contactClassificationRevision ?? 0;
-if (candidateContactRevision >= committedRevision) return;
+let candidate = pendingTypeBefore;
+for (let attempt = 0; attempt < 4; attempt += 1) {
+  if (candidate === undefined) {
+    try {
+      candidate = await extraction.getSuggestion(contactId, 'type', {
+        consistentRead: true,
+      });
+    } catch (err) {
+      log.warn({ err, contactId }, 'type suggestion drain read failed (best-effort)');
+      return;
+    }
+    if (candidate === undefined) return;
+  }
 
-const result = await extraction
-  .deleteTypeSuggestionIfCurrentAtContactRevision(candidate, committedRevision);
-if (result === 'contact_revision_changed') return;
-if (result === 'suggestion_changed_or_absent') {
-  candidate = await extraction.getSuggestion(contactId, 'type', {
-    consistentRead: true,
-  });
-  continue;
+  const candidateContactRevision =
+    candidate.contactClassificationRevision ?? 0;
+  if (candidateContactRevision >= committedRevision) return;
+
+  let result: DeleteTypeSuggestionResult;
+  try {
+    result = await extraction
+      .deleteTypeSuggestionIfCurrentAtContactRevision(candidate, committedRevision);
+  } catch (err) {
+    log.warn({ err, contactId }, 'type suggestion drain failed (best-effort)');
+    return;
+  }
+  if (result === 'contact_revision_changed') return;
+  if (result === 'suggestion_changed_or_absent') {
+    candidate = undefined;
+    continue;
+  }
+
+  const wasPrewriteIdentity = pendingTypeBefore !== undefined
+    && sameSuggestionIdentity(candidate, pendingTypeBefore);
+  const verdict = wasPrewriteIdentity
+    && appliedKind !== undefined
+    && normalizeSuggestionValue('type', candidate.suggestedValue)
+      === normalizeSuggestionValue('type', appliedKind)
+      ? 'accepted'
+      : 'superseded_by_human_edit';
+  await stampTypeVerdictBestEffort(candidate, verdict);
+  candidate = undefined;
 }
-
-const wasPrewriteIdentity = pendingTypeBefore !== undefined
-  && sameSuggestionIdentity(candidate, pendingTypeBefore);
-const verdict = wasPrewriteIdentity
-  && appliedKind !== undefined
-  && normalizeSuggestionValue('type', candidate.suggestedValue)
-    === normalizeSuggestionValue('type', appliedKind)
-    ? 'accepted'
-    : 'superseded_by_human_edit';
-await stampTypeVerdictBestEffort(candidate, verdict);
-candidate = await extraction.getSuggestion(contactId, 'type', {
-  consistentRead: true,
-});
 ```
 
-The identity comparison must prefer `revision`, then use the exact legacy `createdAt` and present-or-absent `runId` fallback. A post-write replacement always gets `superseded_by_human_edit`, even if its value equals `appliedKind`. Stop without deleting when the candidate belongs to the same or a newer classification revision. Log a warning if four older replacements exhaust the bound. Never fail the already-committed contact PATCH for drain or verdict errors.
+The identity comparison must prefer `revision`, then use the exact legacy `createdAt` and present-or-absent `runId` fallback. A post-write replacement always gets `superseded_by_human_edit`, even if its value equals `appliedKind`. Stop without deleting when the candidate belongs to the same or a newer classification revision. If the first successful post-write consistent read returns no row, a publication after that read is owned by the extraction writer's post-put contact check from Task 3; do not add polling. Log a warning if four older replacements exhaust the bound. Never fail the already-committed contact PATCH for pre-read, drain-read, guarded-delete, or verdict errors.
 
 - [ ] **Step 11: Preserve existing route-owned downstream behavior**
 
@@ -1589,7 +1461,186 @@ Expected: the commit contains no API shape change and no new message-catalog ent
 
 ---
 
-### Task 6: Prove Partner and Property Manager end-to-end and close the issue
+### Task 6: Activate the four-kind extraction contract
+
+**Files:**
+- Modify: `app/src/services/extraction/schema.ts:119-128,242-251,420-429`
+- Modify: `app/src/services/extraction/prompt.ts:14-29,50-90`
+- Test: `app/test/extractionSchema.test.ts`
+- Test: `app/test/extractionOps.test.ts`
+
+**Interfaces:**
+- Consumes: Task 1's `SuggestedContactKind` union and the completed extraction, PATCH, and dashboard consumers from Tasks 2-5.
+- Produces: the exact schema enum `['tenant', 'landlord', 'property_manager', 'partner', 'none']`, an applicable parser for the four canonical kinds, preserved raw attempted-output diagnostics, and a prompt contract that classifies the current external contact only.
+- Activation gate: do not begin this task until the focused checks for Tasks 2-5 pass. This is the first task allowed to make a real model response produce Partner or Property Manager.
+
+- [ ] **Step 1: Add red parser, schema, and raw-operation tests**
+
+Pin the nested enum, both newly applicable values, the `none` fold, unsupported applicable output, and unchanged raw diagnostics:
+
+```ts
+it('pins the complete staff-facing kind enum plus the none sentinel', () => {
+  const typeSuggestion = (
+    EXTRACTION_SCHEMA.properties as Record<string, Record<string, unknown>>
+  )['typeSuggestion'];
+  const properties = typeSuggestion?.['properties']
+    as Record<string, Record<string, unknown>>;
+  expect(properties['value']?.['enum']).toEqual([
+    'tenant',
+    'landlord',
+    'property_manager',
+    'partner',
+    'none',
+  ]);
+});
+
+it.each(['partner', 'property_manager'] as const)(
+  'parses the canonical %s kind',
+  (kind) => {
+    const result = parseExtractionText(JSON.stringify({
+      fields: {},
+      typeSuggestion: { value: kind, reason: 'clear self-identification' },
+    }));
+    expect(result.typeSuggestion).toEqual({
+      value: kind,
+      reason: 'clear self-identification',
+    });
+  },
+);
+
+it('folds none and an unsupported kind to no applicable type suggestion', () => {
+  const none = parseExtractionText(JSON.stringify({
+    fields: {},
+    typeSuggestion: { value: 'none', reason: '' },
+  }));
+  const unsupported = parseExtractionText(JSON.stringify({
+    fields: {},
+    typeSuggestion: { value: 'caseworker', reason: 'off enum' },
+  }));
+  expect(none.typeSuggestion).toBeUndefined();
+  expect(unsupported.typeSuggestion).toBeUndefined();
+});
+
+it.each(['partner', 'property_manager'])(
+  'retains %s as the attempted type operation',
+  (kind) => {
+    expect(parseExtractionOps(JSON.stringify({
+      typeSuggestion: { value: kind, reason: 'stated role' },
+    })).type).toEqual({ op: 'suggest', value: kind, reason: 'stated role' });
+  },
+);
+```
+
+Retain the existing off-enum `caseworker` assertion as `op: 'suggest'`; raw attempted output must not be rewritten into a decline.
+
+- [ ] **Step 2: Add red prompt-contract tests**
+
+Add explicit positive and negative phrases:
+
+```ts
+it('classifies the current external contact into four mutually exclusive kinds', () => {
+  const sys = buildExtractionSystemPrompt();
+  expect(sys).toContain('CURRENT external contact');
+  expect(sys).toContain('I own three rental properties');
+  expect(sys).toContain('Landlord');
+  expect(sys).toContain('I manage three properties for the owner');
+  expect(sys).toContain('Property Manager');
+  expect(sys).toContain('not Landlord and not Partner');
+  expect(sys).toContain('I am her caseworker at Hope Atlanta');
+  expect(sys).toContain('Partner');
+  expect(sys).toContain('My caseworker at Hope Atlanta told me to call');
+  expect(sys).toContain('mentioned caseworker is not the contact');
+  expect(sys).toContain('I am calling about a client');
+  expect(sys).toContain('value "none"');
+});
+
+it('requires current-transcript evidence and preserves concise role notes', () => {
+  const sys = buildExtractionSystemPrompt();
+  expect(sys).toContain('current transcript');
+  expect(sys).toContain('Identified as a caseworker at Hope Atlanta');
+  expect(sys).toContain('Identified as property manager for Example Homes');
+  expect(sys).toContain('never infer an organization');
+  expect(sys).toContain('RECONCILE every noteLine against the profile notes');
+});
+```
+
+- [ ] **Step 3: Run the focused tests and verify both intended red causes**
+
+Run:
+
+```powershell
+npm run test -w @housingchoice/app -- test/extractionSchema.test.ts test/extractionOps.test.ts
+```
+
+Expected: FAIL because the live schema/parser still permit only Tenant and Landlord and because the prompt still has the old tenant-biased rule. The existing off-enum diagnostic assertion must remain green.
+
+- [ ] **Step 4: Widen the structured schema and applicable parser**
+
+Use the canonical union from Task 1:
+
+```ts
+const SUGGESTED_CONTACT_KINDS = [
+  'tenant',
+  'landlord',
+  'property_manager',
+  'partner',
+] as const satisfies readonly SuggestedContactKind[];
+
+function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
+  return typeof value === 'string'
+    && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
+}
+```
+
+Set the schema enum to the four values plus `none`. Parse only `isSuggestedContactKind(typeSuggestion.value)`. Keep `parseExtractionOps` stringly so every non-empty value except `none` remains an attempted suggestion for forensic review.
+
+- [ ] **Step 5: Replace the prompt classification block**
+
+Write an explicit rule block equivalent to:
+
+```ts
+const kindRules = [
+  '- typeSuggestion is about the CURRENT external contact whose transcript lines use the existing "client" speaker label.',
+  '- Use it only when CURRENT PROFILE.contactType is "unknown" and the current transcript clearly establishes exactly one kind.',
+  '- Tenant: seeks housing for themselves or their household.',
+  '- Landlord: owns or personally offers housing they control.',
+  '- Property Manager: manages, leases, lists, or coordinates properties for an owner or landlord; working for a landlord is not Partner and does not make the contact Landlord.',
+  '- Partner: works in an outside service, program, agency, inspection, or navigation role and is not the housing seeker, owner, or property manager.',
+  '- A represented or mentioned person never determines this contact kind and their facts never belong on this profile.',
+  '- Do not guess from an organization name or one ambiguous word such as "manager", "agent", or "client". When evidence overlaps or is unclear, emit value "none".',
+  '- A clear Partner or Property Manager identification also adds one concise role or organization noteLine, using only stated facts and the existing note reconciliation rules.',
+];
+```
+
+Include the six approved D3 examples verbatim in meaning, retain `client` and `speakerRoles` wire labels, remove the old caseworker suppression, and do not pin a literal prompt fingerprint. `extractionPromptFingerprint()` already hashes the prompt and schema bytes.
+
+- [ ] **Step 6: Run focused contract tests and app typecheck**
+
+Run:
+
+```powershell
+npm run test -w @housingchoice/app -- test/extractionSchema.test.ts test/extractionOps.test.ts
+npm run typecheck -w @housingchoice/app
+```
+
+Expected: both commands PASS. Confirm the optional-parameter-count test remains green and the prompt fingerprint derives a new value without a hard-coded expectation.
+
+- [ ] **Step 7: Commit runtime activation**
+
+Run:
+
+```powershell
+git status --short --branch
+git rev-parse -q --verify MERGE_HEAD
+git add app/src/services/extraction/schema.ts app/src/services/extraction/prompt.ts app/test/extractionSchema.test.ts app/test/extractionOps.test.ts
+git commit -m "feat: activate four AI contact kinds" -m "Co-Authored-By: GPT-5.6 Codex <noreply@openai.com>"
+```
+
+Expected: the commit contains only the runtime contract and its tests. Every persistence, route, and dashboard consumer is already present and green.
+
+---
+
+### Task 7: Prove Partner and Property Manager end-to-end and close the issue
 
 **Files:**
 - Modify: `e2e/tests/flows/conversation-fact-extraction.spec.ts:1-90,268-300`
@@ -1627,7 +1678,7 @@ function formattedPhone(phone: string): string {
 }
 ```
 
-- [ ] **Step 2: Add the red Partner flow**
+- [ ] **Step 2: Add the Partner acceptance flow**
 
 Use a fresh unknown contact and the deterministic fake payload:
 
@@ -1659,7 +1710,7 @@ expect(await readConversationType(page.request, contactId)).toBe('partner_1to1')
 
 Navigate to `/`, await Today readiness, and assert no `AI suggestions to review` list item contains the formatted phone.
 
-- [ ] **Step 3: Add the red Property Manager flow**
+- [ ] **Step 3: Add the Property Manager acceptance flow**
 
 Use a second fresh unknown contact:
 
@@ -1692,7 +1743,7 @@ expect(await readConversationType(page.request, contactId)).toBe('landlord_1to1'
 
 Again assert the contact's formatted phone is absent from the Today AI-suggestion group.
 
-- [ ] **Step 4: Run the single focused e2e file and verify the red state**
+- [ ] **Step 4: Run the focused post-implementation acceptance regression**
 
 Run only through the e2e workspace:
 
@@ -1700,11 +1751,11 @@ Run only through the e2e workspace:
 npm run e2e -w @housingchoice/e2e -- tests/flows/conversation-fact-extraction.spec.ts
 ```
 
-Expected before Tasks 1-5: the new flows FAIL at label/button/application assertions. Expected after Tasks 1-5: PASS, including the existing extraction scenarios in the file. Do not invoke root Playwright directly.
+Expected after Tasks 1-6: PASS, including the existing extraction scenarios in the file. This e2e is a post-implementation acceptance and regression proof, not a fabricated red-state step; the earlier backend and dashboard tasks own the behavioral red/green tests. Do not invoke root Playwright directly.
 
 - [ ] **Step 5: Tighten selectors or assertions only when evidence shows a real mismatch**
 
-Use `getByRole`, `getByText`, and scoped Needs-triage sections. If a failure is a product defect, fix the owning Task 1-5 file and rerun that task's focused unit tests before rerunning this e2e file. Do not replace an accessibility selector with `data-testid`, extend timeouts without a timing diagnosis, or use the human's live `:5174` or `:8080` lane.
+Use `getByRole`, `getByText`, and scoped Needs-triage sections. If a failure is a product defect, fix the owning Task 1-6 file and rerun that task's focused unit tests before rerunning this e2e file. Do not replace an accessibility selector with `data-testid`, extend timeouts without a timing diagnosis, or use the human's live `:5174` or `:8080` lane.
 
 - [ ] **Step 6: Resolve the tracked issue after the proof is green**
 
@@ -1757,7 +1808,7 @@ Expected: the commit contains the two new e2e flows and the resolved issue recor
 
 ---
 
-### Task 7: Final sync, complete gates, adversarial review, and hermetic self-QA
+### Task 8: Final sync, complete gates, adversarial review, and hermetic self-QA
 
 **Files:**
 - Inspect: every file changed by `git diff --name-only main...HEAD`
@@ -1765,7 +1816,7 @@ Expected: the commit contains the two new e2e flows and the resolved issue recor
 - Record: `.superpowers/build-log.md`
 
 **Interfaces:**
-- Consumes: all six implementation tasks and the repository's feature-mission completion policy.
+- Consumes: all seven implementation tasks and the repository's feature-mission completion policy.
 - Produces: one final sync with current local `main`, exact gate evidence, no-new-errors touched-file lint evidence, independent review fixes, and live proof for Partner and Property Manager.
 
 - [ ] **Step 1: Inspect branch state and perform the one final main sync**

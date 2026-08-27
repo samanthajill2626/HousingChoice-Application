@@ -77,7 +77,29 @@ async function seedSuggestion(
   }
 }
 
-function pendingTypeRun(runId: string, createdAt: string): AiRunRecordInput {
+/**
+ * Model the extraction job's post-record displaced-run stamp. A type
+ * replacement first performs the same repository CAS as production, then its
+ * producing job terminally marks the exact displaced pending decision.
+ */
+async function replaceTypeSuggestionFromExtraction(
+  world: ReturnType<typeof makeWebhookHarness>['world'],
+  suggestion: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
+): Promise<void> {
+  const { displaced } = await world.extractionRepo.putSuggestion(suggestion);
+  if (displaced?.runId === undefined) return;
+  await world.aiRuns.setVerdict(displaced.runId, 'type', 'superseded', {
+    at: new Date().toISOString(),
+    expectedVerdict: 'pending',
+    freshSuggestionCreatedAt: displaced.createdAt,
+  });
+}
+
+function pendingTypeRun(
+  runId: string,
+  createdAt: string,
+  proposedValue: 'tenant' | 'landlord' | 'partner',
+): AiRunRecordInput {
   return {
     runId,
     startedAt: createdAt,
@@ -91,7 +113,7 @@ function pendingTypeRun(runId: string, createdAt: string): AiRunRecordInput {
     decisions: {
       type: {
         proposedOp: 'suggest',
-        proposedValue: 'tenant',
+        proposedValue,
         outcome: 'suggested',
         verdict: 'pending',
       },
@@ -2062,9 +2084,9 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     const createdAtC = '2026-08-26T14:02:00.000Z';
     seedTenant(world, { type: 'unknown', status: 'needs_review' });
     await Promise.all([
-      world.aiRuns.putRun(pendingTypeRun('run-race-a', createdAtA)),
-      world.aiRuns.putRun(pendingTypeRun('run-race-b', createdAtB)),
-      world.aiRuns.putRun(pendingTypeRun('run-race-c', createdAtC)),
+      world.aiRuns.putRun(pendingTypeRun('run-race-a', createdAtA, 'tenant')),
+      world.aiRuns.putRun(pendingTypeRun('run-race-b', createdAtB, 'landlord')),
+      world.aiRuns.putRun(pendingTypeRun('run-race-c', createdAtC, 'partner')),
     ]);
     await world.extractionRepo.putSuggestion({
       ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-race-a',
@@ -2076,13 +2098,13 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     world.suggestionHooks.beforeDeleteTypeSuggestion = async () => {
       deleteBoundary += 1;
       if (deleteBoundary === 1) {
-        await world.extractionRepo.putSuggestion({
+        await replaceTypeSuggestionFromExtraction(world, {
           ownerContactId: 'c1', target: 'type', suggestedValue: 'landlord', conversationId: 'conv-race-b',
           runId: 'run-race-b', contactClassificationRevision: 0, createdAt: createdAtB,
         });
       }
       if (deleteBoundary === 2) {
-        await world.extractionRepo.putSuggestion({
+        await replaceTypeSuggestionFromExtraction(world, {
           ownerContactId: 'c1', target: 'type', suggestedValue: 'partner', conversationId: 'conv-race-c',
           runId: 'run-race-c', contactClassificationRevision: 0, createdAt: createdAtC,
         });
@@ -2104,12 +2126,27 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     const today = await request(app).get('/api/today')
       .set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).expect(200);
     expect(today.body.items).not.toContainEqual(expect.objectContaining({ group: 'ai_suggestions', refId: 'c1' }));
-    expect((await world.aiRuns.getRun('run-race-c'))?.decisions.type).toMatchObject({
-      outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+    expect((await world.aiRuns.getRun('run-race-a'))?.decisions.type).toMatchObject({
+      proposedValue: 'tenant', outcome: 'suggested', verdict: 'superseded',
     });
-    expect(setVerdict).toHaveBeenCalledWith('run-race-c', 'type', 'superseded_by_human_edit', expect.objectContaining({
-      by: ACTOR, freshSuggestionCreatedAt: createdAtC, expectedVerdict: 'pending',
+    expect((await world.aiRuns.getRun('run-race-b'))?.decisions.type).toMatchObject({
+      proposedValue: 'landlord', outcome: 'suggested', verdict: 'superseded',
+    });
+    expect((await world.aiRuns.getRun('run-race-c'))?.decisions.type).toMatchObject({
+      proposedValue: 'partner', outcome: 'suggested', verdict: 'superseded_by_human_edit', verdictBy: ACTOR,
+    });
+    expect(setVerdict).toHaveBeenCalledWith('run-race-a', 'type', 'superseded', expect.objectContaining({
+      at: expect.any(String), expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAtA,
     }));
+    expect(setVerdict).toHaveBeenCalledWith('run-race-b', 'type', 'superseded', expect.objectContaining({
+      at: expect.any(String), expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAtB,
+    }));
+    expect(setVerdict).toHaveBeenCalledWith('run-race-c', 'type', 'superseded_by_human_edit', expect.objectContaining({
+      at: expect.any(String), by: ACTOR, freshSuggestionCreatedAt: createdAtC, expectedVerdict: 'pending',
+    }));
+    const cVerdictOptions = setVerdict.mock.calls.find(([runId]) => runId === 'run-race-c')?.[3];
+    expect((await world.aiRuns.getRun('run-race-c'))?.decisions.type?.verdictAt)
+      .toBe(cVerdictOptions?.at);
   });
 
   it('banks the real PATCH superseded verdict during finalization and merges it into the pending type run', async () => {

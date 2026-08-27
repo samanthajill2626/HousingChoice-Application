@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App.js';
+import { ImageViewerProvider } from './ui/imageViewer/ImageViewerProvider.js';
 import './index.css';
 
 const container = document.getElementById('root');
@@ -14,7 +15,9 @@ if (container === null) {
 createRoot(container).render(
   <StrictMode>
     <BrowserRouter>
-      <App />
+      <ImageViewerProvider>
+        <App />
+      </ImageViewerProvider>
     </BrowserRouter>
   </StrictMode>,
 );

@@ -299,6 +299,15 @@ describe('route registry completeness', () => {
     expect(ROUTES.filter((route) => route.behaviorFamily !== 'inbox').every((route) => route.pathTemplate === route.surfaceId)).toBe(true);
   });
 
+  // TWO empty alternatives per inbox surface, and ALL FOUR carry the second one
+  // (ruling 2026-08-26). `Nothing on this page yet` is what the dashboard
+  // renders for a page that came back with NO rows and a cursor - see
+  // `inboxTerminal` in routes.ts and `emptyMoreCopy` in
+  // dashboard/src/routes/inbox/inboxFilters.ts. Only `inbox-unknown` can reach
+  // it on today's perf seed, but pinning it on all four is the safe direction:
+  // over-pinning a reachable state costs nothing, while under-pinning turns a
+  // copy regression into an unexplained `ready_timeout`. routes.ts and this
+  // table move together.
   it('registers each Inbox filter as an exact independently-ranked surface', () => {
     expect(ROUTES.filter((route) => route.behaviorFamily === 'inbox').map((route) => ({
       surfaceId: route.surfaceId,
@@ -312,25 +321,25 @@ describe('route registry completeness', () => {
         surfaceId: 'inbox-all', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox' },
         sourceTarget: { path: '/', query: { kind: 'absent' } },
         action: { kind: 'link', href: '/inbox' },
-        terminal: ['No conversations yet'],
+        terminal: ['No conversations yet', 'Nothing on this page yet'],
       },
       {
         surfaceId: 'inbox-unread', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unread' },
         sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Unread' },
-        terminal: ["You're all caught up"],
+        terminal: ["You're all caught up", 'Nothing on this page yet'],
       },
       {
         surfaceId: 'inbox-unknown', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unknown' },
         sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Unknown' },
-        terminal: ['No unknown numbers'],
+        terminal: ['No unknown numbers', 'Nothing on this page yet'],
       },
       {
         surfaceId: 'inbox-groups', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=groups' },
         sourceTarget: { path: '/inbox', query: { kind: 'absent' } },
         action: { kind: 'tab', name: 'Groups' },
-        terminal: ['No group texts yet'],
+        terminal: ['No group texts yet', 'Nothing on this page yet'],
       },
     ]);
   });

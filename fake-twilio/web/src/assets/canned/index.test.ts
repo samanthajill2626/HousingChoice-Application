@@ -7,7 +7,12 @@ import { cannedAssets, cannedLabelFor, isImageAsset } from './index.js';
 // picking a canned image errored the send. They are now committed PNG/PDF static
 // files at real, absolute http(s) URLs the guard accepts, the inbound mirror can
 // fetch, and the dashboard's allowlist (raster + PDF) renders.
-const EXT: Record<string, string> = { room: 'png', kitchen: 'png', 'lease-doc': 'pdf' };
+const EXT: Record<string, string> = {
+  room: 'png',
+  kitchen: 'png',
+  'lease-doc': 'pdf',
+  'contact-card': 'vcf',
+};
 
 describe('canned assets', () => {
   test('every asset url is an absolute http(s) URL (not a data: URI)', () => {
@@ -21,10 +26,13 @@ describe('canned assets', () => {
     }
   });
 
-  test('asset types are raster images except the lease-doc PDF', () => {
+  test('asset types are raster images except the document fixtures', () => {
     expect(isImageAsset(cannedAssets.find((a) => a.id === 'room')!.url)).toBe(true);
     expect(isImageAsset(cannedAssets.find((a) => a.id === 'kitchen')!.url)).toBe(true);
     expect(isImageAsset(cannedAssets.find((a) => a.id === 'lease-doc')!.url)).toBe(false);
+    // The vCard is a DOCUMENT: no <img> thumbnail, and the dashboard renders the
+    // mirrored attachment as a named file link rather than inline.
+    expect(isImageAsset(cannedAssets.find((a) => a.id === 'contact-card')!.url)).toBe(false);
   });
 
   test('cannedLabelFor resolves a known url back to its label, else falls back', () => {

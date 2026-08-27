@@ -118,6 +118,29 @@ function makeScrollable(element: HTMLElement, top: number, left: number): void {
   element.scrollLeft = left;
 }
 
+function isInsideInertTree(element: HTMLElement | null): boolean {
+  if (element === null) return false;
+  return element.inert || isInsideInertTree(element.parentElement);
+}
+
+function installInertAwareFocus(): () => void {
+  const nativeFocus = HTMLElement.prototype.focus;
+  const focus = vi
+    .spyOn(HTMLElement.prototype, 'focus')
+    .mockImplementation(function inertAwareFocus(
+      this: HTMLElement,
+      options?: FocusOptions,
+    ): void {
+      if (isInsideInertTree(this)) return;
+      const portal = document.body.querySelector<HTMLElement>(
+        '[data-image-viewer-portal="true"]',
+      );
+      if (portal !== null && !portal.contains(this)) return;
+      nativeFocus.call(this, options);
+    });
+  return () => focus.mockRestore();
+}
+
 async function traverseHistory(direction: 'back' | 'forward'): Promise<void> {
   await act(async () => {
     const popped = new Promise<void>((resolve) => {
@@ -159,6 +182,25 @@ afterEach(() => {
 });
 
 describe('ImageViewerProvider lifecycle', () => {
+  it('releases background inertness before restoring focus to the trigger', async () => {
+    seedEntry();
+    const { root } = renderHarness();
+    const restoreFocus = installInertAwareFocus();
+
+    try {
+      const { trigger } = await openViewer();
+      expect(root.inert).toBe(true);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(root.inert).toBe(false);
+      expect(trigger).toHaveFocus();
+    } finally {
+      restoreFocus();
+    }
+  });
+
   it('opens one same-URL media portal, preserves opaque state, and restores exact inert values', async () => {
     seedEntry({ from: 'inbox', selectedTab: 'comms' });
     const { root, siblingPortal } = renderHarness();

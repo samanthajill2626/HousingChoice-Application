@@ -68,6 +68,7 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
   const dismissRequestedRef = useRef(new Set<string>());
   const normalizedMarkersRef = useRef(new Set<string>());
   const previousActiveRef = useRef<ActiveViewer | undefined>(undefined);
+  const releasePortalRef = useRef<(() => void) | undefined>(undefined);
   const [portalNode] = useState(() => {
     const node = document.createElement('div');
     node.dataset.imageViewerPortal = 'true';
@@ -167,6 +168,7 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
     if (previous === undefined) return;
     previousActiveRef.current = undefined;
     if (location.key !== previous.marker.returnLocationKey) return;
+    releasePortalRef.current?.();
     restoreScrollOwners(previous.entry.scroll);
     if (previous.entry.trigger.isConnected) {
       previous.entry.trigger.focus({ preventScroll: true });
@@ -186,9 +188,18 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
       .map((element) => ({ element, inert: element.inert }));
     for (const snapshot of snapshots) snapshot.element.inert = true;
 
-    return () => {
+    let released = false;
+    const releasePortal = (): void => {
+      if (released) return;
+      released = true;
       for (const snapshot of snapshots) snapshot.element.inert = snapshot.inert;
       portalNode.remove();
+    };
+    releasePortalRef.current = releasePortal;
+
+    return () => {
+      releasePortal();
+      if (releasePortalRef.current === releasePortal) releasePortalRef.current = undefined;
     };
   }, [activeToken, portalNode]);
 

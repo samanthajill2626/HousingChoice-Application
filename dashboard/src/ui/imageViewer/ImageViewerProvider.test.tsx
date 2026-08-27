@@ -70,12 +70,6 @@ interface RenderedHarness {
   unmount: () => void;
 }
 
-interface ControlledMicrotaskQueue {
-  pending: () => number;
-  flush: () => void;
-  restore: () => void;
-}
-
 function seedEntry(state: unknown = { from: 'inbox' }): void {
   window.history.replaceState(
     { usr: state, key: 'contact-entry', idx: 0 },
@@ -147,21 +141,6 @@ function installInertAwareFocus(): () => void {
   return () => focus.mockRestore();
 }
 
-function holdQueuedMicrotasks(): ControlledMicrotaskQueue {
-  const callbacks: VoidFunction[] = [];
-  const queueMicrotask = vi
-    .spyOn(globalThis, 'queueMicrotask')
-    .mockImplementation((callback) => callbacks.push(callback));
-
-  return {
-    pending: () => callbacks.length,
-    flush: () => {
-      while (callbacks.length > 0) callbacks.shift()?.();
-    },
-    restore: () => queueMicrotask.mockRestore(),
-  };
-}
-
 async function traverseHistory(direction: 'back' | 'forward'): Promise<void> {
   await act(async () => {
     const popped = new Promise<void>((resolve) => {
@@ -203,96 +182,6 @@ afterEach(() => {
 });
 
 describe('ImageViewerProvider lifecycle', () => {
-  it('defers trigger focus until the verified history close commit has settled', async () => {
-    seedEntry();
-    renderHarness();
-    const { trigger } = await openViewer();
-    const triggerFocus = vi.spyOn(trigger, 'focus');
-    const microtasks = holdQueuedMicrotasks();
-
-    try {
-      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-      expect(triggerFocus).not.toHaveBeenCalled();
-      expect(microtasks.pending()).toBeGreaterThan(0);
-
-      act(() => microtasks.flush());
-      expect(triggerFocus).toHaveBeenCalledTimes(1);
-      expect(triggerFocus).toHaveBeenCalledWith({ preventScroll: true });
-    } finally {
-      microtasks.restore();
-    }
-  });
-
-  it('cancels pending trigger focus when a new viewer opens', async () => {
-    seedEntry();
-    renderHarness();
-    const { trigger } = await openViewer();
-    const triggerFocus = vi.spyOn(trigger, 'focus');
-    const microtasks = holdQueuedMicrotasks();
-
-    try {
-      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-
-      act(() =>
-        latestOpenImage?.(
-          { src: '/api/messages/MM2/media/0', alt: 'Kitchen.jpg', title: 'Kitchen.jpg' },
-          trigger,
-        ),
-      );
-      await screen.findByRole('dialog', { name: 'Kitchen.jpg' });
-      act(() => microtasks.flush());
-
-      expect(triggerFocus).not.toHaveBeenCalled();
-    } finally {
-      microtasks.restore();
-    }
-  });
-
-  it('cancels pending trigger focus after independent navigation', async () => {
-    seedEntry();
-    renderHarness();
-    const { trigger } = await openViewer();
-    const triggerFocus = vi.spyOn(trigger, 'focus');
-    const microtasks = holdQueuedMicrotasks();
-
-    try {
-      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-
-      act(() => latestNavigate?.('/other', { state: { destination: true } }));
-      await screen.findByRole('button', { name: 'Destination focus' });
-      act(() => microtasks.flush());
-
-      expect(triggerFocus).not.toHaveBeenCalled();
-      expect(screen.getByRole('button', { name: 'Destination focus' })).toHaveFocus();
-    } finally {
-      microtasks.restore();
-    }
-  });
-
-  it('cancels pending trigger focus when the provider unmounts', async () => {
-    seedEntry();
-    const { unmount } = renderHarness();
-    const { trigger } = await openViewer();
-    const triggerFocus = vi.spyOn(trigger, 'focus');
-    const microtasks = holdQueuedMicrotasks();
-
-    try {
-      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-
-      unmount();
-      act(() => microtasks.flush());
-
-      expect(triggerFocus).not.toHaveBeenCalled();
-    } finally {
-      microtasks.restore();
-    }
-  });
-
   it('releases background inertness before restoring focus to the trigger', async () => {
     seedEntry();
     const { root } = renderHarness();

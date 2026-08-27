@@ -384,6 +384,11 @@ describe('prompt builders', () => {
       'only when other current-transcript evidence establishes the caller seeks housing for themselves or their household',
     );
     expect(mentionedCaseworkerLine).toContain('This sentence alone -> none');
+    const representedClientLine = sys.split('\n')
+      .find((line) => line.includes('I am calling about a client'));
+    expect(representedClientLine).toContain(
+      'unless other current-transcript evidence clearly establishes an outside service, program, or navigation role',
+    );
     expect(sys).toContain('value "none"');
   });
 

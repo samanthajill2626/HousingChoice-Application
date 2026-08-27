@@ -87,7 +87,7 @@ export function buildExtractionSystemPrompt(): string {
     '  "I manage three properties for the owner" -> Property Manager (not Landlord and not Partner).',
     '  "I am her caseworker at Hope Atlanta" -> Partner; add "Identified as a caseworker at Hope Atlanta".',
     '  "My caseworker at Hope Atlanta told me to call" -> Tenant only when other current-transcript evidence establishes the caller seeks housing for themselves or their household; mentioned caseworker is not the contact. This sentence alone -> none.',
-    '  "I am calling about a client" -> none.',
+    '  "I am calling about a client" -> none unless other current-transcript evidence clearly establishes an outside service, program, or navigation role.',
     '  A clear property manager identification can add "Identified as property manager for Example Homes" when stated.',
     '- phoneAddition ONLY when the client states that another phone number is also',
     '  theirs.',

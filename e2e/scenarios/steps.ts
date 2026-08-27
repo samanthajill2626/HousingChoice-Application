@@ -230,11 +230,22 @@ export const REMINDER_BODY_MARKERS: Record<ReminderKind, string> = {
 
 /** The staff-facing rung labels the Reminders panel renders (verbatim mirror of
  *  dashboard REMINDER_KIND_LABELS) — the pinned accessible-name contract for the
- *  scheduled-message-visibility Part A panel assertions. */
+ *  scheduled-message-visibility Part A panel assertions.
+ *
+ *  VERBATIM MIRROR - it must move in LOCKSTEP with
+ *  dashboard/src/api/types.ts REMINDER_KIND_LABELS. Nothing in the build
+ *  enforces the agreement: the harness never imports the dashboard map, and
+ *  these strings are only ever used as Playwright text filters, so a drifted
+ *  value does not fail to compile - it silently matches NOTHING and the
+ *  failure surfaces as a rung "missing" from the panel.
+ *
+ *  morning_of relabelled 'Morning of' -> '4 hours before' on 2026-08-26: the
+ *  rung now fires at scheduledAt - 4h. The persisted ReminderKind is
+ *  unchanged (renaming it would orphan in-flight rows). */
 export const REMINDER_KIND_LABELS: Record<ReminderKind, string> = {
   confirmation: 'Confirmation',
   day_before: 'Day before',
-  morning_of: 'Morning of',
+  morning_of: '4 hours before',
   en_route: 'En route',
   no_show_checkin: 'No-show check-in',
 };
@@ -3436,6 +3447,18 @@ export class Scenario {
    * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS); after a
    * reschedule a label can appear twice (an old canceled row + a fresh armed one),
    * so the state filter is what disambiguates.
+   *
+   * COLLISION PROFILE, changed 2026-08-26. `hasText` is a SUBSTRING match over
+   * the WHOLE listitem, which carries the label, the state chip, the
+   * suppression note AND the composed body. The old morning_of label
+   * 'Morning of' was shaped so that no body could contain it; its replacement
+   * '4 hours before' is prose-shaped and could. Verified at the relabel: no
+   * tour.* catalog default contains the substring "hour" at all (zero hits),
+   * and no chip or skip-reason label renders "4 hours" (the nearest is
+   * roster_unavailable's "gave up after an hour"). If a future copy edit
+   * introduces an hours phrase into a reminder body, this filter starts
+   * matching the WRONG row - narrow it to the label element rather than
+   * renaming the label back.
    */
   expectReminderRung(
     kind: ReminderKind,

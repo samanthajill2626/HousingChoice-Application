@@ -345,7 +345,7 @@ test('(3) Send now: a human send goes out immediately, even inside the quiet win
   // ...and Send now overrides exactly that: human sends bypass quiet hours AND
   // the pause - the whole point of leaving a held-back rung pending.
   // Per-rung accessible name (worklist A10) - a bare "Send now" would collide.
-  await row.getByRole('button', { name: 'Send Day before reminder now' }).click();
+  await row.getByRole('button', { name: 'Send the Day before reminder now' }).click();
 
   await flow.expectReminderTo1to1('day_before', tenant);
   await flow.expectReminderRung('day_before', 'sent');

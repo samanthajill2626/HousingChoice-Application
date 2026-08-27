@@ -1243,7 +1243,9 @@ export interface TourRemindersPage {
 export const REMINDER_KIND_LABELS: Readonly<Record<ReminderKind, string>> = {
   confirmation: 'Confirmation',
   day_before: 'Day before',
-  morning_of: 'Morning of',
+  // Relabelled 2026-08-26: the rung fires at scheduledAt - 4h;
+  // the persisted kind keeps its name (in-flight rows).
+  morning_of: '4 hours before',
   en_route: 'En route',
   no_show_checkin: 'No-show check-in',
 };

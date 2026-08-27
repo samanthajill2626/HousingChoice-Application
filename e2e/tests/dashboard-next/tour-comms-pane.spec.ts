@@ -38,8 +38,8 @@
 //     Upcoming region AND the right-pane Reminders card, and both carry the
 //     same rung bodies.
 //   - The send button is always { name: 'Send', exact: true } - a bare 'Send'
-//     substring-matches the pane's "Send email" and the per-rung "Send <Kind>
-//     reminder now" buttons.
+//     substring-matches the pane's "Send email" and the per-rung
+//     "Send the <Kind label> reminder now" buttons.
 //   - Never page.reload() on a tour page mid-assertion: a reload re-runs the
 //     initial-tab rule (Group when a group exists) and silently drops you off
 //     the tab under test. The retries below re-navigate and re-assert the tab.

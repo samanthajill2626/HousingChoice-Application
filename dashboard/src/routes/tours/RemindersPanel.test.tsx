@@ -204,8 +204,8 @@ describe('RemindersPanel', () => {
       next,
     } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
-    await waitFor(() => expect(screen.getByText('Morning of')).toBeInTheDocument());
-    const nextRow = screen.getByText('Morning of').closest('li');
+    await waitFor(() => expect(screen.getByText('4 hours before')).toBeInTheDocument());
+    const nextRow = screen.getByText('4 hours before').closest('li');
     expect(nextRow).not.toBeNull();
     expect(nextRow).toHaveAttribute('aria-current', 'step');
     expect(within(nextRow as HTMLElement).getByText('Next')).toBeInTheDocument();
@@ -283,7 +283,7 @@ describe('RemindersPanel', () => {
     } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
     await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /Send Day before reminder now/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Send the Day before reminder now/i })).toBeEnabled();
   });
 
   it('surfaces a fetch error via role="alert"', async () => {
@@ -440,13 +440,13 @@ describe('RemindersPanel — dueAt-anchored self-refetch', () => {
     patchTourReminder.mockResolvedValue(rung({ reminderId: 'r-c', state: 'canceled' }));
 
     render(<RemindersPanel tourId="tour-1" />);
-    const cancelBtn = await screen.findByRole('button', { name: 'Cancel Day before reminder' });
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel the Day before reminder' });
     cancelBtn.click();
     await waitFor(() =>
       expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'r-c', true),
     );
     // The post-PATCH refetch shows the canceled chip + a Restore action.
-    const restoreBtn = await screen.findByRole('button', { name: 'Restore Day before reminder' });
+    const restoreBtn = await screen.findByRole('button', { name: 'Restore the Day before reminder' });
     expect(screen.getByText('Canceled')).toBeInTheDocument();
 
     patchTourReminder.mockClear();
@@ -455,7 +455,7 @@ describe('RemindersPanel — dueAt-anchored self-refetch', () => {
     await waitFor(() =>
       expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'r-c', false),
     );
-    await screen.findByRole('button', { name: 'Cancel Day before reminder' });
+    await screen.findByRole('button', { name: 'Cancel the Day before reminder' });
   });
 
   it('a sent rung offers NO cancel/restore action', async () => {
@@ -538,7 +538,7 @@ describe('RemindersPanel - Send now', () => {
 
     // Accessible name disambiguates the rung (A10) - a bare "Send now" repeated
     // per rung would be a strict-mode violation for the e2e harness.
-    await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    await screen.findByRole('button', { name: 'Send the Day before reminder now' });
     expect(screen.getAllByRole('button', { name: /reminder now$/ })).toHaveLength(1);
     // Visible text stays short.
     expect(screen.getByText('Send now')).toBeInTheDocument();
@@ -562,7 +562,7 @@ describe('RemindersPanel - Send now', () => {
       } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
 
-    const btn = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    const btn = await screen.findByRole('button', { name: 'Send the Day before reminder now' });
     btn.click();
     await waitFor(() => expect(postReminderSendNow).toHaveBeenCalledWith('tour-1', 'r-n'));
     await waitFor(() => expect(getTourReminders).toHaveBeenCalledTimes(2));
@@ -584,7 +584,7 @@ describe('RemindersPanel - Send now', () => {
     );
     render(<RemindersPanel tourId="tour-1" />);
 
-    const btn = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    const btn = await screen.findByRole('button', { name: 'Send the Day before reminder now' });
     btn.click();
 
     const alert = await screen.findByRole('alert');
@@ -593,7 +593,7 @@ describe('RemindersPanel - Send now', () => {
     expect(alert).not.toHaveTextContent('contact_opted_out');
     // The list must NOT be replaced by the error (the fetch-error path does that).
     expect(screen.getByText('Day before')).toBeInTheDocument();
-    const again = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    const again = await screen.findByRole('button', { name: 'Send the Day before reminder now' });
     expect((again as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -608,7 +608,7 @@ describe('RemindersPanel - Send now', () => {
     );
     render(<RemindersPanel tourId="tour-1" />);
 
-    (await screen.findByRole('button', { name: 'Send Day before reminder now' })).click();
+    (await screen.findByRole('button', { name: 'Send the Day before reminder now' })).click();
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/restore them to send/i);
@@ -625,7 +625,7 @@ describe('RemindersPanel - Send now', () => {
     postReminderSendNow.mockRejectedValue(new ApiError(409, 'wat_is_this', 'wat_is_this'));
     render(<RemindersPanel tourId="tour-1" />);
 
-    (await screen.findByRole('button', { name: 'Send Day before reminder now' })).click();
+    (await screen.findByRole('button', { name: 'Send the Day before reminder now' })).click();
     const alert = await screen.findByRole('alert');
     expect(alert).not.toHaveTextContent('wat_is_this');
     expect(alert).toHaveTextContent(/try again/i);
@@ -648,7 +648,7 @@ describe('RemindersPanel - Send now', () => {
     // sendable by hand.
     expect(screen.getByText('Day before')).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: 'Send Day before reminder now' }),
+      screen.getByRole('button', { name: 'Send the Day before reminder now' }),
     ).toBeInTheDocument();
   });
 });

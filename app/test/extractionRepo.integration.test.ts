@@ -238,6 +238,30 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
     await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(absentRun, 0))
       .resolves.toBe('deleted');
 
+    const presentRunContact = await contacts.create({ type: 'unknown' });
+    const presentRun = await putLegacyTypeSuggestion(
+      presentRunContact.contactId,
+      '2026-08-26T01:00:30.000Z',
+      { runId: 'run-exact' },
+    );
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(presentRun, 0))
+      .resolves.toBe('deleted');
+
+    const presentRunMismatchContact = await contacts.create({ type: 'unknown' });
+    const presentRunIdentity = await putLegacyTypeSuggestion(
+      presentRunMismatchContact.contactId,
+      '2026-08-26T01:00:45.000Z',
+      { runId: 'run-original' },
+    );
+    await putLegacyTypeSuggestion(
+      presentRunMismatchContact.contactId,
+      '2026-08-26T01:00:45.000Z',
+    );
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(presentRunIdentity, 0))
+      .resolves.toBe('suggestion_changed_or_absent');
+    expect((await repo.getSuggestion(presentRunMismatchContact.contactId, 'type'))?.runId)
+      .toBeUndefined();
+
     const runMismatchContact = await contacts.create({ type: 'unknown' });
     const absentRunIdentity = await putLegacyTypeSuggestion(
       runMismatchContact.contactId,

@@ -57,12 +57,23 @@
 //
 // The WRONG-ACCOUNT half of that hazard is closed with evidence the scan
 // already parses: every stored Twilio media URL embeds the account SID that
-// owns it, so `expectedAccountSid` compares it against the configured account
-// and the FIRST mismatch ABORTS - the same semantics as an auth failure, never
-// a skip counter. `TWILIO_API_BASE_URL` is refused outright by the CLI for the
-// same reason: it redirects every REST call, media metadata included, so a
-// shell that still carries the fake-Twilio override would read a fake account
-// and report retention loss for the whole population.
+// owns it, so `expectedAccountSid` compares it against the configured account.
+// TWO OUTCOMES, and the split matters. A row whose URL names another account is
+// a FOREIGN row - a message imported from another platform - and is counted
+// (`skippedForeignAccount`) and left alone, because a first-mismatch abort
+// would let one permanently-unrepairable imported row wedge every future run.
+// A run in which EVERY account-bearing candidate mismatched is instead the
+// systemic shape - credentials for the wrong company - and THROWS at the end of
+// the scan, with the same semantics as an auth failure. Note what this guard
+// can no longer do: dev and prod share ONE Twilio account (separate Messaging
+// Services are what differ), so a mismatch never means "wrong environment".
+// Pointing at the wrong ENVIRONMENT is a TABLE_PREFIX/MEDIA_BUCKET mistake, and
+// the start-of-run log line names both so an operator can check.
+//
+// `TWILIO_API_BASE_URL` and `MEDIA_S3_ENDPOINT` are refused outright by the CLI
+// for the same green-exit reason: each redirects one of the two live systems
+// this script touches, so a shell still carrying an e2e/dev override would work
+// against a fake while reporting on the real one.
 //
 // PII: logs COUNTS and IDs only - never a filename, a media URL, a body or a
 // phone number.
@@ -142,6 +153,14 @@ export interface BackfillResult {
    *  unknown types). Storing it would change nothing and serving it inline is
    *  exactly the stored-XSS hole the allowlist exists to close. */
   skippedStillOpaque: number;
+  /** The stored media URL belongs to a DIFFERENT Twilio account than the
+   *  configured one - e.g. a row imported from another platform (the Quo-era
+   *  import) whose `mediaUrls` still point at that platform's Twilio account.
+   *  Counted and LEFT ALONE: no vendor call is made for it, because the
+   *  configured credentials could only 404 on another account's media SID and
+   *  that 404 would be miscounted as retention loss. Never repairable by this
+   *  script; a steady non-zero value is expected wherever such rows exist. */
+  skippedForeignAccount: number;
   /** ROW-level: an inbound row carrying attachments but no `mediaUrls` - an
    *  inbound EMAIL. There is no Twilio media behind it; counted separately so
    *  it does not inflate the histogram the ops decision reads. Counted on EVERY
@@ -170,11 +189,13 @@ export interface BackfillMediaContentTypesOpts {
    *  rows and the message row. */
   messagesRepo: Pick<MessagesRepo, 'getByTsMsgId' | 'putMediaPointers' | 'annotateMessage'>;
   /** The Twilio account the injected adapter is credentialed for. When given,
-   *  every candidate's media URL must name THAT account and the first mismatch
-   *  ABORTS the run. Omitted by the suite (whose fake adapter answers for any
-   *  account); the CLI always passes `config.twilioAccountSid`, so every ops run
-   *  is guarded. See `main` for why a wrong-account run is otherwise a silent
-   *  green exit. */
+   *  a candidate whose media URL names a DIFFERENT account is counted as
+   *  `skippedForeignAccount` and left alone, and a run in which EVERY
+   *  account-bearing candidate mismatched throws at the end - the systemic
+   *  wrong-credentials shape. Omitted by the suite (whose fake adapter answers
+   *  for any account); the CLI always passes `config.twilioAccountSid`, so every
+   *  ops run is guarded. See `main` for why a wrong-credential run is otherwise
+   *  a silent green exit. */
   expectedAccountSid?: string;
   /** Read + report, write NOTHING. Twilio is still read. */
   dryRun?: boolean;
@@ -257,15 +278,19 @@ const defaultSleep = (ms: number): Promise<void> =>
  * with fakes and needs neither AWS nor Twilio. The misconfiguration guard lives
  * in the CLI wrapper rather than here for exactly that reason - several tests
  * legitimately recover nothing.
+ *
+ * A THROWN RUN STILL REPORTS. The counters are accumulated into a report this
+ * wrapper owns, so an S3 permission failure, a vendor error or the wrong-
+ * credentials backstop below all log what HAD already been done before the
+ * abort, then rethrow. Without that the operator gets a stack trace and zero
+ * numbers - and the one failure the RUNBOOK's IAM bullet is about (`s3:PutObject`
+ * missing, which aborts on the FIRST attachment and which a dry run cannot
+ * pre-detect, because dry runs skip both write halves) would say nothing about
+ * what committed.
  */
 export async function backfillMediaContentTypes(
   opts: BackfillMediaContentTypesOpts,
 ): Promise<BackfillResult> {
-  const { doc, adapter, mediaStore, messagesRepo, expectedAccountSid } = opts;
-  const dryRun = opts.dryRun === true;
-  const sleep = opts.sleep ?? defaultSleep;
-  const table = tableName('messages', opts.env ?? process.env);
-
   const result: BackfillResult = {
     rowsScanned: 0,
     eligible: 0,
@@ -276,10 +301,43 @@ export async function backfillMediaContentTypes(
     skippedTwilio404: 0,
     skippedThrottled: 0,
     skippedStillOpaque: 0,
+    skippedForeignAccount: 0,
     skippedEmailRow: 0,
     skippedLegacyRow: 0,
     vendorCalls: 0,
   };
+  try {
+    await scanAndRepair(opts, result);
+  } catch (err) {
+    // PII: counts and IDs only, exactly as the success report is.
+    logger.error(
+      { ...result },
+      'backfill:media-content-types - PARTIAL result: the run ABORTED, and these counters cover only what completed before the failure. Re-runnable - see the error below.',
+    );
+    throw err;
+  }
+  return result;
+}
+
+/** The scan/repair loop itself. Accumulates into the caller's `result` so a
+ *  throw does not take the counters with it (see the wrapper above). */
+async function scanAndRepair(
+  opts: BackfillMediaContentTypesOpts,
+  result: BackfillResult,
+): Promise<void> {
+  const { doc, adapter, mediaStore, messagesRepo, expectedAccountSid } = opts;
+  const dryRun = opts.dryRun === true;
+  const sleep = opts.sleep ?? defaultSleep;
+  const table = tableName('messages', opts.env ?? process.env);
+
+  // END-OF-RUN WRONG-CREDENTIALS BACKSTOP, accumulated ACROSS pages. A single
+  // foreign row must not wedge the population (that is the import case, and it
+  // is permanent), but a shell whose credentials are for the wrong company/
+  // account is systemic and has a distinct shape: EVERY candidate that carries
+  // an account SID at all disagrees with the configured one. See the throw
+  // after the scan loop.
+  let nativeAccountCandidates = 0;
+  let firstForeignAccountSid: string | undefined;
 
   /**
    * One Twilio metadata read, retried through a throttle. The adapter returns
@@ -440,19 +498,29 @@ export async function backfillMediaContentTypes(
           result.skippedNoUrl += 1;
           continue;
         }
-        // WRONG-ACCOUNT ABORT. Every prod media SID 404s on a dev credential,
-        // so a shell carrying the other environment's TWILIO_* values reports
-        // "all aged out", writes nothing and exits green. The stored URL names
-        // the owning account, so that outcome is detectable before the first
-        // vendor call - and it is an AUTH-CLASS failure, so it throws rather
-        // than incrementing a counter nobody would read as a stop sign.
+        // FOREIGN-ACCOUNT SKIP, and it is a SKIP rather than an abort on
+        // purpose. Dev and prod share ONE Twilio account here (separate
+        // Messaging Services are what differ), so a mismatch cannot mean "wrong
+        // environment"; what it does mean is a row whose stored media URL
+        // belongs to somebody else's account - a message imported from another
+        // platform, whose `mediaUrls` still point at that platform's Twilio.
+        // Those are permanent. Aborting on the FIRST one would let a single
+        // imported row wedge every future run over the whole remaining
+        // population, so it is counted, left alone, and never queried: the
+        // configured credentials can only 404 on another account's media SID,
+        // and that 404 would be miscounted as retention loss.
+        //
+        // The SYSTEMIC case - credentials for the wrong company entirely - is
+        // caught by the end-of-run backstop below, which fires only when NO
+        // account-bearing candidate matched.
         if (expectedAccountSid !== undefined) {
           const accountSid = parseAccountSid(url);
           if (accountSid !== undefined && accountSid !== expectedAccountSid) {
-            throw new Error(
-              `backfill:media-content-types - REFUSING to continue: stored media belongs to Twilio account ${accountSid} but the configured account is ${expectedAccountSid}. The credentials point at the WRONG ENVIRONMENT; every media read would 404 and be miscounted as retention loss.`,
-            );
+            result.skippedForeignAccount += 1;
+            firstForeignAccountSid ??= accountSid;
+            continue;
           }
+          if (accountSid !== undefined) nativeAccountCandidates += 1;
         }
         candidates.push({
           row,
@@ -535,7 +603,30 @@ export async function backfillMediaContentTypes(
     exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (exclusiveStartKey !== undefined);
 
-  return result;
+  // THE WRONG-CREDENTIALS BACKSTOP. A MIXED population is normal - imported
+  // rows point at another platform's Twilio account and are simply skipped - so
+  // only the UNIFORM shape is a stop sign: at least one candidate carried an
+  // account SID, and NOT ONE of them named the configured account. That is a
+  // credential for the wrong company, and continuing would query media SIDs
+  // this account has never held, 404 on every one of them, and report the whole
+  // population as retention loss. It throws rather than warning for the same
+  // reason an auth failure does: the alternative is a green exit that looks
+  // exactly like a completed repair.
+  //
+  // Deliberately at the END: a first-mismatch abort would let a single imported
+  // row wedge every future run permanently. The cost is that rows whose URL
+  // carries no `/Accounts/<x>/` segment at all (no evidence either way) may
+  // already have been repaired when this fires - harmless, since those repairs
+  // are exactly what a re-run would redo.
+  if (
+    expectedAccountSid !== undefined &&
+    nativeAccountCandidates === 0 &&
+    result.skippedForeignAccount > 0
+  ) {
+    throw new Error(
+      `backfill:media-content-types - REFUSING to finish: not one of the ${result.skippedForeignAccount} account-bearing media URLs scanned named the configured Twilio account ${expectedAccountSid} (the first named ${firstForeignAccountSid ?? 'another account'}). These are WRONG CREDENTIALS, not an imported row: every media read would 404 and be miscounted as retention loss.`,
+    );
+  }
 }
 
 /**
@@ -555,8 +646,13 @@ export async function backfillMediaContentTypes(
  * MESSAGING_DRIVER unset would therefore pass a credentials-only guard, get the
  * CONSOLE driver, and hit exactly the green-exit catastrophe above. Checking the
  * credentials is still worth doing (belt and braces; loadConfig already
- * fail-fasts them, plus TWILIO_AUTH_TOKEN, when the driver is twilio -
- * lib/config.ts:623-629).
+ * fail-fasts SIX twilio keys - the three below plus TWILIO_AUTH_TOKEN,
+ * TWILIO_MESSAGING_SERVICE_SID and TWILIO_CONVERSATIONS_SERVICE_SID - when the
+ * driver is twilio: lib/config.ts:623-647. It ALSO requires
+ * TWILIO_EVENTS_WEBHOOK_SECRET on every real twilio config, exempting only a
+ * shell with TWILIO_API_BASE_URL set (lib/config.ts:658-666) - which is exactly
+ * what the refusal below forbids, so an operator shell for this script must
+ * carry the events secret too. HOW_TO_FIX lists the full set.
  *
  * TWILIO_API_BASE_URL IS REFUSED OUTRIGHT, for the same green-exit reason one
  * layer along: `TwilioMessagingDriver` installs a redirecting HTTP client for
@@ -568,6 +664,19 @@ export async function backfillMediaContentTypes(
  * population as aged out. There is no legitimate reason to point an ops repair
  * of real stored media at a redirected host, so this is a refusal rather than a
  * warning.
+ *
+ * MEDIA_S3_ENDPOINT IS REFUSED FOR THE SAME REASON, and it is the more
+ * dangerous of the two because it redirects the only call that MUTATES data.
+ * `createMediaStore` -> `buildS3Client` honours it whenever NODE_ENV is not
+ * 'production' (adapters/mediaStore.ts:374-397) - which an operator `tsx` shell
+ * is not - and the explicit credentials are spread LAST, so real credentials get
+ * pointed at a local MinIO. The S3 CopyObject would then repair a LOCAL object
+ * while the pointer and row writes went to the REAL DynamoDB, clearing the
+ * re-scan predicate with the real object untouched: a silent, PERMANENT split
+ * that no later run can find, because the row no longer says octet-stream.
+ * `loadConfig` rejects the variable only under NODE_ENV=production
+ * (lib/config.ts:576-585), same posture as TWILIO_API_BASE_URL, so the refusal
+ * belongs here.
  *
  * An after-the-fact "recovered is empty" test is the WRONG predicate and is not
  * used: a fully repaired environment legitimately recovers nothing forever, and
@@ -587,11 +696,18 @@ export function messagingMisconfiguration(config: AppConfig): string | undefined
   if (config.twilioApiBaseUrl !== undefined) {
     return 'TWILIO_API_BASE_URL is set, which redirects EVERY Twilio REST call - media metadata included - away from the real account, so every attachment would read as aged out';
   }
+  if (config.mediaS3Endpoint !== undefined) {
+    return 'MEDIA_S3_ENDPOINT is set, which redirects the S3 CopyObject that rewrites the stored Content-Type at a local S3 (MinIO) while the pointer and row writes still go to the REAL DynamoDB - repairing nothing while clearing the re-scan predicate, permanently and undetectably';
+  }
   return undefined;
 }
 
+// The FULL set loadConfig demands, not just the ones this script reads:
+// loadConfig() validates the WHOLE app config at import time, so the shell needs
+// every key a real twilio config requires even though the backfill itself uses
+// only the account/API-key values, MEDIA_BUCKET and TABLE_PREFIX.
 const HOW_TO_FIX =
-  'Set MESSAGING_DRIVER=twilio and TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID (plus MEDIA_BUCKET and TABLE_PREFIX) for the TARGET environment, UNSET TWILIO_API_BASE_URL, then re-run.';
+  'Set MESSAGING_DRIVER=twilio and ALL SIX Twilio keys loadConfig requires - TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID, TWILIO_CONVERSATIONS_SERVICE_SID - plus TWILIO_EVENTS_WEBHOOK_SECRET (required on every real twilio config; the only exemption is TWILIO_API_BASE_URL, which this script refuses), plus MEDIA_BUCKET and TABLE_PREFIX for the TARGET environment. TWILIO_API_BASE_URL and MEDIA_S3_ENDPOINT must be UNSET. Then re-run.';
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes('--dry-run');
@@ -644,15 +760,35 @@ async function main(): Promise<void> {
   const adapter = createMessagingAdapter({ config });
   const messagesRepo = createMessagesRepo({ doc });
 
-  logger.info({ dryRun }, 'backfill:media-content-types - starting');
+  // NAME THE RUN TARGET. The account guard above logs only the AWS account,
+  // which is the same in dev and prod, and the Twilio account SID is now the
+  // same in both too (one account, separate Messaging Services) - so nothing in
+  // this script's scrollback used to distinguish a dev run from a prod run, and
+  // a run that scanned dev TWICE looked exactly like dev-then-prod. The
+  // environment actually lives in the TABLE and the BUCKET, so log both, plus
+  // the appEnv loadConfig derived from TABLE_PREFIX. The operator is told to
+  // read this line on the dry run before letting the apply proceed (RUNBOOK).
+  // PII: IDs and counts only, and the account SID is truncated to its first six
+  // characters - enough to tell two accounts apart, not a credential.
+  logger.info(
+    {
+      dryRun,
+      table: tableName('messages', process.env),
+      mediaBucket: config.mediaBucket,
+      appEnv: config.appEnv,
+      twilioAccountSidPrefix: config.twilioAccountSid?.slice(0, 6),
+    },
+    'backfill:media-content-types - starting. CHECK THIS LINE names the environment you intend.',
+  );
   const result = await backfillMediaContentTypes({
     doc,
     adapter,
     mediaStore,
     messagesRepo,
-    // ALWAYS passed on an ops run: the guard above proved the field is set, and
-    // this is what turns a wrong-environment credential from a silent green
-    // exit into a hard stop before the first write.
+    // ALWAYS passed on an ops run: the guard above proved the field is set.
+    // It separates FOREIGN rows (imported from another platform - counted and
+    // skipped) from WRONG CREDENTIALS (nothing matched - a hard stop), which is
+    // otherwise a silent green exit reporting the whole population as aged out.
     expectedAccountSid: config.twilioAccountSid,
     dryRun,
   });

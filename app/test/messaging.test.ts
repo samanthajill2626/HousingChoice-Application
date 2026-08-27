@@ -1066,6 +1066,20 @@ describe('TwilioMessagingDriver.getMediaContentType', () => {
     expect(await d.getMediaContentType('MM1', 'ME1')).toBeUndefined();
   });
 
+  it('treats a STRING error code as the same 404, with no status to fall back on', async () => {
+    // Twilio delivers `code` as a number or a string depending on the path -
+    // the reason adapters/groupConversations.ts:322-329 exists. On a path that
+    // sets no `status`, a strict `code === 20404` would rethrow, and the
+    // backfill would abort a whole ops run on the one outcome it has a counter
+    // for (skippedTwilio404, a documented steady state).
+    const d = driverWith(
+      callableClient(async () => {
+        throw Object.assign(new Error('gone'), { status: undefined, code: '20404' });
+      }),
+    );
+    expect(await d.getMediaContentType('MM1', 'ME1')).toBeUndefined();
+  });
+
   it('rethrows anything that is not a 404', async () => {
     // A 429 must reach the backfill so it can count throttling separately
     // from retention loss.

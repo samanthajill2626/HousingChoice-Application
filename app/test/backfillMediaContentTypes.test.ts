@@ -270,29 +270,58 @@ describe('backfillMediaContentTypes', () => {
   });
 });
 
-describe('backfillMediaContentTypes - the wrong-account abort', () => {
-  it('ABORTS on the first media URL naming another account, before any vendor call', async () => {
-    // The green-exit catastrophe: dev credentials against prod data 404 on
-    // every media SID, so the run reports "all aged out", writes nothing and
-    // exits 0 - indistinguishable from a completed repair. The stored URL names
-    // the owning account, so this is detectable with data the scan already
-    // parses, and it is an AUTH-CLASS failure: it throws, never counts.
-    const { error, getMediaContentType, setContentType, annotateMessage } = await run({
+describe('backfillMediaContentTypes - foreign accounts vs wrong credentials', () => {
+  it('SKIPS a foreign-account row and still repairs the native ones alongside it', async () => {
+    // A mismatch cannot mean "wrong environment" - dev and prod share one
+    // Twilio account. It means the row was IMPORTED from another platform and
+    // its stored media URL still points at that platform's Twilio. Those rows
+    // are permanently unrepairable, so aborting on the first one would let a
+    // single import wedge every future run over the whole remaining
+    // population. It is counted, never queried (the configured credentials
+    // could only 404 on another account's media SID, and that 404 would be
+    // miscounted as retention loss), and the run continues.
+    const foreignUrl = `https://api.twilio.com/2010-04-01/Accounts/ACquo/Messages/MM9/Media/${ME0}`;
+    const foreign = inboundRow({
+      conversationId: 'c9',
+      tsMsgId: '2026-08-01T00:00:00.000Z#MM9',
+      provider_sid: 'MM9',
+      mediaUrls: [foreignUrl],
+      media_attachments: [{ s3Key: 'media/c9/MM9/0', contentType: 'application/octet-stream' }],
+    });
+    const { result, getMediaContentType, annotateMessage } = await run({
+      rows: [foreign, inboundRow()],
+      expectedAccountSid: ACCOUNT,
+    });
+    expect(result.skippedForeignAccount).toBe(1);
+    // The foreign attachment cost no vendor call: the ONLY call is the native
+    // row's, and it names that row's message SID.
+    expect(getMediaContentType).toHaveBeenCalledTimes(1);
+    expect(getMediaContentType).toHaveBeenCalledWith('MM1', ME0);
+    // The native row was repaired, and the foreign row was never written.
+    expect(result.written).toBe(1);
+    expect(annotateMessage).toHaveBeenCalledTimes(1);
+    expect(annotateMessage).toHaveBeenCalledWith('c1', expect.any(String), expect.anything());
+  });
+
+  it('REJECTS when every account-bearing URL names another account', async () => {
+    // The systemic shape: credentials for the wrong company. Nothing matched,
+    // so continuing would 404 on every media SID and report the entire
+    // population as retention loss - a green exit indistinguishable from a
+    // completed repair. It throws, exactly as an auth failure does.
+    const { error } = await run({
       rows: [inboundRow()],
       expectedAccountSid: 'ACother',
       captureError: true,
     });
     expect(String(error)).toContain(ACCOUNT);
     expect(String(error)).toContain('ACother');
-    expect(String(error)).toMatch(/WRONG ENVIRONMENT/);
-    expect(getMediaContentType).not.toHaveBeenCalled();
-    expect(setContentType).not.toHaveBeenCalled();
-    expect(annotateMessage).not.toHaveBeenCalled();
+    expect(String(error)).toMatch(/WRONG CREDENTIALS/);
   });
 
   it('runs normally when the media URL names the configured account', async () => {
     const { result } = await run({ rows: [inboundRow()], expectedAccountSid: ACCOUNT });
     expect(result.written).toBe(1);
+    expect(result.skippedForeignAccount).toBe(0);
   });
 });
 
@@ -372,6 +401,20 @@ describe('messagingMisconfiguration', () => {
       twilioApiBaseUrl: 'http://localhost:8889',
     } as AppConfig);
     expect(reason).toMatch(/TWILIO_API_BASE_URL/);
+  });
+
+  it('REFUSES when MEDIA_S3_ENDPOINT is set', () => {
+    // TWILIO_API_BASE_URL's twin, and the worse half: it redirects the only
+    // call that MUTATES data. buildS3Client honours it whenever NODE_ENV is not
+    // production - which an operator tsx shell is not - so the CopyObject would
+    // re-type an object in a LOCAL MinIO while the pointer and row writes still
+    // went to the REAL DynamoDB. That clears the re-scan predicate with the real
+    // object untouched: a permanent split no later run can find.
+    const reason = messagingMisconfiguration({
+      ...OK,
+      mediaS3Endpoint: 'http://localhost:9000',
+    } as AppConfig);
+    expect(reason).toMatch(/MEDIA_S3_ENDPOINT/);
   });
 
   it('REFUSES the console driver first, before the credential check', () => {

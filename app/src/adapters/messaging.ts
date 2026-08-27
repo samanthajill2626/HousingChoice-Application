@@ -949,8 +949,16 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       // with code 20404; check BOTH, because the repo has already been bitten
       // by assuming one shape. Anything else (a 429 especially) RETHROWS so the
       // caller can tell throttling from retention loss.
-      const e = err as { status?: number; code?: number };
-      if (e.status === 404 || e.code === 20404) return undefined;
+      //
+      // COMPARE THE CODE STRING-TOLERANTLY: Twilio delivers `code` as a number
+      // OR a string depending on the path, which is the whole reason
+      // adapters/groupConversations.ts:322-329 exists. A strict `code === 20404`
+      // misses the string form on any path that does not ALSO set `status`, and
+      // the retention loss the backfill has a counter for would instead abort
+      // the whole ops run.
+      const e = err as { status?: number; code?: number | string };
+      const code = e.code === undefined ? undefined : Number(e.code);
+      if (e.status === 404 || code === 20404) return undefined;
       throw err;
     }
   }

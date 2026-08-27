@@ -1050,10 +1050,10 @@ Use the `classification_revision` returned by `contacts.update`, not the pre-rea
 ```ts
 const committedRevision = contactClassificationRevision(updated);
 const appliedKind = canonicalSuggestedContactKind(updated);
-const verdictAt = new Date().toISOString();
+// Reuse the existing verdictAt binding shared with generic non-type cleanup.
 ```
 
-Implement a maximum of four guarded delete attempts. If the pre-write snapshot is empty or failed, the first iteration must perform a post-write consistent point read before deciding there is nothing to drain. After every delete attempt, clear the candidate so the next iteration performs another consistent point read:
+Keep exactly one `const verdictAt = new Date().toISOString()` in the existing post-write scope and share it between the retained generic non-type loop and this type drain; do not redeclare it. Implement a maximum of four guarded delete attempts. If the pre-write snapshot is empty or failed, the first iteration must perform a post-write consistent point read before deciding there is nothing to drain. After every delete attempt, clear the candidate so the next iteration performs another consistent point read:
 
 ```ts
 let candidate = pendingTypeBefore;

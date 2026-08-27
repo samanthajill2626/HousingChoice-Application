@@ -68,7 +68,14 @@ export type ReminderSkipReason =
    *  reaches this claim-skip, because `new Date(scheduledAt).toISOString()`
    *  throws a raw RangeError straight out of the arm call first. (READ paths hit
    *  the same uncomposable rung but degrade to body:'' - they stamp nothing.) */
-  | 'invalid_schedule';
+  | 'invalid_schedule'
+  /** ARM time (spec 2026-08-26 section 8): the tour was booked (or
+   *  rescheduled/revived - `now` is the ARM instant) too close to the rung's
+   *  RAW due time for it to usefully fire. Written as a VISIBLE skipped row,
+   *  unlike the silent past-dueAt drop, so a founder who booked late sees WHY
+   *  the rung is missing instead of finding a gap. dueAt on such a row is the
+   *  CLAMPED value, like every other arm-time skip row. */
+  | 'booked_too_late';
 
 export interface TourReminderItem {
   /** PK */

@@ -1213,7 +1213,11 @@ export interface TourReminderView {
     | 'roster_unavailable'
     // The tour has no usable scheduledAt, so no body could be composed for the
     // rung - the poll retires it rather than sending a half-written text.
-    | 'invalid_schedule';
+    | 'invalid_schedule'
+    // ARM time: the tour was booked (or rescheduled) too close to this rung's
+    // raw due time for it to usefully fire, so it was born skipped as a
+    // visible trace rather than leaving a gap in the ladder.
+    | 'booked_too_late';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -1271,6 +1275,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   tenant_not_on_roster: "tenant not on this tour's roster",
   roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
+  booked_too_late: 'booked too late for this reminder',
 };
 
 /**

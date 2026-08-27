@@ -152,6 +152,31 @@ describe('RemindersPanel', () => {
     expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
   });
 
+  it('a rung skipped as booked_too_late names the reason, not a bare "Skipped"', async () => {
+    // Arm-time skip reason (spec 2026-08-26 section 8.2). Omitting the wire
+    // union member does not fail a build - the chip degrades silently to a
+    // reason-less "Skipped", which reads as a bug in the ladder rather than a
+    // missing label. This test is what catches that.
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'day_before',
+          state: 'skipped',
+          skippedAt: '2026-07-13T16:00:00Z',
+          skipReason: 'booked_too_late',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByText('Skipped - booked too late for this reminder'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Skipped')).not.toBeInTheDocument();
+  });
+
   it('an upcoming rung reads "sends in" (a reminder is sent, not "due")', async () => {
     getTourReminders.mockResolvedValue({
       // Far-future dueAt → sendRelative yields "sends in Nd".

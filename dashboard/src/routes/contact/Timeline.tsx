@@ -55,6 +55,7 @@ import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
 import { EmailComposer, type EmailComposerSendInput } from './EmailComposer.js';
 import { EmailHtmlFrame } from './EmailHtmlFrame.js';
+import { useImageViewer } from '../../ui/imageViewer/ImageViewerProvider.js';
 import styles from './Timeline.module.css';
 
 /** A send refusal → a clear, human reason. The server returns a machine-readable
@@ -624,8 +625,23 @@ function attachmentLabel(
   return kind !== undefined ? `${kind} - Attachment ${i + 1}` : `Attachment ${i + 1}`;
 }
 
+function ImageAttachmentButton({ src, label }: { src: string; label: string }): React.JSX.Element {
+  const { openImage } = useImageViewer();
+  return (
+    <button
+      type="button"
+      className={styles.mediaButton}
+      aria-label={`View ${label}`}
+      aria-haspopup="dialog"
+      onClick={(event) => openImage({ src, alt: label, title: label }, event.currentTarget)}
+    >
+      <img className={styles.mediaImg} src={src} alt={label} loading="lazy" />
+    </button>
+  );
+}
+
 /** The mirrored-attachment gallery for a message (MMS bubble AND email card).
- *  Images render inline (open full-size in a new tab); PDFs/other files are links
+ *  Renderable images open in the shared viewer; PDFs/other files are links
  *  to the authed serve endpoint. Without a derivable provider SID there's no
  *  servable URL, so it falls back to a count chip. Factored so MessageBubble and
  *  EmailCard render attachments identically. `stopPropagation` keeps opening media
@@ -646,22 +662,8 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
       {attachments.map((att, i) => {
         const src = messageMediaSrc(sid, i);
         if (isInlineRenderable(att.contentType)) {
-          return (
-            <a
-              key={i}
-              className={styles.mediaLink}
-              href={src}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                className={styles.mediaImg}
-                src={src}
-                alt={attachmentLabel(att.filename, att.contentType, false, i)}
-                loading="lazy"
-              />
-            </a>
-          );
+          const label = attachmentLabel(att.filename, att.contentType, false, i);
+          return <ImageAttachmentButton key={i} src={src} label={label} />;
         }
         const isPdf = att.contentType === 'application/pdf';
         return (

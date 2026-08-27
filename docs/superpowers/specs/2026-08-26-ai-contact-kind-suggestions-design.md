@@ -1,7 +1,6 @@
 # AI contact-kind suggestions - design
 
-**Status:** Design approved; adversarial review converged in round 4; awaiting
-human specification approval.
+**Status:** Human-approved 2026-08-26; adversarial review converged in round 4.
 **Date:** 2026-08-26.
 **Branch:** `feat/ai-contact-kind-suggestions`.
 **Surface:** Conversation fact extraction, Unknown contact triage, AI run log.

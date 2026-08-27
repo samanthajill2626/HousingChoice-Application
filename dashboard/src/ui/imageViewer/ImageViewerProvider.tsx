@@ -65,6 +65,7 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
   const location = useLocation();
   const navigate = useNavigate();
   const [registry, setRegistry] = useState(() => new Map<string, RegistryEntry>());
+  const openRequestedRef = useRef(false);
   const dismissRequestedRef = useRef(new Set<string>());
   const normalizedMarkersRef = useRef(new Set<string>());
   const previousActiveRef = useRef<ActiveViewer | undefined>(undefined);
@@ -84,9 +85,15 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
 
   const openImage = useCallback(
     (image: ViewerImage, trigger: HTMLElement): void => {
-      if (readImageViewerMarker(location.state) !== undefined) return;
+      if (
+        openRequestedRef.current ||
+        readImageViewerMarker(location.state) !== undefined
+      ) {
+        return;
+      }
 
       const token = crypto.randomUUID();
+      openRequestedRef.current = true;
       setRegistry((current) => {
         const next = new Map(current);
         next.set(token, {
@@ -114,6 +121,10 @@ export function ImageViewerProvider({ children }: { children: React.ReactNode })
     },
     [location, navigate],
   );
+
+  useLayoutEffect(() => {
+    openRequestedRef.current = false;
+  }, [location.key]);
 
   const requestDismiss = useCallback(
     (token: string): void => {

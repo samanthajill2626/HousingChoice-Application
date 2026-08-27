@@ -46,6 +46,7 @@ import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
 import { TourDetail } from './routes/tours/TourDetail.js';
 import { ToursPage } from './routes/tours/ToursPage.js';
 import { QuickReply } from './routes/quickReply/QuickReply.js';
+import { ImageViewerProvider } from './ui/imageViewer/ImageViewerProvider.js';
 
 /** /settings index → the first tab visible for the viewer's role (admin → Team,
  *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
@@ -129,11 +130,12 @@ function AuthedApp(): React.JSX.Element {
   return (
     <AuthProvider>
       <AuthGate>
-        {/* One shared /api/events connection for every live-update consumer
-            below (badge, timeline, mark-read, …). Inside the gate so it only
-            runs when authenticated. */}
-        <EventStreamProvider>
-          <Routes>
+        <ImageViewerProvider>
+          {/* One shared /api/events connection for every live-update consumer
+              below (badge, timeline, mark-read, ...). Inside the gate so it only
+              runs when authenticated. */}
+          <EventStreamProvider>
+            <Routes>
           <Route
             element={
               <UnreadProvider>
@@ -261,8 +263,9 @@ function AuthedApp(): React.JSX.Element {
 
             <Route path="*" element={<Placeholder title="Not found" />} />
           </Route>
-          </Routes>
-        </EventStreamProvider>
+            </Routes>
+          </EventStreamProvider>
+        </ImageViewerProvider>
       </AuthGate>
     </AuthProvider>
   );

@@ -281,6 +281,55 @@ describe('ImageViewerProvider lifecycle', () => {
     expect(trigger).toHaveFocus();
   });
 
+  it('restores two nested scroll owners and the connected trigger after backdrop dismissal', async () => {
+    seedEntry();
+    renderHarness();
+    const page = screen.getByTestId('page-scroller');
+    const timeline = screen.getByTestId('timeline-scroller');
+    makeScrollable(page, 140, 9);
+    makeScrollable(timeline, 420, 3);
+
+    const { dialog, trigger } = await openViewer();
+    const triggerFocus = vi.spyOn(trigger, 'focus');
+    page.scrollTop = 701;
+    page.scrollLeft = 702;
+    timeline.scrollTop = 703;
+    timeline.scrollLeft = 704;
+
+    fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect([page.scrollTop, page.scrollLeft]).toEqual([140, 9]);
+    expect([timeline.scrollTop, timeline.scrollLeft]).toEqual([420, 3]);
+    expect(triggerFocus).toHaveBeenCalledTimes(1);
+    expect(triggerFocus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(trigger).toHaveFocus();
+  });
+
+  it('guards two synchronous opens before the router commits the first marker', async () => {
+    seedEntry();
+    renderHarness();
+    const trigger = screen.getByRole('button', {
+      name: 'View Front porch.jpg',
+    }) as HTMLButtonElement;
+
+    act(() => {
+      latestOpenImage?.(IMAGE, trigger);
+      latestOpenImage?.(
+        { src: '/api/messages/MM2/media/0', alt: 'Kitchen.jpg', title: 'Kitchen.jpg' },
+        trigger,
+      );
+    });
+
+    expect(await screen.findByRole('dialog', { name: IMAGE.title })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Kitchen.jpg' })).not.toBeInTheDocument();
+    expect(window.history.state.idx).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(window.history.state.idx).toBe(0);
+  });
+
   it('guards synchronous duplicate dismissals and contains media Escape from background listeners', async () => {
     seedEntry();
     renderHarness();

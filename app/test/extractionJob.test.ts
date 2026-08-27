@@ -191,6 +191,9 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
     listSuggestionsByContact: vi.fn(async () => []),
     deleteSuggestion: vi.fn(async () => {}),
     deleteSuggestionIfCurrent: vi.fn(async () => true),
+    deleteTypeSuggestionIfCurrentAtContactRevision: vi.fn(
+      async () => 'suggestion_changed_or_absent' as const,
+    ),
     restoreSuggestionIfAbsent: vi.fn(async () => true),
     listPending: vi.fn(async () => []),
     putDismissal: vi.fn(async () => {}),

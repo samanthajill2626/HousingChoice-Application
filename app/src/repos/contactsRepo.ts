@@ -91,6 +91,8 @@ export interface ContactEmail {
 export interface ContactItem {
   contactId: string;
   type: ContactType;
+  /** Monotonic fence for committed type or role classifications. */
+  classification_revision?: number;
   /**
    * The contact's SINGLE lifecycle status — type-scoped (STATUS-MODEL.md §5):
    *   - tenant: the §5 lifecycle (TENANT_STATUSES) —
@@ -305,6 +307,18 @@ export interface ContactDisplayItem {
  */
 export function isDeleted(contact: Pick<ContactItem, 'deleted_at'>): boolean {
   return typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
+}
+
+/** Legacy contacts without a persisted fence are logically at revision zero. */
+export function contactClassificationRevision(
+  contact: Pick<ContactItem, 'classification_revision'>,
+): number {
+  const revision = contact.classification_revision;
+  return typeof revision === 'number'
+    && Number.isSafeInteger(revision)
+    && revision >= 0
+    ? revision
+    : 0;
 }
 
 /** contactId prefix for a phone-pointer item: `phoneref#<E.164>`. */
@@ -1158,6 +1172,9 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       const removes: string[] = [];
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
+      const changesKind = Object.entries(patch).some(
+        ([key, value]) => value !== undefined && (key === 'type' || key === 'role'),
+      );
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
@@ -1179,6 +1196,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
           sets.push(`${nameKey} = ${valueKey}`);
         }
         i += 1;
+      }
+      if (changesKind) {
+        names['#classificationRevision'] = 'classification_revision';
+        values[':classificationRevisionZero'] = 0;
+        values[':classificationRevisionOne'] = 1;
+        sets.push(
+          '#classificationRevision = if_not_exists(#classificationRevision, :classificationRevisionZero) + :classificationRevisionOne',
+        );
       }
       if (sets.length === 0 && removes.length === 0) {
         // Nothing to change — read the current item back (still 404s if gone).

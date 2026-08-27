@@ -2,12 +2,14 @@
 // validate. Self-skips when DynamoDB Local is unavailable.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
+import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -35,6 +37,7 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
   const doc = createDocumentClient({ endpoint });
   const logger = createLogger({ destination: createLogCapture().stream });
   const repo = createExtractionRepo({ doc, env: testEnv, logger });
+  const contacts = createContactsRepo({ doc, env: testEnv, logger });
 
   beforeAll(async () => {
     await ensureTable(
@@ -42,10 +45,12 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
       getTableSpec('ai_extraction'),
       tableName('ai_extraction', testEnv),
     );
+    await ensureTable(client, getTableSpec('contacts'), tableName('contacts', testEnv));
   }, 120_000);
 
   afterAll(async () => {
     await deleteTableIfExists(client, tableName('ai_extraction', testEnv));
+    await deleteTableIfExists(client, tableName('contacts', testEnv));
     doc.destroy();
     client.destroy();
   }, 120_000);
@@ -114,5 +119,91 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
     const earlier = winner === left ? right : left;
     expect(winner.displaced?.revision).toBe(earlier.item.revision);
     expect(earlier.displaced?.revision).toBe(base.item.revision);
+  });
+
+  it('deletes only the exact type suggestion at the expected contact revision', async () => {
+    const absentRevision = await contacts.create({ type: 'unknown' });
+    const absentSuggestion = await repo.putSuggestion({
+      ownerContactId: absentRevision.contactId,
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-absent',
+      contactClassificationRevision: 0,
+    });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      absentSuggestion.item,
+      0,
+    )).resolves.toBe('deleted');
+
+    const explicitZero = await contacts.create({ type: 'unknown' });
+    await doc.send(new UpdateCommand({
+      TableName: tableName('contacts', testEnv),
+      Key: { contactId: explicitZero.contactId },
+      UpdateExpression: 'SET classification_revision = :zero',
+      ExpressionAttributeValues: { ':zero': 0 },
+    }));
+    const zeroSuggestion = await repo.putSuggestion({
+      ownerContactId: explicitZero.contactId,
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-zero',
+      contactClassificationRevision: 0,
+    });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      zeroSuggestion.item,
+      0,
+    )).resolves.toBe('deleted');
+
+    const replacedContact = await contacts.create({ type: 'unknown' });
+    const oldSuggestion = await repo.putSuggestion({
+      ownerContactId: replacedContact.contactId,
+      target: 'type',
+      suggestedValue: 'tenant',
+      conversationId: 'conv-old',
+      contactClassificationRevision: 0,
+    });
+    const replacement = await repo.putSuggestion({
+      ownerContactId: replacedContact.contactId,
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-new',
+      contactClassificationRevision: 0,
+    });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      oldSuggestion.item,
+      0,
+    )).resolves.toBe('suggestion_changed_or_absent');
+    expect((await repo.getSuggestion(replacedContact.contactId, 'type'))?.revision)
+      .toBe(replacement.item.revision);
+
+    const changedContact = await contacts.create({ type: 'unknown' });
+    const changedSuggestion = await repo.putSuggestion({
+      ownerContactId: changedContact.contactId,
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-changed',
+      contactClassificationRevision: 0,
+    });
+    await contacts.update(changedContact.contactId, { type: 'tenant' });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      changedSuggestion.item,
+      0,
+    )).resolves.toBe('contact_revision_changed');
+    expect((await repo.getSuggestion(changedContact.contactId, 'type'))?.revision)
+      .toBe(changedSuggestion.item.revision);
+
+    const laterRevision = await contacts.create({ type: 'unknown' });
+    await contacts.update(laterRevision.contactId, { type: 'tenant' });
+    const revisionOneSuggestion = await repo.putSuggestion({
+      ownerContactId: laterRevision.contactId,
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-revision-one',
+      contactClassificationRevision: 1,
+    });
+    await expect(repo.deleteTypeSuggestionIfCurrentAtContactRevision(
+      revisionOneSuggestion.item,
+      1,
+    )).resolves.toBe('deleted');
   });
 });

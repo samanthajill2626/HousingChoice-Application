@@ -29,7 +29,11 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
-import { createExtractionRepo } from '../src/repos/extractionRepo.js';
+import {
+  createExtractionRepo,
+  sameSuggestionIdentity,
+  type SuggestionItem,
+} from '../src/repos/extractionRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 // ---------------------------------------------------------------------------
@@ -265,11 +269,13 @@ interface FakeDoc {
   doc: DynamoDBDocumentClient;
   store: Map<string, Row>;
   lastUpdate: () => UpdateCommand | undefined;
+  lastGet: () => GetCommand | undefined;
 }
 
 function makeFakeDoc(): FakeDoc {
   const store = new Map<string, Row>();
   let lastUpdate: UpdateCommand | undefined;
+  let lastGet: GetCommand | undefined;
   const doc = {
     send: async (cmd: unknown) => {
       if (cmd instanceof PutCommand) {
@@ -290,6 +296,7 @@ function makeFakeDoc(): FakeDoc {
           : {};
       }
       if (cmd instanceof GetCommand) {
+        lastGet = cmd;
         const key = cmd.input.Key as { itemId: string };
         const row = store.get(key.itemId);
         return { Item: row ? { ...row } : undefined };
@@ -387,7 +394,12 @@ function makeFakeDoc(): FakeDoc {
       throw new Error(`fake doc: unexpected command ${String(cmd)}`);
     },
   } as unknown as DynamoDBDocumentClient;
-  return { doc, store, lastUpdate: () => lastUpdate };
+  return {
+    doc,
+    store,
+    lastUpdate: () => lastUpdate,
+    lastGet: () => lastGet,
+  };
 }
 
 function repoWith(doc: DynamoDBDocumentClient) {
@@ -912,6 +924,86 @@ describe('extractionRepo.fail - re-arm survival', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractionRepo suggestions', () => {
+  it('persists the contact classification revision on a type suggestion', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    const result = await repo.putSuggestion({
+      ownerContactId: 'c1',
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-1',
+      contactClassificationRevision: 7,
+    });
+
+    expect(result.item.contactClassificationRevision).toBe(7);
+  });
+
+  it('requests a consistent point read when the caller asks for one', async () => {
+    const { doc, lastGet } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    await repo.getSuggestion('c1', 'type', { consistentRead: true });
+
+    expect(lastGet()?.input.ConsistentRead).toBe(true);
+  });
+
+  it('compares suggestion identity by revision before the legacy fallback', () => {
+    const suggestion = (overrides: Partial<SuggestionItem>): SuggestionItem => ({
+      itemId: 'sugg#c1#type',
+      ownerContactId: 'c1',
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-1',
+      createdAt: T1,
+      ...overrides,
+    });
+    expect(sameSuggestionIdentity(
+      suggestion({ revision: 'rev-1', createdAt: 'old' }),
+      suggestion({ revision: 'rev-1', createdAt: 'new' }),
+    )).toBe(true);
+    expect(sameSuggestionIdentity(
+      suggestion({ revision: 'rev-1' }),
+      suggestion({ revision: 'rev-2' }),
+    )).toBe(false);
+    expect(sameSuggestionIdentity(
+      suggestion({ revision: 'rev-1' }),
+      suggestion({ revision: undefined }),
+    )).toBe(false);
+  });
+
+  it('requires exact legacy identity including present-or-absent runId', () => {
+    const suggestion = (overrides: Partial<SuggestionItem>): SuggestionItem => ({
+      itemId: 'sugg#c1#type',
+      ownerContactId: 'c1',
+      target: 'type',
+      suggestedValue: 'partner',
+      conversationId: 'conv-1',
+      createdAt: T1,
+      ...overrides,
+    });
+    expect(sameSuggestionIdentity(
+      suggestion({ createdAt: 't1', runId: undefined }),
+      suggestion({ createdAt: 't1', runId: undefined }),
+    )).toBe(true);
+    expect(sameSuggestionIdentity(
+      suggestion({ createdAt: 't1', runId: undefined }),
+      suggestion({ createdAt: 't1', runId: 'run-1' }),
+    )).toBe(false);
+    expect(sameSuggestionIdentity(
+      suggestion({ createdAt: 't1', runId: 'run-1' }),
+      suggestion({ createdAt: 't2', runId: 'run-1' }),
+    )).toBe(false);
+    expect(sameSuggestionIdentity(
+      suggestion({ ownerContactId: 'c1' }),
+      suggestion({ ownerContactId: 'c2' }),
+    )).toBe(false);
+    expect(sameSuggestionIdentity(
+      suggestion({ target: 'type' }),
+      suggestion({ target: 'role' }),
+    )).toBe(false);
+  });
+
   it('putSuggestion stamps itemId, pending partition, createdAt and runId; get round-trips', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);

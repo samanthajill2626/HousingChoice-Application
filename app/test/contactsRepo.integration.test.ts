@@ -328,4 +328,34 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     const ok = await contacts.update(created.contactId, { notes: '' });
     expect(ok.notes).toBe('');
   });
+
+  it('increments classification_revision only in the same type or role update', async () => {
+    const created = await contacts.create({ type: 'unknown', firstName: 'Revision' });
+    expect(created.classification_revision).toBeUndefined();
+
+    const noteOnly = await contacts.update(created.contactId, { notes: 'unchanged kind' });
+    expect(noteOnly.classification_revision).toBeUndefined();
+
+    const tenant = await contacts.update(created.contactId, { type: 'tenant' });
+    expect(tenant.classification_revision).toBe(1);
+
+    const roleCleared = await contacts.update(created.contactId, { role: null });
+    expect(roleCleared.classification_revision).toBe(2);
+
+    const unknownAgain = await contacts.update(created.contactId, { type: 'unknown' });
+    expect(unknownAgain.classification_revision).toBe(3);
+  });
+
+  it('increments classification_revision atomically for concurrent classification updates', async () => {
+    const created = await contacts.create({ type: 'unknown', firstName: 'Concurrent Revision' });
+
+    const updates = await Promise.all([
+      contacts.update(created.contactId, { type: 'tenant' }),
+      contacts.update(created.contactId, { role: 'Property Manager' }),
+    ]);
+
+    expect(updates.map((contact) => contact.classification_revision).sort()).toEqual([1, 2]);
+    const stored = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(stored?.classification_revision).toBe(2);
+  });
 });

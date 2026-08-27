@@ -29,6 +29,7 @@ import {
   EmptyIndexKeyError,
   INDEX_KEY_ATTRIBUTES,
   isDeleted,
+  contactClassificationRevision,
   phoneRefId,
   PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
@@ -40,6 +41,7 @@ import {
 } from '../../src/repos/contactsRepo.js';
 import {
   SuggestionDismissedError,
+  sameSuggestionIdentity,
   type ExtractionRepo,
   type SuggestionItem,
 } from '../../src/repos/extractionRepo.js';
@@ -3233,6 +3235,9 @@ export function createFakeWorld(): FakeWorld {
         conversationId: s.conversationId,
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
         ...(s.runId !== undefined && { runId: s.runId }),
+        ...(s.contactClassificationRevision !== undefined && {
+          contactClassificationRevision: s.contactClassificationRevision,
+        }),
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
         revision: randomUUID(),
@@ -3271,6 +3276,20 @@ export function createFakeWorld(): FakeWorld {
       ) return false;
       suggestions.delete(itemId);
       return true;
+    },
+    async deleteTypeSuggestionIfCurrentAtContactRevision(suggestion, expectedRevision) {
+      const contact = contacts.find((item) => item.contactId === suggestion.ownerContactId);
+      if (
+        contact === undefined
+        || contactClassificationRevision(contact) !== expectedRevision
+      ) return 'contact_revision_changed';
+      const itemId = `sugg#${suggestion.ownerContactId}#${suggestion.target}`;
+      const current = suggestions.get(itemId);
+      if (current === undefined || !sameSuggestionIdentity(current, suggestion)) {
+        return 'suggestion_changed_or_absent';
+      }
+      suggestions.delete(itemId);
+      return 'deleted';
     },
     async restoreSuggestionIfAbsent(suggestion) {
       if (suggestions.has(suggestion.itemId)) return false;

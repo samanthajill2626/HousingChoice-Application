@@ -6,7 +6,7 @@ import {
   type Address,
   type LandlordStatus,
   type TenantStatus,
-} from '../../api/index.js';
+} from '../../api/types.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { isoOf } from '../../lib/time.js';
 

@@ -70,6 +70,10 @@ describe('toTimelineMessage - masked relay calls', () => {
       call_status: 'completed',
       call_outcome: 'answered',
       call_duration: 42,
+      relay_refusal_reason: 'non_member',
+      relay_external_caller_phone: '+16175550198',
+      relay_external_caller_contact_id: 'contact-external',
+      relay_external_caller_display_name: 'Morgan Lee',
       // Defense in depth: even a malformed masked row must not put media on the
       // relay TimelineCall wire shape.
       recording_s3_key: 'recordings/forbidden.wav',
@@ -89,6 +93,36 @@ describe('toTimelineMessage - masked relay calls', () => {
       call_status: 'completed',
       call_outcome: 'answered',
       call_duration: 42,
+      relay_refusal_reason: 'non_member',
+      relay_external_caller_phone: '+16175550198',
+      relay_external_caller_contact_id: 'contact-external',
+      relay_external_caller_display_name: 'Morgan Lee',
+    });
+  });
+
+  it('does not forward malformed external caller fields or an unrecognised refusal reason', () => {
+    const call = {
+      conversationId: 'c1',
+      tsMsgId: '2026-08-24T10:00:00.000Z#CA2',
+      provider_sid: 'CA2',
+      provider_ts: '2026-08-24T10:00:00.000Z',
+      direction: 'inbound',
+      author: 'unknown',
+      type: 'call',
+      delivery_status: 'delivered',
+      relay_refusal_reason: 'not_member',
+      relay_external_caller_phone: 6175550198,
+      relay_external_caller_contact_id: { id: 'contact-external' },
+      relay_external_caller_display_name: ['Morgan Lee'],
+    } as unknown as Message;
+
+    expect(toTimelineMessage(call)).toEqual({
+      kind: 'call',
+      id: '2026-08-24T10:00:00.000Z#CA2',
+      at: '2026-08-24T10:00:00.000Z',
+      conversationId: 'c1',
+      direction: 'inbound',
+      author: 'unknown',
     });
   });
 });

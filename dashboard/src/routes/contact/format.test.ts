@@ -6,6 +6,7 @@ import {
   formatAddress,
   formatDuration,
   formatPhone,
+  formatDateTimeWithSeconds,
   formatTime,
   formatTimeWithSeconds,
   humanize,
@@ -76,6 +77,20 @@ describe('formatTimeWithSeconds', () => {
   it('returns empty for an unparseable instant', () => {
     expect(formatTimeWithSeconds('not-a-date')).toBe('');
     expect(formatTimeWithSeconds('')).toBe('');
+  });
+});
+
+describe('formatDateTimeWithSeconds', () => {
+  it('renders the local full date and time through seconds', () => {
+    expect(formatDateTimeWithSeconds('2026-08-28T12:21:16')).toBe('Aug 28, 2026, 12:21:16 PM');
+  });
+
+  it('normalises a `<ISO>#<suffix>` sort key', () => {
+    expect(formatDateTimeWithSeconds('2026-08-28T12:21:16#CA1')).toBe('Aug 28, 2026, 12:21:16 PM');
+  });
+
+  it('uses a visible fallback for an unparseable instant', () => {
+    expect(formatDateTimeWithSeconds('not-a-date')).toBe('Time unavailable');
   });
 });
 

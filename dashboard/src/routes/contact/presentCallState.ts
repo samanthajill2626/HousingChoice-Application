@@ -43,6 +43,8 @@ export interface CallStateInput {
   direction: MessageDirection;
   callStatus?: CallStatus;
   callOutcome?: CallOutcome;
+  /** Explicit persisted fact for a non-member call refused before any participant leg. */
+  relayRefusalReason?: 'non_member';
   /** The call's own instant, ISO. May be unparseable - see `age` below. */
   at: string;
   /** The instant to evaluate against (the card's state clock). */
@@ -110,10 +112,16 @@ export function presentCallState({
   direction,
   callStatus,
   callOutcome,
+  relayRefusalReason,
   at,
   now,
 }: CallStateInput): CallStatePresentation {
   const outbound = direction === 'outbound';
+  // 0. A stored non-member refusal is stronger than its compatibility lifecycle
+  //    fields: no participant leg was created, so this was not a missed call.
+  if (relayRefusalReason === 'non_member') {
+    return { label: 'Not connected', tone: 'danger' };
+  }
   // `age` exists ONLY when `at` parsed. Clauses 3 and 4 require a defined age; an
   // undefined age falls THROUGH them to the outcome clauses, so an unparseable
   // timestamp never produces an age-based claim.

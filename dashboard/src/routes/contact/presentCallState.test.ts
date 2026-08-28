@@ -446,3 +446,30 @@ describe('presentCallState - `<ISO>#<suffix>` sort keys normalise like their ISO
     ).toEqual({ label: 'Ringing...', tone: 'neutral', staleAt: startedMs + RINGING_STALE_MS });
   });
 });
+
+describe('presentCallState - refused non-member relay calls', () => {
+  it('makes the explicit refusal reason win over every lifecycle fact', () => {
+    expect(
+      presentCallState({
+        direction: 'inbound',
+        callStatus: 'in-progress',
+        callOutcome: 'voicemail',
+        relayRefusalReason: 'non_member',
+        at: new Date(startedMsFor(true)).toISOString(),
+        now: NOW,
+      }),
+    ).toEqual({ label: 'Not connected', tone: 'danger' });
+  });
+
+  it('keeps legacy presentation when the refusal reason is absent', () => {
+    expect(
+      presentCallState({
+        direction: 'inbound',
+        callStatus: 'completed',
+        callOutcome: 'missed',
+        at: new Date(startedMsFor(false)).toISOString(),
+        now: NOW,
+      }),
+    ).toEqual({ label: 'Missed', tone: 'danger' });
+  });
+});

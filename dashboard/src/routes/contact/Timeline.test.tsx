@@ -2160,6 +2160,163 @@ describe('Timeline call cards - direction', () => {
     );
   });
 
+  it('renders a matched external caller as a plain-text face with collapsed refusal details', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-named',
+          direction: 'inbound',
+          call_outcome: 'missed',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550198',
+          relay_external_caller_contact_id: 'contact-external',
+          relay_external_caller_display_name: 'Morgan Lee',
+        }),
+      ],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+15550100001', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002', name: 'Bob Brown' },
+      ],
+    });
+
+    expect(screen.getByText('Morgan Lee tried to call this relay number')).toBeInTheDocument();
+    expect(screen.getByText('Not connected')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Morgan Lee tried to call this relay number' })).toBeNull();
+
+    const card = screen.getByRole('group', { name: /^Morgan Lee tried to call this relay number/ });
+    const button = screen.getByRole('button', { name: /^Details for Morgan Lee tried to call this relay number/ });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(card.className).not.toContain('cardRevealed');
+
+    fireEvent.click(button);
+
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(card.className).toContain('cardRevealed');
+    expect(screen.getByText('(617) 555-0198')).toBeInTheDocument();
+    expect(screen.getByText('Not a participant in this relay group')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View contact' })).toHaveAttribute('href', '/contacts/contact-external');
+    expect(screen.getByText('Jun 8, 2026, 11:00:00 AM')).toBeInTheDocument();
+  });
+
+  it('renders an unmatched external number and explicitly reports no linked contact', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-phone',
+          direction: 'inbound',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550198',
+        }),
+      ],
+      relayRoster: [],
+    });
+
+    const card = screen.getByRole('group', { name: /^\(617\) 555-0198 tried to call this relay number/ });
+    const button = screen.getByRole('button', { name: /^Details for \(617\) 555-0198 tried to call this relay number/ });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(card.className).not.toContain('cardRevealed');
+
+    fireEvent.click(button);
+
+    expect(screen.getByText('No linked contact')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'View contact' })).toBeNull();
+  });
+
+  it('keeps unknown external caller details available without caller ID', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-unknown',
+          direction: 'inbound',
+          relay_refusal_reason: 'non_member',
+        }),
+      ],
+      relayRoster: [],
+    });
+
+    expect(screen.getByText('An unknown caller tried to call this relay number')).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: /^Details for An unknown caller tried to call this relay number/ });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(button);
+
+    expect(screen.getByText('Caller ID unavailable')).toBeInTheDocument();
+    expect(screen.getByText('No linked contact')).toBeInTheDocument();
+  });
+
+  it('does not treat a stale stored contact ID as a current link', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-stale-id',
+          direction: 'inbound',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550198',
+          relay_external_caller_contact_id: 'contact-deleted',
+        }),
+      ],
+      relayRoster: [],
+    });
+
+    expect(screen.getByText('(617) 555-0198 tried to call this relay number')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Details for \(617\) 555-0198 tried to call this relay number/ }));
+    expect(screen.getByText('No linked contact')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'View contact' })).toBeNull();
+  });
+
+  it('does not reinterpret a non-member caller as a current roster member with the same phone', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-roster-collision',
+          direction: 'inbound',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550198',
+          relay_sender_key: 'contact-alice',
+        }),
+      ],
+      relayRoster: [
+        { contactId: 'contact-alice', phone: '+16175550198', name: 'Alice Adams' },
+        { contactId: 'contact-bob', phone: '+15550100002', name: 'Bob Brown' },
+      ],
+    });
+
+    expect(screen.getByText('(617) 555-0198 tried to call this relay number')).toBeInTheDocument();
+    expect(screen.queryByText('Alice Adams called Bob Brown')).toBeNull();
+  });
+
+  it('gives two external callers in the same minute distinct Details controls', () => {
+    renderTimeline({
+      items: [
+        callItem({
+          id: 'external-a',
+          direction: 'inbound',
+          at: '2026-06-08T11:00:07',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550198',
+        }),
+        callItem({
+          id: 'external-b',
+          direction: 'inbound',
+          at: '2026-06-08T11:00:41',
+          relay_refusal_reason: 'non_member',
+          relay_external_caller_phone: '+16175550199',
+        }),
+      ],
+      relayRoster: [],
+    });
+
+    const buttonNames = screen
+      .getAllByRole('button', { name: /^Details for \(617\) 555-019/ })
+      .map((el) => el.getAttribute('aria-label'));
+    expect(new Set(buttonNames)).toEqual(
+      new Set([
+        'Details for (617) 555-0198 tried to call this relay number - 11:00:07a',
+        'Details for (617) 555-0199 tried to call this relay number - 11:00:41a',
+      ]),
+    );
+  });
+
   // A REDIAL after a miss: two inbound calls inside one minute. At minute
   // precision both cards, and both reveal buttons, carried the same accessible
   // name - ambiguous to a screen-reader user and a Playwright strict-mode

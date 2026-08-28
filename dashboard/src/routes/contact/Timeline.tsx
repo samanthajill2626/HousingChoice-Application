@@ -28,6 +28,7 @@ import {
   dayKey,
   formatDayDivider,
   formatDuration,
+  formatDateTimeWithSeconds,
   formatPhone,
   formatTime,
   formatTimeWithSeconds,
@@ -43,6 +44,7 @@ import {
 import type { DeliveryPresentation, DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
+import { presentRelayExternalCaller } from './presentRelayExternalCaller.js';
 import {
   findMemberByKey,
   memberDisplayLabel,
@@ -1209,6 +1211,7 @@ function CallCard({
     direction: call.direction,
     callStatus: call.call_status,
     callOutcome: call.call_outcome,
+    relayRefusalReason: call.relay_refusal_reason,
     at: call.at,
     now,
   });
@@ -1251,8 +1254,9 @@ function CallCard({
   // minutes; two calls inside one minute would otherwise carry identical names.
   const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  const externalCaller = presentRelayExternalCaller(call);
   const relaySummary = relayCallSummary(call, relayRoster);
-  const callWho = relaySummary ?? directionWord;
+  const callWho = externalCaller?.summary ?? relaySummary ?? directionWord;
   // An unparseable `at` is a REAL handled case here (the presenter treats it as
   // one and has matrix coverage for it), and the formatter answers '' for it.
   // Concatenating that unconditionally would emit a dangling separator -
@@ -1271,6 +1275,7 @@ function CallCard({
   const detail = relayRoster === undefined && call.party_phone
     ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
     : undefined;
+  const hasDetails = externalCaller !== undefined || detail !== undefined;
 
   return (
     <div
@@ -1296,7 +1301,7 @@ function CallCard({
         {duration ? <span className={styles.callDuration}>{duration}</span> : null}
         <span className={styles.callTrail}>
           <span className={styles.callAt}>{time}</span>
-          {detail !== undefined ? (
+          {hasDetails ? (
             <button
               type="button"
               className={styles.callReveal}
@@ -1312,7 +1317,24 @@ function CallCard({
           ) : null}
         </span>
       </div>
-      {detail !== undefined ? <div className={styles.cardMeta}>{detail}</div> : null}
+      {hasDetails ? (
+        <div className={styles.cardMeta}>
+          {externalCaller !== undefined ? (
+            <>
+              <div>{externalCaller.phoneLabel}</div>
+              <div>Not a participant in this relay group</div>
+              {externalCaller.linkedContactId !== undefined ? (
+                <Link to={`/contacts/${encodeURIComponent(externalCaller.linkedContactId)}`}>View contact</Link>
+              ) : (
+                <div>No linked contact</div>
+              )}
+              <div>{formatDateTimeWithSeconds(call.at)}</div>
+            </>
+          ) : (
+            detail
+          )}
+        </div>
+      ) : null}
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}

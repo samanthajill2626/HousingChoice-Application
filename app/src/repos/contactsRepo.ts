@@ -298,6 +298,7 @@ export interface ContactDisplayItem {
   firstName?: unknown;
   lastName?: unknown;
   phone?: string;
+  deleted_at?: string;
 }
 
 /**
@@ -853,12 +854,13 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
   /** The display projection, shared by getDisplayById and getDisplaysByIds. */
   const DISPLAY_PROJECTION = {
-    ProjectionExpression: '#contactId, #firstName, #lastName, #phone',
+    ProjectionExpression: '#contactId, #firstName, #lastName, #phone, #deletedAt',
     ExpressionAttributeNames: {
       '#contactId': 'contactId',
       '#firstName': 'firstName',
       '#lastName': 'lastName',
       '#phone': 'phone',
+      '#deletedAt': 'deleted_at',
     },
   } as const;
 

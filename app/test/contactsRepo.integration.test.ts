@@ -116,6 +116,26 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect(found.get(second.contactId)).toEqual({ contactId: second.contactId, firstName: 'Grace' });
   });
 
+  it('display reads retain a soft-delete stamp without widening the projection', async () => {
+    const contact = await contacts.create({
+      type: 'tenant',
+      firstName: 'Deleted',
+      lastName: 'Display',
+      phone: nextPhone(),
+    });
+    await contacts.softDelete(contact.contactId, '2026-08-28T16:21:16.000Z');
+
+    const expected = {
+      contactId: contact.contactId,
+      firstName: 'Deleted',
+      lastName: 'Display',
+      phone: contact.phone,
+      deleted_at: '2026-08-28T16:21:16.000Z',
+    };
+    expect(await contacts.getDisplayById(contact.contactId)).toEqual(expected);
+    expect((await contacts.getDisplaysByIds([contact.contactId])).get(contact.contactId)).toEqual(expected);
+  });
+
   it('getManyByIds batch-reads WHOLE items, de-dupes ids, and omits missing ones', async () => {
     const first = await contacts.create({
       type: 'landlord',

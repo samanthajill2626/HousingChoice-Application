@@ -1661,6 +1661,7 @@ export function createFakeWorld(): FakeWorld {
     ...(contact.firstName !== undefined && { firstName: contact.firstName }),
     ...(contact.lastName !== undefined && { lastName: contact.lastName }),
     ...(typeof contact.phone === 'string' && { phone: contact.phone }),
+    ...(typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0 && { deleted_at: contact.deleted_at }),
   });
 
   const contactsRepo: ContactsRepo = {

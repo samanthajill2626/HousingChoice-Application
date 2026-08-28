@@ -43,7 +43,7 @@ import {
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
-import { formatPhoneForDisplay } from '../../lib/phone.js';
+import { formatPhoneForDisplay, normalizeToE164 } from '../../lib/phone.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
 import { callPreview } from '../../lib/callPreview.js';
 import { contactDisplayName } from '../../lib/contactName.js';
@@ -55,6 +55,7 @@ import {
 } from '../../middleware/twilioSignature.js';
 import {
   createContactsRepo,
+  isDeleted,
   type ContactItem,
   type ContactsRepo,
 } from '../../repos/contactsRepo.js';
@@ -900,6 +901,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // Author honesty: a known caller's role, else unknown.
       const callerContact = caller?.contactId ? await contacts.getById(caller.contactId) : undefined;
       const startedAt = new Date().toISOString();
+      let relayExternalCallerPhone: string | undefined;
+      let relayExternalCallerContactId: string | undefined;
+      if (reason === 'non_member') {
+        relayExternalCallerPhone = normalizeToE164(From);
+        if (relayExternalCallerPhone !== undefined) {
+          try {
+            const matched = await contacts.findByPhone(relayExternalCallerPhone);
+            if (matched !== undefined && !isDeleted(matched)) {
+              relayExternalCallerContactId = matched.contactId;
+            }
+          } catch {
+            log.warn(
+              { callSid: CallSid },
+              'masked non-member caller lookup failed; persisting phone-only refusal metadata',
+            );
+          }
+        }
+      }
       try {
         const appended = await messages.append({
           conversationId: relay.conversationId,
@@ -917,6 +936,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           // No counterpart label on a refusal (no bridge happened); record why.
           callPartyLabel: reason === 'closed_thread' ? 'Closed thread' : 'Not connected',
           ...(isClosed && { receivedOnClosedThread: true }),
+          ...(reason === 'non_member' && {
+            relayRefusalReason: 'non_member' as const,
+            ...(relayExternalCallerPhone !== undefined && { relayExternalCallerPhone }),
+            ...(relayExternalCallerContactId !== undefined && { relayExternalCallerContactId }),
+          }),
         });
         if (!appended.deduped) {
           events.emit('message.persisted', {

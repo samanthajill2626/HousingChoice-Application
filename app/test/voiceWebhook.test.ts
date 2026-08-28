@@ -334,6 +334,9 @@ describe('inbound masked voice — refusals + echo guard (M1.9a)', () => {
     const call = world.messages.find((m) => m.provider_sid === 'CAclosed1');
     expect(call?.received_on_closed_thread).toBe(true);
     expect(call?.masked).toBe(true);
+    expect(call?.relay_refusal_reason).toBeUndefined();
+    expect(call?.relay_external_caller_phone).toBeUndefined();
+    expect(call?.relay_external_caller_contact_id).toBeUndefined();
   });
 
   it('echo guard: From is the pool number → empty <Response/>, dropped (no bridge, no persist)', async () => {
@@ -413,6 +416,186 @@ describe('inbound masked voice — refusals + echo guard (M1.9a)', () => {
     const logs = JSON.stringify(capture.lines);
     expect(logs).not.toContain(ALICE);
     expect(logs).not.toContain(BOB);
+  });
+});
+
+describe('inbound masked voice - non-member caller identity', () => {
+  it('stores a normalized phone and current non-deleted contact ID after refusing a matched non-member', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL });
+    seedRelay(world);
+    const contactsBefore = world.contacts.length;
+    const rosterBefore = world.conversations.get('conv-relay-voice-1')?.participants;
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAnonmember-matched' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain(CAROL);
+    const call = world.messages.find((m) => m.provider_sid === 'CAnonmember-matched');
+    expect(call?.relay_refusal_reason).toBe('non_member');
+    expect(call?.relay_external_caller_phone).toBe(CAROL);
+    expect(call?.relay_external_caller_contact_id).toBe('c-external');
+    expect(call?.author).toBe('unknown');
+    expect(call?.relay_sender_key).toBeUndefined();
+    expect(world.contacts).toHaveLength(contactsBefore);
+    expect(world.conversations.get('conv-relay-voice-1')?.participants).toEqual(rosterBefore);
+  });
+
+  it('stores only a normalized phone for an unmatched non-member and keeps TwiML phone-free', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+    const from = '(555) 010-9999';
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: from, CallSid: 'CAnonmember-unmatched' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain(from);
+    const call = world.messages.find((m) => m.provider_sid === 'CAnonmember-unmatched');
+    expect(call?.relay_refusal_reason).toBe('non_member');
+    expect(call?.relay_external_caller_phone).toBe('+15550109999');
+    expect(call?.relay_external_caller_contact_id).toBeUndefined();
+    expect(world.contactCreates).toEqual([]);
+  });
+
+  it('does not retain a deleted contact ID for a non-member caller', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-deleted-external',
+      type: 'unknown',
+      phone: CAROL,
+      deleted_at: '2026-08-28T12:00:00.000Z',
+    });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAnonmember-deleted' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    const call = world.messages.find((m) => m.provider_sid === 'CAnonmember-deleted');
+    expect(call?.relay_refusal_reason).toBe('non_member');
+    expect(call?.relay_external_caller_phone).toBe(CAROL);
+    expect(call?.relay_external_caller_contact_id).toBeUndefined();
+  });
+
+  it('records unknown caller metadata when From is malformed', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: 'anonymous', CallSid: 'CAnonmember-anonymous' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain('anonymous');
+    const call = world.messages.find((m) => m.provider_sid === 'CAnonmember-anonymous');
+    expect(call?.relay_refusal_reason).toBe('non_member');
+    expect(call?.relay_external_caller_phone).toBeUndefined();
+    expect(call?.relay_external_caller_contact_id).toBeUndefined();
+  });
+
+  it('persists phone-only metadata and still returns refusal TwiML when contact lookup fails', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contactsRepo.findByPhone = async () => {
+      throw new Error('lookup should not escape');
+    };
+    const { app, capture } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAnonmember-lookup-failure' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain(CAROL);
+    const call = world.messages.find((m) => m.provider_sid === 'CAnonmember-lookup-failure');
+    expect(call?.relay_refusal_reason).toBe('non_member');
+    expect(call?.relay_external_caller_phone).toBe(CAROL);
+    expect(call?.relay_external_caller_contact_id).toBeUndefined();
+    expect(JSON.stringify(capture.lines)).not.toContain(CAROL);
+    expect(JSON.stringify(capture.lines)).not.toContain('lookup should not escape');
+  });
+
+  it('keeps the first non-member identity facts on a deduped redelivery', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL });
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+    const params = inboundVoiceParams({ From: CAROL, CallSid: 'CAnonmember-redelivery' });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+    world.contacts[0]!.deleted_at = '2026-08-28T12:00:00.000Z';
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    const calls = world.messages.filter((m) => m.provider_sid === 'CAnonmember-redelivery');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.relay_external_caller_contact_id).toBe('c-external');
+  });
+
+  it('does not add caller identity metadata to no-callee or no-pool-number refusals', async () => {
+    const noCalleeWorld = createFakeWorld();
+    seedRelay(noCalleeWorld, {
+      participants: [{ contactId: 'c-alice', phone: ALICE, name: 'Alice' }],
+    });
+    const noCalleeHarness = makeWebhookHarness({ world: noCalleeWorld });
+
+    const noCalleeRes = await signedTwilioPost(
+      noCalleeHarness.app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ CallSid: 'CAno-callee' }),
+    );
+    expect(noCalleeRes.status).toBe(200);
+    expect(noCalleeRes.text).not.toContain('<Dial');
+    const noCalleeCall = noCalleeWorld.messages.find((m) => m.provider_sid === 'CAno-callee');
+    expect(noCalleeCall?.relay_refusal_reason).toBeUndefined();
+    expect(noCalleeCall?.relay_external_caller_phone).toBeUndefined();
+    expect(noCalleeCall?.relay_external_caller_contact_id).toBeUndefined();
+
+    const noPoolWorld = createFakeWorld();
+    const noPoolRelay = seedRelay(noPoolWorld, { pool_number: undefined });
+    noPoolWorld.conversationsRepo.getAllByPoolNumber = async () => [noPoolRelay];
+    const noPoolHarness = makeWebhookHarness({ world: noPoolWorld });
+
+    const noPoolRes = await signedTwilioPost(
+      noPoolHarness.app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ CallSid: 'CAno-pool' }),
+    );
+    expect(noPoolRes.status).toBe(200);
+    expect(noPoolRes.text).not.toContain('<Dial');
+    const noPoolCall = noPoolWorld.messages.find((m) => m.provider_sid === 'CAno-pool');
+    expect(noPoolCall?.relay_refusal_reason).toBeUndefined();
+    expect(noPoolCall?.relay_external_caller_phone).toBeUndefined();
+    expect(noPoolCall?.relay_external_caller_contact_id).toBeUndefined();
   });
 });
 

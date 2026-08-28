@@ -28,6 +28,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { isE164 } from '../lib/phone.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 export type MessageType = 'sms' | 'mms' | 'call' | 'email';
@@ -695,8 +696,9 @@ export interface NewMessage {
   // A `type:'call'` message is a metadata-only timeline entry for a masked
   // (pool-number) call. `providerSid` carries the Twilio CallSid (the dedupe
   // key — same append conditional + a parallel callsid pointer for the status
-  // callback). PII (doc §9): NEVER the raw counterpart phone — the label below
-  // is a role/name only.
+  // callback). PII (doc section 9): call_party_label and roster attribution NEVER carry
+  // the raw counterpart phone. The explicit staff-only external-caller field
+  // below is limited to non-member refusal metadata.
   /** Voice call lifecycle status (absent on sms/mms). */
   callStatus?: CallStatus;
   /** Coarse outcome (set/refined by the status callback). */
@@ -716,6 +718,12 @@ export interface NewMessage {
    * "Landlord"/"Team") or contact name — NEVER the raw counterpart phone (PII).
    */
   callPartyLabel?: string;
+  /** Staff-only external caller metadata for a non-member relay refusal. */
+  relayRefusalReason?: 'non_member';
+  /** Normalized E.164 external caller phone for a non-member relay refusal. */
+  relayExternalCallerPhone?: string;
+  /** Matched contact ID for a non-member relay refusal; requires the phone. */
+  relayExternalCallerContactId?: string;
 
   // --- Email channel v1 (type:'email' items) -------------------------------
   // Provider-id convention (plan F5/F14): INBOUND providerSid = the RFC
@@ -812,6 +820,27 @@ export interface MediaAttachment {
    * MMS/inbound/legacy attachments have none.
    */
   filename?: string;
+}
+
+function assertRelayExternalCallerShape(message: NewMessage): void {
+  const hasReason = message.relayRefusalReason !== undefined;
+  const hasPhone = message.relayExternalCallerPhone !== undefined;
+  const hasContactId = message.relayExternalCallerContactId !== undefined;
+  if (!hasReason && !hasPhone && !hasContactId) return;
+
+  const valid =
+    message.type === 'call' &&
+    message.direction === 'inbound' &&
+    message.masked === true &&
+    message.relayRefusalReason === 'non_member' &&
+    message.author === 'unknown' &&
+    message.relaySenderKey === undefined &&
+    (!hasPhone || isE164(message.relayExternalCallerPhone as string)) &&
+    (!hasContactId || hasPhone);
+
+  if (!valid) {
+    throw new TypeError('invalid relay external caller metadata');
+  }
 }
 
 export interface MessageItem {
@@ -911,6 +940,12 @@ export interface MessageItem {
   masked?: boolean;
   /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
   call_party_label?: string;
+  /** Staff-only external caller metadata for a non-member relay refusal. */
+  relay_refusal_reason?: 'non_member';
+  /** Normalized E.164 external caller phone for a non-member relay refusal. */
+  relay_external_caller_phone?: string;
+  /** Matched contact ID for a non-member relay refusal; requires the phone. */
+  relay_external_caller_contact_id?: string;
 
   // --- Email channel v1 - present only on type:'email' items ---------------
   /** Email subject line. */
@@ -1863,6 +1898,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async append(message) {
+      assertRelayExternalCallerShape(message);
       const tsMsgId = buildTsMsgId(message.providerTs, message.providerSid);
       const now = new Date().toISOString();
       const item: MessageItem = {
@@ -1915,6 +1951,15 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.callDuration !== undefined && { call_duration: message.callDuration }),
         ...(message.masked === true && { masked: true }),
         ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
+        ...(message.relayRefusalReason !== undefined && {
+          relay_refusal_reason: message.relayRefusalReason,
+        }),
+        ...(message.relayExternalCallerPhone !== undefined && {
+          relay_external_caller_phone: message.relayExternalCallerPhone,
+        }),
+        ...(message.relayExternalCallerContactId !== undefined && {
+          relay_external_caller_contact_id: message.relayExternalCallerContactId,
+        }),
         ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
         ...(message.transcript !== undefined && { transcript: message.transcript }),
         // Voice-extraction Layer 1: source-attributed channel->role map for the

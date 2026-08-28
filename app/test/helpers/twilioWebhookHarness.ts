@@ -1105,6 +1105,15 @@ export function createFakeWorld(): FakeWorld {
         ...(message.callDuration !== undefined && { call_duration: message.callDuration }),
         ...(message.masked !== undefined && { masked: message.masked }),
         ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
+        ...(message.relayRefusalReason !== undefined && {
+          relay_refusal_reason: message.relayRefusalReason,
+        }),
+        ...(message.relayExternalCallerPhone !== undefined && {
+          relay_external_caller_phone: message.relayExternalCallerPhone,
+        }),
+        ...(message.relayExternalCallerContactId !== undefined && {
+          relay_external_caller_contact_id: message.relayExternalCallerContactId,
+        }),
         ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
         ...(message.transcript !== undefined && { transcript: message.transcript }),
         // Voice-extraction Layer 1: preserve the source-attributed channel->role

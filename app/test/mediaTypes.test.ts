@@ -6,6 +6,7 @@ import {
   INLINE_MEDIA_TYPES,
   isAcceptedExtension,
   isHandoffMediaType,
+  mediaCspFor,
   isInlineMediaType,
   normalizeStoredMediaType,
   resolveMediaTier,
@@ -195,6 +196,42 @@ describe('isHandoffMediaType', () => {
 
   it('matches on the ESSENCE, like every other decision here', () => {
     expect(isHandoffMediaType(resolveMediaTier('video/mp4; codecs=avc1'))).toBe(true);
+  });
+});
+
+describe('mediaCspFor', () => {
+  it('lets video and audio load their own bytes, and drops sandbox for the player', () => {
+    // Both proven necessary by a real browser, not reasoned about: media-src
+    // falls back to default-src 'none' and blocks the video; and sandbox
+    // without allow-scripts blocks the built-in player UI. They are coupled -
+    // sandbox makes the origin OPAQUE, in which 'self' matches nothing.
+    for (const t of ['video/mp4', 'audio/mpeg']) {
+      expect(mediaCspFor(resolveMediaTier(t))).toBe("default-src 'none'; media-src 'self'");
+    }
+  });
+
+  it('KEEPS the strict policy for images and PDF, which already work under it', () => {
+    for (const t of ['image/png', 'image/jpeg', 'application/pdf']) {
+      expect(mediaCspFor(resolveMediaTier(t))).toBe("default-src 'none'; sandbox");
+    }
+  });
+
+  it('KEEPS the strict policy for every non-playable declarable type', () => {
+    for (const t of ['image/heic', 'text/vcard', 'text/csv']) {
+      expect(mediaCspFor(resolveMediaTier(t))).toBe("default-src 'none'; sandbox");
+    }
+  });
+
+  it('KEEPS the strict policy for opaque and script-capable types', () => {
+    for (const t of ['text/html', 'image/svg+xml', 'application/x-made-up', undefined]) {
+      expect(mediaCspFor(resolveMediaTier(t))).toBe("default-src 'none'; sandbox");
+    }
+  });
+
+  it('never omits default-src none, whatever the type', () => {
+    for (const t of ['video/mp4', 'image/png', 'text/html', 'image/heic', undefined]) {
+      expect(mediaCspFor(resolveMediaTier(t))).toContain("default-src 'none'");
+    }
   });
 });
 

@@ -20,7 +20,12 @@ import {
 } from '../adapters/mediaStore.js';
 import type { Semaphore } from '../lib/semaphore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
-import { isHandoffMediaType, isTwilioDeliverableType, resolveMediaTier } from '../lib/mediaTypes.js';
+import {
+  isHandoffMediaType,
+  isTwilioDeliverableType,
+  mediaCspFor,
+  resolveMediaTier,
+} from '../lib/mediaTypes.js';
 import { buildMediaFilenameParts, contentDispositionHeader } from '../lib/mediaFilename.js';
 import { renditionFor } from '../lib/mmsRenditions.js';
 import { planMmsBatches } from '../lib/mmsBatching.js';
@@ -2344,7 +2349,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       contentDispositionHeader(isHandoffMediaType(resolved) ? 'inline' : 'attachment', filename),
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    res.setHeader('Content-Security-Policy', mediaCspFor(resolved));
     if (object.contentLength !== undefined) {
       res.setHeader('Content-Length', String(object.contentLength));
     }

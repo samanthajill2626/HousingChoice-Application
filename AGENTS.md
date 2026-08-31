@@ -54,7 +54,11 @@ for every non-trivial feature or change.
   and the handback go to `docs/superpowers/reviews/YYYY-MM-DD-<branch>/` and are
   committed AS PRODUCED - not left under the worktree's gitignored
   `.superpowers/`, which holds only the ledger, logs and run state. Do not commit
-  what git can regenerate (raw diffs, byte-exact code quotation). A clean
+  what git can regenerate (raw diffs, byte-exact code quotation). **One file, one
+  kind:** a child producing both findings and reference writes them as SEPARATE
+  artifacts - findings to the records path citing code by `file:line`, reference
+  to `.superpowers/` - because a mixed file can only be dropped whole (losing
+  findings) or kept whole (committing ~90% waste). A clean
   `git status` cannot see ignored files, which is how a 2026-08-21 sweep
   destroyed 16 worktrees' review history; see
   [`FEATURE-DEVELOPMENT-WORKFLOW.md`](documentation/FEATURE-DEVELOPMENT-WORKFLOW.md)

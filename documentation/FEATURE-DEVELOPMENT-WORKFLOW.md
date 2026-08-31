@@ -277,6 +277,24 @@ run state. **Preserve captured tool output VERBATIM** - the ASCII-only rule in
 `AGENTS.md` governs newly authored text, and rewriting a gate transcript to
 satisfy it falsifies the record; note the exception instead.
 
+### One file, one kind - split at authorship
+
+A file that carries findings AND reference together has no good disposal:
+dropping it whole loses the findings, keeping it whole commits the waste, and
+bisecting it later means re-reading it to hunt the seam. So any child that
+produces both writes TWO artifacts, and its brief says so:
+
+- `docs/superpowers/reviews/<date>-<branch>/<area>-findings.md` - what the tree
+  turned out to hold that the plan or spec got WRONG: contradictions,
+  corrections, risks. Cite code by `file:line`; do not paste it.
+- `<worktree>/.superpowers/sdd/<area>-reference.md` - the byte-exact quotation
+  backing those citations. Ignored, dies with the worktree.
+
+Measured on the 2026-08-25 inbox-unread-cluster mission, the three research
+files were **10%, 11% and 0% findings** - one was 83KB of pure quotation with no
+findings at all - so ~94% of 190KB was reference. **A researcher with nothing to
+correct writes no findings file, and that is a valid result** - do not pad one.
+
 Worked example, including what was deliberately dropped and why:
 [`docs/superpowers/reviews/2026-08-25-inbox-unread-cluster/README.md`](../docs/superpowers/reviews/2026-08-25-inbox-unread-cluster/README.md).
 

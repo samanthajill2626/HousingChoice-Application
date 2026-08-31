@@ -8,7 +8,7 @@ import { useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { InboxFilter } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
-import { INBOX_FILTERS, emptyCopy } from './inboxFilters.js';
+import { INBOX_FILTERS, emptyClearedCopy, emptyCopy, emptyMoreCopy } from './inboxFilters.js';
 import { InboxRow } from './InboxRow.js';
 import { rowKey, useInbox } from './useInbox.js';
 import styles from './Inbox.module.css';
@@ -26,7 +26,44 @@ export function Inbox(): React.JSX.Element {
   const [params, setParams] = useSearchParams();
   const filter = filterFromParam(params.get('filter'));
   const inbox = useInbox(filter);
-  const empty = emptyCopy(filter);
+  // THE EMPTY COPY DEPENDS ON WHETHER THE SERVER PAGE CAME BACK EMPTY WITH MORE
+  // BEHIND IT, not on the filter alone. Such a page has not proved the list is
+  // empty - it stopped early - so it gets the "nothing on this page yet" copy
+  // that sits sensibly next to the live Load more below. See emptyMoreCopy.
+  //
+  // BOTH HALVES ARE SERVER STATEMENTS, and the first one is load-bearing (fix
+  // wave 2, F2 - found independently by both round-2 reviewers). Gated on
+  // `hasMore` ALONE this said "This search stopped early to stay fast" at the
+  // end of an ORDINARY unread triage session: the server filled a page of 30
+  // and minted a cursor BECAUSE it filled, the operator marked all 30 read, and
+  // `useInbox` narrows read rows out of `rows` (that narrowing is the whole
+  // point of the tab). The list went empty for a CLIENT reason and selected a
+  // SERVER-flavoured sentence that was false on both halves. `serverRowCount`
+  // is the same server quantity the truncation notice and the failure banner
+  // below are gated on, for the same reason - see those two comments.
+  //
+  // THE CLIENT-EMPTIED-WITH-MORE-BEHIND STATE GETS ITS OWN COPY (2026-08-26,
+  // phase-6 review). It used to fall through to `emptyCopy`, which put "You're
+  // all caught up" next to a live Load more - two sentences that contradict
+  // each other, on the tab an operator lives in all day. The previous round
+  // swapped one false sentence for another; this splits the state out instead
+  // of choosing between two claims that are each wrong somewhere.
+  //
+  // THREE STATES, EACH GATED ON A SERVER QUANTITY - the doctrine every other
+  // gate in this file follows (`serverRowCount`, never `rows`, for anything
+  // that speaks about the server page):
+  //   serverRowCount === 0 && hasMore  the SERVER page was empty and stopped
+  //                                    early -> emptyMoreCopy()
+  //   serverRowCount  > 0 && hasMore   the server filled it and the OPERATOR
+  //                                    cleared it -> emptyClearedCopy()
+  //   otherwise                        the filter's own copy
+  // `rows.length === 0` is not in any of them because the block that renders
+  // `empty` is already inside it. No filter gate either: off Unread, `rows` is
+  // `base` unnarrowed, so `serverRowCount > 0` with an empty list cannot arise -
+  // and `emptyClearedCopy` is worded to stay true if it ever does.
+  const empty = inbox.hasMore
+    ? (inbox.serverRowCount === 0 ? emptyMoreCopy() : emptyClearedCopy())
+    : emptyCopy(filter);
   // A26: the count comes from the hook's server-page tally, NOT from a filter
   // over `inbox.rows`. `rows` is the DISPLAYED list - already narrowed by the
   // Unread filter and already patched by the optimistic mark-read - so counting
@@ -204,29 +241,55 @@ export function Inbox(): React.JSX.Element {
       ) : null}
 
       {inbox.status === 'ready' && inbox.rows.length > 0 ? (
-        <>
-          <ul className={styles.rows} aria-label="Conversations">
-            {inbox.rows.map((row) => (
-              <InboxRow
-                key={rowKey(row)}
-                row={row}
-                onOpen={inbox.markRead}
-                onMarkRead={inbox.markRead}
-                onMarkUnread={inbox.markUnread}
-              />
-            ))}
-          </ul>
-          {inbox.hasMore ? (
-            <button
-              type="button"
-              className={styles.loadMore}
-              onClick={() => inbox.loadMore()}
-              disabled={inbox.loadingMore}
-            >
-              {inbox.loadingMore ? 'Loading…' : 'Load more'}
-            </button>
-          ) : null}
-        </>
+        <ul className={styles.rows} aria-label="Conversations">
+          {inbox.rows.map((row) => (
+            <InboxRow
+              key={rowKey(row)}
+              row={row}
+              onOpen={inbox.markRead}
+              onMarkRead={inbox.markRead}
+              onMarkUnread={inbox.markUnread}
+            />
+          ))}
+        </ul>
+      ) : null}
+
+      {/* LOAD MORE IS GATED ON `hasMore` ALONE, NOT ON THE PAGE HAVING ROWS
+          (M1, rework blast-radius finding 2). It used to be nested inside the
+          `rows.length > 0` block above, which made the server's deliberate
+          empty-page-with-a-cursor a DEAD END: `filter=unknown` returns
+          `{ rows: [], nextCursor }` when its per-request scan budget expires on
+          a wall of soft-deleted residue or threadless stubs (and now also when
+          a thread read fails mid-page), and the operator got the empty state
+          with nothing to click. Every row behind that position was unreachable
+          from the UI - which is the exact defect the paged rework was chartered
+          to remove, reintroduced one layer up. The app-side pin assumed this
+          affordance existed; nothing on the client proved it, so it shipped
+          green.
+
+          It can now render ALONGSIDE the empty state (see `empty` above, which
+          switches its copy for exactly that pairing).
+
+          IT CANNOT RENDER ALONGSIDE THE EARLY-END FAILURE BANNER, and the
+          earlier claim here that it could was wrong (fix wave 2, round-2
+          blast-radius N3). That banner needs `serverRowCount === 0 &&
+          truncated`, and the server nulls the unread cursor on a zero-row page
+          (app/src/routes/inbox.ts, the unread branch's empty-page invariant), so
+          `hasMore` is false wherever the banner is true. The pairing is
+          server-unreachable TODAY, by one line - not by anything on this
+          client - and that line now says so. If it ever changes, this element
+          and that banner render together; a cursor and a truncation are
+          independent server statements, and offering the continuation would not
+          make the banner less true. */}
+      {inbox.status === 'ready' && inbox.hasMore ? (
+        <button
+          type="button"
+          className={styles.loadMore}
+          onClick={() => inbox.loadMore()}
+          disabled={inbox.loadingMore}
+        >
+          {inbox.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
       ) : null}
     </div>
   );

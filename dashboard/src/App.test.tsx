@@ -1,13 +1,47 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { BrowserRouter, MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Stub the heavy detail pages so these tests exercise ROUTING only (each detail
 // page has its own dedicated render tests). The stubs read the dynamic segment
 // so we can assert the right :param resolved into the right route.
-vi.mock('./routes/contact/ContactDetail.js', () => ({
-  ContactDetail: () => <div data-testid="contact-detail" />,
-}));
+vi.mock('./routes/contact/ContactDetail.js', async () => {
+  const { useLocation } = await import('react-router-dom');
+  const { useImageViewer } = await import('./ui/imageViewer/ImageViewerProvider.js');
+
+  function AuthViewerProof(): React.JSX.Element {
+    const { openImage } = useImageViewer();
+    return (
+      <button
+        type="button"
+        onClick={(event) =>
+          openImage(
+            {
+              src: '/api/messages/MMAUTH1/media/0',
+              alt: 'Principal A secret.jpg',
+              title: 'Principal A secret.jpg',
+            },
+            event.currentTarget,
+          )
+        }
+      >
+        View Principal A secret.jpg
+      </button>
+    );
+  }
+
+  function ContactDetail(): React.JSX.Element {
+    const location = useLocation();
+    return location.pathname === '/contacts/viewer-auth-proof' ? (
+      <AuthViewerProof />
+    ) : (
+      <div data-testid="contact-detail" />
+    );
+  }
+
+  return { ContactDetail };
+});
 vi.mock('./routes/listing/ListingDetail.js', () => ({
   ListingDetail: () => <div data-testid="listing-detail" />,
 }));
@@ -95,6 +129,16 @@ function renderAt(path: string, loadIdentity = freshIdentityLoader()): void {
   );
 }
 
+async function traverseBrowserHistory(direction: 'back' | 'forward'): Promise<void> {
+  await act(async () => {
+    const popped = new Promise<void>((resolve) => {
+      window.addEventListener('popstate', () => resolve(), { once: true });
+    });
+    window.history[direction]();
+    await popped;
+  });
+}
+
 describe('App', () => {
   it.each(['/join', '/p/missing-unit'])('%s stays public and never requests auth', async (path) => {
     mockApi();
@@ -141,6 +185,71 @@ describe('App', () => {
       expect(screen.getByRole('link', { name: 'HousingChoice' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument();
+  });
+
+  it('drops retained viewer descriptors on signout so Forward cannot cover Login', async () => {
+    let authenticated = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/app-identity/config.json')) {
+          return Promise.resolve(
+            json({ variant: 'non-production', themeColor: '#f4c542' }),
+          );
+        }
+        if (url.includes('/auth/logout')) {
+          authenticated = false;
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        if (url.includes('/auth/me')) {
+          return authenticated
+            ? Promise.resolve(json({ userId: 'u1', email: 'va@example.com', role: 'va' }))
+            : Promise.resolve(json({ error: 'unauthorized' }, 401));
+        }
+        if (url.includes('/__dev/ping')) {
+          return Promise.resolve(json({ error: 'not_found' }, 404));
+        }
+        return Promise.resolve(json({ error: 'not_found' }, 404));
+      }),
+    );
+    window.history.replaceState(
+      { usr: null, key: 'auth-viewer-entry', idx: 0 },
+      '',
+      '/contacts/viewer-auth-proof',
+    );
+    const user = userEvent.setup();
+
+    render(
+      <BrowserRouter>
+        <App loadIdentity={freshIdentityLoader()} />
+      </BrowserRouter>,
+    );
+
+    await user.click(
+      await screen.findByRole('button', { name: 'View Principal A secret.jpg' }),
+    );
+    expect(
+      await screen.findByRole('dialog', { name: 'Principal A secret.jpg' }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(window.history.state.idx).toBe(0);
+
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    await user.click(
+      within(screen.getByRole('menu')).getByRole('button', { name: 'Sign out' }),
+    );
+    expect(await screen.findByRole('link', { name: 'Sign in with Google' })).toBeInTheDocument();
+
+    await traverseBrowserHistory('forward');
+
+    expect(screen.getByRole('link', { name: 'Sign in with Google' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByText('Principal A secret.jpg')).not.toBeInTheDocument();
+    expect(
+      document.body.querySelector('[data-image-viewer-portal="true"]'),
+    ).not.toBeInTheDocument();
   });
 
   it('resolves the Contacts list at /contacts', async () => {

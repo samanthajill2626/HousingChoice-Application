@@ -93,3 +93,59 @@
   padding: var(--sp-3) var(--sp-4);
   border-top: 1px solid var(--c-border);
 }
+
+.mediaBackdrop {
+  z-index: 200;
+  padding: var(--sp-6);
+}
+
+.mediaDialog {
+  width: min(72rem, calc(100vw - (2 * var(--sp-6))));
+  height: min(52rem, calc(100dvh - (2 * var(--sp-6))));
+  max-width: none;
+  max-height: none;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mediaTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerActions,
+.mediaClose {
+  flex: 0 0 auto;
+}
+
+.mediaClose {
+  margin-left: 0;
+}
+
+.mediaBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mediaBodyInner {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+}
+
+@media (max-width: 599px) {
+  .mediaBackdrop {
+    padding: 0;
+  }
+
+  .mediaDialog {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+  }
+}

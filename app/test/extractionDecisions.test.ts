@@ -78,6 +78,27 @@ describe('buildDecisions', () => {
     });
   });
 
+  it('round-trips a type classification-change drop', () => {
+    const out = buildDecisions({
+      ops: {
+        ...EMPTY_OPS_VIEW,
+        type: { op: 'suggest', value: 'partner' },
+      },
+      rawTextPresent: true,
+      applyDecisions: [{
+        target: 'type',
+        outcome: 'dropped',
+        proposedValue: 'partner',
+        dropReason: 'type_classification_changed',
+      }],
+    });
+
+    expect(out.type).toMatchObject({
+      outcome: 'dropped',
+      dropReason: 'type_classification_changed',
+    });
+  });
+
   it('a scalar write with an EMPTY value reads as dropped/empty_value_at_parse, NEVER no_finding', () => {
     // schema.ts:215-219 rewrites a value-less write into { op: none } and drops
     // the reason, so apply never sees it and records nothing. The raw view still

@@ -247,10 +247,62 @@ Dev-stack self-QA:
 
 - Specs: `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
 - Plans: `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`
+- **Mission records (TRACKED): `docs/superpowers/reviews/YYYY-MM-DD-<branch>/`**
 - Issues (two tiers - inline `TODO(area):` markers + a registry): `docs/issues/`
 - Worktrees: `w:\tmp\<name>`
+- Orchestrator run state (IGNORED): `<worktree>/.superpowers/`
 - Throwaway spikes: the session scratchpad (never the repo)
 - Operational runbook (deploy/ops only; NOT bugs): `RUNBOOK.md`
+
+### Mission records are version-controlled on purpose
+
+A mission's durable value is its DECISIONS - what a review found, what was
+accepted or rejected and why, what the tree turned out to hold that the plan got
+wrong. Git has the diff already; it has none of that. **Commit each record AS IT
+IS PRODUCED, not batched at handback**, so a mission that dies mid-flight still
+leaves its reasoning behind and the commit order reads as an account of how the
+design moved.
+
+Split by KIND, never by file extension:
+
+| | where | what |
+|---|---|---|
+| Records | `docs/superpowers/reviews/<date>-<branch>/`, **tracked** | design + code review rounds, adjudications, findings lists, drift/delta worklists, per-slice and fix-wave reports, self-QA, handback |
+| Run state | `<worktree>/.superpowers/`, **ignored** | `sdd/progress.md` ledger, `live.log`, gate logs, `*.exit`, `*.pid`, raw diff packages |
+
+Do not commit what git can regenerate: a raw diff, or byte-exact quotation of
+code the record already cites by commit. Where a summary file is the DELTA or
+adjudication of a bigger raw one, the summary is the record and the raw file is
+run state. **Preserve captured tool output VERBATIM** - the ASCII-only rule in
+`AGENTS.md` governs newly authored text, and rewriting a gate transcript to
+satisfy it falsifies the record; note the exception instead.
+
+### One file, one kind - split at authorship
+
+A file that carries findings AND reference together has no good disposal:
+dropping it whole loses the findings, keeping it whole commits the waste, and
+bisecting it later means re-reading it to hunt the seam. So any child that
+produces both writes TWO artifacts, and its brief says so:
+
+- `docs/superpowers/reviews/<date>-<branch>/<area>-findings.md` - what the tree
+  turned out to hold that the plan or spec got WRONG: contradictions,
+  corrections, risks. Cite code by `file:line`; do not paste it.
+- `<worktree>/.superpowers/sdd/<area>-reference.md` - the byte-exact quotation
+  backing those citations. Ignored, dies with the worktree.
+
+Measured on the 2026-08-25 inbox-unread-cluster mission, the three research
+files were **10%, 11% and 0% findings** - one was 83KB of pure quotation with no
+findings at all - so ~94% of 190KB was reference. **A researcher with nothing to
+correct writes no findings file, and that is a valid result** - do not pad one.
+
+Worked example, including what was deliberately dropped and why:
+[`docs/superpowers/reviews/2026-08-25-inbox-unread-cluster/README.md`](../docs/superpowers/reviews/2026-08-25-inbox-unread-cluster/README.md).
+
+**Why this rule exists.** These records used to live only under the worktree's
+gitignored `.superpowers/`. `git status --porcelain` cannot see ignored files, so
+a worktree full of review history reports perfectly clean - and a 2026-08-21
+cleanup sweep of 16 worktrees destroyed every handback and adversarial review
+they held, unrecoverably, on exactly that false signal.
 
 ---
 

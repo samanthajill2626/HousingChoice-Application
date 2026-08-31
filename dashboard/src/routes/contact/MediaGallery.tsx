@@ -1,10 +1,11 @@
 // MediaGallery — the "Media from comms" grid for the contact file panes. A
-// square thumbnail per image (links to the full-size media), a glyph tile per
-// non-image (PDF/other). Fed by useContactMedia (the media pointer index, paged
+// square thumbnail per image (opens the shared viewer), a glyph tile per
+// non-image link (PDF/other). Fed by useContactMedia (the media pointer index, paged
 // newest-first) so it shows EVERY attachment on the contact's threads, updates
 // live as messages arrive, and walks older media through "Load older media"
 // - a document is never out of reach because newer texts buried it.
 import { Spinner } from '../../ui/index.js';
+import { useImageViewer } from '../../ui/imageViewer/ImageViewerProvider.js';
 import { EmptyRow } from './Card.js';
 import { isInlineRenderable, isPdfMediaType, mediaKindWord, type CommsMediaItem } from './media.js';
 import styles from './MediaGallery.module.css';
@@ -20,6 +21,26 @@ export interface MediaGalleryPaging {
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
+}
+
+function MediaImageButton({ item }: { item: CommsMediaItem }): React.JSX.Element {
+  const { openImage } = useImageViewer();
+  return (
+    <button
+      type="button"
+      className={styles.tile}
+      aria-label="View image attachment"
+      aria-haspopup="dialog"
+      onClick={(event) =>
+        openImage(
+          { src: item.src, alt: 'Image attachment', title: 'Image attachment' },
+          event.currentTarget,
+        )
+      }
+    >
+      <img className={styles.img} src={item.src} alt="Image attachment" loading="lazy" />
+    </button>
+  );
 }
 
 export function MediaGallery({
@@ -39,15 +60,7 @@ export function MediaGallery({
       <div className={styles.grid}>
         {media.map((m) =>
           isInlineRenderable(m.contentType) ? (
-            <a
-              key={m.key}
-              className={styles.tile}
-              href={m.src}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img className={styles.img} src={m.src} alt="Attachment" loading="lazy" />
-            </a>
+            <MediaImageButton key={m.key} item={m} />
           ) : (
             <a
               key={m.key}

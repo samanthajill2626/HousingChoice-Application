@@ -129,6 +129,20 @@ describe('AiRunsSection', () => {
     expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('not addressed');
     expect(screen.getByRole('row', { name: /^phone/ })).toHaveTextContent('superseded by human edit');
   });
+  it('humanizes only a type decision proposed value, preserving raw forensic panes', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run,
+      rawText: 'property_manager', rawResult: { type: 'property_manager' }, decisions: {
+        type: { proposedOp: 'write', proposedValue: 'property_manager', outcome: 'wrote', verdict: 'auto_applied' },
+        pets: { proposedOp: 'write', proposedValue: 'snake_case', outcome: 'wrote', verdict: 'auto_applied' },
+      },
+    } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const decisions = screen.getByRole('table', { name: 'Decisions' });
+    expect(within(decisions).getByText('Property Manager')).toBeInTheDocument();
+    expect(within(decisions).getByText('snake_case')).toBeInTheDocument();
+    expect(screen.getByText('Raw model response').parentElement).toHaveTextContent('property_manager');
+    expect(screen.getByText('Parsed result').parentElement).toHaveTextContent('property_manager');
+  });
   it('shows WHY a failed run failed - the pane used to render "failed" and drop the cause entirely', () => {
     useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, outcome: 'failed', error: {
       kind: 'truncated', parked: true, attempts: 4,

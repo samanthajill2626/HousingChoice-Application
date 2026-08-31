@@ -1,5 +1,6 @@
 import type { AiRunDetailResponse, AiRunWindowMessage } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
+import { suggestedContactKindLabel } from '../../contact/contactProfile.js';
 import { aiRunContactLabel } from './contactLabel.js';
 import styles from './AiRunsSection.module.css';
 
@@ -10,6 +11,14 @@ function value(value: unknown): string {
 
 export function humanizeEnum(value: string): string {
   return value.replaceAll('_', ' ');
+}
+
+function proposedDecisionValue(
+  target: string,
+  decision: NonNullable<AiRunDetailResponse['run']['decisions'][string]>,
+): string {
+  const proposed = decision.proposedValue ?? decision.proposedOp;
+  return target === 'type' ? suggestedContactKindLabel(proposed) : proposed;
 }
 
 /**
@@ -64,7 +73,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
       {storedWindow.noContent?.length ? <div role="region" aria-label="No content" className={styles.auditList}><h4>No content</h4><ul>{storedWindow.noContent.map((id) => <li key={id}>{id}</li>)}</ul></div> : null}
       {storedWindow.excluded.length ? <div role="region" aria-label="Excluded messages" className={styles.auditList}><h4>Excluded messages</h4><ul>{storedWindow.excluded.map((excluded) => <li key={excluded.tsMsgId}>{excluded.tsMsgId}: {excluded.cause}</li>)}</ul></div> : null}
     </section> : null}
-    {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{decision.proposedValue ?? decision.proposedOp}</td><td>{value(decision.previousValue)}</td><td>{humanizeEnum(decision.outcome)}</td><td>{humanizeEnum(decision.verdict)}</td><td>{decision.reason ?? (decision.dropReason ? humanizeEnum(decision.dropReason) : decision.outcome === 'dropped' ? 'unexplained' : '-')}</td></tr>)}</tbody></table></div></section> : null}
+    {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{proposedDecisionValue(target, decision)}</td><td>{value(decision.previousValue)}</td><td>{humanizeEnum(decision.outcome)}</td><td>{humanizeEnum(decision.verdict)}</td><td>{decision.reason ?? (decision.dropReason ? humanizeEnum(decision.dropReason) : decision.outcome === 'dropped' ? 'unexplained' : '-')}</td></tr>)}</tbody></table></div></section> : null}
     {run.rawText !== undefined ? <details className={styles.raw}><summary>Raw model response</summary><pre>{run.rawText}</pre></details> : null}
     {run.rawResult !== undefined ? <details className={styles.raw}><summary>Parsed result</summary><pre>{JSON.stringify(run.rawResult, null, 2)}</pre></details> : null}
   </section>;

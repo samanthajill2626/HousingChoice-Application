@@ -18,6 +18,7 @@ import {
   GROUP_TEXT_STATUS,
   type ConversationItem,
 } from '../src/repos/conversationsRepo.js';
+import { listByTypeFromContacts } from './helpers/contactsPartitionFake.js';
 import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface GroupSeed {
@@ -105,6 +106,13 @@ function makeDeps(seed: GroupSeed): { deps: InboxRouterDeps; calls: Calls } {
       },
       async getById(contactId: string) {
         return (seed.contacts ?? []).find((x) => x.contactId === contactId);
+      },
+      // Inert until the unknown tab's contact-side read lands (2026-08-25
+      // design). GroupSeed contacts carry no `type` and no `status`, so the
+      // helper filters every one of them out twice over - the unknown
+      // partition is provably empty in this suite.
+      async listByType(type: string, opts = {}) {
+        return listByTypeFromContacts((seed.contacts ?? []) as never, type, opts);
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {

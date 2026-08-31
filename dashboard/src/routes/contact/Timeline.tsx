@@ -28,6 +28,7 @@ import {
   dayKey,
   formatDayDivider,
   formatDuration,
+  formatDateTimeWithSeconds,
   formatPhone,
   formatTime,
   formatTimeWithSeconds,
@@ -43,6 +44,7 @@ import {
 import type { DeliveryPresentation, DeliveryTone } from './deliveryStatus.js';
 import { presentCallState } from './presentCallState.js';
 import type { CallTone } from './presentCallState.js';
+import { presentRelayExternalCaller } from './presentRelayExternalCaller.js';
 import {
   findMemberByKey,
   memberDisplayLabel,
@@ -61,6 +63,7 @@ import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
 import { EmailComposer, type EmailComposerSendInput } from './EmailComposer.js';
 import { EmailHtmlFrame } from './EmailHtmlFrame.js';
+import { useImageViewer } from '../../ui/imageViewer/ImageViewerProvider.js';
 import styles from './Timeline.module.css';
 
 /** A send refusal → a clear, human reason. The server returns a machine-readable
@@ -630,8 +633,23 @@ function attachmentLabel(
   return kind !== undefined ? `${kind} - Attachment ${i + 1}` : `Attachment ${i + 1}`;
 }
 
+function ImageAttachmentButton({ src, label }: { src: string; label: string }): React.JSX.Element {
+  const { openImage } = useImageViewer();
+  return (
+    <button
+      type="button"
+      className={styles.mediaButton}
+      aria-label={`View ${label}`}
+      aria-haspopup="dialog"
+      onClick={(event) => openImage({ src, alt: label, title: label }, event.currentTarget)}
+    >
+      <img className={styles.mediaImg} src={src} alt={label} loading="lazy" />
+    </button>
+  );
+}
+
 /** The mirrored-attachment gallery for a message (MMS bubble AND email card).
- *  Images render inline (open full-size in a new tab); PDFs/other files are links
+ *  Renderable images open in the shared viewer; PDFs/other files are links
  *  to the authed serve endpoint. Without a derivable provider SID there's no
  *  servable URL, so it falls back to a count chip. Factored so MessageBubble and
  *  EmailCard render attachments identically. `stopPropagation` keeps opening media
@@ -652,22 +670,8 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
       {attachments.map((att, i) => {
         const src = messageMediaSrc(sid, i);
         if (isInlineRenderable(att.contentType)) {
-          return (
-            <a
-              key={i}
-              className={styles.mediaLink}
-              href={src}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                className={styles.mediaImg}
-                src={src}
-                alt={attachmentLabel(att.filename, att.contentType, false, i)}
-                loading="lazy"
-              />
-            </a>
-          );
+          const label = attachmentLabel(att.filename, att.contentType, false, i);
+          return <ImageAttachmentButton key={i} src={src} label={label} />;
         }
         const isPdf = isPdfMediaType(att.contentType);
         return (
@@ -1213,6 +1217,7 @@ function CallCard({
     direction: call.direction,
     callStatus: call.call_status,
     callOutcome: call.call_outcome,
+    relayRefusalReason: call.relay_refusal_reason,
     at: call.at,
     now,
   });
@@ -1255,8 +1260,9 @@ function CallCard({
   // minutes; two calls inside one minute would otherwise carry identical names.
   const nameTime = formatTimeWithSeconds(call.at);
   const directionWord = outbound ? 'Outgoing call' : 'Incoming call';
+  const externalCaller = presentRelayExternalCaller(call);
   const relaySummary = relayCallSummary(call, relayRoster);
-  const callWho = relaySummary ?? directionWord;
+  const callWho = externalCaller?.summary ?? relaySummary ?? directionWord;
   // An unparseable `at` is a REAL handled case here (the presenter treats it as
   // one and has matrix coverage for it), and the formatter answers '' for it.
   // Concatenating that unconditionally would emit a dangling separator -
@@ -1275,6 +1281,7 @@ function CallCard({
   const detail = relayRoster === undefined && call.party_phone
     ? `${outbound ? 'to' : 'from'} ${formatPhone(call.party_phone)} - ${time}`
     : undefined;
+  const hasDetails = externalCaller !== undefined || detail !== undefined;
 
   return (
     <div
@@ -1300,7 +1307,7 @@ function CallCard({
         {duration ? <span className={styles.callDuration}>{duration}</span> : null}
         <span className={styles.callTrail}>
           <span className={styles.callAt}>{time}</span>
-          {detail !== undefined ? (
+          {hasDetails ? (
             <button
               type="button"
               className={styles.callReveal}
@@ -1316,7 +1323,24 @@ function CallCard({
           ) : null}
         </span>
       </div>
-      {detail !== undefined ? <div className={styles.cardMeta}>{detail}</div> : null}
+      {hasDetails ? (
+        <div className={styles.cardMeta}>
+          {externalCaller !== undefined ? (
+            <>
+              <div>{externalCaller.phoneLabel}</div>
+              <div>Not a participant in this relay group</div>
+              {externalCaller.linkedContactId !== undefined ? (
+                <Link to={`/contacts/${encodeURIComponent(externalCaller.linkedContactId)}`}>View contact</Link>
+              ) : (
+                <div>No linked contact</div>
+              )}
+              <div>{formatDateTimeWithSeconds(call.at)}</div>
+            </>
+          ) : (
+            detail
+          )}
+        </div>
+      ) : null}
       {/* Playable recording (founder-bridge calls + voicemails). The src uses the
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}

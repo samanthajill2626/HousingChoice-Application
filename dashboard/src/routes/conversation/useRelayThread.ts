@@ -83,6 +83,16 @@ export function toTimelineMessage(m: Message): TimelineMessage | TimelineCall | 
       author: m.author,
       ...(typeof m.relay_sender_key === 'string' && { relay_sender_key: m.relay_sender_key }),
       ...(typeof m.call_party_label === 'string' && { call_party_label: m.call_party_label }),
+      ...(m.relay_refusal_reason === 'non_member' && { relay_refusal_reason: 'non_member' as const }),
+      ...(typeof m.relay_external_caller_phone === 'string' && {
+        relay_external_caller_phone: m.relay_external_caller_phone,
+      }),
+      ...(typeof m.relay_external_caller_contact_id === 'string' && {
+        relay_external_caller_contact_id: m.relay_external_caller_contact_id,
+      }),
+      ...(typeof m.relay_external_caller_display_name === 'string' && {
+        relay_external_caller_display_name: m.relay_external_caller_display_name,
+      }),
       ...(isCallStatus(m.call_status) && { call_status: m.call_status }),
       ...(isCallOutcome(m.call_outcome) && { call_outcome: m.call_outcome }),
       ...(duration !== undefined && { call_duration: duration }),

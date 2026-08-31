@@ -8,7 +8,7 @@
 // runs on the shared in-memory world fakes.
 import type { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
@@ -253,6 +253,28 @@ describe('GET /api/conversations/:conversationId', () => {
 });
 
 describe('GET /api/conversations/:conversationId/messages', () => {
+  async function appendExternalCall(
+    world: ReturnType<typeof createFakeWorld>,
+    providerSid: string,
+    contactId?: string,
+  ) {
+    return world.messagesRepo.append({
+      conversationId: 'conv-1',
+      providerSid,
+      providerTs: '2026-08-28T16:21:16.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'unknown',
+      deliveryStatus: 'delivered',
+      callStatus: 'no-answer',
+      callOutcome: 'missed',
+      masked: true,
+      relayRefusalReason: 'non_member',
+      relayExternalCallerPhone: '+16175550198',
+      ...(contactId !== undefined && { relayExternalCallerContactId: contactId }),
+    });
+  }
+
   it('serves a newest-first page and forwards limit/before to the repo', async () => {
     const { app, world } = makeWebhookHarness();
     seedConversation(world, 'conv-1');
@@ -290,6 +312,97 @@ describe('GET /api/conversations/:conversationId/messages', () => {
       .get('/api/conversations/conv-1/messages?limit=0')
       .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(bad.status).toBe(400);
+  });
+
+  it('hydrates a trimmed current display name with one deduplicated batch read', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    world.contacts.push({ contactId: 'contact-external', type: 'tenant', firstName: ' Morgan ', lastName: ' Lee ' });
+    await appendExternalCall(world, 'CAexternal-1', 'contact-external');
+    await appendExternalCall(world, 'CAexternal-2', 'contact-external');
+    const getDisplaysByIds = vi.spyOn(world.contactsRepo, 'getDisplaysByIds');
+
+    const res = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(getDisplaysByIds).toHaveBeenCalledTimes(1);
+    expect(getDisplaysByIds).toHaveBeenCalledWith(['contact-external']);
+    expect(res.body.messages).toHaveLength(2);
+    expect(res.body.messages.every((message: { relay_external_caller_display_name?: string }) =>
+      message.relay_external_caller_display_name === 'Morgan Lee')).toBe(true);
+    expect(world.messages.every((message) => !('relay_external_caller_display_name' in message))).toBe(true);
+  });
+
+  it('does not read displays when the current page has no external contact ids', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    await appendExternalCall(world, 'CAphone-only');
+    const getDisplaysByIds = vi.spyOn(world.contactsRepo, 'getDisplaysByIds');
+
+    const res = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(getDisplaysByIds).not.toHaveBeenCalled();
+    expect(res.body.messages[0]).not.toHaveProperty('relay_external_caller_display_name');
+  });
+
+  it('omits a display name for a missing display row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    await appendExternalCall(world, 'CAmissing', 'contact-missing');
+
+    const res = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages[0]).not.toHaveProperty('relay_external_caller_display_name');
+  });
+
+  it('omits a deleted display name and hydrates it again after restore', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    world.contacts.push({
+      contactId: 'contact-external',
+      type: 'tenant',
+      firstName: 'Morgan',
+      lastName: 'Lee',
+      deleted_at: '2026-08-28T16:21:16.000Z',
+    });
+    await appendExternalCall(world, 'CAdeleted', 'contact-external');
+
+    const deleted = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.messages[0]).not.toHaveProperty('relay_external_caller_display_name');
+
+    await world.contactsRepo.restore('contact-external');
+    const restored = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(restored.status).toBe(200);
+    expect(restored.body.messages[0]).toMatchObject({ relay_external_caller_display_name: 'Morgan Lee' });
+  });
+
+  it('returns the unhydrated page when the optional display batch read fails', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    world.contacts.push({ contactId: 'contact-external', type: 'tenant', firstName: 'Morgan' });
+    await appendExternalCall(world, 'CAbatch-failure', 'contact-external');
+    vi.spyOn(world.contactsRepo, 'getDisplaysByIds').mockRejectedValueOnce(new Error('contacts unavailable'));
+
+    const res = await request(app)
+      .get('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(1);
+    expect(res.body.messages[0]).not.toHaveProperty('relay_external_caller_display_name');
   });
 });
 

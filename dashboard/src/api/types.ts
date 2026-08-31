@@ -2147,6 +2147,14 @@ export interface Message {
   relay_sender_key?: string;
   /** Legacy, non-phone counterpart label used only when no roster key can resolve. */
   call_party_label?: string;
+  /** Explicit reason for a masked inbound relay call the system refused before dialing. */
+  relay_refusal_reason?: 'non_member';
+  /** Normalized external caller number retained for authenticated staff only. */
+  relay_external_caller_phone?: string;
+  /** Contact matched when the non-member call arrived; no read-time phone matching. */
+  relay_external_caller_contact_id?: string;
+  /** Current display name hydrated by the authenticated messages endpoint only. */
+  relay_external_caller_display_name?: string;
   call_status?: CallStatus;
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -2348,6 +2356,10 @@ export interface TimelineCall extends TimelineBase {
   relay_sender_key?: string;
   /** Legacy metadata fallback for Relay calls written before relay_sender_key. */
   call_party_label?: string;
+  relay_refusal_reason?: 'non_member';
+  relay_external_caller_phone?: string;
+  relay_external_caller_contact_id?: string;
+  relay_external_caller_display_name?: string;
   /** Twilio call lifecycle. ABSENT on imported rows (the importer writes no
    *  status) and on any row whose stored value is not a union member. */
   call_status?: CallStatus;

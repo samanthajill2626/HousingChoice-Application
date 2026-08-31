@@ -40,6 +40,10 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import type { ExtractionAddressParts } from '../adapters/extraction.js';
 import { normalizeSuggestionValue } from '../services/extraction/schema.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import {
+  contactClassificationRevision,
+  type ContactItem,
+} from './contactsRepo.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -98,6 +102,8 @@ export interface SuggestionItem {
   runId?: string;
   /** Immutable identity stamped on production writes; absent only on legacy rows. */
   revision?: string;
+  /** Contact classification revision when this type suggestion was created. */
+  contactClassificationRevision?: number;
   /** Hidden normalized value used only by the dismissal/writer transaction. */
   _normalizedValue?: string;
   /** byPending GSI hash key (fixed 'pending'); present while pending (sparse). */
@@ -110,6 +116,31 @@ export interface SuggestionItem {
 export interface PutSuggestionResult {
   item: SuggestionItem;
   displaced?: SuggestionItem;
+}
+
+export type GuardedTypeDeleteResult =
+  | 'deleted'
+  | 'suggestion_changed_or_absent'
+  | 'contact_revision_changed';
+
+export type SuggestionIdentity = Pick<
+  SuggestionItem,
+  'ownerContactId' | 'target' | 'createdAt' | 'runId' | 'revision'
+>;
+
+export function sameSuggestionIdentity(
+  left: SuggestionIdentity,
+  right: SuggestionIdentity,
+): boolean {
+  if (left.ownerContactId !== right.ownerContactId || left.target !== right.target) {
+    return false;
+  }
+  if (left.revision !== undefined || right.revision !== undefined) {
+    return left.revision !== undefined
+      && right.revision !== undefined
+      && left.revision === right.revision;
+  }
+  return left.createdAt === right.createdAt && left.runId === right.runId;
 }
 
 /** The permanent dismissal tombstone won the atomic suggestion-writer fence. */
@@ -200,12 +231,20 @@ export interface ExtractionRepo {
   putSuggestion(
     s: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
   ): Promise<PutSuggestionResult>;
-  getSuggestion(contactId: string, target: string): Promise<SuggestionItem | undefined>;
+  getSuggestion(
+    contactId: string,
+    target: string,
+    opts?: { consistentRead?: boolean },
+  ): Promise<SuggestionItem | undefined>;
   /** All pending suggestions for one contact (byOwner GSI). */
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
   deleteSuggestion(contactId: string, target: string): Promise<void>;
   /** Delete only the exact version a resolver read; false means it was replaced. */
   deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string, runId?: string, revision?: string): Promise<boolean>;
+  deleteTypeSuggestionIfCurrentAtContactRevision(
+    suggestion: SuggestionIdentity,
+    expectedContactClassificationRevision: number,
+  ): Promise<GuardedTypeDeleteResult>;
   /** Restore a claimed suggestion only if a newer writer has not replaced it. */
   restoreSuggestionIfAbsent(suggestion: SuggestionItem): Promise<boolean>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
@@ -232,6 +271,45 @@ const suggId = (contactId: string, target: string): string => `sugg#${contactId}
 const dismId = (contactId: string, target: string, normValue: string): string =>
   `dism#${contactId}#${target}#${normValue}`;
 
+function exactSuggestionCondition(suggestion: SuggestionIdentity): {
+  conditionExpression: string;
+  expressionAttributeNames: Record<string, string>;
+  expressionAttributeValues: Record<string, unknown>;
+} {
+  if (suggestion.revision !== undefined) {
+    return {
+      conditionExpression: '#revision = :revision',
+      expressionAttributeNames: { '#revision': 'revision' },
+      expressionAttributeValues: { ':revision': suggestion.revision },
+    };
+  }
+  if (suggestion.runId === undefined) {
+    return {
+      conditionExpression:
+        'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)',
+      expressionAttributeNames: {
+        '#revision': 'revision',
+        '#createdAt': 'createdAt',
+        '#runId': 'runId',
+      },
+      expressionAttributeValues: { ':createdAt': suggestion.createdAt },
+    };
+  }
+  return {
+    conditionExpression:
+      'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId',
+    expressionAttributeNames: {
+      '#revision': 'revision',
+      '#createdAt': 'createdAt',
+      '#runId': 'runId',
+    },
+    expressionAttributeValues: {
+      ':createdAt': suggestion.createdAt,
+      ':runId': suggestion.runId,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -239,6 +317,7 @@ const dismId = (contactId: string, target: string, normValue: string): string =>
 export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('ai_extraction', deps.env);
+  const contactsTable = tableName('contacts', deps.env);
   const log = deps.logger ?? defaultLogger;
 
   return {
@@ -505,6 +584,9 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         ...(s.reason !== undefined && { reason: s.reason }),
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
         ...(s.runId !== undefined && { runId: s.runId }),
+        ...(s.contactClassificationRevision !== undefined && {
+          contactClassificationRevision: s.contactClassificationRevision,
+        }),
       };
       // Atomic permanent-dismissal writer fence. The condition-check and the
       // CAS replacement share one transaction, so a dismissal can never cross
@@ -614,9 +696,13 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       throw new Error('suggestion write contention exceeded retry budget');
     },
 
-    async getSuggestion(contactId, target) {
+    async getSuggestion(contactId, target, opts) {
       const { Item } = await doc.send(
-        new GetCommand({ TableName: table, Key: { itemId: suggId(contactId, target) } }),
+        new GetCommand({
+          TableName: table,
+          Key: { itemId: suggId(contactId, target) },
+          ...(opts?.consistentRead && { ConsistentRead: true }),
+        }),
       );
       return Item as SuggestionItem | undefined;
     },
@@ -665,31 +751,93 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
     },
 
     async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
-      const conditionExpression = revision !== undefined
-        ? '#revision = :revision'
-        : runId === undefined
-          ? 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)'
-          : 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId';
-      const expressionAttributeNames: Record<string, string> = revision !== undefined
-        ? { '#revision': 'revision' }
-        : { '#createdAt': 'createdAt', '#runId': 'runId', '#revision': 'revision' };
-      const expressionAttributeValues: Record<string, unknown> = revision !== undefined
-        ? { ':revision': revision }
-        : { ':createdAt': createdAt, ...(runId !== undefined && { ':runId': runId }) };
+      const exact = exactSuggestionCondition({
+        ownerContactId: contactId,
+        target,
+        createdAt,
+        runId,
+        revision,
+      });
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { itemId: suggId(contactId, target) },
-            ConditionExpression: conditionExpression,
-            ExpressionAttributeNames: expressionAttributeNames,
-            ExpressionAttributeValues: expressionAttributeValues,
+            ConditionExpression: exact.conditionExpression,
+            ExpressionAttributeNames: exact.expressionAttributeNames,
+            ExpressionAttributeValues: exact.expressionAttributeValues,
           }),
         );
         log.debug({ contactId, target }, 'suggestion conditionally deleted');
         return true;
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async deleteTypeSuggestionIfCurrentAtContactRevision(
+      suggestion,
+      expectedContactClassificationRevision,
+    ) {
+      const contactCondition = expectedContactClassificationRevision === 0
+        ? 'attribute_exists(contactId) AND (attribute_not_exists(#classificationRevision) OR #classificationRevision = :zero)'
+        : 'attribute_exists(contactId) AND #classificationRevision = :expectedContactRevision';
+      const exact = exactSuggestionCondition(suggestion);
+      try {
+        await doc.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: contactsTable,
+                Key: { contactId: suggestion.ownerContactId },
+                ConditionExpression: contactCondition,
+                ExpressionAttributeNames: {
+                  '#classificationRevision': 'classification_revision',
+                },
+                ExpressionAttributeValues: expectedContactClassificationRevision === 0
+                  ? { ':zero': 0 }
+                  : { ':expectedContactRevision': expectedContactClassificationRevision },
+              },
+            },
+            {
+              Delete: {
+                TableName: table,
+                Key: { itemId: suggId(suggestion.ownerContactId, suggestion.target) },
+                ConditionExpression: exact.conditionExpression,
+                ExpressionAttributeNames: exact.expressionAttributeNames,
+                ExpressionAttributeValues: exact.expressionAttributeValues,
+              },
+            },
+          ],
+        }));
+        log.debug({ contactId: suggestion.ownerContactId, target: suggestion.target }, 'type suggestion fenced delete');
+        return 'deleted';
+      } catch (err) {
+        if (!(err instanceof TransactionCanceledException)) throw err;
+        const [{ Item: contactRaw }, { Item: suggestionRaw }] = await Promise.all([
+          doc.send(new GetCommand({
+            TableName: contactsTable,
+            Key: { contactId: suggestion.ownerContactId },
+            ConsistentRead: true,
+          })),
+          doc.send(new GetCommand({
+            TableName: table,
+            Key: { itemId: suggId(suggestion.ownerContactId, suggestion.target) },
+            ConsistentRead: true,
+          })),
+        ]);
+        const contact = contactRaw as ContactItem | undefined;
+        if (
+          contact === undefined
+          || contactClassificationRevision(contact) !== expectedContactClassificationRevision
+        ) {
+          return 'contact_revision_changed';
+        }
+        const liveSuggestion = suggestionRaw as SuggestionItem | undefined;
+        if (liveSuggestion === undefined || !sameSuggestionIdentity(liveSuggestion, suggestion)) {
+          return 'suggestion_changed_or_absent';
+        }
         throw err;
       }
     },

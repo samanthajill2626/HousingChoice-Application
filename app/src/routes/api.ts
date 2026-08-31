@@ -2128,7 +2128,41 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       limit,
       ...(before !== undefined && { before }),
     });
-    res.json({ messages: page });
+    const contactIds = [...new Set(
+      page.flatMap((message) =>
+        typeof message.relay_external_caller_contact_id === 'string' &&
+        message.relay_external_caller_contact_id.length > 0
+          ? [message.relay_external_caller_contact_id]
+          : [],
+      ),
+    )];
+    if (contactIds.length === 0) {
+      res.json({ messages: page });
+      return;
+    }
+
+    try {
+      const displays = await contacts.getDisplaysByIds(contactIds);
+      const hydratedPage = page.map((message) => {
+        const contactId = message.relay_external_caller_contact_id;
+        if (typeof contactId !== 'string' || contactId.length === 0) return message;
+        const contact = displays.get(contactId);
+        if (contact === undefined || isDeleted(contact)) return message;
+        const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+        const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
+        const displayName = [first, last].filter((part) => part.length > 0).join(' ');
+        return displayName.length > 0
+          ? { ...message, relay_external_caller_display_name: displayName }
+          : message;
+      });
+      res.json({ messages: hydratedPage });
+    } catch {
+      log.warn(
+        { conversationId, count: contactIds.length },
+        'GET /api/conversations/:conversationId/messages: relay caller display hydration failed',
+      );
+      res.json({ messages: page });
+    }
   });
 
   // GET /api/calls/:callId — resolve a call (M1.9a). `callId` is the Twilio
@@ -2136,8 +2170,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // via the SID pointer, exactly like the status-callback path. Returns
   // { call, conversation } so the dashboard /quick-reply/:callId seam can map a
   // callId → its conversation (and render the masked call entry). PII (doc §9):
-  // the call carries call_party_label (a role/name) — never a raw counterpart
-  // phone beyond what the conversation already exposes; logs stay IDs-only.
+  // call_party_label never carries a raw counterpart phone; a non-member refusal
+  // can include its explicit staff-only external-caller field. Logs stay IDs-only.
   router.get('/calls/:callId', async (req, res) => {
     const { callId } = req.params;
     const call = await messages.getByProviderSid(callId);

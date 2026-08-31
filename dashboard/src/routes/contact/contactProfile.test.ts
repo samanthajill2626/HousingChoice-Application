@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { PM_ROLE, CONTACT_TYPE_LABEL, displayKind, normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
+import {
+  PM_ROLE,
+  CONTACT_TYPE_LABEL,
+  displayKind,
+  normalizeRelationships,
+  normalizeCustomFields,
+  patchForSuggestedContactKind,
+  suggestedContactKindLabel,
+} from './contactProfile.js';
 
 describe('displayKind', () => {
   it('returns the role when role is set', () => {
@@ -98,4 +106,20 @@ describe('CONTACT_TYPE_LABEL', () => {
 it('PM_ROLE is the spelled-out label and drives the badge for a landlord-based PM', () => {
   expect(PM_ROLE).toBe('Property Manager');
   expect(displayKind({ type: 'landlord', role: PM_ROLE }, () => 'Landlord')).toBe('Property Manager');
+});
+
+describe('suggested contact kinds', () => {
+  it.each([
+    ['tenant', 'Tenant', { type: 'tenant', role: '' }],
+    ['landlord', 'Landlord', { type: 'landlord', role: '' }],
+    ['partner', 'Partner', { type: 'partner', role: '' }],
+    ['property_manager', 'Property Manager', { type: 'landlord', role: 'Property Manager' }],
+  ] as const)('maps %s to its label and PATCH', (kind, label, patch) => {
+    expect(suggestedContactKindLabel(kind)).toBe(label);
+    expect(patchForSuggestedContactKind(kind)).toEqual(patch);
+  });
+
+  it('leaves an unknown forensic value unchanged', () => {
+    expect(suggestedContactKindLabel('caseworker')).toBe('caseworker');
+  });
 });

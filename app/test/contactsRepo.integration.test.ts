@@ -19,7 +19,11 @@ import { createLogger } from '../src/lib/logger.js';
 import {
   createContactsRepo,
   EmptyIndexKeyError,
+  INDEX_KEY_ATTRIBUTES,
+  IndexKeyWriteError,
   PrimaryPhoneRemovalError,
+  REQUIRED_INDEX_KEY_ATTRIBUTES,
+  RequiredIndexKeyRemovalError,
 } from '../src/repos/contactsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -110,6 +114,26 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect([...found.keys()].sort()).toEqual([first.contactId, second.contactId].sort());
     expect(found.get(first.contactId)).toEqual({ contactId: first.contactId, firstName: 'Ada' });
     expect(found.get(second.contactId)).toEqual({ contactId: second.contactId, firstName: 'Grace' });
+  });
+
+  it('display reads retain a soft-delete stamp without widening the projection', async () => {
+    const contact = await contacts.create({
+      type: 'tenant',
+      firstName: 'Deleted',
+      lastName: 'Display',
+      phone: nextPhone(),
+    });
+    await contacts.softDelete(contact.contactId, '2026-08-28T16:21:16.000Z');
+
+    const expected = {
+      contactId: contact.contactId,
+      firstName: 'Deleted',
+      lastName: 'Display',
+      phone: contact.phone,
+      deleted_at: '2026-08-28T16:21:16.000Z',
+    };
+    expect(await contacts.getDisplayById(contact.contactId)).toEqual(expected);
+    expect((await contacts.getDisplaysByIds([contact.contactId])).get(contact.contactId)).toEqual(expected);
   });
 
   it('getManyByIds batch-reads WHOLE items, de-dupes ids, and omits missing ones', async () => {
@@ -327,5 +351,136 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     // allowed empty strings on non-key attributes since 2020).
     const ok = await contacts.update(created.contactId, { notes: '' });
     expect(ok.notes).toBe('');
+  });
+
+  it('increments classification_revision only in the same type or role update', async () => {
+    const created = await contacts.create({ type: 'unknown', firstName: 'Revision' });
+    expect(created.classification_revision).toBeUndefined();
+
+    const noteOnly = await contacts.update(created.contactId, { notes: 'unchanged kind' });
+    expect(noteOnly.classification_revision).toBeUndefined();
+
+    const tenant = await contacts.update(created.contactId, { type: 'tenant' });
+    expect(tenant.classification_revision).toBe(1);
+
+    const roleCleared = await contacts.update(created.contactId, { role: null });
+    expect(roleCleared.classification_revision).toBe(2);
+
+    const unknownAgain = await contacts.update(created.contactId, { type: 'unknown' });
+    expect(unknownAgain.classification_revision).toBe(3);
+  });
+
+  it('increments classification_revision atomically for concurrent classification updates', async () => {
+    const created = await contacts.create({ type: 'unknown', firstName: 'Concurrent Revision' });
+
+    const updates = await Promise.all([
+      contacts.update(created.contactId, { type: 'tenant' }),
+      contacts.update(created.contactId, { role: 'Property Manager' }),
+    ]);
+
+    expect(updates.map((contact) => contact.classification_revision).sort()).toEqual([1, 2]);
+    const stored = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(stored?.classification_revision).toBe(2);
+  });
+
+  it('update REFUSES a null REMOVE of status, which would make the contact invisible to listByType', async () => {
+    // The OTHER half of the guard above, and the reason it exists: '' was
+    // refused while null - the documented REMOVE path - was waved through in
+    // the adjacent line. A REMOVE of a byTypeStatus key does not error and does
+    // not empty the row; it un-indexes it, so the contact reads back perfectly
+    // by id and is gone from the Unknown tab forever. Without the guard this
+    // test fails TWICE: the rejects assertion (nothing throws) and the
+    // still-listed assertion (the row vanishes from the partition).
+    const created = await contacts.create({
+      type: 'unknown',
+      status: 'needs_review',
+      phone: nextPhone(),
+    });
+
+    const before = await contacts.listByType('unknown', { status: 'needs_review' });
+    expect(before.items.map((c) => c.contactId)).toContain(created.contactId);
+
+    await expect(
+      contacts.update(created.contactId, { status: null }),
+    ).rejects.toBeInstanceOf(RequiredIndexKeyRemovalError);
+
+    // Total refusal: a companion field in the SAME patch must not land either.
+    await expect(
+      contacts.update(created.contactId, { notes: 'triaged', status: null }),
+    ).rejects.toBeInstanceOf(RequiredIndexKeyRemovalError);
+
+    const read = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(read?.status).toBe('needs_review');
+    expect(read?.notes).toBeUndefined();
+
+    // Still in the partition every triage read queries.
+    const after = await contacts.listByType('unknown', { status: 'needs_review' });
+    expect(after.items.map((c) => c.contactId)).toContain(created.contactId);
+  });
+
+  it('update REFUSES a null REMOVE of type for the same reason', async () => {
+    const created = await contacts.create({
+      type: 'unknown',
+      status: 'needs_review',
+      phone: nextPhone(),
+    });
+    await expect(
+      contacts.update(created.contactId, { type: null }),
+    ).rejects.toBeInstanceOf(RequiredIndexKeyRemovalError);
+    const read = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(read?.type).toBe('unknown');
+  });
+
+  it('update still CLEARS housingAuthority with null - the sparse lookup keys stay clearable', async () => {
+    // The narrowness of the guard is the load-bearing part. PATCH
+    // /api/contacts/:id sends `housingAuthority: null` whenever the edit form's
+    // authority field is emptied (routes/contacts.ts), and leaving the sparse
+    // partition is the CORRECT semantics there. A guard over all of
+    // INDEX_KEY_ATTRIBUTES would 500 that form - the exact bug the null
+    // convention was introduced to fix.
+    const authority = `test_authority_${randomUUID().slice(0, 8)}`;
+    const created = await contacts.create({
+      type: 'tenant',
+      status: 'onboarding',
+      phone: nextPhone(),
+      housingAuthority: authority,
+    });
+
+    const cleared = await contacts.update(created.contactId, { housingAuthority: null });
+    expect(cleared.housingAuthority).toBeUndefined();
+    // And the contact is still a tenant on byTypeStatus - only the sparse
+    // authority partition was left.
+    const listed = await contacts.listByType('tenant', { status: 'onboarding' });
+    expect(listed.items.map((c) => c.contactId)).toContain(created.contactId);
+  });
+});
+
+// Constant-only; runs with or without DynamoDB Local. The guard is only as good
+// as this set, and the set is derived by INDEX NAME - so a rename of the
+// byTypeStatus GSI would silently empty it and disarm the guard rather than
+// breaking a build. Pin it here, next to the behaviour it protects.
+describe('contacts index-key guard sets', () => {
+  it('REQUIRED_INDEX_KEY_ATTRIBUTES is exactly the byTypeStatus keys, and a subset of INDEX_KEY_ATTRIBUTES', () => {
+    expect([...REQUIRED_INDEX_KEY_ATTRIBUTES].sort()).toEqual(['status', 'type']);
+    for (const attribute of REQUIRED_INDEX_KEY_ATTRIBUTES) {
+      expect(INDEX_KEY_ATTRIBUTES.has(attribute)).toBe(true);
+    }
+    // The sparse lookup keys must stay OUT: clearing them with null is a
+    // supported operation, not a defect.
+    for (const attribute of ['phone', 'email', 'housingAuthority']) {
+      expect(INDEX_KEY_ATTRIBUTES.has(attribute)).toBe(true);
+      expect(REQUIRED_INDEX_KEY_ATTRIBUTES.has(attribute)).toBe(false);
+    }
+  });
+
+  it('both index-key refusals are one catchable family', () => {
+    expect(new EmptyIndexKeyError('status')).toBeInstanceOf(IndexKeyWriteError);
+    expect(new RequiredIndexKeyRemovalError('status', 'contact-1')).toBeInstanceOf(
+      IndexKeyWriteError,
+    );
+    // The message has to say what to do instead - the sibling's does.
+    expect(new RequiredIndexKeyRemovalError('status', 'contact-1').message).toContain(
+      'Write a real value instead',
+    );
   });
 });

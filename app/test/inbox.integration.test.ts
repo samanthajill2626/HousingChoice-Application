@@ -320,13 +320,17 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
     expect(ids).not.toContain(contactBId);
   });
 
-  it('filter=unknown returns only needsTriage rows', async () => {
+  it('filter=unknown no longer lists the contactless number - it stays on the All tab (class e, design 2026-08-25)', async () => {
     const resp = await get('/api/inbox?filter=unknown');
     expect(resp.status).toBe(200);
     const { rows } = await resp.json() as { rows: Array<Record<string, unknown>> };
-    expect(rows.every((r) => r['needsTriage'] === true)).toBe(true);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!['phone']).toBe(PHONE_UNK);
+    // No unknown CONTACTS exist in this world yet - the queue is empty, and an
+    // empty queue is a normal page, not an error shape.
+    expect(rows).toEqual([]);
+
+    const all = await get('/api/inbox');
+    const allRows = (await all.json() as { rows: Array<Record<string, unknown>> }).rows;
+    expect(allRows.some((r) => r['kind'] === 'unknown' && r['phone'] === PHONE_UNK)).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
@@ -427,5 +431,119 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
   it('POST /read returns 404 when no conversation exists for the phone', async () => {
     const resp = await post('/api/inbox/read', { phone: '+15569999999' });
     expect(resp.status).toBe(404);
+  });
+
+  // LAST ON PURPOSE: this test adds a contact + conversation to the shared
+  // world, and the split-proof paging test above pins exact page counts over
+  // the original topology.
+  it('filter=unknown lists a type=unknown CONTACT with an open thread, against the real byTypeStatus index', async () => {
+    const PHONE_UNK2 = '+15561001099';
+    await contacts.createIfAbsent({
+      contactId: 'it-contact-unk',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: PHONE_UNK2,
+    });
+    await seedConv({ phone: PHONE_UNK2, lastActivityAt: '2026-06-17T09:00:00.000Z', type: 'unknown_1to1', unread: 1 });
+
+    const resp = await get('/api/inbox?filter=unknown');
+    expect(resp.status).toBe(200);
+    const { rows, nextCursor } = await resp.json() as {
+      rows: Array<Record<string, unknown>>;
+      nextCursor: string | null;
+      truncated?: boolean;
+    };
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'contact',
+      contactId: 'it-contact-unk',
+      role: 'unknown',
+      needsTriage: true,
+      phone: PHONE_UNK2,
+    });
+    expect(nextCursor).toBeNull();
+  });
+
+  // ALSO LAST ON PURPOSE, and it depends on the test above having added
+  // `it-contact-unk` to the world: this walks the whole triage queue, so it
+  // asserts over every unknown contact the suite has created.
+  //
+  // WHY IT HAS TO BE AN INTEGRATION TEST. The unit fake pages a static array
+  // and mints its own LastEvaluatedKey shape; only the REAL byTypeStatus index
+  // can prove that the cursor this branch mints - a synthesized
+  // `{type, status, contactId}` ExclusiveStartKey, base64url'd through the
+  // wire - is one DynamoDB accepts, in BOTH status blocks and across the
+  // roll-over between them.
+  it('filter=unknown pages the REAL byTypeStatus index across a block boundary: untriaged block first, union exact, no dupes, no skips', async () => {
+    const untriaged = ['it-unk-n1', 'it-unk-n2', 'it-unk-n3'];
+    const reviewed = ['it-unk-a1', 'it-unk-a2'];
+    let tail = 1101;
+    for (const contactId of [...untriaged, ...reviewed]) {
+      const phone = `+1556100${String(tail)}`;
+      tail += 1;
+      await contacts.createIfAbsent({
+        contactId,
+        type: 'unknown',
+        status: untriaged.includes(contactId) ? 'needs_review' : 'active',
+        phone,
+      });
+      await seedConv({
+        phone,
+        lastActivityAt: `2026-06-18T0${String(tail % 10)}:00:00.000Z`,
+        type: 'unknown_1to1',
+        unread: 1,
+      });
+    }
+    // `it-contact-unk` (needs_review) was created by the test above and is part
+    // of this queue.
+    const expected = ['it-contact-unk', ...untriaged, ...reviewed].sort();
+
+    const pages: string[][] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const query = `/api/inbox?filter=unknown&limit=2${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`;
+      const resp = await get(query);
+      expect(resp.status).toBe(200);
+      const body = (await resp.json()) as {
+        rows: Array<Record<string, unknown>>;
+        nextCursor: string | null;
+        truncated?: boolean;
+      };
+      // The wire failure flag is the unread branch's contract and must never
+      // appear here - the cursor is this feed's continuation signal.
+      expect(body.truncated).toBeUndefined();
+      pages.push(body.rows.map((r) => String(r['contactId'])));
+      cursor = body.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull(); // the walk ENDED; the guard did not stop it
+
+    const seen = pages.flat();
+    expect([...seen].sort()).toEqual(expected); // no skips
+    expect(new Set(seen).size).toBe(seen.length); // no duplicates
+    // 2 + 2 + 2 rows, then ONE EMPTY PAGE. Not a defect - the queue holds
+    // exactly 3 * limit rows, so page 3 FILLED at its last row and the cursor
+    // it minted names the position after it. "Nothing is behind that position"
+    // is unknowable without paying another Query, exactly as it is for a
+    // DynamoDB LastEvaluatedKey at an exact page multiple, so the honest answer
+    // is one more (empty) round trip that ends with nextCursor null. The
+    // dashboard's Load more simply returns nothing and disables itself.
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 2, 0]);
+
+    // QUEUE ORDER ACROSS THE BOUNDARY: every untriaged row is served on a page
+    // no later than the first page carrying a reviewed one.
+    const pageOf = (id: string) => pages.findIndex((p) => p.includes(id));
+    const lastUntriaged = Math.max(...['it-contact-unk', ...untriaged].map(pageOf));
+    const firstReviewed = Math.min(...reviewed.map(pageOf));
+    expect(lastUntriaged).toBeLessThanOrEqual(firstReviewed);
+
+    // A FOREIGN cursor is a 400 against the real route, never a
+    // wrong-partition Query.
+    const foreign = Buffer.from(
+      JSON.stringify({ u: 1, a: '2026-06-18T00:00:00.000Z', c: 'cv-x', s: [] }),
+      'utf8',
+    ).toString('base64url');
+    const bad = await get(`/api/inbox?filter=unknown&cursor=${encodeURIComponent(foreign)}`);
+    expect(bad.status).toBe(400);
   });
 });

@@ -6,7 +6,7 @@ import {
   type Address,
   type LandlordStatus,
   type TenantStatus,
-} from '../../api/index.js';
+} from '../../api/types.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { isoOf } from '../../lib/time.js';
 
@@ -50,6 +50,21 @@ export function formatTimeWithSeconds(iso: string): string {
   h = h % 12;
   if (h === 0) h = 12;
   return `${h}:${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}${mer}`;
+}
+
+/** A full local date and time for revealed call details. Unlike the compact
+ * clock labels, an invalid instant stays visible as an explicit fallback. */
+export function formatDateTimeWithSeconds(iso: string): string {
+  const d = new Date(isoOf(iso));
+  if (Number.isNaN(d.getTime())) return 'Time unavailable';
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 /** A date-divider label for a day, e.g. "Mon Jun 8". Accepts a clean ISO instant or

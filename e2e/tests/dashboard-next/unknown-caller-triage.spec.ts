@@ -111,3 +111,45 @@ test('an inbound call from an unknown number is captured: Unknown list + Today +
   await expect(rows).toHaveCount(1);
   await expect(rows.first().getByRole('link')).toHaveAttribute('href', `/contacts/${stub!.contactId}`);
 });
+
+test('the Unknown tab is the contact triage queue: an honest empty state, then the captured caller', async ({
+  page,
+}) => {
+  const api = page.request;
+  await devLogin(page);
+
+  // (1) Empty queue = the NORMAL zero state: the per-filter empty copy, and
+  // never the load-failure banner (design requirement 5). The lean seed holds
+  // exactly three contacts (tenant/landlord/partner) and ZERO unknowns, so the
+  // tab is genuinely empty here rather than empty by accident.
+  await page.goto(`${NEXT}/inbox?filter=unknown`);
+  await expect(page.getByRole('tab', { name: 'Unknown' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByText('No unknown numbers')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  // (2) A missed call from a fresh number mints an (unknown, needs_review)
+  // contact plus its 1:1 thread (the missed-call auto-text).
+  const caller = uniqueVoicePhone();
+  await placeCall(api, { from: caller, to: BUSINESS, scenario: { digit: null } });
+  let stubId: string | undefined;
+  await expect
+    .poll(
+      async () => {
+        const res = await api.get(`${NEXT}/api/contacts?type=unknown`);
+        if (!res.ok()) return false;
+        const { contacts } = (await res.json()) as { contacts: Array<{ contactId: string; phone?: string }> };
+        stubId = contacts.find((c) => c.phone === caller)?.contactId;
+        return stubId !== undefined;
+      },
+      { timeout: 10_000 },
+    )
+    .toBeTruthy();
+
+  // (3) The Unknown tab now lists the caller, as a CONTACT row deep-linking to
+  // the contact page - the contact-side read (design 2026-08-25).
+  await page.goto(`${NEXT}/inbox?filter=unknown`);
+  const row = page.locator(`a[href="/contacts/${stubId}"]`);
+  await expect(row).toBeVisible();
+  await expect(row).toContainText(/needs triage/i);
+  await expect(page.getByText('No unknown numbers')).toHaveCount(0);
+});

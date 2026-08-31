@@ -28,6 +28,7 @@ import {
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
+import { listByTypeFromContacts } from './helpers/contactsPartitionFake.js';
 import { queryUnreadPageFromItems, unreadFlagFor } from './helpers/unreadIndexFake.js';
 
 interface Seed {
@@ -66,6 +67,8 @@ interface InboxCallCounts {
   findByParticipantPhone: number;
   listByConversation: number;
   getPlacementById: number;
+  listByType: number;
+  listByLastActivity: number;
 }
 
 function emptyCallCounts(): InboxCallCounts {
@@ -75,6 +78,8 @@ function emptyCallCounts(): InboxCallCounts {
     findByParticipantPhone: 0,
     listByConversation: 0,
     getPlacementById: 0,
+    listByType: 0,
+    listByLastActivity: 0,
   };
 }
 
@@ -136,6 +141,7 @@ function makeDeps(
         limit?: number;
         exclusiveStartKey?: Record<string, unknown>;
       }) {
+        if (calls !== undefined) calls.listByLastActivity += 1;
         const start =
           typeof exclusiveStartKey?.['idx'] === 'number'
             ? (exclusiveStartKey['idx'] as number) + 1
@@ -206,6 +212,14 @@ function makeDeps(
       },
       async getById(contactId: string) {
         return seed.contacts.find((c) => c.contactId === contactId);
+      },
+      // Inert until the unknown tab's contact-side read lands (2026-08-25
+      // design): aggregateInbox does not call this yet. Real DynamoDB
+      // semantics via the shared helper so the later mutation probes
+      // (status narrowing, excludeOrigin) can actually go red.
+      async listByType(type: string, opts = {}) {
+        if (calls !== undefined) calls.listByType += 1;
+        return listByTypeFromContacts(seed.contacts, type, opts);
       },
     } as unknown as NonNullable<InboxRouterDeps['contactsRepo']>,
     messagesRepo: {
@@ -415,6 +429,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     const contact: ContactItem = {
       contactId: 'c-unk',
       type: 'unknown',
+      // REQUIRED since the 2026-08-25 contact-side read: byTypeStatus is
+      // (hash: type, range: status) and a GSI does not index an item missing a
+      // key attribute, so a status-less unknown is invisible to the queue read.
+      // Every production write path sets a status; this fixture was always
+      // slightly wrong, and the sparseness rule just made it observable.
+      status: 'needs_review',
       firstName: 'Alexis',
       lastName: 'Monroe',
       phone: '+15550009999',
@@ -518,7 +538,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
   it('relay filter matrix: in "all"+"unread" (when unread>0); NEVER in "unknown"', async () => {
     const seed: Seed = {
-      contacts: [{ contactId: 'c-unk', type: 'unknown', phone: '+14049824978' }],
+      // `status` is REQUIRED here since the 2026-08-25 contact-side read: the
+      // byTypeStatus GSI is sparse, so "IS type unknown" alone stopped being
+      // sufficient - the contact must be INDEXED to reach the queue.
+      contacts: [{ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+14049824978' }],
       conversations: [
         relayConv({ conversationId: 'r-unread', pool_number: '+15550160001', last_activity_at: '2026-06-14T10:00:00.000Z', unread_count: 3,
           participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
@@ -608,8 +631,12 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     );
 
     const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(baseSeed));
-    expect(unknown.rows.every((r) => r.needsTriage)).toBe(true);
-    expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
+    // Class e (design 2026-08-25): a contactless conversation leaves the
+    // TRIAGE QUEUE - a queue built from contacts cannot see it - but stays
+    // visible, replyable and reachable on the All tab.
+    expect(unknown.rows).toEqual([]);
+    const allAgain = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(baseSeed));
+    expect(allAgain.rows.some((r) => r.kind === 'unknown' && r.phone === '+14049824978')).toBe(true);
   });
 
   // The four tests below used to pin the RETIRED contract: `filter=unread`
@@ -650,6 +677,8 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 
@@ -730,11 +759,19 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 
-  it('rejects a resolved non-unknown contact before conversation and message hydration', async () => {
+  it('filter=unknown never walks the open partition: a tenant world costs one listByType PER BLOCK and nothing per-conversation', async () => {
     const calls = emptyCallCounts();
+    // unread_count is 0 here for a reason that EXPIRED on 2026-08-26 and is
+    // kept only so nobody re-derives it: a resurfacing sweep used to resolve a
+    // contact per visible unread index item, so an unread thread would have
+    // put a findByPhone back on this page unrelated to the partition walk.
+    // The sweep is deleted; this branch no longer reads byUnread at all, so
+    // the seed value no longer matters here.
     const page = await aggregateInbox(
       { filter: 'unknown', limit: 30 },
       makeDeps({
@@ -744,7 +781,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
             conversationId: 'conv-tenant',
             participant_phone: '+14045550105',
             last_activity_at: '2026-06-12T10:00:00.000Z',
-            unread_count: 1,
+            unread_count: 0,
             placementId: 'placement-tenant',
           }),
         ],
@@ -757,11 +794,21 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
     expect(page.rows).toEqual([]);
     expect(calls).toEqual({
+      // ZERO byUnread probes since 2026-08-26: the deleted-resurfacing sweep
+      // that rode the sparse index was deleted, so this branch's only read is
+      // the triage partition.
       queryUnreadPage: 0,
-      findByPhone: 1,
+      findByPhone: 0, // the per-conversation contact resolution is GONE
       findByParticipantPhone: 0,
       listByConversation: 0,
       getPlacementById: 0,
+      // ONE Query PER STATUS BLOCK - needs_review, then active - and nothing
+      // else (2026-08-26). Both blocks are read here because neither yielded a
+      // row, so the reader never filled its page and walked the queue to its
+      // end. Coverage is unchanged by the narrowing: every legal status is a
+      // block.
+      listByType: 2,
+      listByLastActivity: 0, // the open-partition pager never runs
     });
   });
 
@@ -804,6 +851,8 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       // Still NO downstream hydration: the drop happens before any of it.
       listByConversation: 0,
       getPlacementById: 0,
+      listByType: 0,
+      listByLastActivity: 0,
     });
   });
 

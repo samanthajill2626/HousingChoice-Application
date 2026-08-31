@@ -180,6 +180,121 @@ describe('messagesRepo.append dedupe (fake document client)', () => {
   });
 });
 
+describe('messagesRepo.append relay external caller metadata', () => {
+  function createAppendHarness() {
+    const transactions: TransactWriteCommand[] = [];
+    const fakeDoc = {
+      send: async (cmd: unknown) => {
+        if (cmd instanceof TransactWriteCommand) {
+          transactions.push(cmd);
+          return {};
+        }
+        throw new Error(`unexpected command: ${String(cmd)}`);
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    return {
+      repo: createMessagesRepo({
+        doc: fakeDoc,
+        env: { TABLE_PREFIX: 'hc-fake-' } as NodeJS.ProcessEnv,
+        logger: createLogger({ destination: createLogCapture().stream }),
+      }),
+      transactions,
+    };
+  }
+
+  const nonMemberCall = {
+    conversationId: 'conv-relay',
+    providerSid: 'CAexternal1',
+    providerTs: '2026-08-28T16:21:16.000Z',
+    type: 'call' as const,
+    direction: 'inbound' as const,
+    author: 'unknown' as const,
+    deliveryStatus: 'delivered' as const,
+    callStatus: 'no-answer' as const,
+    callOutcome: 'missed' as const,
+    masked: true,
+    relayRefusalReason: 'non_member' as const,
+    relayExternalCallerPhone: '+16175550198',
+    relayExternalCallerContactId: 'contact-external',
+  };
+
+  function firstPersistedItem(transaction: TransactWriteCommand) {
+    return transaction.input.TransactItems?.[0]?.Put?.Item;
+  }
+
+  it('persists all approved facts and permits a reason-only unknown caller', async () => {
+    const { repo, transactions } = createAppendHarness();
+
+    await repo.append(nonMemberCall);
+    expect(firstPersistedItem(transactions[0]!)).toMatchObject({
+      relay_refusal_reason: 'non_member',
+      relay_external_caller_phone: '+16175550198',
+      relay_external_caller_contact_id: 'contact-external',
+    });
+
+    await repo.append({
+      ...nonMemberCall,
+      providerSid: 'CAexternal2',
+      relayExternalCallerPhone: undefined,
+      relayExternalCallerContactId: undefined,
+    });
+    expect(firstPersistedItem(transactions[1]!)).toMatchObject({
+      relay_refusal_reason: 'non_member',
+    });
+    expect(firstPersistedItem(transactions[1]!)).not.toHaveProperty('relay_external_caller_phone');
+    expect(firstPersistedItem(transactions[1]!)).not.toHaveProperty('relay_external_caller_contact_id');
+  });
+
+  it.each([
+    { ...nonMemberCall, type: 'sms' },
+    { ...nonMemberCall, direction: 'outbound' },
+    { ...nonMemberCall, masked: false },
+    { ...nonMemberCall, relayRefusalReason: undefined },
+    { ...nonMemberCall, relayExternalCallerPhone: '617-555-0198' },
+    { ...nonMemberCall, relayExternalCallerPhone: undefined },
+    { ...nonMemberCall, relaySenderKey: 'contact-member' },
+    { ...nonMemberCall, author: 'tenant' },
+  ])('rejects an invalid relay external caller storage shape before writing', async (message) => {
+    const { repo, transactions } = createAppendHarness();
+
+    await expect(repo.append(message as unknown as Parameters<typeof repo.append>[0])).rejects.toThrow(
+      'invalid relay external caller metadata',
+    );
+    expect(transactions).toHaveLength(0);
+  });
+
+  it('leaves ordinary call and SMS storage unchanged', async () => {
+    const { repo, transactions } = createAppendHarness();
+
+    await repo.append({
+      ...nonMemberCall,
+      providerSid: 'CAnormal',
+      author: 'tenant',
+      relayRefusalReason: undefined,
+      relayExternalCallerPhone: undefined,
+      relayExternalCallerContactId: undefined,
+    });
+    await repo.append({
+      conversationId: 'conv-sms',
+      providerSid: 'SMnormal',
+      providerTs: '2026-08-28T16:22:16.000Z',
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      body: 'hello',
+      deliveryStatus: 'delivered',
+    });
+
+    for (const transaction of transactions) {
+      const item = firstPersistedItem(transaction);
+      expect(item).not.toHaveProperty('relay_refusal_reason');
+      expect(item).not.toHaveProperty('relay_external_caller_phone');
+      expect(item).not.toHaveProperty('relay_external_caller_contact_id');
+    }
+  });
+});
+
 describe('breaker minute bucketing', () => {
   it('buckets to the UTC minute', () => {
     expect(minuteBucket(new Date('2026-06-12T15:04:59.999Z'))).toBe('2026-06-12T15:04');

@@ -8,7 +8,12 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
-import type { Contact, ContactTimelinePage } from '../../api/index.js';
+import type { Contact, ContactTimelinePage, TimelineItem } from '../../api/index.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 
 const getContactTimeline = vi.fn();
 const getAllConversations = vi.fn();
@@ -91,7 +96,9 @@ function renderPane(props: HarnessProps) {
   // MemoryRouter: MilestonePin renders a <Link> for any milestone with a refId.
   return render(
     <MemoryRouter>
-      <PaneHarness {...props} />
+      <ImageViewerProvider>
+        <PaneHarness {...props} />
+      </ImageViewerProvider>
     </MemoryRouter>,
   );
 }
@@ -103,6 +110,24 @@ const TENANT: Contact = {
   lastName: 'Williams',
   status: 'Active',
   phone: '+14040100007',
+};
+
+const HOST_MEDIA_ATTACHMENTS = [
+  { s3Key: 'inbound/MMHOST1/0', contentType: 'image/png', filename: 'Host proof.png' },
+];
+
+const HOST_TIMELINE_MESSAGE: TimelineItem = {
+  kind: 'message',
+  id: 'host-image-message',
+  at: '2026-08-27T12:00:00.000Z',
+  conversationId: 'conv-host',
+  tsMsgId: '2026-08-27T12:00:00.000Z#MMHOST1',
+  direction: 'inbound',
+  author: 'tenant',
+  type: 'mms',
+  body: 'Host image',
+  delivery_status: 'delivered',
+  media_attachments: HOST_MEDIA_ATTACHMENTS,
 };
 
 // Two numbers = two 1:1 threads (each phone is its own conversation by design).
@@ -178,6 +203,32 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('ContactCommsPane - texting', () => {
+  it('keeps its selected Timeline filter while an image uses the shared viewer', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    getContactTimeline.mockResolvedValue(timelinePage([HOST_TIMELINE_MESSAGE]));
+
+    try {
+      renderPane({ contact: TENANT });
+      const routeRegion = screen.getByRole('region', { name: 'Communications and activity' });
+      const selectedFilter = screen.getByRole('button', { name: /Comms only/i });
+      expect(selectedFilter).toHaveAttribute('aria-pressed', 'false');
+
+      const trigger = await screen.findByRole('button', { name: 'View Host proof.png' });
+      await user.click(trigger);
+      const dialog = screen.getByRole('dialog', { name: 'Host proof.png' });
+      await loadViewerImage(dialog, 'Host proof.png');
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+
+      expect(trigger).toHaveFocus();
+      expect(routeRegion).toBeInTheDocument();
+      expect(selectedFilter).toHaveAttribute('aria-pressed', 'false');
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
   it('sends into the resolved thread and shows the optimistic bubble immediately', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
@@ -573,7 +624,9 @@ describe('ContactCommsPane - local contact override', () => {
     // kept shadowing with its override, the send gate would go stale.
     rerender(
       <MemoryRouter>
-        <PaneHarness contact={{ ...TENANT, sms_opt_out: true }} />
+        <ImageViewerProvider>
+          <PaneHarness contact={{ ...TENANT, sms_opt_out: true }} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     await waitFor(() =>
@@ -679,7 +732,9 @@ describe('ContactCommsPane - EmailManager save', () => {
     // A NEW object from the caller (its own refetch landed) wins, override gone.
     rerender(
       <MemoryRouter>
-        <PaneHarness contact={{ ...NO_EMAIL }} />
+        <ImageViewerProvider>
+          <PaneHarness contact={{ ...NO_EMAIL }} />
+        </ImageViewerProvider>
       </MemoryRouter>,
     );
     await waitFor(() =>

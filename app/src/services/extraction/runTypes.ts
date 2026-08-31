@@ -28,6 +28,7 @@ export const DROP_REASONS = [
   'equal_to_current',
   'status_not_onboarding_tenant',
   'type_already_classified',
+  'type_classification_changed',
   'phone_not_canonicalizable',
   'phone_already_owned',
   'phone_owned_by_other',

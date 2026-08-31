@@ -1,37 +1,78 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { MediaGallery } from './MediaGallery.js';
+import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import {
+  installImageViewerResizeObserver,
+  loadViewerImage,
+} from '../../ui/imageViewer/ImageViewer.testUtils.js';
+import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 
-const AT = '2026-08-01T00:00:00.000Z';
-const item = (contentType: string): CommsMediaItem => ({
-  key: 'a:0',
-  src: '/x',
-  contentType,
-  at: AT,
-});
+const MEDIA: CommsMediaItem[] = [
+  {
+    key: 'new-image',
+    src: '/api/messages/MM2/media/0',
+    contentType: 'image/png',
+    at: '2026-08-27T12:00:00Z',
+  },
+  {
+    key: 'old-image',
+    src: '/api/messages/MM1/media/0',
+    contentType: 'image/jpeg',
+    at: '2026-08-26T12:00:00Z',
+  },
+  {
+    key: 'document',
+    src: '/api/messages/MM0/media/0',
+    contentType: 'application/pdf',
+    at: '2026-08-25T12:00:00Z',
+  },
+  {
+    key: 'heic-image',
+    src: '/api/messages/MMH/media/0',
+    contentType: 'image/heic',
+    at: '2026-08-24T12:00:00Z',
+  },
+];
 
-function renderGallery(media: CommsMediaItem[]) {
-  return render(
+function item(contentType: string): CommsMediaItem {
+  return {
+    key: 'single-item',
+    src: '/api/messages/MMSINGLE/media/0',
+    contentType,
+    at: '2026-08-01T00:00:00.000Z',
+  };
+}
+
+function gallery(
+  media: CommsMediaItem[] = MEDIA,
+  paging?: MediaGalleryPaging,
+): React.JSX.Element {
+  return (
     <MemoryRouter>
-      <MediaGallery media={media} />
-    </MemoryRouter>,
+      <ImageViewerProvider>
+        <MediaGallery media={media} paging={paging} />
+      </ImageViewerProvider>
+    </MemoryRouter>
   );
 }
 
 describe('MediaGallery type tiers', () => {
-  it('renders a HEIC gallery item as a file tile, not an img', () => {
-    renderGallery([item('image/heic')]);
+  it('renders a HEIC gallery item as a file tile, not an image trigger', () => {
+    render(gallery([item('image/heic')]));
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    // The file tile is the other branch. It is titled with the KIND WORD, not
-    // the raw MIME type: an operator hovering a tile wants "Image", not
-    // "image/heic". The bare type was what this assertion used to pin.
-    expect(screen.getByRole('link', { name: 'Image' })).toBeInTheDocument();
+    // BOTH sides of the merge. From main: a non-image stays a LINK opening in
+    // a new tab, while images became viewer buttons. From this branch: that
+    // link is titled with the KIND WORD rather than the raw MIME type - an
+    // operator hovering a tile wants "Image", not "image/heic". The raw type
+    // is what this assertion used to pin, on both sides.
+    expect(screen.getByRole('link', { name: 'Image' })).toHaveAttribute('target', '_blank');
   });
 
   it('titles an unrecognised tile generically rather than leaking the raw type', () => {
-    renderGallery([item('application/octet-stream')]);
+    render(gallery([item('application/octet-stream')]));
     expect(screen.getByRole('link', { name: 'Attachment' })).toBeInTheDocument();
   });
 
@@ -39,13 +80,81 @@ describe('MediaGallery type tiers', () => {
     // The server essence-matches, so it serves this inline as a PDF. An exact
     // === comparison here drew the generic paperclip instead - two readers,
     // one object, different answers.
-    renderGallery([item('application/pdf; charset=utf-8')]);
+    render(gallery([item('application/pdf; charset=utf-8')]));
     const tile = screen.getByRole('link');
     expect(tile.textContent).toBe(String.fromCodePoint(0x1f4c4));
   });
 
-  it('still renders a jpeg gallery item as an img', () => {
-    renderGallery([item('image/jpeg')]);
-    expect(screen.getByRole('img')).toBeInTheDocument();
+  it('renders a JPEG gallery item as an image trigger', () => {
+    render(gallery([item('image/jpeg')]));
+    expect(screen.getByRole('button', { name: 'View image attachment' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Image attachment' })).toBeInTheDocument();
+  });
+});
+
+describe('MediaGallery image viewer integration', () => {
+  it('preserves media order and opens eligible images one at a time while files stay links', async () => {
+    const restoreResizeObserver = installImageViewerResizeObserver({ width: 1000, height: 600 });
+    const user = userEvent.setup();
+    try {
+      render(gallery());
+
+      const triggers = screen.getAllByRole('button', { name: 'View image attachment' });
+      expect(triggers).toHaveLength(2);
+      expect(
+        triggers.map((trigger) =>
+          within(trigger).getByRole('img', { name: 'Image attachment' }).getAttribute('src'),
+        ),
+      ).toEqual(['/api/messages/MM2/media/0', '/api/messages/MM1/media/0']);
+      expect(triggers[0]).toHaveAttribute('aria-haspopup', 'dialog');
+      expect(triggers[1]).toHaveAttribute('aria-haspopup', 'dialog');
+
+      const fileLinks = screen.getAllByRole('link');
+      expect(fileLinks.map((link) => link.getAttribute('href'))).toEqual([
+        '/api/messages/MM0/media/0',
+        '/api/messages/MMH/media/0',
+      ]);
+      for (const link of fileLinks) {
+        expect(link).toHaveAttribute('target', '_blank');
+      }
+
+      await user.click(triggers[0]!);
+      const firstDialog = screen.getByRole('dialog', { name: 'Image attachment' });
+      const firstImage = await loadViewerImage(firstDialog, 'Image attachment');
+      expect(firstImage).toHaveAttribute('src', '/api/messages/MM2/media/0');
+      expect(
+        within(firstDialog).queryByRole('button', { name: /Previous|Next/i }),
+      ).not.toBeInTheDocument();
+
+      await user.click(triggers[1]!);
+      expect(screen.getByRole('dialog', { name: 'Image attachment' })).toBe(firstDialog);
+      expect(firstImage).toHaveAttribute('src', '/api/messages/MM2/media/0');
+
+      await user.click(within(firstDialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(triggers[0]).toHaveFocus();
+
+      await user.click(triggers[1]!);
+      const secondDialog = screen.getByRole('dialog', { name: 'Image attachment' });
+      const secondImage = await loadViewerImage(secondDialog, 'Image attachment');
+      expect(secondImage).toHaveAttribute('src', '/api/messages/MM1/media/0');
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
+  it('keeps paging actionable and disables it while older media loads', async () => {
+    const user = userEvent.setup();
+    const onLoadMore = vi.fn();
+    const view = render(
+      gallery(MEDIA, { hasMore: true, loadingMore: false, onLoadMore }),
+    );
+
+    const loadMore = screen.getByRole('button', { name: 'Load older media' });
+    await user.click(loadMore);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+    view.rerender(gallery(MEDIA, { hasMore: true, loadingMore: true, onLoadMore }));
+    expect(screen.getByRole('button', { name: 'Loading...' })).toBeDisabled();
   });
 });

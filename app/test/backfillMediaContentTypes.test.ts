@@ -58,10 +58,13 @@ async function run(opts: {
   /** Capture a thrown abort instead of rejecting, so the test can assert on the
    *  fakes (no vendor call, no writes) as well as on the message. */
   captureError?: boolean;
+  /** Make every setContentType throw - the systemic-S3-failure abort path. */
+  s3Fails?: boolean;
 }) {
   const calls: string[] = [];
   const setContentType = vi.fn(async (key: string) => {
     calls.push(`s3:${key}`);
+    if (opts.s3Fails === true) throw new Error('s3 exploded');
   });
   const getByTsMsgId = vi.fn(async (conversationId: string, tsMsgId: string) => {
     calls.push(`read:${conversationId}`);
@@ -322,6 +325,49 @@ describe('backfillMediaContentTypes - foreign accounts vs wrong credentials', ()
     const { result } = await run({ rows: [inboundRow()], expectedAccountSid: ACCOUNT });
     expect(result.written).toBe(1);
     expect(result.skippedForeignAccount).toBe(0);
+  });
+});
+
+describe('backfillMediaContentTypes - an S3 failure stops the whole pool', () => {
+  /** One row with 12 repairable attachments, so the 4-worker pool has plenty
+   *  of queued work left at the moment the first write fails. */
+  const manyAttachments = inboundRow({
+    mediaUrls: Array.from(
+      { length: 12 },
+      (_unused, i) =>
+        `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}/Messages/MM1/Media/ME${String(i).padStart(32, '0')}`,
+    ),
+    media_attachments: Array.from({ length: 12 }, (_unused, i) => ({
+      s3Key: `media/c1/MM1/${i}`,
+      contentType: 'application/octet-stream',
+    })),
+  });
+
+  it('stops claiming new work instead of writing on past the abort', async () => {
+    // Promise.all rejects on the FIRST failure but does not stop the other
+    // workers. Without a shared abort flag they keep pulling and keep calling
+    // setContentType, so S3 goes on being mutated after the caller has already
+    // caught the rejection and logged its PARTIAL summary - an operator then
+    // reads a report that understates what the run changed.
+    const { error, setContentType } = await run({
+      rows: [manyAttachments],
+      s3Fails: true,
+      captureError: true,
+    });
+    expect(error).toBeInstanceOf(Error);
+    expect(setContentType.mock.calls.length).toBeGreaterThan(0);
+    // The in-flight batch finishes; nothing beyond it is claimed.
+    expect(setContentType.mock.calls.length).toBeLessThan(12);
+  });
+
+  it('writes no row when the pool aborted', async () => {
+    const { annotateMessage, putMediaPointers } = await run({
+      rows: [manyAttachments],
+      s3Fails: true,
+      captureError: true,
+    });
+    expect(putMediaPointers).not.toHaveBeenCalled();
+    expect(annotateMessage).not.toHaveBeenCalled();
   });
 });
 

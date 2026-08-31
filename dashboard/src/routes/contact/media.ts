@@ -109,9 +109,16 @@ export function mediaKindWord(contentType: string): string | undefined {
   return KIND_WORDS.get(essenceOf(contentType));
 }
 
-/** True when the server will serve this type truthfully (declarable tier).
- *  Every declarable type has a kind word, so this shares the map - but callers
- *  asking a yes/no question get a yes/no answer rather than a label. */
-export function isDeclarableMediaType(contentType: string): boolean {
-  return KIND_WORDS.has(essenceOf(contentType));
+/** True when this attachment is a PDF - a file LINK here rather than an <img>,
+ *  even though the server serves it inline.
+ *
+ *  Essence-matched like everything else in this module. The three render sites
+ *  that need it used to compare `=== 'application/pdf'` exactly, which
+ *  disagreed with every other reader for a stored `application/pdf; charset=x`:
+ *  the server would serve it inline as a PDF while the dashboard drew the
+ *  generic paperclip. Parameterised types are ordinary wire forms, and the
+ *  legacy population predates the write-side normalizer that would have
+ *  stripped them. */
+export function isPdfMediaType(contentType: string): boolean {
+  return essenceOf(contentType) === 'application/pdf';
 }

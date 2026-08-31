@@ -63,10 +63,26 @@ describe('MediaGallery type tiers', () => {
   it('renders a HEIC gallery item as a file tile, not an image trigger', () => {
     render(gallery([item('image/heic')]));
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'image/heic' })).toHaveAttribute(
-      'target',
-      '_blank',
-    );
+    // BOTH sides of the merge. From main: a non-image stays a LINK opening in
+    // a new tab, while images became viewer buttons. From this branch: that
+    // link is titled with the KIND WORD rather than the raw MIME type - an
+    // operator hovering a tile wants "Image", not "image/heic". The raw type
+    // is what this assertion used to pin, on both sides.
+    expect(screen.getByRole('link', { name: 'Image' })).toHaveAttribute('target', '_blank');
+  });
+
+  it('titles an unrecognised tile generically rather than leaking the raw type', () => {
+    render(gallery([item('application/octet-stream')]));
+    expect(screen.getByRole('link', { name: 'Attachment' })).toBeInTheDocument();
+  });
+
+  it('draws the PDF glyph for a PARAMETERIZED pdf, agreeing with the server', () => {
+    // The server essence-matches, so it serves this inline as a PDF. An exact
+    // === comparison here drew the generic paperclip instead - two readers,
+    // one object, different answers.
+    render(gallery([item('application/pdf; charset=utf-8')]));
+    const tile = screen.getByRole('link');
+    expect(tile.textContent).toBe(String.fromCodePoint(0x1f4c4));
   });
 
   it('renders a JPEG gallery item as an image trigger', () => {

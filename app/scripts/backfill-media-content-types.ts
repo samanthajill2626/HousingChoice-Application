@@ -413,18 +413,37 @@ async function scanAndRepair(
    *  Promise.all over a whole page. */
   async function drain(candidates: readonly Candidate[]): Promise<void> {
     let cursor = 0;
+    let failure: unknown;
     const workerCount = Math.min(VENDOR_CONCURRENCY, candidates.length);
     await Promise.all(
       Array.from({ length: workerCount }, async () => {
         for (;;) {
+          // COOPERATIVE ABORT, and it is load-bearing for an HONEST REPORT.
+          // Promise.all rejects the moment ONE worker throws, but it does not
+          // stop the others - they keep pulling from the cursor and keep
+          // calling setContentType, so S3 goes on being mutated AFTER the
+          // caller has caught the rejection and logged its PARTIAL summary.
+          // The operator would then be reading a snapshot that understates
+          // what the run actually changed. Checking a shared flag stops every
+          // worker, and awaiting all of them before rethrowing means the
+          // counters are final by the time anything is printed.
+          if (failure !== undefined) return;
           const index = cursor;
           cursor += 1;
           const candidate = candidates[index];
           if (candidate === undefined) return;
-          await repairAttachment(candidate);
+          try {
+            await repairAttachment(candidate);
+          } catch (err) {
+            failure ??= err;
+            return;
+          }
         }
       }),
     );
+    // Preserves the original semantics - the first failure still aborts the
+    // run - but only once every in-flight write has settled.
+    if (failure !== undefined) throw failure;
   }
 
   let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -709,8 +728,30 @@ export function messagingMisconfiguration(config: AppConfig): string | undefined
 const HOW_TO_FIX =
   'Set MESSAGING_DRIVER=twilio and ALL SIX Twilio keys loadConfig requires - TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID, TWILIO_CONVERSATIONS_SERVICE_SID - plus TWILIO_EVENTS_WEBHOOK_SECRET (required on every real twilio config; the only exemption is TWILIO_API_BASE_URL, which this script refuses), plus MEDIA_BUCKET and TABLE_PREFIX for the TARGET environment. TWILIO_API_BASE_URL and MEDIA_S3_ENDPOINT must be UNSET. Then re-run.';
 
+/** The ONLY flag this script accepts. Anything else is refused - see main. */
+const KNOWN_ARGS: ReadonlySet<string> = new Set(['--dry-run']);
+
 async function main(): Promise<void> {
-  const dryRun = process.argv.includes('--dry-run');
+  // REFUSE UNKNOWN ARGUMENTS. `argv.includes('--dry-run')` is a membership
+  // test, so a typo does not fail - it silently yields dryRun=false and the
+  // script performs the LIVE APPLY against production S3 and DynamoDB while
+  // the operator believes they are rehearsing. `--dryrun`, `--dry_run`, `-n`
+  // and `--dry-run=true` all land there. The whole documented ops procedure is
+  // "dry run FIRST", so the one input that selects between rehearsal and
+  // mutation must be validated rather than sniffed.
+  const passed = process.argv.slice(2);
+  const unknown = passed.filter((arg) => !KNOWN_ARGS.has(arg));
+  if (unknown.length > 0) {
+    logger.error(
+      { unknown, accepted: [...KNOWN_ARGS] },
+      'backfill:media-content-types - UNRECOGNISED ARGUMENT, nothing scanned and nothing written. ' +
+        'The only accepted flag is exactly --dry-run. Refusing rather than guessing: a mistyped ' +
+        'dry-run flag would otherwise fall through to a LIVE APPLY against production.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const dryRun = passed.includes('--dry-run');
 
   let config: AppConfig;
   try {

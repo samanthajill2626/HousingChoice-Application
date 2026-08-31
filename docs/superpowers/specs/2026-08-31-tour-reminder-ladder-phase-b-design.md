@@ -90,10 +90,46 @@ never goes out*. Conflating them is what produced both holes.
 |---|---|
 | the poll's due-row filter (`jobs/tourReminders.ts:602-603`) | excluded, alongside the manual-only filter |
 | `forceSendReminder` (`jobs/tourReminders.ts:1364`) | REFUSES, reason `kind_retired` |
-| the panel chip derivation (`routes/tourReminders.ts:589-597`) | reads "no longer sent", never "Paused" |
+| the tour panel's chip derivation (`routes/tourReminders.ts:589-597`) | reads "no longer sent", never "Paused" |
+| **the contact timeline** (`routes/contactTimeline.ts:84`, `:1091`) | same - it has its OWN `MANUAL_ONLY_REMINDER_KINDS` read |
 
-`kind_retired` therefore spans the skip union AND the force-send refusal union,
-exactly as `roster_unavailable` and `names_unavailable` already do.
+**The fourth row is the one that would have been missed** (design review R3,
+R3-4). Emptying `MANUAL_ONLY_REMINDER_KINDS` without giving the timeline a
+discontinued read reintroduces the perpetual-"sending shortly" lie on a rung that
+can never send - the exact defect the 2026-08-20 pause chip exists to end, one
+surface over.
+
+**Standing hazard for the plan:** this review caught an unenumerated READER three
+separate times (the relay previews in 9.0, the second view builder in 8.2, and
+this). Every kind-filtering or state-derivation change in this mission must be
+grepped for readers app-wide, not reasoned about from the writer's side.
+
+`kind_retired` spans the skip union AND the force-send refusal union - but NOT
+quite the way `roster_unavailable` does (R3-10): the poll EXCLUDES a discontinued
+kind rather than claim-skipping it, so the skip half has no in-app writer at all.
+Only the sweep script (section 4) writes that token. That is a third category in
+`claimSkipRow`'s docblock taxonomy and the docblock joins the rewrite list.
+
+### 3.1a The chip runs through a SHARED union - widening it touches the excluded surface
+
+`ScheduledSuppressionReason` is declared once
+(`app/src/services/scheduledSendSuppression.ts:1`), mirrored on the wire
+(`dashboard/src/api/types.ts:1144`), and consumed as an EXHAUSTIVE
+`Record<ScheduledSuppressionReason, string>` by the placement card
+(`dashboard/src/routes/placements/DeadlinesNudgesCard.tsx:64`). So adding a
+reason is a COMPILE ERROR on the surface section 13 excludes (R3-3).
+
+**RULED, and the exclusion is narrowed rather than broken:** widen the union and
+add the ONE label entry the placement card needs to compile. That is build
+completeness, not feature work - section 13 continues to exclude BUILDING the
+overdue twin there. Stated explicitly so a builder does not read a required
+one-line map entry as a scope violation and invent a workaround.
+
+**Discontinued is evaluated ABOVE the shared suppression ladder, not inside it.**
+That ladder's written rationale is that a HARDER reason wins (opt-out, kill
+switch, manual mode). Discontinued is not a suppression a harder reason should
+override - it is terminal. Keeping it outside the ladder leaves that rationale
+true for the reasons it was written about.
 
 With this, no `confirmation` row sends by ANY path regardless of when or by what
 binary it was armed, the sweep/deploy ordering dependency disappears, and the
@@ -103,6 +139,13 @@ kind is about ARMING only.
 `MANUAL_ONLY_REMINDER_KINDS` is then genuinely emptied and its docblock's "TO
 RESTORE: empty this set. Nothing else has to change" stays TRUE - which is the
 test that the two concepts have been separated properly rather than renamed.
+
+That one line staying true is NOT the same as the docblock staying true (R3-9).
+`app/src/jobs/tourReminders.ts:173-206` is about thirty lines, most of which
+explain why `confirmation` is IN the set and what its inclusion means; after this
+change they describe the wrong set. Full rewrite, not a one-line edit, and the
+new text must send a reader to `DISCONTINUED_REMINDER_KINDS` for the kind that
+moved.
 
 ### 3.2 The remaining sequence
 
@@ -198,6 +241,23 @@ Per token:
 Site 4 is what makes sites 2 and 3 enforceable, so it is not optional
 bookkeeping. `names_unavailable` is listed here rather than only in section 7
 because it is the same edit in the same four places.
+
+**A token that ALSO appears in the force-send refusal union needs two more
+sites - six, not four** (design review R3, R3-5):
+
+5. the refusal union - `app/src/jobs/tourReminders.ts:1317-1330`
+6. `SEND_NOW_ERROR_COPY` in the dashboard
+
+Site 6 matters most for `kind_retired` and `tour_already_passed`, where the map's
+generic "please try again shortly" fallback is ACTIVELY WRONG - retrying will
+never work. `names_unavailable` deliberately keeps that fallback, because there
+retrying IS the right advice.
+
+| token | spans both unions |
+|---|---|
+| `tour_already_passed` | yes - section 6.1a's force-send refusal |
+| `kind_retired` | yes - section 3.1's force-send refusal |
+| `names_unavailable` | already did; keeps its generic copy |
 
 Separate tokens rather than one because the panel chip is operator-facing copy.
 A swept confirmation for next Tuesday's tour showing "the tour had already
@@ -295,19 +355,53 @@ Today quiet hours accidentally caps the damage - an overnight backlog defers to
 returning from an outage at 03:00 texts its entire `en_route` backlog at once,
 including rungs whose tours have already happened.
 
-**RULED: a fire-time gate. A rung whose tour has already STARTED is claim-skipped
-`tour_already_passed` instead of sent.**
+**RULED: a fire-time gate. A rung WHOSE OWN dueAt IS BEFORE THE TOUR, on a tour
+that has already started, is claim-skipped `tour_already_passed` instead of
+sent.**
 
-- Scoped to ALL kinds, not just `en_route`. A reminder for a tour that has
-  already started is useless by construction, and a gate that applies to one rung
-  is the kind of asymmetry the next reader deletes.
-- The token already exists from section 4, so this costs nothing new on the wire
-  or the panel - and it makes the sweep what it should have been: cleanup of a
-  condition the RUNTIME also enforces, rather than the only thing enforcing it.
-- Same reasoning as section 7.1's names bound. The branch that turns sending on
-  must not also be the branch that lets a recovered backlog fire stale.
-- Placed with the other pre-claim gates, ABOVE the claim, so a gated rung is
-  retired exactly once rather than re-listed.
+**The dueAt-before-the-tour qualifier is load-bearing, not a hedge** (design
+review R3, R3-1). `no_show_checkin` is due at `scheduledAt + 30m`
+(`app/src/jobs/tourReminders.ts:153-154`): its whole purpose is to fire AFTER the
+tour and ask a no-show whether they need to reschedule. A gate on "the tour has
+started" would kill exactly the one rung designed to survive it.
+
+So the principle is **"a rung whose own copy assumes the tour has not happened
+yet"**, and the qualifier derives the exemption from the ladder's own data rather
+than from a name in a list. An earlier draft argued the gate should cover ALL
+kinds because "a gate that applies to one rung is the kind of asymmetry the next
+reader deletes" - that reasoning is withdrawn, because here it is the argument
+that would delete the carve-out the product needs.
+
+**PRECEDENCE.** Position is behaviour, and this gate collides with two existing
+ones (R3-2). Evaluated in this order, most-specific first:
+
+1. **past-tour gate** - the truest cause: the tour happened.
+2. the group-open-pending bound (`beforeStart`, `app/src/jobs/tourReminders.ts:956`)
+3. the names bound (section 7) - which for `en_route` lands at the SAME instant
+   as the past-tour gate (`dueAt + 1h` and `scheduledAt` coincide for that rung),
+   so without this ordering the two race for the same row with different tokens.
+
+The `beforeStart` branch's comment claims a rung can never be held past the tour;
+that becomes false and joins the rewrite list.
+
+**Absent `scheduledAt`:** the gate does NOT apply, and `invalid_schedule` keeps
+the rung (R3-11). Firing here would steal a more accurate token.
+
+**Naming:** do not call this "start passed" - that already names a different,
+CLIENT-side gate (`e2e/tests/tour-no-show-checkin.spec.ts:21-23`) on the very kind
+this one must exempt (R3-12).
+
+Placed with the other pre-claim gates, ABOVE the claim, so a gated rung is
+retired exactly once rather than re-listed. The token already exists from section
+4, and this makes the sweep what it should have been: cleanup of a condition the
+RUNTIME also enforces, rather than the only thing enforcing it. Same reasoning as
+section 7.1's names bound - the branch that turns sending on must not also be the
+branch that lets a recovered backlog fire stale.
+
+**Force-send** on a past-tour rung REFUSES with `tour_already_passed`, EXCEPT
+`no_show_checkin` (R3-6). A refusal, never a claim-skip: the standing posture is
+that a human action never retires a rung. The exception is the point - a tenant
+who did not show is exactly when an operator reaches for that button.
 
 ### 6.2 Interaction with supersession - THE ONE RULE CHANGE THIS MISSION MAKES
 
@@ -761,6 +855,12 @@ rather than retried, and 500ing the add-preview route.
 Lower-cased from the existing constant so it reads correctly mid-sentence in
 Sam's wording: "Hey, adding a new member to the group." Never a phone.
 
+`ANONYMOUS_JOINED_LABEL` is REPLACED by this value, not left beside it (design
+review R3, R3-13). Left in place it becomes an unused const in a file this branch
+touches, and gate 5 would attribute the `no-unused-vars` to this branch - the
+exact baseline-attribution trap AGENTS.md warns about, where deleting the last
+USE of a symbol fires the rule on a line your diff never touched.
+
 **STOP is omitted on both.** Sam's logged A2P decision for relay intros
 (changelog 1.2.1 #7). The new member's first contact IS an intro, so the same
 decision governs. DECIDED - do not re-open.
@@ -899,6 +999,16 @@ half where round 1 had scoped the requirement to `confirmation` only).
    DELETIONS or re-baselines: the behaviour they pin is being removed on purpose.
 3. **Seeds** - files that arm or expect a `confirmation` rung; re-baseline or the
    fixtures stop matching the ladder.
+4. **Sites whose BEHAVIOUR changes without their assertions failing** - the most
+   dangerous category, because the suite stays green (design review R3, R3-8).
+   `e2e/tests/scenarios/tours.spec.ts:283-287` ticks past the tour and documents
+   that earlier rungs fire; section 6.1a's gate changes that behind an ABSENCE
+   assertion. The plan hunts these deliberately rather than trusting green.
+
+Section 6.1a also imposes an unstated PRECONDITION on section 10's unit vehicle
+(R3-7): a row created with `dueAt: now0` only sends if `now0 < tour.scheduledAt`.
+Fixtures carrying hardcoded absolute tour dates must be checked against it, or
+the helper silently produces rows the new gate retires.
 
 ### 10a.2 Relay sites - four are TRIPWIRES, not passive coverage
 

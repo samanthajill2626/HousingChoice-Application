@@ -89,14 +89,55 @@ The nine items, in the order Phase B should meet them:
    or re-accept the unbounded shape explicitly, in writing. Do not let this one
    ride through unpause by default.
 
-8. **The cosmetic superseded-by-a-skipped-rung chip.** `supersededBySlot`
-   consults the clamped dueAt map without asking whether the LATER rung was
-   itself retired, so a chip can read "superseded by a later reminder" while
-   pointing at a `booked_too_late` row. PRE-EXISTING behaviour, not introduced
-   by Phase A - `app/test/seedLive.test.ts` already pinned a `confirmation`
-   superseded by a silently-dropped `morning_of` - but the new VISIBLE skip rows
-   make it much easier to notice. A fix would require the later rung to be
-   genuinely armable, which spec 8.1 put out of scope for Phase A.
+8. **NEW IN PHASE A, NOT INHERITED - a `confirmation` retired citing a rung
+   that never armed.** Read this item as a consequence PHASE A INTRODUCED. An
+   earlier draft of this ledger (and the plan it came from) called it
+   PRE-EXISTING, justified by "`app/test/seedLive.test.ts` already pinned a
+   `confirmation` superseded by a silently-dropped `morning_of`". That
+   justification was checked at the merge base and is FALSE; it is corrected
+   here so Phase B does not file this under old news.
+
+   THE DEFECT. `supersededBySlot` (`app/src/jobs/tourReminders.ts`) asks only
+   whether a LATER rung's CLAMPED dueAt equals mine and lands before the tour
+   start. It cannot see that the later rung was itself retired by the new rule
+   (e), so the earlier rung is retired `quiet_hours_superseded` - the panel chip
+   "superseded by a later reminder" - while the rung it names sits beside it
+   reading "booked too late for this reminder".
+
+   WHY IT COULD NOT ARISE AT THE MERGE BASE `440dc75e`, so nobody re-derives it:
+   `git show 440dc75e:app/test/seedLive.test.ts` pins TOUR-A's pending set as
+   `['en_route', 'morning_of']` and asserts `morningOf.skippedAt` is
+   `toBeUndefined()` - that superseder was ALIVE and would have fired. Nor could
+   the general case happen there: `confirmation`'s raw dueAt is `now` and
+   clamping only moves it FORWARD, so its clamped dueAt is always `>= now`,
+   while the base's only silent drop (the past-dueAt branch) always has
+   `dueAt < now` - the two can never be equal - and `supersededBySlot` already
+   excludes `past_event` rungs. So before rule (e), a confirmation retired
+   `quiet_hours_superseded` ALWAYS cited a rung that really armed.
+
+   REACHABLE BAND: arming inside the org quiet window, on the TOUR'S OWN local
+   date (so between local midnight and the window's end), for a tour starting
+   roughly 08:00-12:00 local, booked under six hours out. Both `confirmation`
+   and `morning_of` clamp to the same window-end slot; `morning_of` is then
+   retired `booked_too_late`, and the confirmation has already been retired
+   citing it. The evening side of the window is safe - `localDateOf(now)` is
+   then the day BEFORE the tour, so rule (e) does not fire for `morning_of`.
+
+   WHY IT SHIPPED UNFIXED: spec 8.1 puts the cross-rung supersession machinery
+   OUT OF SCOPE for Phase A in terms, and the fix - requiring a superseder to be
+   genuinely armable - reorders rule evaluation, which is exactly the change
+   spec 8.1 warns reopens the vanishing-row problem the precedence exists to
+   solve. That belongs in a Phase B design with its own review, not bolted on at
+   a Phase A handback.
+
+   PHASE A IMPACT IS BOUNDED BY THE PAUSE. Nothing auto-sends, so what is lost
+   today is a chip naming the wrong cause plus the Send now button on that
+   confirmation (a skipped row is terminal: `forceSendReminder` returns
+   `not_pending`). Note the interaction with item 2 - removing `confirmation`
+   from `REMINDER_KINDS` at unpause retires THIS case, because a rung that never
+   arms cannot be superseded. That is not a fix to the machinery, and Phase B
+   should say which of the two it is doing rather than let the symptom
+   disappear and the predicate stay wrong.
 
 9. **The failure-scope derivation reads catalog DEFAULTS only.**
    `reminderNamesUsed` in `app/src/messages/tourCopy.ts` derives which name
@@ -111,8 +152,19 @@ The nine items, in the order Phase B should meet them:
    semantics never learn about - and the send/preview posture would silently
    stop matching the copy it is protecting.
 
+   SAME CLASS OF HAZARD, filed separately and worth taking in the same pass:
+   [`tour-copy-where-token-declared-not-passed`](./tour-copy-where-token-declared-not-passed.md).
+   There the mismatch runs the other way - `{where}` is DECLARED on the four
+   twin-less tour entries but the composer passes it only when a street exists,
+   so putting `{where}` back into one of those defaults throws a bare `Error`
+   past every containment block for an addressless unit. Both items are a
+   declaration the surrounding code does not honor for every input.
+
 **Suggested fix.** Phase B is its own feature mission. Order matters at the
 front: item 1 before item 2, item 3 before item 2, and item 7 decided (bounded
-or re-accepted in writing) before the pause lifts. Items 4, 5, 8 and 9 can land
-in any order but should each be closed or explicitly re-deferred in the Phase B
-handback rather than silently inherited a third time.
+or re-accepted in writing) before the pause lifts. Item 8 is the one entry here
+that Phase A INTRODUCED rather than inherited, and it must be DECIDED alongside
+item 2 - not left to be silenced by it - so give it a real slot rather than
+leaving it in the tail. Items 4, 5 and 9 can land in any order but should each
+be closed or explicitly re-deferred in the Phase B handback rather than silently
+inherited a third time.

@@ -123,6 +123,37 @@ describe('resolveTourContactNames', () => {
     expect(r.names.propertyContactFirstName).toBe('Lee');
   });
 
+  it('BRACES are stripped: a name of "{where}" comes back inert, so no token can re-open', async () => {
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({ unitId: 'u1', landlordId: 'c-ll' }),
+      contactsRepo: repoOf(
+        {
+          'c-t': contact({ contactId: 'c-t', firstName: '{where}', lastName: '{addressLine}' }),
+          'c-ll': contact({ contactId: 'c-ll', firstName: '{propertyContactName}' }),
+        },
+        [],
+      ),
+    });
+    expect(r.names.tenantFirstName).toBe('where');
+    expect(r.names.tenantName).toBe('where addressLine');
+    expect(r.names.propertyContactFirstName).toBe('propertyContactName');
+    // Nothing handed to interpolate() carries a brace, so the sequential
+    // substitution in messages/resolve.ts has nothing left to re-expand.
+    expect(Object.values(r.names).join(' ')).not.toMatch(/[{}]/);
+  });
+
+  it('a name that is NOTHING but braces reads as absence, not an empty name', async () => {
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: undefined,
+      contactsRepo: repoOf({ 'c-t': contact({ contactId: 'c-t', firstName: '{ }' }) }, []),
+    });
+    expect(r.names.tenantFirstName).toBeUndefined();
+    expect(r.names.tenantName).toBeUndefined();
+    expect(r.tenantReadFailed).toBe(false);
+  });
+
   it('a supplied tenantContact skips the tenant read', async () => {
     const calls: string[] = [];
     const r = await resolveTourContactNames({

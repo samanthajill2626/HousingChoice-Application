@@ -85,9 +85,17 @@ async function bookedSelfGuidedTour(
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
   // Full-ladder-safe booking (14:00 local, 2 days out): Part A asserts EVERY
-  // rung upcoming, and a now-relative tourSchedule() run between 00:00 and
-  // 08:00 local books a pre-08:00 tour whose morning_of is born skipped
-  // (past_event) - the 00:00-08:00 wall-clock flake, root-caused 2026-08-04.
+  // rung upcoming. The fixed hour is still load-bearing, but NOT for the reason
+  // it was: the 00:00-08:00 wall-clock flake (a now-relative tourSchedule()
+  // booking a pre-08:00 tour whose 08:00-org-local morning_of was born skipped
+  // past_event, root-caused 2026-08-04) CANNOT recur - the 2026-08-26 retiming
+  // made morning_of a pure scheduledAt - 4h offset. What the fixed hour buys
+  // now is that every rung instant is identical run to run (day_before 19:30
+  // D-1 < morning_of 10:00 D < en_route 13:00 D < start 14:00 D), which is what
+  // the quiet-hours case anchors its stored window to, and it keeps day_before
+  // - the rung that INHERITED the wall-clock sensitivity - off whatever clock
+  // the suite happens to run at. Full history: tourScheduleFullLadder's docblock
+  // in e2e/scenarios/steps.ts.
   const times = tourScheduleFullLadder();
   await flow.teamBooksTour(times);
   return { tenant, tenantId, unit, times };

@@ -351,8 +351,13 @@ export async function armTourReminders(
     // one that would otherwise vanish without a trace (spec 8.1). RAW offsets,
     // BEFORE clamping; boundaries strictly '>'; `now` is the ARM instant, so a
     // reschedule or a status revival re-evaluates both rules against THAT
-    // moment (spec 11 - which is why the operator label says the reminder was
-    // armed too late, not that the operator was slow).
+    // moment (spec 11). The shipped operator label is
+    // 'booked too late for this reminder' (REMINDER_SKIP_REASON_LABELS in
+    // dashboard/src/api/types.ts) - on a reschedule or a revival the "booking"
+    // it names is the RE-ARM, not the original creation, so the row can read
+    // "booked too late" on a tour first booked days earlier. Spec 11 accepts
+    // that and rules only that the wording must not ACCUSE the operator; if the
+    // phrasing is ever revisited, change the label, not this precedence.
     //
     // Precedence for these two rungs: booked-too-late > past-dueAt >
     // past-event > supersession/staleDayBefore. Known, accepted

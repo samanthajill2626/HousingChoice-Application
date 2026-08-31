@@ -27,24 +27,48 @@ export interface ResolvedTourNames {
   propertyReadFailed: boolean;
 }
 
+/**
+ * Trim, and STRIP `{` / `}` so a resolved name can never re-open a token.
+ *
+ * WHY: a contact name is USER-SUPPLIED - through staff free text, through AI
+ * extraction, and through the UNAUTHENTICATED public intake route
+ * (`POST /public/housing-fair` in routes/public.ts takes `firstName` as an
+ * arbitrary trimmed, length-capped string). The shared interpolate()
+ * (messages/resolve.ts) substitutes the DECLARED tokens in sequence, so a value
+ * put in early that itself contains `{anotherDeclaredToken}` is re-expanded by
+ * a later pass - and every tour entry declares six to eight tokens (the six of
+ * TOUR_NAME_VARS plus `where` / `addressLine`), with the NAME tokens ahead of
+ * the rest, so there is plenty to leak into: a tenant naming themselves
+ * `{propertyContactFirstName}` would be texted the landlord's first name.
+ * Sanitizing at THIS source closes the tour path without touching the shared
+ * interpolator, which every message in the app runs through. The general
+ * single-pass fix is filed as `message-interpolate-token-reexpansion`.
+ *
+ * A name that is nothing BUT braces collapses to '' and is therefore read as
+ * absence by the callers below - which is right; it was never a name.
+ */
+function inertName(raw: string): string {
+  return raw.replace(/[{}]/g, '').trim();
+}
+
 // Local first/full-name derivations. lib/contactName.ts carries an explicit
 // scope guard ("consumed by PUSH-COPY sites only ... do not re-point them
 // here as a drive-by"), so this module keeps its own copy - deliberately,
 // spec 6.2. firstName/lastName ride ContactItem's index signature, so both
-// reads are defensive: a non-string must never reach .trim().
+// reads are defensive: a non-string must never reach inertName().
 // Deliberately NO surname fallback for the first name: greeting a tenant
 // "Hey Chen," is worse than the composer's "Hey there," fallback.
 // TODO(consolidate-contact-display-name-helpers): fold into the shared
 // helper when that issue is worked.
 function firstNameOf(c: ContactItem | undefined): string | undefined {
   if (c === undefined) return undefined;
-  const first = typeof c['firstName'] === 'string' ? c['firstName'].trim() : '';
+  const first = typeof c['firstName'] === 'string' ? inertName(c['firstName']) : '';
   return first.length > 0 ? first : undefined;
 }
 function fullNameOf(c: ContactItem | undefined): string | undefined {
   if (c === undefined) return undefined;
-  const first = typeof c['firstName'] === 'string' ? c['firstName'].trim() : '';
-  const last = typeof c['lastName'] === 'string' ? c['lastName'].trim() : '';
+  const first = typeof c['firstName'] === 'string' ? inertName(c['firstName']) : '';
+  const last = typeof c['lastName'] === 'string' ? inertName(c['lastName']) : '';
   const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : undefined;
 }

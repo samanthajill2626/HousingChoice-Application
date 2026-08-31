@@ -1,0 +1,67 @@
+---
+id: message-interpolate-token-reexpansion
+title: interpolate() substitutes declared tokens SEQUENTIALLY, so a substituted value containing another declared token is re-expanded into the outbound message
+type: bug
+severity: med
+status: open
+area: app/messages
+created: 2026-08-31
+refs: app/src/messages/resolve.ts:24, app/src/messages/catalog.ts:99, app/src/lib/tourContacts.ts, app/src/routes/public.ts
+---
+
+**Problem.** `interpolate` in `app/src/messages/resolve.ts` walks `def.vars` in
+DECLARATION ORDER and does one `split(needle).join(value)` pass per token. The
+output of an earlier pass is the input to every later pass, so a VALUE
+substituted early that itself contains `{anotherDeclaredToken}` is expanded
+again by that later token's pass. Any catalog entry whose value for one token
+can be attacker- or user-supplied, and which declares at least one OTHER token,
+can therefore be made to render a value the call site never passed for that
+slot.
+
+Reachability is real, not theoretical: `POST /public/housing-fair`
+(`app/src/routes/public.ts`) is UNAUTHENTICATED and accepts `firstName` as an
+arbitrary string, trimmed and length-capped only, then creates or dedupes a
+tenant contact from it. AI extraction and staff free text reach the same field.
+
+**Why it is NARROW today.** The two other catalog entries that carry a
+contact-supplied name declare exactly ONE token each, so there is no second
+token for a value to leak into:
+
+- `welcome.sms` declares `['firstName']`.
+- `relay.media_only` (`'{name} sent an attachment.'`) declares `['name']`. The
+  adversarial review that found this called it `notification.attachment`; that
+  id does not exist - `relay.media_only` is the entry it meant.
+
+The tour entries are what changed the picture: `TOUR_NAME_VARS` plus
+`where` / `addressLine` means every `tour.*` entry declares six to eight tokens,
+with the name tokens ahead of `where` / `addressLine` in the list. A tenant
+named `{propertyContactFirstName}` is texted the landlord's first name; a tenant
+named `{where}` or `{addressLine}` is texted the unit's street.
+
+**Stopgap already in place - do not read it as the fix.** The tour path is
+sanitized AT ITS SOURCE: `firstNameOf` / `fullNameOf` in
+`app/src/lib/tourContacts.ts` strip `{` and `}` from every resolved name
+(`inertName`), so nothing the tour composer hands to `interpolate` carries a
+brace. That closes the tour entries and NOTHING else. Any future entry that
+declares more than one token and interpolates user-supplied text reopens the
+hole, and it will not be obvious to whoever writes it.
+
+**Suggested fix.** Make interpolation SINGLE-PASS, so no substituted value is
+ever re-scanned:
+
+```ts
+out = template.replace(/\{([A-Za-z][A-Za-z0-9]*)\}/g, (m, token) =>
+  allowed.includes(token) ? (vars?.[token] ?? throwOrEmpty(token)) : m);
+```
+
+Both current behaviours must be preserved: an UNDECLARED token is left literal
+in the template, and a DECLARED-but-missing var throws in a catalog default
+(strict) while degrading to empty in an operator override (non-strict) - see
+the docblock on `interpolate`.
+
+This is deliberately NOT a drive-by. It changes the rendering path of EVERY
+message in the app - operational SMS, compliance-locked keyword replies, voice
+`<Say>` copy - so it needs its own change, its own catalog-wide test pass, and
+its own review. When it lands, the `inertName` stopgap in `tourContacts.ts` can
+be revisited (it is harmless to keep, and a brace in a human name is still not
+a name).

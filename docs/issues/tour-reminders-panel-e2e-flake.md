@@ -19,6 +19,8 @@ refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:103, e2e/tests/scenarios/
   there happened to match `^word:`; any future body line starting `Note:` at
   column 0 would have become a bogus field.
 -->
+
+<!--
   TITLE CORRECTED 2026-08-21. It still advertised the DETERMINISTIC 08:00
   wall-clock failure, which `150fbfa4` closed on 2026-08-05 ("full-ladder
   assertions book a 14:00-local tour - kills the 00:00-08:00 wall-clock flake").

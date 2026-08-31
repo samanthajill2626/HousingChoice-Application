@@ -123,7 +123,10 @@ export interface OrgSettings {
   /** "HH:MM" 24h local wall clock - window end (end-exclusive). */
   quietHoursEnd: string;
   /** IANA org timezone - the FIRST server-side timezone; also used by the
-   *  morning_of tour reminder. Displayed read-only in the UI this phase. */
+   *  day_before tour reminder (19:30 org-local the evening before the tour's
+   *  local date). Retiming 2026-08-26: morning_of used to be that rung, at
+   *  08:00 org-local; it is now a pure scheduledAt - 4h offset and reads no
+   *  timezone. Displayed read-only in the UI this phase. */
   timezone: string;
   /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
    *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */

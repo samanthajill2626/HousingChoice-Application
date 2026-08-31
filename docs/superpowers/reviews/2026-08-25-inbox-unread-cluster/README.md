@@ -39,16 +39,20 @@ anything a reader could recompute from the repo.
 
 - `review/diff-package.md` and `review/rework-diff-package.md` (151KB + 217KB) -
   raw diffs of the branch, reconstructable from git history.
-- `sdd/research-inbox-route.md`, `sdd/research-repos-unreadfeed.md`,
-  `sdd/research-tests-dashboard-e2e.md` (190KB) - **`sdd/worklist.md` names
-  itself as their distillation**: "The BYTE-EXACT reference lives in the three
-  research files; this file is the DELTA - what the plan says versus what the
-  tree holds, plus the orchestrator's adjudications." The delta and the
-  adjudications are the reasoning and they survive in `worklist.md`; what was
-  dropped is byte-exact quotation of code that git already holds at the commits
-  these reports name. **`worklist.md`'s pointers to `.superpowers/sdd/research-*`
-  are therefore dead links** - deliberately left unedited rather than rewriting
-  a historical record.
+- The REFERENCE half of the three research files (190KB total). These files were
+  internally split: a drift/corrections section stating what the plan and spec
+  got WRONG, then per-file byte-exact quotation of the tree. Measured, the
+  findings were **10%, 11% and 0%** of each file - the third was 83KB of pure
+  quotation with no findings at all. The findings halves are KEPT, extracted to
+  `sdd/research-*-findings.md`; the quotation halves were dropped as
+  recomputable from the commits those findings cite. **`worklist.md`'s pointers
+  to `.superpowers/sdd/research-*` are therefore dead links** - deliberately
+  left unedited rather than rewriting a historical record.
+
+  This one file is why the workflow now tells researchers to emit findings and
+  reference as SEPARATE artifacts at authorship. Dropping a mixed file whole
+  loses findings; keeping it whole commits 90% waste; and bisecting it later
+  depends on someone re-reading 66KB to find the seam.
 - Every `*.log`, `*.exit` and `*.pid` from the gate and session runs.
 
 ## A note on character set

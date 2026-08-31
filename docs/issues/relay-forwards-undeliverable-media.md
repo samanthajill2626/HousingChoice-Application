@@ -1,13 +1,42 @@
 ---
 id: relay-forwards-undeliverable-media
-title: Relay fan-out forwards received media Twilio cannot carry, failing the whole leg
+title: Relay fan-out forwards received media to every other member, with no privacy story
 type: bug
 severity: high
 status: open
 area: app/relay
 created: 2026-08-26
+updated: 2026-08-31
 refs: app/src/jobs/relayFanOut.ts:494-509, app/src/lib/mediaTypes.ts:211-225, app/src/routes/api.ts:2252, docs/issues/mms-forward-received-media.md
 ---
+
+> **OBSERVED 2026-08-31 ON DEV, AND THIS ISSUE'S ORIGINAL CLAIM WAS WRONG.**
+> The founder sent a PDF into a dev relay group. Twilio's own records:
+> inbound `MM02f787a1951589cd7d4c7d77676b807d` (`application/pdf`) produced
+> fan-out leg `MM348110ec2177aa511610a565fd65c35f`, also `application/pdf`,
+> `num_media=1`, **status `delivered`, no error code**. An image test minutes
+> earlier behaved the same way (`MMafef2428...`, `image/png`, delivered).
+>
+> So the leg does NOT fail, 12300 is NOT returned, and the body text is NOT
+> lost. The recipient handset displayed "Cameron App sent an attachment" plus
+> a "file type not supported" notice - that is the RECEIVING DEVICE declining
+> to render a PDF, downstream of a delivery Twilio considers successful.
+>
+> The original prediction rested on `TWILIO_DELIVERABLE_MMS_TYPES`
+> (jpeg/png/gif). That set is OUR OWN SEND-SIDE rule for media we originate;
+> it is not Twilio's accepted-media list, which is materially broader.
+> `relayFanOut` never consults it, so it never predicted anything about this
+> path. The real defect is therefore the SECOND branch below, not the first:
+> relayed inbound media REACHES every other group member, and always has.
+>
+> SCOPE NOTE for `feat/media-content-type-fidelity`: `application/pdf` was
+> already on `INLINE_MEDIA_TYPES` before that work, so a PDF was stored
+> truthfully then too. **This observation therefore does NOT exercise that
+> branch's change to this path.** The types it actually altered - video,
+> audio, HEIC, vCard, the OOXML documents, all previously collapsed to
+> `application/octet-stream` - remain UNOBSERVED on fan-out. A video is the
+> cleanest test: carriers deliver it inbound, and it is the largest class this
+> path would newly hand to Twilio with a true type.
 
 **Problem.** When a relay-group member texts in media, `relayFanOut` presigns
 EVERY stored attachment and hands the URLs to Twilio with no content-type

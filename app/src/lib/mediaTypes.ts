@@ -221,12 +221,57 @@ const HANDOFF_MEDIA_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * True for the VIDEO AND AUDIO hand-off set specifically - NOT the inline tier.
+ * Kept separate from `isHandoffMediaType` because these two families are the
+ * only ones that need a relaxed CSP (see `mediaCspFor`): images and PDF already
+ * render correctly under the strict one and must keep it.
+ */
+export function isPlayableMediaType(resolved: ResolvedMediaType): boolean {
+  return HANDOFF_MEDIA_TYPES.has(resolved.canonical);
+}
+
+/**
  * True when a resolved type should be served `inline` rather than `attachment`.
  * The inline TIER always is (images + PDF); on the declarable tier only the
  * hand-off types above are. Everything else keeps `attachment`.
  */
 export function isHandoffMediaType(resolved: ResolvedMediaType): boolean {
-  return resolved.tier === 'inline' || HANDOFF_MEDIA_TYPES.has(resolved.canonical);
+  return resolved.tier === 'inline' || isPlayableMediaType(resolved);
+}
+
+/**
+ * The Content-Security-Policy for one media response.
+ *
+ * EVERYTHING keeps `default-src 'none'`, so no script, frame, or subresource
+ * can ever load from one of these documents. What differs is video and audio,
+ * and BOTH differences were proven necessary by a real browser (dev, 2026-08-31)
+ * rather than reasoned about:
+ *
+ *   "Loading media ... violates ... default-src 'none'. Note that 'media-src'
+ *    was not explicitly set, so 'default-src' is used as a fallback."
+ *   "Blocked script execution ... because the document's frame is sandboxed
+ *    and the 'allow-scripts' permission is not set."
+ *
+ * So a video needs (a) `media-src` to permit its own bytes, and (b) no
+ * `sandbox`, because the browser's built-in player UI is script-driven. The two
+ * are coupled: `sandbox` puts the document in an OPAQUE ORIGIN, in which
+ * `'self'` matches nothing, so adding `media-src 'self'` while keeping
+ * `sandbox` fails exactly as before.
+ *
+ * Dropping `sandbox` for these two families is safe, and narrowly so:
+ *  - the type is from a closed allowlist, so only video and audio arrive here;
+ *  - `default-src 'none'` still blocks every script, frame and subresource, so
+ *    nothing in the document can load or execute code;
+ *  - a video or audio container cannot carry script the way HTML or SVG can,
+ *    which is the whole reason these types are declarable in the first place.
+ *
+ * Images, PDF, every other declarable type and the opaque tier keep the
+ * original strict policy untouched - they already work under it.
+ */
+export function mediaCspFor(resolved: ResolvedMediaType): string {
+  return isPlayableMediaType(resolved)
+    ? "default-src 'none'; media-src 'self'"
+    : "default-src 'none'; sandbox";
 }
 
 /**

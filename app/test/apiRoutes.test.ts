@@ -724,7 +724,10 @@ describe('GET /api/messages/:providerSid/media/:idx', () => {
     expect(res.headers['content-type']).toBe('video/mp4');
     expect(res.headers['content-disposition']).toBe('inline; filename="attachment-1.mp4"');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
-    expect(res.headers['content-security-policy']).toBe("default-src 'none'; sandbox");
+    // A real browser proved BOTH of these necessary: media-src falls back to
+    // default-src 'none' and blocks the video, and sandbox blocks the built-in
+    // player's script. default-src 'none' still stands.
+    expect(res.headers['content-security-policy']).toBe("default-src 'none'; media-src 'self'");
   });
 
   it('hands off audio the same way', async () => {

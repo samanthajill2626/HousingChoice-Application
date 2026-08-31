@@ -330,11 +330,11 @@ pattern. The kind stays valid in the `ReminderKind` union, in `computeDueAt`, in
 `LADDER_ORDER` and in the catalog, so an in-flight row still composes and still
 displays.
 
-This is about ARMING only. `MANUAL_ONLY_REMINDER_KINDS` keeps its `confirmation`
-entry permanently as the send-side guard - see section 3.1, which is where the
-reasoning lives. The two changes are complementary: one stops new rows, the
-other stops every row that already exists or that an older deployed binary might
-still write.
+This is about ARMING only. The send-side guard is `DISCONTINUED_REMINDER_KINDS`
+(section 3.1, which is where the reasoning lives), and
+`MANUAL_ONLY_REMINDER_KINDS` is genuinely emptied. The two changes are
+complementary: one stops new rows, the other stops every row that already exists
+or that an older deployed binary might still write.
 
 Founder authority: Sam's 2026-08-24 doc, verbatim - "Turned off:
 tour.confirmation and tour.confirmation_no_address. No confirmation text at all
@@ -1134,7 +1134,7 @@ is what makes it a small risk, but the test coverage above is not optional.
 | item | disposition |
 |---|---|
 | 1. retirement sweep | BUILT - section 4, plus the second population the ledger missed |
-| 2. empty manual-only + stop arming `confirmation` | BUILT WITH A CORRECTION - sections 3.1 and 5. The set is NOT emptied; `confirmation` stays in it permanently as the send-side guard |
+| 2. empty manual-only + stop arming `confirmation` | BUILT WITH A CORRECTION - sections 3.1 and 5. The set IS emptied, and a separate permanent `DISCONTINUED_REMINDER_KINDS` is the send-side guard |
 | 3. replacement immediate-send vehicle | BUILT differently - section 10; no seam needed |
 | 4. quiet-hours exemption hook, both sites | BUILT - section 6 |
 | 5. the founder's open `en_route` question | ANSWERED - exempt; section 6 |
@@ -1182,8 +1182,8 @@ same class, rather than left pointing at a closed ledger.
   negative, the operator-restored past-tour rung, and idempotency against an
   already-skipped row). The `en_route` exemption at both sites, AND section
   6.1a's fire-time past-tour gate, AND section 3.1's discontinued-kind guard at
-  all three of its surfaces - including `forceSendReminder` REFUSING, which is
-  the half a poll-only test would miss. **The section 6.2
+  all four of its surfaces - including `forceSendReminder` REFUSING and the
+  contact timeline's own read, the two halves a poll-only test would miss. **The section 6.2
   widening: the 08:30-tour double-send as a regression test, AND a normal
   unclamped ladder proving the widened predicate changes nothing there.** The
   one-hour names bound at BOTH the 1:1 and GROUP sites, including the force-send
